@@ -160,6 +160,16 @@ directory_url = "https://acme-v02.api.letsencrypt.org/directory"
 contact_email = "admin@example.com"
 challenge_dir = "/var/lib/hyperion/acme-challenges"
 
+# Optional FTP/FTPS/SFTP remote backup destination (off by default).
+[backup_remote]
+enabled  = false
+scheme   = "ftp"
+host     = ""
+port     = 21
+user     = ""
+password = ""
+base_path = "/hyperion-backups"
+
 # Enrollment with the master. The token persists here; the mTLS
 # handshake that turns this into a fully-managed cluster member is
 # sub-project 1.5 in the design docs. Until that lands the agent runs

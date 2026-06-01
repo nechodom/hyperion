@@ -113,6 +113,21 @@ pub struct HostingService<A: AdapterPort + 'static> {
     pub adapters: Arc<A>,
     pub secrets: Arc<crate::SecretsStore>,
     pub paths: HostingPaths,
+    pub remote_backup: Option<RemoteBackupConfig>,
+}
+
+/// Cluster-wide remote backup destination. When set, every successful
+/// `backup_now` also pushes the archive over FTP/FTPS/SFTP via curl.
+#[derive(Debug, Clone)]
+pub struct RemoteBackupConfig {
+    /// "ftp" | "ftps" | "sftp"
+    pub scheme: String,
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    pub password: String,
+    /// Per-hosting subdirectory is appended automatically.
+    pub base_path: String,
 }
 
 #[derive(Debug, Clone)]
@@ -139,11 +154,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             adapters,
             secrets,
             paths: HostingPaths::default(),
+            remote_backup: None,
         }
     }
 
     pub fn with_paths(mut self, paths: HostingPaths) -> Self {
         self.paths = paths;
+        self
+    }
+
+    pub fn with_remote_backup(mut self, cfg: Option<RemoteBackupConfig>) -> Self {
+        self.remote_backup = cfg;
         self
     }
 
@@ -1050,6 +1071,55 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     "ok",
                 )
                 .await;
+
+                // Optional remote push. Failures don't roll back the
+                // local backup row — operator still has the local copy.
+                if let Some(remote) = &self.remote_backup {
+                    let hosting_dir = format!(
+                        "{}/{}",
+                        remote.base_path.trim_end_matches('/'),
+                        detail.system_user
+                    );
+                    let upload = hyperion_adapters::backup::RemoteUpload {
+                        scheme: &remote.scheme,
+                        host: &remote.host,
+                        port: remote.port,
+                        user: &remote.user,
+                        password: &remote.password,
+                        remote_dir: &hosting_dir,
+                    };
+                    let archive_result =
+                        hyperion_adapters::backup::upload_remote(&archive_path, &upload).await;
+                    let dump_result = if let Some(p) = db_dump_path.as_ref() {
+                        Some(hyperion_adapters::backup::upload_remote(p, &upload).await)
+                    } else {
+                        None
+                    };
+                    let (ok, note) = match (&archive_result, &dump_result) {
+                        (Ok(_), None) => (true, "archive pushed".to_string()),
+                        (Ok(_), Some(Ok(_))) => (true, "archive + dump pushed".into()),
+                        (Ok(_), Some(Err(e))) => {
+                            (false, format!("archive ok, dump failed: {e}"))
+                        }
+                        (Err(e), _) => (false, format!("archive push failed: {e}")),
+                    };
+                    self.append_audit(
+                        "hosting.backup.remote",
+                        Some(detail.id.as_str()),
+                        &serde_json::json!({
+                            "scheme": remote.scheme,
+                            "host": remote.host,
+                            "dir": hosting_dir,
+                            "note": note,
+                        })
+                        .to_string(),
+                        if ok { "ok" } else { "failed" },
+                    )
+                    .await;
+                    if !ok {
+                        tracing::warn!(domain=%detail.domain, note=%note, "remote backup push failed");
+                    }
+                }
             }
             Err(e) => {
                 let trimmed: String = e.chars().take(2000).collect();

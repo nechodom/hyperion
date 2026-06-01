@@ -182,6 +182,18 @@ backup_root  = "/var/lib/hyperion/backups/local"
 directory_url = "https://acme-v02.api.letsencrypt.org/directory"
 contact_email = "${CONTACT_EMAIL:-admin@example.com}"
 challenge_dir = "/var/lib/hyperion/acme-challenges"
+
+# Optional remote backup destination. Pushed AFTER the local archive is
+# written (local copy always kept). Supports ftp / ftps / sftp via curl.
+# Per-hosting subdir is appended to base_path automatically.
+[backup_remote]
+enabled  = false
+scheme   = "ftp"
+host     = "backup.example.com"
+port     = 21
+user     = "hyperion"
+password = ""
+base_path = "/hyperion-backups"
 EOF
 fi
 

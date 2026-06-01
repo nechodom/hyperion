@@ -6,6 +6,7 @@ use std::path::PathBuf;
 pub struct Config {
     pub agent: AgentSection,
     pub acme: AcmeSection,
+    pub backup_remote: BackupRemoteSection,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -28,11 +29,45 @@ pub struct AcmeSection {
     pub challenge_dir: PathBuf,
 }
 
+/// Optional remote-backup destination. When enabled (`enabled=true`)
+/// every successful `backup_now` pushes the archive (+ optional SQL
+/// dump) to the configured FTP/FTPS/SFTP server after the local
+/// archive is written. Empty by default — operator opts in.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct BackupRemoteSection {
+    pub enabled: bool,
+    /// "ftp" | "ftps" | "sftp"
+    pub scheme: String,
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    /// Plaintext for now; will move into secrets store in a later pass.
+    pub password: String,
+    /// Per-hosting directory is appended automatically.
+    pub base_path: String,
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
             agent: AgentSection::default(),
             acme: AcmeSection::default(),
+            backup_remote: BackupRemoteSection::default(),
+        }
+    }
+}
+
+impl Default for BackupRemoteSection {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            scheme: "ftp".into(),
+            host: String::new(),
+            port: 21,
+            user: String::new(),
+            password: String::new(),
+            base_path: "/hyperion-backups".into(),
         }
     }
 }

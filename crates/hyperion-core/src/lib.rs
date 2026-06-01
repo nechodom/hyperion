@@ -15,4 +15,4 @@ pub mod service;
 pub use agent::AgentImpl;
 pub use real_adapter::RealAdapter;
 pub use secrets::{SecretsError, SecretsStore};
-pub use service::{AdapterPort, HostingPaths, HostingService};
+pub use service::{AdapterPort, HostingPaths, HostingService, RemoteBackupConfig};

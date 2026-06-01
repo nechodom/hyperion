@@ -43,8 +43,23 @@ async fn main() -> anyhow::Result<()> {
         acme_challenge_root: cfg.acme.challenge_dir.to_string_lossy().to_string(),
         backup_root: cfg.agent.backup_root.to_string_lossy().to_string(),
     };
-    let svc =
-        Arc::new(hyperion_core::HostingService::new(pool, adapter, secrets).with_paths(paths));
+    let remote_backup = if cfg.backup_remote.enabled {
+        Some(hyperion_core::RemoteBackupConfig {
+            scheme: cfg.backup_remote.scheme.clone(),
+            host: cfg.backup_remote.host.clone(),
+            port: cfg.backup_remote.port,
+            user: cfg.backup_remote.user.clone(),
+            password: cfg.backup_remote.password.clone(),
+            base_path: cfg.backup_remote.base_path.clone(),
+        })
+    } else {
+        None
+    };
+    let svc = Arc::new(
+        hyperion_core::HostingService::new(pool, adapter, secrets)
+            .with_paths(paths)
+            .with_remote_backup(remote_backup),
+    );
     // Background scheduler: fire scheduler_tick (expiry sweep) every 5 minutes.
     {
         let tick_svc = svc.clone();

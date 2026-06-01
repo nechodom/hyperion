@@ -160,6 +160,64 @@ pub async fn restore_mariadb_dump(db_name: &str, sql_path: &Path) -> Result<(), 
     Ok(())
 }
 
+/// Remote backup destination — FTP/FTPS/SFTP via curl. Passwords are
+/// passed through `--user user:pass` (so they appear in argv; we run
+/// this only inside the agent process, no shell on argv).
+#[derive(Debug, Clone)]
+pub struct RemoteUpload<'a> {
+    /// "ftp", "ftps", or "sftp".
+    pub scheme: &'a str,
+    pub host: &'a str,
+    pub port: u16,
+    pub user: &'a str,
+    pub password: &'a str,
+    /// Path on the remote (the basename of the local file is appended).
+    pub remote_dir: &'a str,
+}
+
+/// Push a local file to a remote destination via curl. Returns the URL
+/// the file landed at.
+pub async fn upload_remote(
+    file: &Path,
+    upload: &RemoteUpload<'_>,
+) -> Result<String, AdapterError> {
+    let scheme = match upload.scheme {
+        "ftp" | "ftps" | "sftp" => upload.scheme,
+        other => {
+            return Err(AdapterError::Other(format!(
+                "unsupported remote scheme: {other}"
+            )))
+        }
+    };
+    let filename = file
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| AdapterError::Other("file has no name".into()))?;
+    let dir = upload.remote_dir.trim_end_matches('/');
+    let url = format!(
+        "{scheme}://{host}:{port}{dir}/{filename}",
+        host = upload.host,
+        port = upload.port,
+    );
+    let creds = format!("{}:{}", upload.user, upload.password);
+    let args: Vec<&str> = vec![
+        "--fail",
+        "--silent",
+        "--show-error",
+        "--max-time",
+        "300",
+        // FTP: create missing remote directories.
+        "--ftp-create-dirs",
+        "--user",
+        &creds,
+        "--upload-file",
+        file.to_str().ok_or_else(|| AdapterError::Other("file path not utf8".into()))?,
+        &url,
+    ];
+    cmd::run("/usr/bin/curl", &args).await?;
+    Ok(url)
+}
+
 /// Restore a `pg_dump -Fc` archive (custom format) into `db_name`.
 pub async fn restore_postgres_dump(db_name: &str, dump_path: &Path) -> Result<(), AdapterError> {
     if !dump_path.exists() {
