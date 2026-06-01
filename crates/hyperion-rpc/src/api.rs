@@ -141,6 +141,25 @@ pub trait AgentApi: Send + Sync + 'static {
     /// List enrolled nodes (master-side `nodes` table).
     async fn nodes_list(&self) -> Result<Vec<NodeSummary>, RpcError>;
 
+    /// Reset the WordPress admin password (wp user update --user_pass).
+    /// Returns the new password (the caller usually shows it to the
+    /// operator exactly once).
+    async fn wp_reset_password(
+        &self,
+        sel: HostingSelector,
+        wp_user: String,
+        new_password: String,
+    ) -> Result<(), RpcError>;
+
+    /// Reset the hosting's DB password (ALTER USER on mariadb /
+    /// ALTER ROLE on postgres) and rewrite the stored secret.
+    /// Returns the new password.
+    async fn db_reset_password(
+        &self,
+        sel: HostingSelector,
+        new_password: String,
+    ) -> Result<(), RpcError>;
+
     /// Restore a hosting from a previously-taken backup archive. The path
     /// must point at one of OUR archives (under /var/lib/hyperion/backups
     /// or an operator-uploaded copy in /var/lib/hyperion/backups/incoming).

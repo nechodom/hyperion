@@ -22,49 +22,75 @@
   </div>
 {% endif %}
 
-<div class="grid cols-3">
-  <div class="stat-card">
-    <div class="stat-head">
-      <span class="stat-label">Agent</span>
-      <div class="stat-icon {% if agent_info.is_some() %}success{% else %}warn{% endif %}">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
-      </div>
-    </div>
-    {% if let Some(info) = agent_info %}
-      <div class="stat-value">{{ info.hostname }}</div>
-      <div class="stat-meta">v{{ info.version }} · schema {{ info.schema_version }}</div>
-    {% else %}
-      <div class="stat-value text-dim">offline</div>
-      <div class="stat-meta">unable to reach agent socket</div>
-    {% endif %}
-  </div>
-
+<div class="grid cols-4">
   <div class="stat-card">
     <div class="stat-head">
       <span class="stat-label">Hostings</span>
       <div class="stat-icon primary">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
       </div>
     </div>
     <div class="stat-value">
-      {% if let Some(info) = agent_info %}{{ info.hostings_count }}{% else %}—{% endif %}
+      {% if let Some(c) = cluster %}{{ c.total_hostings }}{% else %}—{% endif %}
     </div>
-    <div class="stat-meta">managed by this agent</div>
+    <div class="stat-meta">
+      {% if let Some(c) = cluster %}
+        <span style="color:var(--success)">●</span> {{ c.total_active }} ·
+        <span style="color:var(--warn)">●</span> {{ c.total_suspended }} ·
+        <span style="color:var(--danger)">●</span> {{ c.total_failed }}
+      {% else %}
+        no sample yet
+      {% endif %}
+    </div>
   </div>
 
   <div class="stat-card">
     <div class="stat-head">
-      <span class="stat-label">Signed in</span>
+      <span class="stat-label">Disk used</span>
       <div class="stat-icon info">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
       </div>
     </div>
-    <div class="stat-value">{{ username }}</div>
-    <div class="stat-meta">admin · single-user mode</div>
+    <div class="stat-value">
+      {% if let Some(c) = cluster %}{{ crate::handlers::stats::fmt_bytes(c.total_disk_bytes) }}{% else %}—{% endif %}
+    </div>
+    <div class="stat-meta">all hostings combined</div>
+  </div>
+
+  <div class="stat-card">
+    <div class="stat-head">
+      <span class="stat-label">BW out · 24h</span>
+      <div class="stat-icon success">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m13 18 6-6-6-6"/></svg>
+      </div>
+    </div>
+    <div class="stat-value">
+      {% if let Some(c) = cluster %}{{ crate::handlers::stats::fmt_bytes(c.total_bw_out_24h) }}{% else %}—{% endif %}
+    </div>
+    <div class="stat-meta">
+      {% if let Some(c) = cluster %}{{ c.total_requests_24h }} requests{% else %}—{% endif %}
+    </div>
+  </div>
+
+  <div class="stat-card">
+    <div class="stat-head">
+      <span class="stat-label">Agent</span>
+      <div class="stat-icon {% if agent_info.is_some() %}success{% else %}warn{% endif %}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+      </div>
+    </div>
+    {% if let Some(info) = agent_info %}
+      <div class="stat-value" style="font-size:1.05rem">{{ info.hostname }}</div>
+      <div class="stat-meta">v{{ info.version }}</div>
+    {% else %}
+      <div class="stat-value text-dim">offline</div>
+      <div class="stat-meta">socket unreachable</div>
+    {% endif %}
   </div>
 </div>
 
-<div class="card hover" style="margin-top:1.5rem">
+<div style="display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:1rem;margin-top:1.5rem;align-items:start">
+<div class="card hover">
   <div class="spread" style="margin-bottom:1rem">
     <h2 style="margin:0">
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
@@ -107,5 +133,32 @@
       </table>
     </div>
   {% endif %}
+</div>
+
+<div class="card hover">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+    Recent activity
+  </h2>
+  {% if activity.is_empty() %}
+    <p class="muted" style="font-size:0.88rem">No audit entries yet.</p>
+  {% else %}
+    <ul style="list-style:none;padding:0;margin:0">
+      {% for a in activity %}
+        <li style="display:flex;gap:0.6rem;padding:0.55rem 0;border-bottom:1px solid var(--border);font-size:0.88rem">
+          <span class="pill small {% if a.result == "ok" %}ok{% else %}err{% endif %}" style="font-size:0.65rem">{{ a.result }}</span>
+          <div style="flex:1;min-width:0">
+            <div><code style="font-size:0.78rem">{{ a.action }}</code> {% if let Some(t) = a.target %}<span class="muted">on</span> <code style="font-size:0.78rem">{{ t }}</code>{% endif %}</div>
+            <div class="muted" style="font-size:0.76rem;margin-top:0.15rem">{{ a.actor_label }} · {{ a.ts }}</div>
+          </div>
+        </li>
+      {% endfor %}
+    </ul>
+    <a href="/audit" class="btn small ghost" style="margin-top:0.7rem">
+      View full audit log
+      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+    </a>
+  {% endif %}
+</div>
 </div>
 {% endblock %}

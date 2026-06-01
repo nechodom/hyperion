@@ -121,6 +121,15 @@ pub enum Request {
         public_ip: Option<String>,
     },
     NodesList,
+    WpResetPassword {
+        sel: HostingSelector,
+        wp_user: String,
+        new_password: String,
+    },
+    DbResetPassword {
+        sel: HostingSelector,
+        new_password: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -163,6 +172,8 @@ pub enum Response {
     CronReplace,
     EnrollConsume,
     NodesList(Vec<NodeSummary>),
+    WpResetPassword,
+    DbResetPassword,
     Error(RpcError),
 }
 

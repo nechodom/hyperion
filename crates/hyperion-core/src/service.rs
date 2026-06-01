@@ -1308,6 +1308,120 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         })
     }
 
+    /// Reset the WordPress admin password via `wp user update --user_pass`.
+    pub async fn wp_reset_password(
+        &self,
+        sel: HostingSelector,
+        wp_user: String,
+        new_password: String,
+    ) -> Result<(), RpcError> {
+        if new_password.len() < 8 {
+            return Err(RpcError::Validation {
+                message: "new password must be at least 8 characters".into(),
+            });
+        }
+        let detail = self.get(sel).await?;
+        if detail.state != HostingState::Active {
+            return Err(RpcError::Conflict {
+                message: "hosting must be active to reset WP password".into(),
+            });
+        }
+        // Use wp user update <user> --user_pass=<pw> ... but feed password
+        // through stdin via --prompt if wp-cli supports it. For simplicity
+        // pass --user_pass=<pw> directly; arg array prevents shell injection.
+        let user_arg = format!("--user_pass={new_password}");
+        let wp_args: [&str; 5] = [
+            "user",
+            "update",
+            &wp_user,
+            &user_arg,
+            "--skip-email",
+        ];
+        let argv = hyperion_adapters::wpcli::build_argv(
+            &detail.system_user,
+            &detail.root_dir,
+            &wp_args,
+        );
+        hyperion_adapters::cmd::run("/usr/bin/sudo", &argv)
+            .await
+            .map_err(|e| RpcError::ProvisioningFailed {
+                stage: "wp_reset_password".into(),
+                reason: e.to_string(),
+            })?;
+        self.append_audit(
+            "wordpress.reset_password",
+            Some(detail.id.as_str()),
+            &serde_json::json!({"wp_user": wp_user}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
+    /// Reset the DB password for a hosting, persisting the new secret.
+    pub async fn db_reset_password(
+        &self,
+        sel: HostingSelector,
+        new_password: String,
+    ) -> Result<(), RpcError> {
+        if new_password.len() < 12 {
+            return Err(RpcError::Validation {
+                message: "new password must be at least 12 characters".into(),
+            });
+        }
+        let detail = self.get(sel).await?;
+        let db_row = databases::get_for_hosting(&self.pool, &detail.id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("db lookup: {e}")))?
+            .ok_or(RpcError::NotFound {
+                kind: "database".into(),
+                id: detail.domain.clone(),
+            })?;
+
+        match db_row.engine {
+            DbProvision::MariaDB => {
+                hyperion_adapters::mariadb::reset_password(&db_row.db_user, &new_password)
+                    .await
+                    .map_err(|e| RpcError::ProvisioningFailed {
+                        stage: "mariadb_reset".into(),
+                        reason: e.to_string(),
+                    })?;
+            }
+            DbProvision::Postgres => {
+                hyperion_adapters::postgres::reset_password(&db_row.db_user, &new_password)
+                    .await
+                    .map_err(|e| RpcError::ProvisioningFailed {
+                        stage: "postgres_reset".into(),
+                        reason: e.to_string(),
+                    })?;
+            }
+        }
+
+        // Re-persist the secret. We re-fetch & overwrite the existing
+        // record so the password matches what the operator now wants.
+        self.secrets
+            .put(
+                &db_row.secret_id,
+                &serde_json::json!({
+                    "engine": db_row.engine.as_str(),
+                    "db_name": db_row.db_name,
+                    "db_user": db_row.db_user,
+                    "password": new_password,
+                }),
+            )
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("secret update: {e}")))?;
+
+        self.append_audit(
+            "database.reset_password",
+            Some(detail.id.as_str()),
+            &serde_json::json!({"engine": db_row.engine.as_str()}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
     /// Return the recorded WordPress install for a hosting, if any.
     pub async fn wp_status(
         &self,

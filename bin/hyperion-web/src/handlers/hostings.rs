@@ -75,6 +75,8 @@ struct DetailTpl<'a> {
     csrf_logs: String,
     csrf_cron: String,
     cron_body: String,
+    csrf_wp_reset: String,
+    csrf_db_reset: String,
     error: Option<&'a str>,
     wp_error: Option<String>,
     wp_flash: Option<String>,
@@ -88,6 +90,8 @@ struct DetailTpl<'a> {
     restore_flash: Option<String>,
     cron_error: Option<String>,
     cron_flash: Option<String>,
+    db_error: Option<String>,
+    db_flash: Option<String>,
     just_created: Option<HostingCreated>,
 }
 
@@ -233,6 +237,8 @@ pub async fn post_create(
                 csrf_logs: csrf_token_for(&state, &ctx, "/hostings/logs"),
                 csrf_cron: csrf_token_for(&state, &ctx, "/hostings/cron"),
                 cron_body: String::new(),
+                csrf_wp_reset: csrf_token_for(&state, &ctx, "/hostings/wp/reset-password"),
+                csrf_db_reset: csrf_token_for(&state, &ctx, "/hostings/db/reset-password"),
                 error: None,
                 wp_error: None,
                 wp_flash: None,
@@ -246,6 +252,8 @@ pub async fn post_create(
                 restore_flash: None,
                 cron_error: None,
                 cron_flash: None,
+                db_error: None,
+                db_flash: None,
                 just_created: Some(created),
             };
             Ok(Html(tpl.render()?).into_response())
@@ -317,9 +325,17 @@ pub async fn get_detail(
         csrf_logs: csrf_token_for(&state, &ctx, "/hostings/logs"),
         csrf_cron: csrf_token_for(&state, &ctx, "/hostings/cron"),
         cron_body,
+        csrf_wp_reset: csrf_token_for(&state, &ctx, "/hostings/wp/reset-password"),
+        csrf_db_reset: csrf_token_for(&state, &ctx, "/hostings/db/reset-password"),
         error: None,
         wp_error: q.wp_error,
-        wp_flash: q.wp.map(|_| "WordPress install succeeded.".into()),
+        wp_flash: q.wp.map(|s| {
+            if s == "reset" {
+                "WordPress admin password reset.".to_string()
+            } else {
+                "WordPress install succeeded.".into()
+            }
+        }),
         backup_error: q.backup_error,
         backup_flash: q.backup.map(|_| "Backup started — see list below.".into()),
         expiry_error: q.expiry_error,
@@ -342,6 +358,8 @@ pub async fn get_detail(
         restore_flash: q.restore.map(|_| "Backup restored.".into()),
         cron_error: q.cron_error,
         cron_flash: q.cron.map(|_| "Crontab saved.".into()),
+        db_error: q.db_error,
+        db_flash: q.db.map(|_| "Database password reset.".into()),
         just_created: None,
     };
     Ok(Html(tpl.render()?).into_response())
@@ -397,6 +415,10 @@ pub struct DetailQuery {
     pub cron: Option<String>,
     #[serde(default)]
     pub cron_error: Option<String>,
+    #[serde(default)]
+    pub db: Option<String>,
+    #[serde(default)]
+    pub db_error: Option<String>,
 }
 
 async fn fetch_expiry(
@@ -1054,6 +1076,72 @@ pub async fn post_cron_save(
         RpcResponse::Error(e) => {
             let msg = urlencoding(&e.to_string());
             Ok(Redirect::to(&format!("/hostings/{}?cron_error={}", sel_url, msg)).into_response())
+        }
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct WpResetForm {
+    pub selector: String,
+    pub wp_user: String,
+    pub new_password: String,
+}
+
+pub async fn post_wp_reset(
+    State(state): State<SharedState>,
+    Form(form): Form<WpResetForm>,
+) -> Result<Response, AppError> {
+    let sel = parse_selector(&form.selector)?;
+    let sel_url = urlencoding(&form.selector);
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::WpResetPassword {
+            sel,
+            wp_user: form.wp_user.trim().to_string(),
+            new_password: form.new_password,
+        },
+    )
+    .await?;
+    match resp {
+        RpcResponse::WpResetPassword => {
+            Ok(Redirect::to(&format!("/hostings/{}?wp=reset", sel_url)).into_response())
+        }
+        RpcResponse::Error(e) => {
+            let msg = urlencoding(&e.to_string());
+            Ok(Redirect::to(&format!("/hostings/{}?wp_error={}", sel_url, msg)).into_response())
+        }
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct DbResetForm {
+    pub selector: String,
+    pub new_password: String,
+}
+
+pub async fn post_db_reset(
+    State(state): State<SharedState>,
+    Form(form): Form<DbResetForm>,
+) -> Result<Response, AppError> {
+    let sel = parse_selector(&form.selector)?;
+    let sel_url = urlencoding(&form.selector);
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::DbResetPassword {
+            sel,
+            new_password: form.new_password,
+        },
+    )
+    .await?;
+    match resp {
+        RpcResponse::DbResetPassword => {
+            Ok(Redirect::to(&format!("/hostings/{}?db=reset", sel_url)).into_response())
+        }
+        RpcResponse::Error(e) => {
+            let msg = urlencoding(&e.to_string());
+            Ok(Redirect::to(&format!("/hostings/{}?db_error={}", sel_url, msg)).into_response())
         }
         _ => Err(AppError::Internal("unexpected response".into())),
     }

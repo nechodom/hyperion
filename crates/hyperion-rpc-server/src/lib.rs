@@ -251,6 +251,20 @@ async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::NodesList(v),
             Err(e) => Response::Error(e),
         },
+        Request::WpResetPassword {
+            sel,
+            wp_user,
+            new_password,
+        } => match api.wp_reset_password(sel, wp_user, new_password).await {
+            Ok(_) => Response::WpResetPassword,
+            Err(e) => Response::Error(e),
+        },
+        Request::DbResetPassword { sel, new_password } => {
+            match api.db_reset_password(sel, new_password).await {
+                Ok(_) => Response::DbResetPassword,
+                Err(e) => Response::Error(e),
+            }
+        }
     }
 }
 
@@ -444,6 +458,21 @@ mod tests {
         }
         async fn nodes_list(&self) -> Result<Vec<NodeSummary>, RpcError> {
             Ok(vec![])
+        }
+        async fn wp_reset_password(
+            &self,
+            _: HostingSelector,
+            _: String,
+            _: String,
+        ) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn db_reset_password(
+            &self,
+            _: HostingSelector,
+            _: String,
+        ) -> Result<(), RpcError> {
+            Ok(())
         }
     }
 

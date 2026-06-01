@@ -169,6 +169,26 @@
     <dt>User</dt><dd><code>{{ db.db_user }}</code></dd>
     <dt>Password</dt><dd class="muted">stored in <code>/etc/hyperion/secrets/&lt;id&gt;.json</code>, not displayed</dd>
   </dl>
+
+  {% if let Some(m) = db_flash %}<div class="flash success" style="margin-top:1rem"><div class="flash-body">{{ m }}</div></div>{% endif %}
+  {% if let Some(e) = db_error %}<div class="flash error" style="margin-top:1rem"><div class="flash-body">{{ e }}</div></div>{% endif %}
+
+  <div class="card-section">
+    <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Reset database password</h2>
+    <p class="muted" style="margin:0 0 0.8rem;font-size:0.85rem">Generate a new strong password and update both the DB grant + the persisted secret.</p>
+    <form method="post" action="/hostings/db/reset-password" autocomplete="off"
+          onsubmit="return confirm('Reset DB password for {{ db.db_user }}? Existing connections may drop.');">
+      <input type="hidden" name="_csrf" value="{{ csrf_db_reset }}">
+      <input type="hidden" name="selector" value="{{ detail.domain }}">
+      <div class="row" style="gap:0.5rem;align-items:flex-end">
+        <div class="field" style="flex:1;margin:0">
+          <label for="db_new_pw">New password <span class="hint">≥ 12 chars</span></label>
+          <input id="db_new_pw" name="new_password" type="password" required minlength="12">
+        </div>
+        <button class="btn" type="submit">Reset</button>
+      </div>
+    </form>
+  </div>
 </div>
 {% endif %}
 
@@ -267,7 +287,27 @@
       <dt>WP version</dt><dd><span class="tag">{{ wp.wp_version }}</span></dd>
       <dt>Installed</dt><dd class="muted numeric">{{ wp.installed_at }}</dd>
     </dl>
-    <p class="muted" style="font-size:0.85rem;margin-top:0.7rem;margin-bottom:0">To reinstall, drop the row from <code>wp_installs</code> and clear the DB tables first.</p>
+    <p class="muted" style="font-size:0.85rem;margin-top:0.7rem">To reinstall, drop the row from <code>wp_installs</code> and clear the DB tables first.</p>
+
+    <div class="card-section">
+      <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Reset admin password</h2>
+      <form method="post" action="/hostings/wp/reset-password" autocomplete="off"
+            onsubmit="return confirm('Reset WordPress admin password?');">
+        <input type="hidden" name="_csrf" value="{{ csrf_wp_reset }}">
+        <input type="hidden" name="selector" value="{{ detail.domain }}">
+        <div class="field-row">
+          <div class="field">
+            <label for="wp_reset_user">WP user</label>
+            <input id="wp_reset_user" name="wp_user" type="text" value="admin" required>
+          </div>
+          <div class="field">
+            <label for="wp_reset_pw">New password <span class="hint">≥ 8 chars</span></label>
+            <input id="wp_reset_pw" name="new_password" type="password" required minlength="8">
+          </div>
+        </div>
+        <button class="btn" type="submit">Reset WP password</button>
+      </form>
+    </div>
   {% else if detail.database.is_none() %}
     <p class="muted">This hosting has no database. WordPress needs MariaDB — recreate the hosting with <code>--db mariadb</code> first.</p>
   {% else if detail.state.as_str() != "active" %}

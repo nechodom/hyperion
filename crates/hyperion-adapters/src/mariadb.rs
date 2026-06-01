@@ -61,6 +61,18 @@ pub async fn create_db_and_user(
     })
 }
 
+/// `ALTER USER ... IDENTIFIED BY '<new>'`. Caller is responsible for
+/// updating the persisted secret.
+pub async fn reset_password(db_user: &str, new_password: &str) -> Result<(), AdapterError> {
+    let sql = format!(
+        "ALTER USER `{user}`@`localhost` IDENTIFIED BY '{pass}';\nFLUSH PRIVILEGES;",
+        user = escape_ident(db_user),
+        pass = escape_string_literal(new_password),
+    );
+    cmd::run_with_stdin("/usr/bin/mariadb", &[], sql.as_bytes()).await?;
+    Ok(())
+}
+
 /// `ALTER USER ... ACCOUNT LOCK`. Idempotent.
 pub async fn lock_user(db_user: &str) -> Result<(), AdapterError> {
     let sql = format!(

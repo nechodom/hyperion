@@ -258,4 +258,21 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     async fn nodes_list(&self) -> Result<Vec<NodeSummary>, RpcError> {
         self.svc.nodes_list().await
     }
+
+    async fn wp_reset_password(
+        &self,
+        sel: HostingSelector,
+        wp_user: String,
+        new_password: String,
+    ) -> Result<(), RpcError> {
+        self.svc.wp_reset_password(sel, wp_user, new_password).await
+    }
+
+    async fn db_reset_password(
+        &self,
+        sel: HostingSelector,
+        new_password: String,
+    ) -> Result<(), RpcError> {
+        self.svc.db_reset_password(sel, new_password).await
+    }
 }

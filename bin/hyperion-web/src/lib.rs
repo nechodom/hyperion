@@ -64,6 +64,14 @@ pub fn build_router(state: SharedState) -> Router {
             "/hostings/cron",
             post(handlers::hostings::post_cron_save),
         )
+        .route(
+            "/hostings/wp/reset-password",
+            post(handlers::hostings::post_wp_reset),
+        )
+        .route(
+            "/hostings/db/reset-password",
+            post(handlers::hostings::post_db_reset),
+        )
         .route("/stats", get(handlers::stats::get_stats))
         .route("/audit", get(handlers::audit::get_audit))
         .route("/install", get(handlers::install::get_install))

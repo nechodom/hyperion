@@ -548,6 +548,8 @@ fn print_pretty(resp: &Response) {
                 );
             }
         }
+        Response::WpResetPassword => println!("✓ WordPress admin password reset"),
+        Response::DbResetPassword => println!("✓ DB password reset (secret updated)"),
         Response::Error(e) => {
             eprintln!("ERROR: {e}");
         }

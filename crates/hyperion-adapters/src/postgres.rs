@@ -82,6 +82,29 @@ pub async fn create_db_and_role(
     })
 }
 
+/// `ALTER ROLE ... WITH PASSWORD '<new>'`. Caller updates persisted secret.
+pub async fn reset_password(db_user: &str, new_password: &str) -> Result<(), AdapterError> {
+    let escaped = new_password.replace('\'', "''");
+    let sql = format!(
+        "ALTER ROLE \"{u}\" WITH PASSWORD '{escaped}';",
+        u = escape_ident(db_user),
+    );
+    cmd::run(
+        "/usr/bin/sudo",
+        &[
+            "-u",
+            "postgres",
+            "/usr/bin/psql",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-c",
+            &sql,
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
 /// `ALTER ROLE ... NOLOGIN`. Idempotent.
 pub async fn lock_role(db_user: &str) -> Result<(), AdapterError> {
     let sql = format!("ALTER ROLE \"{u}\" NOLOGIN;", u = escape_ident(db_user));
