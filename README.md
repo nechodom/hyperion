@@ -243,30 +243,30 @@ hyp·erion           Dashboard  Hostings  Audit  Install              signed in 
 
 Recent hostings                                        [+ New hosting]
 DOMAIN              PHP    STATE        CREATED
-example.cz          8.3    ● active     2 hours ago
-blog.kevin.cz       8.4    ● active     yesterday
-staging.client.cz   8.3    ⚠ suspended  3 days ago
+example.com          8.3    ● active     2 hours ago
+blog.example.com       8.4    ● active     yesterday
+staging.example.com   8.3    ⚠ suspended  3 days ago
 ```
 
 ### CLI — `hctl`
 
 ```
 $ hctl info
-agent: master.example.cz version=0.1.0 schema=2 hostings=12
+agent: master.example.com version=0.1.0 schema=2 hostings=12
 
-$ hctl hosting create example.cz --php 8.3 --db mariadb
-✓ created example_cz (id=01K4Z…)
-  root: /home/example_cz/example.cz/htdocs
+$ hctl hosting create example.com --php 8.3 --db mariadb
+✓ created example_com (id=01K4Z…)
+  root: /home/example_com/example.com/htdocs
   db:   lm_a8c_examplecz (user=lm_a8c_u, password=Hx9k…RnG2)
   cert: issuer=self-signed, not_after=2027-06-01
 
-$ hctl hosting suspend example.cz --reason="payment overdue"
+$ hctl hosting suspend example.com --reason="payment overdue"
 ✓ suspended
 
-$ hctl hosting backup-now example.cz
+$ hctl hosting backup-now example.com
 ✓ backup 17 ok
-  archive: /var/lib/hyperion/backups/local/example_cz/example.cz-1764672000.tar.gz
-  db_dump: /var/lib/hyperion/backups/local/example_cz/example.cz-1764672000.sql
+  archive: /var/lib/hyperion/backups/local/example_com/example.com-1764672000.tar.gz
+  db_dump: /var/lib/hyperion/backups/local/example_com/example.com-1764672000.sql
   bytes:   148373921
 
 $ hctl audit --limit 5

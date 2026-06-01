@@ -122,15 +122,15 @@ The socket appears at `/run/hyperion.sock` (group `hyperion-admin`).
 hctl info
 # agent: <hostname> version=0.1.0 hostings=0
 
-hctl hosting create example.cz --php 8.3 --db mariadb
-# ✓ created example_cz (id=01JXX...)
-#   root: /home/example_cz/example.cz/htdocs
-#   db:   lm_xxx_examplecz (user=lm_xxx_u, password=<random>)
+hctl hosting create example.com --php 8.3 --db mariadb
+# ✓ created example_com (id=01JXX...)
+#   root: /home/example_com/example.com/htdocs
+#   db:   lm_xxx_examplecom (user=lm_xxx_u, password=<random>)
 #   cert: issuer=self-signed, not_after=...
 
 hctl hosting list
-hctl hosting get example.cz
-hctl hosting delete example.cz
+hctl hosting get example.com
+hctl hosting delete example.com
 ```
 
 > **Cert note.** Foundation issues a self-signed cert via `rcgen` so
