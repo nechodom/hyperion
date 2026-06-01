@@ -41,7 +41,11 @@ struct NewTpl<'a> {
 struct DetailTpl<'a> {
     username: &'a str,
     detail: HostingDetail,
-    csrf_token: String,
+    limits: lm_types::HostingLimits,
+    csrf_delete: String,
+    csrf_suspend: String,
+    csrf_resume: String,
+    csrf_limits: String,
     error: Option<&'a str>,
     just_created: Option<HostingCreated>,
 }
@@ -151,11 +155,17 @@ pub async fn post_create(
                 RpcResponse::HostingGet(d) => d,
                 _ => return Err(AppError::Internal("expected HostingGet".into())),
             };
-            let csrf_delete = csrf_token_for(&state, &ctx, "/hostings/delete");
+            let limits = fetch_limits(&state, HostingSelector::Id(created.id.clone()))
+                .await
+                .unwrap_or_else(|_| lm_types::HostingLimits::defaults());
             let tpl = DetailTpl {
                 username: &ctx.username,
                 detail,
-                csrf_token: csrf_delete,
+                limits,
+                csrf_delete: csrf_token_for(&state, &ctx, "/hostings/delete"),
+                csrf_suspend: csrf_token_for(&state, &ctx, "/hostings/suspend"),
+                csrf_resume: csrf_token_for(&state, &ctx, "/hostings/resume"),
+                csrf_limits: csrf_token_for(&state, &ctx, "/hostings/set-limits"),
                 error: None,
                 just_created: Some(created),
             };
@@ -184,15 +194,34 @@ pub async fn get_detail(
         RpcResponse::Error(e) => return Err(AppError::Rpc(e.to_string())),
         _ => return Err(AppError::Internal("unexpected response".into())),
     };
-    let csrf_token = csrf_token_for(&state, &ctx, "/hostings/delete");
+    let sel_id = HostingSelector::Id(detail.id.clone());
+    let limits = fetch_limits(&state, sel_id)
+        .await
+        .unwrap_or_else(|_| lm_types::HostingLimits::defaults());
     let tpl = DetailTpl {
         username: &ctx.username,
         detail,
-        csrf_token,
+        limits,
+        csrf_delete: csrf_token_for(&state, &ctx, "/hostings/delete"),
+        csrf_suspend: csrf_token_for(&state, &ctx, "/hostings/suspend"),
+        csrf_resume: csrf_token_for(&state, &ctx, "/hostings/resume"),
+        csrf_limits: csrf_token_for(&state, &ctx, "/hostings/set-limits"),
         error: None,
         just_created: None,
     };
     Ok(Html(tpl.render()?).into_response())
+}
+
+async fn fetch_limits(
+    state: &SharedState,
+    sel: HostingSelector,
+) -> Result<lm_types::HostingLimits, AppError> {
+    let resp = lm_rpc_client::call(&state.agent_socket, Request::HostingGetLimits(sel)).await?;
+    match resp {
+        RpcResponse::HostingGetLimits(l) => Ok(l),
+        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
 }
 
 #[derive(Deserialize)]
@@ -220,6 +249,121 @@ pub async fn post_delete(
         RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
+}
+
+#[derive(Deserialize)]
+pub struct SuspendForm {
+    selector: String,
+    #[serde(default)]
+    reason: String,
+}
+
+pub async fn post_suspend(
+    State(state): State<SharedState>,
+    Form(form): Form<SuspendForm>,
+) -> Result<Response, AppError> {
+    let sel = parse_selector(&form.selector)?;
+    let reason = lm_types::SuspendReason::Manual {
+        message: if form.reason.trim().is_empty() {
+            None
+        } else {
+            Some(form.reason.trim().to_string())
+        },
+    };
+    let resp = lm_rpc_client::call(
+        &state.agent_socket,
+        Request::HostingSuspend { sel, reason },
+    )
+    .await?;
+    match resp {
+        RpcResponse::HostingSuspend => Ok(Redirect::to(&format!(
+            "/hostings/{}",
+            urlencoding(&form.selector)
+        ))
+        .into_response()),
+        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ResumeForm {
+    selector: String,
+}
+
+pub async fn post_resume(
+    State(state): State<SharedState>,
+    Form(form): Form<ResumeForm>,
+) -> Result<Response, AppError> {
+    let sel = parse_selector(&form.selector)?;
+    let resp = lm_rpc_client::call(&state.agent_socket, Request::HostingResume(sel)).await?;
+    match resp {
+        RpcResponse::HostingResume => Ok(Redirect::to(&format!(
+            "/hostings/{}",
+            urlencoding(&form.selector)
+        ))
+        .into_response()),
+        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct SetLimitsForm {
+    selector: String,
+    php_memory_mb: i64,
+    php_max_exec_secs: i64,
+    php_max_children: i64,
+    php_max_requests: i64,
+    db_max_connections: i64,
+    #[serde(default)]
+    disk_hard_mb: String,
+    #[serde(default)]
+    bw_monthly_mb: String,
+}
+
+pub async fn post_set_limits(
+    State(state): State<SharedState>,
+    Form(form): Form<SetLimitsForm>,
+) -> Result<Response, AppError> {
+    let sel = parse_selector(&form.selector)?;
+    let mut l = lm_types::HostingLimits::defaults();
+    l.php_memory_mb = form.php_memory_mb;
+    l.php_max_exec_secs = form.php_max_exec_secs;
+    l.php_max_children = form.php_max_children;
+    l.php_max_requests = form.php_max_requests;
+    l.db_max_connections = form.db_max_connections;
+    if let Ok(mb) = form.disk_hard_mb.trim().parse::<i64>() {
+        if mb > 0 {
+            l.disk_hard_bytes = Some(mb * 1024 * 1024);
+        }
+    }
+    if let Ok(mb) = form.bw_monthly_mb.trim().parse::<i64>() {
+        if mb > 0 {
+            l.bw_monthly_bytes = Some(mb * 1024 * 1024);
+        }
+    }
+    let resp = lm_rpc_client::call(
+        &state.agent_socket,
+        Request::HostingSetLimits {
+            sel,
+            limits: l,
+        },
+    )
+    .await?;
+    match resp {
+        RpcResponse::HostingSetLimits(_) => Ok(Redirect::to(&format!(
+            "/hostings/{}",
+            urlencoding(&form.selector)
+        ))
+        .into_response()),
+        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+fn urlencoding(s: &str) -> String {
+    url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
 }
 
 fn parse_aliases(input: &str) -> Result<Vec<Domain>, String> {

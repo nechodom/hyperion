@@ -61,6 +61,26 @@ pub async fn create_db_and_user(
     })
 }
 
+/// `ALTER USER ... ACCOUNT LOCK`. Idempotent.
+pub async fn lock_user(db_user: &str) -> Result<(), AdapterError> {
+    let sql = format!(
+        "ALTER USER `{user}`@`localhost` ACCOUNT LOCK;",
+        user = escape_ident(db_user),
+    );
+    cmd::run_with_stdin("/usr/bin/mariadb", &[], sql.as_bytes()).await?;
+    Ok(())
+}
+
+/// `ALTER USER ... ACCOUNT UNLOCK`. Idempotent.
+pub async fn unlock_user(db_user: &str) -> Result<(), AdapterError> {
+    let sql = format!(
+        "ALTER USER `{user}`@`localhost` ACCOUNT UNLOCK;",
+        user = escape_ident(db_user),
+    );
+    cmd::run_with_stdin("/usr/bin/mariadb", &[], sql.as_bytes()).await?;
+    Ok(())
+}
+
 /// Drop database + user. Idempotent.
 pub async fn drop_db_and_user(db_name: &str, db_user: &str) -> Result<(), AdapterError> {
     let sql = format!(

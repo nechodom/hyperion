@@ -53,6 +53,7 @@
           <td>
             <span class="pill
               {% if r.state.as_str() == "active" %}ok
+              {% else if r.state.as_str() == "suspended" %}warn
               {% else if r.state.as_str() == "failed" %}err
               {% else %}warn{% endif %}">{{ r.state.as_str() }}</span>
           </td>

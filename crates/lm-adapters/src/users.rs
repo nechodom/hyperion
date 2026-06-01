@@ -67,6 +67,41 @@ pub async fn ensure_user(spec: &UserSpec) -> Result<UserInfo, AdapterError> {
         .ok_or_else(|| AdapterError::Other(format!("user {} not found after useradd", spec.name)))
 }
 
+/// `usermod -L` to lock the password and swap shell to `/usr/sbin/nologin`.
+/// Idempotent — running on an already-locked account is a no-op.
+pub async fn lock_login(name: &SystemUserName) -> Result<(), AdapterError> {
+    if lookup(name).await?.is_none() {
+        return Ok(());
+    }
+    cmd::run("/usr/sbin/usermod", &["-L", name.as_str()]).await?;
+    cmd::run(
+        "/usr/sbin/usermod",
+        &["-s", "/usr/sbin/nologin", name.as_str()],
+    )
+    .await?;
+    Ok(())
+}
+
+/// `usermod -U` to unlock the password. The shell stays at /usr/sbin/nologin
+/// because the agent's user spec sets it that way by default.
+pub async fn unlock_login(name: &SystemUserName) -> Result<(), AdapterError> {
+    if lookup(name).await?.is_none() {
+        return Ok(());
+    }
+    cmd::run("/usr/sbin/usermod", &["-U", name.as_str()]).await?;
+    Ok(())
+}
+
+/// `pkill -KILL -u <name>`. Best-effort: not-found / no-procs return Ok.
+pub async fn kill_user_procs(name: &SystemUserName) -> Result<(), AdapterError> {
+    match cmd::run("/usr/bin/pkill", &["-KILL", "-u", name.as_str()]).await {
+        Ok(_) => Ok(()),
+        // pkill exits 1 when no matching processes; treat as no-op.
+        Err(AdapterError::Command { code: 1, .. }) => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 /// Delete a Linux user and their home directory.
 pub async fn delete_user(name: &SystemUserName) -> Result<(), AdapterError> {
     if lookup(name).await?.is_none() {

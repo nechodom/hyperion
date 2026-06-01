@@ -3,7 +3,7 @@
 use clap::{Parser, Subcommand};
 use lm_rpc::codec::{Request, Response};
 use lm_rpc::wire::{DeleteOpts, HostingCreateReq, HostingSelector};
-use lm_types::{DbProvision, HostingId, PhpVersion};
+use lm_types::{DbProvision, HostingId, HostingLimits, PhpVersion, SuspendReason};
 use lm_validate::{Domain, SystemUserName};
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -31,6 +31,11 @@ enum Cmd {
     /// Certificate management.
     #[command(subcommand)]
     Cert(CertCmd),
+    /// Print recent audit log entries.
+    Audit {
+        #[arg(long, default_value_t = 50)]
+        limit: i64,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -61,6 +66,40 @@ enum HostingCmd {
         keep_user: bool,
         #[arg(long)]
         keep_db: bool,
+    },
+    /// Suspend a hosting (best-effort cascade).
+    Suspend {
+        selector: String,
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Resume a previously suspended hosting.
+    Resume { selector: String },
+    /// Update per-hosting PHP / DB / disk / bandwidth limits.
+    SetLimits {
+        selector: String,
+        #[arg(long)]
+        php_memory_mb: Option<i64>,
+        #[arg(long)]
+        php_max_exec_secs: Option<i64>,
+        #[arg(long)]
+        php_max_children: Option<i64>,
+        #[arg(long)]
+        php_max_requests: Option<i64>,
+        #[arg(long)]
+        db_max_connections: Option<i64>,
+        #[arg(long)]
+        disk_hard_bytes: Option<i64>,
+        #[arg(long)]
+        bw_monthly_bytes: Option<i64>,
+    },
+    /// Show current limits for a hosting.
+    GetLimits { selector: String },
+    /// Show recent usage observations for a hosting.
+    Usage {
+        selector: String,
+        #[arg(long, default_value_t = 24)]
+        limit: i64,
     },
 }
 
@@ -161,6 +200,60 @@ async fn call(cli: &Cli) -> anyhow::Result<Response> {
                 keep_database: *keep_db,
             },
         },
+        Cmd::Hosting(HostingCmd::Suspend { selector, reason }) => Request::HostingSuspend {
+            sel: parse_selector(selector)?,
+            reason: SuspendReason::Manual {
+                message: reason.clone(),
+            },
+        },
+        Cmd::Hosting(HostingCmd::Resume { selector }) => {
+            Request::HostingResume(parse_selector(selector)?)
+        }
+        Cmd::Hosting(HostingCmd::SetLimits {
+            selector,
+            php_memory_mb,
+            php_max_exec_secs,
+            php_max_children,
+            php_max_requests,
+            db_max_connections,
+            disk_hard_bytes,
+            bw_monthly_bytes,
+        }) => {
+            let mut l = HostingLimits::defaults();
+            if let Some(v) = php_memory_mb {
+                l.php_memory_mb = *v;
+            }
+            if let Some(v) = php_max_exec_secs {
+                l.php_max_exec_secs = *v;
+            }
+            if let Some(v) = php_max_children {
+                l.php_max_children = *v;
+            }
+            if let Some(v) = php_max_requests {
+                l.php_max_requests = *v;
+            }
+            if let Some(v) = db_max_connections {
+                l.db_max_connections = *v;
+            }
+            if let Some(v) = disk_hard_bytes {
+                l.disk_hard_bytes = Some(*v);
+            }
+            if let Some(v) = bw_monthly_bytes {
+                l.bw_monthly_bytes = Some(*v);
+            }
+            Request::HostingSetLimits {
+                sel: parse_selector(selector)?,
+                limits: l,
+            }
+        }
+        Cmd::Hosting(HostingCmd::GetLimits { selector }) => {
+            Request::HostingGetLimits(parse_selector(selector)?)
+        }
+        Cmd::Hosting(HostingCmd::Usage { selector, limit }) => Request::HostingUsage {
+            sel: parse_selector(selector)?,
+            limit: *limit,
+        },
+        Cmd::Audit { limit } => Request::AuditList { limit: *limit },
         Cmd::Cert(CertCmd::RenewAll) => Request::CertRenewAll,
         Cmd::Cert(CertCmd::Issue { domain }) => Request::CertIssue {
             domain: Domain::parse(domain)?,
@@ -228,6 +321,53 @@ fn print_pretty(resp: &Response) {
         }
         Response::HostingDelete => {
             println!("✓ deleted");
+        }
+        Response::HostingSetLimits(l) | Response::HostingGetLimits(l) => {
+            println!("limits:");
+            println!("  php_memory_mb       = {}", l.php_memory_mb);
+            println!("  php_max_exec_secs   = {}", l.php_max_exec_secs);
+            println!("  php_max_children    = {}", l.php_max_children);
+            println!("  php_max_requests    = {}", l.php_max_requests);
+            println!("  db_max_connections  = {}", l.db_max_connections);
+            println!(
+                "  disk_hard_bytes     = {}",
+                l.disk_hard_bytes
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "—".into())
+            );
+            println!(
+                "  bw_monthly_bytes    = {}",
+                l.bw_monthly_bytes
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "—".into())
+            );
+            println!("  over_bw_policy      = {}", l.over_bw_policy.as_str());
+        }
+        Response::HostingSuspend => println!("✓ suspended"),
+        Response::HostingResume => println!("✓ resumed"),
+        Response::HostingUsage(rows) => {
+            println!(
+                "{:<14} {:>10} {:>10} {:>10} {:>10}",
+                "PERIOD", "DISK", "BW IN", "BW OUT", "PHP REQ"
+            );
+            for r in rows {
+                println!(
+                    "{:<14} {:>10} {:>10} {:>10} {:>10}",
+                    r.period, r.disk_used_bytes, r.bw_in_bytes, r.bw_out_bytes, r.php_requests
+                );
+            }
+        }
+        Response::AuditList(rows) => {
+            println!(
+                "{:>5} {:<19} {:<14} {:<22} {:<10}",
+                "ID", "TS", "ACTOR", "ACTION", "RESULT"
+            );
+            for r in rows {
+                println!(
+                    "{:>5} {:<19} {:<14} {:<22} {:<10}",
+                    r.id, r.ts, r.actor_label, r.action, r.result
+                );
+            }
         }
         Response::CertIssue(c) => {
             println!("✓ issued {} (not_after={})", c.domain, c.not_after);

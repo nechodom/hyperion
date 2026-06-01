@@ -7,7 +7,10 @@ use crate::{
     error::RpcError,
     wire::{AgentInfo, DeleteOpts, HostingCreateReq, HostingCreated, HostingSelector},
 };
-use lm_types::{CertInfo, CertRenewResult, HostingDetail, HostingSummary};
+use lm_types::{
+    CertInfo, CertRenewResult, HostingDetail, HostingLimits, HostingSummary,
+    HostingUsageBucket, SuspendReason,
+};
 use lm_validate::Domain;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -25,6 +28,23 @@ pub enum Request {
         sel: HostingSelector,
         opts: DeleteOpts,
     },
+    HostingSetLimits {
+        sel: HostingSelector,
+        limits: HostingLimits,
+    },
+    HostingGetLimits(HostingSelector),
+    HostingSuspend {
+        sel: HostingSelector,
+        reason: SuspendReason,
+    },
+    HostingResume(HostingSelector),
+    HostingUsage {
+        sel: HostingSelector,
+        limit: i64,
+    },
+    AuditList {
+        limit: i64,
+    },
     CertIssue {
         domain: Domain,
     },
@@ -39,9 +59,27 @@ pub enum Response {
     HostingList(Vec<HostingSummary>),
     HostingGet(HostingDetail),
     HostingDelete,
+    HostingSetLimits(HostingLimits),
+    HostingGetLimits(HostingLimits),
+    HostingSuspend,
+    HostingResume,
+    HostingUsage(Vec<HostingUsageBucket>),
+    AuditList(Vec<AuditEntryWire>),
     CertIssue(CertInfo),
     CertRenewAll(Vec<CertRenewResult>),
     Error(RpcError),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AuditEntryWire {
+    pub id: i64,
+    pub ts: i64,
+    pub actor_uid: i64,
+    pub actor_label: String,
+    pub action: String,
+    pub target: Option<String>,
+    pub payload_json: String,
+    pub result: String,
 }
 
 pub async fn write_frame<W, T>(w: &mut W, value: &T) -> std::io::Result<()>

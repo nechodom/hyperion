@@ -82,6 +82,44 @@ pub async fn create_db_and_role(
     })
 }
 
+/// `ALTER ROLE ... NOLOGIN`. Idempotent.
+pub async fn lock_role(db_user: &str) -> Result<(), AdapterError> {
+    let sql = format!("ALTER ROLE \"{u}\" NOLOGIN;", u = escape_ident(db_user));
+    cmd::run(
+        "/usr/bin/sudo",
+        &[
+            "-u",
+            "postgres",
+            "/usr/bin/psql",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-c",
+            &sql,
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+/// `ALTER ROLE ... LOGIN`. Idempotent.
+pub async fn unlock_role(db_user: &str) -> Result<(), AdapterError> {
+    let sql = format!("ALTER ROLE \"{u}\" LOGIN;", u = escape_ident(db_user));
+    cmd::run(
+        "/usr/bin/sudo",
+        &[
+            "-u",
+            "postgres",
+            "/usr/bin/psql",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-c",
+            &sql,
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
 pub async fn drop_db_and_role(db_name: &str, db_user: &str) -> Result<(), AdapterError> {
     let drop_db = format!(
         "DROP DATABASE IF EXISTS \"{db}\";",

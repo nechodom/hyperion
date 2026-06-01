@@ -95,6 +95,34 @@ async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(_) => Response::HostingDelete,
             Err(e) => Response::Error(e),
         },
+        Request::HostingSetLimits { sel, limits } => {
+            match api.hosting_set_limits(sel, limits).await {
+                Ok(l) => Response::HostingSetLimits(l),
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::HostingGetLimits(sel) => match api.hosting_get_limits(sel).await {
+            Ok(l) => Response::HostingGetLimits(l),
+            Err(e) => Response::Error(e),
+        },
+        Request::HostingSuspend { sel, reason } => {
+            match api.hosting_suspend(sel, reason).await {
+                Ok(_) => Response::HostingSuspend,
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::HostingResume(sel) => match api.hosting_resume(sel).await {
+            Ok(_) => Response::HostingResume,
+            Err(e) => Response::Error(e),
+        },
+        Request::HostingUsage { sel, limit } => match api.hosting_usage(sel, limit).await {
+            Ok(v) => Response::HostingUsage(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::AuditList { limit } => match api.audit_list(limit).await {
+            Ok(v) => Response::AuditList(v),
+            Err(e) => Response::Error(e),
+        },
         Request::CertIssue { domain } => match api.cert_issue(domain).await {
             Ok(v) => Response::CertIssue(v),
             Err(e) => Response::Error(e),
@@ -111,8 +139,11 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use lm_rpc::wire::{AgentInfo, DeleteOpts, HostingCreateReq, HostingCreated, HostingSelector};
-    use lm_rpc::RpcError;
-    use lm_types::{CertInfo, CertRenewResult, HostingDetail, HostingSummary};
+    use lm_rpc::{AuditEntryWire, RpcError};
+    use lm_types::{
+        CertInfo, CertRenewResult, HostingDetail, HostingLimits, HostingSummary,
+        HostingUsageBucket, SuspendReason,
+    };
     use lm_validate::Domain;
 
     struct EchoApi;
@@ -141,6 +172,36 @@ mod tests {
         }
         async fn hosting_delete(&self, _: HostingSelector, _: DeleteOpts) -> Result<(), RpcError> {
             Ok(())
+        }
+        async fn hosting_set_limits(
+            &self,
+            _: HostingSelector,
+            l: HostingLimits,
+        ) -> Result<HostingLimits, RpcError> {
+            Ok(l)
+        }
+        async fn hosting_get_limits(&self, _: HostingSelector) -> Result<HostingLimits, RpcError> {
+            Ok(HostingLimits::defaults())
+        }
+        async fn hosting_suspend(
+            &self,
+            _: HostingSelector,
+            _: SuspendReason,
+        ) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn hosting_resume(&self, _: HostingSelector) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn hosting_usage(
+            &self,
+            _: HostingSelector,
+            _: i64,
+        ) -> Result<Vec<HostingUsageBucket>, RpcError> {
+            Ok(vec![])
+        }
+        async fn audit_list(&self, _: i64) -> Result<Vec<AuditEntryWire>, RpcError> {
+            Ok(vec![])
         }
         async fn cert_issue(&self, _: Domain) -> Result<CertInfo, RpcError> {
             Err(RpcError::Internal)

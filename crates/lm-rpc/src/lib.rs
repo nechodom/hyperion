@@ -12,7 +12,7 @@ pub mod error;
 pub mod wire;
 
 pub use api::AgentApi;
-pub use codec::{read_frame, write_frame, Request, Response, MAX_FRAME};
+pub use codec::{read_frame, write_frame, AuditEntryWire, Request, Response, MAX_FRAME};
 pub use error::RpcError;
 pub use wire::{
     AgentInfo, DbCredentials, DeleteOpts, HostingCreateReq, HostingCreated, HostingSelector,

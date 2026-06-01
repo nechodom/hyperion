@@ -33,6 +33,47 @@ struct VhostTpl<'a> {
 }
 
 /// Render the vhost file's contents without writing.
+#[derive(askama::Template)]
+#[template(path = "nginx-vhost-suspended.conf.j2", escape = "none")]
+struct SuspendedTpl<'a> {
+    domain: &'a str,
+    cert_path: &'a str,
+    key_path: &'a str,
+    reason_message: &'a str,
+}
+
+#[derive(Debug, Clone)]
+pub struct SuspendedInput<'a> {
+    pub domain: &'a str,
+    pub cert_path: &'a str,
+    pub key_path: &'a str,
+    pub reason_message: &'a str,
+}
+
+/// Render the suspended-state vhost.
+pub fn render_suspended(input: &SuspendedInput<'_>) -> Result<String, AdapterError> {
+    let tpl = SuspendedTpl {
+        domain: input.domain,
+        cert_path: input.cert_path,
+        key_path: input.key_path,
+        reason_message: input.reason_message,
+    };
+    Ok(tpl.render()?)
+}
+
+/// Swap the vhost to the suspended variant.
+pub async fn apply_suspended(
+    paths: &Paths,
+    input: &SuspendedInput<'_>,
+) -> Result<(), AdapterError> {
+    let body = render_suspended(input)?;
+    let vhost = paths.vhost_file(input.domain);
+    crate::fs::atomic_write(&vhost, body.as_bytes(), 0o644).await?;
+    let symlink = paths.symlink_file(input.domain);
+    ensure_symlink(&vhost, &symlink).await?;
+    reload().await
+}
+
 pub fn render(input: &VhostInput<'_>) -> Result<String, AdapterError> {
     let tpl = VhostTpl {
         domain: input.domain,

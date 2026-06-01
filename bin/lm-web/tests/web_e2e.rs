@@ -86,6 +86,40 @@ impl lm_core::AdapterPort for StubAdapters {
     async fn nginx_delete_vhost(&self, _: &str) -> Result<(), AdapterError> {
         Ok(())
     }
+    async fn nginx_apply_suspended(
+        &self,
+        _: &str,
+        _: Option<String>,
+    ) -> Result<(), AdapterError> {
+        Ok(())
+    }
+    async fn apply_php_limits(
+        &self,
+        _: &str,
+        _: &str,
+        _: Option<PhpVersion>,
+        _: i64,
+        _: i64,
+        _: i64,
+        _: i64,
+    ) -> Result<(), AdapterError> {
+        Ok(())
+    }
+    async fn db_lock(&self, _: DbProvision, _: &str) -> Result<(), AdapterError> {
+        Ok(())
+    }
+    async fn db_unlock(&self, _: DbProvision, _: &str) -> Result<(), AdapterError> {
+        Ok(())
+    }
+    async fn linux_lock_login(&self, _: &str) -> Result<(), AdapterError> {
+        Ok(())
+    }
+    async fn linux_unlock_login(&self, _: &str) -> Result<(), AdapterError> {
+        Ok(())
+    }
+    async fn kill_user_procs(&self, _: &str) -> Result<(), AdapterError> {
+        Ok(())
+    }
 }
 
 /// Start a stub lm-agent on a temp Unix socket. Returns the socket path
@@ -461,6 +495,125 @@ async fn create_without_csrf_is_403() {
         .await
         .expect("call");
     assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn audit_page_renders_with_entries_after_create() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock, admin);
+    let login_body = b"username=kevin&password=good-pw&next=/";
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/login")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(login_body.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    let cookie = extract_cookie(&resp);
+
+    // Create hosting → also creates an audit entry via service-level append
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/hostings/new")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    let csrf = extract_csrf(&body_string(resp).await);
+    let body = format!(
+        "_csrf={csrf}&domain=audit-test.cz&aliases=&php=8.3&db=mariadb&system_user="
+    );
+    let _ = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/hostings")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, &cookie)
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+
+    // Suspend → audit entry should be visible
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/hostings/audit-test.cz")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    let suspend_csrf =
+        extract_csrf_named(&body_string(resp).await, "/hostings/suspend");
+    let body =
+        format!("_csrf={suspend_csrf}&selector=audit-test.cz&reason=test+suspend");
+    let _ = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/hostings/suspend")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, &cookie)
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+
+    // Fetch the audit page
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/audit")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp).await;
+    assert!(body.contains("Audit log"));
+    assert!(body.contains("hosting.suspend"), "body: {body}");
+}
+
+/// Pull the FIRST csrf token whose surrounding form action matches `path`.
+/// This lets a single rendered page hand out distinct tokens per form.
+fn extract_csrf_named(html: &str, action_path: &str) -> String {
+    let needle = format!("action=\"{action_path}\"");
+    let action_idx = html
+        .find(&needle)
+        .unwrap_or_else(|| panic!("form action {action_path} not in page"));
+    // search backwards or forwards for the matching _csrf input within the form
+    let form_close = html[action_idx..]
+        .find("</form>")
+        .map(|n| n + action_idx)
+        .unwrap_or(html.len());
+    let scope = &html[action_idx..form_close];
+    let csrf_needle = "name=\"_csrf\" value=\"";
+    let i = scope
+        .find(csrf_needle)
+        .unwrap_or_else(|| panic!("csrf missing in form action={action_path}"));
+    let start = i + csrf_needle.len();
+    let end = scope[start..].find('"').expect("quote") + start;
+    scope[start..end].to_string()
 }
 
 #[tokio::test]

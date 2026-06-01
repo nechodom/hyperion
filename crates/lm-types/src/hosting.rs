@@ -10,6 +10,7 @@ use std::str::FromStr;
 pub enum HostingState {
     Provisioning,
     Active,
+    Suspended,
     Failed,
     Deleting,
 }
@@ -19,6 +20,7 @@ impl HostingState {
         match self {
             Self::Provisioning => "provisioning",
             Self::Active => "active",
+            Self::Suspended => "suspended",
             Self::Failed => "failed",
             Self::Deleting => "deleting",
         }
@@ -37,6 +39,7 @@ impl FromStr for HostingState {
         match s {
             "provisioning" => Ok(Self::Provisioning),
             "active" => Ok(Self::Active),
+            "suspended" => Ok(Self::Suspended),
             "failed" => Ok(Self::Failed),
             "deleting" => Ok(Self::Deleting),
             other => Err(format!("unknown state: {other}")),
@@ -78,6 +81,7 @@ mod tests {
         for s in [
             HostingState::Provisioning,
             HostingState::Active,
+            HostingState::Suspended,
             HostingState::Failed,
             HostingState::Deleting,
         ] {

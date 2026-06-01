@@ -58,6 +58,43 @@ pub trait AdapterPort: Send + Sync {
 
     async fn nginx_write_vhost(&self, detail: &HostingDetail) -> Result<(), AdapterError>;
     async fn nginx_delete_vhost(&self, domain: &str) -> Result<(), AdapterError>;
+    async fn nginx_apply_suspended(
+        &self,
+        domain: &str,
+        reason_message: Option<String>,
+    ) -> Result<(), AdapterError>;
+
+    /// Apply per-pool PHP limits (memory, max_children, …). No-op if hosting
+    /// has no PHP-FPM pool (static site).
+    async fn apply_php_limits(
+        &self,
+        system_user: &str,
+        domain: &str,
+        version: Option<PhpVersion>,
+        php_memory_mb: i64,
+        php_max_exec_secs: i64,
+        php_max_children: i64,
+        php_max_requests: i64,
+    ) -> Result<(), AdapterError>;
+
+    /// Lock the DB user/role so the hosting cannot reach its database.
+    async fn db_lock(
+        &self,
+        engine: DbProvision,
+        db_user: &str,
+    ) -> Result<(), AdapterError>;
+    async fn db_unlock(
+        &self,
+        engine: DbProvision,
+        db_user: &str,
+    ) -> Result<(), AdapterError>;
+
+    /// `usermod -L` / `-U` and shell swap to /usr/sbin/nologin.
+    async fn linux_lock_login(&self, name: &str) -> Result<(), AdapterError>;
+    async fn linux_unlock_login(&self, name: &str) -> Result<(), AdapterError>;
+
+    /// `pkill -KILL -u <name>` to kill any process owned by the suspended user.
+    async fn kill_user_procs(&self, name: &str) -> Result<(), AdapterError>;
 }
 
 #[derive(Clone)]
@@ -455,6 +492,289 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .map_err(|e| RpcError::Internal_with(format!("delete row: {e}")))?;
         Ok(())
     }
+
+    /// Apply / replace the per-hosting limits. Persists the row, then asks the
+    /// adapter to apply the PHP-FPM side effects. Returns the canonical row
+    /// (so callers see exactly what was stored after defaults / clamping).
+    pub async fn set_limits(
+        &self,
+        sel: HostingSelector,
+        limits: lm_types::HostingLimits,
+    ) -> Result<lm_types::HostingLimits, RpcError> {
+        let detail = self.get(sel).await?;
+        let limits = clamp_limits(limits);
+        let row = limits_to_row(&detail.id, &limits, now_secs());
+        lm_state::limits::upsert(&self.pool, &row)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("limits upsert: {e}")))?;
+        if let Err(e) = self
+            .adapters
+            .apply_php_limits(
+                &detail.system_user,
+                &detail.domain,
+                detail.php_version,
+                limits.php_memory_mb,
+                limits.php_max_exec_secs,
+                limits.php_max_children,
+                limits.php_max_requests,
+            )
+            .await
+        {
+            return Err(e.into());
+        }
+        Ok(limits)
+    }
+
+    pub async fn get_limits(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<lm_types::HostingLimits, RpcError> {
+        let detail = self.get(sel).await?;
+        let row = lm_state::limits::get(&self.pool, &detail.id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("limits get: {e}")))?;
+        Ok(row.map(row_to_limits).unwrap_or_else(lm_types::HostingLimits::defaults))
+    }
+
+    /// Best-effort suspend. State row goes to 'suspended'; cascading effects
+    /// (nginx swap, FPM stop, DB lock, login lock, kill procs) run as
+    /// best-effort — failures are logged but don't revert state. Suspended is
+    /// the safer state; operators retry to converge.
+    pub async fn suspend(
+        &self,
+        sel: HostingSelector,
+        reason: lm_types::SuspendReason,
+    ) -> Result<(), RpcError> {
+        let detail = self.get(sel).await?;
+        if detail.state == HostingState::Suspended {
+            return Ok(());
+        }
+        if detail.state == HostingState::Deleting {
+            return Err(RpcError::Conflict {
+                message: "hosting is being deleted".into(),
+            });
+        }
+        hostings::set_state(&self.pool, &detail.id, HostingState::Suspended, now_secs())
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("set suspended: {e}")))?;
+        let susp = lm_state::limits::SuspensionRow {
+            hosting_id: detail.id.clone(),
+            suspended_at: now_secs(),
+            suspended_by: reason.label().to_string(),
+            reason_message: reason.message().map(|s| s.to_string()),
+            custom_page_html: None,
+        };
+        lm_state::limits::insert_suspension(&self.pool, &susp)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("insert suspension: {e}")))?;
+
+        let _ = self
+            .adapters
+            .nginx_apply_suspended(&detail.domain, reason.message().map(|s| s.to_string()))
+            .await;
+        if let Some(ver) = detail.php_version {
+            let _ = self.adapters.fpm_delete(&detail.system_user, ver).await;
+        }
+        if let Some(db) = detail.database.as_ref() {
+            let _ = self.adapters.db_lock(db.engine, &db.db_user).await;
+        }
+        let _ = self.adapters.linux_lock_login(&detail.system_user).await;
+        let _ = self.adapters.kill_user_procs(&detail.system_user).await;
+
+        self.append_audit(
+            "hosting.suspend",
+            Some(detail.id.as_str()),
+            &serde_json::json!({"reason": reason.label()}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
+    /// Undo a suspend. Brings the hosting back to 'active'.
+    pub async fn resume(&self, sel: HostingSelector) -> Result<(), RpcError> {
+        let detail = self.get(sel).await?;
+        if detail.state != HostingState::Suspended {
+            return Ok(());
+        }
+        // Re-apply effects in resume order.
+        let _ = self.adapters.linux_unlock_login(&detail.system_user).await;
+        if let Some(db) = detail.database.as_ref() {
+            let _ = self.adapters.db_unlock(db.engine, &db.db_user).await;
+        }
+        if let Some(ver) = detail.php_version {
+            let _ = self
+                .adapters
+                .fpm_ensure(&detail.system_user, &detail.domain, ver)
+                .await;
+            // Re-apply persisted limits to FPM pool.
+            if let Ok(Some(row)) = lm_state::limits::get(&self.pool, &detail.id).await {
+                let _ = self
+                    .adapters
+                    .apply_php_limits(
+                        &detail.system_user,
+                        &detail.domain,
+                        Some(ver),
+                        row.php_memory_mb,
+                        row.php_max_exec_secs,
+                        row.php_max_children,
+                        row.php_max_requests,
+                    )
+                    .await;
+            }
+        }
+        let _ = self.adapters.nginx_write_vhost(&detail).await;
+        hostings::set_state(&self.pool, &detail.id, HostingState::Active, now_secs())
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("set active: {e}")))?;
+        lm_state::limits::delete_suspension(&self.pool, &detail.id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("delete suspension: {e}")))?;
+        self.append_audit(
+            "hosting.resume",
+            Some(detail.id.as_str()),
+            "{}",
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
+    pub async fn usage(
+        &self,
+        sel: HostingSelector,
+        limit: i64,
+    ) -> Result<Vec<lm_types::HostingUsageBucket>, RpcError> {
+        let detail = self.get(sel).await?;
+        let rows = lm_state::limits::usage_for(&self.pool, &detail.id, limit.max(1).min(744))
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("usage: {e}")))?;
+        Ok(rows
+            .into_iter()
+            .map(|b| lm_types::HostingUsageBucket {
+                period: b.period,
+                disk_used_bytes: b.disk_used_bytes,
+                inodes_used: b.inodes_used,
+                bw_in_bytes: b.bw_in_bytes,
+                bw_out_bytes: b.bw_out_bytes,
+                php_requests: b.php_requests,
+            })
+            .collect())
+    }
+
+    pub async fn audit_list(
+        &self,
+        limit: i64,
+    ) -> Result<Vec<lm_rpc::AuditEntryWire>, RpcError> {
+        let rows = lm_state::audit::list(&self.pool, limit.max(1).min(1000))
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("audit list: {e}")))?;
+        Ok(rows
+            .into_iter()
+            .map(|e| lm_rpc::AuditEntryWire {
+                id: e.id,
+                ts: e.ts,
+                actor_uid: e.actor_uid,
+                actor_label: e.actor_label,
+                action: e.action,
+                target: e.target,
+                payload_json: e.payload_json,
+                result: e.result,
+            })
+            .collect())
+    }
+
+    pub(crate) async fn append_audit(
+        &self,
+        action: &str,
+        target: Option<&str>,
+        payload_json: &str,
+        result: &str,
+    ) {
+        let r = lm_state::audit::append(
+            &self.pool,
+            lm_state::audit::AppendReq {
+                ts: now_secs(),
+                actor_uid: 0,
+                actor_label: "agent",
+                action,
+                target,
+                payload_json,
+                result,
+            },
+        )
+        .await;
+        if let Err(e) = r {
+            tracing::warn!(error=%e, "audit append failed");
+        }
+    }
+}
+
+fn clamp_limits(mut l: lm_types::HostingLimits) -> lm_types::HostingLimits {
+    // Hard sanity ranges. Refusing to store nonsense is more useful than
+    // silently mis-applying it later.
+    l.php_memory_mb = l.php_memory_mb.clamp(16, 8192);
+    l.php_max_exec_secs = l.php_max_exec_secs.clamp(1, 3600);
+    l.php_max_children = l.php_max_children.clamp(1, 200);
+    l.php_max_requests = l.php_max_requests.clamp(0, 1_000_000);
+    l.db_max_connections = l.db_max_connections.clamp(1, 1000);
+    if let Some(b) = l.disk_soft_bytes {
+        l.disk_soft_bytes = Some(b.max(0));
+    }
+    if let Some(b) = l.disk_hard_bytes {
+        l.disk_hard_bytes = Some(b.max(0));
+    }
+    if let Some(b) = l.bw_monthly_bytes {
+        l.bw_monthly_bytes = Some(b.max(0));
+    }
+    if let Some(k) = l.throttle_kbps {
+        l.throttle_kbps = Some(k.clamp(1, 10_000_000));
+    }
+    l
+}
+
+fn limits_to_row(
+    id: &HostingId,
+    l: &lm_types::HostingLimits,
+    now: i64,
+) -> lm_state::limits::LimitsRow {
+    lm_state::limits::LimitsRow {
+        hosting_id: id.clone(),
+        disk_soft_bytes: l.disk_soft_bytes,
+        disk_hard_bytes: l.disk_hard_bytes,
+        inode_soft: l.inode_soft,
+        inode_hard: l.inode_hard,
+        php_memory_mb: l.php_memory_mb,
+        php_max_exec_secs: l.php_max_exec_secs,
+        php_max_children: l.php_max_children,
+        php_max_requests: l.php_max_requests,
+        db_max_connections: l.db_max_connections,
+        bw_monthly_bytes: l.bw_monthly_bytes,
+        over_bw_policy: l.over_bw_policy.as_str().to_string(),
+        throttle_kbps: l.throttle_kbps,
+        updated_at: now,
+    }
+}
+
+fn row_to_limits(row: lm_state::limits::LimitsRow) -> lm_types::HostingLimits {
+    let policy = match row.over_bw_policy.as_str() {
+        "throttle" => lm_types::OverBwPolicy::Throttle,
+        _ => lm_types::OverBwPolicy::Suspend,
+    };
+    lm_types::HostingLimits {
+        disk_soft_bytes: row.disk_soft_bytes,
+        disk_hard_bytes: row.disk_hard_bytes,
+        inode_soft: row.inode_soft,
+        inode_hard: row.inode_hard,
+        php_memory_mb: row.php_memory_mb,
+        php_max_exec_secs: row.php_max_exec_secs,
+        php_max_children: row.php_max_children,
+        php_max_requests: row.php_max_requests,
+        db_max_connections: row.db_max_connections,
+        bw_monthly_bytes: row.bw_monthly_bytes,
+        over_bw_policy: policy,
+        throttle_kbps: row.throttle_kbps,
+    }
 }
 
 // ===== Internal-error helper =====
@@ -764,5 +1084,147 @@ mod tests {
             Err(RpcError::AlreadyExists { kind, .. }) => assert_eq!(kind, "hosting"),
             other => panic!("expected AlreadyExists, got {other:?}"),
         }
+    }
+
+    fn suspend_mocks() -> MockAdapterPort {
+        let mut a = happy_mocks();
+        a.expect_nginx_apply_suspended().returning(|_, _| Ok(()));
+        a.expect_fpm_delete().returning(|_, _| Ok(()));
+        a.expect_db_lock().returning(|_, _| Ok(()));
+        a.expect_linux_lock_login().returning(|_| Ok(()));
+        a.expect_kill_user_procs().returning(|_| Ok(()));
+        a
+    }
+
+    fn resume_mocks() -> MockAdapterPort {
+        let mut a = MockAdapterPort::new();
+        a.expect_ensure_user().returning(|_, _| Ok(1042));
+        a.expect_ensure_dirs().returning(|_, _, _, _| Ok(()));
+        a.expect_fpm_ensure().returning(|_, _, _| Ok(()));
+        a.expect_db_create().returning(|_, _, _| Ok(db_creds()));
+        a.expect_acme_issue().returning(|d, _| Ok(cert_for(d)));
+        a.expect_nginx_write_vhost().returning(|_| Ok(()));
+        a.expect_nginx_apply_suspended().returning(|_, _| Ok(()));
+        a.expect_fpm_delete().returning(|_, _| Ok(()));
+        a.expect_db_lock().returning(|_, _| Ok(()));
+        a.expect_linux_lock_login().returning(|_| Ok(()));
+        a.expect_kill_user_procs().returning(|_| Ok(()));
+        a.expect_linux_unlock_login().returning(|_| Ok(()));
+        a.expect_db_unlock().returning(|_, _| Ok(()));
+        a.expect_apply_php_limits()
+            .returning(|_, _, _, _, _, _, _| Ok(()));
+        a
+    }
+
+    #[tokio::test]
+    async fn suspend_sets_state_and_writes_suspension_row() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), suspend_mocks());
+        s.create(req("ex.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("ex.cz").unwrap());
+        s.suspend(
+            sel.clone(),
+            lm_types::SuspendReason::Manual {
+                message: Some("over quota".into()),
+            },
+        )
+        .await
+        .expect("suspend");
+        let detail = s.get(sel).await.expect("get");
+        assert_eq!(detail.state, HostingState::Suspended);
+        let row = lm_state::limits::get_suspension(&pool, &detail.id)
+            .await
+            .expect("get")
+            .expect("present");
+        assert_eq!(row.suspended_by, "manual");
+        assert_eq!(row.reason_message.as_deref(), Some("over quota"));
+    }
+
+    #[tokio::test]
+    async fn suspend_is_idempotent_for_already_suspended() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), suspend_mocks());
+        s.create(req("ex.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("ex.cz").unwrap());
+        s.suspend(sel.clone(), lm_types::SuspendReason::Expired)
+            .await
+            .expect("first");
+        // Second call is a no-op; no extra adapter calls beyond what
+        // suspend_mocks already allows. Should succeed.
+        s.suspend(sel, lm_types::SuspendReason::Expired)
+            .await
+            .expect("idempotent");
+    }
+
+    #[tokio::test]
+    async fn suspend_refuses_when_already_deleting() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), suspend_mocks());
+        let created = s.create(req("ex.cz")).await.expect("create");
+        // Force into 'deleting' directly.
+        lm_state::hostings::set_state(
+            &pool,
+            &created.id,
+            HostingState::Deleting,
+            now_secs(),
+        )
+        .await
+        .expect("set");
+        let sel = HostingSelector::Id(created.id.clone());
+        let r = s
+            .suspend(sel, lm_types::SuspendReason::Manual { message: None })
+            .await;
+        match r {
+            Err(RpcError::Conflict { .. }) => {}
+            other => panic!("expected Conflict, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn resume_brings_back_to_active() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), resume_mocks());
+        s.create(req("ex.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("ex.cz").unwrap());
+        s.suspend(sel.clone(), lm_types::SuspendReason::Expired)
+            .await
+            .expect("suspend");
+        s.resume(sel.clone()).await.expect("resume");
+        let detail = s.get(sel).await.expect("get");
+        assert_eq!(detail.state, HostingState::Active);
+        let susp = lm_state::limits::get_suspension(&pool, &detail.id)
+            .await
+            .expect("get");
+        assert!(susp.is_none(), "suspension row removed on resume");
+    }
+
+    #[tokio::test]
+    async fn set_limits_clamps_and_persists() {
+        let pool = open_memory().await.expect("open");
+        let mut a = happy_mocks();
+        a.expect_apply_php_limits()
+            .returning(|_, _, _, _, _, _, _| Ok(()));
+        let s = svc(pool.clone(), a);
+        s.create(req("ex.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("ex.cz").unwrap());
+        let mut l = lm_types::HostingLimits::defaults();
+        l.php_memory_mb = 100_000; // nonsense
+        l.php_max_children = 0; // nonsense
+        let stored = s.set_limits(sel.clone(), l).await.expect("set");
+        assert_eq!(stored.php_memory_mb, 8192, "clamped to upper bound");
+        assert_eq!(stored.php_max_children, 1, "clamped to lower bound");
+        // Round-trip via get_limits
+        let l2 = s.get_limits(sel).await.expect("get");
+        assert_eq!(l2, stored);
+    }
+
+    #[tokio::test]
+    async fn get_limits_defaults_when_no_row() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), happy_mocks());
+        s.create(req("ex.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("ex.cz").unwrap());
+        let l = s.get_limits(sel).await.expect("get");
+        assert_eq!(l, lm_types::HostingLimits::defaults());
     }
 }

@@ -4,8 +4,11 @@ use crate::service::AdapterPort;
 use crate::HostingService;
 use async_trait::async_trait;
 use lm_rpc::wire::{AgentInfo, DeleteOpts, HostingCreateReq, HostingCreated, HostingSelector};
-use lm_rpc::{AgentApi, RpcError};
-use lm_types::{CertInfo, CertRenewResult, HostingDetail, HostingSummary};
+use lm_rpc::{AgentApi, AuditEntryWire, RpcError};
+use lm_types::{
+    CertInfo, CertRenewResult, HostingDetail, HostingLimits, HostingSummary, HostingUsageBucket,
+    SuspendReason,
+};
 use lm_validate::Domain;
 use std::sync::Arc;
 
@@ -42,7 +45,7 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         Ok(AgentInfo {
             hostname: self.hostname.clone(),
             version: self.version.clone(),
-            schema_version: 1,
+            schema_version: 2,
             hostings_count: count,
         })
     }
@@ -63,15 +66,47 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.delete(sel, opts).await
     }
 
+    async fn hosting_set_limits(
+        &self,
+        sel: HostingSelector,
+        limits: HostingLimits,
+    ) -> Result<HostingLimits, RpcError> {
+        self.svc.set_limits(sel, limits).await
+    }
+
+    async fn hosting_get_limits(&self, sel: HostingSelector) -> Result<HostingLimits, RpcError> {
+        self.svc.get_limits(sel).await
+    }
+
+    async fn hosting_suspend(
+        &self,
+        sel: HostingSelector,
+        reason: SuspendReason,
+    ) -> Result<(), RpcError> {
+        self.svc.suspend(sel, reason).await
+    }
+
+    async fn hosting_resume(&self, sel: HostingSelector) -> Result<(), RpcError> {
+        self.svc.resume(sel).await
+    }
+
+    async fn hosting_usage(
+        &self,
+        sel: HostingSelector,
+        limit: i64,
+    ) -> Result<Vec<HostingUsageBucket>, RpcError> {
+        self.svc.usage(sel, limit).await
+    }
+
+    async fn audit_list(&self, limit: i64) -> Result<Vec<AuditEntryWire>, RpcError> {
+        self.svc.audit_list(limit).await
+    }
+
     async fn cert_issue(&self, _domain: Domain) -> Result<CertInfo, RpcError> {
-        // Foundation: explicit cert issue outside hosting_create is not
-        // implemented yet — that's planned for sub-project 9 hardening.
         Err(RpcError::Internal)
     }
 
     async fn cert_renew_all(&self) -> Result<Vec<CertRenewResult>, RpcError> {
-        // Likewise — handled by a systemd timer + adapter loop in a later
-        // sub-project. Returns an empty list for now.
         Ok(vec![])
     }
 }

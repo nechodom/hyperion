@@ -85,6 +85,40 @@ impl lm_core::AdapterPort for StubAdapters {
     async fn nginx_delete_vhost(&self, _: &str) -> Result<(), AdapterError> {
         Ok(())
     }
+    async fn nginx_apply_suspended(
+        &self,
+        _: &str,
+        _: Option<String>,
+    ) -> Result<(), AdapterError> {
+        Ok(())
+    }
+    async fn apply_php_limits(
+        &self,
+        _: &str,
+        _: &str,
+        _: Option<PhpVersion>,
+        _: i64,
+        _: i64,
+        _: i64,
+        _: i64,
+    ) -> Result<(), AdapterError> {
+        Ok(())
+    }
+    async fn db_lock(&self, _: DbProvision, _: &str) -> Result<(), AdapterError> {
+        Ok(())
+    }
+    async fn db_unlock(&self, _: DbProvision, _: &str) -> Result<(), AdapterError> {
+        Ok(())
+    }
+    async fn linux_lock_login(&self, _: &str) -> Result<(), AdapterError> {
+        Ok(())
+    }
+    async fn linux_unlock_login(&self, _: &str) -> Result<(), AdapterError> {
+        Ok(())
+    }
+    async fn kill_user_procs(&self, _: &str) -> Result<(), AdapterError> {
+        Ok(())
+    }
 }
 
 async fn start_agent() -> (std::path::PathBuf, tempfile::TempDir) {

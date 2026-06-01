@@ -9,12 +9,14 @@ pub mod cert;
 pub mod db;
 pub mod hosting;
 pub mod ids;
+pub mod limits;
 pub mod php;
 
 pub use cert::{CertInfo, CertRenewOutcome, CertRenewResult};
 pub use db::{DbProvision, DbSummary};
 pub use hosting::{HostingDetail, HostingState, HostingSummary};
 pub use ids::{AgentId, HostingId, SecretId};
+pub use limits::{HostingLimits, HostingUsageBucket, OverBwPolicy, SuspendReason};
 pub use php::PhpVersion;
 
 /// Current Unix epoch seconds. Centralized so tests can replace it if needed.

@@ -208,6 +208,83 @@ impl AdapterPort for RealAdapter {
     async fn nginx_delete_vhost(&self, domain: &str) -> Result<(), AdapterError> {
         lm_adapters::nginx::delete_vhost(&self.nginx_paths, domain).await
     }
+
+    async fn nginx_apply_suspended(
+        &self,
+        domain: &str,
+        reason_message: Option<String>,
+    ) -> Result<(), AdapterError> {
+        let cert_path = format!("{}/{}/fullchain.pem", self.certs_root.display(), domain);
+        let key_path = format!("{}/{}/privkey.pem", self.certs_root.display(), domain);
+        let msg = reason_message
+            .unwrap_or_else(|| "This site is temporarily unavailable.".to_string());
+        let input = lm_adapters::nginx::SuspendedInput {
+            domain,
+            cert_path: &cert_path,
+            key_path: &key_path,
+            reason_message: &msg,
+        };
+        lm_adapters::nginx::apply_suspended(&self.nginx_paths, &input).await
+    }
+
+    async fn apply_php_limits(
+        &self,
+        system_user: &str,
+        domain: &str,
+        version: Option<PhpVersion>,
+        php_memory_mb: i64,
+        php_max_exec_secs: i64,
+        php_max_children: i64,
+        php_max_requests: i64,
+    ) -> Result<(), AdapterError> {
+        let Some(ver) = version else {
+            return Ok(());
+        };
+        let mut input = lm_adapters::phpfpm::PoolInput::defaults(system_user, domain, ver);
+        input.memory_mb = php_memory_mb.max(16) as u32;
+        input.max_exec_secs = php_max_exec_secs.max(1) as u32;
+        input.max_children = php_max_children.max(1) as u32;
+        input.max_requests = php_max_requests.max(0) as u32;
+        lm_adapters::phpfpm::ensure_pool(&input).await?;
+        Ok(())
+    }
+
+    async fn db_lock(
+        &self,
+        engine: DbProvision,
+        db_user: &str,
+    ) -> Result<(), AdapterError> {
+        match engine {
+            DbProvision::MariaDB => lm_adapters::mariadb::lock_user(db_user).await,
+            DbProvision::Postgres => lm_adapters::postgres::lock_role(db_user).await,
+        }
+    }
+
+    async fn db_unlock(
+        &self,
+        engine: DbProvision,
+        db_user: &str,
+    ) -> Result<(), AdapterError> {
+        match engine {
+            DbProvision::MariaDB => lm_adapters::mariadb::unlock_user(db_user).await,
+            DbProvision::Postgres => lm_adapters::postgres::unlock_role(db_user).await,
+        }
+    }
+
+    async fn linux_lock_login(&self, name: &str) -> Result<(), AdapterError> {
+        let n = SystemUserName::parse(name)?;
+        lm_adapters::users::lock_login(&n).await
+    }
+
+    async fn linux_unlock_login(&self, name: &str) -> Result<(), AdapterError> {
+        let n = SystemUserName::parse(name)?;
+        lm_adapters::users::unlock_login(&n).await
+    }
+
+    async fn kill_user_procs(&self, name: &str) -> Result<(), AdapterError> {
+        let n = SystemUserName::parse(name)?;
+        lm_adapters::users::kill_user_procs(&n).await
+    }
 }
 
 #[cfg(test)]
