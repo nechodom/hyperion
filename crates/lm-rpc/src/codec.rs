@@ -5,9 +5,7 @@
 
 use crate::{
     error::RpcError,
-    wire::{
-        AgentInfo, DeleteOpts, HostingCreateReq, HostingCreated, HostingSelector,
-    },
+    wire::{AgentInfo, DeleteOpts, HostingCreateReq, HostingCreated, HostingSelector},
 };
 use lm_types::{CertInfo, CertRenewResult, HostingDetail, HostingSummary};
 use lm_validate::Domain;
@@ -127,7 +125,9 @@ mod tests {
     #[tokio::test]
     async fn refuses_overlarge_frame_on_read() {
         let (mut a, mut b) = duplex(8192);
-        a.write_u32((MAX_FRAME + 1) as u32).await.expect("write len");
+        a.write_u32((MAX_FRAME + 1) as u32)
+            .await
+            .expect("write len");
         let result: std::io::Result<Request> = read_frame(&mut b).await;
         assert!(result.is_err());
     }

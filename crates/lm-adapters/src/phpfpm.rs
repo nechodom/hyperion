@@ -69,10 +69,7 @@ pub async fn ensure_pool(input: &PoolInput<'_>) -> Result<PathBuf, AdapterError>
 }
 
 /// Remove the pool file and reload. Idempotent.
-pub async fn delete_pool(
-    system_user: &str,
-    php_version: PhpVersion,
-) -> Result<(), AdapterError> {
+pub async fn delete_pool(system_user: &str, php_version: PhpVersion) -> Result<(), AdapterError> {
     let path = PathBuf::from(php_version.pool_dir()).join(format!("{system_user}.conf"));
     if tokio::fs::metadata(&path).await.is_ok() {
         tokio::fs::remove_file(&path).await?;
@@ -95,8 +92,12 @@ mod tests {
 
     #[test]
     fn render_includes_key_fields() {
-        let out = render(&PoolInput::defaults("alice_cz", "alice.cz", PhpVersion::V8_3))
-            .expect("render");
+        let out = render(&PoolInput::defaults(
+            "alice_cz",
+            "alice.cz",
+            PhpVersion::V8_3,
+        ))
+        .expect("render");
         assert!(out.contains("[alice_cz]"));
         assert!(out.contains("user = alice_cz"));
         assert!(out.contains("listen = /run/php/8.3/alice_cz.sock"));

@@ -4,7 +4,7 @@
 //!
 //! Tests inject `MockAdapterPort` (via `mockall`) so orchestration logic
 //! is verified without touching the system.
-#![deny(clippy::unwrap_used, clippy::expect_used)]
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 #![forbid(unsafe_code)]
 
 pub mod agent;
@@ -15,4 +15,4 @@ pub mod service;
 pub use agent::AgentImpl;
 pub use real_adapter::RealAdapter;
 pub use secrets::{SecretsError, SecretsStore};
-pub use service::{AdapterPort, HostingService, HostingPaths};
+pub use service::{AdapterPort, HostingPaths, HostingService};

@@ -3,7 +3,7 @@
 //! One call per connection. `call(path, request) -> Response` returns the
 //! decoded response, including the `Response::Error(..)` variant when the
 //! agent returned a typed RPC error.
-#![deny(clippy::unwrap_used, clippy::expect_used)]
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 #![forbid(unsafe_code)]
 
 use lm_rpc::codec::{read_frame, write_frame, Request, Response};

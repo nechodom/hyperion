@@ -5,7 +5,7 @@
 //! - shells out only via `Command::new(..).arg(..)` (no `sh -c`),
 //! - is idempotent (ensure-X style, no-ops if state already matches),
 //! - returns a `RollbackToken` for any state-mutating step.
-#![deny(clippy::unwrap_used, clippy::expect_used)]
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 #![forbid(unsafe_code)]
 
 pub mod acme;

@@ -16,5 +16,9 @@ async-trait.workspace = true
 lm-rpc-client = { path = "../lm-rpc-client" }
 lm-types = { path = "../lm-types" }
 lm-validate = { path = "../lm-validate" }
+lm-state = { path = "../lm-state" }
+lm-core = { path = "../lm-core" }
+lm-adapters = { path = "../lm-adapters" }
 tokio = { workspace = true, features = ["macros", "rt"] }
 tempfile.workspace = true
+async-trait.workspace = true

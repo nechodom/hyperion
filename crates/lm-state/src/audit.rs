@@ -7,8 +7,7 @@
 use crate::db::StateError;
 use sqlx::SqlitePool;
 
-pub const GENESIS_HASH: &str =
-    "0000000000000000000000000000000000000000000000000000000000000000";
+pub const GENESIS_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuditEntry {
@@ -43,7 +42,9 @@ pub async fn append(pool: &SqlitePool, req: AppendReq<'_>) -> Result<i64, StateE
         sqlx::query_as("SELECT row_hash FROM audit_log ORDER BY id DESC LIMIT 1")
             .fetch_optional(&mut *tx)
             .await?;
-    let prev_hash = prev.map(|(h,)| h).unwrap_or_else(|| GENESIS_HASH.to_string());
+    let prev_hash = prev
+        .map(|(h,)| h)
+        .unwrap_or_else(|| GENESIS_HASH.to_string());
     let row_hash = compute_row_hash(
         &prev_hash,
         req.ts,
@@ -246,11 +247,10 @@ mod tests {
     async fn first_entry_uses_genesis() {
         let pool = open_memory().await.expect("open");
         append(&pool, req("first")).await.expect("ok");
-        let row: (String,) =
-            sqlx::query_as("SELECT prev_hash FROM audit_log ORDER BY id LIMIT 1")
-                .fetch_one(&pool)
-                .await
-                .expect("query");
+        let row: (String,) = sqlx::query_as("SELECT prev_hash FROM audit_log ORDER BY id LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .expect("query");
         assert_eq!(row.0, GENESIS_HASH);
     }
 

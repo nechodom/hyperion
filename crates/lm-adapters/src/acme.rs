@@ -22,8 +22,7 @@ pub trait ChallengeWriter: Send + Sync {
 /// In-memory test implementation.
 #[cfg(test)]
 pub struct InMemoryChallengeWriter {
-    pub written:
-        std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<String, String>>>,
+    pub written: std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<String, String>>>,
 }
 
 #[cfg(test)]
@@ -75,9 +74,9 @@ impl AcmeConfig {
 /// colon-separated hex format used by browsers.
 pub fn fingerprint_sha256_der(der: &[u8]) -> String {
     let h = blake3::hash(der); // BLAKE3 not SHA-256; renamed in API to be clear:
-    // NOTE: we expose this as fingerprint_sha256 for compatibility with the
-    // existing CertInfo field. A future revision should switch to real SHA-256
-    // via the `sha2` crate; for Foundation the value is opaque to consumers.
+                               // NOTE: we expose this as fingerprint_sha256 for compatibility with the
+                               // existing CertInfo field. A future revision should switch to real SHA-256
+                               // via the `sha2` crate; for Foundation the value is opaque to consumers.
     hex::encode(h.as_bytes())
 }
 

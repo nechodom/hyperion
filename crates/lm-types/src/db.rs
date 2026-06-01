@@ -64,9 +64,18 @@ mod tests {
 
     #[test]
     fn fromstr_accepts_aliases() {
-        assert_eq!("mysql".parse::<DbProvision>().expect("parse"), DbProvision::MariaDB);
-        assert_eq!("PG".parse::<DbProvision>().expect("parse"), DbProvision::Postgres);
-        assert_eq!("PostgreSQL".parse::<DbProvision>().expect("parse"), DbProvision::Postgres);
+        assert_eq!(
+            "mysql".parse::<DbProvision>().expect("parse"),
+            DbProvision::MariaDB
+        );
+        assert_eq!(
+            "PG".parse::<DbProvision>().expect("parse"),
+            DbProvision::Postgres
+        );
+        assert_eq!(
+            "PostgreSQL".parse::<DbProvision>().expect("parse"),
+            DbProvision::Postgres
+        );
     }
 
     #[test]

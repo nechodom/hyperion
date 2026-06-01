@@ -24,19 +24,14 @@ impl Default for RealAdapter {
             certs_root: PathBuf::from("/etc/linux-manager/certs"),
             acme_challenge_root: PathBuf::from("/var/lib/linux-manager/acme-challenges"),
             acme_email: "admin@example.com".into(),
-            acme_directory_url:
-                "https://acme-v02.api.letsencrypt.org/directory".into(),
+            acme_directory_url: "https://acme-v02.api.letsencrypt.org/directory".into(),
         }
     }
 }
 
 #[async_trait]
 impl AdapterPort for RealAdapter {
-    async fn ensure_user(
-        &self,
-        name: &str,
-        home_dir: &str,
-    ) -> Result<u32, AdapterError> {
+    async fn ensure_user(&self, name: &str, home_dir: &str) -> Result<u32, AdapterError> {
         let spec = lm_adapters::users::UserSpec::new_with_default_shell(
             SystemUserName::parse(name)?,
             home_dir.to_string(),
@@ -60,9 +55,8 @@ impl AdapterPort for RealAdapter {
         for p in [htdocs, logs, tmp] {
             lm_adapters::fs::ensure_dir(std::path::Path::new(p), 0o750).await?;
             // chown best-effort via Unix syscall; ignore EPERM on non-root setups.
-            let path_c = std::ffi::CString::new(p).map_err(|e| {
-                AdapterError::Other(format!("path C-string: {e}"))
-            })?;
+            let path_c = std::ffi::CString::new(p)
+                .map_err(|e| AdapterError::Other(format!("path C-string: {e}")))?;
             // SAFETY: We DO NOT use unsafe code anywhere — call chown via the `nix` crate
             // (forbid(unsafe_code) at lib root). We use std::process::Command instead.
             let _ = path_c;
@@ -93,11 +87,7 @@ impl AdapterPort for RealAdapter {
         Ok(())
     }
 
-    async fn fpm_delete(
-        &self,
-        system_user: &str,
-        version: PhpVersion,
-    ) -> Result<(), AdapterError> {
+    async fn fpm_delete(&self, system_user: &str, version: PhpVersion) -> Result<(), AdapterError> {
         lm_adapters::phpfpm::delete_pool(system_user, version).await
     }
 
@@ -136,20 +126,14 @@ impl AdapterPort for RealAdapter {
         db_user: &str,
     ) -> Result<(), AdapterError> {
         match engine {
-            DbProvision::MariaDB => {
-                lm_adapters::mariadb::drop_db_and_user(db_name, db_user).await
-            }
+            DbProvision::MariaDB => lm_adapters::mariadb::drop_db_and_user(db_name, db_user).await,
             DbProvision::Postgres => {
                 lm_adapters::postgres::drop_db_and_role(db_name, db_user).await
             }
         }
     }
 
-    async fn acme_issue(
-        &self,
-        domain: &str,
-        sans: &[String],
-    ) -> Result<CertInfo, AdapterError> {
+    async fn acme_issue(&self, domain: &str, sans: &[String]) -> Result<CertInfo, AdapterError> {
         // Foundation note: a full ACME HTTP-01 flow with nginx temp vhost
         // coordination is deferred to sub-project 9 hardening / a follow-up
         // task. For now we generate a self-signed cert via rcgen and write
@@ -175,12 +159,8 @@ impl AdapterPort for RealAdapter {
             0o644,
         )
         .await?;
-        lm_adapters::fs::atomic_write(
-            &domain_dir.join("privkey.pem"),
-            key_pem.as_bytes(),
-            0o600,
-        )
-        .await?;
+        lm_adapters::fs::atomic_write(&domain_dir.join("privkey.pem"), key_pem.as_bytes(), 0o600)
+            .await?;
         // not_after = now + 365 days as rcgen default
         let not_after = lm_types::now_secs() + 365 * 24 * 3600;
         Ok(CertInfo {
@@ -197,10 +177,7 @@ impl AdapterPort for RealAdapter {
         lm_adapters::fs::remove_dir_all(&domain_dir).await
     }
 
-    async fn nginx_write_vhost(
-        &self,
-        detail: &HostingDetail,
-    ) -> Result<(), AdapterError> {
+    async fn nginx_write_vhost(&self, detail: &HostingDetail) -> Result<(), AdapterError> {
         let cert_path = format!(
             "{}/{}/fullchain.pem",
             self.certs_root.display(),
@@ -244,7 +221,10 @@ mod tests {
             a.nginx_paths.vhost_file("x.cz").to_string_lossy(),
             "/etc/nginx/sites-available/x.cz.conf"
         );
-        assert_eq!(a.certs_root.display().to_string(), "/etc/linux-manager/certs");
+        assert_eq!(
+            a.certs_root.display().to_string(),
+            "/etc/linux-manager/certs"
+        );
     }
 
     #[tokio::test]

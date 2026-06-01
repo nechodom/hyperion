@@ -7,11 +7,7 @@ use std::sync::Arc;
 mod config;
 
 #[derive(Parser, Debug)]
-#[command(
-    name = "lm-agent",
-    version,
-    about = "linux-manager agent daemon"
-)]
+#[command(name = "lm-agent", version, about = "linux-manager agent daemon")]
 struct Cli {
     /// Path to the agent.toml config file.
     #[arg(long, default_value = "/etc/linux-manager/agent.toml")]
@@ -44,9 +40,7 @@ async fn main() -> anyhow::Result<()> {
         home_root: cfg.agent.home_root.to_string_lossy().to_string(),
         acme_challenge_root: cfg.acme.challenge_dir.to_string_lossy().to_string(),
     };
-    let svc = Arc::new(
-        lm_core::HostingService::new(pool, adapter, secrets).with_paths(paths),
-    );
+    let svc = Arc::new(lm_core::HostingService::new(pool, adapter, secrets).with_paths(paths));
     let agent = Arc::new(lm_core::AgentImpl::new(svc));
     let server = lm_rpc_server::Server::bind(&cfg.agent.socket_path, agent).await?;
     tracing::info!("ready");

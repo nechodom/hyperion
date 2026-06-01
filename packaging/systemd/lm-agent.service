@@ -1,0 +1,24 @@
+[Unit]
+Description=linux-manager agent
+After=network-online.target nginx.service mariadb.service postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/lm-agent --config /etc/linux-manager/agent.toml
+Restart=on-failure
+RestartSec=3s
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=false
+ProtectKernelTunables=true
+ProtectKernelModules=true
+PrivateTmp=true
+LogsDirectory=linux-manager
+RuntimeDirectory=linux-manager
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

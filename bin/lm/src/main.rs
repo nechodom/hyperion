@@ -102,10 +102,7 @@ fn build_create(
         .map(DbProvision::from_str)
         .transpose()
         .map_err(anyhow::Error::msg)?;
-    let system_user = user
-        .as_deref()
-        .map(SystemUserName::parse)
-        .transpose()?;
+    let system_user = user.as_deref().map(SystemUserName::parse).transpose()?;
     Ok(HostingCreateReq {
         domain,
         aliases,
@@ -175,7 +172,10 @@ async fn call(cli: &Cli) -> anyhow::Result<Response> {
 fn print_pretty(resp: &Response) {
     match resp {
         Response::AgentInfo(i) => {
-            println!("agent: {} version={} hostings={}", i.hostname, i.version, i.hostings_count);
+            println!(
+                "agent: {} version={} hostings={}",
+                i.hostname, i.version, i.hostings_count
+            );
         }
         Response::HostingCreate(c) => {
             println!("✓ created {} (id={})", c.system_user, c.id);
@@ -187,7 +187,10 @@ fn print_pretty(resp: &Response) {
                 );
             }
             if let Some(cert) = &c.cert {
-                println!("  cert: issuer={}, not_after={}", cert.issuer, cert.not_after);
+                println!(
+                    "  cert: issuer={}, not_after={}",
+                    cert.issuer, cert.not_after
+                );
             }
         }
         Response::HostingList(rows) => {
@@ -217,7 +220,10 @@ fn print_pretty(resp: &Response) {
                 println!("  db:          {} (user={})", db.db_name, db.db_user);
             }
             if let Some(cert) = &d.cert {
-                println!("  cert:        {} (not_after={})", cert.issuer, cert.not_after);
+                println!(
+                    "  cert:        {} (not_after={})",
+                    cert.issuer, cert.not_after
+                );
             }
         }
         Response::HostingDelete => {

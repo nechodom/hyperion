@@ -94,17 +94,9 @@ mod tests {
         let pool = open_memory().await.expect("open");
         let hid = fixture_hosting(&pool).await;
         let sec = SecretId::new();
-        insert(
-            &pool,
-            &hid,
-            DbProvision::MariaDB,
-            "lm_d",
-            "lm_u",
-            &sec,
-            1,
-        )
-        .await
-        .expect("insert");
+        insert(&pool, &hid, DbProvision::MariaDB, "lm_d", "lm_u", &sec, 1)
+            .await
+            .expect("insert");
         let got = get_for_hosting(&pool, &hid)
             .await
             .expect("get")
@@ -148,27 +140,10 @@ mod tests {
         let pool = open_memory().await.expect("open");
         let hid = fixture_hosting(&pool).await;
         let sec = SecretId::new();
-        insert(
-            &pool,
-            &hid,
-            DbProvision::MariaDB,
-            "a",
-            "u",
-            &sec,
-            1,
-        )
-        .await
-        .expect("ok");
-        let r = insert(
-            &pool,
-            &hid,
-            DbProvision::Postgres,
-            "b",
-            "u",
-            &sec,
-            2,
-        )
-        .await;
+        insert(&pool, &hid, DbProvision::MariaDB, "a", "u", &sec, 1)
+            .await
+            .expect("ok");
+        let r = insert(&pool, &hid, DbProvision::Postgres, "b", "u", &sec, 2).await;
         assert!(r.is_err(), "duplicate secret_id must fail");
     }
 }

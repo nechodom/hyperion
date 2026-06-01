@@ -2,7 +2,7 @@
 //!
 //! No I/O, no system calls — just newtype IDs, enums, and DTOs that
 //! cross crate boundaries and the RPC wire.
-#![deny(clippy::unwrap_used, clippy::expect_used)]
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 #![forbid(unsafe_code)]
 
 pub mod cert;

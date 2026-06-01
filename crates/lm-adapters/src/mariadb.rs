@@ -141,9 +141,7 @@ mod tests {
     #[ignore = "requires running mariadb-server"]
     async fn create_and_drop_round_trip() {
         let id = HostingId("01J7A8GQX5BCDEF".into());
-        let r = create_db_and_user(&id, "example.cz")
-            .await
-            .expect("create");
+        let r = create_db_and_user(&id, "example.cz").await.expect("create");
         drop_db_and_user(&r.db_name, &r.db_user)
             .await
             .expect("drop");

@@ -40,7 +40,9 @@ mod tests {
     #[test]
     fn each_variant_round_trips() {
         let cases = vec![
-            RpcError::Validation { message: "m".into() },
+            RpcError::Validation {
+                message: "m".into(),
+            },
             RpcError::AlreadyExists {
                 kind: "k".into(),
                 id: "i".into(),
@@ -58,7 +60,9 @@ mod tests {
                 code: 1,
                 stderr_tail: "e".into(),
             },
-            RpcError::Conflict { message: "c".into() },
+            RpcError::Conflict {
+                message: "c".into(),
+            },
             RpcError::Internal,
         ];
         for c in cases {
@@ -70,8 +74,7 @@ mod tests {
 
     #[test]
     fn from_validation_error_maps_to_validation_variant() {
-        let e: RpcError =
-            lm_validate::ValidationError::InvalidDomain("x".into(), "bad").into();
+        let e: RpcError = lm_validate::ValidationError::InvalidDomain("x".into(), "bad").into();
         match e {
             RpcError::Validation { .. } => {}
             other => panic!("wrong variant: {other:?}"),

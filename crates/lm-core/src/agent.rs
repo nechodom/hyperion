@@ -3,9 +3,7 @@
 use crate::service::AdapterPort;
 use crate::HostingService;
 use async_trait::async_trait;
-use lm_rpc::wire::{
-    AgentInfo, DeleteOpts, HostingCreateReq, HostingCreated, HostingSelector,
-};
+use lm_rpc::wire::{AgentInfo, DeleteOpts, HostingCreateReq, HostingCreated, HostingSelector};
 use lm_rpc::{AgentApi, RpcError};
 use lm_types::{CertInfo, CertRenewResult, HostingDetail, HostingSummary};
 use lm_validate::Domain;
@@ -40,12 +38,7 @@ fn hostname_or_unknown() -> String {
 #[async_trait]
 impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     async fn agent_info(&self) -> Result<AgentInfo, RpcError> {
-        let count = self
-            .svc
-            .list()
-            .await
-            .map(|v| v.len() as i64)
-            .unwrap_or(0);
+        let count = self.svc.list().await.map(|v| v.len() as i64).unwrap_or(0);
         Ok(AgentInfo {
             hostname: self.hostname.clone(),
             version: self.version.clone(),
@@ -54,10 +47,7 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         })
     }
 
-    async fn hosting_create(
-        &self,
-        req: HostingCreateReq,
-    ) -> Result<HostingCreated, RpcError> {
+    async fn hosting_create(&self, req: HostingCreateReq) -> Result<HostingCreated, RpcError> {
         self.svc.create(req).await
     }
 
@@ -69,11 +59,7 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.get(sel).await
     }
 
-    async fn hosting_delete(
-        &self,
-        sel: HostingSelector,
-        opts: DeleteOpts,
-    ) -> Result<(), RpcError> {
+    async fn hosting_delete(&self, sel: HostingSelector, opts: DeleteOpts) -> Result<(), RpcError> {
         self.svc.delete(sel, opts).await
     }
 

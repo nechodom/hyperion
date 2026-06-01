@@ -45,14 +45,16 @@ pub async fn get_by_name(
     .bind(name)
     .fetch_optional(pool)
     .await?;
-    Ok(row.map(|(id, name, uid, home_dir, shell, created_at)| SystemUserRow {
-        id,
-        name,
-        uid,
-        home_dir,
-        shell,
-        created_at,
-    }))
+    Ok(row.map(
+        |(id, name, uid, home_dir, shell, created_at)| SystemUserRow {
+            id,
+            name,
+            uid,
+            home_dir,
+            shell,
+            created_at,
+        },
+    ))
 }
 
 pub async fn delete(pool: &SqlitePool, id: i64) -> Result<(), StateError> {
@@ -71,9 +73,16 @@ mod tests {
     #[tokio::test]
     async fn insert_and_get_by_name_round_trip() {
         let pool = open_memory().await.expect("open");
-        let id = insert(&pool, "alice", 1042, "/home/alice", "/usr/sbin/nologin", 100)
-            .await
-            .expect("insert");
+        let id = insert(
+            &pool,
+            "alice",
+            1042,
+            "/home/alice",
+            "/usr/sbin/nologin",
+            100,
+        )
+        .await
+        .expect("insert");
         let got = get_by_name(&pool, "alice")
             .await
             .expect("get")

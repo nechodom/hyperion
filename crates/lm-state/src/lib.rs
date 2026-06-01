@@ -2,7 +2,7 @@
 //!
 //! The pool is the single source of truth for hostings, users, DBs, and
 //! certificates on the node. All public functions are async.
-#![deny(clippy::unwrap_used, clippy::expect_used)]
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 #![forbid(unsafe_code)]
 
 pub mod audit;

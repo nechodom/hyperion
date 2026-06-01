@@ -1,6 +1,6 @@
 //! Input validation primitives. Every public type carries proof that
 //! its value matches a strict whitelist regex.
-#![deny(clippy::unwrap_used, clippy::expect_used)]
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 #![forbid(unsafe_code)]
 
 pub mod domain;

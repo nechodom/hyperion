@@ -135,7 +135,10 @@ mod tests {
         .await
         .expect("upsert");
         assert_eq!(id1, id2, "upsert reuses id");
-        let got = get(&pool, "example.cz").await.expect("get").expect("present");
+        let got = get(&pool, "example.cz")
+            .await
+            .expect("get")
+            .expect("present");
         assert_eq!(got.issued_at, 200);
         assert_eq!(got.not_after, 2000);
     }

@@ -1,0 +1,35 @@
+# Example /etc/linux-manager/agent.toml
+#
+# Defaults are baked into the binary; every section + key is optional.
+
+[agent]
+# Unix socket the CLI talks to. Set group ownership to control access.
+socket_path = "/run/linux-manager.sock"
+socket_group = "lm-admin"
+
+# SQLite state DB. Created on first boot; migrations applied at startup.
+state_db = "/var/lib/linux-manager/state.db"
+
+# Secret files (DB passwords, ACME account key, etc.) — mode 0600 files
+# in a 0700 dir. Never persisted in SQLite.
+secrets_dir = "/etc/linux-manager/secrets"
+
+# Structured JSON Lines log.
+log_path = "/var/log/linux-manager/agent.log"
+
+# Per-system-user homes are created under this dir as
+# <home_root>/<system_user>/<domain>/htdocs.
+home_root = "/home"
+
+[acme]
+# Let's Encrypt production directory by default. Swap for staging when
+# testing to avoid rate-limits.
+directory_url = "https://acme-v02.api.letsencrypt.org/directory"
+# directory_url = "https://acme-staging-v02.api.letsencrypt.org/directory"
+
+# Required by Let's Encrypt — rotate as needed.
+contact_email = "admin@example.com"
+
+# Where the HTTP-01 challenge files are written; nginx vhosts serve from
+# /.well-known/acme-challenge/ here.
+challenge_dir = "/var/lib/linux-manager/acme-challenges"

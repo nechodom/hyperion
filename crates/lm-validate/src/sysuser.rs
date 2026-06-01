@@ -11,9 +11,8 @@ use std::fmt;
 use std::str::FromStr;
 
 static RE: Lazy<Regex> = Lazy::new(|| {
-    Regex::new(r"^[a-z][a-z0-9_]{2,31}$").unwrap_or_else(|_| {
-        panic!("BUG: sysuser regex failed to compile")
-    })
+    Regex::new(r"^[a-z][a-z0-9_]{2,31}$")
+        .unwrap_or_else(|_| panic!("BUG: sysuser regex failed to compile"))
 });
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -55,7 +54,12 @@ impl SystemUserName {
                 "derived empty name",
             ));
         }
-        let prefixed = if !filtered.chars().next().map(|c| c.is_ascii_alphabetic()).unwrap_or(false) {
+        let prefixed = if !filtered
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_alphabetic())
+            .unwrap_or(false)
+        {
             format!("x{filtered}")
         } else {
             filtered
@@ -135,7 +139,9 @@ mod tests {
     #[test]
     fn rejects_bad_names() {
         let too_long = "a".repeat(33);
-        let cases: Vec<&str> = vec!["", "ab", "1abc", "_abc", "Abc", "abc!", "abc-def", &too_long];
+        let cases: Vec<&str> = vec![
+            "", "ab", "1abc", "_abc", "Abc", "abc!", "abc-def", &too_long,
+        ];
         for s in cases {
             assert!(SystemUserName::parse(s).is_err(), "should reject {s}");
         }
@@ -144,15 +150,21 @@ mod tests {
     #[test]
     fn derive_basic() {
         assert_eq!(
-            SystemUserName::derive_from_domain("example.cz").expect("derive").as_str(),
+            SystemUserName::derive_from_domain("example.cz")
+                .expect("derive")
+                .as_str(),
             "example_cz"
         );
         assert_eq!(
-            SystemUserName::derive_from_domain("www.example.cz").expect("derive").as_str(),
+            SystemUserName::derive_from_domain("www.example.cz")
+                .expect("derive")
+                .as_str(),
             "www_example_cz"
         );
         assert_eq!(
-            SystemUserName::derive_from_domain("foo-bar.io").expect("derive").as_str(),
+            SystemUserName::derive_from_domain("foo-bar.io")
+                .expect("derive")
+                .as_str(),
             "foo_bar_io"
         );
     }

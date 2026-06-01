@@ -3,9 +3,7 @@
 use async_trait::async_trait;
 use lm_adapters::rollback::{Rollback, RollbackStack};
 use lm_adapters::AdapterError;
-use lm_rpc::wire::{
-    DbCredentials, DeleteOpts, HostingCreateReq, HostingCreated, HostingSelector,
-};
+use lm_rpc::wire::{DbCredentials, DeleteOpts, HostingCreateReq, HostingCreated, HostingSelector};
 use lm_rpc::RpcError;
 use lm_state::{certificates, databases, hostings, system_users};
 use lm_types::{
@@ -23,11 +21,7 @@ use std::sync::Arc;
 #[cfg_attr(test, mockall::automock)]
 #[async_trait]
 pub trait AdapterPort: Send + Sync {
-    async fn ensure_user(
-        &self,
-        name: &str,
-        home_dir: &str,
-    ) -> Result<u32, AdapterError>;
+    async fn ensure_user(&self, name: &str, home_dir: &str) -> Result<u32, AdapterError>;
     async fn delete_user(&self, name: &str) -> Result<(), AdapterError>;
     async fn ensure_dirs(
         &self,
@@ -44,11 +38,7 @@ pub trait AdapterPort: Send + Sync {
         domain: &str,
         version: PhpVersion,
     ) -> Result<(), AdapterError>;
-    async fn fpm_delete(
-        &self,
-        system_user: &str,
-        version: PhpVersion,
-    ) -> Result<(), AdapterError>;
+    async fn fpm_delete(&self, system_user: &str, version: PhpVersion) -> Result<(), AdapterError>;
 
     async fn db_create(
         &self,
@@ -63,17 +53,10 @@ pub trait AdapterPort: Send + Sync {
         db_user: &str,
     ) -> Result<(), AdapterError>;
 
-    async fn acme_issue(
-        &self,
-        domain: &str,
-        sans: &[String],
-    ) -> Result<CertInfo, AdapterError>;
+    async fn acme_issue(&self, domain: &str, sans: &[String]) -> Result<CertInfo, AdapterError>;
     async fn acme_delete(&self, domain: &str) -> Result<(), AdapterError>;
 
-    async fn nginx_write_vhost(
-        &self,
-        detail: &HostingDetail,
-    ) -> Result<(), AdapterError>;
+    async fn nginx_write_vhost(&self, detail: &HostingDetail) -> Result<(), AdapterError>;
     async fn nginx_delete_vhost(&self, domain: &str) -> Result<(), AdapterError>;
 }
 
@@ -87,7 +70,7 @@ pub struct HostingService<A: AdapterPort + 'static> {
 
 #[derive(Debug, Clone)]
 pub struct HostingPaths {
-    pub home_root: String, // e.g. "/home"
+    pub home_root: String,           // e.g. "/home"
     pub acme_challenge_root: String, // e.g. "/var/lib/linux-manager/acme-challenges"
 }
 
@@ -116,10 +99,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     }
 
     /// Provision a hosting end-to-end with LIFO rollback on partial failure.
-    pub async fn create(
-        &self,
-        req: HostingCreateReq,
-    ) -> Result<HostingCreated, RpcError> {
+    pub async fn create(&self, req: HostingCreateReq) -> Result<HostingCreated, RpcError> {
         // 1. Validate (parse already did most). Derive system user if absent.
         let system_user = match req.system_user.clone() {
             Some(u) => u,
@@ -149,11 +129,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }));
 
         // 3. ensure_dirs
-        if let Err(e) = self
-            .adapters
-            .ensure_dirs(&htdocs, &logs, &tmp, uid)
-            .await
-        {
+        if let Err(e) = self.adapters.ensure_dirs(&htdocs, &logs, &tmp, uid).await {
             let _ = stack.rollback_all().await;
             return Err(e.into());
         }
@@ -240,11 +216,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // 6. database
         let mut db_creds: Option<DbCredentials> = None;
         if let Some(engine) = req.database {
-            let creds = match self
-                .adapters
-                .db_create(engine, &hosting_id, domain)
-                .await
-            {
+            let creds = match self.adapters.db_create(engine, &hosting_id, domain).await {
                 Ok(c) => c,
                 Err(e) => {
                     let _ = stack.rollback_all().await;
@@ -343,13 +315,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
 
         // 9. transition to active
-        if let Err(e) = hostings::set_state(
-            &self.pool,
-            &hosting_id,
-            HostingState::Active,
-            now_secs(),
-        )
-        .await
+        if let Err(e) =
+            hostings::set_state(&self.pool, &hosting_id, HostingState::Active, now_secs()).await
         {
             // We were so close.
             let _ = stack.rollback_all().await;
@@ -412,16 +379,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .flatten();
         let system_user_name = match suser {
             Some(_) => String::new(),
-            None => match sqlx::query_as::<_, (String,)>(
-                "SELECT name FROM system_users WHERE id = ?",
-            )
-            .bind(row.system_user_id)
-            .fetch_optional(&self.pool)
-            .await
-            {
-                Ok(Some((s,))) => s,
-                _ => String::new(),
-            },
+            None => {
+                match sqlx::query_as::<_, (String,)>("SELECT name FROM system_users WHERE id = ?")
+                    .bind(row.system_user_id)
+                    .fetch_optional(&self.pool)
+                    .await
+                {
+                    Ok(Some((s,))) => s,
+                    _ => String::new(),
+                }
+            }
         };
         Ok(HostingDetail {
             id: row.id,
@@ -438,11 +405,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         })
     }
 
-    pub async fn delete(
-        &self,
-        sel: HostingSelector,
-        opts: DeleteOpts,
-    ) -> Result<(), RpcError> {
+    pub async fn delete(&self, sel: HostingSelector, opts: DeleteOpts) -> Result<(), RpcError> {
         let detail = self.get(sel.clone()).await?;
         hostings::set_state(&self.pool, &detail.id, HostingState::Deleting, now_secs())
             .await
@@ -456,15 +419,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // db drop
         if let Some(db) = detail.database.as_ref() {
             if !opts.keep_database {
-                let _ = self.adapters.db_drop(db.engine, &db.db_name, &db.db_user).await;
+                let _ = self
+                    .adapters
+                    .db_drop(db.engine, &db.db_name, &db.db_user)
+                    .await;
             }
         }
         // fpm pool delete
         if let Some(ver) = detail.php_version {
-            let _ = self
-                .adapters
-                .fpm_delete(&detail.system_user, ver)
-                .await;
+            let _ = self.adapters.fpm_delete(&detail.system_user, ver).await;
         }
         // remove tree
         let hosting_root = format!(
@@ -668,8 +631,7 @@ mod tests {
         a.expect_ensure_dirs().returning(|_, _, _, _| Ok(()));
         a.expect_fpm_ensure().returning(|_, _, _| Ok(()));
         a.expect_db_create().returning(|_, _, _| Ok(db_creds()));
-        a.expect_acme_issue()
-            .returning(|d, _| Ok(cert_for(d)));
+        a.expect_acme_issue().returning(|d, _| Ok(cert_for(d)));
         a.expect_nginx_write_vhost().returning(|_| Ok(()));
         a
     }
@@ -731,8 +693,7 @@ mod tests {
         a.expect_ensure_dirs().returning(|_, _, _, _| Ok(()));
         a.expect_fpm_ensure().returning(|_, _, _| Ok(()));
         a.expect_db_create().returning(|_, _, _| Ok(db_creds()));
-        a.expect_acme_issue()
-            .returning(|d, _| Ok(cert_for(d)));
+        a.expect_acme_issue().returning(|d, _| Ok(cert_for(d)));
         a.expect_nginx_write_vhost()
             .returning(|_| Err(AdapterError::Other("nginx -t failed".into())));
         a.expect_acme_delete().returning(|_| Ok(()));
@@ -755,8 +716,7 @@ mod tests {
         a.expect_ensure_dirs().returning(|_, _, _, _| Ok(()));
         a.expect_fpm_ensure().returning(|_, _, _| Ok(()));
         a.expect_db_create().returning(|_, _, _| Ok(db_creds()));
-        a.expect_acme_issue()
-            .returning(|d, _| Ok(cert_for(d)));
+        a.expect_acme_issue().returning(|d, _| Ok(cert_for(d)));
         a.expect_nginx_write_vhost().returning(|_| Ok(()));
         // Replace the adapter for the second call using a fresh svc.
         let secrets_dir = tempfile::tempdir().expect("dir");

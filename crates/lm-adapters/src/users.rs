@@ -62,12 +62,9 @@ pub async fn ensure_user(spec: &UserSpec) -> Result<UserInfo, AdapterError> {
         ],
     )
     .await?;
-    lookup(&spec.name).await?.ok_or_else(|| {
-        AdapterError::Other(format!(
-            "user {} not found after useradd",
-            spec.name
-        ))
-    })
+    lookup(&spec.name)
+        .await?
+        .ok_or_else(|| AdapterError::Other(format!("user {} not found after useradd", spec.name)))
 }
 
 /// Delete a Linux user and their home directory.

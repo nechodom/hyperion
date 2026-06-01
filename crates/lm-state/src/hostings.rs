@@ -57,11 +57,12 @@ pub async fn insert_alias(
 }
 
 pub async fn aliases(pool: &SqlitePool, hosting_id: &HostingId) -> Result<Vec<String>, StateError> {
-    let rows: Vec<(String,)> =
-        sqlx::query_as("SELECT alias_domain FROM hosting_aliases WHERE hosting_id = ? ORDER BY alias_domain")
-            .bind(hosting_id.as_str())
-            .fetch_all(pool)
-            .await?;
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT alias_domain FROM hosting_aliases WHERE hosting_id = ? ORDER BY alias_domain",
+    )
+    .bind(hosting_id.as_str())
+    .fetch_all(pool)
+    .await?;
     Ok(rows.into_iter().map(|(s,)| s).collect())
 }
 
@@ -88,7 +89,10 @@ pub async fn delete(pool: &SqlitePool, id: &HostingId) -> Result<(), StateError>
     Ok(())
 }
 
-pub async fn get_by_id(pool: &SqlitePool, id: &HostingId) -> Result<Option<HostingRow>, StateError> {
+pub async fn get_by_id(
+    pool: &SqlitePool,
+    id: &HostingId,
+) -> Result<Option<HostingRow>, StateError> {
     fetch_one(
         pool,
         "WHERE id = ?",
@@ -120,8 +124,7 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<HostingSummary>, StateError> 
         out.push(HostingSummary {
             id: HostingId(id),
             domain,
-            state: HostingState::from_str(&state)
-                .map_err(StateError::InvalidState)?,
+            state: HostingState::from_str(&state).map_err(StateError::InvalidState)?,
             php_version: match php_version {
                 Some(v) => Some(PhpVersion::from_str(&v).map_err(StateError::InvalidState)?),
                 None => None,
@@ -134,7 +137,16 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<HostingSummary>, StateError> 
 
 // --- internals ---
 
-type RawHostingRow = (String, String, String, i64, Option<String>, String, i64, i64);
+type RawHostingRow = (
+    String,
+    String,
+    String,
+    i64,
+    Option<String>,
+    String,
+    i64,
+    i64,
+);
 
 const QUERY_BASE: &str =
     "SELECT id, domain, state, system_user_id, php_version, root_dir, created_at, updated_at FROM hostings WHERE id = ?";

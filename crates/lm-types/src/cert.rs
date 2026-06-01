@@ -47,7 +47,9 @@ mod tests {
     fn renew_outcome_renewed_round_trip() {
         let v = CertRenewResult {
             domain: "x.cz".into(),
-            outcome: CertRenewOutcome::Renewed { new_not_after: 12345 },
+            outcome: CertRenewOutcome::Renewed {
+                new_not_after: 12345,
+            },
         };
         let s = serde_json::to_string(&v).expect("serialize");
         let back: CertRenewResult = serde_json::from_str(&s).expect("deserialize");
@@ -58,7 +60,9 @@ mod tests {
     fn renew_outcome_skipped_round_trip() {
         let v = CertRenewResult {
             domain: "x.cz".into(),
-            outcome: CertRenewOutcome::Skipped { reason: "not yet".into() },
+            outcome: CertRenewOutcome::Skipped {
+                reason: "not yet".into(),
+            },
         };
         let s = serde_json::to_string(&v).expect("serialize");
         let back: CertRenewResult = serde_json::from_str(&s).expect("deserialize");
@@ -69,7 +73,9 @@ mod tests {
     fn renew_outcome_failed_round_trip() {
         let v = CertRenewResult {
             domain: "x.cz".into(),
-            outcome: CertRenewOutcome::Failed { error: "boom".into() },
+            outcome: CertRenewOutcome::Failed {
+                error: "boom".into(),
+            },
         };
         let s = serde_json::to_string(&v).expect("serialize");
         let back: CertRenewResult = serde_json::from_str(&s).expect("deserialize");

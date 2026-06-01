@@ -50,13 +50,29 @@ pub async fn create_db_and_role(
     let role_sql = build_role_sql(&user, &password);
     cmd::run(
         "/usr/bin/sudo",
-        &["-u", "postgres", "/usr/bin/psql", "-v", "ON_ERROR_STOP=1", "-c", &role_sql],
+        &[
+            "-u",
+            "postgres",
+            "/usr/bin/psql",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-c",
+            &role_sql,
+        ],
     )
     .await?;
     let db_sql = build_db_sql(&db, &user);
     cmd::run(
         "/usr/bin/sudo",
-        &["-u", "postgres", "/usr/bin/psql", "-v", "ON_ERROR_STOP=1", "-c", &db_sql],
+        &[
+            "-u",
+            "postgres",
+            "/usr/bin/psql",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-c",
+            &db_sql,
+        ],
     )
     .await?;
     Ok(CreateResult {
@@ -67,16 +83,35 @@ pub async fn create_db_and_role(
 }
 
 pub async fn drop_db_and_role(db_name: &str, db_user: &str) -> Result<(), AdapterError> {
-    let drop_db = format!("DROP DATABASE IF EXISTS \"{db}\";", db = escape_ident(db_name));
+    let drop_db = format!(
+        "DROP DATABASE IF EXISTS \"{db}\";",
+        db = escape_ident(db_name)
+    );
     let drop_role = format!("DROP ROLE IF EXISTS \"{u}\";", u = escape_ident(db_user));
     cmd::run(
         "/usr/bin/sudo",
-        &["-u", "postgres", "/usr/bin/psql", "-v", "ON_ERROR_STOP=1", "-c", &drop_db],
+        &[
+            "-u",
+            "postgres",
+            "/usr/bin/psql",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-c",
+            &drop_db,
+        ],
     )
     .await?;
     cmd::run(
         "/usr/bin/sudo",
-        &["-u", "postgres", "/usr/bin/psql", "-v", "ON_ERROR_STOP=1", "-c", &drop_role],
+        &[
+            "-u",
+            "postgres",
+            "/usr/bin/psql",
+            "-v",
+            "ON_ERROR_STOP=1",
+            "-c",
+            &drop_role,
+        ],
     )
     .await?;
     Ok(())

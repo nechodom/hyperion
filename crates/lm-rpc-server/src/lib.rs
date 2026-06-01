@@ -4,7 +4,7 @@
 //! One request/response per connection. The socket is set to mode 0660 on
 //! bind; deployment is expected to place it in a group (e.g. `lm-admin`)
 //! whose members are authorized callers.
-#![deny(clippy::unwrap_used, clippy::expect_used)]
+#![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 #![forbid(unsafe_code)]
 
 use lm_rpc::codec::{read_frame, write_frame, Request, Response};
@@ -110,9 +110,7 @@ async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use lm_rpc::wire::{
-        AgentInfo, DeleteOpts, HostingCreateReq, HostingCreated, HostingSelector,
-    };
+    use lm_rpc::wire::{AgentInfo, DeleteOpts, HostingCreateReq, HostingCreated, HostingSelector};
     use lm_rpc::RpcError;
     use lm_types::{CertInfo, CertRenewResult, HostingDetail, HostingSummary};
     use lm_validate::Domain;
@@ -129,10 +127,7 @@ mod tests {
                 hostings_count: 0,
             })
         }
-        async fn hosting_create(
-            &self,
-            _: HostingCreateReq,
-        ) -> Result<HostingCreated, RpcError> {
+        async fn hosting_create(&self, _: HostingCreateReq) -> Result<HostingCreated, RpcError> {
             Err(RpcError::Internal)
         }
         async fn hosting_list(&self) -> Result<Vec<HostingSummary>, RpcError> {
@@ -144,11 +139,7 @@ mod tests {
                 id: "x".into(),
             })
         }
-        async fn hosting_delete(
-            &self,
-            _: HostingSelector,
-            _: DeleteOpts,
-        ) -> Result<(), RpcError> {
+        async fn hosting_delete(&self, _: HostingSelector, _: DeleteOpts) -> Result<(), RpcError> {
             Ok(())
         }
         async fn cert_issue(&self, _: Domain) -> Result<CertInfo, RpcError> {
@@ -215,7 +206,11 @@ mod tests {
     #[tokio::test]
     async fn socket_perms_are_0660() {
         let (path, _d) = spawn(Arc::new(EchoApi)).await;
-        let m = std::fs::metadata(&path).expect("metadata").permissions().mode() & 0o777;
+        let m = std::fs::metadata(&path)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(m, 0o660);
     }
 
