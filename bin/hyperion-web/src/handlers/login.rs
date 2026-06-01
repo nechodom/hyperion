@@ -15,6 +15,7 @@ use serde::Deserialize;
 struct LoginTpl<'a> {
     error: Option<&'a str>,
     next: &'a str,
+    css_version: &'static str,
 }
 
 #[derive(Deserialize, Default)]
@@ -44,6 +45,7 @@ pub async fn get_login(
     let tpl = LoginTpl {
         error: q.error.as_deref(),
         next: &q.next,
+        css_version: crate::handlers::css_version(),
     };
     let _ = state;
     Ok(Html(tpl.render()?).into_response())

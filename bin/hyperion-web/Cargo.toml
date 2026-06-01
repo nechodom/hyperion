@@ -35,6 +35,8 @@ subtle.workspace = true
 async-trait.workspace = true
 ulid.workspace = true
 thiserror.workspace = true
+blake3.workspace = true
+hex.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }

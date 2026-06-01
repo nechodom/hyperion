@@ -14,6 +14,8 @@ struct AuditTpl<'a> {
     username: &'a str,
     user_initial: char,
     active: &'static str,
+    css_version: &'static str,
+    htmx_version: &'static str,
     rows: Vec<AuditEntryWire>,
     limit: i64,
 }
@@ -44,6 +46,8 @@ pub async fn get_audit(
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
         active: "audit",
+        css_version: super::css_version(),
+        htmx_version: super::htmx_version(),
         rows,
         limit,
     };
