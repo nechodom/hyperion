@@ -119,6 +119,32 @@ async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::HostingUsage(v),
             Err(e) => Response::Error(e),
         },
+        Request::HostingSetExpiry { sel, expiry } => {
+            match api.hosting_set_expiry(sel, expiry).await {
+                Ok(v) => Response::HostingSetExpiry(v),
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::HostingGetExpiry(sel) => match api.hosting_get_expiry(sel).await {
+            Ok(v) => Response::HostingGetExpiry(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::HostingClearExpiry(sel) => match api.hosting_clear_expiry(sel).await {
+            Ok(_) => Response::HostingClearExpiry,
+            Err(e) => Response::Error(e),
+        },
+        Request::UpcomingExpiries { within_seconds } => {
+            match api.upcoming_expiries(within_seconds).await {
+                Ok(v) => Response::UpcomingExpiries(v),
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::SchedulerTick => match api.scheduler_tick().await {
+            Ok(n) => Response::SchedulerTick {
+                actions_processed: n,
+            },
+            Err(e) => Response::Error(e),
+        },
         Request::AuditList { limit } => match api.audit_list(limit).await {
             Ok(v) => Response::AuditList(v),
             Err(e) => Response::Error(e),
@@ -141,8 +167,8 @@ mod tests {
     use lm_rpc::wire::{AgentInfo, DeleteOpts, HostingCreateReq, HostingCreated, HostingSelector};
     use lm_rpc::{AuditEntryWire, RpcError};
     use lm_types::{
-        CertInfo, CertRenewResult, HostingDetail, HostingLimits, HostingSummary,
-        HostingUsageBucket, SuspendReason,
+        CertInfo, CertRenewResult, ExpiringHosting, HostingDetail, HostingExpiry,
+        HostingLimits, HostingSummary, HostingUsageBucket, SuspendReason,
     };
     use lm_validate::Domain;
 
@@ -202,6 +228,31 @@ mod tests {
         }
         async fn audit_list(&self, _: i64) -> Result<Vec<AuditEntryWire>, RpcError> {
             Ok(vec![])
+        }
+        async fn hosting_set_expiry(
+            &self,
+            _: HostingSelector,
+            e: HostingExpiry,
+        ) -> Result<HostingExpiry, RpcError> {
+            Ok(e)
+        }
+        async fn hosting_get_expiry(
+            &self,
+            _: HostingSelector,
+        ) -> Result<HostingExpiry, RpcError> {
+            Ok(HostingExpiry::defaults())
+        }
+        async fn hosting_clear_expiry(&self, _: HostingSelector) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn upcoming_expiries(
+            &self,
+            _: i64,
+        ) -> Result<Vec<ExpiringHosting>, RpcError> {
+            Ok(vec![])
+        }
+        async fn scheduler_tick(&self) -> Result<i64, RpcError> {
+            Ok(0)
         }
         async fn cert_issue(&self, _: Domain) -> Result<CertInfo, RpcError> {
             Err(RpcError::Internal)

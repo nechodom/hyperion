@@ -369,6 +369,36 @@ fn print_pretty(resp: &Response) {
                 );
             }
         }
+        Response::HostingSetExpiry(e) | Response::HostingGetExpiry(e) => {
+            println!("expiry:");
+            println!(
+                "  expires_at = {}",
+                e.expires_at
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "—".into())
+            );
+            println!(
+                "  owner_email = {}",
+                e.owner_email.as_deref().unwrap_or("—")
+            );
+            println!("  grace_days  = {}", e.grace_days);
+            println!("  warnings    = {}", e.warning_offsets_days);
+        }
+        Response::HostingClearExpiry => println!("✓ cleared"),
+        Response::UpcomingExpiries(rows) => {
+            println!("{:<24} {:>14} {:<25}", "DOMAIN", "EXPIRES AT", "OWNER");
+            for r in rows {
+                println!(
+                    "{:<24} {:>14} {:<25}",
+                    r.domain,
+                    r.expires_at,
+                    r.owner_email.as_deref().unwrap_or("—")
+                );
+            }
+        }
+        Response::SchedulerTick { actions_processed } => {
+            println!("scheduler tick processed {} action(s)", actions_processed);
+        }
         Response::CertIssue(c) => {
             println!("✓ issued {} (not_after={})", c.domain, c.not_after);
         }

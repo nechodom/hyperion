@@ -662,6 +662,298 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .collect())
     }
 
+    pub async fn set_expiry(
+        &self,
+        sel: HostingSelector,
+        expiry: lm_types::HostingExpiry,
+    ) -> Result<lm_types::HostingExpiry, RpcError> {
+        let detail = self.get(sel).await?;
+        let grace = expiry.grace_days.clamp(1, 365);
+        let offsets = lm_state::scheduler::parse_offsets(&expiry.warning_offsets_days);
+        let csv = if offsets.is_empty() {
+            "30,7,1".to_string()
+        } else {
+            offsets
+                .iter()
+                .map(|n| n.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        lm_state::scheduler::set_expiry(
+            &self.pool,
+            &detail.id,
+            expiry.expires_at,
+            expiry.owner_email.as_deref(),
+            grace,
+            &csv,
+            now_secs(),
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("set_expiry: {e}")))?;
+        // Cancel any previously-queued actions and re-schedule from scratch.
+        lm_state::scheduler::cancel_for_hosting(&self.pool, &detail.id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("cancel: {e}")))?;
+        if let Some(exp) = expiry.expires_at {
+            self.reschedule_actions_for(&detail.id, exp, grace, &offsets).await?;
+        }
+        self.append_audit(
+            "hosting.set_expiry",
+            Some(detail.id.as_str()),
+            &serde_json::json!({
+                "expires_at": expiry.expires_at,
+                "grace_days": grace,
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+        let updated = lm_state::scheduler::get_expiry(&self.pool, &detail.id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("get_expiry: {e}")))?
+            .ok_or(RpcError::Internal)?;
+        Ok(expiry_row_to_dto(updated))
+    }
+
+    pub async fn get_expiry(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<lm_types::HostingExpiry, RpcError> {
+        let detail = self.get(sel).await?;
+        let row = lm_state::scheduler::get_expiry(&self.pool, &detail.id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("get_expiry: {e}")))?
+            .ok_or(RpcError::NotFound {
+                kind: "hosting".into(),
+                id: detail.id.0.clone(),
+            })?;
+        Ok(expiry_row_to_dto(row))
+    }
+
+    pub async fn clear_expiry(&self, sel: HostingSelector) -> Result<(), RpcError> {
+        let detail = self.get(sel).await?;
+        lm_state::scheduler::set_expiry(
+            &self.pool, &detail.id, None, None, 30, "30,7,1", now_secs(),
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("clear: {e}")))?;
+        lm_state::scheduler::cancel_for_hosting(&self.pool, &detail.id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("cancel: {e}")))?;
+        self.append_audit(
+            "hosting.clear_expiry",
+            Some(detail.id.as_str()),
+            "{}",
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
+    pub async fn upcoming_expiries(
+        &self,
+        within_seconds: i64,
+    ) -> Result<Vec<lm_types::ExpiringHosting>, RpcError> {
+        let rows = lm_state::scheduler::list_with_expiry(&self.pool)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("list: {e}")))?;
+        let cutoff = now_secs() + within_seconds.max(0);
+        Ok(rows
+            .into_iter()
+            .filter_map(|r| {
+                let exp = r.expires_at?;
+                if exp <= cutoff {
+                    Some(lm_types::ExpiringHosting {
+                        id: r.id,
+                        domain: r.domain,
+                        expires_at: exp,
+                        owner_email: r.owner_email,
+                        grace_days: r.grace_days,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect())
+    }
+
+    /// Drive one tick of the scheduler. Returns the number of actions
+    /// processed (success + failed). Designed to be called both manually
+    /// and from a tokio interval task in lm-agent.
+    pub async fn scheduler_tick(&self) -> Result<i64, RpcError> {
+        // 1. Make sure every hosting with an expires_at has its scheduled rows.
+        self.reconcile_scheduled_rows()
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("reconcile: {e}")))?;
+
+        // 2. Take a slice of due, pending actions.
+        let now = now_secs();
+        let due = lm_state::scheduler::pending_due(&self.pool, now, 100)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("pending_due: {e}")))?;
+        let mut processed = 0i64;
+        for action in due {
+            lm_state::scheduler::mark_running(&self.pool, action.id, now)
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("mark_running: {e}")))?;
+            let result = self.run_action(&action).await;
+            match result {
+                Ok(()) => {
+                    lm_state::scheduler::mark_done(&self.pool, action.id)
+                        .await
+                        .map_err(|e| RpcError::Internal_with(format!("mark_done: {e}")))?;
+                }
+                Err(e) => {
+                    tracing::warn!(action_id=action.id, error=%e, "scheduled action failed");
+                    lm_state::scheduler::mark_failed_or_retry(
+                        &self.pool,
+                        action.id,
+                        &e,
+                        3,
+                    )
+                    .await
+                    .map_err(|e| RpcError::Internal_with(format!("mark_failed: {e}")))?;
+                }
+            }
+            processed += 1;
+        }
+        Ok(processed)
+    }
+
+    async fn reconcile_scheduled_rows(&self) -> Result<(), lm_state::StateError> {
+        let rows = lm_state::scheduler::list_with_expiry(&self.pool).await?;
+        let now = now_secs();
+        for r in rows {
+            let Some(exp) = r.expires_at else { continue };
+            let offsets = lm_state::scheduler::parse_offsets(&r.warning_offsets_days);
+            // Map each offset to a notification kind. Beyond the spec's
+            // 30/7/1-day defaults we still queue extras, but we tag any
+            // offset >= 30 as Notify30d, 7..30 as Notify7d, <7 as Notify1d
+            // (good-enough bucketing for v1).
+            for offset_days in &offsets {
+                let kind = if *offset_days >= 30 {
+                    lm_state::scheduler::ScheduledKind::Notify30d
+                } else if *offset_days >= 7 {
+                    lm_state::scheduler::ScheduledKind::Notify7d
+                } else {
+                    lm_state::scheduler::ScheduledKind::Notify1d
+                };
+                let due = exp - offset_days * 86_400;
+                if due > now - 7 * 86_400 {
+                    lm_state::scheduler::upsert(&self.pool, &r.id, kind, due, now).await?;
+                }
+            }
+            lm_state::scheduler::upsert(
+                &self.pool,
+                &r.id,
+                lm_state::scheduler::ScheduledKind::SuspendExpired,
+                exp,
+                now,
+            )
+            .await?;
+            let delete_at = exp + r.grace_days.max(1) * 86_400;
+            lm_state::scheduler::upsert(
+                &self.pool,
+                &r.id,
+                lm_state::scheduler::ScheduledKind::DeleteExpired,
+                delete_at,
+                now,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn reschedule_actions_for(
+        &self,
+        id: &HostingId,
+        expires_at: i64,
+        grace_days: i64,
+        offsets: &[i64],
+    ) -> Result<(), RpcError> {
+        let now = now_secs();
+        for offset_days in offsets {
+            let kind = if *offset_days >= 30 {
+                lm_state::scheduler::ScheduledKind::Notify30d
+            } else if *offset_days >= 7 {
+                lm_state::scheduler::ScheduledKind::Notify7d
+            } else {
+                lm_state::scheduler::ScheduledKind::Notify1d
+            };
+            let due = expires_at - offset_days * 86_400;
+            if due > now - 7 * 86_400 {
+                lm_state::scheduler::upsert(&self.pool, id, kind, due, now)
+                    .await
+                    .map_err(|e| RpcError::Internal_with(format!("upsert: {e}")))?;
+            }
+        }
+        lm_state::scheduler::upsert(
+            &self.pool,
+            id,
+            lm_state::scheduler::ScheduledKind::SuspendExpired,
+            expires_at,
+            now,
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("upsert: {e}")))?;
+        let delete_at = expires_at + grace_days.max(1) * 86_400;
+        lm_state::scheduler::upsert(
+            &self.pool,
+            id,
+            lm_state::scheduler::ScheduledKind::DeleteExpired,
+            delete_at,
+            now,
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("upsert: {e}")))?;
+        Ok(())
+    }
+
+    async fn run_action(
+        &self,
+        action: &lm_state::scheduler::ScheduledRow,
+    ) -> Result<(), String> {
+        use lm_state::scheduler::ScheduledKind;
+        match action.action {
+            ScheduledKind::Notify30d | ScheduledKind::Notify7d | ScheduledKind::Notify1d => {
+                // Foundation: we log the notification. Real SMTP integration
+                // is config-gated and ships with the controller (sub-project 4).
+                let row = lm_state::scheduler::get_expiry(&self.pool, &action.hosting_id)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let email = row.as_ref().and_then(|r| r.owner_email.as_deref());
+                tracing::info!(
+                    hosting=%action.hosting_id, action=action.action.as_str(),
+                    owner=email.unwrap_or("<none>"),
+                    "expiry notification due",
+                );
+                self.append_audit(
+                    "scheduler.notify",
+                    Some(action.hosting_id.as_str()),
+                    &serde_json::json!({"kind": action.action.as_str()}).to_string(),
+                    "ok",
+                )
+                .await;
+                Ok(())
+            }
+            ScheduledKind::SuspendExpired => {
+                self.suspend(
+                    HostingSelector::Id(action.hosting_id.clone()),
+                    lm_types::SuspendReason::Expired,
+                )
+                .await
+                .map_err(|e| e.to_string())
+            }
+            ScheduledKind::DeleteExpired => self
+                .delete(
+                    HostingSelector::Id(action.hosting_id.clone()),
+                    lm_rpc::wire::DeleteOpts::default(),
+                )
+                .await
+                .map_err(|e| e.to_string()),
+        }
+    }
+
     pub async fn audit_list(
         &self,
         limit: i64,
@@ -707,6 +999,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         if let Err(e) = r {
             tracing::warn!(error=%e, "audit append failed");
         }
+    }
+}
+
+fn expiry_row_to_dto(row: lm_state::scheduler::ExpiryRow) -> lm_types::HostingExpiry {
+    lm_types::HostingExpiry {
+        expires_at: row.expires_at,
+        owner_email: row.owner_email,
+        grace_days: row.grace_days,
+        warning_offsets_days: row.warning_offsets_days,
     }
 }
 
@@ -1226,5 +1527,72 @@ mod tests {
         let sel = HostingSelector::Domain(Domain::parse("ex.cz").unwrap());
         let l = s.get_limits(sel).await.expect("get");
         assert_eq!(l, lm_types::HostingLimits::defaults());
+    }
+
+    #[tokio::test]
+    async fn set_expiry_schedules_actions_and_clear_cancels() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), happy_mocks());
+        s.create(req("ex.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("ex.cz").unwrap());
+        let exp = now_secs() + 2 * 86_400;
+        let mut e = lm_types::HostingExpiry::defaults();
+        e.expires_at = Some(exp);
+        e.grace_days = 7;
+        e.owner_email = Some("k@x.cz".into());
+        let stored = s.set_expiry(sel.clone(), e).await.expect("set");
+        assert_eq!(stored.expires_at, Some(exp));
+        assert_eq!(stored.grace_days, 7);
+
+        let due_far_future = lm_state::scheduler::pending_due(&pool, exp + 100 * 86_400, 100)
+            .await
+            .expect("pending");
+        let actions: Vec<&str> = due_far_future.iter().map(|a| a.action.as_str()).collect();
+        assert!(actions.contains(&"suspend_expired"));
+        assert!(actions.contains(&"delete_expired"));
+        assert!(actions.contains(&"notify_1d"));
+
+        s.clear_expiry(sel).await.expect("clear");
+        let after = lm_state::scheduler::pending_due(&pool, exp + 100 * 86_400, 100)
+            .await
+            .expect("pending");
+        assert!(after.is_empty(), "actions canceled");
+    }
+
+    #[tokio::test]
+    async fn scheduler_tick_runs_suspend_for_expired_hosting() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), suspend_mocks());
+        s.create(req("ex.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("ex.cz").unwrap());
+
+        let past = now_secs() - 86_400;
+        let mut e = lm_types::HostingExpiry::defaults();
+        e.expires_at = Some(past);
+        s.set_expiry(sel.clone(), e).await.expect("set");
+        let processed = s.scheduler_tick().await.expect("tick");
+        assert!(processed >= 1, "processed: {processed}");
+
+        let detail = s.get(sel).await.expect("get");
+        assert_eq!(detail.state, HostingState::Suspended);
+    }
+
+    #[tokio::test]
+    async fn upcoming_expiries_filters_by_window() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), happy_mocks());
+        s.create(req("a.cz")).await.expect("a");
+        let sel = HostingSelector::Domain(Domain::parse("a.cz").unwrap());
+        let exp = now_secs() + 10 * 86_400;
+        let mut e = lm_types::HostingExpiry::defaults();
+        e.expires_at = Some(exp);
+        s.set_expiry(sel, e).await.expect("set");
+
+        let within_5d = s.upcoming_expiries(5 * 86_400).await.expect("up");
+        assert!(within_5d.is_empty(), "10d > 5d window");
+
+        let within_30d = s.upcoming_expiries(30 * 86_400).await.expect("up");
+        assert_eq!(within_30d.len(), 1);
+        assert_eq!(within_30d[0].domain, "a.cz");
     }
 }

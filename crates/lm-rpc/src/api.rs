@@ -7,8 +7,8 @@ use crate::{
 };
 use async_trait::async_trait;
 use lm_types::{
-    CertInfo, CertRenewResult, HostingDetail, HostingLimits, HostingSummary,
-    HostingUsageBucket, SuspendReason,
+    CertInfo, CertRenewResult, ExpiringHosting, HostingDetail, HostingExpiry, HostingLimits,
+    HostingSummary, HostingUsageBucket, SuspendReason,
 };
 use lm_validate::Domain;
 
@@ -50,6 +50,27 @@ pub trait AgentApi: Send + Sync + 'static {
     ) -> Result<Vec<HostingUsageBucket>, RpcError>;
 
     async fn audit_list(&self, limit: i64) -> Result<Vec<AuditEntryWire>, RpcError>;
+
+    async fn hosting_set_expiry(
+        &self,
+        sel: HostingSelector,
+        expiry: HostingExpiry,
+    ) -> Result<HostingExpiry, RpcError>;
+    async fn hosting_get_expiry(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<HostingExpiry, RpcError>;
+    async fn hosting_clear_expiry(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<(), RpcError>;
+    async fn upcoming_expiries(
+        &self,
+        within_seconds: i64,
+    ) -> Result<Vec<ExpiringHosting>, RpcError>;
+    /// Manually drive one tick of the scheduler. The agent also runs this
+    /// every `[scheduler] tick_interval` seconds in the background.
+    async fn scheduler_tick(&self) -> Result<i64, RpcError>;
 
     async fn cert_issue(&self, domain: Domain) -> Result<CertInfo, RpcError>;
     async fn cert_renew_all(&self) -> Result<Vec<CertRenewResult>, RpcError>;

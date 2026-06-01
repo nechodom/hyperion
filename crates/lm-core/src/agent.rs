@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use lm_rpc::wire::{AgentInfo, DeleteOpts, HostingCreateReq, HostingCreated, HostingSelector};
 use lm_rpc::{AgentApi, AuditEntryWire, RpcError};
 use lm_types::{
-    CertInfo, CertRenewResult, HostingDetail, HostingLimits, HostingSummary, HostingUsageBucket,
-    SuspendReason,
+    CertInfo, CertRenewResult, ExpiringHosting, HostingDetail, HostingExpiry, HostingLimits,
+    HostingSummary, HostingUsageBucket, SuspendReason,
 };
 use lm_validate::Domain;
 use std::sync::Arc;
@@ -100,6 +100,36 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
 
     async fn audit_list(&self, limit: i64) -> Result<Vec<AuditEntryWire>, RpcError> {
         self.svc.audit_list(limit).await
+    }
+
+    async fn hosting_set_expiry(
+        &self,
+        sel: HostingSelector,
+        expiry: HostingExpiry,
+    ) -> Result<HostingExpiry, RpcError> {
+        self.svc.set_expiry(sel, expiry).await
+    }
+
+    async fn hosting_get_expiry(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<HostingExpiry, RpcError> {
+        self.svc.get_expiry(sel).await
+    }
+
+    async fn hosting_clear_expiry(&self, sel: HostingSelector) -> Result<(), RpcError> {
+        self.svc.clear_expiry(sel).await
+    }
+
+    async fn upcoming_expiries(
+        &self,
+        within_seconds: i64,
+    ) -> Result<Vec<ExpiringHosting>, RpcError> {
+        self.svc.upcoming_expiries(within_seconds).await
+    }
+
+    async fn scheduler_tick(&self) -> Result<i64, RpcError> {
+        self.svc.scheduler_tick().await
     }
 
     async fn cert_issue(&self, _domain: Domain) -> Result<CertInfo, RpcError> {

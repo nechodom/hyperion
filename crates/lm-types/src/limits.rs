@@ -101,6 +101,36 @@ pub struct HostingUsageBucket {
     pub php_requests: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct HostingExpiry {
+    /// `None` = no expiry. Otherwise unix-epoch seconds.
+    pub expires_at: Option<i64>,
+    pub owner_email: Option<String>,
+    pub grace_days: i64,
+    /// CSV like "30,7,1" — days before expiry to send warnings.
+    pub warning_offsets_days: String,
+}
+
+impl HostingExpiry {
+    pub fn defaults() -> Self {
+        Self {
+            expires_at: None,
+            owner_email: None,
+            grace_days: 30,
+            warning_offsets_days: "30,7,1".into(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ExpiringHosting {
+    pub id: crate::HostingId,
+    pub domain: String,
+    pub expires_at: i64,
+    pub owner_email: Option<String>,
+    pub grace_days: i64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

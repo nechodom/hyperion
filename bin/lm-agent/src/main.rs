@@ -41,6 +41,23 @@ async fn main() -> anyhow::Result<()> {
         acme_challenge_root: cfg.acme.challenge_dir.to_string_lossy().to_string(),
     };
     let svc = Arc::new(lm_core::HostingService::new(pool, adapter, secrets).with_paths(paths));
+    // Background scheduler: fire scheduler_tick every 5 minutes.
+    {
+        let tick_svc = svc.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5 * 60));
+            // Skip the immediate first tick — give the server a moment to bind.
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                match tick_svc.scheduler_tick().await {
+                    Ok(n) if n > 0 => tracing::info!(processed = n, "scheduler tick"),
+                    Ok(_) => tracing::debug!("scheduler tick: nothing due"),
+                    Err(e) => tracing::warn!(error=%e, "scheduler tick failed"),
+                }
+            }
+        });
+    }
     let agent = Arc::new(lm_core::AgentImpl::new(svc));
     let server = lm_rpc_server::Server::bind(&cfg.agent.socket_path, agent).await?;
     tracing::info!("ready");

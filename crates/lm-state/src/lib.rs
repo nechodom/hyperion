@@ -11,6 +11,7 @@ pub mod databases;
 pub mod db;
 pub mod hostings;
 pub mod limits;
+pub mod scheduler;
 pub mod system_users;
 
 pub use db::{open, open_memory, StateError};
