@@ -7,6 +7,21 @@ pub struct Config {
     pub agent: AgentSection,
     pub acme: AcmeSection,
     pub backup_remote: BackupRemoteSection,
+    pub enrollment: EnrollmentSection,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct EnrollmentSection {
+    /// URL of the master to enroll against (https://master.example.com).
+    pub master_url: String,
+    /// One-time invite token minted by the master. Consumed on first boot.
+    pub invite_token: String,
+    /// Label this node wants to be known as in the cluster.
+    pub node_label: String,
+    /// Path where the assigned node_id is persisted after first enrollment.
+    /// Defaults to /etc/hyperion/node-id.json.
+    pub state_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -54,6 +69,7 @@ impl Default for Config {
             agent: AgentSection::default(),
             acme: AcmeSection::default(),
             backup_remote: BackupRemoteSection::default(),
+            enrollment: EnrollmentSection::default(),
         }
     }
 }

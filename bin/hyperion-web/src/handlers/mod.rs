@@ -1,5 +1,6 @@
 pub mod audit;
 pub mod dashboard;
+pub mod enroll;
 pub mod hostings;
 pub mod install;
 pub mod login;

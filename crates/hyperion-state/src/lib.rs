@@ -15,6 +15,7 @@ pub mod invites;
 pub mod limits;
 pub mod metrics;
 pub mod nodejs;
+pub mod nodes;
 pub mod scheduler;
 pub mod system_users;
 pub mod wordpress;

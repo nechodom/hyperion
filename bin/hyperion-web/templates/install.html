@@ -65,6 +65,45 @@
 
 <div class="card no-pad-table">
   <h2 style="padding:1.4rem 1.5rem 0">
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
+    Enrolled nodes
+  </h2>
+  {% if nodes.is_empty() %}
+    <div class="empty">
+      <p>No nodes have enrolled yet. They show up here automatically the first time an agent calls <code>/api/enroll</code> with a valid token.</p>
+    </div>
+  {% else %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Label</th>
+          <th>Node ID</th>
+          <th>Version</th>
+          <th>Public IP</th>
+          <th>Enrolled</th>
+          <th>Last seen</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for n in nodes %}
+        <tr>
+          <td><strong>{{ n.label }}</strong></td>
+          <td><code style="font-size:0.74rem">{{ n.node_id }}</code></td>
+          <td><span class="tag">v{{ n.agent_version }}</span></td>
+          <td>{% if let Some(ip) = n.public_ip %}<code>{{ ip }}</code>{% else %}<span class="text-soft">—</span>{% endif %}</td>
+          <td class="muted numeric">{{ n.enrolled_at }}</td>
+          <td class="muted numeric">{{ n.last_seen_at }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+
+<div class="card no-pad-table">
+  <h2 style="padding:1.4rem 1.5rem 0">
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
     Pending invites
   </h2>

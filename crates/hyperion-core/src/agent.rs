@@ -10,7 +10,7 @@ use hyperion_rpc::{AgentApi, AuditEntryWire, RpcError};
 use hyperion_types::{
     BackupRunWire, CertInfo, CertIssueRequest, CertRenewResult, ClusterStats, DnsCheckResult,
     ExpiringHosting, HostingDetail, HostingExpiry, HostingLimits, HostingStats, HostingSummary,
-    HostingUsageBucket, NodeInviteMint, NodeInviteSummary, NodeStats, SuspendReason,
+    HostingUsageBucket, NodeInviteMint, NodeInviteSummary, NodeStats, NodeSummary, SuspendReason,
     WpInstallRequest, WpInstallStatus,
 };
 use hyperion_validate::Domain;
@@ -239,5 +239,23 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         body: String,
     ) -> Result<(), RpcError> {
         self.svc.cron_replace(sel, body).await
+    }
+
+    async fn enroll_consume(
+        &self,
+        token: String,
+        caller_ip: String,
+        node_id: String,
+        label: String,
+        agent_version: String,
+        public_ip: Option<String>,
+    ) -> Result<(), RpcError> {
+        self.svc
+            .enroll_consume(token, caller_ip, node_id, label, agent_version, public_ip)
+            .await
+    }
+
+    async fn nodes_list(&self) -> Result<Vec<NodeSummary>, RpcError> {
+        self.svc.nodes_list().await
     }
 }

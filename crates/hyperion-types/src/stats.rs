@@ -51,6 +51,18 @@ pub struct NodeStats {
     pub agent_online: bool,
 }
 
+/// One enrolled node as shown in admin lists (Install + Stats).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NodeSummary {
+    pub node_id: String,
+    pub label: String,
+    pub master_url: Option<String>,
+    pub agent_version: String,
+    pub public_ip: Option<String>,
+    pub enrolled_at: i64,
+    pub last_seen_at: i64,
+}
+
 /// Cluster-wide aggregate. Today single-node = node_stats[0]; later
 /// folds across enrolled nodes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

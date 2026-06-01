@@ -1327,6 +1327,74 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     }
 
     /// Mint a one-time node enrollment token. Plaintext returned exactly once.
+    /// List enrolled nodes (master-side view).
+    pub async fn nodes_list(&self) -> Result<Vec<hyperion_types::NodeSummary>, RpcError> {
+        let rows = hyperion_state::nodes::list(&self.pool)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("nodes list: {e}")))?;
+        Ok(rows
+            .into_iter()
+            .map(|r| hyperion_types::NodeSummary {
+                node_id: r.node_id,
+                label: r.label,
+                master_url: r.master_url,
+                agent_version: r.agent_version,
+                public_ip: r.public_ip,
+                enrolled_at: r.enrolled_at,
+                last_seen_at: r.last_seen_at,
+            })
+            .collect())
+    }
+
+    /// Master-side: validate `token`, mark the invite consumed, and
+    /// insert the node into the `nodes` table. The token is matched by
+    /// its hash so the plaintext never lives on disk past this call.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn enroll_consume(
+        &self,
+        token: String,
+        caller_ip: String,
+        node_id: String,
+        label: String,
+        agent_version: String,
+        public_ip: Option<String>,
+    ) -> Result<(), RpcError> {
+        if token.trim().is_empty() {
+            return Err(RpcError::Validation {
+                message: "empty token".into(),
+            });
+        }
+        let now = now_secs();
+        let ok = hyperion_state::invites::consume(&self.pool, &token, &caller_ip, &node_id, now)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("consume: {e}")))?;
+        if !ok {
+            return Err(RpcError::Validation {
+                message: "invite token invalid, expired, or already consumed".into(),
+            });
+        }
+        let hash = hyperion_state::invites::hash_token(&token);
+        let row = hyperion_state::nodes::NewNode {
+            node_id: node_id.clone(),
+            label,
+            master_url: None, // node knows its own master URL
+            agent_version,
+            public_ip,
+            enrolled_via_hash: hash,
+        };
+        hyperion_state::nodes::insert(&self.pool, &row, now)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("nodes insert: {e}")))?;
+        self.append_audit(
+            "node.enroll",
+            Some(&node_id),
+            &serde_json::json!({"label": row.label, "caller_ip": caller_ip}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
     pub async fn invite_create(
         &self,
         label: String,

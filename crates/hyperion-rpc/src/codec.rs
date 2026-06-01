@@ -10,7 +10,7 @@ use crate::{
 use hyperion_types::{
     BackupRunWire, CertInfo, CertIssueRequest, CertRenewResult, ClusterStats, DnsCheckResult,
     ExpiringHosting, HostingDetail, HostingExpiry, HostingLimits, HostingStats, HostingSummary,
-    HostingUsageBucket, NodeInviteMint, NodeInviteSummary, NodeStats, SuspendReason,
+    HostingUsageBucket, NodeInviteMint, NodeInviteSummary, NodeStats, NodeSummary, SuspendReason,
     WpInstallRequest, WpInstallStatus,
 };
 use hyperion_validate::Domain;
@@ -112,6 +112,15 @@ pub enum Request {
         sel: HostingSelector,
         body: String,
     },
+    EnrollConsume {
+        token: String,
+        caller_ip: String,
+        node_id: String,
+        label: String,
+        agent_version: String,
+        public_ip: Option<String>,
+    },
+    NodesList,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -152,6 +161,8 @@ pub enum Response {
     HostingLogs(String),
     CronList(String),
     CronReplace,
+    EnrollConsume,
+    NodesList(Vec<NodeSummary>),
     Error(RpcError),
 }
 

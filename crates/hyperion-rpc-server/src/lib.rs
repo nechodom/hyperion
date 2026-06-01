@@ -233,6 +233,24 @@ async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(_) => Response::CronReplace,
             Err(e) => Response::Error(e),
         },
+        Request::EnrollConsume {
+            token,
+            caller_ip,
+            node_id,
+            label,
+            agent_version,
+            public_ip,
+        } => match api
+            .enroll_consume(token, caller_ip, node_id, label, agent_version, public_ip)
+            .await
+        {
+            Ok(_) => Response::EnrollConsume,
+            Err(e) => Response::Error(e),
+        },
+        Request::NodesList => match api.nodes_list().await {
+            Ok(v) => Response::NodesList(v),
+            Err(e) => Response::Error(e),
+        },
     }
 }
 
@@ -247,8 +265,8 @@ mod tests {
     use hyperion_types::{
         BackupRunWire, CertInfo, CertIssueRequest, CertRenewResult, ClusterStats, DnsCheckResult,
         ExpiringHosting, HostingDetail, HostingExpiry, HostingLimits, HostingStats, HostingSummary,
-        HostingUsageBucket, NodeInviteMint, NodeInviteSummary, NodeStats, SuspendReason,
-        WpInstallRequest, WpInstallStatus,
+        HostingUsageBucket, NodeInviteMint, NodeInviteSummary, NodeStats, NodeSummary,
+        SuspendReason, WpInstallRequest, WpInstallStatus,
     };
     use hyperion_validate::Domain;
 
@@ -412,6 +430,20 @@ mod tests {
             _: String,
         ) -> Result<(), RpcError> {
             Ok(())
+        }
+        async fn enroll_consume(
+            &self,
+            _: String,
+            _: String,
+            _: String,
+            _: String,
+            _: String,
+            _: Option<String>,
+        ) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn nodes_list(&self) -> Result<Vec<NodeSummary>, RpcError> {
+            Ok(vec![])
         }
     }
 

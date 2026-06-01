@@ -9,7 +9,7 @@ use axum::http::HeaderMap;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Form;
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
-use hyperion_types::{NodeInviteMint, NodeInviteSummary};
+use hyperion_types::{NodeInviteMint, NodeInviteSummary, NodeSummary};
 use serde::Deserialize;
 
 #[derive(Template)]
@@ -22,6 +22,7 @@ struct InstallTpl<'a> {
     htmx_version: &'static str,
     master_url: &'a str,
     invites: Vec<NodeInviteSummary>,
+    nodes: Vec<NodeSummary>,
     just_minted: Option<NodeInviteMint>,
     error: Option<String>,
     csrf_create: String,
@@ -34,6 +35,7 @@ pub async fn get_install(
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let invites = fetch_invites(&state).await.unwrap_or_default();
+    let nodes = fetch_nodes(&state).await.unwrap_or_default();
     let master_url = derive_master_url(&state, &headers);
     let tpl = InstallTpl {
         username: &ctx.username,
@@ -43,6 +45,7 @@ pub async fn get_install(
         htmx_version: super::htmx_version(),
         master_url: &master_url,
         invites,
+        nodes,
         just_minted: None,
         error: None,
         csrf_create: csrf_token(&state, &ctx, "/install/invite"),
@@ -85,6 +88,7 @@ pub async fn post_invite(
         _ => return Err(AppError::Internal("unexpected response".into())),
     };
     let invites = fetch_invites(&state).await.unwrap_or_default();
+    let nodes = fetch_nodes(&state).await.unwrap_or_default();
     let master_url = derive_master_url(&state, &headers);
     let tpl = InstallTpl {
         username: &ctx.username,
@@ -94,6 +98,7 @@ pub async fn post_invite(
         htmx_version: super::htmx_version(),
         master_url: &master_url,
         invites,
+        nodes,
         just_minted: Some(mint),
         error: None,
         csrf_create: csrf_token(&state, &ctx, "/install/invite"),
@@ -129,6 +134,15 @@ async fn fetch_invites(state: &SharedState) -> Result<Vec<NodeInviteSummary>, Ap
     let resp = hyperion_rpc_client::call(&state.agent_socket, Request::InviteList).await?;
     match resp {
         RpcResponse::InviteList(v) => Ok(v),
+        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+async fn fetch_nodes(state: &SharedState) -> Result<Vec<NodeSummary>, AppError> {
+    let resp = hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await?;
+    match resp {
+        RpcResponse::NodesList(v) => Ok(v),
         RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
@@ -184,6 +198,7 @@ async fn render_with_error(
     message: &str,
 ) -> Response {
     let invites = fetch_invites(state).await.unwrap_or_default();
+    let nodes = fetch_nodes(state).await.unwrap_or_default();
     let master_url = derive_master_url(state, headers);
     let tpl = InstallTpl {
         username: &ctx.username,
@@ -193,6 +208,7 @@ async fn render_with_error(
         htmx_version: super::htmx_version(),
         master_url: &master_url,
         invites,
+        nodes,
         just_minted: None,
         error: Some(message.to_string()),
         csrf_create: csrf_token(state, ctx, "/install/invite"),

@@ -1149,11 +1149,13 @@ name = "hyperion-agent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "clap",
  "hyperion-core",
  "hyperion-rpc-server",
  "hyperion-state",
  "serde",
+ "serde_json",
  "tempfile",
  "tokio",
  "toml",

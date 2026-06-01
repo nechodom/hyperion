@@ -83,5 +83,7 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/login", post(handlers::login::post_login))
         .route("/static/app.css", get(handlers::statics::app_css))
         .route("/static/htmx.min.js", get(handlers::statics::htmx_js))
+        // Node enrollment — no session auth (the token IS the credential).
+        .route("/api/enroll", post(handlers::enroll::post_enroll))
         .with_state(state)
 }

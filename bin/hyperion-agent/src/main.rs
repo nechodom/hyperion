@@ -5,6 +5,17 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 mod config;
+mod enroll;
+
+fn hostname_or_unknown() -> String {
+    std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".to_string())
+}
 
 #[derive(Parser, Debug)]
 #[command(name = "hyperion-agent", version, about = "hyperion agent daemon")]
@@ -93,6 +104,29 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
+    // One-shot enrollment with the master, if configured and not yet done.
+    if !cfg.enrollment.master_url.is_empty() && !cfg.enrollment.invite_token.is_empty() {
+        let enr = enroll::EnrollmentConfig {
+            master_url: cfg.enrollment.master_url.clone(),
+            token: cfg.enrollment.invite_token.clone(),
+            label: if cfg.enrollment.node_label.is_empty() {
+                hostname_or_unknown()
+            } else {
+                cfg.enrollment.node_label.clone()
+            },
+            state_file: cfg
+                .enrollment
+                .state_file
+                .clone()
+                .unwrap_or_else(|| PathBuf::from("/etc/hyperion/node-id.json")),
+        };
+        tokio::spawn(async move {
+            if let Err(e) = enroll::ensure_enrolled(enr).await {
+                tracing::warn!(error=%e, "enrollment failed (will retry next boot)");
+            }
+        });
+    }
+
     let agent = Arc::new(hyperion_core::AgentImpl::new(svc));
     let server = hyperion_rpc_server::Server::bind(&cfg.agent.socket_path, agent).await?;
     tracing::info!("ready");

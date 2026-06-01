@@ -539,6 +539,15 @@ fn print_pretty(resp: &Response) {
         Response::HostingLogs(s) => print!("{s}"),
         Response::CronList(s) => print!("{s}"),
         Response::CronReplace => println!("✓ crontab updated"),
+        Response::EnrollConsume => println!("✓ node enrolled"),
+        Response::NodesList(rows) => {
+            for n in rows {
+                println!(
+                    "{}\t{}\tv{}\t{}",
+                    n.node_id, n.label, n.agent_version, n.last_seen_at
+                );
+            }
+        }
         Response::Error(e) => {
             eprintln!("ERROR: {e}");
         }

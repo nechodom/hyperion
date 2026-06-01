@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use hyperion_types::{
     BackupRunWire, CertInfo, CertIssueRequest, CertRenewResult, ClusterStats, DnsCheckResult,
     ExpiringHosting, HostingDetail, HostingExpiry, HostingLimits, HostingStats, HostingSummary,
-    HostingUsageBucket, NodeInviteMint, NodeInviteSummary, NodeStats, SuspendReason,
+    HostingUsageBucket, NodeInviteMint, NodeInviteSummary, NodeStats, NodeSummary, SuspendReason,
     WpInstallRequest, WpInstallStatus,
 };
 use hyperion_validate::Domain;
@@ -124,6 +124,22 @@ pub trait AgentApi: Send + Sync + 'static {
     /// Replace the hosting's crontab atomically (writes to a temp file,
     /// `crontab -u <user> <file>`).
     async fn cron_replace(&self, sel: HostingSelector, body: String) -> Result<(), RpcError>;
+
+    /// Master-side node enrollment: consume an invite token, record the
+    /// node in the `nodes` table, return Ok(()).
+    #[allow(clippy::too_many_arguments)]
+    async fn enroll_consume(
+        &self,
+        token: String,
+        caller_ip: String,
+        node_id: String,
+        label: String,
+        agent_version: String,
+        public_ip: Option<String>,
+    ) -> Result<(), RpcError>;
+
+    /// List enrolled nodes (master-side `nodes` table).
+    async fn nodes_list(&self) -> Result<Vec<NodeSummary>, RpcError>;
 
     /// Restore a hosting from a previously-taken backup archive. The path
     /// must point at one of OUR archives (under /var/lib/hyperion/backups
