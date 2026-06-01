@@ -185,6 +185,38 @@ async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::WpStatus(v),
             Err(e) => Response::Error(e),
         },
+        Request::DnsCheck { domain } => match api.dns_check(domain).await {
+            Ok(v) => Response::DnsCheck(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::CertIssueAcme { sel, req } => match api.cert_issue_acme(sel, req).await {
+            Ok(v) => Response::CertIssueAcme(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::HostingStats { sel } => match api.hosting_stats(sel).await {
+            Ok(v) => Response::HostingStats(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::NodeStats => match api.node_stats().await {
+            Ok(v) => Response::NodeStats(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::ClusterStats => match api.cluster_stats().await {
+            Ok(v) => Response::ClusterStats(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::StatsTick => match api.stats_tick().await {
+            Ok(n) => Response::StatsTick {
+                hostings_sampled: n,
+            },
+            Err(e) => Response::Error(e),
+        },
+        Request::BackupRestore { sel, archive_path } => {
+            match api.backup_restore(sel, archive_path).await {
+                Ok(_) => Response::BackupRestore,
+                Err(e) => Response::Error(e),
+            }
+        }
     }
 }
 
@@ -197,9 +229,10 @@ mod tests {
     };
     use hyperion_rpc::{AuditEntryWire, RpcError};
     use hyperion_types::{
-        BackupRunWire, CertInfo, CertRenewResult, ExpiringHosting, HostingDetail, HostingExpiry,
-        HostingLimits, HostingSummary, HostingUsageBucket, NodeInviteMint, NodeInviteSummary,
-        SuspendReason, WpInstallRequest, WpInstallStatus,
+        BackupRunWire, CertInfo, CertIssueRequest, CertRenewResult, ClusterStats, DnsCheckResult,
+        ExpiringHosting, HostingDetail, HostingExpiry, HostingLimits, HostingStats, HostingSummary,
+        HostingUsageBucket, NodeInviteMint, NodeInviteSummary, NodeStats, SuspendReason,
+        WpInstallRequest, WpInstallStatus,
     };
     use hyperion_validate::Domain;
 
@@ -316,6 +349,35 @@ mod tests {
             _: HostingSelector,
         ) -> Result<Option<WpInstallStatus>, RpcError> {
             Ok(None)
+        }
+        async fn dns_check(&self, _: Domain) -> Result<DnsCheckResult, RpcError> {
+            Err(RpcError::Internal)
+        }
+        async fn cert_issue_acme(
+            &self,
+            _: HostingSelector,
+            _: CertIssueRequest,
+        ) -> Result<CertInfo, RpcError> {
+            Err(RpcError::Internal)
+        }
+        async fn hosting_stats(&self, _: HostingSelector) -> Result<HostingStats, RpcError> {
+            Err(RpcError::Internal)
+        }
+        async fn node_stats(&self) -> Result<NodeStats, RpcError> {
+            Err(RpcError::Internal)
+        }
+        async fn cluster_stats(&self) -> Result<ClusterStats, RpcError> {
+            Err(RpcError::Internal)
+        }
+        async fn stats_tick(&self) -> Result<i64, RpcError> {
+            Ok(0)
+        }
+        async fn backup_restore(
+            &self,
+            _: HostingSelector,
+            _: String,
+        ) -> Result<(), RpcError> {
+            Ok(())
         }
     }
 

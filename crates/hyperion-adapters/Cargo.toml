@@ -23,6 +23,7 @@ async-trait.workspace = true
 blake3.workspace = true
 regex.workspace = true
 once_cell.workspace = true
+x509-parser.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

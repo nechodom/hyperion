@@ -470,6 +470,72 @@ fn print_pretty(resp: &Response) {
             }
             None => println!("(no WordPress install on this hosting)"),
         },
+        Response::DnsCheck(c) => {
+            println!("domain:   {}", c.domain);
+            println!("A:        {:?}", c.resolved_a);
+            println!("AAAA:     {:?}", c.resolved_aaaa);
+            println!(
+                "our v4:   {}",
+                c.our_public_ipv4.as_deref().unwrap_or("?")
+            );
+            println!(
+                "our v6:   {}",
+                c.our_public_ipv6.as_deref().unwrap_or("?")
+            );
+            println!(
+                "matches:  {}",
+                if c.matches { "yes ✓" } else { "no ✗" }
+            );
+            println!("note:     {}", c.note);
+        }
+        Response::CertIssueAcme(c) => {
+            println!("✓ certificate issued");
+            println!("  issuer:    {}", c.issuer);
+            println!("  not_after: {}", c.not_after);
+            println!("  fp:        {}", c.fingerprint_sha256);
+        }
+        Response::HostingStats(s) => {
+            println!("{}", s.domain);
+            println!("  disk:     {} B", s.disk_bytes);
+            println!("  bw_in:    {} B (24h)", s.bw_in_bytes_24h);
+            println!("  bw_out:   {} B (24h)", s.bw_out_bytes_24h);
+            println!("  requests: {} (24h)", s.requests_24h);
+        }
+        Response::NodeStats(n) => {
+            println!("{} ({})", n.label, n.node_id);
+            println!(
+                "  hostings: {} (active={}, suspended={}, failed={})",
+                n.hostings_count, n.hostings_active, n.hostings_suspended, n.hostings_failed
+            );
+            println!("  disk:     {} B total", n.total_disk_bytes);
+            println!("  bw_out:   {} B (24h)", n.total_bw_out_24h);
+            println!("  reqs:     {} (24h)", n.total_requests_24h);
+            println!(
+                "  load1:    {:.2}",
+                n.loadavg_1m_x100 as f64 / 100.0
+            );
+            println!("  mem:      {} / {} kiB", n.mem_used_kib, n.mem_total_kib);
+            println!("  uptime:   {}s", n.uptime_secs);
+        }
+        Response::ClusterStats(c) => {
+            println!("nodes: {}", c.nodes.len());
+            for n in &c.nodes {
+                println!("  - {} ({}), {} hostings", n.label, n.node_id, n.hostings_count);
+            }
+            println!(
+                "totals: hostings={} (active={}/susp={}/fail={}), disk={} B, bw_out_24h={} B",
+                c.total_hostings,
+                c.total_active,
+                c.total_suspended,
+                c.total_failed,
+                c.total_disk_bytes,
+                c.total_bw_out_24h
+            );
+        }
+        Response::StatsTick { hostings_sampled } => {
+            println!("✓ {} hostings sampled", hostings_sampled);
+        }
+        Response::BackupRestore => println!("✓ backup restored"),
         Response::Error(e) => {
             eprintln!("ERROR: {e}");
         }

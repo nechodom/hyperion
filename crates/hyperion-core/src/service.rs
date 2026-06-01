@@ -7,12 +7,13 @@ use hyperion_rpc::wire::{
     DbCredentials, DeleteOpts, HostingCreateReq, HostingCreated, HostingSelector,
 };
 use hyperion_rpc::RpcError;
-use hyperion_state::{certificates, databases, hostings, system_users, wordpress};
+use hyperion_state::{certificates, databases, hostings, metrics, system_users, wordpress};
 use hyperion_types::{
-    now_secs, CertInfo, DbProvision, DbSummary, HostingDetail, HostingId, HostingState,
-    HostingSummary, PhpVersion, SecretId, WpInstallRequest, WpInstallStatus,
+    now_secs, CertInfo, CertIssueRequest, ClusterStats, DbProvision, DbSummary, DnsCheckResult,
+    HostingDetail, HostingId, HostingState, HostingStats, HostingSummary, NodeStats, PhpVersion,
+    SecretId, WpInstallRequest, WpInstallStatus,
 };
-use hyperion_validate::SystemUserName;
+use hyperion_validate::{Domain, SystemUserName};
 use sqlx::SqlitePool;
 use std::sync::Arc;
 
@@ -1367,6 +1368,582 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             tracing::warn!(error=%e, "audit append failed");
         }
     }
+
+    // ================================================================
+    //  DNS pre-check + real ACME issuance
+    // ================================================================
+
+    /// Resolve `domain`'s A + AAAA records via `dig`, fetch our agent's
+    /// public IP, and report whether the records point here.
+    pub async fn dns_check(&self, domain: Domain) -> Result<DnsCheckResult, RpcError> {
+        let d = domain.as_str().to_string();
+        let resolved_a = dig_records(&d, "A").await.unwrap_or_default();
+        let resolved_aaaa = dig_records(&d, "AAAA").await.unwrap_or_default();
+        let our_ipv4 = fetch_public_ip("https://api.ipify.org").await.ok();
+        let our_ipv6 = fetch_public_ip("https://api6.ipify.org").await.ok();
+
+        let mut matches = false;
+        if let Some(ref ip) = our_ipv4 {
+            if resolved_a.iter().any(|r| r == ip) {
+                matches = true;
+            }
+        }
+        if let Some(ref ip) = our_ipv6 {
+            if resolved_aaaa.iter().any(|r| r == ip) {
+                matches = true;
+            }
+        }
+        let note = if resolved_a.is_empty() && resolved_aaaa.is_empty() {
+            format!("{} has no A or AAAA records (NXDOMAIN or DNS error)", d)
+        } else if matches {
+            "DNS resolves here — cert issuance will work.".into()
+        } else {
+            format!(
+                "DNS points elsewhere. We see A={:?} AAAA={:?}; our IPs are {}/{}",
+                resolved_a,
+                resolved_aaaa,
+                our_ipv4.as_deref().unwrap_or("?"),
+                our_ipv6.as_deref().unwrap_or("?"),
+            )
+        };
+
+        Ok(DnsCheckResult {
+            domain: d,
+            resolved_a,
+            resolved_aaaa,
+            our_public_ipv4: our_ipv4,
+            our_public_ipv6: our_ipv6,
+            matches,
+            note,
+        })
+    }
+
+    /// Issue a real Let's Encrypt cert via HTTP-01 + install it.
+    /// Refuses unless DNS resolves here (override via req.require_dns_match=false).
+    pub async fn issue_real_cert(
+        &self,
+        sel: HostingSelector,
+        req: CertIssueRequest,
+    ) -> Result<CertInfo, RpcError> {
+        let detail = self.get(sel).await?;
+        let domain = Domain::parse(&detail.domain)?;
+
+        if req.require_dns_match {
+            let check = self.dns_check(domain.clone()).await?;
+            if !check.matches {
+                return Err(RpcError::Conflict {
+                    message: format!(
+                        "DNS pre-check failed for {}: {} (set require_dns_match=false to override)",
+                        detail.domain, check.note
+                    ),
+                });
+            }
+        }
+
+        // SANs = aliases + any extras
+        let mut sans: Vec<String> = detail.aliases.clone();
+        sans.extend(req.extra_sans.iter().cloned());
+        sans.sort();
+        sans.dedup();
+
+        let cert = hyperion_adapters::acme::issue_http01(hyperion_adapters::acme::IssueRequest {
+            domain: &detail.domain,
+            sans: &sans,
+            contact_email: "admin@example.com", // TODO: from agent config
+            staging: req.staging,
+            challenge_root: std::path::Path::new(&self.paths.acme_challenge_root),
+            certs_root: "/etc/hyperion/certs",
+        })
+        .await
+        .map_err(|e| RpcError::ProvisioningFailed {
+            stage: "acme".into(),
+            reason: e.to_string(),
+        })?;
+
+        // Persist cert info in DB
+        let cert_path = format!("/etc/hyperion/certs/{}/fullchain.pem", detail.domain);
+        let key_path = format!("/etc/hyperion/certs/{}/privkey.pem", detail.domain);
+        let _ = certificates::upsert(
+            &self.pool,
+            &detail.domain,
+            now_secs(),
+            cert.not_after,
+            &cert_path,
+            &key_path,
+            &cert.issuer,
+        )
+        .await;
+
+        // Re-render vhost so nginx picks up new cert (paths are same but
+        // reload triggers fresh load + cert chain pickup).
+        let new_detail = HostingDetail {
+            cert: Some(cert.clone()),
+            ..detail.clone()
+        };
+        if let Err(e) = self.adapters.nginx_write_vhost(&new_detail).await {
+            return Err(RpcError::ProvisioningFailed {
+                stage: "nginx_reload".into(),
+                reason: e.to_string(),
+            });
+        }
+
+        self.append_audit(
+            "cert.issue.acme",
+            Some(detail.id.as_str()),
+            &serde_json::json!({
+                "domain": detail.domain,
+                "issuer": cert.issuer,
+                "staging": req.staging,
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+
+        Ok(cert)
+    }
+
+    // ================================================================
+    //  Stats — collection + readback
+    // ================================================================
+
+    /// Run one background sampler tick.
+    /// Per hosting: `du -sb <root>` + tail parse access.log over last hour.
+    /// Per node: snapshot /proc/loadavg + /proc/meminfo + /proc/uptime.
+    /// Persist into hosting_usage + node_metrics.
+    /// Returns count of hostings sampled.
+    pub async fn stats_tick(&self) -> Result<i64, RpcError> {
+        let now = now_secs();
+        let period = period_key(now);
+        let summaries = self.list().await?;
+        let mut total_disk: i64 = 0;
+        let mut total_bw_out: i64 = 0;
+        let mut total_requests: i64 = 0;
+        let mut active = 0i64;
+        let mut suspended = 0i64;
+        let mut failed = 0i64;
+        for s in &summaries {
+            match s.state {
+                HostingState::Active => active += 1,
+                HostingState::Suspended => suspended += 1,
+                HostingState::Failed => failed += 1,
+                _ => {}
+            }
+        }
+
+        for s in &summaries {
+            let host_root = std::path::PathBuf::from(&self.paths.home_root)
+                .join(derive_user_from_summary(s).unwrap_or_else(|| "_".to_string()))
+                .join(&s.domain);
+            let disk = du_bytes(&host_root).await.unwrap_or(0);
+            let logs_dir = host_root.join("logs");
+            let (bw_in, bw_out, reqs, _last) =
+                parse_access_log_window(&logs_dir.join("access.log"), now - 24 * 3600).await;
+
+            // Upsert usage row.
+            let _ = hyperion_state::limits::upsert_usage(
+                &self.pool,
+                &hyperion_state::limits::UsageBucket {
+                    hosting_id: s.id.clone(),
+                    period: period.clone(),
+                    disk_used_bytes: disk,
+                    inodes_used: 0,
+                    bw_in_bytes: bw_in,
+                    bw_out_bytes: bw_out,
+                    php_requests: reqs,
+                },
+            )
+            .await;
+
+            total_disk += disk;
+            total_bw_out += bw_out;
+            total_requests += reqs;
+        }
+
+        let (la, mem_total, mem_used, uptime) = read_proc_metrics().await;
+
+        let _ = metrics::insert(
+            &self.pool,
+            &metrics::NodeMetricsInput {
+                sampled_at: now,
+                hostings_count: summaries.len() as i64,
+                hostings_active: active,
+                hostings_suspended: suspended,
+                hostings_failed: failed,
+                total_disk_bytes: total_disk,
+                total_bw_out_24h: total_bw_out,
+                total_requests_24h: total_requests,
+                loadavg_1m_x100: la,
+                mem_total_kib: mem_total,
+                mem_used_kib: mem_used,
+                uptime_secs: uptime,
+            },
+        )
+        .await;
+
+        // Prune > 30d to keep DB lean.
+        let _ = metrics::prune_older_than(&self.pool, now - 30 * 24 * 3600).await;
+
+        Ok(summaries.len() as i64)
+    }
+
+    pub async fn hosting_stats(&self, sel: HostingSelector) -> Result<HostingStats, RpcError> {
+        let detail = self.get(sel).await?;
+        // Sum last 24h of hourly usage rows.
+        let rows = hyperion_state::limits::usage_for(&self.pool, &detail.id, 24)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("usage: {e}")))?;
+        let now = now_secs();
+        let mut disk = 0i64;
+        let mut bw_in = 0i64;
+        let mut bw_out = 0i64;
+        let mut reqs = 0i64;
+        for r in &rows {
+            disk = disk.max(r.disk_used_bytes); // current disk = latest
+            bw_in += r.bw_in_bytes;
+            bw_out += r.bw_out_bytes;
+            reqs += r.php_requests;
+        }
+        Ok(HostingStats {
+            hosting_id: detail.id,
+            domain: detail.domain,
+            disk_bytes: disk,
+            bw_in_bytes_24h: bw_in,
+            bw_out_bytes_24h: bw_out,
+            requests_24h: reqs,
+            last_request_at: rows.first().map(|_| now),
+            sampled_at: now,
+        })
+    }
+
+    pub async fn node_stats(
+        &self,
+        hostname: &str,
+        version: &str,
+    ) -> Result<NodeStats, RpcError> {
+        let latest = metrics::latest(&self.pool)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("metrics: {e}")))?;
+        let summaries = self.list().await?;
+        Ok(node_stats_from(hostname, version, latest, &summaries))
+    }
+
+    pub async fn cluster_stats(
+        &self,
+        hostname: &str,
+        version: &str,
+    ) -> Result<ClusterStats, RpcError> {
+        let n = self.node_stats(hostname, version).await?;
+        Ok(ClusterStats {
+            total_hostings: n.hostings_count,
+            total_active: n.hostings_active,
+            total_suspended: n.hostings_suspended,
+            total_failed: n.hostings_failed,
+            total_disk_bytes: n.total_disk_bytes,
+            total_bw_out_24h: n.total_bw_out_24h,
+            total_requests_24h: n.total_requests_24h,
+            nodes: vec![n],
+        })
+    }
+
+    // ================================================================
+    //  Restore from backup archive
+    // ================================================================
+
+    pub async fn backup_restore(
+        &self,
+        sel: HostingSelector,
+        archive_path: String,
+    ) -> Result<(), RpcError> {
+        let detail = self.get(sel).await?;
+        // Whitelist the path — must live under one of OUR backup roots.
+        let p = std::path::PathBuf::from(&archive_path);
+        let canonical = p.canonicalize().map_err(|e| RpcError::Validation {
+            message: format!("archive not readable: {e}"),
+        })?;
+        let allowed_roots = [
+            std::path::PathBuf::from(&self.paths.backup_root),
+            std::path::PathBuf::from("/var/lib/hyperion/backups/incoming"),
+        ];
+        if !allowed_roots
+            .iter()
+            .any(|r| canonical.starts_with(r))
+        {
+            return Err(RpcError::Validation {
+                message: format!(
+                    "archive {} is not under an allowed backup root",
+                    canonical.display()
+                ),
+            });
+        }
+
+        // 1. Extract tar.gz over the hosting root.
+        let host_root = std::path::PathBuf::from(&self.paths.home_root)
+            .join(&detail.system_user)
+            .join(&detail.domain);
+        tracing::info!(domain = %detail.domain, archive = %canonical.display(),
+            "restoring backup");
+        let restore_result =
+            hyperion_adapters::backup::restore_archive(&canonical, &host_root).await;
+        if let Err(e) = restore_result {
+            return Err(RpcError::ProvisioningFailed {
+                stage: "tar_extract".into(),
+                reason: e.to_string(),
+            });
+        }
+
+        // 2. Look for sibling .sql dump and restore it if hosting has a DB.
+        let archive_dir = canonical.parent().unwrap_or(std::path::Path::new("/"));
+        if let Some(stem) = canonical.file_stem().and_then(|s| s.to_str()) {
+            // strip the trailing ".tar" if present from .tar.gz double-ext
+            let trim = stem.strip_suffix(".tar").unwrap_or(stem);
+            let sibling = archive_dir.join(format!("{trim}.sql"));
+            if sibling.exists() {
+                if let Some(db) = &detail.database {
+                    let restore = match db.engine {
+                        hyperion_types::DbProvision::MariaDB => {
+                            hyperion_adapters::backup::restore_mariadb_dump(
+                                &db.db_name,
+                                &sibling,
+                            )
+                            .await
+                        }
+                        hyperion_types::DbProvision::Postgres => {
+                            hyperion_adapters::backup::restore_postgres_dump(
+                                &db.db_name,
+                                &sibling,
+                            )
+                            .await
+                        }
+                    };
+                    if let Err(e) = restore {
+                        return Err(RpcError::ProvisioningFailed {
+                            stage: "db_restore".into(),
+                            reason: e.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+
+        self.append_audit(
+            "hosting.restore",
+            Some(detail.id.as_str()),
+            &serde_json::json!({"archive": canonical.display().to_string()}).to_string(),
+            "ok",
+        )
+        .await;
+
+        Ok(())
+    }
+}
+
+fn node_stats_from(
+    hostname: &str,
+    version: &str,
+    latest: Option<metrics::NodeMetricsRow>,
+    summaries: &[HostingSummary],
+) -> NodeStats {
+    let (a, s, f) = summaries.iter().fold((0i64, 0i64, 0i64), |(a, s, f), x| {
+        match x.state {
+            HostingState::Active => (a + 1, s, f),
+            HostingState::Suspended => (a, s + 1, f),
+            HostingState::Failed => (a, s, f + 1),
+            _ => (a, s, f),
+        }
+    });
+    let count = summaries.len() as i64;
+    match latest {
+        Some(r) => NodeStats {
+            node_id: hostname.to_string(),
+            label: hostname.to_string(),
+            hostings_count: count,
+            hostings_active: a,
+            hostings_suspended: s,
+            hostings_failed: f,
+            total_disk_bytes: r.total_disk_bytes,
+            total_bw_out_24h: r.total_bw_out_24h,
+            total_requests_24h: r.total_requests_24h,
+            loadavg_1m_x100: r.loadavg_1m_x100,
+            mem_total_kib: r.mem_total_kib,
+            mem_used_kib: r.mem_used_kib,
+            uptime_secs: r.uptime_secs,
+            sampled_at: r.sampled_at,
+            agent_version: version.to_string(),
+            agent_online: true,
+        },
+        None => NodeStats {
+            node_id: hostname.to_string(),
+            label: hostname.to_string(),
+            hostings_count: count,
+            hostings_active: a,
+            hostings_suspended: s,
+            hostings_failed: f,
+            total_disk_bytes: 0,
+            total_bw_out_24h: 0,
+            total_requests_24h: 0,
+            loadavg_1m_x100: 0,
+            mem_total_kib: 0,
+            mem_used_kib: 0,
+            uptime_secs: 0,
+            sampled_at: 0,
+            agent_version: version.to_string(),
+            agent_online: true,
+        },
+    }
+}
+
+fn derive_user_from_summary(s: &HostingSummary) -> Option<String> {
+    // HostingSummary doesn't carry system_user yet; fall back to deriving
+    // it from the domain the same way the create flow does.
+    SystemUserName::derive_from_domain(&s.domain).ok().map(|u| u.as_str().to_string())
+}
+
+fn period_key(now: i64) -> String {
+    use chrono::{TimeZone, Utc};
+    let dt = Utc.timestamp_opt(now, 0).single().unwrap_or_else(Utc::now);
+    dt.format("%Y-%m-%d-%H").to_string()
+}
+
+async fn dig_records(domain: &str, kind: &str) -> Result<Vec<String>, std::io::Error> {
+    let out = tokio::process::Command::new("/usr/bin/dig")
+        .args(["+short", "+time=3", "+tries=2", kind, domain])
+        .output()
+        .await?;
+    if !out.status.success() {
+        return Ok(vec![]);
+    }
+    let body = String::from_utf8_lossy(&out.stdout);
+    Ok(body
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && !l.contains(' '))
+        .map(String::from)
+        .collect())
+}
+
+async fn fetch_public_ip(url: &str) -> Result<String, std::io::Error> {
+    let out = tokio::process::Command::new("/usr/bin/curl")
+        .args(["-fsS", "--max-time", "4", url])
+        .output()
+        .await?;
+    if !out.status.success() {
+        return Err(std::io::Error::other("curl exit non-zero"));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+async fn du_bytes(path: &std::path::Path) -> Result<i64, std::io::Error> {
+    let out = tokio::process::Command::new("/usr/bin/du")
+        .args(["-sb"])
+        .arg(path)
+        .output()
+        .await?;
+    if !out.status.success() {
+        return Ok(0);
+    }
+    let s = String::from_utf8_lossy(&out.stdout);
+    Ok(s.split_whitespace()
+        .next()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0))
+}
+
+/// Parse the tail of nginx access.log (default combined format) for the
+/// last `since` epoch-seconds window. Returns (bw_in_bytes, bw_out_bytes,
+/// requests, last_request_ts).
+///
+/// Nginx combined format: '$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent ...'.
+/// We only have body_bytes_sent (bw_out) — bw_in is approximated as
+/// `request_length` if available, else 0.
+async fn parse_access_log_window(path: &std::path::Path, since: i64) -> (i64, i64, i64, i64) {
+    let Ok(body) = tokio::fs::read_to_string(path).await else {
+        return (0, 0, 0, 0);
+    };
+    use chrono::{DateTime, FixedOffset};
+    let mut bw_in: i64 = 0;
+    let mut bw_out: i64 = 0;
+    let mut reqs: i64 = 0;
+    let mut last_ts: i64 = 0;
+    for line in body.lines() {
+        // Extract bracketed timestamp.
+        let Some(start) = line.find('[') else { continue };
+        let Some(end) = line[start..].find(']') else { continue };
+        let ts_str = &line[start + 1..start + end];
+        let Ok(dt) = DateTime::<FixedOffset>::parse_from_str(ts_str, "%d/%b/%Y:%H:%M:%S %z") else {
+            continue;
+        };
+        let ts = dt.timestamp();
+        if ts < since {
+            continue;
+        }
+        reqs += 1;
+        last_ts = last_ts.max(ts);
+        // body_bytes_sent is the field right after status code.
+        let parts: Vec<&str> = line.split(' ').collect();
+        if parts.len() > 10 {
+            if let Ok(n) = parts[9].parse::<i64>() {
+                bw_out += n;
+            }
+        }
+        // If log_format extended with $request_length, it's usually parts[10..].
+        if parts.len() > 11 {
+            if let Ok(n) = parts[10].parse::<i64>() {
+                bw_in += n;
+            }
+        }
+    }
+    (bw_in, bw_out, reqs, last_ts)
+}
+
+async fn read_proc_metrics() -> (i64, i64, i64, i64) {
+    let loadavg = tokio::fs::read_to_string("/proc/loadavg").await.ok();
+    let la_1m = loadavg
+        .and_then(|s| {
+            s.split_whitespace()
+                .next()
+                .and_then(|t| t.parse::<f64>().ok())
+        })
+        .map(|f| (f * 100.0) as i64)
+        .unwrap_or(0);
+
+    let meminfo = tokio::fs::read_to_string("/proc/meminfo").await.ok();
+    let (mem_total, mem_avail) = meminfo
+        .map(|s| {
+            let mut total = 0i64;
+            let mut avail = 0i64;
+            for l in s.lines() {
+                if let Some(rest) = l.strip_prefix("MemTotal:") {
+                    total = rest
+                        .split_whitespace()
+                        .next()
+                        .and_then(|n| n.parse().ok())
+                        .unwrap_or(0);
+                } else if let Some(rest) = l.strip_prefix("MemAvailable:") {
+                    avail = rest
+                        .split_whitespace()
+                        .next()
+                        .and_then(|n| n.parse().ok())
+                        .unwrap_or(0);
+                }
+            }
+            (total, avail)
+        })
+        .unwrap_or((0, 0));
+    let mem_used = (mem_total - mem_avail).max(0);
+
+    let uptime = tokio::fs::read_to_string("/proc/uptime")
+        .await
+        .ok()
+        .and_then(|s| {
+            s.split_whitespace()
+                .next()
+                .and_then(|t| t.parse::<f64>().ok())
+        })
+        .map(|f| f as i64)
+        .unwrap_or(0);
+
+    (la_1m, mem_total, mem_used, uptime)
 }
 
 fn run_to_wire(r: hyperion_state::backups::BackupRun) -> hyperion_types::BackupRunWire {

@@ -120,6 +120,72 @@ pub async fn write_manifest(manifest: &BackupManifest, path: &Path) -> Result<()
     crate::fs::atomic_write(path, &bytes, 0o600).await
 }
 
+/// Extract a previously-taken `tar.gz` over a hosting tree. Restores
+/// only the `htdocs` subdir (the only thing make_archive writes) so the
+/// rest of the tree (logs/, tmp/) stays whatever the operator has there.
+///
+/// Roughly equivalent to `tar -xzf <archive> -C <target_root>` — the
+/// archive root is the hosting's `htdocs` directory.
+pub async fn restore_archive(archive: &Path, target_root: &Path) -> Result<u64, AdapterError> {
+    if !archive.exists() {
+        return Err(AdapterError::Other(format!(
+            "archive not found: {}",
+            archive.display()
+        )));
+    }
+    tokio::fs::create_dir_all(target_root).await?;
+    let archive_str = archive.display().to_string();
+    let target_str = target_root.display().to_string();
+    cmd::run(
+        "/usr/bin/tar",
+        &["-xzf", &archive_str, "-C", &target_str],
+    )
+    .await?;
+    let meta = tokio::fs::metadata(archive).await?;
+    Ok(meta.len())
+}
+
+/// Restore a `mariadb-dump` SQL dump file into the named DB. Drops +
+/// recreates objects (the dump includes DROP/CREATE if --add-drop-table
+/// is set; mariadb-dump default does).
+pub async fn restore_mariadb_dump(db_name: &str, sql_path: &Path) -> Result<(), AdapterError> {
+    if !sql_path.exists() {
+        return Err(AdapterError::Other(format!(
+            "sql dump not found: {}",
+            sql_path.display()
+        )));
+    }
+    let sql_bytes = tokio::fs::read(sql_path).await?;
+    crate::cmd::run_with_stdin("/usr/bin/mariadb", &[db_name], &sql_bytes).await?;
+    Ok(())
+}
+
+/// Restore a `pg_dump -Fc` archive (custom format) into `db_name`.
+pub async fn restore_postgres_dump(db_name: &str, dump_path: &Path) -> Result<(), AdapterError> {
+    if !dump_path.exists() {
+        return Err(AdapterError::Other(format!(
+            "pg dump not found: {}",
+            dump_path.display()
+        )));
+    }
+    let dump_str = dump_path.display().to_string();
+    cmd::run(
+        "/usr/bin/sudo",
+        &[
+            "-u",
+            "postgres",
+            "/usr/bin/pg_restore",
+            "--clean",
+            "--if-exists",
+            "-d",
+            db_name,
+            &dump_str,
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
 pub fn engine_str(engine: DbProvision) -> &'static str {
     match engine {
         DbProvision::MariaDB => "mariadb",

@@ -8,9 +8,10 @@ use crate::{
     wire::{AgentInfo, DeleteOpts, HostingCreateReq, HostingCreated, HostingSelector},
 };
 use hyperion_types::{
-    BackupRunWire, CertInfo, CertRenewResult, ExpiringHosting, HostingDetail, HostingExpiry,
-    HostingLimits, HostingSummary, HostingUsageBucket, NodeInviteMint, NodeInviteSummary,
-    SuspendReason, WpInstallRequest, WpInstallStatus,
+    BackupRunWire, CertInfo, CertIssueRequest, CertRenewResult, ClusterStats, DnsCheckResult,
+    ExpiringHosting, HostingDetail, HostingExpiry, HostingLimits, HostingStats, HostingSummary,
+    HostingUsageBucket, NodeInviteMint, NodeInviteSummary, NodeStats, SuspendReason,
+    WpInstallRequest, WpInstallStatus,
 };
 use hyperion_validate::Domain;
 use serde::{Deserialize, Serialize};
@@ -82,6 +83,23 @@ pub enum Request {
     WpStatus {
         sel: HostingSelector,
     },
+    DnsCheck {
+        domain: Domain,
+    },
+    CertIssueAcme {
+        sel: HostingSelector,
+        req: CertIssueRequest,
+    },
+    HostingStats {
+        sel: HostingSelector,
+    },
+    NodeStats,
+    ClusterStats,
+    StatsTick,
+    BackupRestore {
+        sel: HostingSelector,
+        archive_path: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -112,6 +130,13 @@ pub enum Response {
     CertRenewAll(Vec<CertRenewResult>),
     WpInstall(WpInstallStatus),
     WpStatus(Option<WpInstallStatus>),
+    DnsCheck(DnsCheckResult),
+    CertIssueAcme(CertInfo),
+    HostingStats(HostingStats),
+    NodeStats(NodeStats),
+    ClusterStats(ClusterStats),
+    StatsTick { hostings_sampled: i64 },
+    BackupRestore,
     Error(RpcError),
 }
 

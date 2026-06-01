@@ -8,9 +8,10 @@ use hyperion_rpc::wire::{
 };
 use hyperion_rpc::{AgentApi, AuditEntryWire, RpcError};
 use hyperion_types::{
-    BackupRunWire, CertInfo, CertRenewResult, ExpiringHosting, HostingDetail, HostingExpiry,
-    HostingLimits, HostingSummary, HostingUsageBucket, NodeInviteMint, NodeInviteSummary,
-    SuspendReason, WpInstallRequest, WpInstallStatus,
+    BackupRunWire, CertInfo, CertIssueRequest, CertRenewResult, ClusterStats, DnsCheckResult,
+    ExpiringHosting, HostingDetail, HostingExpiry, HostingLimits, HostingStats, HostingSummary,
+    HostingUsageBucket, NodeInviteMint, NodeInviteSummary, NodeStats, SuspendReason,
+    WpInstallRequest, WpInstallStatus,
 };
 use hyperion_validate::Domain;
 use std::sync::Arc;
@@ -181,5 +182,41 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         sel: HostingSelector,
     ) -> Result<Option<WpInstallStatus>, RpcError> {
         self.svc.wp_status(sel).await
+    }
+
+    async fn dns_check(&self, domain: Domain) -> Result<DnsCheckResult, RpcError> {
+        self.svc.dns_check(domain).await
+    }
+
+    async fn cert_issue_acme(
+        &self,
+        sel: HostingSelector,
+        req: CertIssueRequest,
+    ) -> Result<CertInfo, RpcError> {
+        self.svc.issue_real_cert(sel, req).await
+    }
+
+    async fn hosting_stats(&self, sel: HostingSelector) -> Result<HostingStats, RpcError> {
+        self.svc.hosting_stats(sel).await
+    }
+
+    async fn node_stats(&self) -> Result<NodeStats, RpcError> {
+        self.svc.node_stats(&self.hostname, &self.version).await
+    }
+
+    async fn cluster_stats(&self) -> Result<ClusterStats, RpcError> {
+        self.svc.cluster_stats(&self.hostname, &self.version).await
+    }
+
+    async fn stats_tick(&self) -> Result<i64, RpcError> {
+        self.svc.stats_tick().await
+    }
+
+    async fn backup_restore(
+        &self,
+        sel: HostingSelector,
+        archive_path: String,
+    ) -> Result<(), RpcError> {
+        self.svc.backup_restore(sel, archive_path).await
     }
 }

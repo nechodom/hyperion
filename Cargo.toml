@@ -58,6 +58,7 @@ tower-http = { version = "0.6", features = ["fs", "trace", "set-header"] }
 subtle = "2"
 url = "2"
 http-body-util = "0.1"
+x509-parser = "0.16"
 
 [profile.release]
 strip = "symbols"

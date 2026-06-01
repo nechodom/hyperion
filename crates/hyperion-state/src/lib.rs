@@ -13,6 +13,7 @@ pub mod db;
 pub mod hostings;
 pub mod invites;
 pub mod limits;
+pub mod metrics;
 pub mod nodejs;
 pub mod scheduler;
 pub mod system_users;
