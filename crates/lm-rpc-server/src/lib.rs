@@ -145,6 +145,14 @@ async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             },
             Err(e) => Response::Error(e),
         },
+        Request::BackupNow { sel } => match api.backup_now(sel).await {
+            Ok(v) => Response::BackupNow(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::BackupList { sel, limit } => match api.backup_list(sel, limit).await {
+            Ok(v) => Response::BackupList(v),
+            Err(e) => Response::Error(e),
+        },
         Request::AuditList { limit } => match api.audit_list(limit).await {
             Ok(v) => Response::AuditList(v),
             Err(e) => Response::Error(e),
@@ -167,8 +175,8 @@ mod tests {
     use lm_rpc::wire::{AgentInfo, DeleteOpts, HostingCreateReq, HostingCreated, HostingSelector};
     use lm_rpc::{AuditEntryWire, RpcError};
     use lm_types::{
-        CertInfo, CertRenewResult, ExpiringHosting, HostingDetail, HostingExpiry,
-        HostingLimits, HostingSummary, HostingUsageBucket, SuspendReason,
+        BackupRunWire, CertInfo, CertRenewResult, ExpiringHosting, HostingDetail,
+        HostingExpiry, HostingLimits, HostingSummary, HostingUsageBucket, SuspendReason,
     };
     use lm_validate::Domain;
 
@@ -253,6 +261,16 @@ mod tests {
         }
         async fn scheduler_tick(&self) -> Result<i64, RpcError> {
             Ok(0)
+        }
+        async fn backup_now(&self, _: HostingSelector) -> Result<BackupRunWire, RpcError> {
+            Err(RpcError::Internal)
+        }
+        async fn backup_list(
+            &self,
+            _: HostingSelector,
+            _: i64,
+        ) -> Result<Vec<BackupRunWire>, RpcError> {
+            Ok(vec![])
         }
         async fn cert_issue(&self, _: Domain) -> Result<CertInfo, RpcError> {
             Err(RpcError::Internal)

@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use lm_rpc::wire::{AgentInfo, DeleteOpts, HostingCreateReq, HostingCreated, HostingSelector};
 use lm_rpc::{AgentApi, AuditEntryWire, RpcError};
 use lm_types::{
-    CertInfo, CertRenewResult, ExpiringHosting, HostingDetail, HostingExpiry, HostingLimits,
-    HostingSummary, HostingUsageBucket, SuspendReason,
+    BackupRunWire, CertInfo, CertRenewResult, ExpiringHosting, HostingDetail, HostingExpiry,
+    HostingLimits, HostingSummary, HostingUsageBucket, SuspendReason,
 };
 use lm_validate::Domain;
 use std::sync::Arc;
@@ -130,6 +130,18 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
 
     async fn scheduler_tick(&self) -> Result<i64, RpcError> {
         self.svc.scheduler_tick().await
+    }
+
+    async fn backup_now(&self, sel: HostingSelector) -> Result<BackupRunWire, RpcError> {
+        self.svc.backup_now(sel).await
+    }
+
+    async fn backup_list(
+        &self,
+        sel: HostingSelector,
+        limit: i64,
+    ) -> Result<Vec<BackupRunWire>, RpcError> {
+        self.svc.backup_list(sel, limit).await
     }
 
     async fn cert_issue(&self, _domain: Domain) -> Result<CertInfo, RpcError> {

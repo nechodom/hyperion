@@ -7,8 +7,8 @@ use crate::{
 };
 use async_trait::async_trait;
 use lm_types::{
-    CertInfo, CertRenewResult, ExpiringHosting, HostingDetail, HostingExpiry, HostingLimits,
-    HostingSummary, HostingUsageBucket, SuspendReason,
+    BackupRunWire, CertInfo, CertRenewResult, ExpiringHosting, HostingDetail, HostingExpiry,
+    HostingLimits, HostingSummary, HostingUsageBucket, SuspendReason,
 };
 use lm_validate::Domain;
 
@@ -71,6 +71,13 @@ pub trait AgentApi: Send + Sync + 'static {
     /// Manually drive one tick of the scheduler. The agent also runs this
     /// every `[scheduler] tick_interval` seconds in the background.
     async fn scheduler_tick(&self) -> Result<i64, RpcError>;
+
+    async fn backup_now(&self, sel: HostingSelector) -> Result<BackupRunWire, RpcError>;
+    async fn backup_list(
+        &self,
+        sel: HostingSelector,
+        limit: i64,
+    ) -> Result<Vec<BackupRunWire>, RpcError>;
 
     async fn cert_issue(&self, domain: Domain) -> Result<CertInfo, RpcError>;
     async fn cert_renew_all(&self) -> Result<Vec<CertRenewResult>, RpcError>;

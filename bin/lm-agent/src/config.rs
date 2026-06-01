@@ -17,6 +17,7 @@ pub struct AgentSection {
     pub secrets_dir: PathBuf,
     pub log_path: PathBuf,
     pub home_root: PathBuf,
+    pub backup_root: PathBuf,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -45,6 +46,7 @@ impl Default for AgentSection {
             secrets_dir: PathBuf::from("/etc/linux-manager/secrets"),
             log_path: PathBuf::from("/var/log/linux-manager/agent.log"),
             home_root: PathBuf::from("/home"),
+            backup_root: PathBuf::from("/var/lib/linux-manager/backups/local"),
         }
     }
 }

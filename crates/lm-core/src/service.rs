@@ -109,6 +109,7 @@ pub struct HostingService<A: AdapterPort + 'static> {
 pub struct HostingPaths {
     pub home_root: String,           // e.g. "/home"
     pub acme_challenge_root: String, // e.g. "/var/lib/linux-manager/acme-challenges"
+    pub backup_root: String,         // e.g. "/var/lib/linux-manager/backups/local"
 }
 
 impl Default for HostingPaths {
@@ -116,6 +117,7 @@ impl Default for HostingPaths {
         Self {
             home_root: "/home".into(),
             acme_challenge_root: "/var/lib/linux-manager/acme-challenges".into(),
+            backup_root: "/var/lib/linux-manager/backups/local".into(),
         }
     }
 }
@@ -954,6 +956,136 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
     }
 
+    /// Produce a tar.gz + DB dump backup. Single 'local' target for v1.
+    pub async fn backup_now(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<lm_types::BackupRunWire, RpcError> {
+        let detail = self.get(sel).await?;
+        let backup_root = self.paths.backup_root.clone();
+        let run_id = lm_state::backups::start(&self.pool, &detail.id, "local", now_secs())
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("backup start: {e}")))?;
+        // Build target dir
+        let ts = now_secs();
+        let archive_dir = std::path::PathBuf::from(&backup_root).join(&detail.system_user);
+        let archive_name = format!("{}-{}.tar.gz", detail.domain, ts);
+        let archive_path = archive_dir.join(&archive_name);
+        let db_dump_path = detail
+            .database
+            .as_ref()
+            .map(|_| archive_dir.join(format!("{}-{}.sql", detail.domain, ts)));
+
+        // Run the backup. Failures roll the row to 'failed'.
+        let result: Result<(u64, Option<u64>), String> = async {
+            // 1. Archive htdocs (parent of htdocs)
+            let host_root = std::path::PathBuf::from(&self.paths.home_root)
+                .join(&detail.system_user)
+                .join(&detail.domain);
+            let archive_bytes = lm_adapters::backup::make_archive(
+                &host_root,
+                "htdocs",
+                &archive_path,
+            )
+            .await
+            .map_err(|e| format!("archive: {e}"))?;
+            // 2. Optional DB dump.
+            let dump_bytes = if let (Some(db), Some(dump_p)) =
+                (detail.database.as_ref(), db_dump_path.as_ref())
+            {
+                let n = match db.engine {
+                    lm_types::DbProvision::MariaDB => {
+                        lm_adapters::backup::dump_mariadb(&db.db_name, dump_p).await
+                    }
+                    lm_types::DbProvision::Postgres => {
+                        lm_adapters::backup::dump_postgres(&db.db_name, dump_p).await
+                    }
+                };
+                Some(n.map_err(|e| format!("db dump: {e}"))?)
+            } else {
+                None
+            };
+            // 3. Write manifest next to archive.
+            let manifest = lm_adapters::backup::BackupManifest {
+                hosting_id: detail.id.0.clone(),
+                domain: detail.domain.clone(),
+                system_user: detail.system_user.clone(),
+                php_version: detail.php_version.map(|v| v.as_str().to_string()),
+                database: detail
+                    .database
+                    .as_ref()
+                    .map(|db| lm_adapters::backup::ManifestDb {
+                        engine: lm_adapters::backup::engine_str(db.engine).to_string(),
+                        name: db.db_name.clone(),
+                        user: db.db_user.clone(),
+                    }),
+                started_at: ts,
+                schema_version: 1,
+            };
+            let manifest_path =
+                archive_dir.join(format!("{}-{}.manifest.json", detail.domain, ts));
+            lm_adapters::backup::write_manifest(&manifest, &manifest_path)
+                .await
+                .map_err(|e| format!("manifest: {e}"))?;
+            Ok((archive_bytes, dump_bytes))
+        }
+        .await;
+
+        match result {
+            Ok((archive_bytes, dump_bytes)) => {
+                let total = archive_bytes as i64 + dump_bytes.unwrap_or(0) as i64;
+                let dump_str = db_dump_path
+                    .as_ref()
+                    .map(|p| p.display().to_string());
+                lm_state::backups::mark_ok(
+                    &self.pool,
+                    run_id,
+                    &archive_path.display().to_string(),
+                    dump_str.as_deref(),
+                    total,
+                    now_secs(),
+                )
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("mark_ok: {e}")))?;
+                self.append_audit(
+                    "hosting.backup",
+                    Some(detail.id.as_str()),
+                    &serde_json::json!({"target":"local","bytes":total}).to_string(),
+                    "ok",
+                )
+                .await;
+            }
+            Err(e) => {
+                let trimmed: String = e.chars().take(2000).collect();
+                lm_state::backups::mark_failed(&self.pool, run_id, &trimmed, now_secs())
+                    .await
+                    .map_err(|e| RpcError::Internal_with(format!("mark_failed: {e}")))?;
+                return Err(RpcError::ProvisioningFailed {
+                    stage: "backup".into(),
+                    reason: trimmed,
+                });
+            }
+        }
+        let rows = lm_state::backups::list_for(&self.pool, &detail.id, 1)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("list_for: {e}")))?;
+        let r = rows.into_iter().next().ok_or(RpcError::Internal)?;
+        Ok(run_to_wire(r))
+    }
+
+    pub async fn backup_list(
+        &self,
+        sel: HostingSelector,
+        limit: i64,
+    ) -> Result<Vec<lm_types::BackupRunWire>, RpcError> {
+        let detail = self.get(sel).await?;
+        let rows =
+            lm_state::backups::list_for(&self.pool, &detail.id, limit.max(1).min(500))
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("list: {e}")))?;
+        Ok(rows.into_iter().map(run_to_wire).collect())
+    }
+
     pub async fn audit_list(
         &self,
         limit: i64,
@@ -999,6 +1131,21 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         if let Err(e) = r {
             tracing::warn!(error=%e, "audit append failed");
         }
+    }
+}
+
+fn run_to_wire(r: lm_state::backups::BackupRun) -> lm_types::BackupRunWire {
+    lm_types::BackupRunWire {
+        id: r.id,
+        hosting_id: r.hosting_id,
+        target: r.target,
+        started_at: r.started_at,
+        finished_at: r.finished_at,
+        state: r.state,
+        archive_path: r.archive_path,
+        db_dump_path: r.db_dump_path,
+        bytes_total: r.bytes_total,
+        error_message: r.error_message,
     }
 }
 

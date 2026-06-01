@@ -39,6 +39,7 @@ async fn main() -> anyhow::Result<()> {
     let paths = lm_core::HostingPaths {
         home_root: cfg.agent.home_root.to_string_lossy().to_string(),
         acme_challenge_root: cfg.acme.challenge_dir.to_string_lossy().to_string(),
+        backup_root: cfg.agent.backup_root.to_string_lossy().to_string(),
     };
     let svc = Arc::new(lm_core::HostingService::new(pool, adapter, secrets).with_paths(paths));
     // Background scheduler: fire scheduler_tick every 5 minutes.

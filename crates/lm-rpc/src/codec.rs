@@ -8,8 +8,8 @@ use crate::{
     wire::{AgentInfo, DeleteOpts, HostingCreateReq, HostingCreated, HostingSelector},
 };
 use lm_types::{
-    CertInfo, CertRenewResult, ExpiringHosting, HostingDetail, HostingExpiry, HostingLimits,
-    HostingSummary, HostingUsageBucket, SuspendReason,
+    BackupRunWire, CertInfo, CertRenewResult, ExpiringHosting, HostingDetail, HostingExpiry,
+    HostingLimits, HostingSummary, HostingUsageBucket, SuspendReason,
 };
 use lm_validate::Domain;
 use serde::{Deserialize, Serialize};
@@ -52,6 +52,13 @@ pub enum Request {
         within_seconds: i64,
     },
     SchedulerTick,
+    BackupNow {
+        sel: HostingSelector,
+    },
+    BackupList {
+        sel: HostingSelector,
+        limit: i64,
+    },
     AuditList {
         limit: i64,
     },
@@ -79,6 +86,8 @@ pub enum Response {
     HostingClearExpiry,
     UpcomingExpiries(Vec<ExpiringHosting>),
     SchedulerTick { actions_processed: i64 },
+    BackupNow(BackupRunWire),
+    BackupList(Vec<BackupRunWire>),
     AuditList(Vec<AuditEntryWire>),
     CertIssue(CertInfo),
     CertRenewAll(Vec<CertRenewResult>),

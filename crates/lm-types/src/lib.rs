@@ -17,8 +17,8 @@ pub use db::{DbProvision, DbSummary};
 pub use hosting::{HostingDetail, HostingState, HostingSummary};
 pub use ids::{AgentId, HostingId, SecretId};
 pub use limits::{
-    ExpiringHosting, HostingExpiry, HostingLimits, HostingUsageBucket, OverBwPolicy,
-    SuspendReason,
+    BackupRunWire, ExpiringHosting, HostingExpiry, HostingLimits, HostingUsageBucket,
+    OverBwPolicy, SuspendReason,
 };
 pub use php::PhpVersion;
 

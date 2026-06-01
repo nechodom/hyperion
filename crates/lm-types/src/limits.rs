@@ -131,6 +131,20 @@ pub struct ExpiringHosting {
     pub grace_days: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BackupRunWire {
+    pub id: i64,
+    pub hosting_id: crate::HostingId,
+    pub target: String,
+    pub started_at: i64,
+    pub finished_at: Option<i64>,
+    pub state: String,
+    pub archive_path: Option<String>,
+    pub db_dump_path: Option<String>,
+    pub bytes_total: i64,
+    pub error_message: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

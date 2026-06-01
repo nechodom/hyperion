@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 pub mod audit;
+pub mod backups;
 pub mod certificates;
 pub mod databases;
 pub mod db;

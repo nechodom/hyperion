@@ -399,6 +399,32 @@ fn print_pretty(resp: &Response) {
         Response::SchedulerTick { actions_processed } => {
             println!("scheduler tick processed {} action(s)", actions_processed);
         }
+        Response::BackupNow(r) => {
+            println!("✓ backup {} {}", r.id, r.state);
+            if let Some(p) = &r.archive_path {
+                println!("  archive: {p}");
+            }
+            if let Some(p) = &r.db_dump_path {
+                println!("  db_dump: {p}");
+            }
+            println!("  bytes:   {}", r.bytes_total);
+        }
+        Response::BackupList(rows) => {
+            println!(
+                "{:>4} {:<19} {:<8} {:>12} {}",
+                "ID", "STARTED", "STATE", "BYTES", "ARCHIVE"
+            );
+            for r in rows {
+                println!(
+                    "{:>4} {:<19} {:<8} {:>12} {}",
+                    r.id,
+                    r.started_at,
+                    r.state,
+                    r.bytes_total,
+                    r.archive_path.as_deref().unwrap_or("—")
+                );
+            }
+        }
         Response::CertIssue(c) => {
             println!("✓ issued {} (not_after={})", c.domain, c.not_after);
         }

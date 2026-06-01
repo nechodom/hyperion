@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 pub mod acme;
+pub mod backup;
 pub mod cmd;
 pub mod fs;
 pub mod mariadb;
