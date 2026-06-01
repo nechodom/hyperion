@@ -2,77 +2,133 @@
 {% block title %}{{ detail.domain }} · hyperion{% endblock %}
 {% block main %}
 
+<div class="breadcrumbs">
+  <a href="/hostings">Hostings</a>
+  <span class="sep">›</span>
+  <span>{{ detail.domain }}</span>
+</div>
+
 {% if let Some(c) = just_created %}
 <div class="flash success">
-  ✓ Provisioned <b>{{ detail.domain }}</b>.
-  {% if let Some(db) = c.db %}
-    <br>Database password (shown <b>once</b>):
-    <span class="secret">{{ db.password }}</span>
-  {% endif %}
+  <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+  <div class="flash-body">
+    <strong>Provisioned {{ detail.domain }}.</strong>
+    {% if let Some(db) = c.db %}
+      <br>Database password (shown <strong>once</strong>): <span class="secret">{{ db.password }}</span>
+    {% endif %}
+  </div>
 </div>
 {% endif %}
 
 <div class="page-header">
-  <h1>{{ detail.domain }}</h1>
-  <span class="pill
-    {% if detail.state.as_str() == "active" %}ok
-    {% else if detail.state.as_str() == "suspended" %}warn
-    {% else if detail.state.as_str() == "failed" %}err
-    {% else %}warn{% endif %}">{{ detail.state.as_str() }}</span>
+  <div>
+    <h1 style="display:flex;align-items:center;gap:0.7rem">
+      {{ detail.domain }}
+      <span class="pill
+        {% if detail.state.as_str() == "active" %}ok
+        {% else if detail.state.as_str() == "suspended" %}warn
+        {% else if detail.state.as_str() == "failed" %}err
+        {% else %}warn pulse{% endif %}">{{ detail.state.as_str() }}</span>
+    </h1>
+    <div class="subtitle">
+      <code>{{ detail.id }}</code>
+      {% if !detail.aliases.is_empty() %} · {{ detail.aliases.join(", ") }}{% endif %}
+    </div>
+  </div>
   <span class="grow"></span>
-  <a href="/hostings" class="btn">← Back</a>
-  {% if detail.state.as_str() == "suspended" %}
-    <form method="post" action="/hostings/resume" style="display:inline">
-      <input type="hidden" name="_csrf" value="{{ csrf_resume }}">
-      <input type="hidden" name="selector" value="{{ detail.domain }}">
-      <button class="btn primary" type="submit">Resume</button>
-    </form>
-  {% else if detail.state.as_str() == "active" %}
-    <form method="post" action="/hostings/suspend" style="display:inline"
-          onsubmit="return confirm('Suspend {{ detail.domain }}? Site will return HTTP 503 until resumed.');">
-      <input type="hidden" name="_csrf" value="{{ csrf_suspend }}">
-      <input type="hidden" name="selector" value="{{ detail.domain }}">
-      <button class="btn" type="submit">Suspend</button>
-    </form>
-  {% endif %}
-  <form method="post" action="/hostings/delete" style="display:inline"
-        onsubmit="return confirm('Delete {{ detail.domain }} and all its data?');">
-    <input type="hidden" name="_csrf" value="{{ csrf_delete }}">
-    <input type="hidden" name="selector" value="{{ detail.domain }}">
-    <button class="btn danger" type="submit">Delete</button>
-  </form>
+  <div class="actions">
+    {% if detail.state.as_str() == "suspended" %}
+      <form method="post" action="/hostings/resume" style="display:inline">
+        <input type="hidden" name="_csrf" value="{{ csrf_resume }}">
+        <input type="hidden" name="selector" value="{{ detail.domain }}">
+        <button class="btn primary" type="submit">
+          <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          Resume
+        </button>
+      </form>
+    {% else if detail.state.as_str() == "active" %}
+      <form method="post" action="/hostings/suspend" style="display:inline"
+            onsubmit="return confirm('Suspend {{ detail.domain }}? Site will return HTTP 503 until resumed.');">
+        <input type="hidden" name="_csrf" value="{{ csrf_suspend }}">
+        <input type="hidden" name="selector" value="{{ detail.domain }}">
+        <button class="btn" type="submit">
+          <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+          Suspend
+        </button>
+      </form>
+    {% endif %}
+  </div>
 </div>
 
-{% if let Some(e) = error %}<div class="flash error">{{ e }}</div>{% endif %}
-{% if let Some(m) = wp_flash %}<div class="flash success">✓ {{ m }}</div>{% endif %}
-{% if let Some(e) = wp_error %}<div class="flash error">WordPress install failed: {{ e }}</div>{% endif %}
-{% if let Some(m) = backup_flash %}<div class="flash success">✓ {{ m }}</div>{% endif %}
-{% if let Some(e) = backup_error %}<div class="flash error">Backup failed: {{ e }}</div>{% endif %}
-{% if let Some(m) = expiry_flash %}<div class="flash success">✓ {{ m }}</div>{% endif %}
-{% if let Some(e) = expiry_error %}<div class="flash error">{{ e }}</div>{% endif %}
+{% if let Some(e) = error %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">{{ e }}</div>
+  </div>
+{% endif %}
+{% if let Some(m) = wp_flash %}
+  <div class="flash success">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+    <div class="flash-body">{{ m }}</div>
+  </div>
+{% endif %}
+{% if let Some(e) = wp_error %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body"><strong>WordPress install failed:</strong> {{ e }}</div>
+  </div>
+{% endif %}
+{% if let Some(m) = backup_flash %}
+  <div class="flash success">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+    <div class="flash-body">{{ m }}</div>
+  </div>
+{% endif %}
+{% if let Some(e) = backup_error %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body"><strong>Backup failed:</strong> {{ e }}</div>
+  </div>
+{% endif %}
+{% if let Some(m) = expiry_flash %}
+  <div class="flash success">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+    <div class="flash-body">{{ m }}</div>
+  </div>
+{% endif %}
+{% if let Some(e) = expiry_error %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">{{ e }}</div>
+  </div>
+{% endif %}
 
-<div class="card">
-  <h2>Overview</h2>
+<div class="card hover">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+    Overview
+  </h2>
   <dl class="kv">
-    <dt>ID</dt><dd><code>{{ detail.id }}</code></dd>
-    <dt>State</dt><dd>{{ detail.state.as_str() }}</dd>
-    <dt>System user</dt><dd>{{ detail.system_user }}</dd>
-    <dt>Root</dt><dd><code>{{ detail.root_dir }}</code></dd>
+    <dt>System user</dt><dd><code>{{ detail.system_user }}</code></dd>
+    <dt>Document root</dt><dd><code>{{ detail.root_dir }}</code></dd>
     <dt>PHP</dt>
-    <dd>{% if let Some(v) = detail.php_version %}{{ v }}{% else %}<span class="muted">static (no PHP)</span>{% endif %}</dd>
+    <dd>{% if let Some(v) = detail.php_version %}<span class="tag">PHP {{ v }}</span>{% else %}<span class="text-soft">static (no PHP)</span>{% endif %}</dd>
     {% if !detail.aliases.is_empty() %}
     <dt>Aliases</dt><dd>{{ detail.aliases.join(", ") }}</dd>
     {% endif %}
-    <dt>Created</dt><dd class="muted">{{ detail.created_at }}</dd>
-    <dt>Updated</dt><dd class="muted">{{ detail.updated_at }}</dd>
+    <dt>Created</dt><dd class="muted numeric">{{ detail.created_at }}</dd>
+    <dt>Updated</dt><dd class="muted numeric">{{ detail.updated_at }}</dd>
   </dl>
 </div>
 
 {% if let Some(db) = detail.database %}
-<div class="card">
-  <h2>Database</h2>
+<div class="card hover">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+    Database
+  </h2>
   <dl class="kv">
-    <dt>Engine</dt><dd>{{ db.engine }}</dd>
+    <dt>Engine</dt><dd><span class="tag">{{ db.engine }}</span></dd>
     <dt>Name</dt><dd><code>{{ db.db_name }}</code></dd>
     <dt>User</dt><dd><code>{{ db.db_user }}</code></dd>
     <dt>Password</dt><dd class="muted">stored in <code>/etc/hyperion/secrets/&lt;id&gt;.json</code>, not displayed</dd>
@@ -81,22 +137,96 @@
 {% endif %}
 
 {% if let Some(cert) = detail.cert %}
-<div class="card">
-  <h2>Certificate</h2>
+<div class="card hover">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+    Certificate
+  </h2>
   <dl class="kv">
-    <dt>Issuer</dt><dd>{{ cert.issuer }}</dd>
+    <dt>Issuer</dt><dd><span class="tag">{{ cert.issuer }}</span></dd>
     <dt>Domain</dt><dd>{{ cert.domain }}</dd>
     {% if !cert.sans.is_empty() %}
     <dt>SANs</dt><dd>{{ cert.sans.join(", ") }}</dd>
     {% endif %}
-    <dt>Not after</dt><dd class="muted">{{ cert.not_after }}</dd>
-    <dt>Fingerprint</dt><dd><code style="font-size:0.78rem">{{ cert.fingerprint_sha256 }}</code></dd>
+    <dt>Not after</dt><dd class="muted numeric">{{ cert.not_after }}</dd>
+    <dt>Fingerprint</dt><dd><code style="font-size:0.74rem">{{ cert.fingerprint_sha256 }}</code></dd>
   </dl>
 </div>
 {% endif %}
 
-<div class="card">
-  <h2>Limits</h2>
+<div class="card hover">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20l9-5-9-5-9 5 9 5z"/><path d="M12 12l9-5-9-5-9 5 9 5z"/></svg>
+    WordPress
+  </h2>
+  {% if let Some(wp) = wp_status %}
+    <dl class="kv">
+      <dt>Site URL</dt><dd><a href="{{ wp.site_url }}" target="_blank" rel="noopener">{{ wp.site_url }} ↗</a></dd>
+      <dt>WP version</dt><dd><span class="tag">{{ wp.wp_version }}</span></dd>
+      <dt>Installed</dt><dd class="muted numeric">{{ wp.installed_at }}</dd>
+    </dl>
+    <p class="muted" style="font-size:0.85rem;margin-top:0.7rem;margin-bottom:0">To reinstall, drop the row from <code>wp_installs</code> and clear the DB tables first.</p>
+  {% else if detail.database.is_none() %}
+    <p class="muted">This hosting has no database. WordPress needs MariaDB — recreate the hosting with <code>--db mariadb</code> first.</p>
+  {% else if detail.state.as_str() != "active" %}
+    <p class="muted">Hosting must be <strong>active</strong> before installing WordPress (current state: <code>{{ detail.state.as_str() }}</code>).</p>
+  {% else %}
+    <form method="post" action="/hostings/wp/install" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_wp_install }}">
+      <input type="hidden" name="selector" value="{{ detail.domain }}">
+      <div class="field-row">
+        <div class="field">
+          <label for="wp_site_url">Site URL</label>
+          <input id="wp_site_url" name="site_url" type="url" required
+                 value="https://{{ detail.domain }}">
+        </div>
+        <div class="field">
+          <label for="wp_title">Site title</label>
+          <input id="wp_title" name="title" type="text" required
+                 value="{{ detail.domain }}">
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label for="wp_admin_user">Admin username</label>
+          <input id="wp_admin_user" name="admin_user" type="text" required
+                 value="admin" pattern="[a-zA-Z0-9_]+">
+        </div>
+        <div class="field">
+          <label for="wp_admin_email">Admin email</label>
+          <input id="wp_admin_email" name="admin_email" type="email" required placeholder="you@example.com">
+        </div>
+      </div>
+      <div class="field">
+        <label for="wp_admin_password">Admin password</label>
+        <input id="wp_admin_password" name="admin_password" type="password" required
+               minlength="8" autocomplete="new-password" placeholder="min 8 characters">
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label for="wp_locale">Locale</label>
+          <input id="wp_locale" name="locale" type="text" value="en_US"
+                 pattern="[a-z]{2,3}(_[A-Z]{2})?" placeholder="en_US · cs_CZ · sk_SK">
+        </div>
+        <div class="field">
+          <label for="wp_version">WordPress version</label>
+          <input id="wp_version" name="version" type="text" value="latest"
+                 placeholder="latest · 6.5.3">
+        </div>
+      </div>
+      <button class="btn primary" type="submit">
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        Install WordPress
+      </button>
+    </form>
+  {% endif %}
+</div>
+
+<div class="card hover">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="9" y1="9" x2="15" y2="9"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
+    Limits
+  </h2>
   <form method="post" action="/hostings/set-limits">
     <input type="hidden" name="_csrf" value="{{ csrf_limits }}">
     <input type="hidden" name="selector" value="{{ detail.domain }}">
@@ -131,95 +261,37 @@
                value="{{ limits.db_max_connections }}">
       </div>
       <div class="field">
-        <label for="disk_hard_mb">Disk limit <span class="hint">MB (blank = unlimited)</span></label>
+        <label for="disk_hard_mb">Disk limit <span class="hint">MB · blank = unlimited</span></label>
         <input id="disk_hard_mb" name="disk_hard_mb" type="number" min="0"
                value="{% if let Some(b) = limits.disk_hard_bytes %}{{ b / 1048576 }}{% endif %}">
       </div>
     </div>
     <div class="field">
-      <label for="bw_monthly_mb">Monthly bandwidth <span class="hint">MB (blank = unlimited)</span></label>
+      <label for="bw_monthly_mb">Monthly bandwidth <span class="hint">MB · blank = unlimited</span></label>
       <input id="bw_monthly_mb" name="bw_monthly_mb" type="number" min="0"
              value="{% if let Some(b) = limits.bw_monthly_bytes %}{{ b / 1048576 }}{% endif %}">
     </div>
-    <button class="btn primary" type="submit">Save limits</button>
+    <button class="btn primary" type="submit">
+      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+      Save limits
+    </button>
   </form>
 </div>
 
-<div class="card">
-  <h2>WordPress</h2>
-  {% if let Some(wp) = wp_status %}
-    <dl class="kv">
-      <dt>Site URL</dt><dd><a href="{{ wp.site_url }}" target="_blank">{{ wp.site_url }}</a></dd>
-      <dt>WP version</dt><dd><code>{{ wp.wp_version }}</code></dd>
-      <dt>Installed</dt><dd class="muted">{{ wp.installed_at }}</dd>
-    </dl>
-    <p class="muted">A WordPress install already exists. To reinstall, drop the
-    row from <code>wp_installs</code> and clear the DB tables first.</p>
-  {% else if detail.database.is_none() %}
-    <p class="muted">This hosting has no database. WordPress needs MariaDB —
-    delete and recreate the hosting with <code>--db mariadb</code> first.</p>
-  {% else if detail.state.as_str() != "active" %}
-    <p class="muted">Hosting must be <b>active</b> before installing WordPress
-    (current state: <code>{{ detail.state.as_str() }}</code>).</p>
-  {% else %}
-    <form method="post" action="/hostings/wp/install" autocomplete="off">
-      <input type="hidden" name="_csrf" value="{{ csrf_wp_install }}">
-      <input type="hidden" name="selector" value="{{ detail.domain }}">
-      <div class="field-row">
-        <div class="field">
-          <label for="wp_site_url">Site URL</label>
-          <input id="wp_site_url" name="site_url" type="url" required
-                 value="https://{{ detail.domain }}">
-        </div>
-        <div class="field">
-          <label for="wp_title">Site title</label>
-          <input id="wp_title" name="title" type="text" required
-                 value="{{ detail.domain }}">
-        </div>
-      </div>
-      <div class="field-row">
-        <div class="field">
-          <label for="wp_admin_user">Admin username</label>
-          <input id="wp_admin_user" name="admin_user" type="text" required
-                 value="admin" pattern="[a-zA-Z0-9_]+">
-        </div>
-        <div class="field">
-          <label for="wp_admin_email">Admin email</label>
-          <input id="wp_admin_email" name="admin_email" type="email" required>
-        </div>
-      </div>
-      <div class="field">
-        <label for="wp_admin_password">Admin password</label>
-        <input id="wp_admin_password" name="admin_password" type="password" required
-               minlength="8" autocomplete="new-password">
-      </div>
-      <div class="field-row">
-        <div class="field">
-          <label for="wp_locale">Locale</label>
-          <input id="wp_locale" name="locale" type="text" value="en_US"
-                 pattern="[a-z]{2,3}(_[A-Z]{2})?" placeholder="en_US / cs_CZ / …">
-        </div>
-        <div class="field">
-          <label for="wp_version">WordPress version</label>
-          <input id="wp_version" name="version" type="text" value="latest"
-                 placeholder="latest or 6.5.3">
-        </div>
-      </div>
-      <button class="btn primary" type="submit">Install WordPress</button>
-    </form>
-  {% endif %}
-</div>
-
-<div class="card">
-  <h2>Expiration</h2>
+<div class="card hover">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+    Expiration
+  </h2>
   {% if let Some(t) = expiry.expires_at %}
-    <p>Expires at <code>{{ t }}</code> (UTC seconds), grace
-    <code>{{ expiry.grace_days }}</code> days.
-    Auto-suspend then auto-delete fires from the agent scheduler.</p>
+    <div class="row" style="margin-bottom:0.8rem">
+      <span class="pill warn">expires {{ t }}</span>
+      <span class="muted" style="font-size:0.88rem">grace {{ expiry.grace_days }} days · warnings {{ expiry.warning_offsets_days }}</span>
+    </div>
     <form method="post" action="/hostings/expiry/clear" style="display:inline">
       <input type="hidden" name="_csrf" value="{{ csrf_expiry_clear }}">
       <input type="hidden" name="selector" value="{{ detail.domain }}">
-      <button class="btn" type="submit">Clear expiry</button>
+      <button class="btn small" type="submit">Clear expiry</button>
     </form>
   {% else %}
     <p class="muted">No expiry set — hosting will never auto-suspend.</p>
@@ -229,20 +301,21 @@
     <input type="hidden" name="selector" value="{{ detail.domain }}">
     <div class="field-row">
       <div class="field">
-        <label for="expires_on">Expires on <span class="hint">date (UTC)</span></label>
+        <label for="expires_on">Expires on <span class="hint">date · UTC</span></label>
         <input id="expires_on" name="expires_on" type="date" required>
       </div>
       <div class="field">
-        <label for="grace_days">Grace period <span class="hint">days after expiry before delete</span></label>
+        <label for="grace_days">Grace period <span class="hint">days before auto-delete</span></label>
         <input id="grace_days" name="grace_days" type="number" min="0" max="365"
                value="{{ expiry.grace_days }}">
       </div>
     </div>
     <div class="field-row">
       <div class="field">
-        <label for="owner_email">Owner email <span class="hint">for warnings</span></label>
+        <label for="owner_email">Owner email <span class="hint">for warning notifications</span></label>
         <input id="owner_email" name="owner_email" type="email"
-               value="{% if let Some(e) = expiry.owner_email %}{{ e }}{% endif %}">
+               value="{% if let Some(e) = expiry.owner_email %}{{ e }}{% endif %}"
+               placeholder="owner@example.com">
       </div>
       <div class="field">
         <label for="warning_offsets">Warning offsets <span class="hint">comma-sep days</span></label>
@@ -250,60 +323,77 @@
                value="{{ expiry.warning_offsets_days }}" placeholder="30,7,1">
       </div>
     </div>
-    <button class="btn primary" type="submit">Set / update expiry</button>
+    <button class="btn primary" type="submit">
+      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+      Save expiry
+    </button>
   </form>
 </div>
 
-<div class="card">
-  <h2>Backups</h2>
+<div class="card hover">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+    Backups
+  </h2>
   <form method="post" action="/hostings/backup-now" style="margin-bottom:1rem">
     <input type="hidden" name="_csrf" value="{{ csrf_backup_now }}">
     <input type="hidden" name="selector" value="{{ detail.domain }}">
-    <button class="btn primary" type="submit">Run backup now</button>
-    <span class="muted hint">Archives htdocs + dumps DB (if any) under
-    <code>/var/lib/hyperion/backups/local/{{ detail.system_user }}/</code></span>
+    <button class="btn primary" type="submit">
+      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+      Run backup now
+    </button>
+    <span class="muted" style="font-size:0.85rem;margin-left:0.4rem">Archives htdocs + dumps DB to <code>/var/lib/hyperion/backups/local/{{ detail.system_user }}/</code></span>
   </form>
   {% if backups.is_empty() %}
-    <p class="muted">No backups recorded yet.</p>
+    <p class="muted" style="font-size:0.9rem">No backups recorded yet.</p>
   {% else %}
-    <table class="grid">
-      <thead><tr>
-        <th>When (started)</th><th>Target</th><th>State</th>
-        <th>Size</th><th>Archive</th>
-      </tr></thead>
-      <tbody>
-      {% for b in backups %}
-        <tr>
-          <td class="muted">{{ b.started_at }}</td>
-          <td>{{ b.target }}</td>
-          <td>
-            {% if b.state == "ok" %}<span class="pill ok">{{ b.state }}</span>
-            {% else if b.state == "failed" %}<span class="pill err">{{ b.state }}</span>
-            {% else %}<span class="pill warn">{{ b.state }}</span>{% endif %}
-          </td>
-          <td class="muted">{{ b.bytes_total }} B</td>
-          <td>
-            {% if let Some(p) = b.archive_path %}<code style="font-size:0.78rem">{{ p }}</code>{% endif %}
-          </td>
-        </tr>
-      {% endfor %}
-      </tbody>
-    </table>
+    <div class="table-wrap" style="border-top:1px solid var(--border);margin-top:1rem">
+      <table>
+        <thead><tr>
+          <th>Started</th><th>Target</th><th>State</th>
+          <th class="right">Size</th><th>Archive</th>
+        </tr></thead>
+        <tbody>
+        {% for b in backups %}
+          <tr>
+            <td class="muted numeric">{{ b.started_at }}</td>
+            <td><span class="tag">{{ b.target }}</span></td>
+            <td>
+              {% if b.state == "ok" %}<span class="pill ok">{{ b.state }}</span>
+              {% else if b.state == "failed" %}<span class="pill err">{{ b.state }}</span>
+              {% else %}<span class="pill warn pulse">{{ b.state }}</span>{% endif %}
+            </td>
+            <td class="right muted numeric">{{ b.bytes_total }} B</td>
+            <td>
+              {% if let Some(p) = b.archive_path %}<code style="font-size:0.74rem">{{ p }}</code>{% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
   {% endif %}
 </div>
 
-<div class="card muted">
-  <h2>Danger zone</h2>
-  <p>Deleting removes the hosting's site, files, databases, and Linux user.
-  Suspending serves a 503 page, stops PHP-FPM, locks the DB user, kills running
-  processes — fully reversible.</p>
-  <form method="post" action="/hostings/delete" class="row"
+<div class="card danger">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+    Danger zone
+  </h2>
+  <p class="muted">Deleting removes the hosting's site, files, databases, and Linux user.
+  Suspending serves a 503 page, stops PHP-FPM, locks the DB user, kills running processes — fully reversible.</p>
+  <form method="post" action="/hostings/delete" class="row gap-md"
+        style="margin-top:0.5rem"
         onsubmit="return confirm('Really delete {{ detail.domain }}?');">
     <input type="hidden" name="_csrf" value="{{ csrf_delete }}">
     <input type="hidden" name="selector" value="{{ detail.domain }}">
     <label class="field-checkbox"><input type="checkbox" name="keep_user" value="on"> Keep the Linux user</label>
     <label class="field-checkbox"><input type="checkbox" name="keep_db" value="on"> Keep the database</label>
-    <button class="btn danger" type="submit">Delete hosting</button>
+    <span class="grow"></span>
+    <button class="btn danger solid" type="submit">
+      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+      Delete hosting
+    </button>
   </form>
 </div>
 {% endblock %}

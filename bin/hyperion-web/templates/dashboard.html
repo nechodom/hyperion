@@ -2,66 +2,110 @@
 {% block title %}Dashboard · hyperion{% endblock %}
 {% block main %}
 <div class="page-header">
-  <h1>Dashboard</h1>
+  <div>
+    <h1>Dashboard</h1>
+    <div class="subtitle">Cluster overview at a glance.</div>
+  </div>
   <span class="grow"></span>
-  <a href="/hostings/new" class="btn primary">+ New hosting</a>
+  <div class="actions">
+    <a href="/hostings/new" class="btn primary">
+      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      New hosting
+    </a>
+  </div>
 </div>
 
 {% if let Some(e) = error %}
-  <div class="flash error">{{ e }}</div>
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">{{ e }}</div>
+  </div>
 {% endif %}
 
-<div class="cards-grid">
-  <div class="card stat">
-    <div class="label">Agent</div>
+<div class="grid cols-3">
+  <div class="stat-card">
+    <div class="stat-head">
+      <span class="stat-label">Agent</span>
+      <div class="stat-icon {% if agent_info.is_some() %}success{% else %}warn{% endif %}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+      </div>
+    </div>
     {% if let Some(info) = agent_info %}
-      <div class="value">{{ info.hostname }}</div>
-      <div class="muted">version {{ info.version }} · schema {{ info.schema_version }}</div>
+      <div class="stat-value">{{ info.hostname }}</div>
+      <div class="stat-meta">v{{ info.version }} · schema {{ info.schema_version }}</div>
     {% else %}
-      <div class="value muted">offline</div>
+      <div class="stat-value text-dim">offline</div>
+      <div class="stat-meta">unable to reach agent socket</div>
     {% endif %}
   </div>
-  <div class="card stat">
-    <div class="label">Hostings</div>
-    <div class="value">
+
+  <div class="stat-card">
+    <div class="stat-head">
+      <span class="stat-label">Hostings</span>
+      <div class="stat-icon primary">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+      </div>
+    </div>
+    <div class="stat-value">
       {% if let Some(info) = agent_info %}{{ info.hostings_count }}{% else %}—{% endif %}
     </div>
-    <div class="muted">across this agent</div>
+    <div class="stat-meta">managed by this agent</div>
   </div>
-  <div class="card stat">
-    <div class="label">You</div>
-    <div class="value">{{ username }}</div>
-    <div class="muted">admin · single-user mode</div>
+
+  <div class="stat-card">
+    <div class="stat-head">
+      <span class="stat-label">Signed in</span>
+      <div class="stat-icon info">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+      </div>
+    </div>
+    <div class="stat-value">{{ username }}</div>
+    <div class="stat-meta">admin · single-user mode</div>
   </div>
 </div>
 
-<div class="card" style="margin-top:1.5rem">
-  <div class="spread" style="margin-bottom:0.75rem">
-    <h2 style="margin:0">Recent hostings</h2>
-    <a href="/hostings" class="btn small">View all →</a>
+<div class="card hover" style="margin-top:1.5rem">
+  <div class="spread" style="margin-bottom:1rem">
+    <h2 style="margin:0">
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+      Recent hostings
+    </h2>
+    <a href="/hostings" class="btn small ghost">
+      View all
+      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+    </a>
   </div>
   {% if recent.is_empty() %}
-    <p class="muted">No hostings yet. <a href="/hostings/new">Create the first one</a>.</p>
+    <div class="empty">
+      <div class="empty-illustration">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+      </div>
+      <h3>No hostings yet</h3>
+      <p>Provision your first site to see it appear here.</p>
+      <a href="/hostings/new" class="btn primary">Create first hosting</a>
+    </div>
   {% else %}
-    <table>
-      <thead><tr><th>Domain</th><th>PHP</th><th>State</th><th>Created</th></tr></thead>
-      <tbody>
-        {% for r in recent %}
-        <tr>
-          <td><a href="/hostings/{{ r.domain }}">{{ r.domain }}</a></td>
-          <td>{% if let Some(v) = r.php_version %}{{ v }}{% else %}<span class="muted">static</span>{% endif %}</td>
-          <td>
-            <span class="pill
-              {% if r.state.as_str() == "active" %}ok
-              {% else if r.state.as_str() == "suspended" %}warn
-              {% else if r.state.as_str() == "failed" %}err
-              {% else %}warn{% endif %}">{{ r.state.as_str() }}</span>
-          </td>
-          <td class="muted">{{ r.created_at }}</td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Domain</th><th>PHP</th><th>State</th><th class="right">Created</th></tr></thead>
+        <tbody>
+          {% for r in recent %}
+          <tr>
+            <td><a href="/hostings/{{ r.domain }}">{{ r.domain }}</a></td>
+            <td>{% if let Some(v) = r.php_version %}<span class="tag">PHP {{ v }}</span>{% else %}<span class="text-soft">static</span>{% endif %}</td>
+            <td>
+              <span class="pill
+                {% if r.state.as_str() == "active" %}ok
+                {% else if r.state.as_str() == "suspended" %}warn
+                {% else if r.state.as_str() == "failed" %}err
+                {% else %}warn pulse{% endif %}">{{ r.state.as_str() }}</span>
+            </td>
+            <td class="muted right numeric">{{ r.created_at }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
   {% endif %}
 </div>
 {% endblock %}

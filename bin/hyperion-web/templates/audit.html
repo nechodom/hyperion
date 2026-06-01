@@ -2,42 +2,50 @@
 {% block title %}Audit log · hyperion{% endblock %}
 {% block main %}
 <div class="page-header">
-  <h1>Audit log</h1>
-  <span class="desc muted">last {{ limit }} entries · tamper-evident chain</span>
+  <div>
+    <h1>Audit log</h1>
+    <div class="subtitle">Tamper-evident hash chain · last {{ limit }} entries</div>
+  </div>
 </div>
 
-<div class="card">
+<div class="card no-pad-table">
   {% if rows.is_empty() %}
-    <p class="muted">No audit entries yet.</p>
+    <div class="empty">
+      <div class="empty-illustration">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+      </div>
+      <h3>No audit entries yet</h3>
+      <p>The audit log fills as you provision, suspend, back up, and delete hostings.</p>
+    </div>
   {% else %}
-    <table>
-      <thead>
-        <tr>
-          <th>ID</th>
-          <th>TS</th>
-          <th>Actor</th>
-          <th>Action</th>
-          <th>Target</th>
-          <th>Result</th>
-        </tr>
-      </thead>
-      <tbody>
-        {% for r in rows %}
-        <tr>
-          <td><code>{{ r.id }}</code></td>
-          <td class="muted">{{ r.ts }}</td>
-          <td>{{ r.actor_label }}</td>
-          <td><code>{{ r.action }}</code></td>
-          <td>{% if let Some(t) = r.target %}<code>{{ t }}</code>{% else %}—{% endif %}</td>
-          <td>
-            <span class="pill {% if r.result == "ok" %}ok{% else %}err{% endif %}">
-              {{ r.result }}
-            </span>
-          </td>
-        </tr>
-        {% endfor %}
-      </tbody>
-    </table>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>ID</th>
+            <th>Time</th>
+            <th>Actor</th>
+            <th>Action</th>
+            <th>Target</th>
+            <th class="right">Result</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for r in rows %}
+          <tr>
+            <td><code>{{ r.id }}</code></td>
+            <td class="muted numeric">{{ r.ts }}</td>
+            <td><strong>{{ r.actor_label }}</strong></td>
+            <td><code>{{ r.action }}</code></td>
+            <td>{% if let Some(t) = r.target %}<code>{{ t }}</code>{% else %}<span class="text-soft">—</span>{% endif %}</td>
+            <td class="right">
+              <span class="pill {% if r.result == "ok" %}ok{% else %}err{% endif %}">{{ r.result }}</span>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
   {% endif %}
 </div>
 {% endblock %}

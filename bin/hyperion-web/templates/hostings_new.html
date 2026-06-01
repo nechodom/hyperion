@@ -1,71 +1,106 @@
 {% extends "base.html" %}
 {% block title %}New hosting · hyperion{% endblock %}
 {% block main %}
+<div class="breadcrumbs">
+  <a href="/hostings">Hostings</a>
+  <span class="sep">›</span>
+  <span>New</span>
+</div>
 <div class="page-header">
-  <h1>New hosting</h1>
+  <div>
+    <h1>Provision a new hosting</h1>
+    <div class="subtitle">nginx vhost · PHP-FPM pool · database · TLS — laid down atomically.</div>
+  </div>
   <span class="grow"></span>
-  <a href="/hostings" class="btn">← Cancel</a>
+  <div class="actions">
+    <a href="/hostings" class="btn ghost">
+      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+      Cancel
+    </a>
+  </div>
 </div>
 
-{% if let Some(e) = error %}<div class="flash error">{{ e }}</div>{% endif %}
+{% if let Some(e) = error %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">{{ e }}</div>
+  </div>
+{% endif %}
 
-<div class="card" style="max-width:42rem">
+<div style="display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:1.25rem;align-items:start">
+<div class="card">
   <form method="post" action="/hostings">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
 
+    <h2>
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+      Domains
+    </h2>
     <div class="field">
-      <label for="domain">Primary domain <span class="hint">e.g. example.cz</span></label>
+      <label for="domain">Primary domain <span class="hint">root hostname, e.g. <code>example.com</code></span></label>
       <input id="domain" name="domain" type="text" required autofocus
-             value="{{ domain_in|e }}" placeholder="example.cz">
+             value="{{ domain_in|e }}" placeholder="example.com">
     </div>
-
     <div class="field">
-      <label for="aliases">Aliases <span class="hint">comma- or space-separated, optional</span></label>
+      <label for="aliases">Aliases <span class="hint">optional, comma- or space-separated</span></label>
       <input id="aliases" name="aliases" type="text"
-             value="{{ aliases_in|e }}" placeholder="www.example.cz">
+             value="{{ aliases_in|e }}" placeholder="www.example.com, m.example.com">
     </div>
 
-    <div class="field-row">
-      <div class="field">
-        <label for="php">PHP version</label>
-        <select id="php" name="php">
-          <option value="none" {% if php_in.is_empty() || php_in == "none" %}selected{% endif %}>none (static)</option>
-          <option value="8.1" {% if php_in == "8.1" %}selected{% endif %}>PHP 8.1</option>
-          <option value="8.2" {% if php_in == "8.2" %}selected{% endif %}>PHP 8.2</option>
-          <option value="8.3" {% if php_in == "8.3" %}selected{% endif %}>PHP 8.3</option>
-          <option value="8.4" {% if php_in == "8.4" %}selected{% endif %}>PHP 8.4</option>
-        </select>
+    <div class="card-section">
+      <h2 style="margin-bottom:1rem">
+        <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+        Runtime
+      </h2>
+      <div class="field-row">
+        <div class="field">
+          <label for="php">PHP version</label>
+          <select id="php" name="php">
+            <option value="none" {% if php_in.is_empty() || php_in == "none" %}selected{% endif %}>none (static)</option>
+            <option value="8.1" {% if php_in == "8.1" %}selected{% endif %}>PHP 8.1</option>
+            <option value="8.2" {% if php_in == "8.2" %}selected{% endif %}>PHP 8.2</option>
+            <option value="8.3" {% if php_in == "8.3" %}selected{% endif %}>PHP 8.3</option>
+            <option value="8.4" {% if php_in == "8.4" %}selected{% endif %}>PHP 8.4</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="db">Database</label>
+          <select id="db" name="db">
+            <option value="none" {% if db_in.is_empty() || db_in == "none" %}selected{% endif %}>none</option>
+            <option value="mariadb" {% if db_in == "mariadb" %}selected{% endif %}>MariaDB</option>
+            <option value="postgres" {% if db_in == "postgres" %}selected{% endif %}>PostgreSQL</option>
+          </select>
+        </div>
       </div>
       <div class="field">
-        <label for="db">Database</label>
-        <select id="db" name="db">
-          <option value="none" {% if db_in.is_empty() || db_in == "none" %}selected{% endif %}>none</option>
-          <option value="mariadb" {% if db_in == "mariadb" %}selected{% endif %}>MariaDB</option>
-          <option value="postgres" {% if db_in == "postgres" %}selected{% endif %}>PostgreSQL</option>
-        </select>
+        <label for="system_user">System user <span class="hint">leave blank to derive from domain</span></label>
+        <input id="system_user" name="system_user" type="text" placeholder="auto">
       </div>
     </div>
 
-    <div class="field">
-      <label for="system_user">System user <span class="hint">optional — derived from domain by default</span></label>
-      <input id="system_user" name="system_user" type="text" placeholder="">
-    </div>
-
-    <div class="row" style="margin-top:1rem">
-      <button class="btn primary" type="submit">Provision</button>
-      <a href="/hostings" class="btn">Cancel</a>
+    <div class="btn-group" style="margin-top:1rem">
+      <button class="btn primary lg" type="submit">
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+        Provision
+      </button>
+      <a href="/hostings" class="btn ghost">Cancel</a>
     </div>
   </form>
 </div>
 
-<div class="card muted" style="max-width:42rem; margin-top:1rem">
-  <h2>What happens next</h2>
-  <ol style="margin:0; padding-left:1.25rem">
-    <li>Linux user is created and given a chroot-style home.</li>
-    <li>Directory tree is laid out under <code>/home/{user}/{domain}</code>.</li>
-    <li>PHP-FPM pool config is rendered and the service reloaded.</li>
-    <li>Database + DB user are provisioned and the password returned <em>once</em>.</li>
-    <li>A TLS cert is issued and the nginx vhost goes live.</li>
+<div class="card muted">
+  <h2 style="margin-bottom:0.6rem">
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+    What happens next
+  </h2>
+  <ol style="margin:0;padding-left:1.25rem;font-size:0.92rem;line-height:1.7">
+    <li>Linux user created with chroot-style home.</li>
+    <li>Directory tree laid out under <code>/home/{user}/{domain}</code>.</li>
+    <li>PHP-FPM pool rendered and the service reloaded.</li>
+    <li>Database + DB user provisioned, password returned <em>once</em>.</li>
+    <li>TLS cert issued; nginx vhost goes live.</li>
   </ol>
+  <p class="muted" style="font-size:0.85rem;margin-top:1rem;margin-bottom:0">Any step that fails triggers LIFO rollback — the system never half-creates a hosting.</p>
+</div>
 </div>
 {% endblock %}

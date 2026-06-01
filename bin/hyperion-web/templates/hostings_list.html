@@ -2,19 +2,46 @@
 {% block title %}Hostings · hyperion{% endblock %}
 {% block main %}
 <div class="page-header">
-  <h1>Hostings</h1>
-  <span class="desc muted">{{ rows.len() }} total</span>
+  <div>
+    <h1>Hostings</h1>
+    <div class="subtitle">{{ rows.len() }} site{% if rows.len() != 1 %}s{% endif %} managed by this agent.</div>
+  </div>
   <span class="grow"></span>
-  <a href="/hostings/new" class="btn primary">+ New hosting</a>
+  <div class="actions">
+    <a href="/hostings/new" class="btn primary">
+      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      New hosting
+    </a>
+  </div>
 </div>
 
-{% if let Some(f) = flash %}<div class="flash success">{{ f }}</div>{% endif %}
-{% if let Some(e) = error %}<div class="flash error">{{ e }}</div>{% endif %}
+{% if let Some(f) = flash %}
+  <div class="flash success">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+    <div class="flash-body">{{ f }}</div>
+  </div>
+{% endif %}
+{% if let Some(e) = error %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">{{ e }}</div>
+  </div>
+{% endif %}
 
+{% if rows.is_empty() %}
 <div class="card">
-  {% if rows.is_empty() %}
-    <p class="muted">No hostings yet. <a href="/hostings/new">Create the first one</a>.</p>
-  {% else %}
+  <div class="empty">
+    <div class="empty-illustration">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+    </div>
+    <h3>No hostings yet</h3>
+    <p>Create one to provision nginx + PHP-FPM + a database + a TLS cert in one step.</p>
+    <a href="/hostings/new" class="btn primary">Create first hosting</a>
+  </div>
+</div>
+{% else %}
+<div class="card no-pad-table">
+  <div class="table-wrap">
     <table>
       <thead>
         <tr>
@@ -22,35 +49,46 @@
           <th>PHP</th>
           <th>State</th>
           <th>Created</th>
-          <th style="text-align:right">Actions</th>
+          <th class="right">Actions</th>
         </tr>
       </thead>
       <tbody>
       {% for r in rows %}
         <tr>
-          <td><a href="/hostings/{{ r.domain }}">{{ r.domain }}</a></td>
-          <td>{% if let Some(v) = r.php_version %}{{ v }}{% else %}<span class="muted">static</span>{% endif %}</td>
+          <td>
+            <a href="/hostings/{{ r.domain }}"><strong>{{ r.domain }}</strong></a>
+          </td>
+          <td>
+            {% if let Some(v) = r.php_version %}
+              <span class="tag">PHP {{ v }}</span>
+            {% else %}
+              <span class="text-soft">static</span>
+            {% endif %}
+          </td>
           <td>
             <span class="pill
               {% if r.state.as_str() == "active" %}ok
               {% else if r.state.as_str() == "suspended" %}warn
               {% else if r.state.as_str() == "failed" %}err
-              {% else %}warn{% endif %}">{{ r.state.as_str() }}</span>
+              {% else %}warn pulse{% endif %}">{{ r.state.as_str() }}</span>
           </td>
-          <td class="muted">{{ r.created_at }}</td>
-          <td style="text-align:right">
-            <a class="btn small" href="/hostings/{{ r.domain }}">View</a>
-            <form method="post" action="/hostings/delete" style="display:inline"
-                  onsubmit="return confirm('Delete {{ r.domain }} and all its data?');">
-              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-              <input type="hidden" name="selector" value="{{ r.domain }}">
-              <button class="btn small danger" type="submit">Delete</button>
-            </form>
+          <td class="muted numeric">{{ r.created_at }}</td>
+          <td class="right">
+            <div class="row-actions">
+              <a class="btn small" href="/hostings/{{ r.domain }}">View</a>
+              <form method="post" action="/hostings/delete" style="display:inline"
+                    onsubmit="return confirm('Delete {{ r.domain }} and all its data?');">
+                <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                <input type="hidden" name="selector" value="{{ r.domain }}">
+                <button class="btn small danger" type="submit">Delete</button>
+              </form>
+            </div>
           </td>
         </tr>
       {% endfor %}
       </tbody>
     </table>
-  {% endif %}
+  </div>
 </div>
+{% endif %}
 {% endblock %}

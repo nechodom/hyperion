@@ -15,6 +15,8 @@ use serde::Deserialize;
 #[template(path = "install.html")]
 struct InstallTpl<'a> {
     username: &'a str,
+    user_initial: char,
+    active: &'static str,
     master_url: &'a str,
     invites: Vec<NodeInviteSummary>,
     just_minted: Option<NodeInviteMint>,
@@ -31,6 +33,8 @@ pub async fn get_install(
     let master_url = derive_master_url(&state);
     let tpl = InstallTpl {
         username: &ctx.username,
+        user_initial: super::user_initial(&ctx.username),
+        active: "install",
         master_url: &master_url,
         invites,
         just_minted: None,
@@ -77,6 +81,8 @@ pub async fn post_invite(
     let master_url = derive_master_url(&state);
     let tpl = InstallTpl {
         username: &ctx.username,
+        user_initial: super::user_initial(&ctx.username),
+        active: "install",
         master_url: &master_url,
         invites,
         just_minted: Some(mint),
@@ -150,6 +156,8 @@ async fn render_with_error(state: &SharedState, ctx: &AuthCtx, message: &str) ->
     let master_url = derive_master_url(state);
     let tpl = InstallTpl {
         username: &ctx.username,
+        user_initial: super::user_initial(&ctx.username),
+        active: "install",
         master_url: &master_url,
         invites,
         just_minted: None,

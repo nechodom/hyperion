@@ -18,6 +18,8 @@ use std::str::FromStr;
 #[template(path = "hostings_list.html")]
 struct ListTpl<'a> {
     username: &'a str,
+    user_initial: char,
+    active: &'static str,
     rows: Vec<HostingSummary>,
     csrf_token: String,
     error: Option<String>,
@@ -28,6 +30,8 @@ struct ListTpl<'a> {
 #[template(path = "hostings_new.html")]
 struct NewTpl<'a> {
     username: &'a str,
+    user_initial: char,
+    active: &'static str,
     csrf_token: String,
     error: Option<&'a str>,
     domain_in: &'a str,
@@ -42,6 +46,8 @@ struct NewTpl<'a> {
 #[template(path = "hostings_detail.html")]
 struct DetailTpl<'a> {
     username: &'a str,
+    user_initial: char,
+    active: &'static str,
     detail: HostingDetail,
     limits: hyperion_types::HostingLimits,
     wp_status: Option<WpInstallStatus>,
@@ -73,6 +79,8 @@ pub async fn get_list(
     let csrf_token = csrf_token_for(&state, &ctx, "/hostings/delete");
     let tpl = ListTpl {
         username: &ctx.username,
+        user_initial: super::user_initial(&ctx.username),
+        active: "hostings",
         rows,
         csrf_token,
         error: None,
@@ -85,6 +93,8 @@ pub async fn get_new(State(state): State<SharedState>, ctx: AuthCtx) -> Result<R
     let csrf_token = csrf_token_for(&state, &ctx, "/hostings");
     let tpl = NewTpl {
         username: &ctx.username,
+        user_initial: super::user_initial(&ctx.username),
+        active: "hostings",
         csrf_token,
         error: None,
         domain_in: "",
@@ -175,6 +185,8 @@ pub async fn post_create(
                 .unwrap_or_else(|_| hyperion_types::HostingLimits::defaults());
             let tpl = DetailTpl {
                 username: &ctx.username,
+                user_initial: super::user_initial(&ctx.username),
+                active: "hostings",
                 detail,
                 limits,
                 wp_status: None,
@@ -240,6 +252,8 @@ pub async fn get_detail(
         .unwrap_or_default();
     let tpl = DetailTpl {
         username: &ctx.username,
+        user_initial: super::user_initial(&ctx.username),
+        active: "hostings",
         detail,
         limits,
         wp_status,
@@ -712,6 +726,8 @@ fn render_new_error<'a>(
 ) -> Response {
     let tpl = NewTpl {
         username: &ctx.username,
+        user_initial: super::user_initial(&ctx.username),
+        active: "hostings",
         csrf_token: csrf_token.to_string(),
         error: Some(error),
         domain_in: &form.domain,

@@ -1,34 +1,44 @@
 {% extends "base.html" %}
-{% block title %}Install · hyperion{% endblock %}
+{% block title %}Nodes · hyperion{% endblock %}
 {% block main %}
 <div class="page-header">
-  <h1>Install</h1>
-  <span class="desc muted">Master URL: <code>{{ master_url }}</code></span>
+  <div>
+    <h1>Nodes</h1>
+    <div class="subtitle">Enroll new hosts into the cluster · master URL <code>{{ master_url }}</code></div>
+  </div>
 </div>
 
-{% if let Some(e) = error %}<div class="flash error">{{ e }}</div>{% endif %}
+{% if let Some(e) = error %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">{{ e }}</div>
+  </div>
+{% endif %}
 
 {% if let Some(m) = just_minted %}
 <div class="flash success">
-  ✓ Invite minted for <b>{{ m.label }}</b>.
-  Token (shown <b>once</b>) — paste it into the install command on the new node:
-  <pre class="copy"><code>curl -fsSL {{ master_url }}/install/install-node.sh \
-    | sudo bash -s -- --token={{ m.token }} --master={{ master_url }}</code></pre>
-  <small class="muted">Token hash for revoke: <code>{{ m.token_hash }}</code></small>
+  <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+  <div class="flash-body">
+    <strong>Invite minted for {{ m.label }}.</strong> The plaintext token is shown <strong>once below</strong> — copy it now; only its hash is persisted server-side.
+    <pre style="margin-top:0.7rem"><code>curl -fsSL {{ master_url }}/install/install-node.sh \
+  | sudo bash -s -- --token={{ m.token }} --master={{ master_url }}</code></pre>
+    <div class="muted" style="margin-top:0.5rem;font-size:0.82rem">Token hash for revoke: <code>{{ m.token_hash }}</code></div>
+  </div>
 </div>
 {% endif %}
 
-<div class="card">
-  <h2>Install on a new node</h2>
-  <p class="muted">Generate a one-time token below, then run the install
-  one-liner on the fresh Debian 12 VPS. The token authenticates the node
-  against this master.</p>
+<div class="card hover">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+    Mint a node invite
+  </h2>
+  <p class="muted" style="margin-top:-0.4rem">Generates a one-time token. Paste the printed one-liner on the new Debian 12 VPS.</p>
 
-  <form method="post" action="/install/invite">
+  <form method="post" action="/install/invite" style="margin-top:1rem">
     <input type="hidden" name="_csrf" value="{{ csrf_create }}">
     <div class="field-row">
       <div class="field">
-        <label for="label">Label <span class="hint">human name, e.g. <code>node5.example.com</code></span></label>
+        <label for="label">Label <span class="hint">e.g. <code>node5.example.com</code></span></label>
         <input id="label" name="label" type="text" required placeholder="node5.example.com">
       </div>
       <div class="field">
@@ -36,25 +46,34 @@
         <input id="ttl_hours" name="ttl_hours" type="number" min="1" max="720" value="24">
       </div>
     </div>
-    <button class="btn primary" type="submit">Generate invite</button>
+    <button class="btn primary" type="submit">
+      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+      Generate invite
+    </button>
   </form>
 </div>
 
-<div class="card">
-  <h2>Install this master</h2>
-  <p class="muted">If you ever want to redeploy or set up a sibling master:</p>
+<div class="card hover">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 16 12 12 8 16"/><line x1="12" y1="12" x2="12" y2="21"/><path d="M20.39 18.39A5 5 0 0 0 18 9h-1.26A8 8 0 1 0 3 16.3"/><polyline points="16 16 12 12 8 16"/></svg>
+    Re-install this master
+  </h2>
+  <p class="muted" style="margin-top:-0.4rem">If you ever want to redeploy or set up a sibling master:</p>
   <pre><code>curl -fsSL https://raw.githubusercontent.com/nechodom/hyperion/main/packaging/install/install-master.sh \
-    | sudo bash</code></pre>
-  <p class="muted">The script installs nginx + PHP-FPM + MariaDB + PostgreSQL,
-  builds hyperion from source, bootstraps the admin user, and enables the
-  systemd services.</p>
+  | sudo bash</code></pre>
 </div>
 
-<div class="card">
-  <h2>Pending invites</h2>
+<div class="card no-pad-table">
+  <h2 style="padding:1.4rem 1.5rem 0">
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+    Pending invites
+  </h2>
   {% if invites.is_empty() %}
-    <p class="muted">No pending invites. Generate one above to onboard a new node.</p>
+    <div class="empty">
+      <p>No pending invites. Generate one above to onboard a new node.</p>
+    </div>
   {% else %}
+  <div class="table-wrap">
     <table>
       <thead>
         <tr>
@@ -62,17 +81,17 @@
           <th>Created</th>
           <th>Expires</th>
           <th>Token hash</th>
-          <th style="text-align:right">Actions</th>
+          <th class="right">Actions</th>
         </tr>
       </thead>
       <tbody>
         {% for i in invites %}
         <tr>
-          <td><b>{{ i.label }}</b></td>
-          <td class="muted">{{ i.created_at }}</td>
-          <td class="muted">{{ i.expires_at }}</td>
-          <td><code style="font-size:0.75rem">{{ i.token_hash }}</code></td>
-          <td style="text-align:right">
+          <td><strong>{{ i.label }}</strong></td>
+          <td class="muted numeric">{{ i.created_at }}</td>
+          <td class="muted numeric">{{ i.expires_at }}</td>
+          <td><code style="font-size:0.74rem">{{ i.token_hash }}</code></td>
+          <td class="right">
             <form method="post" action="/install/invite/revoke" style="display:inline"
                   onsubmit="return confirm('Revoke invite for {{ i.label }}?');">
               <input type="hidden" name="_csrf" value="{{ csrf_revoke }}">
@@ -84,20 +103,20 @@
         {% endfor %}
       </tbody>
     </table>
+  </div>
   {% endif %}
 </div>
 
 <div class="card muted">
-  <h2>How node enrollment works</h2>
-  <ol style="margin:0;padding-left:1.25rem">
-    <li>Generate a labeled token above. <b>Plaintext shown once</b> — copy
-    immediately; only its hash is persisted server-side.</li>
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+    How enrollment works
+  </h2>
+  <ol style="margin:0;padding-left:1.25rem;font-size:0.92rem;line-height:1.7">
+    <li>Generate a labeled token above. <strong>Plaintext shown once</strong> — copy immediately; only its hash is persisted server-side.</li>
     <li>Paste the printed <code>curl … | sudo bash …</code> on the new VPS.</li>
-    <li>The install script provisions deps, builds hyperion-agent, saves the
-    token + master URL into <code>/etc/hyperion/agent.toml</code>, and starts the service.</li>
-    <li>Full mTLS enrollment (sub-project 1.5 in the design specs) consumes
-    the token and rolls the new node into the cluster. Until that lands the
-    node runs single-node and the operator can manage it via its own socket.</li>
+    <li>Install script provisions deps, builds <code>hyperion-agent</code>, saves the token + master URL into <code>/etc/hyperion/agent.toml</code>, and starts the service.</li>
+    <li>Full mTLS enrollment (sub-project 1.5) consumes the token and rolls the new node into the cluster. Until that lands the node runs single-node.</li>
   </ol>
 </div>
 {% endblock %}

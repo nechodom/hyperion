@@ -12,6 +12,8 @@ use hyperion_types::HostingSummary;
 #[template(path = "dashboard.html")]
 struct DashboardTpl<'a> {
     username: &'a str,
+    user_initial: char,
+    active: &'static str,
     agent_info: Option<AgentInfo>,
     recent: Vec<HostingSummary>,
     error: Option<String>,
@@ -24,6 +26,8 @@ pub async fn get_dashboard(
     let (info, recent, error) = fetch(&state).await;
     let tpl = DashboardTpl {
         username: &ctx.username,
+        user_initial: super::user_initial(&ctx.username),
+        active: "dashboard",
         agent_info: info,
         recent,
         error,

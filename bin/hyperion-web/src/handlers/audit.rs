@@ -12,6 +12,8 @@ use serde::Deserialize;
 #[template(path = "audit.html")]
 struct AuditTpl<'a> {
     username: &'a str,
+    user_initial: char,
+    active: &'static str,
     rows: Vec<AuditEntryWire>,
     limit: i64,
 }
@@ -40,6 +42,8 @@ pub async fn get_audit(
     };
     let tpl = AuditTpl {
         username: &ctx.username,
+        user_initial: super::user_initial(&ctx.username),
+        active: "audit",
         rows,
         limit,
     };
