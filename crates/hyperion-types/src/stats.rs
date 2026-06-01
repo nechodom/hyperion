@@ -51,6 +51,19 @@ pub struct NodeStats {
     pub agent_online: bool,
 }
 
+/// Operator-facing alert surfaced on the dashboard. Computed from
+/// hostings + certs + backups + node_metrics at request time.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DashboardAlert {
+    /// "cert_expiring" | "hosting_failed" | "backup_stale" | "high_load"
+    pub kind: String,
+    /// "info" | "warn" | "error"
+    pub severity: String,
+    pub message: String,
+    /// Optional hosting domain for jump-to-detail.
+    pub hosting: Option<String>,
+}
+
 /// One enrolled node as shown in admin lists (Install + Stats).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NodeSummary {

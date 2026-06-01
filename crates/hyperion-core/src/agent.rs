@@ -8,10 +8,10 @@ use hyperion_rpc::wire::{
 };
 use hyperion_rpc::{AgentApi, AuditEntryWire, RpcError};
 use hyperion_types::{
-    BackupRunWire, CertInfo, CertIssueRequest, CertRenewResult, ClusterStats, DnsCheckResult,
-    ExpiringHosting, HostingDetail, HostingExpiry, HostingLimits, HostingStats, HostingSummary,
-    HostingUsageBucket, NodeInviteMint, NodeInviteSummary, NodeStats, NodeSummary, SuspendReason,
-    WpInstallRequest, WpInstallStatus,
+    BackupRunWire, CertInfo, CertIssueRequest, CertRenewResult, ClusterStats, DashboardAlert,
+    DnsCheckResult, ExpiringHosting, HostingDetail, HostingExpiry, HostingLimits, HostingStats,
+    HostingSummary, HostingUsageBucket, NodeInviteMint, NodeInviteSummary, NodeStats, NodeSummary,
+    SuspendReason, WpInstallRequest, WpInstallStatus,
 };
 use hyperion_validate::Domain;
 use std::sync::Arc;
@@ -285,5 +285,9 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         new_password: String,
     ) -> Result<(), RpcError> {
         self.svc.db_reset_password(sel, new_password).await
+    }
+
+    async fn dashboard_alerts(&self) -> Result<Vec<DashboardAlert>, RpcError> {
+        self.svc.dashboard_alerts().await
     }
 }

@@ -273,6 +273,10 @@ async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::DashboardAlerts => match api.dashboard_alerts().await {
+            Ok(v) => Response::DashboardAlerts(v),
+            Err(e) => Response::Error(e),
+        },
     }
 }
 
@@ -285,10 +289,10 @@ mod tests {
     };
     use hyperion_rpc::{AuditEntryWire, RpcError};
     use hyperion_types::{
-        BackupRunWire, CertInfo, CertIssueRequest, CertRenewResult, ClusterStats, DnsCheckResult,
-        ExpiringHosting, HostingDetail, HostingExpiry, HostingLimits, HostingStats, HostingSummary,
-        HostingUsageBucket, NodeInviteMint, NodeInviteSummary, NodeStats, NodeSummary,
-        SuspendReason, WpInstallRequest, WpInstallStatus,
+        BackupRunWire, CertInfo, CertIssueRequest, CertRenewResult, ClusterStats, DashboardAlert,
+        DnsCheckResult, ExpiringHosting, HostingDetail, HostingExpiry, HostingLimits, HostingStats,
+        HostingSummary, HostingUsageBucket, NodeInviteMint, NodeInviteSummary, NodeStats,
+        NodeSummary, SuspendReason, WpInstallRequest, WpInstallStatus,
     };
     use hyperion_validate::Domain;
 
@@ -489,6 +493,9 @@ mod tests {
             _: String,
         ) -> Result<(), RpcError> {
             Ok(())
+        }
+        async fn dashboard_alerts(&self) -> Result<Vec<DashboardAlert>, RpcError> {
+            Ok(vec![])
         }
     }
 

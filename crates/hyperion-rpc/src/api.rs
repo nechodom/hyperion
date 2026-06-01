@@ -7,10 +7,10 @@ use crate::{
 };
 use async_trait::async_trait;
 use hyperion_types::{
-    BackupRunWire, CertInfo, CertIssueRequest, CertRenewResult, ClusterStats, DnsCheckResult,
-    ExpiringHosting, HostingDetail, HostingExpiry, HostingLimits, HostingStats, HostingSummary,
-    HostingUsageBucket, NodeInviteMint, NodeInviteSummary, NodeStats, NodeSummary, SuspendReason,
-    WpInstallRequest, WpInstallStatus,
+    BackupRunWire, CertInfo, CertIssueRequest, CertRenewResult, ClusterStats, DashboardAlert,
+    DnsCheckResult, ExpiringHosting, HostingDetail, HostingExpiry, HostingLimits, HostingStats,
+    HostingSummary, HostingUsageBucket, NodeInviteMint, NodeInviteSummary, NodeStats, NodeSummary,
+    SuspendReason, WpInstallRequest, WpInstallStatus,
 };
 use hyperion_validate::Domain;
 
@@ -151,6 +151,10 @@ pub trait AgentApi: Send + Sync + 'static {
 
     /// List enrolled nodes (master-side `nodes` table).
     async fn nodes_list(&self) -> Result<Vec<NodeSummary>, RpcError>;
+
+    /// Compute operator alerts (cert expiring, failed hostings, stale
+    /// backups, high load) at request time.
+    async fn dashboard_alerts(&self) -> Result<Vec<DashboardAlert>, RpcError>;
 
     /// Reset the WordPress admin password (wp user update --user_pass).
     /// Returns the new password (the caller usually shows it to the

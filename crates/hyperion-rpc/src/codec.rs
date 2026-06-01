@@ -8,10 +8,10 @@ use crate::{
     wire::{AgentInfo, DeleteOpts, HostingCreateReq, HostingCreated, HostingSelector},
 };
 use hyperion_types::{
-    BackupRunWire, CertInfo, CertIssueRequest, CertRenewResult, ClusterStats, DnsCheckResult,
-    ExpiringHosting, HostingDetail, HostingExpiry, HostingLimits, HostingStats, HostingSummary,
-    HostingUsageBucket, NodeInviteMint, NodeInviteSummary, NodeStats, NodeSummary, SuspendReason,
-    WpInstallRequest, WpInstallStatus,
+    BackupRunWire, CertInfo, CertIssueRequest, CertRenewResult, ClusterStats, DashboardAlert,
+    DnsCheckResult, ExpiringHosting, HostingDetail, HostingExpiry, HostingLimits, HostingStats,
+    HostingSummary, HostingUsageBucket, NodeInviteMint, NodeInviteSummary, NodeStats, NodeSummary,
+    SuspendReason, WpInstallRequest, WpInstallStatus,
 };
 use hyperion_validate::Domain;
 use serde::{Deserialize, Serialize};
@@ -135,6 +135,7 @@ pub enum Request {
         sel: HostingSelector,
         new_password: String,
     },
+    DashboardAlerts,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -180,6 +181,7 @@ pub enum Response {
     NodeHeartbeat,
     WpResetPassword,
     DbResetPassword,
+    DashboardAlerts(Vec<DashboardAlert>),
     Error(RpcError),
 }
 

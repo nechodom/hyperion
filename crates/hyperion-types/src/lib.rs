@@ -25,7 +25,7 @@ pub use limits::{
     NodeInviteMint, NodeInviteSummary, OverBwPolicy, SuspendReason,
 };
 pub use php::PhpVersion;
-pub use stats::{ClusterStats, HostingStats, NodeStats, NodeSummary};
+pub use stats::{ClusterStats, DashboardAlert, HostingStats, NodeStats, NodeSummary};
 pub use wp::{WpInstallRequest, WpInstallStatus};
 
 /// Current Unix epoch seconds. Centralized so tests can replace it if needed.

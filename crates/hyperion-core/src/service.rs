@@ -9,9 +9,9 @@ use hyperion_rpc::wire::{
 use hyperion_rpc::RpcError;
 use hyperion_state::{certificates, databases, hostings, metrics, system_users, wordpress};
 use hyperion_types::{
-    now_secs, CertInfo, CertIssueRequest, ClusterStats, DbProvision, DbSummary, DnsCheckResult,
-    HostingDetail, HostingId, HostingState, HostingStats, HostingSummary, NodeStats, PhpVersion,
-    SecretId, WpInstallRequest, WpInstallStatus,
+    now_secs, CertInfo, CertIssueRequest, ClusterStats, DashboardAlert, DbProvision, DbSummary,
+    DnsCheckResult, HostingDetail, HostingId, HostingState, HostingStats, HostingSummary,
+    NodeStats, PhpVersion, SecretId, WpInstallRequest, WpInstallStatus,
 };
 use hyperion_validate::{Domain, SystemUserName};
 use sqlx::SqlitePool;
@@ -1514,6 +1514,131 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     }
 
     /// Mint a one-time node enrollment token. Plaintext returned exactly once.
+    /// Compute the operator dashboard alert list. Scans hostings + certs
+    /// + backups + scheduler state and surfaces anything that needs
+    /// human attention. Read-only — no side effects.
+    pub async fn dashboard_alerts(&self) -> Result<Vec<DashboardAlert>, RpcError> {
+        let mut out: Vec<DashboardAlert> = Vec::new();
+        let now = now_secs();
+        let summaries = self.list().await?;
+
+        // Failed hostings — straight pass.
+        for s in &summaries {
+            if s.state == HostingState::Failed {
+                out.push(DashboardAlert {
+                    kind: "hosting_failed".into(),
+                    severity: "error".into(),
+                    message: format!("{} is in state Failed.", s.domain),
+                    hosting: Some(s.domain.clone()),
+                });
+            }
+        }
+
+        // Cert expiry — fetch detail per hosting (cheap; we already have
+        // the row in-memory) and check not_after.
+        for s in &summaries {
+            if let Ok(detail) = self.get(HostingSelector::Id(s.id.clone())).await {
+                if let Some(cert) = detail.cert {
+                    let days = (cert.not_after - now) / 86400;
+                    if days < 0 {
+                        out.push(DashboardAlert {
+                            kind: "cert_expired".into(),
+                            severity: "error".into(),
+                            message: format!(
+                                "{} certificate EXPIRED {} day(s) ago — site is now untrusted.",
+                                detail.domain,
+                                days.abs()
+                            ),
+                            hosting: Some(detail.domain.clone()),
+                        });
+                    } else if days < 14 && cert.issuer != "self-signed" {
+                        out.push(DashboardAlert {
+                            kind: "cert_expiring".into(),
+                            severity: "warn".into(),
+                            message: format!(
+                                "{} certificate expires in {} day(s).",
+                                detail.domain, days
+                            ),
+                            hosting: Some(detail.domain.clone()),
+                        });
+                    }
+                }
+            }
+        }
+
+        // Stale backups — last ok backup > 7 days OR never. Only check
+        // active hostings (suspended ones don't accumulate data).
+        for s in &summaries {
+            if s.state != HostingState::Active {
+                continue;
+            }
+            let runs = hyperion_state::backups::list_for(&self.pool, &s.id, 5)
+                .await
+                .unwrap_or_default();
+            let last_ok = runs.iter().find(|r| r.state == "ok").map(|r| r.started_at);
+            match last_ok {
+                Some(ts) if now - ts > 7 * 86400 => {
+                    out.push(DashboardAlert {
+                        kind: "backup_stale".into(),
+                        severity: "warn".into(),
+                        message: format!(
+                            "{} last successful backup was {} day(s) ago.",
+                            s.domain,
+                            (now - ts) / 86400
+                        ),
+                        hosting: Some(s.domain.clone()),
+                    });
+                }
+                None if !runs.is_empty() => {
+                    // Has runs but none successful.
+                    out.push(DashboardAlert {
+                        kind: "backup_failing".into(),
+                        severity: "error".into(),
+                        message: format!("{} has no successful backups on record.", s.domain),
+                        hosting: Some(s.domain.clone()),
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        // High load — latest node_metrics sample.
+        if let Ok(Some(m)) = hyperion_state::metrics::latest(&self.pool).await {
+            // loadavg_1m_x100 / cpu_count > 1.5 → warn. We don't track
+            // cpu_count yet; rough heuristic: load > 4.0 always warn.
+            if m.loadavg_1m_x100 > 400 {
+                out.push(DashboardAlert {
+                    kind: "high_load".into(),
+                    severity: "warn".into(),
+                    message: format!(
+                        "1-minute load average is {:.2} — investigate or scale.",
+                        m.loadavg_1m_x100 as f64 / 100.0
+                    ),
+                    hosting: None,
+                });
+            }
+            if m.mem_total_kib > 0 && m.mem_used_kib * 100 / m.mem_total_kib > 90 {
+                out.push(DashboardAlert {
+                    kind: "high_memory".into(),
+                    severity: "warn".into(),
+                    message: format!(
+                        "Memory usage at {}% — sites may start swapping.",
+                        m.mem_used_kib * 100 / m.mem_total_kib
+                    ),
+                    hosting: None,
+                });
+            }
+        }
+
+        // Severity sort: error first, then warn, then info.
+        out.sort_by_key(|a| match a.severity.as_str() {
+            "error" => 0,
+            "warn" => 1,
+            _ => 2,
+        });
+        Ok(out)
+    }
+
     /// List enrolled nodes (master-side view).
     pub async fn nodes_list(&self) -> Result<Vec<hyperion_types::NodeSummary>, RpcError> {
         let rows = hyperion_state::nodes::list(&self.pool)

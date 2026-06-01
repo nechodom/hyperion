@@ -554,6 +554,20 @@ fn print_pretty(resp: &Response) {
         }
         Response::WpResetPassword => println!("✓ WordPress admin password reset"),
         Response::DbResetPassword => println!("✓ DB password reset (secret updated)"),
+        Response::DashboardAlerts(alerts) => {
+            if alerts.is_empty() {
+                println!("(no alerts)");
+            } else {
+                for a in alerts {
+                    println!(
+                        "{}  {}  {}",
+                        a.severity.to_uppercase(),
+                        a.kind,
+                        a.message
+                    );
+                }
+            }
+        }
         Response::Error(e) => {
             eprintln!("ERROR: {e}");
         }

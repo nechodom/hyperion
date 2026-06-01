@@ -7,7 +7,7 @@ use axum::response::{Html, IntoResponse, Response};
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
 use hyperion_rpc::wire::AgentInfo;
 use hyperion_rpc::AuditEntryWire;
-use hyperion_types::{ClusterStats, HostingSummary};
+use hyperion_types::{ClusterStats, DashboardAlert, HostingSummary};
 
 #[derive(Template)]
 #[template(path = "dashboard.html")]
@@ -21,6 +21,7 @@ struct DashboardTpl<'a> {
     recent: Vec<HostingSummary>,
     cluster: Option<ClusterStats>,
     activity: Vec<AuditEntryWire>,
+    alerts: Vec<DashboardAlert>,
     error: Option<String>,
 }
 
@@ -43,6 +44,11 @@ pub async fn get_dashboard(
         Ok(RpcResponse::AuditList(v)) => v,
         _ => vec![],
     };
+    let alerts = match hyperion_rpc_client::call(&state.agent_socket, Request::DashboardAlerts).await
+    {
+        Ok(RpcResponse::DashboardAlerts(v)) => v,
+        _ => vec![],
+    };
     let tpl = DashboardTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -53,6 +59,7 @@ pub async fn get_dashboard(
         recent,
         cluster,
         activity,
+        alerts,
         error,
     };
     Ok(Html(tpl.render()?).into_response())
