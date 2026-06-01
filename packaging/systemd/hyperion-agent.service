@@ -10,8 +10,13 @@ Restart=on-failure
 RestartSec=3s
 
 # Hardening
+# ProtectSystem=true (not "full") because the agent legitimately writes
+# /etc/passwd, /etc/nginx/sites-available, /etc/php/*/fpm/pool.d,
+# /etc/systemd/system/*, etc. as part of provisioning hostings.
+# ProtectSystem=true keeps /usr and /boot read-only (which the agent
+# never needs to write to) while letting useradd & friends do their job.
 NoNewPrivileges=true
-ProtectSystem=full
+ProtectSystem=true
 ProtectHome=false
 ProtectKernelTunables=true
 ProtectKernelModules=true

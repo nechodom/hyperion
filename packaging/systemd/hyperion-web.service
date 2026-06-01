@@ -11,8 +11,14 @@ Restart=on-failure
 RestartSec=3s
 
 # Hardening
+# ProtectSystem=full keeps /etc, /usr, /boot read-only, BUT the web
+# service needs to be able to manage its own state files under
+# /etc/hyperion (session keys, CSRF keys, admin user file when the
+# operator changes passwords). ReadWritePaths punches a hole exactly
+# there and nowhere else — /etc/passwd & co. remain fully read-only.
 NoNewPrivileges=true
 ProtectSystem=full
+ReadWritePaths=/etc/hyperion
 ProtectKernelTunables=true
 ProtectKernelModules=true
 PrivateTmp=true
