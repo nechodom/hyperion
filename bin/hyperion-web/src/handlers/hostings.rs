@@ -1088,6 +1088,92 @@ pub struct WpResetForm {
     pub new_password: String,
 }
 
+/// Multipart upload of a tar.gz backup archive. Saved to
+/// /var/lib/hyperion/backups/incoming/<sanitized-filename> then handed
+/// off to the existing BackupRestore RPC.
+pub async fn post_restore_upload(
+    State(state): State<SharedState>,
+    mut multipart: axum::extract::Multipart,
+) -> Result<Response, AppError> {
+    let mut selector: Option<String> = None;
+    let mut filename: Option<String> = None;
+    let mut bytes: Option<Vec<u8>> = None;
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| AppError::BadRequest(format!("multipart: {e}")))?
+    {
+        match field.name() {
+            Some("selector") => {
+                selector = Some(
+                    field
+                        .text()
+                        .await
+                        .map_err(|e| AppError::BadRequest(format!("selector: {e}")))?,
+                );
+            }
+            Some("archive") => {
+                filename = field.file_name().map(|s| {
+                    s.chars()
+                        .filter(|c| c.is_ascii_alphanumeric() || ['.', '-', '_'].contains(c))
+                        .collect()
+                });
+                bytes = Some(
+                    field
+                        .bytes()
+                        .await
+                        .map_err(|e| AppError::BadRequest(format!("read archive: {e}")))?
+                        .to_vec(),
+                );
+            }
+            _ => {}
+        }
+    }
+    let selector = selector.ok_or_else(|| AppError::BadRequest("missing selector".into()))?;
+    let bytes = bytes.ok_or_else(|| AppError::BadRequest("missing archive file".into()))?;
+    let filename = filename
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("upload-{}.tar.gz", hyperion_types::now_secs()));
+    if !filename.ends_with(".tar.gz") {
+        return Err(AppError::BadRequest(
+            "archive must be a .tar.gz file".into(),
+        ));
+    }
+
+    let incoming_dir = std::path::PathBuf::from("/var/lib/hyperion/backups/incoming");
+    tokio::fs::create_dir_all(&incoming_dir)
+        .await
+        .map_err(|e| AppError::Internal(format!("mkdir incoming: {e}")))?;
+    let dest = incoming_dir.join(&filename);
+    tokio::fs::write(&dest, &bytes)
+        .await
+        .map_err(|e| AppError::Internal(format!("write upload: {e}")))?;
+
+    let sel = parse_selector(&selector)?;
+    let sel_url = urlencoding(&selector);
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::BackupRestore {
+            sel,
+            archive_path: dest.display().to_string(),
+        },
+    )
+    .await?;
+    match resp {
+        RpcResponse::BackupRestore => {
+            Ok(Redirect::to(&format!("/hostings/{}?restore=ok", sel_url)).into_response())
+        }
+        RpcResponse::Error(e) => {
+            let msg = urlencoding(&e.to_string());
+            Ok(
+                Redirect::to(&format!("/hostings/{}?restore_error={}", sel_url, msg))
+                    .into_response(),
+            )
+        }
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
 pub async fn post_wp_reset(
     State(state): State<SharedState>,
     Form(form): Form<WpResetForm>,

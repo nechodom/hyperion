@@ -52,7 +52,7 @@ toml = "0.8"
 argon2 = "0.5"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 base64 = "0.22"
-axum = { version = "0.7", features = ["macros"] }
+axum = { version = "0.7", features = ["macros", "multipart"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["fs", "trace", "set-header"] }
 subtle = "2"

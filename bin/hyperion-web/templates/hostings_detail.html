@@ -530,9 +530,28 @@
   {% endif %}
 
   <div class="card-section">
+    <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Restore from a .tar.gz upload</h2>
+    <p class="muted" style="margin:0 0 1rem;font-size:0.85rem">
+      Upload a previously-taken archive (max 2 GiB). Saved to
+      <code>/var/lib/hyperion/backups/incoming/</code> then restored.
+    </p>
+    <form method="post" action="/hostings/restore-upload" enctype="multipart/form-data"
+          onsubmit="return confirm('Restore {{ detail.domain }} from the uploaded archive?');">
+      <input type="hidden" name="selector" value="{{ detail.domain }}">
+      <div class="row" style="gap:0.5rem;align-items:flex-end">
+        <div class="field" style="flex:1;margin:0">
+          <label for="restore_upload">Archive file</label>
+          <input id="restore_upload" name="archive" type="file" accept=".gz,.tgz,application/gzip,application/x-gzip" required>
+        </div>
+        <button class="btn primary" type="submit">Upload &amp; restore</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="card-section">
     <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Restore from a custom archive path</h2>
     <p class="muted" style="margin:0 0 1rem;font-size:0.85rem">
-      For archives you copied into <code>/var/lib/hyperion/backups/incoming/</code> (e.g. from a previous box). Paths outside the backup roots are refused.
+      For archives already on disk under one of the backup roots.
     </p>
     <form method="post" action="/hostings/restore"
           onsubmit="return confirm('Restore {{ detail.domain }} from this archive?');">
