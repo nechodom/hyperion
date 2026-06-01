@@ -27,6 +27,9 @@
   --primary-soft: #312e81;
   --primary-fg:   #ffffff;
 
+  /* Brand accent — emerald glow for the wordmark, distinct from primary CTAs */
+  --brand-accent: #34d399;
+
   --success:      #34d399;
   --success-soft: #064e3b;
   --warn:         #fbbf24;
@@ -72,6 +75,8 @@
     --primary:      #4f46e5;
     --primary-h:    #4338ca;
     --primary-soft: #e0e7ff;
+
+    --brand-accent: #059669;
 
     --success:      #059669;
     --success-soft: #d1fae5;
@@ -165,26 +170,27 @@ pre code {
 }
 
 .sidebar .brand {
-  padding: 1.4rem 1.25rem 1rem;
-  display: flex;
-  align-items: center;
-  gap: 0.65rem;
-  font-weight: 700;
-  font-size: 1.15rem;
-  letter-spacing: -0.02em;
-  color: var(--text);
-}
-.sidebar .brand .mark {
-  width: 28px;
-  height: 28px;
-  border-radius: 8px;
-  background: linear-gradient(135deg, var(--primary) 0%, var(--info) 100%);
-  display: grid;
-  place-items: center;
-  color: white;
-  font-size: 0.85rem;
+  padding: 1.5rem 1.25rem 1.1rem;
+  display: block;
   font-weight: 800;
-  box-shadow: 0 4px 12px color-mix(in oklab, var(--primary) 40%, transparent);
+  font-size: 1.15rem;
+  letter-spacing: 0.04em;
+  color: var(--text);
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+}
+.sidebar .brand .accent {
+  color: var(--brand-accent);
+  text-shadow: 0 0 18px color-mix(in oklab, var(--brand-accent) 60%, transparent);
+}
+.sidebar .brand .sep {
+  color: var(--text-soft);
+  margin: 0 0.05em;
+  font-weight: 500;
+}
+.sidebar .brand:hover {
+  text-decoration: none;
+  color: var(--text);
 }
 
 .sidebar .nav-section {

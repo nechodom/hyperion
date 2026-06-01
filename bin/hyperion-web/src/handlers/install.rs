@@ -5,6 +5,7 @@ use crate::error::AppError;
 use crate::state::SharedState;
 use askama::Template;
 use axum::extract::State;
+use axum::http::HeaderMap;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Form;
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
@@ -30,9 +31,10 @@ struct InstallTpl<'a> {
 pub async fn get_install(
     State(state): State<SharedState>,
     ctx: AuthCtx,
+    headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let invites = fetch_invites(&state).await.unwrap_or_default();
-    let master_url = derive_master_url(&state);
+    let master_url = derive_master_url(&state, &headers);
     let tpl = InstallTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -62,11 +64,12 @@ fn default_ttl() -> i64 {
 pub async fn post_invite(
     State(state): State<SharedState>,
     ctx: AuthCtx,
+    headers: HeaderMap,
     Form(form): Form<CreateForm>,
 ) -> Result<Response, AppError> {
     let label = form.label.trim().to_string();
     if label.is_empty() {
-        return Ok(render_with_error(&state, &ctx, "Label must not be empty").await);
+        return Ok(render_with_error(&state, &ctx, &headers, "Label must not be empty").await);
     }
     let ttl_secs = form.ttl_hours.clamp(1, 30 * 24) * 3600;
     let resp = hyperion_rpc_client::call(
@@ -77,12 +80,12 @@ pub async fn post_invite(
     let mint = match resp {
         RpcResponse::InviteCreate(m) => m,
         RpcResponse::Error(e) => {
-            return Ok(render_with_error(&state, &ctx, &e.to_string()).await);
+            return Ok(render_with_error(&state, &ctx, &headers, &e.to_string()).await);
         }
         _ => return Err(AppError::Internal("unexpected response".into())),
     };
     let invites = fetch_invites(&state).await.unwrap_or_default();
-    let master_url = derive_master_url(&state);
+    let master_url = derive_master_url(&state, &headers);
     let tpl = InstallTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -131,16 +134,33 @@ async fn fetch_invites(state: &SharedState) -> Result<Vec<NodeInviteSummary>, Ap
     }
 }
 
-fn derive_master_url(state: &SharedState) -> String {
-    // Best-effort: take the listen address from config, prefix with https://
-    // (or http:// if secure_cookies is off). Operator can override via the
-    // page form later if needed.
-    let scheme = if state.cfg.web.secure_cookies {
-        "https"
-    } else {
-        "http"
-    };
-    format!("{}://{}", scheme, &state.cfg.web.listen)
+/// Derive the master's public URL from the incoming request — the Host
+/// header is what the client actually used to reach us, so it's the only
+/// value we can hand to install-node.sh that's guaranteed to work.
+///
+/// `state.cfg.web.listen` is the *bind* address (e.g. `0.0.0.0:8443`) —
+/// useless for clients. Falls back to it only if Host is missing.
+///
+/// Honours `X-Forwarded-Proto` for installs behind a reverse proxy.
+fn derive_master_url(state: &SharedState, headers: &HeaderMap) -> String {
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_lowercase())
+        .filter(|s| s == "http" || s == "https")
+        .unwrap_or_else(|| {
+            if state.cfg.web.secure_cookies {
+                "https".to_string()
+            } else {
+                "http".to_string()
+            }
+        });
+    let host = headers
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| state.cfg.web.listen.clone());
+    format!("{scheme}://{host}")
 }
 
 fn csrf_token(state: &SharedState, ctx: &AuthCtx, form_id: &str) -> String {
@@ -157,9 +177,14 @@ fn csrf_token(state: &SharedState, ctx: &AuthCtx, form_id: &str) -> String {
     )
 }
 
-async fn render_with_error(state: &SharedState, ctx: &AuthCtx, message: &str) -> Response {
+async fn render_with_error(
+    state: &SharedState,
+    ctx: &AuthCtx,
+    headers: &HeaderMap,
+    message: &str,
+) -> Response {
     let invites = fetch_invites(state).await.unwrap_or_default();
-    let master_url = derive_master_url(state);
+    let master_url = derive_master_url(state, headers);
     let tpl = InstallTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
