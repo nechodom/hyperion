@@ -37,6 +37,7 @@ ulid.workspace = true
 thiserror.workspace = true
 blake3.workspace = true
 hex.workspace = true
+askama_escape = "0.10"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }

@@ -1064,6 +1064,14 @@ hr.divider {
   from { opacity: 0; transform: translateY(4px); }
 }
 
+/* HTMX progressive indicator — fades in while a request is in flight */
+.htmx-indicator {
+  opacity: 0;
+  transition: opacity var(--t-med);
+}
+.htmx-request .htmx-indicator,
+.htmx-request.htmx-indicator { opacity: 1; }
+
 /* Reduced motion */
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {

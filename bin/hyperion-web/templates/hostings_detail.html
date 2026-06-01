@@ -102,6 +102,30 @@
     <div class="flash-body">{{ e }}</div>
   </div>
 {% endif %}
+{% if let Some(m) = cert_flash %}
+  <div class="flash success">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+    <div class="flash-body">{{ m }}</div>
+  </div>
+{% endif %}
+{% if let Some(e) = cert_error %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body"><strong>Cert issuance failed:</strong> {{ e }}</div>
+  </div>
+{% endif %}
+{% if let Some(m) = restore_flash %}
+  <div class="flash success">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+    <div class="flash-body">{{ m }}</div>
+  </div>
+{% endif %}
+{% if let Some(e) = restore_error %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body"><strong>Restore failed:</strong> {{ e }}</div>
+  </div>
+{% endif %}
 
 <div class="card hover">
   <h2>
@@ -143,7 +167,12 @@
     Certificate
   </h2>
   <dl class="kv">
-    <dt>Issuer</dt><dd><span class="tag">{{ cert.issuer }}</span></dd>
+    <dt>Issuer</dt><dd>
+      <span class="tag">{{ cert.issuer }}</span>
+      {% if cert.issuer == "self-signed" %}
+        <span class="muted" style="margin-left:0.5rem;font-size:0.82rem">— browsers will warn until a real cert is issued below.</span>
+      {% endif %}
+    </dd>
     <dt>Domain</dt><dd>{{ cert.domain }}</dd>
     {% if !cert.sans.is_empty() %}
     <dt>SANs</dt><dd>{{ cert.sans.join(", ") }}</dd>
@@ -151,6 +180,67 @@
     <dt>Not after</dt><dd class="muted numeric">{{ cert.not_after }}</dd>
     <dt>Fingerprint</dt><dd><code style="font-size:0.74rem">{{ cert.fingerprint_sha256 }}</code></dd>
   </dl>
+
+  <div class="card-section">
+    <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Issue a real Let's Encrypt certificate</h2>
+    <p class="muted" style="margin:0 0 1rem;font-size:0.88rem">
+      First check that DNS for <code>{{ detail.domain }}</code> resolves to this server. The cert flow refuses to start otherwise.
+    </p>
+
+    <div id="dns-result" style="background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.85rem 1rem;margin-bottom:1rem">
+      <span class="muted">DNS not checked yet.</span>
+    </div>
+
+    <form hx-post="/hostings/dns-check" hx-target="#dns-result" hx-swap="innerHTML"
+          hx-indicator="#dns-spinner" style="display:flex;gap:0.5rem;align-items:center;margin-bottom:1.5rem">
+      <input type="hidden" name="_csrf" value="{{ csrf_dns_check }}">
+      <input type="hidden" name="selector" value="{{ detail.domain }}">
+      <button class="btn" type="submit">
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+        Check DNS
+      </button>
+      <span id="dns-spinner" class="muted htmx-indicator" style="font-size:0.85rem">resolving…</span>
+    </form>
+
+    <form method="post" action="/hostings/cert/issue"
+          onsubmit="return confirm('Issue a real Let\\'s Encrypt cert for {{ detail.domain }}? This contacts the LE API.');">
+      <input type="hidden" name="_csrf" value="{{ csrf_cert_issue }}">
+      <input type="hidden" name="selector" value="{{ detail.domain }}">
+      <label class="field-checkbox">
+        <input type="checkbox" name="staging" value="on" checked>
+        Use Let's Encrypt <strong>staging</strong> first (recommended)
+        <span class="muted" style="margin-left:0.4rem;font-size:0.82rem">— untrusted CA but no rate limits</span>
+      </label>
+      <label class="field-checkbox">
+        <input type="checkbox" name="require_dns_match" value="off">
+        <strong>Override</strong> DNS pre-check
+        <span class="muted" style="margin-left:0.4rem;font-size:0.82rem">— issue anyway (will probably fail)</span>
+      </label>
+      <button class="btn primary" type="submit" style="margin-top:0.7rem">
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        Issue HTTPS certificate
+      </button>
+    </form>
+  </div>
+</div>
+{% endif %}
+
+{% if let Some(s) = stats %}
+<div class="card hover">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+    Stats
+  </h2>
+  <dl class="kv">
+    <dt>Disk used</dt><dd>{{ crate::handlers::stats::fmt_bytes(s.disk_bytes) }}</dd>
+    <dt>BW in · 24h</dt><dd>{{ crate::handlers::stats::fmt_bytes(s.bw_in_bytes_24h) }}</dd>
+    <dt>BW out · 24h</dt><dd>{{ crate::handlers::stats::fmt_bytes(s.bw_out_bytes_24h) }}</dd>
+    <dt>Requests · 24h</dt><dd class="numeric">{{ s.requests_24h }}</dd>
+    <dt>Last sampled</dt><dd class="muted numeric">{{ s.sampled_at }}</dd>
+  </dl>
+  <p class="muted" style="font-size:0.82rem;margin-top:0.8rem;margin-bottom:0">
+    Numbers come from the agent's 5-minute sampler — du on the hosting tree + tail-parse of nginx access.log.
+  </p>
 </div>
 {% endif %}
 
@@ -351,7 +441,7 @@
       <table>
         <thead><tr>
           <th>Started</th><th>Target</th><th>State</th>
-          <th class="right">Size</th><th>Archive</th>
+          <th class="right">Size</th><th>Archive</th><th class="right">Restore</th>
         </tr></thead>
         <tbody>
         {% for b in backups %}
@@ -363,9 +453,22 @@
               {% else if b.state == "failed" %}<span class="pill err">{{ b.state }}</span>
               {% else %}<span class="pill warn pulse">{{ b.state }}</span>{% endif %}
             </td>
-            <td class="right muted numeric">{{ b.bytes_total }} B</td>
+            <td class="right muted numeric">{{ crate::handlers::stats::fmt_bytes(b.bytes_total) }}</td>
             <td>
               {% if let Some(p) = b.archive_path %}<code style="font-size:0.74rem">{{ p }}</code>{% endif %}
+            </td>
+            <td class="right">
+              {% if b.state == "ok" %}
+                {% if let Some(p) = b.archive_path %}
+                <form method="post" action="/hostings/restore" style="display:inline"
+                      onsubmit="return confirm('Restore {{ detail.domain }} from this backup? Current files + DB will be overwritten.');">
+                  <input type="hidden" name="_csrf" value="{{ csrf_restore }}">
+                  <input type="hidden" name="selector" value="{{ detail.domain }}">
+                  <input type="hidden" name="archive_path" value="{{ p }}">
+                  <button class="btn small" type="submit">Restore</button>
+                </form>
+                {% endif %}
+              {% endif %}
             </td>
           </tr>
         {% endfor %}
@@ -373,6 +476,26 @@
       </table>
     </div>
   {% endif %}
+
+  <div class="card-section">
+    <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Restore from a custom archive path</h2>
+    <p class="muted" style="margin:0 0 1rem;font-size:0.85rem">
+      For archives you copied into <code>/var/lib/hyperion/backups/incoming/</code> (e.g. from a previous box). Paths outside the backup roots are refused.
+    </p>
+    <form method="post" action="/hostings/restore"
+          onsubmit="return confirm('Restore {{ detail.domain }} from this archive?');">
+      <input type="hidden" name="_csrf" value="{{ csrf_restore }}">
+      <input type="hidden" name="selector" value="{{ detail.domain }}">
+      <div class="row" style="gap:0.5rem;align-items:flex-end">
+        <div class="field" style="flex:1;margin:0">
+          <label for="restore_path">Archive path</label>
+          <input id="restore_path" name="archive_path" type="text" required
+                 placeholder="/var/lib/hyperion/backups/incoming/{{ detail.domain }}-XXXX.tar.gz">
+        </div>
+        <button class="btn" type="submit">Restore</button>
+      </div>
+    </form>
+  </div>
 </div>
 
 <div class="card danger">

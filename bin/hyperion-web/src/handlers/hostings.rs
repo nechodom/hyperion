@@ -8,7 +8,8 @@ use axum::Form;
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
 use hyperion_rpc::wire::{DeleteOpts, HostingCreateReq, HostingCreated, HostingSelector};
 use hyperion_types::{
-    DbProvision, HostingDetail, HostingSummary, PhpVersion, WpInstallRequest, WpInstallStatus,
+    CertIssueRequest, DbProvision, DnsCheckResult, HostingDetail, HostingStats, HostingSummary,
+    PhpVersion, WpInstallRequest, WpInstallStatus,
 };
 use hyperion_validate::{Domain, SystemUserName};
 use serde::Deserialize;
@@ -59,6 +60,7 @@ struct DetailTpl<'a> {
     wp_status: Option<WpInstallStatus>,
     expiry: hyperion_types::HostingExpiry,
     backups: Vec<hyperion_types::BackupRunWire>,
+    stats: Option<HostingStats>,
     csrf_delete: String,
     csrf_suspend: String,
     csrf_resume: String,
@@ -67,6 +69,9 @@ struct DetailTpl<'a> {
     csrf_backup_now: String,
     csrf_expiry_set: String,
     csrf_expiry_clear: String,
+    csrf_dns_check: String,
+    csrf_cert_issue: String,
+    csrf_restore: String,
     error: Option<&'a str>,
     wp_error: Option<String>,
     wp_flash: Option<String>,
@@ -74,6 +79,10 @@ struct DetailTpl<'a> {
     backup_flash: Option<String>,
     expiry_error: Option<String>,
     expiry_flash: Option<String>,
+    cert_error: Option<String>,
+    cert_flash: Option<String>,
+    restore_error: Option<String>,
+    restore_flash: Option<String>,
     just_created: Option<HostingCreated>,
 }
 
@@ -204,6 +213,7 @@ pub async fn post_create(
                 wp_status: None,
                 expiry: hyperion_types::HostingExpiry::defaults(),
                 backups: vec![],
+                stats: None,
                 csrf_delete: csrf_token_for(&state, &ctx, "/hostings/delete"),
                 csrf_suspend: csrf_token_for(&state, &ctx, "/hostings/suspend"),
                 csrf_resume: csrf_token_for(&state, &ctx, "/hostings/resume"),
@@ -212,6 +222,9 @@ pub async fn post_create(
                 csrf_backup_now: csrf_token_for(&state, &ctx, "/hostings/backup-now"),
                 csrf_expiry_set: csrf_token_for(&state, &ctx, "/hostings/expiry/set"),
                 csrf_expiry_clear: csrf_token_for(&state, &ctx, "/hostings/expiry/clear"),
+                csrf_dns_check: csrf_token_for(&state, &ctx, "/hostings/dns-check"),
+                csrf_cert_issue: csrf_token_for(&state, &ctx, "/hostings/cert/issue"),
+                csrf_restore: csrf_token_for(&state, &ctx, "/hostings/restore"),
                 error: None,
                 wp_error: None,
                 wp_flash: None,
@@ -219,6 +232,10 @@ pub async fn post_create(
                 backup_flash: None,
                 expiry_error: None,
                 expiry_flash: None,
+                cert_error: None,
+                cert_flash: None,
+                restore_error: None,
+                restore_flash: None,
                 just_created: Some(created),
             };
             Ok(Html(tpl.render()?).into_response())
@@ -259,9 +276,10 @@ pub async fn get_detail(
     let expiry = fetch_expiry(&state, sel_id.clone())
         .await
         .unwrap_or_else(|_| hyperion_types::HostingExpiry::defaults());
-    let backups = fetch_backup_list(&state, sel_id, 10)
+    let backups = fetch_backup_list(&state, sel_id.clone(), 10)
         .await
         .unwrap_or_default();
+    let stats = fetch_stats(&state, sel_id).await.ok();
     let tpl = DetailTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -273,6 +291,7 @@ pub async fn get_detail(
         wp_status,
         expiry,
         backups,
+        stats,
         csrf_delete: csrf_token_for(&state, &ctx, "/hostings/delete"),
         csrf_suspend: csrf_token_for(&state, &ctx, "/hostings/suspend"),
         csrf_resume: csrf_token_for(&state, &ctx, "/hostings/resume"),
@@ -281,6 +300,9 @@ pub async fn get_detail(
         csrf_backup_now: csrf_token_for(&state, &ctx, "/hostings/backup-now"),
         csrf_expiry_set: csrf_token_for(&state, &ctx, "/hostings/expiry/set"),
         csrf_expiry_clear: csrf_token_for(&state, &ctx, "/hostings/expiry/clear"),
+        csrf_dns_check: csrf_token_for(&state, &ctx, "/hostings/dns-check"),
+        csrf_cert_issue: csrf_token_for(&state, &ctx, "/hostings/cert/issue"),
+        csrf_restore: csrf_token_for(&state, &ctx, "/hostings/restore"),
         error: None,
         wp_error: q.wp_error,
         wp_flash: q.wp.map(|_| "WordPress install succeeded.".into()),
@@ -294,9 +316,32 @@ pub async fn get_detail(
                 "Expiry updated.".to_string()
             }
         }),
+        cert_error: q.cert_error,
+        cert_flash: q.cert.map(|s| {
+            if s == "staging" {
+                "Staging certificate issued — issuer 'letsencrypt-staging'.".into()
+            } else {
+                "Production HTTPS certificate issued.".into()
+            }
+        }),
+        restore_error: q.restore_error,
+        restore_flash: q.restore.map(|_| "Backup restored.".into()),
         just_created: None,
     };
     Ok(Html(tpl.render()?).into_response())
+}
+
+async fn fetch_stats(
+    state: &SharedState,
+    sel: HostingSelector,
+) -> Result<HostingStats, AppError> {
+    let resp =
+        hyperion_rpc_client::call(&state.agent_socket, Request::HostingStats { sel }).await?;
+    match resp {
+        RpcResponse::HostingStats(s) => Ok(s),
+        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
 }
 
 #[derive(Deserialize, Default)]
@@ -315,6 +360,14 @@ pub struct DetailQuery {
     pub expiry: Option<String>,
     #[serde(default)]
     pub expiry_error: Option<String>,
+    #[serde(default)]
+    pub cert: Option<String>,
+    #[serde(default)]
+    pub cert_error: Option<String>,
+    #[serde(default)]
+    pub restore: Option<String>,
+    #[serde(default)]
+    pub restore_error: Option<String>,
 }
 
 async fn fetch_expiry(
@@ -766,5 +819,160 @@ async fn list_hostings(state: &SharedState) -> Result<Vec<HostingSummary>, Strin
         RpcResponse::HostingList(v) => Ok(v),
         RpcResponse::Error(e) => Err(e.to_string()),
         _ => Err("unexpected response".into()),
+    }
+}
+
+// ==================================================================
+//  DNS check + real ACME issue + restore
+// ==================================================================
+
+#[derive(Deserialize)]
+pub struct DnsCheckForm {
+    pub selector: String,
+}
+
+/// HTMX-style endpoint: returns just the result fragment (not a full page)
+/// so the operator can poll without losing the rest of the screen.
+pub async fn post_dns_check(
+    State(state): State<SharedState>,
+    Form(form): Form<DnsCheckForm>,
+) -> Result<Response, AppError> {
+    let detail_sel = parse_selector(&form.selector)?;
+    let detail_resp =
+        hyperion_rpc_client::call(&state.agent_socket, Request::HostingGet(detail_sel)).await?;
+    let domain = match detail_resp {
+        RpcResponse::HostingGet(d) => Domain::parse(&d.domain)?,
+        RpcResponse::Error(e) => return Err(AppError::Rpc(e.to_string())),
+        _ => return Err(AppError::Internal("unexpected response".into())),
+    };
+    let resp =
+        hyperion_rpc_client::call(&state.agent_socket, Request::DnsCheck { domain }).await?;
+    let html = match resp {
+        RpcResponse::DnsCheck(r) => render_dns_fragment(&r),
+        RpcResponse::Error(e) => {
+            format!(
+                "<div class=\"flash error\"><div class=\"flash-body\">DNS check failed: {}</div></div>",
+                askama_escape::escape(&e.to_string(), askama_escape::Html)
+            )
+        }
+        _ => "<div class=\"flash error\"><div class=\"flash-body\">Unexpected response.</div></div>"
+            .into(),
+    };
+    Ok(Html(html).into_response())
+}
+
+fn render_dns_fragment(r: &DnsCheckResult) -> String {
+    let esc = |s: &str| askama_escape::escape(s, askama_escape::Html).to_string();
+    let badge = if r.matches {
+        "<span class=\"pill ok\">matches ✓</span>"
+    } else {
+        "<span class=\"pill err\">no match ✗</span>"
+    };
+    let a_list = if r.resolved_a.is_empty() {
+        "<span class=\"text-soft\">none</span>".to_string()
+    } else {
+        r.resolved_a
+            .iter()
+            .map(|ip| format!("<code>{}</code>", esc(ip)))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let aaaa_list = if r.resolved_aaaa.is_empty() {
+        "<span class=\"text-soft\">none</span>".to_string()
+    } else {
+        r.resolved_aaaa
+            .iter()
+            .map(|ip| format!("<code>{}</code>", esc(ip)))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let our_v4 = r.our_public_ipv4.as_deref().unwrap_or("?");
+    let our_v6 = r.our_public_ipv6.as_deref().unwrap_or("?");
+    format!(
+        r#"<div class="kv" style="margin-top:0.5rem">
+            <dt>Status</dt><dd>{badge}</dd>
+            <dt>A records</dt><dd>{a_list}</dd>
+            <dt>AAAA records</dt><dd>{aaaa_list}</dd>
+            <dt>Our IPv4</dt><dd><code>{ipv4}</code></dd>
+            <dt>Our IPv6</dt><dd><code>{ipv6}</code></dd>
+        </div>
+        <p class="muted" style="font-size:0.85rem;margin-top:0.7rem;margin-bottom:0">{note}</p>"#,
+        badge = badge,
+        a_list = a_list,
+        aaaa_list = aaaa_list,
+        ipv4 = esc(our_v4),
+        ipv6 = esc(our_v6),
+        note = esc(&r.note),
+    )
+}
+
+#[derive(Deserialize)]
+pub struct CertIssueForm {
+    pub selector: String,
+    #[serde(default)]
+    pub staging: Option<String>,
+    #[serde(default)]
+    pub require_dns_match: Option<String>,
+}
+
+pub async fn post_cert_issue(
+    State(state): State<SharedState>,
+    Form(form): Form<CertIssueForm>,
+) -> Result<Response, AppError> {
+    let sel = parse_selector(&form.selector)?;
+    let sel_url = urlencoding(&form.selector);
+    let req = CertIssueRequest {
+        staging: form.staging.as_deref() == Some("on"),
+        require_dns_match: form.require_dns_match.as_deref() != Some("off"),
+        extra_sans: vec![],
+    };
+    let staging = req.staging;
+    let resp =
+        hyperion_rpc_client::call(&state.agent_socket, Request::CertIssueAcme { sel, req }).await?;
+    match resp {
+        RpcResponse::CertIssueAcme(_) => {
+            let kind = if staging { "staging" } else { "prod" };
+            Ok(Redirect::to(&format!("/hostings/{}?cert={}", sel_url, kind)).into_response())
+        }
+        RpcResponse::Error(e) => {
+            let msg = urlencoding(&e.to_string());
+            Ok(Redirect::to(&format!("/hostings/{}?cert_error={}", sel_url, msg)).into_response())
+        }
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct RestoreForm {
+    pub selector: String,
+    pub archive_path: String,
+}
+
+pub async fn post_restore(
+    State(state): State<SharedState>,
+    Form(form): Form<RestoreForm>,
+) -> Result<Response, AppError> {
+    let sel = parse_selector(&form.selector)?;
+    let sel_url = urlencoding(&form.selector);
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::BackupRestore {
+            sel,
+            archive_path: form.archive_path.trim().to_string(),
+        },
+    )
+    .await?;
+    match resp {
+        RpcResponse::BackupRestore => {
+            Ok(Redirect::to(&format!("/hostings/{}?restore=ok", sel_url)).into_response())
+        }
+        RpcResponse::Error(e) => {
+            let msg = urlencoding(&e.to_string());
+            Ok(
+                Redirect::to(&format!("/hostings/{}?restore_error={}", sel_url, msg))
+                    .into_response(),
+            )
+        }
+        _ => Err(AppError::Internal("unexpected response".into())),
     }
 }
