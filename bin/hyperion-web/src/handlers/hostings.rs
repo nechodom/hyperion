@@ -24,6 +24,9 @@ struct ListTpl<'a> {
     css_version: &'static str,
     htmx_version: &'static str,
     rows: Vec<HostingSummary>,
+    total_count: usize,
+    q: String,
+    state_filter: String,
     csrf_token: String,
     error: Option<String>,
     flash: Option<String>,
@@ -95,11 +98,28 @@ struct DetailTpl<'a> {
     just_created: Option<HostingCreated>,
 }
 
+#[derive(Deserialize, Default)]
+pub struct ListQuery {
+    #[serde(default)]
+    pub q: String,
+    #[serde(default)]
+    pub state: String,
+}
+
 pub async fn get_list(
     State(state): State<SharedState>,
     ctx: AuthCtx,
+    axum::extract::Query(q): axum::extract::Query<ListQuery>,
 ) -> Result<Response, AppError> {
     let rows = list_hostings(&state).await.map_err(AppError::Rpc)?;
+    let total_count = rows.len();
+    let needle = q.q.trim().to_lowercase();
+    let state_filter = q.state.trim().to_lowercase();
+    let rows: Vec<HostingSummary> = rows
+        .into_iter()
+        .filter(|r| needle.is_empty() || r.domain.to_lowercase().contains(&needle))
+        .filter(|r| state_filter.is_empty() || r.state.as_str() == state_filter)
+        .collect();
     let csrf_token = csrf_token_for(&state, &ctx, "/hostings/delete");
     let tpl = ListTpl {
         username: &ctx.username,
@@ -108,6 +128,9 @@ pub async fn get_list(
         css_version: super::css_version(),
         htmx_version: super::htmx_version(),
         rows,
+        total_count,
+        q: q.q,
+        state_filter,
         csrf_token,
         error: None,
         flash: None,

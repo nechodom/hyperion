@@ -4,7 +4,13 @@
 <div class="page-header">
   <div>
     <h1>Hostings</h1>
-    <div class="subtitle">{{ rows.len() }} site{% if rows.len() != 1 %}s{% endif %} managed by this agent.</div>
+    <div class="subtitle">
+      {% if rows.len() == total_count %}
+        {{ total_count }} site{% if total_count != 1 %}s{% endif %} managed by this agent.
+      {% else %}
+        Showing <strong>{{ rows.len() }}</strong> of {{ total_count }} site{% if total_count != 1 %}s{% endif %}.
+      {% endif %}
+    </div>
   </div>
   <span class="grow"></span>
   <div class="actions">
@@ -13,6 +19,20 @@
       New hosting
     </a>
   </div>
+</div>
+
+<div class="card" style="margin-bottom:1rem;padding:0.85rem 1rem">
+  <form method="get" action="/hostings" style="display:flex;gap:0.6rem;align-items:center;flex-wrap:wrap">
+    <input type="search" name="q" value="{{ q|e }}" placeholder="Search by domain…"
+           style="flex:1;min-width:14rem;max-width:24rem;margin:0">
+    <div class="btn-group" role="tablist">
+      <a class="btn small {% if state_filter.is_empty() %}primary{% endif %}" href="/hostings?q={{ q|e }}">All</a>
+      <a class="btn small {% if state_filter == "active" %}primary{% endif %}" href="/hostings?q={{ q|e }}&state=active">Active</a>
+      <a class="btn small {% if state_filter == "suspended" %}primary{% endif %}" href="/hostings?q={{ q|e }}&state=suspended">Suspended</a>
+      <a class="btn small {% if state_filter == "failed" %}primary{% endif %}" href="/hostings?q={{ q|e }}&state=failed">Failed</a>
+    </div>
+    <button type="submit" class="btn small">Search</button>
+  </form>
 </div>
 
 {% if let Some(f) = flash %}
