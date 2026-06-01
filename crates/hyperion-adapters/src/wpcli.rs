@@ -74,9 +74,49 @@ pub struct WpDbCreds<'a> {
     pub host: &'a str,
 }
 
+/// URL of the wp-cli phar release we self-install if `/usr/local/bin/wp`
+/// is missing. Pinned to the wp-cli "stable" builds branch on GitHub
+/// (signed releases). Override at compile time with the
+/// `HYPERION_WPCLI_URL` env var if you mirror it internally.
+pub const WPCLI_PHAR_URL: &str =
+    "https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar";
+
+/// Where the wp-cli phar lives on disk. Has to match `build_argv`.
+pub const WPCLI_PATH: &str = "/usr/local/bin/wp";
+
+/// Make sure `/usr/local/bin/wp` exists and is executable. If it doesn't,
+/// download the phar from upstream over HTTPS (curl verifies TLS by
+/// default) and `chmod 0755` it. No-op if already present.
+///
+/// This lets the WordPress install pipeline self-heal on hosts where
+/// `install-master.sh` predated the wp-cli step. Operators can prevent
+/// auto-download in air-gapped environments by pre-installing wp-cli
+/// themselves; the existence check makes this trivially a no-op.
+pub async fn ensure_wp_cli_present() -> Result<(), AdapterError> {
+    if std::path::Path::new(WPCLI_PATH).exists() {
+        return Ok(());
+    }
+    tracing::info!(url = WPCLI_PHAR_URL, "wp-cli missing — downloading");
+    cmd::run(
+        "/usr/bin/curl",
+        &["-fsSL", WPCLI_PHAR_URL, "-o", WPCLI_PATH],
+    )
+    .await
+    .map_err(|e| {
+        AdapterError::Other(format!(
+            "could not download wp-cli from {WPCLI_PHAR_URL}: {e}.\n\
+             Fix by hand:\n  \
+               curl -fsSL {WPCLI_PHAR_URL} -o {WPCLI_PATH} && chmod 0755 {WPCLI_PATH}"
+        ))
+    })?;
+    cmd::run("/bin/chmod", &["0755", WPCLI_PATH]).await?;
+    Ok(())
+}
+
 /// Install WordPress into `htdocs` running as `user`.
 ///
 /// Pipeline:
+///   0. `ensure_wp_cli_present` — fetches wp-cli phar if missing
 ///   1. `wp core download --locale --version --skip-content`
 ///   2. `wp config create --dbname --dbuser --dbpass-from-stdin --dbhost --force`
 ///   3. `wp core install --url --title --admin_user --admin_email
@@ -96,6 +136,7 @@ pub async fn install_wordpress(
     db: WpDbCreds<'_>,
     req: &WpInstallRequest,
 ) -> Result<String, AdapterError> {
+    ensure_wp_cli_present().await?;
     if !LOCALE_RX.is_match(&req.locale) {
         return Err(AdapterError::Other(format!(
             "wp locale refused (not en_US-style): {}",
