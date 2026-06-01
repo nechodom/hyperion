@@ -4,8 +4,32 @@
 <div class="page-header">
   <div>
     <h1>Audit log</h1>
-    <div class="subtitle">Tamper-evident hash chain · last {{ limit }} entries</div>
+    <div class="subtitle">
+      Tamper-evident hash chain ·
+      {% if rows.len() == total_count %}
+        last {{ total_count }} entries
+      {% else %}
+        Showing <strong>{{ rows.len() }}</strong> of {{ total_count }} entries
+      {% endif %}
+    </div>
   </div>
+</div>
+
+<div class="card" style="margin-bottom:1rem;padding:0.85rem 1rem">
+  <form method="get" action="/audit" style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
+    <input type="search" name="q" value="{{ q|e }}" placeholder="Search action / target / payload / actor…"
+           style="flex:1;min-width:14rem;max-width:28rem;margin:0">
+    <input type="text" name="action" value="{{ action_filter|e }}" placeholder="action prefix"
+           style="width:14rem;margin:0">
+    <select name="result" style="width:9rem;margin:0">
+      <option value="" {% if result_filter.is_empty() %}selected{% endif %}>All</option>
+      <option value="ok" {% if result_filter == "ok" %}selected{% endif %}>ok</option>
+      <option value="failed" {% if result_filter == "failed" %}selected{% endif %}>failed</option>
+    </select>
+    <input type="hidden" name="limit" value="{{ limit }}">
+    <button type="submit" class="btn small">Search</button>
+    <a class="btn small ghost" href="/audit">Reset</a>
+  </form>
 </div>
 
 <div class="card no-pad-table">

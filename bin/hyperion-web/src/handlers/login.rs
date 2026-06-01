@@ -9,6 +9,65 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Form;
 use hyperion_auth::Session;
 use serde::Deserialize;
+use std::sync::Mutex;
+
+/// Per-IP failed-login tracker. Token bucket with a 5-attempt cap over
+/// a 5-minute window. Resets on successful login.
+struct ThrottleState {
+    by_ip: std::collections::HashMap<String, (u32, i64)>,
+}
+static THROTTLE: once_cell::sync::Lazy<Mutex<ThrottleState>> =
+    once_cell::sync::Lazy::new(|| {
+        Mutex::new(ThrottleState {
+            by_ip: std::collections::HashMap::new(),
+        })
+    });
+
+const THROTTLE_WINDOW_SECS: i64 = 5 * 60;
+const THROTTLE_LIMIT: u32 = 5;
+
+fn caller_ip(headers: &HeaderMap) -> String {
+    headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.split(',').next().unwrap_or(s).trim().to_string())
+        .or_else(|| {
+            headers
+                .get("x-real-ip")
+                .and_then(|v| v.to_str().ok())
+                .map(String::from)
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn check_throttle(ip: &str) -> bool {
+    let now = hyperion_types::now_secs();
+    let mut s = THROTTLE.lock().expect("login throttle mutex poisoned");
+    // Garbage-collect stale entries opportunistically.
+    s.by_ip
+        .retain(|_, (_, ts)| now - *ts < THROTTLE_WINDOW_SECS);
+    let entry = s.by_ip.entry(ip.to_string()).or_insert((0, now));
+    if now - entry.1 >= THROTTLE_WINDOW_SECS {
+        *entry = (0, now);
+    }
+    entry.0 < THROTTLE_LIMIT
+}
+
+fn record_failure(ip: &str) {
+    let now = hyperion_types::now_secs();
+    let mut s = THROTTLE.lock().expect("login throttle mutex poisoned");
+    let entry = s.by_ip.entry(ip.to_string()).or_insert((0, now));
+    if now - entry.1 >= THROTTLE_WINDOW_SECS {
+        *entry = (1, now);
+    } else {
+        entry.0 += 1;
+    }
+}
+
+fn clear_throttle(ip: &str) {
+    let mut s = THROTTLE.lock().expect("login throttle mutex poisoned");
+    s.by_ip.remove(ip);
+}
 
 #[derive(Template)]
 #[template(path = "login.html")]
@@ -53,17 +112,31 @@ pub async fn get_login(
 
 pub async fn post_login(
     State(state): State<SharedState>,
+    headers: HeaderMap,
     Form(form): Form<LoginForm>,
 ) -> Result<Response, AppError> {
+    let ip = caller_ip(&headers);
+    if !check_throttle(&ip) {
+        tracing::warn!(ip = %ip, "login throttled");
+        return Ok((
+            StatusCode::TOO_MANY_REQUESTS,
+            [("retry-after", "300")],
+            "Too many failed login attempts. Wait 5 minutes and try again.",
+        )
+            .into_response());
+    }
     let user = state.admin_user.clone();
     if !subtle_eq(&form.username, &user.username) {
+        record_failure(&ip);
         return Ok(login_failed(&form.next));
     }
     let ok =
         admin_user::verify(&user, &form.password).map_err(|e| AppError::Internal(e.to_string()))?;
     if !ok {
+        record_failure(&ip);
         return Ok(login_failed(&form.next));
     }
+    clear_throttle(&ip);
     // Mint a session.
     let now = hyperion_types::now_secs();
     let sid = ulid::Ulid::new().to_string();
