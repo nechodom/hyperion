@@ -138,6 +138,12 @@ refresh_unit() {
 (( HAVE_AGENT )) && refresh_unit hyperion-agent
 (( HAVE_WEB   )) && refresh_unit hyperion-web
 
+#-------- 4a. TLS cert dir (idempotent) -----------------------------------
+# hyperion-web auto-generates a self-signed cert on first start; we just
+# need to make sure the directory exists and the agent service can write
+# into it (covered by ReadWritePaths=/etc/hyperion in the systemd unit).
+install -d -m 0700 /etc/hyperion/web-tls
+
 #-------- 4b. wp-cli (best-effort install/update) -------------------------
 # WordPress install adapter shells out to /usr/local/bin/wp. Older Hyperion
 # installs predate wp-cli being installed by install-master.sh, so make

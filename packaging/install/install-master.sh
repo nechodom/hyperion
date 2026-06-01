@@ -214,11 +214,20 @@ admin_user_file      = "/etc/hyperion/web-admin.json"
 session_key_file     = "/etc/hyperion/web-session.key"
 csrf_key_file        = "/etc/hyperion/web-csrf.key"
 session_ttl_secs     = 28800
-secure_cookies       = false
+# TLS enabled by default; hyperion-web auto-generates a self-signed cert
+# at first boot. Replace fullchain.pem + privkey.pem with a real LE cert
+# any time and restart hyperion-web. Cookies need Secure=true under TLS.
+secure_cookies       = true
 session_cookie_name  = "hyperion_session"
+tls_enabled          = true
+tls_cert_file        = "/etc/hyperion/web-tls/fullchain.pem"
+tls_key_file         = "/etc/hyperion/web-tls/privkey.pem"
 EOF
 fi
 chmod 0600 /etc/hyperion/agent.toml /etc/hyperion/web.toml
+
+# TLS cert directory — agent runs as root and writes through ReadWritePaths.
+install -d -m 0700 /etc/hyperion/web-tls
 
 #-------- 8. systemd units -------------------------------------------------
 for unit in hyperion-agent hyperion-web; do

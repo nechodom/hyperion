@@ -26,6 +26,11 @@ pub struct WebSection {
     pub secure_cookies: bool,
     /// Cookie name for the session.
     pub session_cookie_name: String,
+    /// Enable TLS termination. Default true. When true, ensures cert + key
+    /// exist (auto-generates self-signed) and binds via rustls.
+    pub tls_enabled: bool,
+    pub tls_cert_file: PathBuf,
+    pub tls_key_file: PathBuf,
 }
 
 impl Default for Config {
@@ -47,6 +52,9 @@ impl Default for WebSection {
             session_ttl_secs: 8 * 3600,
             secure_cookies: true,
             session_cookie_name: "hyperion_session".into(),
+            tls_enabled: true,
+            tls_cert_file: PathBuf::from("/etc/hyperion/web-tls/fullchain.pem"),
+            tls_key_file: PathBuf::from("/etc/hyperion/web-tls/privkey.pem"),
         }
     }
 }
