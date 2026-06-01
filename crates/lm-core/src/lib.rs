@@ -8,9 +8,11 @@
 #![forbid(unsafe_code)]
 
 pub mod agent;
+pub mod real_adapter;
 pub mod secrets;
 pub mod service;
 
 pub use agent::AgentImpl;
+pub use real_adapter::RealAdapter;
 pub use secrets::{SecretsError, SecretsStore};
-pub use service::{AdapterPort, HostingService};
+pub use service::{AdapterPort, HostingService, HostingPaths};

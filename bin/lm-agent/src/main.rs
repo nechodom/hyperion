@@ -1,5 +1,55 @@
-// Phase F: lm-agent daemon. Implementation lands in Phase F task.
-fn main() {
-    eprintln!("lm-agent: not yet implemented");
-    std::process::exit(2);
+//! `lm-agent` — the privileged daemon.
+
+use clap::Parser;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+mod config;
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "lm-agent",
+    version,
+    about = "linux-manager agent daemon"
+)]
+struct Cli {
+    /// Path to the agent.toml config file.
+    #[arg(long, default_value = "/etc/linux-manager/agent.toml")]
+    config: PathBuf,
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,lm=debug")),
+        )
+        .init();
+
+    let cli = Cli::parse();
+    let cfg = config::Config::load_from_path(&cli.config)?;
+
+    tracing::info!(socket=%cfg.agent.socket_path.display(), "starting lm-agent");
+
+    let pool = lm_state::open(&cfg.agent.state_db).await?;
+    let secrets = Arc::new(lm_core::SecretsStore::new(cfg.agent.secrets_dir.clone()));
+    let adapter = Arc::new(lm_core::RealAdapter {
+        acme_email: cfg.acme.contact_email.clone(),
+        acme_directory_url: cfg.acme.directory_url.clone(),
+        acme_challenge_root: cfg.acme.challenge_dir.clone(),
+        ..Default::default()
+    });
+    let paths = lm_core::HostingPaths {
+        home_root: cfg.agent.home_root.to_string_lossy().to_string(),
+        acme_challenge_root: cfg.acme.challenge_dir.to_string_lossy().to_string(),
+    };
+    let svc = Arc::new(
+        lm_core::HostingService::new(pool, adapter, secrets).with_paths(paths),
+    );
+    let agent = Arc::new(lm_core::AgentImpl::new(svc));
+    let server = lm_rpc_server::Server::bind(&cfg.agent.socket_path, agent).await?;
+    tracing::info!("ready");
+    server.run().await?;
+    Ok(())
 }
