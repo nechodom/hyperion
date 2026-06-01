@@ -1,3 +1,15 @@
-//! Phase B: SQLite state layer. Implementation lands in Phase B task.
+//! SQLite-backed state for `lm-agent`.
+//!
+//! The pool is the single source of truth for hostings, users, DBs, and
+//! certificates on the node. All public functions are async.
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 #![forbid(unsafe_code)]
+
+pub mod audit;
+pub mod certificates;
+pub mod databases;
+pub mod db;
+pub mod hostings;
+pub mod system_users;
+
+pub use db::{open, open_memory, StateError};
