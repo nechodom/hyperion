@@ -141,6 +141,7 @@ async fn start_agent() -> (std::path::PathBuf, tempfile::TempDir) {
         secrets,
         paths: hyperion_core::HostingPaths::default(),
         remote_backup: None,
+        retention: hyperion_core::BackupRetention::default(),
     });
     let _ = adapters; // silence unused warning
     let agent: Arc<dyn AgentApi> = Arc::new(AgentImpl::new(svc));

@@ -65,5 +65,30 @@
 {% endblock %}
 
 <script src="/static/htmx.min.js?v={{ htmx_version }}" defer></script>
+<script>
+// Auto-generate strong password into the input designated by data-genpw="<input-id>".
+// 24 chars from a-zA-Z0-9 + punctuation. Used by reset-password forms; we
+// surface the generated value once so the operator can copy it before submit.
+document.addEventListener('click', function (ev) {
+  const btn = ev.target.closest('[data-genpw]');
+  if (!btn) return;
+  ev.preventDefault();
+  const targetId = btn.getAttribute('data-genpw');
+  const input = document.getElementById(targetId);
+  if (!input) return;
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789!@#$%^&*-_=+';
+  const bytes = new Uint8Array(24);
+  crypto.getRandomValues(bytes);
+  let out = '';
+  for (const b of bytes) out += alphabet[b % alphabet.length];
+  input.value = out;
+  input.type = 'text'; // briefly reveal so operator can copy
+  setTimeout(() => { input.type = 'password'; }, 8000);
+  // Visual feedback on the button.
+  const orig = btn.textContent;
+  btn.textContent = 'Generated · revealed for 8s';
+  setTimeout(() => { btn.textContent = orig; }, 8000);
+});
+</script>
 </body>
 </html>

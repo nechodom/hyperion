@@ -60,11 +60,25 @@
   </div>
 </div>
 {% else %}
+<form method="post" action="/hostings/bulk" id="bulk-form"
+      onsubmit="return confirmBulk(this);">
+<input type="hidden" name="_csrf" value="{{ csrf_bulk }}">
+<input type="hidden" name="action" id="bulk-action" value="">
+
 <div class="card no-pad-table">
+  <div style="padding:0.85rem 1.5rem;display:flex;align-items:center;gap:0.5rem;border-bottom:1px solid var(--border)">
+    <span id="bulk-count" class="muted" style="font-size:0.88rem">0 selected</span>
+    <span class="grow"></span>
+    <button type="button" class="btn small" data-bulk="suspend" disabled>Suspend</button>
+    <button type="button" class="btn small" data-bulk="resume" disabled>Resume</button>
+    <button type="button" class="btn small" data-bulk="backup" disabled>Backup now</button>
+    <button type="button" class="btn small danger" data-bulk="delete" disabled>Delete</button>
+  </div>
   <div class="table-wrap">
     <table>
       <thead>
         <tr>
+          <th style="width:1px;padding-right:0"><input type="checkbox" id="bulk-all" aria-label="Select all"></th>
           <th>Domain</th>
           <th>PHP</th>
           <th>State</th>
@@ -75,6 +89,9 @@
       <tbody>
       {% for r in rows %}
         <tr>
+          <td style="padding-right:0">
+            <input type="checkbox" class="bulk-row" name="selected" value="{{ r.domain }}" aria-label="Select {{ r.domain }}">
+          </td>
           <td>
             <a href="/hostings/{{ r.domain }}"><strong>{{ r.domain }}</strong></a>
           </td>
@@ -110,5 +127,48 @@
     </table>
   </div>
 </div>
+</form>
+
+<script>
+(function () {
+  const form = document.getElementById('bulk-form');
+  if (!form) return;
+  const all = document.getElementById('bulk-all');
+  const rows = form.querySelectorAll('.bulk-row');
+  const count = document.getElementById('bulk-count');
+  const actionBtns = form.querySelectorAll('[data-bulk]');
+  const actionInput = document.getElementById('bulk-action');
+
+  function refresh() {
+    const selected = form.querySelectorAll('.bulk-row:checked');
+    const n = selected.length;
+    count.textContent = n === 0 ? '0 selected' : (n + ' selected');
+    actionBtns.forEach(b => { b.disabled = n === 0; });
+    // Sync header checkbox state
+    if (n === 0) { all.checked = false; all.indeterminate = false; }
+    else if (n === rows.length) { all.checked = true; all.indeterminate = false; }
+    else { all.checked = false; all.indeterminate = true; }
+  }
+  rows.forEach(r => r.addEventListener('change', refresh));
+  all.addEventListener('change', () => {
+    rows.forEach(r => { r.checked = all.checked; });
+    refresh();
+  });
+  actionBtns.forEach(b => b.addEventListener('click', () => {
+    actionInput.value = b.dataset.bulk;
+    form.requestSubmit();
+  }));
+  window.confirmBulk = function (f) {
+    const n = f.querySelectorAll('.bulk-row:checked').length;
+    if (n === 0) return false;
+    const action = f.querySelector('#bulk-action').value;
+    if (action === 'delete') {
+      return confirm('Really DELETE ' + n + ' hosting(s) and all their data?');
+    }
+    return confirm(action.charAt(0).toUpperCase() + action.slice(1) + ' ' + n + ' hosting(s)?');
+  };
+  refresh();
+})();
+</script>
 {% endif %}
 {% endblock %}

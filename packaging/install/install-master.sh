@@ -194,6 +194,13 @@ port     = 21
 user     = "hyperion"
 password = ""
 base_path = "/hyperion-backups"
+
+# Backup retention. After each successful local backup, archives older
+# than max_age_days are deleted, but the newest keep_latest_n per
+# hosting are ALWAYS retained.
+[backup_retention]
+max_age_days  = 30
+keep_latest_n = 5
 EOF
 fi
 

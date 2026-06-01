@@ -28,6 +28,7 @@ struct ListTpl<'a> {
     q: String,
     state_filter: String,
     csrf_token: String,
+    csrf_bulk: String,
     error: Option<String>,
     flash: Option<String>,
 }
@@ -104,6 +105,8 @@ pub struct ListQuery {
     pub q: String,
     #[serde(default)]
     pub state: String,
+    #[serde(default)]
+    pub bulk_flash: Option<String>,
 }
 
 pub async fn get_list(
@@ -121,6 +124,7 @@ pub async fn get_list(
         .filter(|r| state_filter.is_empty() || r.state.as_str() == state_filter)
         .collect();
     let csrf_token = csrf_token_for(&state, &ctx, "/hostings/delete");
+    let csrf_bulk = csrf_token_for(&state, &ctx, "/hostings/bulk");
     let tpl = ListTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -132,8 +136,9 @@ pub async fn get_list(
         q: q.q,
         state_filter,
         csrf_token,
+        csrf_bulk,
         error: None,
-        flash: None,
+        flash: q.bulk_flash,
     };
     Ok(Html(tpl.render()?).into_response())
 }
@@ -1195,6 +1200,76 @@ pub async fn post_restore_upload(
         }
         _ => Err(AppError::Internal("unexpected response".into())),
     }
+}
+
+#[derive(Deserialize)]
+pub struct BulkForm {
+    pub action: String,
+    /// Comma-separated list of selectors (domains). Browsers POST checkboxes
+    /// one per name, so we use serde to gather them into a Vec. Axum's Form
+    /// extractor surfaces repeated fields as comma-separated when the form
+    /// type expects a String — use the manual deserializer instead.
+    #[serde(default)]
+    pub selected: Vec<String>,
+}
+
+pub async fn post_bulk(
+    State(state): State<SharedState>,
+    Form(form): Form<BulkForm>,
+) -> Result<Response, AppError> {
+    if form.selected.is_empty() {
+        return Ok(Redirect::to("/hostings?q=&state=").into_response());
+    }
+    let mut ok = 0;
+    let mut errs: Vec<String> = vec![];
+    for sel_str in &form.selected {
+        let sel = match parse_selector(sel_str) {
+            Ok(s) => s,
+            Err(e) => {
+                errs.push(format!("{sel_str}: {e}"));
+                continue;
+            }
+        };
+        let req = match form.action.as_str() {
+            "suspend" => Request::HostingSuspend {
+                sel,
+                reason: hyperion_types::SuspendReason::Manual {
+                    message: Some("bulk suspend".into()),
+                },
+            },
+            "resume" => Request::HostingResume(sel),
+            "backup" => Request::BackupNow { sel },
+            "delete" => Request::HostingDelete {
+                sel,
+                opts: hyperion_rpc::wire::DeleteOpts {
+                    keep_user: false,
+                    keep_database: false,
+                },
+            },
+            other => {
+                return Err(AppError::BadRequest(format!(
+                    "unknown bulk action: {other}"
+                )));
+            }
+        };
+        match hyperion_rpc_client::call(&state.agent_socket, req).await {
+            Ok(RpcResponse::Error(e)) => errs.push(format!("{sel_str}: {e}")),
+            Ok(_) => ok += 1,
+            Err(e) => errs.push(format!("{sel_str}: {e}")),
+        }
+    }
+    let flash = if errs.is_empty() {
+        format!("{} {} {}", ok, form.action, if ok == 1 { "ok" } else { "ok" })
+    } else {
+        format!(
+            "{} succeeded, {} failed: {}",
+            ok,
+            errs.len(),
+            errs.into_iter().take(3).collect::<Vec<_>>().join("; ")
+        )
+    };
+    let q = urlencoding(&flash);
+    Ok(Redirect::to(&format!("/hostings?bulk_flash={}", q)).into_response())
 }
 
 pub async fn post_wp_reset(

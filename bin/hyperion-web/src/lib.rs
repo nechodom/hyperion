@@ -77,6 +77,7 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::hostings::post_restore_upload)
                 .layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024 * 1024)),
         )
+        .route("/hostings/bulk", post(handlers::hostings::post_bulk))
         .route("/stats", get(handlers::stats::get_stats))
         .route("/audit", get(handlers::audit::get_audit))
         .route("/install", get(handlers::install::get_install))

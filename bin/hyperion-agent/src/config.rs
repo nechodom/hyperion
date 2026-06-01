@@ -7,6 +7,7 @@ pub struct Config {
     pub agent: AgentSection,
     pub acme: AcmeSection,
     pub backup_remote: BackupRemoteSection,
+    pub backup_retention: BackupRetentionSection,
     pub enrollment: EnrollmentSection,
 }
 
@@ -63,12 +64,32 @@ pub struct BackupRemoteSection {
     pub base_path: String,
 }
 
+/// Backup retention policy. After every successful local backup,
+/// archives older than `max_age_days` are deleted, but at least
+/// `keep_latest_n` newest per hosting are always retained.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct BackupRetentionSection {
+    pub max_age_days: i64,
+    pub keep_latest_n: i64,
+}
+
+impl Default for BackupRetentionSection {
+    fn default() -> Self {
+        Self {
+            max_age_days: 30,
+            keep_latest_n: 5,
+        }
+    }
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
             agent: AgentSection::default(),
             acme: AcmeSection::default(),
             backup_remote: BackupRemoteSection::default(),
+            backup_retention: BackupRetentionSection::default(),
             enrollment: EnrollmentSection::default(),
         }
     }

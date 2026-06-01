@@ -114,6 +114,7 @@ pub struct HostingService<A: AdapterPort + 'static> {
     pub secrets: Arc<crate::SecretsStore>,
     pub paths: HostingPaths,
     pub remote_backup: Option<RemoteBackupConfig>,
+    pub retention: BackupRetention,
 }
 
 /// Cluster-wide remote backup destination. When set, every successful
@@ -128,6 +129,25 @@ pub struct RemoteBackupConfig {
     pub password: String,
     /// Per-hosting subdirectory is appended automatically.
     pub base_path: String,
+}
+
+/// Backup retention policy: archives older than `max_age_days` are
+/// pruned BUT we always keep the newest `keep_latest_n` per hosting,
+/// so an operator who hasn't backed up in 6 months still has SOMETHING
+/// to roll back to.
+#[derive(Debug, Clone)]
+pub struct BackupRetention {
+    pub max_age_days: i64,
+    pub keep_latest_n: i64,
+}
+
+impl Default for BackupRetention {
+    fn default() -> Self {
+        Self {
+            max_age_days: 30,
+            keep_latest_n: 5,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -155,6 +175,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             secrets,
             paths: HostingPaths::default(),
             remote_backup: None,
+            retention: BackupRetention::default(),
         }
     }
 
@@ -165,6 +186,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
     pub fn with_remote_backup(mut self, cfg: Option<RemoteBackupConfig>) -> Self {
         self.remote_backup = cfg;
+        self
+    }
+
+    pub fn with_retention(mut self, retention: BackupRetention) -> Self {
+        self.retention = retention;
         self
     }
 
@@ -1132,11 +1158,58 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 });
             }
         }
+        // Apply retention policy. Failures are audit-logged but don't
+        // propagate — operator still has the just-made backup.
+        if let Err(e) = self.prune_old_backups(&detail.id).await {
+            tracing::warn!(domain=%detail.domain, error=%e, "backup retention prune failed");
+        }
+
         let rows = hyperion_state::backups::list_for(&self.pool, &detail.id, 1)
             .await
             .map_err(|e| RpcError::Internal_with(format!("list_for: {e}")))?;
         let r = rows.into_iter().next().ok_or(RpcError::Internal)?;
         Ok(run_to_wire(r))
+    }
+
+    /// Drop backup archives older than `retention.max_age_days` from disk
+    /// AND from the backup_runs table, keeping the newest
+    /// `retention.keep_latest_n` per hosting regardless of age.
+    pub(crate) async fn prune_old_backups(
+        &self,
+        hosting_id: &HostingId,
+    ) -> Result<u64, RpcError> {
+        let rows = hyperion_state::backups::list_for(&self.pool, hosting_id, 1000)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("list_for: {e}")))?;
+        let cutoff = now_secs() - self.retention.max_age_days.max(1) * 24 * 3600;
+        let mut pruned = 0u64;
+        // Newest-first; skip the first keep_latest_n.
+        for r in rows.into_iter().skip(self.retention.keep_latest_n.max(1) as usize) {
+            if r.started_at >= cutoff {
+                continue;
+            }
+            if let Some(p) = r.archive_path.as_deref() {
+                let _ = tokio::fs::remove_file(p).await;
+            }
+            if let Some(p) = r.db_dump_path.as_deref() {
+                let _ = tokio::fs::remove_file(p).await;
+            }
+            if let Err(e) = hyperion_state::backups::delete_by_id(&self.pool, r.id).await {
+                tracing::warn!(id = r.id, error=%e, "delete backup row");
+                continue;
+            }
+            pruned += 1;
+        }
+        if pruned > 0 {
+            self.append_audit(
+                "hosting.backup.prune",
+                Some(hosting_id.as_str()),
+                &serde_json::json!({"pruned": pruned}).to_string(),
+                "ok",
+            )
+            .await;
+        }
+        Ok(pruned)
     }
 
     pub async fn backup_list(
@@ -2747,6 +2820,7 @@ mod tests {
             secrets,
             paths: HostingPaths::default(),
             remote_backup: None,
+            retention: BackupRetention::default(),
         };
         s2.create(HostingCreateReq {
             domain: Domain::parse("b.cz").expect("parse"),
@@ -2780,6 +2854,7 @@ mod tests {
             secrets,
             paths: HostingPaths::default(),
             remote_backup: None,
+            retention: BackupRetention::default(),
         };
         let r = s2.create(req("dup.cz")).await;
         match r {

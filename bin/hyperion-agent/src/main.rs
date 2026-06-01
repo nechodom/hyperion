@@ -66,10 +66,15 @@ async fn main() -> anyhow::Result<()> {
     } else {
         None
     };
+    let retention = hyperion_core::BackupRetention {
+        max_age_days: cfg.backup_retention.max_age_days.max(1),
+        keep_latest_n: cfg.backup_retention.keep_latest_n.max(1),
+    };
     let svc = Arc::new(
         hyperion_core::HostingService::new(pool, adapter, secrets)
             .with_paths(paths)
-            .with_remote_backup(remote_backup),
+            .with_remote_backup(remote_backup)
+            .with_retention(retention),
     );
     // Background scheduler: fire scheduler_tick (expiry sweep) every 5 minutes.
     {

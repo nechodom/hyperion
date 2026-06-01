@@ -185,6 +185,7 @@
           <label for="db_new_pw">New password <span class="hint">≥ 12 chars</span></label>
           <input id="db_new_pw" name="new_password" type="password" required minlength="12">
         </div>
+        <button type="button" class="btn small ghost" data-genpw="db_new_pw">Generate</button>
         <button class="btn" type="submit">Reset</button>
       </div>
     </form>
@@ -305,7 +306,10 @@
             <input id="wp_reset_pw" name="new_password" type="password" required minlength="8">
           </div>
         </div>
-        <button class="btn" type="submit">Reset WP password</button>
+        <div class="row" style="gap:0.5rem">
+          <button class="btn" type="submit">Reset WP password</button>
+          <button type="button" class="btn small ghost" data-genpw="wp_reset_pw">Generate</button>
+        </div>
       </form>
     </div>
   {% else if detail.database.is_none() %}
@@ -341,8 +345,12 @@
       </div>
       <div class="field">
         <label for="wp_admin_password">Admin password</label>
-        <input id="wp_admin_password" name="admin_password" type="password" required
-               minlength="8" autocomplete="new-password" placeholder="min 8 characters">
+        <div class="row" style="gap:0.5rem;align-items:stretch">
+          <input id="wp_admin_password" name="admin_password" type="password" required
+                 minlength="8" autocomplete="new-password" placeholder="min 8 characters"
+                 style="flex:1">
+          <button type="button" class="btn small ghost" data-genpw="wp_admin_password">Generate</button>
+        </div>
       </div>
       <div class="field-row">
         <div class="field">

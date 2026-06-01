@@ -135,6 +135,15 @@ pub async fn list_for(
         .collect())
 }
 
+/// Delete a backup_run row by id.
+pub async fn delete_by_id(pool: &SqlitePool, id: i64) -> Result<(), StateError> {
+    sqlx::query("DELETE FROM backup_runs WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 pub async fn list_all(pool: &SqlitePool, limit: i64) -> Result<Vec<BackupRun>, StateError> {
     let rows: Vec<(
         i64,
