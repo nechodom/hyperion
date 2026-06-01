@@ -1229,6 +1229,7 @@ name = "lm-rpc-client"
 version = "0.1.0"
 dependencies = [
  "lm-rpc",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
 ]
@@ -1239,6 +1240,10 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "lm-rpc",
+ "lm-rpc-client",
+ "lm-types",
+ "lm-validate",
+ "tempfile",
  "thiserror 1.0.69",
  "tokio",
  "tracing",

@@ -9,3 +9,7 @@ license.workspace = true
 lm-rpc = { path = "../lm-rpc" }
 tokio = { workspace = true }
 thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+tempfile.workspace = true
