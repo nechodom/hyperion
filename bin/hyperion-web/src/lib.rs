@@ -44,6 +44,7 @@ pub fn build_router(state: SharedState) -> Router {
             "/hostings/expiry/clear",
             post(handlers::hostings::post_clear_expiry),
         )
+        .route("/stats", get(handlers::stats::get_stats))
         .route("/audit", get(handlers::audit::get_audit))
         .route("/install", get(handlers::install::get_install))
         .route("/install/invite", post(handlers::install::post_invite))

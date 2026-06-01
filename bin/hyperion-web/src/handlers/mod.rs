@@ -4,6 +4,7 @@ pub mod hostings;
 pub mod install;
 pub mod login;
 pub mod statics;
+pub mod stats;
 
 /// Uppercase first ASCII letter of `username`, or `?` if empty / non-ASCII.
 /// Used as the avatar glyph in the sidebar.

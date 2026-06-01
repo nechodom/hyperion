@@ -45,13 +45,12 @@ async fn main() -> anyhow::Result<()> {
     };
     let svc =
         Arc::new(hyperion_core::HostingService::new(pool, adapter, secrets).with_paths(paths));
-    // Background scheduler: fire scheduler_tick every 5 minutes.
+    // Background scheduler: fire scheduler_tick (expiry sweep) every 5 minutes.
     {
         let tick_svc = svc.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(5 * 60));
-            // Skip the immediate first tick — give the server a moment to bind.
-            interval.tick().await;
+            interval.tick().await; // skip the immediate first tick
             loop {
                 interval.tick().await;
                 match tick_svc.scheduler_tick().await {
@@ -59,6 +58,23 @@ async fn main() -> anyhow::Result<()> {
                     Ok(_) => tracing::debug!("scheduler tick: nothing due"),
                     Err(e) => tracing::warn!(error=%e, "scheduler tick failed"),
                 }
+            }
+        });
+    }
+    // Background stats sampler: fire stats_tick every 5 minutes. Offset
+    // by 30s so it doesn't collide with the scheduler tick.
+    {
+        let stats_svc = svc.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5 * 60));
+            interval.tick().await; // immediate first tick now that we're past the offset
+            loop {
+                match stats_svc.stats_tick().await {
+                    Ok(n) => tracing::info!(sampled = n, "stats tick"),
+                    Err(e) => tracing::warn!(error=%e, "stats tick failed"),
+                }
+                interval.tick().await;
             }
         });
     }
