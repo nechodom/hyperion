@@ -169,6 +169,37 @@ sudo HYPERION_LOCAL_TARBALL=/root/hyperion.tar.gz \
      bash install-node.sh --token=ABCD-… --master=https://<master>
 ```
 
+### Updating an existing install
+
+Once you've installed Hyperion, in-place updates use `update.sh`:
+
+```bash
+# Public repo, the default install path /opt/hyperion:
+sudo /opt/hyperion/packaging/install/update.sh
+
+# Or piped from GitHub:
+curl -fsSL https://raw.githubusercontent.com/nechodom/hyperion/main/packaging/install/update.sh \
+  | sudo bash
+
+# Private repo: pass the PAT through env:
+sudo HYPERION_GIT_TOKEN='ghp_xxx' /opt/hyperion/packaging/install/update.sh
+
+# After a failed `hosting create` left orphan provisioning rows behind,
+# clean them up as part of the update:
+sudo /opt/hyperion/packaging/install/update.sh --repair
+```
+
+The script stops services, fast-forwards `/opt/hyperion` to
+`origin/$HYPERION_REF` (refuses if your working tree is dirty), rebuilds
+`hyperion-agent` / `hyperion-web` / `hctl`, reinstalls binaries, refreshes
+systemd unit files **only if they changed**, materializes any missing
+session/CSRF keys, starts services back up, and tails `journalctl` for
+you if anything fails its health check.
+
+`--repair` drops rows in `hostings.state IN ('provisioning','failed','deleting')`
+— it does **not** touch on-disk artefacts (system users, nginx vhosts,
+databases); the script prints the diagnostic commands to inspect those.
+
 ### Local development (macOS / dev VPS)
 
 You only need Rust:

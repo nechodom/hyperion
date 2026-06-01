@@ -1,0 +1,24 @@
+[Unit]
+Description=hyperion web admin UI
+After=hyperion-agent.service network-online.target
+Requires=hyperion-agent.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/hyperion-web --config /etc/hyperion/web.toml
+Restart=on-failure
+RestartSec=3s
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectKernelTunables=true
+ProtectKernelModules=true
+PrivateTmp=true
+LogsDirectory=hyperion
+RuntimeDirectory=hyperion
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

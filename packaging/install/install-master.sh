@@ -191,34 +191,12 @@ fi
 chmod 0600 /etc/hyperion/agent.toml /etc/hyperion/web.toml
 
 #-------- 8. systemd units -------------------------------------------------
-if [[ -f "$INSTALL_DIR/packaging/systemd/hyperion-agent.service" ]]; then
-  install -m 0644 "$INSTALL_DIR/packaging/systemd/hyperion-agent.service" \
-    /etc/systemd/system/hyperion-agent.service
-fi
-cat > /etc/systemd/system/hyperion-web.service <<'EOF'
-[Unit]
-Description=hyperion web admin UI
-After=hyperion-agent.service network-online.target
-Requires=hyperion-agent.service
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/usr/sbin/hyperion-web --config /etc/hyperion/web.toml
-Restart=on-failure
-RestartSec=3s
-NoNewPrivileges=true
-ProtectSystem=full
-ProtectKernelTunables=true
-ProtectKernelModules=true
-PrivateTmp=true
-LogsDirectory=hyperion
-RuntimeDirectory=hyperion
-LimitNOFILE=65536
-
-[Install]
-WantedBy=multi-user.target
-EOF
+for unit in hyperion-agent hyperion-web; do
+  src="$INSTALL_DIR/packaging/systemd/${unit}.service"
+  if [[ -f "$src" ]]; then
+    install -m 0644 "$src" "/etc/systemd/system/${unit}.service"
+  fi
+done
 systemctl daemon-reload
 
 #-------- 9. MariaDB hardening (one-shot) ---------------------------------
