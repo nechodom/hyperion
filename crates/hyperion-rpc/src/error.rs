@@ -13,7 +13,7 @@ pub enum RpcError {
     NotFound { kind: String, id: String },
     #[error("provisioning failed at stage '{stage}': {reason}")]
     ProvisioningFailed { stage: String, reason: String },
-    #[error("system command failed: {cmd} exit {code}")]
+    #[error("system command failed: {cmd} (exit {code}): {stderr_tail}")]
     SystemCommand {
         cmd: String,
         code: i32,
@@ -89,5 +89,18 @@ mod tests {
             id: "abc".into(),
         };
         assert_eq!(e.to_string(), "not found: hosting abc");
+    }
+
+    #[test]
+    fn system_command_display_includes_stderr_tail() {
+        let e = RpcError::SystemCommand {
+            cmd: "/usr/sbin/useradd -U foo".into(),
+            code: 9,
+            stderr_tail: "useradd: group foo exists".into(),
+        };
+        let s = e.to_string();
+        assert!(s.contains("useradd: group foo exists"), "missing stderr: {s}");
+        assert!(s.contains("exit 9"), "missing exit code: {s}");
+        assert!(s.contains("/usr/sbin/useradd -U foo"), "missing cmd: {s}");
     }
 }
