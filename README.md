@@ -80,6 +80,63 @@ All env knobs: `HYPERION_REF` (git branch, default `main`),
 `HYPERION_ADMIN_USER` (default `admin`), `HYPERION_ADMIN_PASS`,
 `HYPERION_LISTEN`, `HYPERION_ACME_EMAIL`.
 
+#### Installing from a private repository
+
+Both `install-master.sh` and `install-node.sh` ship with four ways to
+fetch the source. Pick whichever fits your secret-management story —
+the script's behaviour is identical from step 6 onwards.
+
+**1 · HTTPS with a Personal Access Token** (recommended for one-off
+installs on machines you control). Create a fine-scoped PAT with
+`repo:read` and feed it through the environment — the token goes into
+git's askpass helper, **never** into the URL or `argv` (so it doesn't
+show up in `ps`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/nechodom/hyperion/main/packaging/install/install-master.sh \
+  -o /tmp/install-master.sh
+sudo HYPERION_GIT_TOKEN='ghp_xxxxxxxxxxxxxxxxxxxx' \
+     HYPERION_GIT_URL='https://github.com/nechodom/hyperion' \
+     bash /tmp/install-master.sh
+```
+
+**2 · SSH with deploy key / ssh-agent forwarding** (recommended for
+multi-server fleets — one deploy key per host, no token rotation
+pain):
+
+```bash
+# On a box that has the deploy key (or your laptop with -A forwarding):
+sudo HYPERION_GIT_URL='git@github.com:nechodom/hyperion' \
+     bash /tmp/install-master.sh
+```
+
+**3 · Pre-cloned source** (Ansible-friendly — let your config
+management lay down the source tree, then drive the installer):
+
+```bash
+sudo -E git clone git@github.com:nechodom/hyperion /opt/hyperion
+sudo HYPERION_SKIP_CLONE=1 bash /tmp/install-master.sh
+# The script reuses /opt/hyperion as-is and only does the build + setup.
+```
+
+**4 · Offline / air-gapped from a tarball** (download once on a
+networked box, ship the artifact, run on an isolated host):
+
+```bash
+# On a networked box:
+git clone --depth=1 git@github.com:nechodom/hyperion /tmp/hyperion-src
+tar -czf hyperion.tar.gz -C /tmp/hyperion-src .
+
+# On the target (no GitHub access needed):
+sudo HYPERION_LOCAL_TARBALL=/root/hyperion.tar.gz bash install-master.sh
+```
+
+**Curl-pipe-bash caveat.** With a private repo you cannot `curl` the
+script from `raw.githubusercontent.com` unauthenticated either —
+download it once over an authenticated channel (PAT / SSH) and invoke
+it from disk, as shown above. Or self-host the script on your own
+HTTPS endpoint and reference that.
+
 ### Adding a node
 
 1. Log in to the master's web UI → **Install** in the navigation
@@ -96,6 +153,21 @@ The node bootstraps with the same apt deps, builds `hyperion-agent` +
 `hctl`, writes the token + master URL into `/etc/hyperion/agent.toml`,
 and starts the agent. Once the controller's mTLS enrollment loop ships
 (sub-project 1.5), the agent rolls into the cluster automatically.
+
+For a **private repo**, the node script honours the same four source
+modes as the master script. Most common patterns:
+
+```bash
+# PAT in env (still leaves the master URL + token on argv; that's by design
+# — the master URL is non-secret and the invite token is single-use).
+sudo HYPERION_GIT_TOKEN='ghp_xxx' \
+     HYPERION_GIT_URL='https://github.com/nechodom/hyperion' \
+     bash install-node.sh --token=ABCD-… --master=https://<master>
+
+# Or stage a tarball via your config-management layer:
+sudo HYPERION_LOCAL_TARBALL=/root/hyperion.tar.gz \
+     bash install-node.sh --token=ABCD-… --master=https://<master>
+```
 
 ### Local development (macOS / dev VPS)
 

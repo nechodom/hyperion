@@ -27,6 +27,12 @@ REF="${HYPERION_REF:-main}"
 INSTALL_DIR="${HYPERION_INSTALL_DIR:-/opt/hyperion}"
 LABEL="${HYPERION_NODE_LABEL:-$(hostname -f 2>/dev/null || hostname)}"
 
+# Source acquisition — same env knobs as install-master.sh.
+GIT_URL="${HYPERION_GIT_URL:-https://github.com/nechodom/hyperion}"
+GIT_TOKEN="${HYPERION_GIT_TOKEN:-}"
+LOCAL_TARBALL="${HYPERION_LOCAL_TARBALL:-}"
+SKIP_CLONE="${HYPERION_SKIP_CLONE:-}"
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --token=*)  TOKEN="${1#*=}";;
@@ -76,15 +82,45 @@ if ! command -v cargo >/dev/null 2>&1; then
 fi
 export PATH="$HOME/.cargo/bin:/root/.cargo/bin:$PATH"
 
-#-------- 4. Build agent ---------------------------------------------------
-log "Fetching hyperion source ($REF) → $INSTALL_DIR ..."
-if [[ -d "$INSTALL_DIR/.git" ]]; then
-  git -C "$INSTALL_DIR" fetch --depth=1 origin "$REF"
-  git -C "$INSTALL_DIR" reset --hard FETCH_HEAD
-else
-  git clone --depth=1 --branch "$REF" \
-    https://github.com/nechodom/hyperion "$INSTALL_DIR"
-fi
+#-------- 4. Acquire source + build agent ---------------------------------
+acquire_source() {
+  if [[ -n "$LOCAL_TARBALL" ]]; then
+    [[ -f "$LOCAL_TARBALL" ]] || fail "HYPERION_LOCAL_TARBALL not found: $LOCAL_TARBALL"
+    log "Extracting $LOCAL_TARBALL → $INSTALL_DIR ..."
+    install -d -m 0755 "$INSTALL_DIR"
+    tar -xzf "$LOCAL_TARBALL" -C "$INSTALL_DIR" --strip-components=1
+    return
+  fi
+  if [[ -n "$SKIP_CLONE" || -d "$INSTALL_DIR/.git" ]]; then
+    log "Reusing existing checkout at $INSTALL_DIR ..."
+    return
+  fi
+  if [[ -n "$GIT_TOKEN" ]]; then
+    log "Cloning $GIT_URL via HTTPS PAT ..."
+    export GIT_ASKPASS="/tmp/hyp-askpass.$$"
+    cat > "$GIT_ASKPASS" <<'EOF'
+#!/bin/sh
+case "$1" in
+  Username*) printf 'oauth2\n' ;;
+  Password*) printf '%s\n' "$HYPERION_GIT_TOKEN" ;;
+esac
+EOF
+    chmod 0700 "$GIT_ASKPASS"
+    trap "rm -f $GIT_ASKPASS" EXIT
+    git -c core.askPass="$GIT_ASKPASS" clone --depth=1 --branch "$REF" \
+      "$GIT_URL" "$INSTALL_DIR"
+    return
+  fi
+  log "Fetching $GIT_URL ($REF) → $INSTALL_DIR ..."
+  git clone --depth=1 --branch "$REF" "$GIT_URL" "$INSTALL_DIR" || {
+    fail "git clone failed. For a private repo set HYPERION_GIT_TOKEN
+       or HYPERION_GIT_URL=git@github.com:... or pre-clone into
+       $INSTALL_DIR and re-run with HYPERION_SKIP_CLONE=1, or supply
+       HYPERION_LOCAL_TARBALL for an offline install."
+  }
+}
+
+acquire_source
 cd "$INSTALL_DIR"
 
 log "Building hyperion-agent + hctl ..."

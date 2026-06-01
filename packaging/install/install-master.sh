@@ -27,6 +27,18 @@ ADMIN_PASS="${HYPERION_ADMIN_PASS:-}"
 LISTEN="${HYPERION_LISTEN:-0.0.0.0:8443}"
 CONTACT_EMAIL="${HYPERION_ACME_EMAIL:-}"
 
+# Source acquisition (private-repo-friendly). One of:
+#   HYPERION_LOCAL_TARBALL=/path/to/hyperion.tar.gz  → extract that
+#   HYPERION_SKIP_CLONE=1                            → assume $INSTALL_DIR is ready
+#   HYPERION_GIT_URL=git@github.com:nechodom/hyperion → SSH clone (use ssh-agent)
+#   HYPERION_GIT_TOKEN=ghp_xxx + HYPERION_GIT_URL=https://github.com/...
+#     → HTTPS clone with PAT, passed via git credential helper (no token in argv)
+# Default (public repo or world-readable mirror):
+GIT_URL="${HYPERION_GIT_URL:-https://github.com/nechodom/hyperion}"
+GIT_TOKEN="${HYPERION_GIT_TOKEN:-}"
+LOCAL_TARBALL="${HYPERION_LOCAL_TARBALL:-}"
+SKIP_CLONE="${HYPERION_SKIP_CLONE:-}"
+
 log()  { printf '\033[36m[hyperion]\033[0m %s\n' "$*"; }
 fail() { printf '\033[31m[error]\033[0m %s\n' "$*" >&2; exit 1; }
 
@@ -75,14 +87,54 @@ fi
 export PATH="$HOME/.cargo/bin:/root/.cargo/bin:$PATH"
 
 #-------- 5. Source checkout + build --------------------------------------
-log "Fetching hyperion source ($REF) → $INSTALL_DIR ..."
-if [[ -d "$INSTALL_DIR/.git" ]]; then
-  git -C "$INSTALL_DIR" fetch --depth=1 origin "$REF"
-  git -C "$INSTALL_DIR" reset --hard FETCH_HEAD
-else
-  git clone --depth=1 --branch "$REF" \
-    https://github.com/nechodom/hyperion "$INSTALL_DIR"
-fi
+acquire_source() {
+  # 5a. Local tarball — air-gapped / pre-downloaded installs.
+  if [[ -n "$LOCAL_TARBALL" ]]; then
+    [[ -f "$LOCAL_TARBALL" ]] || fail "HYPERION_LOCAL_TARBALL not found: $LOCAL_TARBALL"
+    log "Extracting $LOCAL_TARBALL → $INSTALL_DIR ..."
+    install -d -m 0755 "$INSTALL_DIR"
+    tar -xzf "$LOCAL_TARBALL" -C "$INSTALL_DIR" --strip-components=1
+    return
+  fi
+
+  # 5b. Pre-cloned directory (operator did the clone with their creds).
+  if [[ -n "$SKIP_CLONE" || -d "$INSTALL_DIR/.git" ]]; then
+    if [[ ! -d "$INSTALL_DIR/.git" ]]; then
+      fail "HYPERION_SKIP_CLONE=1 but $INSTALL_DIR/.git not present."
+    fi
+    log "Reusing existing checkout at $INSTALL_DIR ..."
+    return
+  fi
+
+  # 5c. PAT-via-credential-helper. Token stays in env; never appears on argv.
+  if [[ -n "$GIT_TOKEN" ]]; then
+    log "Cloning $GIT_URL ($REF) via HTTPS PAT (token from \$HYPERION_GIT_TOKEN) ..."
+    export GIT_ASKPASS="/tmp/hyp-askpass.$$"
+    cat > "$GIT_ASKPASS" <<'EOF'
+#!/bin/sh
+case "$1" in
+  Username*) printf 'oauth2\n' ;;
+  Password*) printf '%s\n' "$HYPERION_GIT_TOKEN" ;;
+esac
+EOF
+    chmod 0700 "$GIT_ASKPASS"
+    trap "rm -f $GIT_ASKPASS" EXIT
+    git -c core.askPass="$GIT_ASKPASS" clone --depth=1 --branch "$REF" \
+      "$GIT_URL" "$INSTALL_DIR"
+    return
+  fi
+
+  # 5d. Plain clone (works for public repos OR with SSH agent + git@github.com URL).
+  log "Fetching $GIT_URL ($REF) → $INSTALL_DIR ..."
+  git clone --depth=1 --branch "$REF" "$GIT_URL" "$INSTALL_DIR" || {
+    fail "git clone failed. For a private repo set HYPERION_GIT_TOKEN
+       (HTTPS PAT) or HYPERION_GIT_URL=git@github.com:nechodom/hyperion
+       (SSH with agent forwarding), or pre-clone into $INSTALL_DIR and
+       re-run with HYPERION_SKIP_CLONE=1."
+  }
+}
+
+acquire_source
 cd "$INSTALL_DIR"
 
 log "Building release binaries (this can take a few minutes the first time)..."
