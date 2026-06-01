@@ -15,5 +15,6 @@ pub mod limits;
 pub mod nodejs;
 pub mod scheduler;
 pub mod system_users;
+pub mod wordpress;
 
 pub use db::{open, open_memory, StateError};

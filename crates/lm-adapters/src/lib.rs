@@ -19,6 +19,7 @@ pub mod phpfpm;
 pub mod postgres;
 pub mod rollback;
 pub mod users;
+pub mod wpcli;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AdapterError {

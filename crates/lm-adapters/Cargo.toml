@@ -21,6 +21,8 @@ rand.workspace = true
 hex.workspace = true
 async-trait.workspace = true
 blake3.workspace = true
+regex.workspace = true
+once_cell.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
