@@ -100,6 +100,18 @@ pub enum Request {
         sel: HostingSelector,
         archive_path: String,
     },
+    HostingLogs {
+        sel: HostingSelector,
+        log_kind: String,
+        lines: i64,
+    },
+    CronList {
+        sel: HostingSelector,
+    },
+    CronReplace {
+        sel: HostingSelector,
+        body: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -137,6 +149,9 @@ pub enum Response {
     ClusterStats(ClusterStats),
     StatsTick { hostings_sampled: i64 },
     BackupRestore,
+    HostingLogs(String),
+    CronList(String),
+    CronReplace,
     Error(RpcError),
 }
 

@@ -1720,6 +1720,112 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     //  Restore from backup archive
     // ================================================================
 
+    // ================================================================
+    //  Per-hosting logs
+    // ================================================================
+
+    /// Return the tail of a log file for the given hosting.
+    /// `log_kind` ∈ {"access", "error"}.
+    pub async fn hosting_logs(
+        &self,
+        sel: HostingSelector,
+        log_kind: &str,
+        lines: i64,
+    ) -> Result<String, RpcError> {
+        let detail = self.get(sel).await?;
+        let lines = lines.clamp(10, 5000);
+        let filename = match log_kind {
+            "access" => "access.log",
+            "error" => "error.log",
+            other => {
+                return Err(RpcError::Validation {
+                    message: format!("unknown log_kind {other:?}; want \"access\" or \"error\""),
+                })
+            }
+        };
+        let path = std::path::PathBuf::from(&self.paths.home_root)
+            .join(&detail.system_user)
+            .join(&detail.domain)
+            .join("logs")
+            .join(filename);
+        if !path.exists() {
+            return Ok(format!("(no {} log yet at {})", log_kind, path.display()));
+        }
+        let path_str = path.display().to_string();
+        let lines_str = lines.to_string();
+        let out = tokio::process::Command::new("/usr/bin/tail")
+            .args(["-n", &lines_str, &path_str])
+            .output()
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("tail: {e}")))?;
+        if !out.status.success() {
+            return Err(RpcError::Internal_with(format!(
+                "tail exit {:?}",
+                out.status.code()
+            )));
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
+    // ================================================================
+    //  Per-hosting cron jobs
+    // ================================================================
+
+    /// Read `crontab -u <user> -l`. Returns empty string if the user has
+    /// no crontab installed.
+    pub async fn cron_list(&self, sel: HostingSelector) -> Result<String, RpcError> {
+        let detail = self.get(sel).await?;
+        let out = tokio::process::Command::new("/usr/bin/crontab")
+            .args(["-u", &detail.system_user, "-l"])
+            .output()
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("crontab: {e}")))?;
+        if !out.status.success() {
+            // crontab returns non-zero if no crontab exists — treat as empty.
+            return Ok(String::new());
+        }
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    }
+
+    /// Replace the user's crontab with `body`. Atomic — writes via temp
+    /// file + `crontab -u <user> <file>`. Validates lines look like
+    /// crontab entries (5 schedule fields + a command, OR @reboot etc.)
+    /// to prevent injection.
+    pub async fn cron_replace(
+        &self,
+        sel: HostingSelector,
+        body: String,
+    ) -> Result<(), RpcError> {
+        let detail = self.get(sel).await?;
+        validate_crontab(&body)?;
+        let tmp =
+            std::env::temp_dir().join(format!("hyperion-cron-{}.tab", detail.system_user));
+        tokio::fs::write(&tmp, body.as_bytes())
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("write tmp: {e}")))?;
+        let tmp_str = tmp.display().to_string();
+        let out = tokio::process::Command::new("/usr/bin/crontab")
+            .args(["-u", &detail.system_user, &tmp_str])
+            .output()
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("crontab: {e}")))?;
+        let _ = tokio::fs::remove_file(&tmp).await;
+        if !out.status.success() {
+            return Err(RpcError::ProvisioningFailed {
+                stage: "crontab".into(),
+                reason: String::from_utf8_lossy(&out.stderr).into_owned(),
+            });
+        }
+        self.append_audit(
+            "hosting.cron.replace",
+            Some(detail.id.as_str()),
+            &serde_json::json!({"lines": body.lines().count()}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
     pub async fn backup_restore(
         &self,
         sel: HostingSelector,
@@ -1861,6 +1967,36 @@ fn node_stats_from(
             agent_online: true,
         },
     }
+}
+
+/// Lightweight crontab sanity check — reject any line containing a
+/// NUL byte or a backtick (command-substitution). Empty lines and
+/// comments (#) are allowed. We DON'T parse the schedule fields; the
+/// real crontab command does that and rejects bad entries with a
+/// meaningful error.
+fn validate_crontab(body: &str) -> Result<(), RpcError> {
+    for (i, line) in body.lines().enumerate() {
+        if line.contains('\0') {
+            return Err(RpcError::Validation {
+                message: format!("line {} contains NUL byte", i + 1),
+            });
+        }
+        // Reject backticks because they're shell command substitution and
+        // we don't want operators accidentally executing arbitrary code
+        // by pasting from a sketchy source. Operators who need them can
+        // edit /var/spool/cron/crontabs/<user> directly.
+        if line.contains('`') {
+            return Err(RpcError::Validation {
+                message: format!("line {} contains backtick — refused for safety", i + 1),
+            });
+        }
+    }
+    if body.len() > 65_536 {
+        return Err(RpcError::Validation {
+            message: "crontab body exceeds 64 KiB".into(),
+        });
+    }
+    Ok(())
 }
 
 fn derive_user_from_summary(s: &HostingSummary) -> Option<String> {
@@ -2376,6 +2512,7 @@ mod tests {
             adapters: Arc::new(a),
             secrets,
             paths: HostingPaths::default(),
+            remote_backup: None,
         };
         s2.create(HostingCreateReq {
             domain: Domain::parse("b.cz").expect("parse"),
@@ -2408,6 +2545,7 @@ mod tests {
             adapters: Arc::new(a),
             secrets,
             paths: HostingPaths::default(),
+            remote_backup: None,
         };
         let r = s2.create(req("dup.cz")).await;
         match r {

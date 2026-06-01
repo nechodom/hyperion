@@ -141,6 +141,7 @@ async fn start_agent() -> (PathBuf, tempfile::TempDir) {
         adapters: Arc::new(StubAdapters::new()),
         secrets,
         paths: hyperion_core::HostingPaths::default(),
+        remote_backup: None,
     });
     let agent: Arc<dyn AgentApi> = Arc::new(AgentImpl::new(svc));
     let path = dir.path().join("agent.sock");

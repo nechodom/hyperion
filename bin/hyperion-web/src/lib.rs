@@ -56,6 +56,14 @@ pub fn build_router(state: SharedState) -> Router {
             "/hostings/restore",
             post(handlers::hostings::post_restore),
         )
+        .route(
+            "/hostings/logs",
+            post(handlers::hostings::post_logs),
+        )
+        .route(
+            "/hostings/cron",
+            post(handlers::hostings::post_cron_save),
+        )
         .route("/stats", get(handlers::stats::get_stats))
         .route("/audit", get(handlers::audit::get_audit))
         .route("/install", get(handlers::install::get_install))

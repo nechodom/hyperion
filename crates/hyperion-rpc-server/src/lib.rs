@@ -217,6 +217,22 @@ async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::HostingLogs {
+            sel,
+            log_kind,
+            lines,
+        } => match api.hosting_logs(sel, log_kind, lines).await {
+            Ok(s) => Response::HostingLogs(s),
+            Err(e) => Response::Error(e),
+        },
+        Request::CronList { sel } => match api.cron_list(sel).await {
+            Ok(s) => Response::CronList(s),
+            Err(e) => Response::Error(e),
+        },
+        Request::CronReplace { sel, body } => match api.cron_replace(sel, body).await {
+            Ok(_) => Response::CronReplace,
+            Err(e) => Response::Error(e),
+        },
     }
 }
 
@@ -373,6 +389,24 @@ mod tests {
             Ok(0)
         }
         async fn backup_restore(
+            &self,
+            _: HostingSelector,
+            _: String,
+        ) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn hosting_logs(
+            &self,
+            _: HostingSelector,
+            _: String,
+            _: i64,
+        ) -> Result<String, RpcError> {
+            Ok(String::new())
+        }
+        async fn cron_list(&self, _: HostingSelector) -> Result<String, RpcError> {
+            Ok(String::new())
+        }
+        async fn cron_replace(
             &self,
             _: HostingSelector,
             _: String,

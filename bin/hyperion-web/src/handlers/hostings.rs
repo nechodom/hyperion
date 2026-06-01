@@ -72,6 +72,9 @@ struct DetailTpl<'a> {
     csrf_dns_check: String,
     csrf_cert_issue: String,
     csrf_restore: String,
+    csrf_logs: String,
+    csrf_cron: String,
+    cron_body: String,
     error: Option<&'a str>,
     wp_error: Option<String>,
     wp_flash: Option<String>,
@@ -83,6 +86,8 @@ struct DetailTpl<'a> {
     cert_flash: Option<String>,
     restore_error: Option<String>,
     restore_flash: Option<String>,
+    cron_error: Option<String>,
+    cron_flash: Option<String>,
     just_created: Option<HostingCreated>,
 }
 
@@ -225,6 +230,9 @@ pub async fn post_create(
                 csrf_dns_check: csrf_token_for(&state, &ctx, "/hostings/dns-check"),
                 csrf_cert_issue: csrf_token_for(&state, &ctx, "/hostings/cert/issue"),
                 csrf_restore: csrf_token_for(&state, &ctx, "/hostings/restore"),
+                csrf_logs: csrf_token_for(&state, &ctx, "/hostings/logs"),
+                csrf_cron: csrf_token_for(&state, &ctx, "/hostings/cron"),
+                cron_body: String::new(),
                 error: None,
                 wp_error: None,
                 wp_flash: None,
@@ -236,6 +244,8 @@ pub async fn post_create(
                 cert_flash: None,
                 restore_error: None,
                 restore_flash: None,
+                cron_error: None,
+                cron_flash: None,
                 just_created: Some(created),
             };
             Ok(Html(tpl.render()?).into_response())
@@ -279,7 +289,8 @@ pub async fn get_detail(
     let backups = fetch_backup_list(&state, sel_id.clone(), 10)
         .await
         .unwrap_or_default();
-    let stats = fetch_stats(&state, sel_id).await.ok();
+    let stats = fetch_stats(&state, sel_id.clone()).await.ok();
+    let cron_body = fetch_cron(&state, sel_id).await.unwrap_or_default();
     let tpl = DetailTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -303,6 +314,9 @@ pub async fn get_detail(
         csrf_dns_check: csrf_token_for(&state, &ctx, "/hostings/dns-check"),
         csrf_cert_issue: csrf_token_for(&state, &ctx, "/hostings/cert/issue"),
         csrf_restore: csrf_token_for(&state, &ctx, "/hostings/restore"),
+        csrf_logs: csrf_token_for(&state, &ctx, "/hostings/logs"),
+        csrf_cron: csrf_token_for(&state, &ctx, "/hostings/cron"),
+        cron_body,
         error: None,
         wp_error: q.wp_error,
         wp_flash: q.wp.map(|_| "WordPress install succeeded.".into()),
@@ -326,9 +340,20 @@ pub async fn get_detail(
         }),
         restore_error: q.restore_error,
         restore_flash: q.restore.map(|_| "Backup restored.".into()),
+        cron_error: q.cron_error,
+        cron_flash: q.cron.map(|_| "Crontab saved.".into()),
         just_created: None,
     };
     Ok(Html(tpl.render()?).into_response())
+}
+
+async fn fetch_cron(state: &SharedState, sel: HostingSelector) -> Result<String, AppError> {
+    let resp = hyperion_rpc_client::call(&state.agent_socket, Request::CronList { sel }).await?;
+    match resp {
+        RpcResponse::CronList(s) => Ok(s),
+        RpcResponse::Error(_) => Ok(String::new()),
+        _ => Ok(String::new()),
+    }
 }
 
 async fn fetch_stats(
@@ -368,6 +393,10 @@ pub struct DetailQuery {
     pub restore: Option<String>,
     #[serde(default)]
     pub restore_error: Option<String>,
+    #[serde(default)]
+    pub cron: Option<String>,
+    #[serde(default)]
+    pub cron_error: Option<String>,
 }
 
 async fn fetch_expiry(
@@ -946,6 +975,88 @@ pub async fn post_cert_issue(
 pub struct RestoreForm {
     pub selector: String,
     pub archive_path: String,
+}
+
+#[derive(Deserialize)]
+pub struct LogsForm {
+    pub selector: String,
+    pub kind: String,
+    #[serde(default = "default_log_lines")]
+    pub lines: i64,
+}
+fn default_log_lines() -> i64 {
+    200
+}
+
+pub async fn post_logs(
+    State(state): State<SharedState>,
+    Form(form): Form<LogsForm>,
+) -> Result<Response, AppError> {
+    let sel = parse_selector(&form.selector)?;
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::HostingLogs {
+            sel,
+            log_kind: form.kind.clone(),
+            lines: form.lines,
+        },
+    )
+    .await?;
+    let body = match resp {
+        RpcResponse::HostingLogs(s) => s,
+        RpcResponse::Error(e) => return Err(AppError::Rpc(e.to_string())),
+        _ => return Err(AppError::Internal("unexpected response".into())),
+    };
+    let kind = askama_escape::escape(&form.kind, askama_escape::Html).to_string();
+    let lines_label = form.lines;
+    let pre = if body.trim().is_empty() {
+        format!(
+            r#"<div class="muted" style="padding:0.5rem 0">No {kind} log entries.</div>"#,
+            kind = kind
+        )
+    } else {
+        let esc = askama_escape::escape(&body, askama_escape::Html).to_string();
+        format!(
+            r#"<div class="muted" style="font-size:0.8rem;margin-bottom:0.4rem">Last {lines} lines · {kind}.log</div>
+<pre style="max-height:36rem;overflow:auto;font-size:11.5px;line-height:1.5">{esc}</pre>"#,
+            lines = lines_label,
+            kind = kind,
+            esc = esc
+        )
+    };
+    Ok(Html(pre).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct CronForm {
+    pub selector: String,
+    pub body: String,
+}
+
+pub async fn post_cron_save(
+    State(state): State<SharedState>,
+    Form(form): Form<CronForm>,
+) -> Result<Response, AppError> {
+    let sel = parse_selector(&form.selector)?;
+    let sel_url = urlencoding(&form.selector);
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::CronReplace {
+            sel,
+            body: form.body,
+        },
+    )
+    .await?;
+    match resp {
+        RpcResponse::CronReplace => {
+            Ok(Redirect::to(&format!("/hostings/{}?cron=saved", sel_url)).into_response())
+        }
+        RpcResponse::Error(e) => {
+            let msg = urlencoding(&e.to_string());
+            Ok(Redirect::to(&format!("/hostings/{}?cron_error={}", sel_url, msg)).into_response())
+        }
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
 }
 
 pub async fn post_restore(

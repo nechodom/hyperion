@@ -110,6 +110,21 @@ pub trait AgentApi: Send + Sync + 'static {
     /// hosting, node metrics row). Returns the count of hostings sampled.
     async fn stats_tick(&self) -> Result<i64, RpcError>;
 
+    /// Tail the last N lines of access / error logs for a hosting.
+    async fn hosting_logs(
+        &self,
+        sel: HostingSelector,
+        log_kind: String,
+        lines: i64,
+    ) -> Result<String, RpcError>;
+
+    /// Read the hosting's crontab (lines belonging to the hosting's system
+    /// user). Returns the entire crontab as a string.
+    async fn cron_list(&self, sel: HostingSelector) -> Result<String, RpcError>;
+    /// Replace the hosting's crontab atomically (writes to a temp file,
+    /// `crontab -u <user> <file>`).
+    async fn cron_replace(&self, sel: HostingSelector, body: String) -> Result<(), RpcError>;
+
     /// Restore a hosting from a previously-taken backup archive. The path
     /// must point at one of OUR archives (under /var/lib/hyperion/backups
     /// or an operator-uploaded copy in /var/lib/hyperion/backups/incoming).

@@ -126,6 +126,18 @@
     <div class="flash-body"><strong>Restore failed:</strong> {{ e }}</div>
   </div>
 {% endif %}
+{% if let Some(m) = cron_flash %}
+  <div class="flash success">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+    <div class="flash-body">{{ m }}</div>
+  </div>
+{% endif %}
+{% if let Some(e) = cron_error %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body"><strong>Crontab error:</strong> {{ e }}</div>
+  </div>
+{% endif %}
 
 <div class="card hover">
   <h2>
@@ -496,6 +508,68 @@
       </div>
     </form>
   </div>
+</div>
+
+<div class="card hover">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+    Logs
+  </h2>
+  <p class="muted" style="font-size:0.85rem;margin-top:-0.4rem;margin-bottom:1rem">Tail the hosting's nginx logs without SSHing into the box.</p>
+  <div id="logs-output" style="background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.85rem 1rem">
+    <span class="muted">Click a button below to fetch.</span>
+  </div>
+  <div class="row" style="margin-top:0.7rem">
+    <form hx-post="/hostings/logs" hx-target="#logs-output" hx-swap="innerHTML"
+          hx-indicator="#log-spinner" style="display:inline">
+      <input type="hidden" name="_csrf" value="{{ csrf_logs }}">
+      <input type="hidden" name="selector" value="{{ detail.domain }}">
+      <input type="hidden" name="kind" value="access">
+      <input type="hidden" name="lines" value="200">
+      <button class="btn small" type="submit">Tail access.log</button>
+    </form>
+    <form hx-post="/hostings/logs" hx-target="#logs-output" hx-swap="innerHTML"
+          hx-indicator="#log-spinner" style="display:inline">
+      <input type="hidden" name="_csrf" value="{{ csrf_logs }}">
+      <input type="hidden" name="selector" value="{{ detail.domain }}">
+      <input type="hidden" name="kind" value="error">
+      <input type="hidden" name="lines" value="200">
+      <button class="btn small" type="submit">Tail error.log</button>
+    </form>
+    <form hx-post="/hostings/logs" hx-target="#logs-output" hx-swap="innerHTML"
+          hx-indicator="#log-spinner" style="display:inline">
+      <input type="hidden" name="_csrf" value="{{ csrf_logs }}">
+      <input type="hidden" name="selector" value="{{ detail.domain }}">
+      <input type="hidden" name="kind" value="error">
+      <input type="hidden" name="lines" value="1000">
+      <button class="btn small" type="submit">Tail error.log · 1000 lines</button>
+    </form>
+    <span id="log-spinner" class="muted htmx-indicator" style="font-size:0.85rem">fetching…</span>
+  </div>
+</div>
+
+<div class="card hover">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+    Cron jobs
+  </h2>
+  <p class="muted" style="font-size:0.85rem;margin-top:-0.4rem;margin-bottom:0.8rem">
+    Crontab for system user <code>{{ detail.system_user }}</code>. Standard cron syntax. Lines with backticks are refused for safety.
+  </p>
+  <form method="post" action="/hostings/cron"
+        onsubmit="return confirm('Replace the crontab for {{ detail.system_user }}?');">
+    <input type="hidden" name="_csrf" value="{{ csrf_cron }}">
+    <input type="hidden" name="selector" value="{{ detail.domain }}">
+    <textarea name="body" rows="10" spellcheck="false" style="font-family:var(--font-mono);font-size:12.5px"
+              placeholder="# m h dom mon dow command&#10;0 3 * * * /usr/bin/php /home/{{ detail.system_user }}/{{ detail.domain }}/htdocs/wp-cron.php >/dev/null 2>&amp;1">{{ cron_body }}</textarea>
+    <div class="row" style="margin-top:0.7rem">
+      <button class="btn primary" type="submit">
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+        Save crontab
+      </button>
+      <span class="muted hint">empty body removes the crontab</span>
+    </div>
+  </form>
 </div>
 
 <div class="card danger">

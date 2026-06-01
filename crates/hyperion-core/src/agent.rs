@@ -219,4 +219,25 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     ) -> Result<(), RpcError> {
         self.svc.backup_restore(sel, archive_path).await
     }
+
+    async fn hosting_logs(
+        &self,
+        sel: HostingSelector,
+        log_kind: String,
+        lines: i64,
+    ) -> Result<String, RpcError> {
+        self.svc.hosting_logs(sel, &log_kind, lines).await
+    }
+
+    async fn cron_list(&self, sel: HostingSelector) -> Result<String, RpcError> {
+        self.svc.cron_list(sel).await
+    }
+
+    async fn cron_replace(
+        &self,
+        sel: HostingSelector,
+        body: String,
+    ) -> Result<(), RpcError> {
+        self.svc.cron_replace(sel, body).await
+    }
 }

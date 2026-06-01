@@ -536,6 +536,9 @@ fn print_pretty(resp: &Response) {
             println!("✓ {} hostings sampled", hostings_sampled);
         }
         Response::BackupRestore => println!("✓ backup restored"),
+        Response::HostingLogs(s) => print!("{s}"),
+        Response::CronList(s) => print!("{s}"),
+        Response::CronReplace => println!("✓ crontab updated"),
         Response::Error(e) => {
             eprintln!("ERROR: {e}");
         }
