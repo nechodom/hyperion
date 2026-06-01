@@ -9,8 +9,10 @@ members = [
     "crates/lm-state",
     "crates/lm-adapters",
     "crates/lm-core",
+    "crates/lm-auth",
     "bin/lm-agent",
     "bin/lm",
+    "bin/lm-web",
 ]
 
 [workspace.package]
@@ -47,6 +49,15 @@ once_cell = "1"
 hex = "0.4"
 rand = "0.8"
 toml = "0.8"
+argon2 = "0.5"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+base64 = "0.22"
+axum = { version = "0.7", features = ["macros"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["fs", "trace", "set-header"] }
+subtle = "2"
+url = "2"
+http-body-util = "0.1"
 
 [profile.release]
 strip = "symbols"

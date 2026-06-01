@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block title %}{{ detail.domain }} · linux-manager{% endblock %}
+{% block main %}
+
+{% if let Some(c) = just_created %}
+<div class="flash success">
+  ✓ Provisioned <b>{{ detail.domain }}</b>.
+  {% if let Some(db) = c.db %}
+    <br>Database password (shown <b>once</b>):
+    <span class="secret">{{ db.password }}</span>
+  {% endif %}
+</div>
+{% endif %}
+
+<div class="page-header">
+  <h1>{{ detail.domain }}</h1>
+  <span class="pill
+    {% if detail.state.as_str() == "active" %}ok
+    {% else if detail.state.as_str() == "failed" %}err
+    {% else %}warn{% endif %}">{{ detail.state.as_str() }}</span>
+  <span class="grow"></span>
+  <a href="/hostings" class="btn">← Back</a>
+  <form method="post" action="/hostings/delete" style="display:inline"
+        onsubmit="return confirm('Delete {{ detail.domain }} and all its data?');">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <input type="hidden" name="selector" value="{{ detail.domain }}">
+    <button class="btn danger" type="submit">Delete</button>
+  </form>
+</div>
+
+{% if let Some(e) = error %}<div class="flash error">{{ e }}</div>{% endif %}
+
+<div class="card">
+  <h2>Overview</h2>
+  <dl class="kv">
+    <dt>ID</dt><dd><code>{{ detail.id }}</code></dd>
+    <dt>State</dt><dd>{{ detail.state.as_str() }}</dd>
+    <dt>System user</dt><dd>{{ detail.system_user }}</dd>
+    <dt>Root</dt><dd><code>{{ detail.root_dir }}</code></dd>
+    <dt>PHP</dt>
+    <dd>{% if let Some(v) = detail.php_version %}{{ v }}{% else %}<span class="muted">static (no PHP)</span>{% endif %}</dd>
+    {% if !detail.aliases.is_empty() %}
+    <dt>Aliases</dt><dd>{{ detail.aliases.join(", ") }}</dd>
+    {% endif %}
+    <dt>Created</dt><dd class="muted">{{ detail.created_at }}</dd>
+    <dt>Updated</dt><dd class="muted">{{ detail.updated_at }}</dd>
+  </dl>
+</div>
+
+{% if let Some(db) = detail.database %}
+<div class="card">
+  <h2>Database</h2>
+  <dl class="kv">
+    <dt>Engine</dt><dd>{{ db.engine }}</dd>
+    <dt>Name</dt><dd><code>{{ db.db_name }}</code></dd>
+    <dt>User</dt><dd><code>{{ db.db_user }}</code></dd>
+    <dt>Password</dt><dd class="muted">stored in <code>/etc/linux-manager/secrets/&lt;id&gt;.json</code>, not displayed</dd>
+  </dl>
+</div>
+{% endif %}
+
+{% if let Some(cert) = detail.cert %}
+<div class="card">
+  <h2>Certificate</h2>
+  <dl class="kv">
+    <dt>Issuer</dt><dd>{{ cert.issuer }}</dd>
+    <dt>Domain</dt><dd>{{ cert.domain }}</dd>
+    {% if !cert.sans.is_empty() %}
+    <dt>SANs</dt><dd>{{ cert.sans.join(", ") }}</dd>
+    {% endif %}
+    <dt>Not after</dt><dd class="muted">{{ cert.not_after }}</dd>
+    <dt>Fingerprint</dt><dd><code style="font-size:0.78rem">{{ cert.fingerprint_sha256 }}</code></dd>
+  </dl>
+</div>
+{% endif %}
+
+<div class="card muted">
+  <h2>Danger zone</h2>
+  <p>Deleting removes the hosting's site, files, databases, and Linux user.
+  Backups are NOT taken automatically here — those land in sub-project 5.</p>
+  <form method="post" action="/hostings/delete" class="row"
+        onsubmit="return confirm('Really delete {{ detail.domain }}?');">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <input type="hidden" name="selector" value="{{ detail.domain }}">
+    <label class="field-checkbox"><input type="checkbox" name="keep_user" value="on"> Keep the Linux user</label>
+    <label class="field-checkbox"><input type="checkbox" name="keep_db" value="on"> Keep the database</label>
+    <button class="btn danger" type="submit">Delete hosting</button>
+  </form>
+</div>
+{% endblock %}

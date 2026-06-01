@@ -24,10 +24,13 @@ and will land in subsequent sub-projects.
 | E | `lm-core` (orchestrator + secrets) | 16 | ✅ |
 | F | `lm-agent` daemon + `lm` CLI | 7 | ✅ |
 | G | End-to-end socket+state+orchestrator integration | 4 | ✅ |
+| H | `lm-auth` (argon2id + Ed25519 sessions + CSRF + keys) | 21 | ✅ |
+| I | `lm-web` (axum + askama + HTMX modern admin UI) | 4 unit | ✅ |
+| J | lm-web full-flow tests (login, dashboard, hosting CRUD) | 11 e2e | ✅ |
 
 ⁻ = 3 integration tests gated `#[ignore]` (require root + Debian system tools).
 
-**Total: 143 tests passing on macOS** (CI matrix for Debian integration
+**Total: 175 tests passing on macOS** (CI matrix for Debian integration
 tests is part of sub-project 9).
 
 ## Architecture
@@ -90,26 +93,42 @@ cargo test --workspace -- --ignored
 ## Try It Locally (no root)
 
 ```bash
-# Terminal A — run the agent with a temp config
-mkdir -p /tmp/lm-state
-cat > /tmp/agent.toml <<EOF
+# Terminal A — run the agent
+mkdir -p /tmp/lm-demo
+cat > /tmp/lm-demo/agent.toml <<EOF
 [agent]
-socket_path = "/tmp/lm-agent.sock"
-state_db    = "/tmp/lm-state/state.db"
-secrets_dir = "/tmp/lm-state/secrets"
-log_path    = "/tmp/lm-state/agent.log"
-home_root   = "/tmp/lm-state/home"
+socket_path = "/tmp/lm-demo/agent.sock"
+state_db    = "/tmp/lm-demo/state.db"
+secrets_dir = "/tmp/lm-demo/secrets"
+log_path    = "/tmp/lm-demo/agent.log"
+home_root   = "/tmp/lm-demo/home"
 
 [acme]
 contact_email = "you@example.com"
-challenge_dir = "/tmp/lm-state/acme"
+challenge_dir = "/tmp/lm-demo/acme"
 EOF
+cargo run --bin lm-agent -- --config /tmp/lm-demo/agent.toml &
 
-cargo run --bin lm-agent -- --config /tmp/agent.toml &
+# Terminal B — run the web UI
+cat > /tmp/lm-demo/web.toml <<EOF
+[web]
+listen = "127.0.0.1:8443"
+agent_socket = "/tmp/lm-demo/agent.sock"
+admin_user_file = "/tmp/lm-demo/admin.json"
+session_key_file = "/tmp/lm-demo/sess.key"
+csrf_key_file = "/tmp/lm-demo/csrf.key"
+secure_cookies = false   # plain HTTP in dev
+EOF
+cargo run --bin lm-web -- --config /tmp/lm-demo/web.toml bootstrap \
+    --username kevin --password "your-strong-password"
+cargo run --bin lm-web -- --config /tmp/lm-demo/web.toml
 
-# Terminal B
-target/debug/lm --socket /tmp/lm-agent.sock info
-target/debug/lm --socket /tmp/lm-agent.sock hosting list
+# Browser
+open http://127.0.0.1:8443/         # → /login
+
+# CLI alternative
+target/debug/lm --socket /tmp/lm-demo/agent.sock info
+target/debug/lm --socket /tmp/lm-demo/agent.sock hosting list
 # Note: hosting create on macOS will fail at `useradd` — see RUNBOOK.md.
 ```
 
@@ -129,10 +148,12 @@ linux-manager/
 │   ├── lm-rpc-client/             # Unix socket client (1)
 │   ├── lm-state/                  # SQLite + audit chain (26)
 │   ├── lm-adapters/               # system tool wrappers (35+3⁻)
-│   └── lm-core/                   # orchestration + secrets (16)
+│   ├── lm-core/                   # orchestration + secrets (16)
+│   └── lm-auth/                   # argon2id + Ed25519 sessions + CSRF (21)
 ├── bin/
 │   ├── lm-agent/                  # daemon (2)
-│   └── lm/                        # CLI (5)
+│   ├── lm/                        # CLI (5)
+│   └── lm-web/                    # web UI (4+11 e2e)
 └── docs/
     └── superpowers/
         ├── specs/                 # 11 design specs (Foundation + 10 sub-projects)
