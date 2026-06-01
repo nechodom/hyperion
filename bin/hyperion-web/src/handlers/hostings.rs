@@ -45,14 +45,23 @@ struct DetailTpl<'a> {
     detail: HostingDetail,
     limits: hyperion_types::HostingLimits,
     wp_status: Option<WpInstallStatus>,
+    expiry: hyperion_types::HostingExpiry,
+    backups: Vec<hyperion_types::BackupRunWire>,
     csrf_delete: String,
     csrf_suspend: String,
     csrf_resume: String,
     csrf_limits: String,
     csrf_wp_install: String,
+    csrf_backup_now: String,
+    csrf_expiry_set: String,
+    csrf_expiry_clear: String,
     error: Option<&'a str>,
     wp_error: Option<String>,
     wp_flash: Option<String>,
+    backup_error: Option<String>,
+    backup_flash: Option<String>,
+    expiry_error: Option<String>,
+    expiry_flash: Option<String>,
     just_created: Option<HostingCreated>,
 }
 
@@ -169,14 +178,23 @@ pub async fn post_create(
                 detail,
                 limits,
                 wp_status: None,
+                expiry: hyperion_types::HostingExpiry::defaults(),
+                backups: vec![],
                 csrf_delete: csrf_token_for(&state, &ctx, "/hostings/delete"),
                 csrf_suspend: csrf_token_for(&state, &ctx, "/hostings/suspend"),
                 csrf_resume: csrf_token_for(&state, &ctx, "/hostings/resume"),
                 csrf_limits: csrf_token_for(&state, &ctx, "/hostings/set-limits"),
                 csrf_wp_install: csrf_token_for(&state, &ctx, "/hostings/wp/install"),
+                csrf_backup_now: csrf_token_for(&state, &ctx, "/hostings/backup-now"),
+                csrf_expiry_set: csrf_token_for(&state, &ctx, "/hostings/expiry/set"),
+                csrf_expiry_clear: csrf_token_for(&state, &ctx, "/hostings/expiry/clear"),
                 error: None,
                 wp_error: None,
                 wp_flash: None,
+                backup_error: None,
+                backup_flash: None,
+                expiry_error: None,
+                expiry_flash: None,
                 just_created: Some(created),
             };
             Ok(Html(tpl.render()?).into_response())
@@ -211,20 +229,43 @@ pub async fn get_detail(
     let limits = fetch_limits(&state, sel_id.clone())
         .await
         .unwrap_or_else(|_| hyperion_types::HostingLimits::defaults());
-    let wp_status = fetch_wp_status(&state, sel_id).await.unwrap_or(None);
+    let wp_status = fetch_wp_status(&state, sel_id.clone())
+        .await
+        .unwrap_or(None);
+    let expiry = fetch_expiry(&state, sel_id.clone())
+        .await
+        .unwrap_or_else(|_| hyperion_types::HostingExpiry::defaults());
+    let backups = fetch_backup_list(&state, sel_id, 10)
+        .await
+        .unwrap_or_default();
     let tpl = DetailTpl {
         username: &ctx.username,
         detail,
         limits,
         wp_status,
+        expiry,
+        backups,
         csrf_delete: csrf_token_for(&state, &ctx, "/hostings/delete"),
         csrf_suspend: csrf_token_for(&state, &ctx, "/hostings/suspend"),
         csrf_resume: csrf_token_for(&state, &ctx, "/hostings/resume"),
         csrf_limits: csrf_token_for(&state, &ctx, "/hostings/set-limits"),
         csrf_wp_install: csrf_token_for(&state, &ctx, "/hostings/wp/install"),
+        csrf_backup_now: csrf_token_for(&state, &ctx, "/hostings/backup-now"),
+        csrf_expiry_set: csrf_token_for(&state, &ctx, "/hostings/expiry/set"),
+        csrf_expiry_clear: csrf_token_for(&state, &ctx, "/hostings/expiry/clear"),
         error: None,
         wp_error: q.wp_error,
         wp_flash: q.wp.map(|_| "WordPress install succeeded.".into()),
+        backup_error: q.backup_error,
+        backup_flash: q.backup.map(|_| "Backup started — see list below.".into()),
+        expiry_error: q.expiry_error,
+        expiry_flash: q.expiry.map(|s| {
+            if s == "cleared" {
+                "Expiry cleared.".to_string()
+            } else {
+                "Expiry updated.".to_string()
+            }
+        }),
         just_created: None,
     };
     Ok(Html(tpl.render()?).into_response())
@@ -238,6 +279,44 @@ pub struct DetailQuery {
     /// Surface WP install failures back into the detail page.
     #[serde(default)]
     pub wp_error: Option<String>,
+    #[serde(default)]
+    pub backup: Option<String>,
+    #[serde(default)]
+    pub backup_error: Option<String>,
+    #[serde(default)]
+    pub expiry: Option<String>,
+    #[serde(default)]
+    pub expiry_error: Option<String>,
+}
+
+async fn fetch_expiry(
+    state: &SharedState,
+    sel: HostingSelector,
+) -> Result<hyperion_types::HostingExpiry, AppError> {
+    let resp =
+        hyperion_rpc_client::call(&state.agent_socket, Request::HostingGetExpiry(sel)).await?;
+    match resp {
+        RpcResponse::HostingGetExpiry(e) => Ok(e),
+        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+async fn fetch_backup_list(
+    state: &SharedState,
+    sel: HostingSelector,
+    limit: i64,
+) -> Result<Vec<hyperion_types::BackupRunWire>, AppError> {
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::BackupList { sel, limit },
+    )
+    .await?;
+    match resp {
+        RpcResponse::BackupList(rows) => Ok(rows),
+        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
 }
 
 async fn fetch_wp_status(
@@ -265,6 +344,142 @@ pub struct WpInstallForm {
     pub locale: String,
     #[serde(default)]
     pub version: String,
+}
+
+#[derive(Deserialize)]
+pub struct BackupNowForm {
+    pub selector: String,
+}
+
+pub async fn post_backup_now(
+    State(state): State<SharedState>,
+    Form(form): Form<BackupNowForm>,
+) -> Result<Response, AppError> {
+    let sel = parse_selector(&form.selector)?;
+    let resp =
+        hyperion_rpc_client::call(&state.agent_socket, Request::BackupNow { sel }).await?;
+    let sel_url = urlencoding(&form.selector);
+    match resp {
+        RpcResponse::BackupNow(_) => {
+            Ok(Redirect::to(&format!("/hostings/{}?backup=started", sel_url)).into_response())
+        }
+        RpcResponse::Error(e) => {
+            let msg = urlencoding(&e.to_string());
+            Ok(
+                Redirect::to(&format!("/hostings/{}?backup_error={}", sel_url, msg))
+                    .into_response(),
+            )
+        }
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct SetExpiryForm {
+    pub selector: String,
+    /// `YYYY-MM-DD` from <input type="date">, or empty to clear.
+    pub expires_on: String,
+    #[serde(default)]
+    pub owner_email: String,
+    #[serde(default)]
+    pub grace_days: Option<i64>,
+    #[serde(default)]
+    pub warning_offsets: Option<String>,
+}
+
+pub async fn post_set_expiry(
+    State(state): State<SharedState>,
+    Form(form): Form<SetExpiryForm>,
+) -> Result<Response, AppError> {
+    let sel = parse_selector(&form.selector)?;
+    let sel_url = urlencoding(&form.selector);
+    let expires_at = match parse_yyyymmdd_to_epoch(form.expires_on.trim()) {
+        Ok(t) => t,
+        Err(msg) => {
+            return Ok(Redirect::to(&format!(
+                "/hostings/{}?expiry_error={}",
+                sel_url,
+                urlencoding(&msg)
+            ))
+            .into_response());
+        }
+    };
+    let expiry = hyperion_types::HostingExpiry {
+        expires_at,
+        owner_email: if form.owner_email.trim().is_empty() {
+            None
+        } else {
+            Some(form.owner_email.trim().to_string())
+        },
+        grace_days: form.grace_days.unwrap_or(30).max(0),
+        warning_offsets_days: form
+            .warning_offsets
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("30,7,1")
+            .to_string(),
+    };
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::HostingSetExpiry { sel, expiry },
+    )
+    .await?;
+    match resp {
+        RpcResponse::HostingSetExpiry(_) => {
+            Ok(Redirect::to(&format!("/hostings/{}?expiry=set", sel_url)).into_response())
+        }
+        RpcResponse::Error(e) => {
+            let msg = urlencoding(&e.to_string());
+            Ok(
+                Redirect::to(&format!("/hostings/{}?expiry_error={}", sel_url, msg))
+                    .into_response(),
+            )
+        }
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ClearExpiryForm {
+    pub selector: String,
+}
+
+pub async fn post_clear_expiry(
+    State(state): State<SharedState>,
+    Form(form): Form<ClearExpiryForm>,
+) -> Result<Response, AppError> {
+    let sel = parse_selector(&form.selector)?;
+    let sel_url = urlencoding(&form.selector);
+    let resp =
+        hyperion_rpc_client::call(&state.agent_socket, Request::HostingClearExpiry(sel)).await?;
+    match resp {
+        RpcResponse::HostingClearExpiry => {
+            Ok(Redirect::to(&format!("/hostings/{}?expiry=cleared", sel_url)).into_response())
+        }
+        RpcResponse::Error(e) => {
+            let msg = urlencoding(&e.to_string());
+            Ok(
+                Redirect::to(&format!("/hostings/{}?expiry_error={}", sel_url, msg))
+                    .into_response(),
+            )
+        }
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+/// Parse YYYY-MM-DD into a Unix epoch (UTC midnight). Empty input → None.
+fn parse_yyyymmdd_to_epoch(s: &str) -> Result<Option<i64>, String> {
+    if s.is_empty() {
+        return Ok(None);
+    }
+    let d = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
+        .map_err(|_| format!("Date must be YYYY-MM-DD, got: {s}"))?;
+    let dt = d
+        .and_hms_opt(0, 0, 0)
+        .ok_or_else(|| "Invalid date".to_string())?
+        .and_utc();
+    Ok(Some(dt.timestamp()))
 }
 
 pub async fn post_wp_install(

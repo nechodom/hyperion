@@ -28,6 +28,7 @@ axum.workspace = true
 tower.workspace = true
 tower-http.workspace = true
 url.workspace = true
+chrono.workspace = true
 http-body-util.workspace = true
 once_cell.workspace = true
 subtle.workspace = true

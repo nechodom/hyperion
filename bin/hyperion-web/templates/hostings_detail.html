@@ -46,6 +46,10 @@
 {% if let Some(e) = error %}<div class="flash error">{{ e }}</div>{% endif %}
 {% if let Some(m) = wp_flash %}<div class="flash success">✓ {{ m }}</div>{% endif %}
 {% if let Some(e) = wp_error %}<div class="flash error">WordPress install failed: {{ e }}</div>{% endif %}
+{% if let Some(m) = backup_flash %}<div class="flash success">✓ {{ m }}</div>{% endif %}
+{% if let Some(e) = backup_error %}<div class="flash error">Backup failed: {{ e }}</div>{% endif %}
+{% if let Some(m) = expiry_flash %}<div class="flash success">✓ {{ m }}</div>{% endif %}
+{% if let Some(e) = expiry_error %}<div class="flash error">{{ e }}</div>{% endif %}
 
 <div class="card">
   <h2>Overview</h2>
@@ -203,6 +207,88 @@
       </div>
       <button class="btn primary" type="submit">Install WordPress</button>
     </form>
+  {% endif %}
+</div>
+
+<div class="card">
+  <h2>Expiration</h2>
+  {% if let Some(t) = expiry.expires_at %}
+    <p>Expires at <code>{{ t }}</code> (UTC seconds), grace
+    <code>{{ expiry.grace_days }}</code> days.
+    Auto-suspend then auto-delete fires from the agent scheduler.</p>
+    <form method="post" action="/hostings/expiry/clear" style="display:inline">
+      <input type="hidden" name="_csrf" value="{{ csrf_expiry_clear }}">
+      <input type="hidden" name="selector" value="{{ detail.domain }}">
+      <button class="btn" type="submit">Clear expiry</button>
+    </form>
+  {% else %}
+    <p class="muted">No expiry set — hosting will never auto-suspend.</p>
+  {% endif %}
+  <form method="post" action="/hostings/expiry/set" style="margin-top:1rem">
+    <input type="hidden" name="_csrf" value="{{ csrf_expiry_set }}">
+    <input type="hidden" name="selector" value="{{ detail.domain }}">
+    <div class="field-row">
+      <div class="field">
+        <label for="expires_on">Expires on <span class="hint">date (UTC)</span></label>
+        <input id="expires_on" name="expires_on" type="date" required>
+      </div>
+      <div class="field">
+        <label for="grace_days">Grace period <span class="hint">days after expiry before delete</span></label>
+        <input id="grace_days" name="grace_days" type="number" min="0" max="365"
+               value="{{ expiry.grace_days }}">
+      </div>
+    </div>
+    <div class="field-row">
+      <div class="field">
+        <label for="owner_email">Owner email <span class="hint">for warnings</span></label>
+        <input id="owner_email" name="owner_email" type="email"
+               value="{% if let Some(e) = expiry.owner_email %}{{ e }}{% endif %}">
+      </div>
+      <div class="field">
+        <label for="warning_offsets">Warning offsets <span class="hint">comma-sep days</span></label>
+        <input id="warning_offsets" name="warning_offsets" type="text"
+               value="{{ expiry.warning_offsets_days }}" placeholder="30,7,1">
+      </div>
+    </div>
+    <button class="btn primary" type="submit">Set / update expiry</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Backups</h2>
+  <form method="post" action="/hostings/backup-now" style="margin-bottom:1rem">
+    <input type="hidden" name="_csrf" value="{{ csrf_backup_now }}">
+    <input type="hidden" name="selector" value="{{ detail.domain }}">
+    <button class="btn primary" type="submit">Run backup now</button>
+    <span class="muted hint">Archives htdocs + dumps DB (if any) under
+    <code>/var/lib/hyperion/backups/local/{{ detail.system_user }}/</code></span>
+  </form>
+  {% if backups.is_empty() %}
+    <p class="muted">No backups recorded yet.</p>
+  {% else %}
+    <table class="grid">
+      <thead><tr>
+        <th>When (started)</th><th>Target</th><th>State</th>
+        <th>Size</th><th>Archive</th>
+      </tr></thead>
+      <tbody>
+      {% for b in backups %}
+        <tr>
+          <td class="muted">{{ b.started_at }}</td>
+          <td>{{ b.target }}</td>
+          <td>
+            {% if b.state == "ok" %}<span class="pill ok">{{ b.state }}</span>
+            {% else if b.state == "failed" %}<span class="pill err">{{ b.state }}</span>
+            {% else %}<span class="pill warn">{{ b.state }}</span>{% endif %}
+          </td>
+          <td class="muted">{{ b.bytes_total }} B</td>
+          <td>
+            {% if let Some(p) = b.archive_path %}<code style="font-size:0.78rem">{{ p }}</code>{% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
   {% endif %}
 </div>
 

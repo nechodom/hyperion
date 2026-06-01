@@ -32,6 +32,18 @@ pub fn build_router(state: SharedState) -> Router {
             "/hostings/wp/install",
             post(handlers::hostings::post_wp_install),
         )
+        .route(
+            "/hostings/backup-now",
+            post(handlers::hostings::post_backup_now),
+        )
+        .route(
+            "/hostings/expiry/set",
+            post(handlers::hostings::post_set_expiry),
+        )
+        .route(
+            "/hostings/expiry/clear",
+            post(handlers::hostings::post_clear_expiry),
+        )
         .route("/audit", get(handlers::audit::get_audit))
         .route("/install", get(handlers::install::get_install))
         .route("/install/invite", post(handlers::install::post_invite))
