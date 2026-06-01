@@ -1,0 +1,141 @@
+//! JSON length-prefixed framing.
+//!
+//! Each frame on the wire is `u32be length || JSON bytes`.
+//! `MAX_FRAME` (4 MiB) is enforced both at write and read.
+
+use crate::{
+    error::RpcError,
+    wire::{
+        AgentInfo, DeleteOpts, HostingCreateReq, HostingCreated, HostingSelector,
+    },
+};
+use lm_types::{CertInfo, CertRenewResult, HostingDetail, HostingSummary};
+use lm_validate::Domain;
+use serde::{Deserialize, Serialize};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+
+pub const MAX_FRAME: usize = 4 * 1024 * 1024;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "method", content = "params", rename_all = "snake_case")]
+pub enum Request {
+    AgentInfo,
+    HostingCreate(HostingCreateReq),
+    HostingList,
+    HostingGet(HostingSelector),
+    HostingDelete {
+        sel: HostingSelector,
+        opts: DeleteOpts,
+    },
+    CertIssue {
+        domain: Domain,
+    },
+    CertRenewAll,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "method", content = "result", rename_all = "snake_case")]
+pub enum Response {
+    AgentInfo(AgentInfo),
+    HostingCreate(HostingCreated),
+    HostingList(Vec<HostingSummary>),
+    HostingGet(HostingDetail),
+    HostingDelete,
+    CertIssue(CertInfo),
+    CertRenewAll(Vec<CertRenewResult>),
+    Error(RpcError),
+}
+
+pub async fn write_frame<W, T>(w: &mut W, value: &T) -> std::io::Result<()>
+where
+    W: AsyncWrite + Unpin,
+    T: Serialize,
+{
+    let bytes = serde_json::to_vec(value)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    if bytes.len() > MAX_FRAME {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("frame {} exceeds MAX_FRAME {}", bytes.len(), MAX_FRAME),
+        ));
+    }
+    let len = bytes.len() as u32;
+    w.write_u32(len).await?;
+    w.write_all(&bytes).await?;
+    w.flush().await?;
+    Ok(())
+}
+
+pub async fn read_frame<R, T>(r: &mut R) -> std::io::Result<T>
+where
+    R: AsyncRead + Unpin,
+    T: for<'de> Deserialize<'de>,
+{
+    let len = r.read_u32().await? as usize;
+    if len > MAX_FRAME {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("frame {len} exceeds MAX_FRAME"),
+        ));
+    }
+    let mut buf = vec![0u8; len];
+    r.read_exact(&mut buf).await?;
+    serde_json::from_slice(&buf)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::duplex;
+
+    #[tokio::test]
+    async fn request_round_trip_through_duplex() {
+        let (mut a, mut b) = duplex(8192);
+        let req = Request::HostingList;
+        write_frame(&mut a, &req).await.expect("write");
+        let got: Request = read_frame(&mut b).await.expect("read");
+        assert_eq!(req, got);
+    }
+
+    #[tokio::test]
+    async fn response_round_trip() {
+        let (mut a, mut b) = duplex(8192);
+        let resp = Response::AgentInfo(AgentInfo {
+            hostname: "test".into(),
+            version: "0".into(),
+            schema_version: 1,
+            hostings_count: 0,
+        });
+        write_frame(&mut a, &resp).await.expect("write");
+        let got: Response = read_frame(&mut b).await.expect("read");
+        assert_eq!(resp, got);
+    }
+
+    #[tokio::test]
+    async fn error_response_round_trip() {
+        let (mut a, mut b) = duplex(8192);
+        let resp = Response::Error(RpcError::NotFound {
+            kind: "hosting".into(),
+            id: "x".into(),
+        });
+        write_frame(&mut a, &resp).await.expect("write");
+        let got: Response = read_frame(&mut b).await.expect("read");
+        assert_eq!(resp, got);
+    }
+
+    #[tokio::test]
+    async fn refuses_overlarge_frame_on_read() {
+        let (mut a, mut b) = duplex(8192);
+        a.write_u32((MAX_FRAME + 1) as u32).await.expect("write len");
+        let result: std::io::Result<Request> = read_frame(&mut b).await;
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn request_method_tag_in_json() {
+        let req = Request::HostingList;
+        let s = serde_json::to_string(&req).expect("serialize");
+        assert!(s.contains("hosting_list"), "got: {s}");
+    }
+}

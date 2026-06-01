@@ -1,0 +1,22 @@
+[package]
+name = "lm-agent"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "lm-agent"
+path = "src/main.rs"
+
+[dependencies]
+lm-core = { path = "../../crates/lm-core" }
+lm-rpc-server = { path = "../../crates/lm-rpc-server" }
+lm-state = { path = "../../crates/lm-state" }
+tokio = { workspace = true }
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+serde.workspace = true
+toml.workspace = true

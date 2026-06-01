@@ -1,0 +1,27 @@
+[package]
+name = "lm-adapters"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+lm-types = { path = "../lm-types" }
+lm-validate = { path = "../lm-validate" }
+lm-rpc = { path = "../lm-rpc" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true }
+tracing.workspace = true
+askama.workspace = true
+instant-acme.workspace = true
+rcgen.workspace = true
+rand.workspace = true
+hex.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }
+mockall.workspace = true
