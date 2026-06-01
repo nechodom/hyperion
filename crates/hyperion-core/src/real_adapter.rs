@@ -5,7 +5,7 @@ use crate::service::AdapterPort;
 use async_trait::async_trait;
 use hyperion_adapters::AdapterError;
 use hyperion_rpc::wire::DbCredentials;
-use hyperion_types::{CertInfo, DbProvision, HostingDetail, HostingId, PhpVersion};
+use hyperion_types::{CertInfo, DbProvision, HostingDetail, HostingId, PhpVersion, WpInstallRequest};
 use hyperion_validate::SystemUserName;
 use std::path::PathBuf;
 
@@ -284,6 +284,25 @@ impl AdapterPort for RealAdapter {
     async fn kill_user_procs(&self, name: &str) -> Result<(), AdapterError> {
         let n = SystemUserName::parse(name)?;
         hyperion_adapters::users::kill_user_procs(&n).await
+    }
+
+    async fn wp_install_run(
+        &self,
+        system_user: &str,
+        htdocs: &str,
+        db_name: &str,
+        db_user: &str,
+        db_password: &str,
+        db_host: &str,
+        req: &WpInstallRequest,
+    ) -> Result<String, AdapterError> {
+        let db = hyperion_adapters::wpcli::WpDbCreds {
+            name: db_name,
+            user: db_user,
+            password: db_password,
+            host: db_host,
+        };
+        hyperion_adapters::wpcli::install_wordpress(system_user, htdocs, db, req).await
     }
 }
 

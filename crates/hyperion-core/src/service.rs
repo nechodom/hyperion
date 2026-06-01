@@ -7,10 +7,10 @@ use hyperion_rpc::wire::{
     DbCredentials, DeleteOpts, HostingCreateReq, HostingCreated, HostingSelector,
 };
 use hyperion_rpc::RpcError;
-use hyperion_state::{certificates, databases, hostings, system_users};
+use hyperion_state::{certificates, databases, hostings, system_users, wordpress};
 use hyperion_types::{
     now_secs, CertInfo, DbProvision, DbSummary, HostingDetail, HostingId, HostingState,
-    HostingSummary, PhpVersion, SecretId,
+    HostingSummary, PhpVersion, SecretId, WpInstallRequest, WpInstallStatus,
 };
 use hyperion_validate::SystemUserName;
 use sqlx::SqlitePool;
@@ -89,6 +89,21 @@ pub trait AdapterPort: Send + Sync {
 
     /// `pkill -KILL -u <name>` to kill any process owned by the suspended user.
     async fn kill_user_procs(&self, name: &str) -> Result<(), AdapterError>;
+
+    /// Run wp-cli's full install pipeline (download → config create →
+    /// core install) under `system_user` against the hosting's existing
+    /// MariaDB. Returns the installed core version string.
+    #[allow(clippy::too_many_arguments)]
+    async fn wp_install_run(
+        &self,
+        system_user: &str,
+        htdocs: &str,
+        db_name: &str,
+        db_user: &str,
+        db_password: &str,
+        db_host: &str,
+        req: &WpInstallRequest,
+    ) -> Result<String, AdapterError>;
 }
 
 #[derive(Clone)]
@@ -1063,6 +1078,181 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .await
             .map_err(|e| RpcError::Internal_with(format!("list: {e}")))?;
         Ok(rows.into_iter().map(run_to_wire).collect())
+    }
+
+    /// Install WordPress into an existing hosting.
+    ///
+    /// Preconditions: hosting state is Active, hosting has a MariaDB
+    /// (Postgres is rejected — WordPress doesn't support it natively),
+    /// admin credentials are well-formed.
+    ///
+    /// Side effects: downloads WP core into `htdocs`, writes
+    /// `wp-config.php`, populates the DB with WP tables, records a row
+    /// in `wp_installs`, appends an audit entry.
+    pub async fn install_wordpress(
+        &self,
+        sel: HostingSelector,
+        req: WpInstallRequest,
+    ) -> Result<WpInstallStatus, RpcError> {
+        // Light validation here. Adapter does locale/version regex.
+        if req.site_url.trim().is_empty()
+            || req.title.trim().is_empty()
+            || req.admin_user.trim().is_empty()
+            || req.admin_email.trim().is_empty()
+        {
+            return Err(RpcError::Validation {
+                message: "site_url, title, admin_user, admin_email must all be non-empty".into(),
+            });
+        }
+        if req.admin_password.is_empty() {
+            return Err(RpcError::Validation {
+                message: "admin_password must be non-empty".into(),
+            });
+        }
+        if !req.admin_email.contains('@') {
+            return Err(RpcError::Validation {
+                message: "admin_email must be a valid address".into(),
+            });
+        }
+        if !req.site_url.starts_with("http://") && !req.site_url.starts_with("https://") {
+            return Err(RpcError::Validation {
+                message: "site_url must include http(s):// scheme".into(),
+            });
+        }
+
+        let detail = self.get(sel).await?;
+        if detail.state != HostingState::Active {
+            return Err(RpcError::Conflict {
+                message: format!(
+                    "hosting {} is in state {:?}; resume it before installing WordPress",
+                    detail.domain, detail.state
+                ),
+            });
+        }
+        let db_row = databases::get_for_hosting(&self.pool, &detail.id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("db lookup: {e}")))?
+            .ok_or(RpcError::Conflict {
+                message: format!(
+                    "hosting {} has no database — WordPress needs MariaDB",
+                    detail.domain
+                ),
+            })?;
+        if db_row.engine != DbProvision::MariaDB {
+            return Err(RpcError::Conflict {
+                message: format!(
+                    "WordPress requires MariaDB; hosting {} uses {:?}",
+                    detail.domain, db_row.engine
+                ),
+            });
+        }
+
+        // Read the plaintext DB password from the secrets store.
+        #[derive(serde::Deserialize)]
+        struct StoredDbCred {
+            password: String,
+        }
+        let stored: StoredDbCred = self
+            .secrets
+            .get(&db_row.secret_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("secret read: {e}")))?;
+
+        // Reject re-install for now — operator must manually clear
+        // wp_installs + wipe DB to redo. This avoids stomping on a live
+        // site through fat-fingered UI.
+        if wordpress::get_install(&self.pool, &detail.id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("wp lookup: {e}")))?
+            .is_some()
+        {
+            return Err(RpcError::Conflict {
+                message: format!(
+                    "WordPress already installed on {} — drop the row from wp_installs first",
+                    detail.domain
+                ),
+            });
+        }
+
+        let installed_version = self
+            .adapters
+            .wp_install_run(
+                &detail.system_user,
+                &detail.root_dir,
+                &db_row.db_name,
+                &db_row.db_user,
+                &stored.password,
+                "localhost",
+                &req,
+            )
+            .await
+            .map_err(|e| match e {
+                AdapterError::Command { code, .. } => RpcError::ProvisioningFailed {
+                    stage: "wp_install".into(),
+                    reason: format!("wp-cli failed with exit {code}: {e}"),
+                },
+                other => other.into(),
+            })?;
+
+        // Stable hash describing what we installed. Without an app_pack
+        // this is just "vanilla-<version>-<locale>" so re-applying the
+        // same options is detectable later.
+        let manifest_marker = format!(
+            "vanilla-{}-{}",
+            installed_version.trim(),
+            req.locale.trim()
+        );
+        let pack_hash = wordpress::pack_hash(&manifest_marker);
+        let now = now_secs();
+        wordpress::record_install(
+            &self.pool,
+            &detail.id,
+            &req.site_url,
+            &installed_version,
+            &pack_hash,
+            now,
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("record_install: {e}")))?;
+
+        self.append_audit(
+            "wordpress.install",
+            Some(detail.id.as_str()),
+            &serde_json::json!({
+                "site_url": req.site_url,
+                "locale": req.locale,
+                "version": installed_version.trim(),
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+
+        Ok(WpInstallStatus {
+            hosting_id: detail.id.clone(),
+            site_url: req.site_url,
+            wp_version: installed_version.trim().to_string(),
+            installed_at: now,
+            last_pack_hash: pack_hash,
+        })
+    }
+
+    /// Return the recorded WordPress install for a hosting, if any.
+    pub async fn wp_status(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<Option<WpInstallStatus>, RpcError> {
+        let detail = self.get(sel).await?;
+        let row = wordpress::get_install(&self.pool, &detail.id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("wp lookup: {e}")))?;
+        Ok(row.map(|r| WpInstallStatus {
+            hosting_id: r.hosting_id,
+            site_url: r.site_url,
+            wp_version: r.wp_version,
+            installed_at: r.installed_at,
+            last_pack_hash: r.last_pack_hash,
+        }))
     }
 
     /// Mint a one-time node enrollment token. Plaintext returned exactly once.

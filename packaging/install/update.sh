@@ -138,6 +138,17 @@ refresh_unit() {
 (( HAVE_AGENT )) && refresh_unit hyperion-agent
 (( HAVE_WEB   )) && refresh_unit hyperion-web
 
+#-------- 4b. wp-cli (best-effort install/update) -------------------------
+# WordPress install adapter shells out to /usr/local/bin/wp. Older Hyperion
+# installs predate wp-cli being installed by install-master.sh, so make
+# update.sh fix that too.
+if [[ ! -x /usr/local/bin/wp ]]; then
+  log "Installing wp-cli ..."
+  curl -fsSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar \
+    -o /usr/local/bin/wp
+  chmod 0755 /usr/local/bin/wp
+fi
+
 #-------- 5. Materialize web keys (idempotent) ----------------------------
 # hyperion-web's systemd unit runs with ProtectSystem=full, which makes
 # /etc read-only. keys::load_or_init would happily create these on a

@@ -6,6 +6,7 @@
 //! `hyperion-validate` higher up.
 
 use crate::{cmd, AdapterError};
+use hyperion_types::WpInstallRequest;
 use once_cell::sync::Lazy;
 use regex::Regex;
 
@@ -49,6 +50,122 @@ pub async fn run(user: &str, htdocs: &str, args: &[&str]) -> Result<String, Adap
     validate_args(args)?;
     let argv = build_argv(user, htdocs, args);
     cmd::run("/usr/bin/sudo", &argv).await
+}
+
+static LOCALE_RX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^[a-z]{2,3}(_[A-Z]{2})?$")
+        .unwrap_or_else(|_| panic!("BUG: LOCALE_RX failed to compile"))
+});
+static VERSION_RX: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"^(latest|[0-9]+(\.[0-9]+){0,3})$")
+        .unwrap_or_else(|_| panic!("BUG: VERSION_RX failed to compile"))
+});
+
+/// MariaDB DB credentials for a WordPress install. Lives here (not in a
+/// shared crate) because the only place we shove these into wp-cli is
+/// from this adapter — keeping the struct co-located makes the adapter
+/// boundary obvious.
+#[derive(Debug, Clone)]
+pub struct WpDbCreds<'a> {
+    pub name: &'a str,
+    pub user: &'a str,
+    pub password: &'a str,
+    /// Typically `localhost` (Debian MariaDB unix socket).
+    pub host: &'a str,
+}
+
+/// Install WordPress into `htdocs` running as `user`.
+///
+/// Pipeline:
+///   1. `wp core download --locale --version --skip-content`
+///   2. `wp config create --dbname --dbuser --dbpass-from-stdin --dbhost --force`
+///   3. `wp core install --url --title --admin_user --admin_email
+///                       --prompt=admin_password`  (admin_password via stdin)
+///
+/// Both DB password and admin password go through stdin via wp-cli's
+/// `--prompt` mechanism so they never appear on argv (and thus never in
+/// `ps` output). Structural args (`locale`, `version`) are checked
+/// against tight regexes; the rest go through `Command::new().arg()`,
+/// which uses an argv array (no shell parsing), so shell metacharacters
+/// in titles/passwords are not a vector.
+///
+/// Returns the installed core version (`wp core version` output, trimmed).
+pub async fn install_wordpress(
+    user: &str,
+    htdocs: &str,
+    db: WpDbCreds<'_>,
+    req: &WpInstallRequest,
+) -> Result<String, AdapterError> {
+    if !LOCALE_RX.is_match(&req.locale) {
+        return Err(AdapterError::Other(format!(
+            "wp locale refused (not en_US-style): {}",
+            req.locale
+        )));
+    }
+    if !VERSION_RX.is_match(&req.version) {
+        return Err(AdapterError::Other(format!(
+            "wp version refused (not 'latest' / X.Y[.Z]): {}",
+            req.version
+        )));
+    }
+
+    // 1. wp core download
+    let locale_arg = format!("--locale={}", req.locale);
+    let version_arg = format!("--version={}", req.version);
+    let core_args: [&str; 6] = [
+        "core",
+        "download",
+        &locale_arg,
+        &version_arg,
+        "--skip-content",
+        "--force",
+    ];
+    let core_argv = build_argv(user, htdocs, &core_args);
+    cmd::run("/usr/bin/sudo", &core_argv).await?;
+
+    // 2. wp config create — pipe DB password via stdin (--prompt=dbpass).
+    let dbname_arg = format!("--dbname={}", db.name);
+    let dbuser_arg = format!("--dbuser={}", db.user);
+    let dbhost_arg = format!("--dbhost={}", db.host);
+    let config_args: [&str; 7] = [
+        "config",
+        "create",
+        &dbname_arg,
+        &dbuser_arg,
+        &dbhost_arg,
+        "--prompt=dbpass",
+        "--force",
+    ];
+    let config_argv = build_argv(user, htdocs, &config_args);
+    // wp-cli's --prompt reads "field: <value>\n" from stdin per missing arg.
+    // We provide a single line for dbpass.
+    let stdin = format!("{}\n", db.password);
+    cmd::run_with_stdin("/usr/bin/sudo", &config_argv, stdin.as_bytes()).await?;
+
+    // 3. wp core install — pipe admin password via stdin.
+    let url_arg = format!("--url={}", req.site_url);
+    let title_arg = format!("--title={}", req.title);
+    let admin_user_arg = format!("--admin_user={}", req.admin_user);
+    let admin_email_arg = format!("--admin_email={}", req.admin_email);
+    let install_args: [&str; 8] = [
+        "core",
+        "install",
+        &url_arg,
+        &title_arg,
+        &admin_user_arg,
+        &admin_email_arg,
+        "--prompt=admin_password",
+        "--skip-email",
+    ];
+    let install_argv = build_argv(user, htdocs, &install_args);
+    let stdin = format!("{}\n", req.admin_password);
+    cmd::run_with_stdin("/usr/bin/sudo", &install_argv, stdin.as_bytes()).await?;
+
+    // 4. What core version did we end up with?
+    let v_args: [&str; 2] = ["core", "version"];
+    let v_argv = build_argv(user, htdocs, &v_args);
+    let v = cmd::run("/usr/bin/sudo", &v_argv).await?;
+    Ok(v.trim().to_string())
 }
 
 #[cfg(test)]
@@ -110,5 +227,33 @@ mod tests {
                 "download"
             ]
         );
+    }
+
+    #[test]
+    fn locale_regex_accepts_standard_codes() {
+        for ok in ["en", "en_US", "cs_CZ", "sk_SK", "de", "pt_BR"] {
+            assert!(LOCALE_RX.is_match(ok), "should accept {ok}");
+        }
+    }
+
+    #[test]
+    fn locale_regex_refuses_garbage() {
+        for bad in ["", "EN_US", "en-US", "english", "cs_cz", "../etc/passwd"] {
+            assert!(!LOCALE_RX.is_match(bad), "should refuse {bad}");
+        }
+    }
+
+    #[test]
+    fn version_regex_accepts_latest_and_semver() {
+        for ok in ["latest", "6", "6.5", "6.5.3", "6.5.3.1"] {
+            assert!(VERSION_RX.is_match(ok), "should accept {ok}");
+        }
+    }
+
+    #[test]
+    fn version_regex_refuses_garbage() {
+        for bad in ["", "6.5;rm", "v6.5", "6.5-rc1", "$VERSION"] {
+            assert!(!VERSION_RX.is_match(bad), "should refuse {bad}");
+        }
     }
 }

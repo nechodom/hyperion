@@ -10,7 +10,7 @@ use hyperion_rpc::{AgentApi, AuditEntryWire, RpcError};
 use hyperion_types::{
     BackupRunWire, CertInfo, CertRenewResult, ExpiringHosting, HostingDetail, HostingExpiry,
     HostingLimits, HostingSummary, HostingUsageBucket, NodeInviteMint, NodeInviteSummary,
-    SuspendReason,
+    SuspendReason, WpInstallRequest, WpInstallStatus,
 };
 use hyperion_validate::Domain;
 use std::sync::Arc;
@@ -166,5 +166,20 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
 
     async fn cert_renew_all(&self) -> Result<Vec<CertRenewResult>, RpcError> {
         Ok(vec![])
+    }
+
+    async fn wp_install(
+        &self,
+        sel: HostingSelector,
+        req: WpInstallRequest,
+    ) -> Result<WpInstallStatus, RpcError> {
+        self.svc.install_wordpress(sel, req).await
+    }
+
+    async fn wp_status(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<Option<WpInstallStatus>, RpcError> {
+        self.svc.wp_status(sel).await
     }
 }

@@ -177,6 +177,14 @@ async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::CertRenewAll(v),
             Err(e) => Response::Error(e),
         },
+        Request::WpInstall { sel, req } => match api.wp_install(sel, req).await {
+            Ok(v) => Response::WpInstall(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::WpStatus { sel } => match api.wp_status(sel).await {
+            Ok(v) => Response::WpStatus(v),
+            Err(e) => Response::Error(e),
+        },
     }
 }
 
@@ -191,7 +199,7 @@ mod tests {
     use hyperion_types::{
         BackupRunWire, CertInfo, CertRenewResult, ExpiringHosting, HostingDetail, HostingExpiry,
         HostingLimits, HostingSummary, HostingUsageBucket, NodeInviteMint, NodeInviteSummary,
-        SuspendReason,
+        SuspendReason, WpInstallRequest, WpInstallStatus,
     };
     use hyperion_validate::Domain;
 
@@ -295,6 +303,19 @@ mod tests {
         }
         async fn cert_renew_all(&self) -> Result<Vec<CertRenewResult>, RpcError> {
             Ok(vec![])
+        }
+        async fn wp_install(
+            &self,
+            _: HostingSelector,
+            _: WpInstallRequest,
+        ) -> Result<WpInstallStatus, RpcError> {
+            Err(RpcError::Internal)
+        }
+        async fn wp_status(
+            &self,
+            _: HostingSelector,
+        ) -> Result<Option<WpInstallStatus>, RpcError> {
+            Ok(None)
         }
     }
 

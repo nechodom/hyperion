@@ -7,7 +7,9 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Form;
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
 use hyperion_rpc::wire::{DeleteOpts, HostingCreateReq, HostingCreated, HostingSelector};
-use hyperion_types::{DbProvision, HostingDetail, HostingSummary, PhpVersion};
+use hyperion_types::{
+    DbProvision, HostingDetail, HostingSummary, PhpVersion, WpInstallRequest, WpInstallStatus,
+};
 use hyperion_validate::{Domain, SystemUserName};
 use serde::Deserialize;
 use std::str::FromStr;
@@ -42,11 +44,15 @@ struct DetailTpl<'a> {
     username: &'a str,
     detail: HostingDetail,
     limits: hyperion_types::HostingLimits,
+    wp_status: Option<WpInstallStatus>,
     csrf_delete: String,
     csrf_suspend: String,
     csrf_resume: String,
     csrf_limits: String,
+    csrf_wp_install: String,
     error: Option<&'a str>,
+    wp_error: Option<String>,
+    wp_flash: Option<String>,
     just_created: Option<HostingCreated>,
 }
 
@@ -162,11 +168,15 @@ pub async fn post_create(
                 username: &ctx.username,
                 detail,
                 limits,
+                wp_status: None,
                 csrf_delete: csrf_token_for(&state, &ctx, "/hostings/delete"),
                 csrf_suspend: csrf_token_for(&state, &ctx, "/hostings/suspend"),
                 csrf_resume: csrf_token_for(&state, &ctx, "/hostings/resume"),
                 csrf_limits: csrf_token_for(&state, &ctx, "/hostings/set-limits"),
+                csrf_wp_install: csrf_token_for(&state, &ctx, "/hostings/wp/install"),
                 error: None,
+                wp_error: None,
+                wp_flash: None,
                 just_created: Some(created),
             };
             Ok(Html(tpl.render()?).into_response())
@@ -185,6 +195,7 @@ pub async fn get_detail(
     State(state): State<SharedState>,
     ctx: AuthCtx,
     Path(selector): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<DetailQuery>,
 ) -> Result<Response, AppError> {
     let sel = parse_selector(&selector)?;
     let resp = hyperion_rpc_client::call(&state.agent_socket, Request::HostingGet(sel)).await?;
@@ -197,21 +208,102 @@ pub async fn get_detail(
         _ => return Err(AppError::Internal("unexpected response".into())),
     };
     let sel_id = HostingSelector::Id(detail.id.clone());
-    let limits = fetch_limits(&state, sel_id)
+    let limits = fetch_limits(&state, sel_id.clone())
         .await
         .unwrap_or_else(|_| hyperion_types::HostingLimits::defaults());
+    let wp_status = fetch_wp_status(&state, sel_id).await.unwrap_or(None);
     let tpl = DetailTpl {
         username: &ctx.username,
         detail,
         limits,
+        wp_status,
         csrf_delete: csrf_token_for(&state, &ctx, "/hostings/delete"),
         csrf_suspend: csrf_token_for(&state, &ctx, "/hostings/suspend"),
         csrf_resume: csrf_token_for(&state, &ctx, "/hostings/resume"),
         csrf_limits: csrf_token_for(&state, &ctx, "/hostings/set-limits"),
+        csrf_wp_install: csrf_token_for(&state, &ctx, "/hostings/wp/install"),
         error: None,
+        wp_error: q.wp_error,
+        wp_flash: q.wp.map(|_| "WordPress install succeeded.".into()),
         just_created: None,
     };
     Ok(Html(tpl.render()?).into_response())
+}
+
+#[derive(Deserialize, Default)]
+pub struct DetailQuery {
+    /// Set to "installed" via the redirect after a successful WP install.
+    #[serde(default)]
+    pub wp: Option<String>,
+    /// Surface WP install failures back into the detail page.
+    #[serde(default)]
+    pub wp_error: Option<String>,
+}
+
+async fn fetch_wp_status(
+    state: &SharedState,
+    sel: HostingSelector,
+) -> Result<Option<WpInstallStatus>, AppError> {
+    let resp =
+        hyperion_rpc_client::call(&state.agent_socket, Request::WpStatus { sel }).await?;
+    match resp {
+        RpcResponse::WpStatus(s) => Ok(s),
+        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct WpInstallForm {
+    pub selector: String,
+    pub site_url: String,
+    pub title: String,
+    pub admin_user: String,
+    pub admin_email: String,
+    pub admin_password: String,
+    #[serde(default)]
+    pub locale: String,
+    #[serde(default)]
+    pub version: String,
+}
+
+pub async fn post_wp_install(
+    State(state): State<SharedState>,
+    Form(form): Form<WpInstallForm>,
+) -> Result<Response, AppError> {
+    let sel = parse_selector(&form.selector)?;
+    let locale = if form.locale.trim().is_empty() {
+        "en_US".to_string()
+    } else {
+        form.locale.trim().to_string()
+    };
+    let version = if form.version.trim().is_empty() {
+        "latest".to_string()
+    } else {
+        form.version.trim().to_string()
+    };
+    let req = WpInstallRequest {
+        site_url: form.site_url.trim().to_string(),
+        title: form.title.trim().to_string(),
+        admin_user: form.admin_user.trim().to_string(),
+        admin_email: form.admin_email.trim().to_string(),
+        admin_password: form.admin_password,
+        locale,
+        version,
+    };
+    let resp =
+        hyperion_rpc_client::call(&state.agent_socket, Request::WpInstall { sel, req }).await?;
+    let sel_url = urlencoding(&form.selector);
+    match resp {
+        RpcResponse::WpInstall(_) => {
+            Ok(Redirect::to(&format!("/hostings/{}?wp=installed", sel_url)).into_response())
+        }
+        RpcResponse::Error(e) => {
+            let msg = urlencoding(&e.to_string());
+            Ok(Redirect::to(&format!("/hostings/{}?wp_error={}", sel_url, msg)).into_response())
+        }
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
 }
 
 async fn fetch_limits(

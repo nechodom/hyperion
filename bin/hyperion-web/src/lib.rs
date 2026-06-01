@@ -28,6 +28,10 @@ pub fn build_router(state: SharedState) -> Router {
             "/hostings/set-limits",
             post(handlers::hostings::post_set_limits),
         )
+        .route(
+            "/hostings/wp/install",
+            post(handlers::hostings::post_wp_install),
+        )
         .route("/audit", get(handlers::audit::get_audit))
         .route("/install", get(handlers::install::get_install))
         .route("/install/invite", post(handlers::install::post_invite))

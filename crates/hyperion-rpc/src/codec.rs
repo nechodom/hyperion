@@ -10,7 +10,7 @@ use crate::{
 use hyperion_types::{
     BackupRunWire, CertInfo, CertRenewResult, ExpiringHosting, HostingDetail, HostingExpiry,
     HostingLimits, HostingSummary, HostingUsageBucket, NodeInviteMint, NodeInviteSummary,
-    SuspendReason,
+    SuspendReason, WpInstallRequest, WpInstallStatus,
 };
 use hyperion_validate::Domain;
 use serde::{Deserialize, Serialize};
@@ -75,6 +75,13 @@ pub enum Request {
         domain: Domain,
     },
     CertRenewAll,
+    WpInstall {
+        sel: HostingSelector,
+        req: WpInstallRequest,
+    },
+    WpStatus {
+        sel: HostingSelector,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -103,6 +110,8 @@ pub enum Response {
     AuditList(Vec<AuditEntryWire>),
     CertIssue(CertInfo),
     CertRenewAll(Vec<CertRenewResult>),
+    WpInstall(WpInstallStatus),
+    WpStatus(Option<WpInstallStatus>),
     Error(RpcError),
 }
 

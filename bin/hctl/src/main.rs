@@ -457,6 +457,19 @@ fn print_pretty(resp: &Response) {
                 println!("{} -> {:?}", r.domain, r.outcome);
             }
         }
+        Response::WpInstall(s) => {
+            println!("✓ WordPress installed");
+            println!("  site:    {}", s.site_url);
+            println!("  version: {}", s.wp_version);
+        }
+        Response::WpStatus(maybe) => match maybe {
+            Some(s) => {
+                println!("site:    {}", s.site_url);
+                println!("version: {}", s.wp_version);
+                println!("at:      {}", s.installed_at);
+            }
+            None => println!("(no WordPress install on this hosting)"),
+        },
         Response::Error(e) => {
             eprintln!("ERROR: {e}");
         }

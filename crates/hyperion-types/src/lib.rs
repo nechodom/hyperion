@@ -11,6 +11,7 @@ pub mod hosting;
 pub mod ids;
 pub mod limits;
 pub mod php;
+pub mod wp;
 
 pub use cert::{CertInfo, CertRenewOutcome, CertRenewResult};
 pub use db::{DbProvision, DbSummary};
@@ -21,6 +22,7 @@ pub use limits::{
     NodeInviteMint, NodeInviteSummary, OverBwPolicy, SuspendReason,
 };
 pub use php::PhpVersion;
+pub use wp::{WpInstallRequest, WpInstallStatus};
 
 /// Current Unix epoch seconds. Centralized so tests can replace it if needed.
 pub fn now_secs() -> i64 {

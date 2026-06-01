@@ -74,6 +74,14 @@ fi
 apt-get install -y -qq \
   php8.3-fpm php8.3-cli php8.3-mysql php8.3-pgsql
 
+# wp-cli — required for WordPress install requests dispatched from master.
+if [[ ! -x /usr/local/bin/wp ]]; then
+  log "Installing wp-cli ..."
+  curl -fsSL https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar \
+    -o /usr/local/bin/wp
+  chmod 0755 /usr/local/bin/wp
+fi
+
 #-------- 3. Rust ----------------------------------------------------------
 if ! command -v cargo >/dev/null 2>&1; then
   log "Installing Rust toolchain..."

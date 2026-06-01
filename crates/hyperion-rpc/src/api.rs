@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use hyperion_types::{
     BackupRunWire, CertInfo, CertRenewResult, ExpiringHosting, HostingDetail, HostingExpiry,
     HostingLimits, HostingSummary, HostingUsageBucket, NodeInviteMint, NodeInviteSummary,
-    SuspendReason,
+    SuspendReason, WpInstallRequest, WpInstallStatus,
 };
 use hyperion_validate::Domain;
 
@@ -71,4 +71,16 @@ pub trait AgentApi: Send + Sync + 'static {
 
     async fn cert_issue(&self, domain: Domain) -> Result<CertInfo, RpcError>;
     async fn cert_renew_all(&self) -> Result<Vec<CertRenewResult>, RpcError>;
+
+    /// Install WordPress into a hosting (downloads core, writes wp-config.php
+    /// against the hosting's DB credentials, runs `wp core install`, records
+    /// the result in `wp_installs`).
+    async fn wp_install(
+        &self,
+        sel: HostingSelector,
+        req: WpInstallRequest,
+    ) -> Result<WpInstallStatus, RpcError>;
+    /// Return the recorded WP install for a hosting, or `None` if no
+    /// install has been recorded.
+    async fn wp_status(&self, sel: HostingSelector) -> Result<Option<WpInstallStatus>, RpcError>;
 }

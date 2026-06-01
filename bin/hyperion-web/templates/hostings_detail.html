@@ -44,6 +44,8 @@
 </div>
 
 {% if let Some(e) = error %}<div class="flash error">{{ e }}</div>{% endif %}
+{% if let Some(m) = wp_flash %}<div class="flash success">✓ {{ m }}</div>{% endif %}
+{% if let Some(e) = wp_error %}<div class="flash error">WordPress install failed: {{ e }}</div>{% endif %}
 
 <div class="card">
   <h2>Overview</h2>
@@ -137,6 +139,71 @@
     </div>
     <button class="btn primary" type="submit">Save limits</button>
   </form>
+</div>
+
+<div class="card">
+  <h2>WordPress</h2>
+  {% if let Some(wp) = wp_status %}
+    <dl class="kv">
+      <dt>Site URL</dt><dd><a href="{{ wp.site_url }}" target="_blank">{{ wp.site_url }}</a></dd>
+      <dt>WP version</dt><dd><code>{{ wp.wp_version }}</code></dd>
+      <dt>Installed</dt><dd class="muted">{{ wp.installed_at }}</dd>
+    </dl>
+    <p class="muted">A WordPress install already exists. To reinstall, drop the
+    row from <code>wp_installs</code> and clear the DB tables first.</p>
+  {% else if detail.database.is_none() %}
+    <p class="muted">This hosting has no database. WordPress needs MariaDB —
+    delete and recreate the hosting with <code>--db mariadb</code> first.</p>
+  {% else if detail.state.as_str() != "active" %}
+    <p class="muted">Hosting must be <b>active</b> before installing WordPress
+    (current state: <code>{{ detail.state.as_str() }}</code>).</p>
+  {% else %}
+    <form method="post" action="/hostings/wp/install" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_wp_install }}">
+      <input type="hidden" name="selector" value="{{ detail.domain }}">
+      <div class="field-row">
+        <div class="field">
+          <label for="wp_site_url">Site URL</label>
+          <input id="wp_site_url" name="site_url" type="url" required
+                 value="https://{{ detail.domain }}">
+        </div>
+        <div class="field">
+          <label for="wp_title">Site title</label>
+          <input id="wp_title" name="title" type="text" required
+                 value="{{ detail.domain }}">
+        </div>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label for="wp_admin_user">Admin username</label>
+          <input id="wp_admin_user" name="admin_user" type="text" required
+                 value="admin" pattern="[a-zA-Z0-9_]+">
+        </div>
+        <div class="field">
+          <label for="wp_admin_email">Admin email</label>
+          <input id="wp_admin_email" name="admin_email" type="email" required>
+        </div>
+      </div>
+      <div class="field">
+        <label for="wp_admin_password">Admin password</label>
+        <input id="wp_admin_password" name="admin_password" type="password" required
+               minlength="8" autocomplete="new-password">
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label for="wp_locale">Locale</label>
+          <input id="wp_locale" name="locale" type="text" value="en_US"
+                 pattern="[a-z]{2,3}(_[A-Z]{2})?" placeholder="en_US / cs_CZ / …">
+        </div>
+        <div class="field">
+          <label for="wp_version">WordPress version</label>
+          <input id="wp_version" name="version" type="text" value="latest"
+                 placeholder="latest or 6.5.3">
+        </div>
+      </div>
+      <button class="btn primary" type="submit">Install WordPress</button>
+    </form>
+  {% endif %}
 </div>
 
 <div class="card muted">

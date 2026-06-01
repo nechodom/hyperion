@@ -115,6 +115,18 @@ impl hyperion_core::AdapterPort for StubAdapters {
     async fn kill_user_procs(&self, _: &str) -> Result<(), AdapterError> {
         Ok(())
     }
+    async fn wp_install_run(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &hyperion_types::WpInstallRequest,
+    ) -> Result<String, AdapterError> {
+        Ok("6.5.3".into())
+    }
 }
 
 async fn start_agent() -> (std::path::PathBuf, tempfile::TempDir) {
