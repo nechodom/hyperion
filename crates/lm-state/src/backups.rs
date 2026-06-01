@@ -135,10 +135,7 @@ pub async fn list_for(
         .collect())
 }
 
-pub async fn list_all(
-    pool: &SqlitePool,
-    limit: i64,
-) -> Result<Vec<BackupRun>, StateError> {
+pub async fn list_all(pool: &SqlitePool, limit: i64) -> Result<Vec<BackupRun>, StateError> {
     let rows: Vec<(
         i64,
         String,
@@ -210,14 +207,24 @@ mod tests {
         let pool = open_memory().await.expect("open");
         let id = fixture(&pool).await;
         let run = start(&pool, &id, "local", 100).await.expect("start");
-        mark_ok(&pool, run, "/var/backups/ex.tar.gz", Some("/var/backups/ex.sql"), 1024, 200)
-            .await
-            .expect("ok");
+        mark_ok(
+            &pool,
+            run,
+            "/var/backups/ex.tar.gz",
+            Some("/var/backups/ex.sql"),
+            1024,
+            200,
+        )
+        .await
+        .expect("ok");
         let rows = list_for(&pool, &id, 10).await.expect("list");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].state, "ok");
         assert_eq!(rows[0].bytes_total, 1024);
-        assert_eq!(rows[0].archive_path.as_deref(), Some("/var/backups/ex.tar.gz"));
+        assert_eq!(
+            rows[0].archive_path.as_deref(),
+            Some("/var/backups/ex.tar.gz")
+        );
     }
 
     #[tokio::test]

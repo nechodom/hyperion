@@ -30,15 +30,29 @@ pub struct PackCoreSpec {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum PackPlugin {
-    Repo { from_repo: String, activate: bool },
-    Asset { asset_id: String, filename: String, activate: bool },
+    Repo {
+        from_repo: String,
+        activate: bool,
+    },
+    Asset {
+        asset_id: String,
+        filename: String,
+        activate: bool,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(untagged)]
 pub enum PackTheme {
-    Repo { from_repo: String, activate: bool },
-    Asset { asset_id: String, filename: String, activate: bool },
+    Repo {
+        from_repo: String,
+        activate: bool,
+    },
+    Asset {
+        asset_id: String,
+        filename: String,
+        activate: bool,
+    },
 }
 
 /// Stable content hash of a manifest. Used so that re-applying an unchanged
@@ -87,40 +101,25 @@ pub async fn get_pack_by_name(
     pool: &SqlitePool,
     name: &str,
 ) -> Result<Option<PackRow>, StateError> {
-    let row: Option<(i64, String, String, Option<String>, String, String, i64, i64)> =
-        sqlx::query_as(
-            "SELECT id, name, kind, description, manifest_json, content_hash, created_at, disabled
+    let row: Option<(
+        i64,
+        String,
+        String,
+        Option<String>,
+        String,
+        String,
+        i64,
+        i64,
+    )> = sqlx::query_as(
+        "SELECT id, name, kind, description, manifest_json, content_hash, created_at, disabled
              FROM app_packs WHERE name = ?",
-        )
-        .bind(name)
-        .fetch_optional(pool)
-        .await?;
+    )
+    .bind(name)
+    .fetch_optional(pool)
+    .await?;
     Ok(row.map(
-        |(id, name, kind, description, manifest_json, content_hash, created_at, disabled)| PackRow {
-            id,
-            name,
-            kind,
-            description,
-            manifest_json,
-            content_hash,
-            created_at,
-            disabled: disabled != 0,
-        },
-    ))
-}
-
-pub async fn list_packs(pool: &SqlitePool) -> Result<Vec<PackRow>, StateError> {
-    let rows: Vec<(i64, String, String, Option<String>, String, String, i64, i64)> =
-        sqlx::query_as(
-            "SELECT id, name, kind, description, manifest_json, content_hash, created_at, disabled
-             FROM app_packs ORDER BY name",
-        )
-        .fetch_all(pool)
-        .await?;
-    Ok(rows
-        .into_iter()
-        .map(
-            |(id, name, kind, description, manifest_json, content_hash, created_at, disabled)| PackRow {
+        |(id, name, kind, description, manifest_json, content_hash, created_at, disabled)| {
+            PackRow {
                 id,
                 name,
                 kind,
@@ -129,6 +128,41 @@ pub async fn list_packs(pool: &SqlitePool) -> Result<Vec<PackRow>, StateError> {
                 content_hash,
                 created_at,
                 disabled: disabled != 0,
+            }
+        },
+    ))
+}
+
+pub async fn list_packs(pool: &SqlitePool) -> Result<Vec<PackRow>, StateError> {
+    let rows: Vec<(
+        i64,
+        String,
+        String,
+        Option<String>,
+        String,
+        String,
+        i64,
+        i64,
+    )> = sqlx::query_as(
+        "SELECT id, name, kind, description, manifest_json, content_hash, created_at, disabled
+             FROM app_packs ORDER BY name",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(id, name, kind, description, manifest_json, content_hash, created_at, disabled)| {
+                PackRow {
+                    id,
+                    name,
+                    kind,
+                    description,
+                    manifest_json,
+                    content_hash,
+                    created_at,
+                    disabled: disabled != 0,
+                }
             },
         )
         .collect())
@@ -187,7 +221,16 @@ pub async fn get_install(
     .fetch_optional(pool)
     .await?;
     Ok(row.map(
-        |(hosting_id, site_url, wp_version, installed_at, last_pack_hash, core, plugins, themes)| {
+        |(
+            hosting_id,
+            site_url,
+            wp_version,
+            installed_at,
+            last_pack_hash,
+            core,
+            plugins,
+            themes,
+        )| {
             WpInstallRow {
                 hosting_id: HostingId(hosting_id),
                 site_url,
@@ -248,7 +291,10 @@ mod tests {
         assert_eq!(m.wp_core.version, "latest");
         assert_eq!(m.plugins.len(), 2);
         match &m.plugins[0] {
-            PackPlugin::Repo { from_repo, activate } => {
+            PackPlugin::Repo {
+                from_repo,
+                activate,
+            } => {
                 assert_eq!(from_repo, "akismet");
                 assert!(*activate);
             }
@@ -302,7 +348,10 @@ mod tests {
         record_install(&pool, &id, "https://example.cz", "6.5.3", "hash2", 200)
             .await
             .expect("update");
-        let got = get_install(&pool, &id).await.expect("get").expect("present");
+        let got = get_install(&pool, &id)
+            .await
+            .expect("get")
+            .expect("present");
         assert_eq!(got.wp_version, "6.5.3");
         assert_eq!(got.last_pack_hash, "hash2");
     }

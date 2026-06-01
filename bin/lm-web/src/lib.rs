@@ -24,7 +24,10 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/hostings/delete", post(handlers::hostings::post_delete))
         .route("/hostings/suspend", post(handlers::hostings::post_suspend))
         .route("/hostings/resume", post(handlers::hostings::post_resume))
-        .route("/hostings/set-limits", post(handlers::hostings::post_set_limits))
+        .route(
+            "/hostings/set-limits",
+            post(handlers::hostings::post_set_limits),
+        )
         .route("/audit", get(handlers::audit::get_audit))
         .route("/hostings/:selector", get(handlers::hostings::get_detail))
         .route("/logout", post(handlers::login::post_logout))

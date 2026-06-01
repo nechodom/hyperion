@@ -149,12 +149,11 @@ pub enum PortPoolError {
 /// Pop the lowest free port and mark it used. Atomic via `UPDATE ... WHERE`.
 pub async fn allocate_port(pool: &SqlitePool) -> Result<u16, PortPoolError> {
     let mut tx = pool.begin().await.map_err(StateError::from)?;
-    let row: Option<(i64,)> = sqlx::query_as(
-        "SELECT port FROM port_pool WHERE used = 0 ORDER BY port LIMIT 1",
-    )
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(StateError::from)?;
+    let row: Option<(i64,)> =
+        sqlx::query_as("SELECT port FROM port_pool WHERE used = 0 ORDER BY port LIMIT 1")
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(StateError::from)?;
     let port = match row {
         Some((p,)) => p,
         None => return Err(PortPoolError::Exhausted),

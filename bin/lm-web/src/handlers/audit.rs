@@ -32,8 +32,7 @@ pub async fn get_audit(
     Query(q): Query<AuditQuery>,
 ) -> Result<Response, AppError> {
     let limit = q.limit.clamp(1, 1000);
-    let resp = lm_rpc_client::call(&state.agent_socket, Request::AuditList { limit })
-        .await?;
+    let resp = lm_rpc_client::call(&state.agent_socket, Request::AuditList { limit }).await?;
     let rows = match resp {
         RpcResponse::AuditList(v) => v,
         RpcResponse::Error(e) => return Err(AppError::Rpc(e.to_string())),

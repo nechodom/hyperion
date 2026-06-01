@@ -85,11 +85,7 @@ impl lm_core::AdapterPort for StubAdapters {
     async fn nginx_delete_vhost(&self, _: &str) -> Result<(), AdapterError> {
         Ok(())
     }
-    async fn nginx_apply_suspended(
-        &self,
-        _: &str,
-        _: Option<String>,
-    ) -> Result<(), AdapterError> {
+    async fn nginx_apply_suspended(&self, _: &str, _: Option<String>) -> Result<(), AdapterError> {
         Ok(())
     }
     async fn apply_php_limits(

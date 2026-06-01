@@ -172,10 +172,7 @@ pub struct SuspensionRow {
     pub custom_page_html: Option<String>,
 }
 
-pub async fn insert_suspension(
-    pool: &SqlitePool,
-    row: &SuspensionRow,
-) -> Result<(), StateError> {
+pub async fn insert_suspension(pool: &SqlitePool, row: &SuspensionRow) -> Result<(), StateError> {
     sqlx::query(
         r#"INSERT INTO hosting_suspension
            (hosting_id, suspended_at, suspended_by, reason_message, custom_page_html)
@@ -207,21 +204,16 @@ pub async fn get_suspension(
     .bind(id.as_str())
     .fetch_optional(pool)
     .await?;
-    Ok(row.map(
-        |(hosting_id, ts, by, msg, html)| SuspensionRow {
-            hosting_id: HostingId(hosting_id),
-            suspended_at: ts,
-            suspended_by: by,
-            reason_message: msg,
-            custom_page_html: html,
-        },
-    ))
+    Ok(row.map(|(hosting_id, ts, by, msg, html)| SuspensionRow {
+        hosting_id: HostingId(hosting_id),
+        suspended_at: ts,
+        suspended_by: by,
+        reason_message: msg,
+        custom_page_html: html,
+    }))
 }
 
-pub async fn delete_suspension(
-    pool: &SqlitePool,
-    id: &HostingId,
-) -> Result<(), StateError> {
+pub async fn delete_suspension(pool: &SqlitePool, id: &HostingId) -> Result<(), StateError> {
     sqlx::query("DELETE FROM hosting_suspension WHERE hosting_id = ?")
         .bind(id.as_str())
         .execute(pool)
@@ -242,10 +234,7 @@ pub struct UsageBucket {
     pub php_requests: i64,
 }
 
-pub async fn upsert_usage(
-    pool: &SqlitePool,
-    bucket: &UsageBucket,
-) -> Result<(), StateError> {
+pub async fn upsert_usage(pool: &SqlitePool, bucket: &UsageBucket) -> Result<(), StateError> {
     sqlx::query(
         r#"INSERT INTO hosting_usage
            (hosting_id, period, disk_used_bytes, inodes_used, bw_in_bytes, bw_out_bytes, php_requests)
@@ -285,8 +274,8 @@ pub async fn usage_for(
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(hosting_id, period, disk, inodes, bw_in, bw_out, php)| {
-            UsageBucket {
+        .map(
+            |(hosting_id, period, disk, inodes, bw_in, bw_out, php)| UsageBucket {
                 hosting_id: HostingId(hosting_id),
                 period,
                 disk_used_bytes: disk,
@@ -294,8 +283,8 @@ pub async fn usage_for(
                 bw_in_bytes: bw_in,
                 bw_out_bytes: bw_out,
                 php_requests: php,
-            }
-        })
+            },
+        )
         .collect())
 }
 

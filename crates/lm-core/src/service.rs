@@ -78,16 +78,8 @@ pub trait AdapterPort: Send + Sync {
     ) -> Result<(), AdapterError>;
 
     /// Lock the DB user/role so the hosting cannot reach its database.
-    async fn db_lock(
-        &self,
-        engine: DbProvision,
-        db_user: &str,
-    ) -> Result<(), AdapterError>;
-    async fn db_unlock(
-        &self,
-        engine: DbProvision,
-        db_user: &str,
-    ) -> Result<(), AdapterError>;
+    async fn db_lock(&self, engine: DbProvision, db_user: &str) -> Result<(), AdapterError>;
+    async fn db_unlock(&self, engine: DbProvision, db_user: &str) -> Result<(), AdapterError>;
 
     /// `usermod -L` / `-U` and shell swap to /usr/sbin/nologin.
     async fn linux_lock_login(&self, name: &str) -> Result<(), AdapterError>;
@@ -535,7 +527,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let row = lm_state::limits::get(&self.pool, &detail.id)
             .await
             .map_err(|e| RpcError::Internal_with(format!("limits get: {e}")))?;
-        Ok(row.map(row_to_limits).unwrap_or_else(lm_types::HostingLimits::defaults))
+        Ok(row
+            .map(row_to_limits)
+            .unwrap_or_else(lm_types::HostingLimits::defaults))
     }
 
     /// Best-effort suspend. State row goes to 'suspended'; cascading effects
@@ -632,13 +626,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         lm_state::limits::delete_suspension(&self.pool, &detail.id)
             .await
             .map_err(|e| RpcError::Internal_with(format!("delete suspension: {e}")))?;
-        self.append_audit(
-            "hosting.resume",
-            Some(detail.id.as_str()),
-            "{}",
-            "ok",
-        )
-        .await;
+        self.append_audit("hosting.resume", Some(detail.id.as_str()), "{}", "ok")
+            .await;
         Ok(())
     }
 
@@ -697,7 +686,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .await
             .map_err(|e| RpcError::Internal_with(format!("cancel: {e}")))?;
         if let Some(exp) = expiry.expires_at {
-            self.reschedule_actions_for(&detail.id, exp, grace, &offsets).await?;
+            self.reschedule_actions_for(&detail.id, exp, grace, &offsets)
+                .await?;
         }
         self.append_audit(
             "hosting.set_expiry",
@@ -735,20 +725,21 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     pub async fn clear_expiry(&self, sel: HostingSelector) -> Result<(), RpcError> {
         let detail = self.get(sel).await?;
         lm_state::scheduler::set_expiry(
-            &self.pool, &detail.id, None, None, 30, "30,7,1", now_secs(),
+            &self.pool,
+            &detail.id,
+            None,
+            None,
+            30,
+            "30,7,1",
+            now_secs(),
         )
         .await
         .map_err(|e| RpcError::Internal_with(format!("clear: {e}")))?;
         lm_state::scheduler::cancel_for_hosting(&self.pool, &detail.id)
             .await
             .map_err(|e| RpcError::Internal_with(format!("cancel: {e}")))?;
-        self.append_audit(
-            "hosting.clear_expiry",
-            Some(detail.id.as_str()),
-            "{}",
-            "ok",
-        )
-        .await;
+        self.append_audit("hosting.clear_expiry", Some(detail.id.as_str()), "{}", "ok")
+            .await;
         Ok(())
     }
 
@@ -807,14 +798,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 }
                 Err(e) => {
                     tracing::warn!(action_id=action.id, error=%e, "scheduled action failed");
-                    lm_state::scheduler::mark_failed_or_retry(
-                        &self.pool,
-                        action.id,
-                        &e,
-                        3,
-                    )
-                    .await
-                    .map_err(|e| RpcError::Internal_with(format!("mark_failed: {e}")))?;
+                    lm_state::scheduler::mark_failed_or_retry(&self.pool, action.id, &e, 3)
+                        .await
+                        .map_err(|e| RpcError::Internal_with(format!("mark_failed: {e}")))?;
                 }
             }
             processed += 1;
@@ -911,10 +897,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(())
     }
 
-    async fn run_action(
-        &self,
-        action: &lm_state::scheduler::ScheduledRow,
-    ) -> Result<(), String> {
+    async fn run_action(&self, action: &lm_state::scheduler::ScheduledRow) -> Result<(), String> {
         use lm_state::scheduler::ScheduledKind;
         match action.action {
             ScheduledKind::Notify30d | ScheduledKind::Notify7d | ScheduledKind::Notify1d => {
@@ -938,14 +921,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .await;
                 Ok(())
             }
-            ScheduledKind::SuspendExpired => {
-                self.suspend(
+            ScheduledKind::SuspendExpired => self
+                .suspend(
                     HostingSelector::Id(action.hosting_id.clone()),
                     lm_types::SuspendReason::Expired,
                 )
                 .await
-                .map_err(|e| e.to_string())
-            }
+                .map_err(|e| e.to_string()),
             ScheduledKind::DeleteExpired => self
                 .delete(
                     HostingSelector::Id(action.hosting_id.clone()),
@@ -982,13 +964,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             let host_root = std::path::PathBuf::from(&self.paths.home_root)
                 .join(&detail.system_user)
                 .join(&detail.domain);
-            let archive_bytes = lm_adapters::backup::make_archive(
-                &host_root,
-                "htdocs",
-                &archive_path,
-            )
-            .await
-            .map_err(|e| format!("archive: {e}"))?;
+            let archive_bytes =
+                lm_adapters::backup::make_archive(&host_root, "htdocs", &archive_path)
+                    .await
+                    .map_err(|e| format!("archive: {e}"))?;
             // 2. Optional DB dump.
             let dump_bytes = if let (Some(db), Some(dump_p)) =
                 (detail.database.as_ref(), db_dump_path.as_ref())
@@ -1022,8 +1001,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 started_at: ts,
                 schema_version: 1,
             };
-            let manifest_path =
-                archive_dir.join(format!("{}-{}.manifest.json", detail.domain, ts));
+            let manifest_path = archive_dir.join(format!("{}-{}.manifest.json", detail.domain, ts));
             lm_adapters::backup::write_manifest(&manifest, &manifest_path)
                 .await
                 .map_err(|e| format!("manifest: {e}"))?;
@@ -1034,9 +1012,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         match result {
             Ok((archive_bytes, dump_bytes)) => {
                 let total = archive_bytes as i64 + dump_bytes.unwrap_or(0) as i64;
-                let dump_str = db_dump_path
-                    .as_ref()
-                    .map(|p| p.display().to_string());
+                let dump_str = db_dump_path.as_ref().map(|p| p.display().to_string());
                 lm_state::backups::mark_ok(
                     &self.pool,
                     run_id,
@@ -1079,17 +1055,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         limit: i64,
     ) -> Result<Vec<lm_types::BackupRunWire>, RpcError> {
         let detail = self.get(sel).await?;
-        let rows =
-            lm_state::backups::list_for(&self.pool, &detail.id, limit.max(1).min(500))
-                .await
-                .map_err(|e| RpcError::Internal_with(format!("list: {e}")))?;
+        let rows = lm_state::backups::list_for(&self.pool, &detail.id, limit.max(1).min(500))
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("list: {e}")))?;
         Ok(rows.into_iter().map(run_to_wire).collect())
     }
 
-    pub async fn audit_list(
-        &self,
-        limit: i64,
-    ) -> Result<Vec<lm_rpc::AuditEntryWire>, RpcError> {
+    pub async fn audit_list(&self, limit: i64) -> Result<Vec<lm_rpc::AuditEntryWire>, RpcError> {
         let rows = lm_state::audit::list(&self.pool, limit.max(1).min(1000))
             .await
             .map_err(|e| RpcError::Internal_with(format!("audit list: {e}")))?;
@@ -1610,14 +1582,9 @@ mod tests {
         let s = svc(pool.clone(), suspend_mocks());
         let created = s.create(req("ex.cz")).await.expect("create");
         // Force into 'deleting' directly.
-        lm_state::hostings::set_state(
-            &pool,
-            &created.id,
-            HostingState::Deleting,
-            now_secs(),
-        )
-        .await
-        .expect("set");
+        lm_state::hostings::set_state(&pool, &created.id, HostingState::Deleting, now_secs())
+            .await
+            .expect("set");
         let sel = HostingSelector::Id(created.id.clone());
         let r = s
             .suspend(sel, lm_types::SuspendReason::Manual { message: None })

@@ -270,17 +270,12 @@ pub async fn post_suspend(
             Some(form.reason.trim().to_string())
         },
     };
-    let resp = lm_rpc_client::call(
-        &state.agent_socket,
-        Request::HostingSuspend { sel, reason },
-    )
-    .await?;
+    let resp =
+        lm_rpc_client::call(&state.agent_socket, Request::HostingSuspend { sel, reason }).await?;
     match resp {
-        RpcResponse::HostingSuspend => Ok(Redirect::to(&format!(
-            "/hostings/{}",
-            urlencoding(&form.selector)
-        ))
-        .into_response()),
+        RpcResponse::HostingSuspend => {
+            Ok(Redirect::to(&format!("/hostings/{}", urlencoding(&form.selector))).into_response())
+        }
         RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
@@ -298,11 +293,9 @@ pub async fn post_resume(
     let sel = parse_selector(&form.selector)?;
     let resp = lm_rpc_client::call(&state.agent_socket, Request::HostingResume(sel)).await?;
     match resp {
-        RpcResponse::HostingResume => Ok(Redirect::to(&format!(
-            "/hostings/{}",
-            urlencoding(&form.selector)
-        ))
-        .into_response()),
+        RpcResponse::HostingResume => {
+            Ok(Redirect::to(&format!("/hostings/{}", urlencoding(&form.selector))).into_response())
+        }
         RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
@@ -345,18 +338,13 @@ pub async fn post_set_limits(
     }
     let resp = lm_rpc_client::call(
         &state.agent_socket,
-        Request::HostingSetLimits {
-            sel,
-            limits: l,
-        },
+        Request::HostingSetLimits { sel, limits: l },
     )
     .await?;
     match resp {
-        RpcResponse::HostingSetLimits(_) => Ok(Redirect::to(&format!(
-            "/hostings/{}",
-            urlencoding(&form.selector)
-        ))
-        .into_response()),
+        RpcResponse::HostingSetLimits(_) => {
+            Ok(Redirect::to(&format!("/hostings/{}", urlencoding(&form.selector))).into_response())
+        }
         RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
         _ => Err(AppError::Internal("unexpected response".into())),
     }

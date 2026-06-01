@@ -110,10 +110,7 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.set_expiry(sel, expiry).await
     }
 
-    async fn hosting_get_expiry(
-        &self,
-        sel: HostingSelector,
-    ) -> Result<HostingExpiry, RpcError> {
+    async fn hosting_get_expiry(&self, sel: HostingSelector) -> Result<HostingExpiry, RpcError> {
         self.svc.get_expiry(sel).await
     }
 

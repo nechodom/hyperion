@@ -131,11 +131,7 @@ pub async fn pending_due(
     Ok(out)
 }
 
-pub async fn mark_running(
-    pool: &SqlitePool,
-    id: i64,
-    now: i64,
-) -> Result<(), StateError> {
+pub async fn mark_running(pool: &SqlitePool, id: i64, now: i64) -> Result<(), StateError> {
     sqlx::query(
         "UPDATE scheduled_actions
          SET state='running', last_attempt_at=?, attempts=attempts+1
@@ -291,9 +287,17 @@ mod tests {
     async fn set_expiry_writes_columns() {
         let pool = open_memory().await.expect("open");
         let id = fixture(&pool).await;
-        set_expiry(&pool, &id, Some(1_900_000_000), Some("k@x.cz"), 14, "30,7", 100)
-            .await
-            .expect("set");
+        set_expiry(
+            &pool,
+            &id,
+            Some(1_900_000_000),
+            Some("k@x.cz"),
+            14,
+            "30,7",
+            100,
+        )
+        .await
+        .expect("set");
         let row = get_expiry(&pool, &id).await.expect("get").expect("present");
         assert_eq!(row.expires_at, Some(1_900_000_000));
         assert_eq!(row.owner_email.as_deref(), Some("k@x.cz"));

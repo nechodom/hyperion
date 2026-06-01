@@ -216,8 +216,8 @@ impl AdapterPort for RealAdapter {
     ) -> Result<(), AdapterError> {
         let cert_path = format!("{}/{}/fullchain.pem", self.certs_root.display(), domain);
         let key_path = format!("{}/{}/privkey.pem", self.certs_root.display(), domain);
-        let msg = reason_message
-            .unwrap_or_else(|| "This site is temporarily unavailable.".to_string());
+        let msg =
+            reason_message.unwrap_or_else(|| "This site is temporarily unavailable.".to_string());
         let input = lm_adapters::nginx::SuspendedInput {
             domain,
             cert_path: &cert_path,
@@ -249,22 +249,14 @@ impl AdapterPort for RealAdapter {
         Ok(())
     }
 
-    async fn db_lock(
-        &self,
-        engine: DbProvision,
-        db_user: &str,
-    ) -> Result<(), AdapterError> {
+    async fn db_lock(&self, engine: DbProvision, db_user: &str) -> Result<(), AdapterError> {
         match engine {
             DbProvision::MariaDB => lm_adapters::mariadb::lock_user(db_user).await,
             DbProvision::Postgres => lm_adapters::postgres::lock_role(db_user).await,
         }
     }
 
-    async fn db_unlock(
-        &self,
-        engine: DbProvision,
-        db_user: &str,
-    ) -> Result<(), AdapterError> {
+    async fn db_unlock(&self, engine: DbProvision, db_user: &str) -> Result<(), AdapterError> {
         match engine {
             DbProvision::MariaDB => lm_adapters::mariadb::unlock_user(db_user).await,
             DbProvision::Postgres => lm_adapters::postgres::unlock_role(db_user).await,

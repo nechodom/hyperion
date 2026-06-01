@@ -51,13 +51,7 @@ pub async fn make_archive(
     let source_root_str = source_root.display().to_string();
     cmd::run(
         "/usr/bin/tar",
-        &[
-            "-czf",
-            &archive_str,
-            "-C",
-            &source_root_str,
-            source_subdir,
-        ],
+        &["-czf", &archive_str, "-C", &source_root_str, source_subdir],
     )
     .await?;
     let meta = tokio::fs::metadata(archive_path).await?;
@@ -103,13 +97,7 @@ pub async fn dump_postgres(db_name: &str, path: &Path) -> Result<u64, AdapterErr
         }
     }
     let out = tokio::process::Command::new("/usr/bin/sudo")
-        .args([
-            "-u",
-            "postgres",
-            "/usr/bin/pg_dump",
-            "-Fc",
-            db_name,
-        ])
+        .args(["-u", "postgres", "/usr/bin/pg_dump", "-Fc", db_name])
         .output()
         .await?;
     if !out.status.success() {
@@ -126,10 +114,7 @@ pub async fn dump_postgres(db_name: &str, path: &Path) -> Result<u64, AdapterErr
 }
 
 /// Write the manifest JSON.
-pub async fn write_manifest(
-    manifest: &BackupManifest,
-    path: &Path,
-) -> Result<(), AdapterError> {
+pub async fn write_manifest(manifest: &BackupManifest, path: &Path) -> Result<(), AdapterError> {
     let bytes = serde_json::to_vec_pretty(manifest)
         .map_err(|e| AdapterError::Other(format!("manifest serialize: {e}")))?;
     crate::fs::atomic_write(path, &bytes, 0o600).await
@@ -173,12 +158,9 @@ mod tests {
         let d = tempfile::tempdir().expect("dir");
         let root = d.path().join("source");
         std::fs::create_dir_all(root.join("htdocs")).expect("mkdir");
-        std::fs::write(root.join("htdocs/index.php"), b"<?php echo 'hi';")
-            .expect("write");
+        std::fs::write(root.join("htdocs/index.php"), b"<?php echo 'hi';").expect("write");
         let archive = d.path().join("out.tar.gz");
-        let bytes = make_archive(&root, "htdocs", &archive)
-            .await
-            .expect("tar");
+        let bytes = make_archive(&root, "htdocs", &archive).await.expect("tar");
         assert!(archive.exists());
         assert!(bytes > 0, "non-empty archive");
         let head = std::fs::read(&archive).expect("read")[..2].to_vec();

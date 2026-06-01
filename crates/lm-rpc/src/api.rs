@@ -16,27 +16,17 @@ use lm_validate::Domain;
 pub trait AgentApi: Send + Sync + 'static {
     async fn agent_info(&self) -> Result<AgentInfo, RpcError>;
 
-    async fn hosting_create(
-        &self,
-        req: HostingCreateReq,
-    ) -> Result<HostingCreated, RpcError>;
+    async fn hosting_create(&self, req: HostingCreateReq) -> Result<HostingCreated, RpcError>;
     async fn hosting_list(&self) -> Result<Vec<HostingSummary>, RpcError>;
     async fn hosting_get(&self, sel: HostingSelector) -> Result<HostingDetail, RpcError>;
-    async fn hosting_delete(
-        &self,
-        sel: HostingSelector,
-        opts: DeleteOpts,
-    ) -> Result<(), RpcError>;
+    async fn hosting_delete(&self, sel: HostingSelector, opts: DeleteOpts) -> Result<(), RpcError>;
 
     async fn hosting_set_limits(
         &self,
         sel: HostingSelector,
         limits: HostingLimits,
     ) -> Result<HostingLimits, RpcError>;
-    async fn hosting_get_limits(
-        &self,
-        sel: HostingSelector,
-    ) -> Result<HostingLimits, RpcError>;
+    async fn hosting_get_limits(&self, sel: HostingSelector) -> Result<HostingLimits, RpcError>;
     async fn hosting_suspend(
         &self,
         sel: HostingSelector,
@@ -56,14 +46,8 @@ pub trait AgentApi: Send + Sync + 'static {
         sel: HostingSelector,
         expiry: HostingExpiry,
     ) -> Result<HostingExpiry, RpcError>;
-    async fn hosting_get_expiry(
-        &self,
-        sel: HostingSelector,
-    ) -> Result<HostingExpiry, RpcError>;
-    async fn hosting_clear_expiry(
-        &self,
-        sel: HostingSelector,
-    ) -> Result<(), RpcError>;
+    async fn hosting_get_expiry(&self, sel: HostingSelector) -> Result<HostingExpiry, RpcError>;
+    async fn hosting_clear_expiry(&self, sel: HostingSelector) -> Result<(), RpcError>;
     async fn upcoming_expiries(
         &self,
         within_seconds: i64,

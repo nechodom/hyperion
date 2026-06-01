@@ -13,9 +13,8 @@ static SAFE_ARG: Lazy<Regex> = Lazy::new(|| {
     // Conservative whitelist for wp-cli arguments. Used to refuse anything
     // that could plausibly be shell or argument-injection (e.g. spaces are
     // allowed, but only via the per-arg Command::arg, never concatenated).
-    Regex::new(r"^[a-zA-Z0-9 _.\-/:%@=,]+$").unwrap_or_else(|_| {
-        panic!("BUG: SAFE_ARG regex failed to compile")
-    })
+    Regex::new(r"^[a-zA-Z0-9 _.\-/:%@=,]+$")
+        .unwrap_or_else(|_| panic!("BUG: SAFE_ARG regex failed to compile"))
 });
 
 /// Refuse to run a wp-cli command whose arguments contain shell metacharacters.
@@ -31,11 +30,7 @@ pub fn validate_args(args: &[&str]) -> Result<(), AdapterError> {
 }
 
 /// Build the full command line for `sudo -u <user> /usr/local/bin/wp --path=<path> <args>`.
-pub fn build_argv<'a>(
-    user: &'a str,
-    htdocs: &'a str,
-    extra: &'a [&'a str],
-) -> Vec<&'a str> {
+pub fn build_argv<'a>(user: &'a str, htdocs: &'a str, extra: &'a [&'a str]) -> Vec<&'a str> {
     let mut v = vec![
         "-u",
         user,
@@ -50,11 +45,7 @@ pub fn build_argv<'a>(
 
 /// Run an arbitrary wp-cli subcommand. Refuses inputs that fail
 /// `validate_args` so we never pass user-controlled metacharacters.
-pub async fn run(
-    user: &str,
-    htdocs: &str,
-    args: &[&str],
-) -> Result<String, AdapterError> {
+pub async fn run(user: &str, htdocs: &str, args: &[&str]) -> Result<String, AdapterError> {
     validate_args(args)?;
     let argv = build_argv(user, htdocs, args);
     cmd::run("/usr/bin/sudo", &argv).await
@@ -66,13 +57,9 @@ mod tests {
 
     #[test]
     fn validate_args_accepts_typical_wp_inputs() {
-        assert!(validate_args(&[
-            "core",
-            "download",
-            "--locale=cs_CZ",
-            "--version=latest",
-        ])
-        .is_ok());
+        assert!(
+            validate_args(&["core", "download", "--locale=cs_CZ", "--version=latest",]).is_ok()
+        );
         assert!(validate_args(&[
             "core",
             "install",

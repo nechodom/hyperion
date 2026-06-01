@@ -86,11 +86,7 @@ impl lm_core::AdapterPort for StubAdapters {
     async fn nginx_delete_vhost(&self, _: &str) -> Result<(), AdapterError> {
         Ok(())
     }
-    async fn nginx_apply_suspended(
-        &self,
-        _: &str,
-        _: Option<String>,
-    ) -> Result<(), AdapterError> {
+    async fn nginx_apply_suspended(&self, _: &str, _: Option<String>) -> Result<(), AdapterError> {
         Ok(())
     }
     async fn apply_php_limits(
@@ -530,9 +526,8 @@ async fn audit_page_renders_with_entries_after_create() {
         .await
         .expect("call");
     let csrf = extract_csrf(&body_string(resp).await);
-    let body = format!(
-        "_csrf={csrf}&domain=audit-test.cz&aliases=&php=8.3&db=mariadb&system_user="
-    );
+    let body =
+        format!("_csrf={csrf}&domain=audit-test.cz&aliases=&php=8.3&db=mariadb&system_user=");
     let _ = app
         .clone()
         .oneshot(
@@ -559,10 +554,8 @@ async fn audit_page_renders_with_entries_after_create() {
         )
         .await
         .expect("call");
-    let suspend_csrf =
-        extract_csrf_named(&body_string(resp).await, "/hostings/suspend");
-    let body =
-        format!("_csrf={suspend_csrf}&selector=audit-test.cz&reason=test+suspend");
+    let suspend_csrf = extract_csrf_named(&body_string(resp).await, "/hostings/suspend");
+    let body = format!("_csrf={suspend_csrf}&selector=audit-test.cz&reason=test+suspend");
     let _ = app
         .clone()
         .oneshot(

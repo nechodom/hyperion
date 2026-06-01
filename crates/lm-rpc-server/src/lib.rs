@@ -105,12 +105,10 @@ async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(l) => Response::HostingGetLimits(l),
             Err(e) => Response::Error(e),
         },
-        Request::HostingSuspend { sel, reason } => {
-            match api.hosting_suspend(sel, reason).await {
-                Ok(_) => Response::HostingSuspend,
-                Err(e) => Response::Error(e),
-            }
-        }
+        Request::HostingSuspend { sel, reason } => match api.hosting_suspend(sel, reason).await {
+            Ok(_) => Response::HostingSuspend,
+            Err(e) => Response::Error(e),
+        },
         Request::HostingResume(sel) => match api.hosting_resume(sel).await {
             Ok(_) => Response::HostingResume,
             Err(e) => Response::Error(e),
@@ -175,8 +173,8 @@ mod tests {
     use lm_rpc::wire::{AgentInfo, DeleteOpts, HostingCreateReq, HostingCreated, HostingSelector};
     use lm_rpc::{AuditEntryWire, RpcError};
     use lm_types::{
-        BackupRunWire, CertInfo, CertRenewResult, ExpiringHosting, HostingDetail,
-        HostingExpiry, HostingLimits, HostingSummary, HostingUsageBucket, SuspendReason,
+        BackupRunWire, CertInfo, CertRenewResult, ExpiringHosting, HostingDetail, HostingExpiry,
+        HostingLimits, HostingSummary, HostingUsageBucket, SuspendReason,
     };
     use lm_validate::Domain;
 
@@ -244,19 +242,13 @@ mod tests {
         ) -> Result<HostingExpiry, RpcError> {
             Ok(e)
         }
-        async fn hosting_get_expiry(
-            &self,
-            _: HostingSelector,
-        ) -> Result<HostingExpiry, RpcError> {
+        async fn hosting_get_expiry(&self, _: HostingSelector) -> Result<HostingExpiry, RpcError> {
             Ok(HostingExpiry::defaults())
         }
         async fn hosting_clear_expiry(&self, _: HostingSelector) -> Result<(), RpcError> {
             Ok(())
         }
-        async fn upcoming_expiries(
-            &self,
-            _: i64,
-        ) -> Result<Vec<ExpiringHosting>, RpcError> {
+        async fn upcoming_expiries(&self, _: i64) -> Result<Vec<ExpiringHosting>, RpcError> {
             Ok(vec![])
         }
         async fn scheduler_tick(&self) -> Result<i64, RpcError> {
