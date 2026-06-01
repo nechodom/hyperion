@@ -229,11 +229,24 @@ fi
 
 #-------- 10. Bootstrap admin user ----------------------------------------
 if [[ ! -f /etc/hyperion/web-admin.json ]]; then
-  if [[ -z "$ADMIN_PASS" ]]; then
-    echo
-    read -rsp "Choose admin password for the web UI: " ADMIN_PASS
-    echo
-  fi
+  # When the script is run via `curl … | sudo bash`, stdin is the pipe,
+  # not the terminal — a plain `read` would get an empty string. Read
+  # from /dev/tty if it exists; otherwise require the env var.
+  while [[ -z "$ADMIN_PASS" ]]; do
+    if [[ -r /dev/tty ]]; then
+      echo
+      printf 'Choose admin password for the web UI (min 1 char): ' > /dev/tty
+      IFS= read -rs ADMIN_PASS < /dev/tty
+      echo > /dev/tty
+    else
+      fail "No terminal available for password prompt.
+       Re-run with HYPERION_ADMIN_PASS set, e.g.:
+         curl -fsSL <installer-url> | sudo HYPERION_ADMIN_PASS='your-pass' bash"
+    fi
+    if [[ -z "$ADMIN_PASS" ]]; then
+      printf '  empty — try again.\n' > /dev/tty
+    fi
+  done
   log "Bootstrapping admin user '${ADMIN_USER}' ..."
   /usr/sbin/hyperion-web --config /etc/hyperion/web.toml bootstrap \
     --username "$ADMIN_USER" --password "$ADMIN_PASS"
