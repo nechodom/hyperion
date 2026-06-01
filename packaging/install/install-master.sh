@@ -252,6 +252,22 @@ if [[ ! -f /etc/hyperion/web-admin.json ]]; then
     --username "$ADMIN_USER" --password "$ADMIN_PASS"
 fi
 
+#-------- 10b. Pre-generate web session + CSRF keys ------------------------
+# The systemd unit runs hyperion-web with ProtectSystem=full, which makes
+# /etc read-only for the service. hyperion-web's keys::load_or_init would
+# happily create these on first start in a writable environment, but here
+# the sandbox blocks the write. We materialize them ahead of time so the
+# running service only ever has to READ them.
+gen_key_file() {
+  local path="$1"
+  if [[ -f "$path" ]]; then return 0; fi
+  log "Generating $(basename "$path") ..."
+  install -m 0600 /dev/null "$path"
+  head -c 32 /dev/urandom | base64 -w 0 > "$path"
+}
+gen_key_file /etc/hyperion/web-session.key
+gen_key_file /etc/hyperion/web-csrf.key
+
 #-------- 11. Enable + start services -------------------------------------
 log "Enabling + starting hyperion-agent ..."
 systemctl enable --now hyperion-agent
