@@ -1,0 +1,34 @@
+[Unit]
+Description=lm app: {{ domain }} (Node {{ node_version }})
+After=network.target
+ConditionPathExists=/home/{{ system_user }}/{{ domain }}/htdocs/package.json
+
+[Service]
+Type=simple
+User={{ system_user }}
+Group={{ system_user }}
+WorkingDirectory=/home/{{ system_user }}/{{ domain }}/htdocs
+Environment=NODE_ENV=production PORT={{ listen_port }} HOME=/home/{{ system_user }}
+EnvironmentFile=-/etc/linux-manager/secrets/{{ env_vars_secret_id }}
+ExecStart=/usr/bin/node{{ node_version }} {{ app_entry }}
+Restart=on-failure
+RestartSec=5s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=lm-app-{{ system_user }}
+
+MemoryMax={{ memory_mb }}M
+CPUQuota={{ cpu_quota_pct }}%
+TasksMax={{ tasks_max }}
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=false
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

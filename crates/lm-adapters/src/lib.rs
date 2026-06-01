@@ -14,6 +14,7 @@ pub mod cmd;
 pub mod fs;
 pub mod mariadb;
 pub mod nginx;
+pub mod nodejs;
 pub mod phpfpm;
 pub mod postgres;
 pub mod rollback;
