@@ -105,6 +105,11 @@ async fn main() -> anyhow::Result<()> {
         });
     }
     // One-shot enrollment with the master, if configured and not yet done.
+    let state_file = cfg
+        .enrollment
+        .state_file
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("/etc/hyperion/node-id.json"));
     if !cfg.enrollment.master_url.is_empty() && !cfg.enrollment.invite_token.is_empty() {
         let enr = enroll::EnrollmentConfig {
             master_url: cfg.enrollment.master_url.clone(),
@@ -114,16 +119,19 @@ async fn main() -> anyhow::Result<()> {
             } else {
                 cfg.enrollment.node_label.clone()
             },
-            state_file: cfg
-                .enrollment
-                .state_file
-                .clone()
-                .unwrap_or_else(|| PathBuf::from("/etc/hyperion/node-id.json")),
+            state_file: state_file.clone(),
         };
         tokio::spawn(async move {
             if let Err(e) = enroll::ensure_enrolled(enr).await {
                 tracing::warn!(error=%e, "enrollment failed (will retry next boot)");
             }
+        });
+    }
+    // Periodic heartbeat (60s interval). No-op until enrolled.
+    {
+        let path = state_file.clone();
+        tokio::spawn(async move {
+            enroll::heartbeat_loop(path, 60).await;
         });
     }
 

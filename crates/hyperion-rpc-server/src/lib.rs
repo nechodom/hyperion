@@ -244,7 +244,15 @@ async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             .enroll_consume(token, caller_ip, node_id, label, agent_version, public_ip)
             .await
         {
-            Ok(_) => Response::EnrollConsume,
+            Ok(secret) => Response::EnrollConsume { secret },
+            Err(e) => Response::Error(e),
+        },
+        Request::NodeHeartbeat {
+            node_id,
+            secret,
+            agent_version,
+        } => match api.node_heartbeat(node_id, secret, agent_version).await {
+            Ok(_) => Response::NodeHeartbeat,
             Err(e) => Response::Error(e),
         },
         Request::NodesList => match api.nodes_list().await {
@@ -453,6 +461,14 @@ mod tests {
             _: String,
             _: String,
             _: Option<String>,
+        ) -> Result<String, RpcError> {
+            Ok("test-secret".into())
+        }
+        async fn node_heartbeat(
+            &self,
+            _: String,
+            _: String,
+            _: String,
         ) -> Result<(), RpcError> {
             Ok(())
         }

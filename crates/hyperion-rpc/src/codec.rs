@@ -121,6 +121,11 @@ pub enum Request {
         public_ip: Option<String>,
     },
     NodesList,
+    NodeHeartbeat {
+        node_id: String,
+        secret: String,
+        agent_version: String,
+    },
     WpResetPassword {
         sel: HostingSelector,
         wp_user: String,
@@ -170,8 +175,9 @@ pub enum Response {
     HostingLogs(String),
     CronList(String),
     CronReplace,
-    EnrollConsume,
+    EnrollConsume { secret: String },
     NodesList(Vec<NodeSummary>),
+    NodeHeartbeat,
     WpResetPassword,
     DbResetPassword,
     Error(RpcError),

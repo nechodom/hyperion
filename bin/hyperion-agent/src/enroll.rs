@@ -28,13 +28,22 @@ struct EnrollRequest<'a> {
 struct EnrollResponse {
     node_id: String,
     master_url: String,
+    secret: String,
 }
 
 #[derive(Deserialize, Serialize)]
-struct PersistedNodeId {
-    node_id: String,
-    master_url: String,
-    enrolled_at: i64,
+pub struct PersistedNodeId {
+    pub node_id: String,
+    pub master_url: String,
+    #[serde(default)]
+    pub secret: String,
+    pub enrolled_at: i64,
+}
+
+/// Load the persisted node identity if present.
+pub async fn load_persisted(path: &std::path::Path) -> Option<PersistedNodeId> {
+    let bytes = tokio::fs::read(path).await.ok()?;
+    serde_json::from_slice(&bytes).ok()
 }
 
 pub async fn ensure_enrolled(cfg: EnrollmentConfig) -> Result<(), String> {
@@ -91,6 +100,7 @@ pub async fn ensure_enrolled(cfg: EnrollmentConfig) -> Result<(), String> {
     let persisted = PersistedNodeId {
         node_id: resp.node_id.clone(),
         master_url: resp.master_url.clone(),
+        secret: resp.secret.clone(),
         enrolled_at: chrono::Utc::now().timestamp(),
     };
     let bytes = serde_json::to_vec_pretty(&persisted)
@@ -106,6 +116,65 @@ pub async fn ensure_enrolled(cfg: EnrollmentConfig) -> Result<(), String> {
     .await;
     tracing::info!(node_id=%resp.node_id, master=%resp.master_url, "node enrolled");
     Ok(())
+}
+
+/// Background heartbeat loop. Reads the persisted node-id file every
+/// `period_secs` and POSTs {node_id, secret, agent_version} to
+/// `<master>/api/heartbeat`. Single error → log + retry next tick.
+pub async fn heartbeat_loop(state_file: std::path::PathBuf, period_secs: u64) {
+    let agent_version = env!("CARGO_PKG_VERSION");
+    let period = std::time::Duration::from_secs(period_secs);
+    let mut interval = tokio::time::interval(period);
+    // First tick fires immediately — skip it so we wait one period after
+    // enrollment before phoning home.
+    interval.tick().await;
+    loop {
+        interval.tick().await;
+        let p = match load_persisted(&state_file).await {
+            Some(p) if !p.secret.is_empty() => p,
+            _ => continue, // not enrolled yet, or pre-secret deploy
+        };
+        let url = format!("{}/api/heartbeat", p.master_url.trim_end_matches('/'));
+        let body = match serde_json::to_string(&serde_json::json!({
+            "node_id": p.node_id,
+            "secret": p.secret,
+            "agent_version": agent_version,
+        })) {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(error=%e, "heartbeat serialize");
+                continue;
+            }
+        };
+        let result = tokio::process::Command::new("/usr/bin/curl")
+            .args([
+                "-fsS",
+                "--max-time",
+                "8",
+                "-X",
+                "POST",
+                "-H",
+                "content-type: application/json",
+                "--data",
+                &body,
+                &url,
+            ])
+            .output()
+            .await;
+        match result {
+            Ok(out) if out.status.success() => {
+                tracing::debug!(node = %p.node_id, master = %p.master_url, "heartbeat ok");
+            }
+            Ok(out) => {
+                tracing::warn!(
+                    code = ?out.status.code(),
+                    stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+                    "heartbeat returned non-zero — will retry"
+                );
+            }
+            Err(e) => tracing::warn!(error=%e, "heartbeat curl failed"),
+        }
+    }
 }
 
 async fn fetch_public_ip() -> Option<String> {

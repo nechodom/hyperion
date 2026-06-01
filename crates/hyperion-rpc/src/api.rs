@@ -126,7 +126,9 @@ pub trait AgentApi: Send + Sync + 'static {
     async fn cron_replace(&self, sel: HostingSelector, body: String) -> Result<(), RpcError>;
 
     /// Master-side node enrollment: consume an invite token, record the
-    /// node in the `nodes` table, return Ok(()).
+    /// node in the `nodes` table, mint a per-node secret. Returns the
+    /// secret (plaintext, shown only once — node persists it locally
+    /// for heartbeat auth).
     #[allow(clippy::too_many_arguments)]
     async fn enroll_consume(
         &self,
@@ -136,6 +138,15 @@ pub trait AgentApi: Send + Sync + 'static {
         label: String,
         agent_version: String,
         public_ip: Option<String>,
+    ) -> Result<String, RpcError>;
+
+    /// Master-side heartbeat: verifies (node_id, secret) and bumps the
+    /// node's last_seen_at + agent_version.
+    async fn node_heartbeat(
+        &self,
+        node_id: String,
+        secret: String,
+        agent_version: String,
     ) -> Result<(), RpcError>;
 
     /// List enrolled nodes (master-side `nodes` table).

@@ -20,6 +20,9 @@ async-trait.workspace = true
 sqlx = { workspace = true }
 rcgen.workspace = true
 chrono.workspace = true
+hex.workspace = true
+blake3.workspace = true
+rand.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }

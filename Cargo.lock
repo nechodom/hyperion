@@ -1196,13 +1196,16 @@ name = "hyperion-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "blake3",
  "chrono",
+ "hex",
  "hyperion-adapters",
  "hyperion-rpc",
  "hyperion-state",
  "hyperion-types",
  "hyperion-validate",
  "mockall",
+ "rand 0.8.6",
  "rcgen",
  "serde",
  "serde_json",

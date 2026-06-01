@@ -29,6 +29,8 @@ pub struct EnrollRequest {
 pub struct EnrollResponse {
     pub node_id: String,
     pub master_url: String,
+    /// Per-node shared secret for ongoing heartbeats. Returned once.
+    pub secret: String,
 }
 
 pub async fn post_enroll(
@@ -69,11 +71,12 @@ pub async fn post_enroll(
     )
     .await;
     match outcome {
-        Ok(()) => {
+        Ok(secret) => {
             let master_url = derive_master_from_headers(&headers, &state);
             Ok(Json(EnrollResponse {
                 node_id,
                 master_url,
+                secret,
             })
             .into_response())
         }
@@ -89,11 +92,7 @@ async fn consume_and_register(
     label: &str,
     agent_version: &str,
     public_ip: Option<&str>,
-) -> Result<(), String> {
-    // The web binary doesn't hold the agent's SqlitePool directly. We use
-    // two new RPC methods: InviteConsume + NodeInsert. For Foundation
-    // simplicity these are wired through the existing socket. If we wanted
-    // to skip the round-trip we'd hand the SharedState a pool ref.
+) -> Result<String, String> {
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
         Request::EnrollConsume {
@@ -108,9 +107,38 @@ async fn consume_and_register(
     .await
     .map_err(|e| format!("rpc: {e}"))?;
     match resp {
-        RpcResponse::EnrollConsume => Ok(()),
+        RpcResponse::EnrollConsume { secret } => Ok(secret),
         RpcResponse::Error(e) => Err(e.to_string()),
         _ => Err("unexpected response".into()),
+    }
+}
+
+/// Periodic heartbeat — node POSTs {node_id, secret, agent_version}.
+#[derive(serde::Deserialize)]
+pub struct HeartbeatRequest {
+    pub node_id: String,
+    pub secret: String,
+    #[serde(default)]
+    pub agent_version: String,
+}
+
+pub async fn post_heartbeat(
+    State(state): State<SharedState>,
+    Json(req): Json<HeartbeatRequest>,
+) -> Result<Response, AppError> {
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::NodeHeartbeat {
+            node_id: req.node_id,
+            secret: req.secret,
+            agent_version: req.agent_version,
+        },
+    )
+    .await?;
+    match resp {
+        RpcResponse::NodeHeartbeat => Ok(Json(serde_json::json!({"status":"ok"})).into_response()),
+        RpcResponse::Error(e) => Err(AppError::BadRequest(format!("heartbeat refused: {e}"))),
+        _ => Err(AppError::Internal("unexpected response".into())),
     }
 }
 

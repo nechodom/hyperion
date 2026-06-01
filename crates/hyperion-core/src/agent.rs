@@ -249,9 +249,20 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         label: String,
         agent_version: String,
         public_ip: Option<String>,
-    ) -> Result<(), RpcError> {
+    ) -> Result<String, RpcError> {
         self.svc
             .enroll_consume(token, caller_ip, node_id, label, agent_version, public_ip)
+            .await
+    }
+
+    async fn node_heartbeat(
+        &self,
+        node_id: String,
+        secret: String,
+        agent_version: String,
+    ) -> Result<(), RpcError> {
+        self.svc
+            .node_heartbeat(node_id, secret, agent_version)
             .await
     }
 

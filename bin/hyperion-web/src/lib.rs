@@ -98,5 +98,9 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/static/htmx.min.js", get(handlers::statics::htmx_js))
         // Node enrollment — no session auth (the token IS the credential).
         .route("/api/enroll", post(handlers::enroll::post_enroll))
+        .route("/api/heartbeat", post(handlers::enroll::post_heartbeat))
+        // Probes — no auth (LB / monitoring scrapes).
+        .route("/healthz", get(handlers::health::get_healthz))
+        .route("/readyz", get(handlers::health::get_readyz))
         .with_state(state)
 }

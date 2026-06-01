@@ -1460,9 +1460,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .collect())
     }
 
-    /// Master-side: validate `token`, mark the invite consumed, and
-    /// insert the node into the `nodes` table. The token is matched by
-    /// its hash so the plaintext never lives on disk past this call.
+    /// Master-side: validate `token`, mark the invite consumed, insert
+    /// the node, and mint a per-node shared secret for heartbeat auth.
+    /// Returns the plaintext secret — the master only stores its hash.
     #[allow(clippy::too_many_arguments)]
     pub async fn enroll_consume(
         &self,
@@ -1472,7 +1472,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         label: String,
         agent_version: String,
         public_ip: Option<String>,
-    ) -> Result<(), RpcError> {
+    ) -> Result<String, RpcError> {
         if token.trim().is_empty() {
             return Err(RpcError::Validation {
                 message: "empty token".into(),
@@ -1488,13 +1488,22 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             });
         }
         let hash = hyperion_state::invites::hash_token(&token);
+        // Mint a 32-byte per-node secret. Plaintext returned to the caller
+        // exactly once; master persists only the BLAKE3 hash.
+        let mut secret_bytes = [0u8; 32];
+        use rand::RngCore;
+        rand::thread_rng().fill_bytes(&mut secret_bytes);
+        let secret_plain = hex::encode(secret_bytes);
+        let secret_hash =
+            hex::encode(blake3::hash(secret_plain.as_bytes()).as_bytes());
         let row = hyperion_state::nodes::NewNode {
             node_id: node_id.clone(),
             label,
-            master_url: None, // node knows its own master URL
+            master_url: None,
             agent_version,
             public_ip,
             enrolled_via_hash: hash,
+            secret_hash,
         };
         hyperion_state::nodes::insert(&self.pool, &row, now)
             .await
@@ -1506,6 +1515,49 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             "ok",
         )
         .await;
+        Ok(secret_plain)
+    }
+
+    /// Master-side: verify a node's heartbeat (constant-time secret
+    /// check) and bump last_seen_at + agent_version. Returns Ok(()) if
+    /// the node exists and the secret matches; otherwise Validation.
+    pub async fn node_heartbeat(
+        &self,
+        node_id: String,
+        secret: String,
+        agent_version: String,
+    ) -> Result<(), RpcError> {
+        let row = hyperion_state::nodes::get_by_node_id(&self.pool, &node_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("node lookup: {e}")))?
+            .ok_or(RpcError::Validation {
+                message: "unknown node_id".into(),
+            })?;
+        let expected = row.secret_hash.as_bytes();
+        let actual = hex::encode(blake3::hash(secret.as_bytes()).as_bytes());
+        let actual_bytes = actual.as_bytes();
+        if expected.len() != actual_bytes.len() {
+            return Err(RpcError::Validation {
+                message: "bad secret".into(),
+            });
+        }
+        let mut diff = 0u8;
+        for (a, b) in expected.iter().zip(actual_bytes.iter()) {
+            diff |= a ^ b;
+        }
+        if diff != 0 {
+            return Err(RpcError::Validation {
+                message: "bad secret".into(),
+            });
+        }
+        hyperion_state::nodes::touch_last_seen(
+            &self.pool,
+            &node_id,
+            now_secs(),
+            Some(&agent_version),
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("touch: {e}")))?;
         Ok(())
     }
 
