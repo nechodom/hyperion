@@ -18,30 +18,30 @@ the exact shape of the follow-on work.
 **Spec:** [2026-05-31-controller-enrollment-design.md](specs/2026-05-31-controller-enrollment-design.md)
 
 **What's already in place:**
-- The `AgentApi` trait is transport-agnostic; `lm-rpc-server` over a
-  Unix socket works today. A future `lm-rpc-tls` crate that serves the
+- The `AgentApi` trait is transport-agnostic; `hyperion-rpc-server` over a
+  Unix socket works today. A future `hyperion-rpc-tls` crate that serves the
   same trait over mTLS TCP is a drop-in.
 - The wire codec (`u32be length || JSON body`, max 4 MiB) doesn't change.
-- `lm-auth` already has Ed25519 session signing and a `keys::load_or_init`
+- `hyperion-auth` already has Ed25519 session signing and a `keys::load_or_init`
   helper that's the right shape for storing the controller's CA key.
 
 **What's missing for a working controller:**
-1. **`lm-ca` crate** — rcgen-based CA: generate root, sign agent CSRs,
+1. **`hyperion-ca` crate** — rcgen-based CA: generate root, sign agent CSRs,
    publish the root cert + (optional) CRL.
-2. **`lm-rpc-tls` crate** — rustls-based server + client speaking the
+2. **`hyperion-rpc-tls` crate** — rustls-based server + client speaking the
    same `AgentApi` trait. Pinning the agent leaf cert SHA-256 on
    connect.
-3. **`lm-controller` binary** — controller daemon. Has its own SQLite
+3. **`hyperion-controller` binary** — controller daemon. Has its own SQLite
    (`agents`, `agent_invites`, `ca_state`, `crl_entries`,
    `controller_audit_log`). HTTP server with `POST /enroll`, `GET
    /install` (serves the bash one-liner), `GET /apt/*` (apt repo).
    Background reconcilers for agent health-check + cert renewal.
 3. **`lmc` CLI** — controller-side CLI: `agent invite/list/show/
    remove/health`.
-4. **Apt repo packaging** — `lm-agent.deb` built by `cargo-deb` and
+4. **Apt repo packaging** — `hyperion-agent.deb` built by `cargo-deb` and
    published into the controller's `/apt` endpoint.
 5. **One-liner installer** — bash script template at
-   `crates/lm-controller-core/templates/install.sh.j2` that gets
+   `crates/hyperion-controller-core/templates/install.sh.j2` that gets
    stamped with the public hostname and served from `GET /install`.
 
 **Pre-conditions for tests:**
@@ -80,10 +80,10 @@ extended Sub-project 5.
 **Spec:** [2026-05-31-security-hardening-design.md](specs/2026-05-31-security-hardening-design.md)
 
 **What's in place:**
-- `lm-adapters/templates/nginx-vhost.conf.j2` already emits HSTS,
+- `hyperion-adapters/templates/nginx-vhost.conf.j2` already emits HSTS,
   strict ciphers, X-Frame-Options, server_tokens off.
-- `lm-rpc-server` sets socket mode 0660, group lm-admin.
-- `lm-core::HostingService` audit-logs every state-changing operation;
+- `hyperion-rpc-server` sets socket mode 0660, group hyperion-admin.
+- `hyperion-core::HostingService` audit-logs every state-changing operation;
   the chain is BLAKE3 + can be verified on startup.
 - All adapter modules forbid `unsafe_code` and use only
   `Command::new().arg()`.
@@ -93,7 +93,7 @@ extended Sub-project 5.
    sketched for sub-project 3's bandwidth counters); plus default-DROP
    policy, fail2ban `blocked_ips_v4/v6` sets, agent mTLS port allow.
 2. **fail2ban integration** — jail templates + custom filters for
-   nginx-4xx + lm-admin-login + nftables banaction.
+   nginx-4xx + hyperion-admin-login + nftables banaction.
 3. **ModSecurity v3** — apt install + per-vhost `modsecurity on;` /
    `modsecurity_rules 'SecRuleEngine DetectionOnly';` template
    variant. WAF mode is already a per-hosting flag in the spec.
@@ -116,7 +116,7 @@ A real HTTP-01 ACME loop is a small lm-adapter extension on top of the
 existing `instant-acme` dependency — but tying it correctly to the
 nginx temp-vhost dance is best tested on a real public host where
 Let's Encrypt's validation can hit `/.well-known/acme-challenge/`.
-Operators replace certs via `lm cert renew` once the loop ships.
+Operators replace certs via `hctl cert renew` once the loop ships.
 
 ## What about real remote backup targets?
 
@@ -124,7 +124,7 @@ Phase N ships a local `tar.gz + mysqldump` target. Adding SFTP / S3 /
 restic targets is mechanical:
 
 1. Extend `backup_targets` (table is already in the spec for sub-project 5).
-2. Add `lm-adapters::restic` wrapping `restic backup` with a repo URL
+2. Add `hyperion-adapters::restic` wrapping `restic backup` with a repo URL
    per target.
 3. Per-policy scheduling via the existing `scheduler` infrastructure
    from phase L (add `BackupNow` as a new `ScheduledKind`).

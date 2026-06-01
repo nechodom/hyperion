@@ -51,7 +51,7 @@ by the agent under the hosting's system user.
 |---|---|---|
 | D1 | `wp-cli` invoked via `sudo -u <hosting_user>` from agent | Runs file ops with correct ownership |
 | D2 | `wp-cli` binary is installed via .deb dep (`wp-cli` not in Debian stable, so we vendor it ourselves: download release tarball into /usr/local/bin during postinst, pinned by SHA-256) | Trusted distribution |
-| D3 | WP core downloaded from wordpress.org by wp-cli; cached on the agent under `/var/lib/linux-manager/wp-cache/` | Avoid repeat downloads; integrity-checked |
+| D3 | WP core downloaded from wordpress.org by wp-cli; cached on the agent under `/var/lib/hyperion/wp-cache/` | Avoid repeat downloads; integrity-checked |
 | D4 | Packs stored on controller; distributed to agent via mTLS RPC (chunked stream) on first use; cached agent-side | One source of truth for assets |
 | D5 | Each pack is content-hashed (`SHA-256` of canonical manifest + asset hashes); agents pull by hash | Immutable, idempotent install |
 | D6 | Auto-update default OFF; opt-in per hosting | Conservative safety default |
@@ -84,7 +84,7 @@ CREATE TABLE app_pack_assets (
     filename        TEXT NOT NULL,                    -- e.g. 'akismet.zip'
     sha256          TEXT NOT NULL,
     bytes           INTEGER NOT NULL,
-    stored_path     TEXT NOT NULL,                    -- /var/lib/linux-manager-controller/packs/<asset_id>.zip
+    stored_path     TEXT NOT NULL,                    -- /var/lib/hyperion-controller/packs/<asset_id>.zip
     PRIMARY KEY (pack_id, asset_id)
 );
 ```
@@ -266,7 +266,7 @@ snapshot; mark state='rolled-back'; alert.
 [wp]
 wpcli_path               = "/usr/local/bin/wp"
 wpcli_sha256             = "..."          # pinned at install
-core_cache               = "/var/lib/linux-manager/wp-cache"
+core_cache               = "/var/lib/hyperion/wp-cache"
 update_requires_backup   = true
 max_asset_size_bytes     = 67108864       # 64 MiB
 auto_update_check_interval = "24h"
@@ -274,7 +274,7 @@ auto_update_check_interval = "24h"
 
 ## 12. Auto-Update Scheduler
 
-A background task in `lm-agent` runs daily (configurable):
+A background task in `hyperion-agent` runs daily (configurable):
 
 ```text
 - select wp_installs where any auto_update_* is enabled

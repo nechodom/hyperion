@@ -114,15 +114,15 @@ port     = http,https
 filter   = lm-nginx-4xx
 logpath  = /home/*/*/logs/access.log
 
-[lm-admin-login]               # rate brute on /login from controller logs
+[hyperion-admin-login]               # rate brute on /login from controller logs
 enabled = true
-filter  = lm-admin-login
-logpath = /var/log/linux-manager-controller/web.log
+filter  = hyperion-admin-login
+logpath = /var/log/hyperion-controller/web.log
 maxretry = 5
 ```
 
 Custom filters at `/etc/fail2ban/filter.d/lm-nginx-4xx.conf` and
-`/etc/fail2ban/filter.d/lm-admin-login.conf`. nftables action
+`/etc/fail2ban/filter.d/hyperion-admin-login.conf`. nftables action
 `/etc/fail2ban/action.d/nftables-multiport.local` updates
 `lm.blocked_ips_v4` / `blocked_ips_v6` sets.
 
@@ -169,7 +169,7 @@ the table or globally in `agent.toml`).
 
 ## 8. SSH Hardening
 
-`/etc/ssh/sshd_config.d/50-lm.conf` written by `lm-agent` at install
+`/etc/ssh/sshd_config.d/50-lm.conf` written by `hyperion-agent` at install
 (and reapplied during `hardening apply`):
 
 ```sshd_config
@@ -189,7 +189,7 @@ MaxAuthTries 5
 MaxStartups 5:30:60
 LoginGraceTime 30
 # subsystem sftp (left default)
-# Match Group lm-sftp-users (defined in sub-project 6)
+# Match Group hyperion-sftp-users (defined in sub-project 6)
 ```
 
 Reload via `systemctl reload ssh`.
@@ -242,8 +242,8 @@ Sample IDs:
 - `LM-SEC-05` fail2ban service active
 - `LM-SEC-06` sysctl hardening file present and applied
 - `LM-SEC-07` audit log hash chain valid (Foundation cross-check)
-- `LM-SEC-08` `lm-agent` socket mode 0660 + group lm-admin
-- `LM-SEC-09` `/etc/linux-manager/secrets/` mode 0700
+- `LM-SEC-08` `hyperion-agent` socket mode 0660 + group hyperion-admin
+- `LM-SEC-09` `/etc/hyperion/secrets/` mode 0700
 - `LM-SEC-10` agent TLS cert valid + matches pinned controller_cert_sha256
 - `LM-SEC-11` ModSecurity module loaded by nginx
 - `LM-SEC-12` All vhosts use Mozilla intermediate TLS profile

@@ -1,8 +1,8 @@
-# linux-manager
+# hyperion
 
 A Rust-based hosting control panel for Debian 12+. Built as a privileged
-agent daemon (`lm-agent`) plus an unprivileged CLI client (`lm`) and a
-modern axum web UI (`lm-web`), communicating over a local Unix-socket
+agent daemon (`hyperion-agent`) plus an unprivileged CLI client (`hctl`) and a
+modern axum web UI (`hyperion-web`), communicating over a local Unix-socket
 RPC. Designed to grow into a multi-node setup (controller + N agents
 over mTLS) — see the design specs under
 [`docs/superpowers/specs/`](docs/superpowers/specs/).
@@ -11,16 +11,16 @@ over mTLS) — see the design specs under
 
 | Phase | Component | Tests | Status |
 |---|---|---|---|
-| A | Workspace + `lm-types` + `lm-validate` + `lm-rpc` | 49 | ✅ |
-| B | `lm-state` (SQLite + hash-chain audit) | 48 | ✅ |
-| C | `lm-rpc-server` + `lm-rpc-client` (Unix socket) | 6 | ✅ |
-| D | `lm-adapters` (fs, users, nginx, phpfpm, mariadb, postgres, acme) | 40+4⁻ | ✅ |
-| E | `lm-core` (orchestrator + secrets + RealAdapter) | 25 | ✅ |
-| F | `lm-agent` daemon + `lm` CLI | 7 | ✅ |
+| A | Workspace + `hyperion-types` + `hyperion-validate` + `hyperion-rpc` | 49 | ✅ |
+| B | `hyperion-state` (SQLite + hash-chain audit) | 48 | ✅ |
+| C | `hyperion-rpc-server` + `hyperion-rpc-client` (Unix socket) | 6 | ✅ |
+| D | `hyperion-adapters` (fs, users, nginx, phpfpm, mariadb, postgres, acme) | 40+4⁻ | ✅ |
+| E | `hyperion-core` (orchestrator + secrets + RealAdapter) | 25 | ✅ |
+| F | `hyperion-agent` daemon + `hctl` CLI | 7 | ✅ |
 | G | End-to-end socket+state+orchestrator integration | 4 | ✅ |
-| H | `lm-auth` (argon2id + Ed25519 sessions + CSRF + keys) | 21 | ✅ |
-| I | `lm-web` (axum + askama + HTMX modern admin UI) | 4 unit | ✅ |
-| J | lm-web full-flow tests (login, dashboard, hosting CRUD) | 12 e2e | ✅ |
+| H | `hyperion-auth` (argon2id + Ed25519 sessions + CSRF + keys) | 21 | ✅ |
+| I | `hyperion-web` (axum + askama + HTMX modern admin UI) | 4 unit | ✅ |
+| J | hyperion-web full-flow tests (login, dashboard, hosting CRUD) | 12 e2e | ✅ |
 | K | Limits + quotas + suspend/resume (sub-project 3) | 13 | ✅ |
 | L | Expiration + background scheduler (sub-project 4) | 10 | ✅ |
 | M | Audit log viewer | covered by 12 e2e | ✅ |
@@ -52,7 +52,7 @@ operations. Real Debian integration tests run with `--ignored`.
 - **Expiration** — per-hosting expires_at + grace_days + warning
   offsets; controller-side scheduler fires notifications, auto-suspend
   on expiry, auto-delete after grace
-- **Background scheduler** — tokio interval task in lm-agent runs every
+- **Background scheduler** — tokio interval task in hyperion-agent runs every
   5 minutes; reconciles missing rows from live hostings; pending
   actions retried 3× with mark_failed_or_retry
 
@@ -60,11 +60,11 @@ operations. Real Debian integration tests run with `--ignored`.
 - LIFO rollback stack on multi-step provisioning
 - Hash-chain audit log (BLAKE3) with tamper detection
 - Local backups: tar.gz of htdocs + DB dump + JSON manifest
-- Secret files in `/etc/linux-manager/secrets/` (mode 0600)
+- Secret files in `/etc/hyperion/secrets/` (mode 0600)
 - No shell interpolation anywhere; every `Command::new(..).arg(..)`
 - `#![forbid(unsafe_code)]` on every crate
 
-### Web UI (`lm-web`)
+### Web UI (`hyperion-web`)
 - Modern axum + askama + HTMX admin panel
 - Single-user bootstrap auth, argon2id passwords, Ed25519-signed
   session cookies, CSRF tokens scoped per session+form
@@ -74,13 +74,13 @@ operations. Real Debian integration tests run with `--ignored`.
 - Dark + light theme via `prefers-color-scheme`, ~6 KB hand-written
   CSS, HTMX 2.0.4 embedded into the binary (no JS build)
 
-### CLI (`lm`)
-- `lm info` / `lm hosting create|list|get|delete`
-- `lm hosting suspend|resume`
-- `lm hosting set-limits|get-limits|usage`
-- `lm hosting set-expiry|get-expiry|upcoming-expiries`
-- `lm hosting backup-now|backup-list`
-- `lm audit`
+### CLI (`hctl`)
+- `hctl info` / `hctl hosting create|list|get|delete`
+- `hctl hosting suspend|resume`
+- `hctl hosting set-limits|get-limits|usage`
+- `hctl hosting set-expiry|get-expiry|upcoming-expiries`
+- `hctl hosting backup-now|backup-list`
+- `hctl audit`
 - `--json` flag on every subcommand for machine consumption
 
 ## Architecture
@@ -88,26 +88,26 @@ operations. Real Debian integration tests run with `--ignored`.
 ```
                   ┌──────────────────────────┐
                   │  Unix socket             │
-                  │  /run/linux-manager.sock │
-                  │  (mode 0660, lm-admin)   │
+                  │  /run/hyperion.sock │
+                  │  (mode 0660, hyperion-admin)   │
                   └────────┬─────────┬───────┘
                            │         │
        Server side ▲       │         │       ▼ Client side
                            │         │
    ┌───────────────────────┴┐       ┌┴──────────────────────────┐
-   │  lm-agent              │       │  lm  (CLI) │ lm-web       │
+   │  hyperion-agent        │       │  hctl (CLI) │ hyperion-web │
    │  (root daemon)         │       │  unprivileged, in         │
-   │                        │       │  lm-admin group           │
+   │                        │       │  hyperion-admin group           │
    │  ┌───────────────────┐ │       └───────────────────────────┘
-   │  │ lm-rpc-server     │ │
+   │  │ hyperion-rpc-server     │ │
    │  └────────┬──────────┘ │
    │  ┌────────▼──────────┐ │
-   │  │ AgentImpl         │ │       lm-rpc:
+   │  │ AgentImpl         │ │       hyperion-rpc:
    │  │  → HostingService │ │       transport-agnostic
    │  └────────┬──────────┘ │       AgentApi trait
    │   ┌───────┴──────────┐ │       + length-prefixed JSON codec.
-   │   │ lm-state (SQLite) │ │
-   │   │ lm-adapters       │ │       Background:
+   │   │ hyperion-state (SQLite) │ │
+   │   │ hyperion-adapters       │ │       Background:
    │   │   fs/users/nginx  │ │       - scheduler_tick every 5 min
    │   │   phpfpm/mariadb  │ │         (expiration → suspend → delete)
    │   │   postgres/acme   │ │       - audit chain verified on startup
@@ -120,12 +120,12 @@ operations. Real Debian integration tests run with `--ignored`.
 ## Build
 
 ```bash
-git clone <this repo> linux-manager
-cd linux-manager
+git clone <this repo> hyperion
+cd hyperion
 cargo build --release --workspace
 ```
 
-Binaries land in `target/release/{lm-agent, lm, lm-web}`.
+Binaries land in `target/release/{hyperion-agent, hctl, hyperion-web}`.
 
 ## Develop
 
@@ -161,7 +161,7 @@ backup_root = "/tmp/lm-demo/backups"
 contact_email = "you@example.com"
 challenge_dir = "/tmp/lm-demo/acme"
 EOF
-cargo run --bin lm-agent -- --config /tmp/lm-demo/agent.toml &
+cargo run --bin hyperion-agent -- --config /tmp/lm-demo/agent.toml &
 
 # Terminal B — run the web UI
 cat > /tmp/lm-demo/web.toml <<EOF
@@ -173,17 +173,17 @@ session_key_file = "/tmp/lm-demo/sess.key"
 csrf_key_file = "/tmp/lm-demo/csrf.key"
 secure_cookies = false   # plain HTTP in dev
 EOF
-cargo run --bin lm-web -- --config /tmp/lm-demo/web.toml bootstrap \
+cargo run --bin hyperion-web -- --config /tmp/lm-demo/web.toml bootstrap \
     --username kevin --password "your-strong-password"
-cargo run --bin lm-web -- --config /tmp/lm-demo/web.toml
+cargo run --bin hyperion-web -- --config /tmp/lm-demo/web.toml
 
 # Browser
 open http://127.0.0.1:8443/         # → /login
 
 # CLI alternative
-target/debug/lm --socket /tmp/lm-demo/agent.sock info
-target/debug/lm --socket /tmp/lm-demo/agent.sock hosting list
-target/debug/lm --socket /tmp/lm-demo/agent.sock audit
+target/debug/hctl --socket /tmp/lm-demo/agent.sock info
+target/debug/hctl --socket /tmp/lm-demo/agent.sock hosting list
+target/debug/hctl --socket /tmp/lm-demo/agent.sock audit
 # Note: hosting create on macOS will fail at `useradd` — see RUNBOOK.md.
 ```
 
@@ -192,25 +192,25 @@ For production deployment on Debian, see [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
 ## Project Layout
 
 ```
-linux-manager/
+hyperion/
 ├── Cargo.toml                     # workspace
 ├── rust-toolchain.toml            # stable
 ├── crates/
-│   ├── lm-types/                  # newtype IDs + DTOs (limits/expiry/backup)
-│   ├── lm-validate/               # Domain + SystemUserName parsers
-│   ├── lm-rpc/                    # trait + wire + codec
-│   ├── lm-rpc-server/             # Unix socket server
-│   ├── lm-rpc-client/             # Unix socket client
-│   ├── lm-state/                  # SQLite + 6 migrations + audit chain
+│   ├── hyperion-types/                  # newtype IDs + DTOs (limits/expiry/backup)
+│   ├── hyperion-validate/               # Domain + SystemUserName parsers
+│   ├── hyperion-rpc/                    # trait + wire + codec
+│   ├── hyperion-rpc-server/             # Unix socket server
+│   ├── hyperion-rpc-client/             # Unix socket client
+│   ├── hyperion-state/                  # SQLite + 6 migrations + audit chain
 │   │                              # + limits / scheduler / backups /
 │   │                              #   nodejs / wordpress
-│   ├── lm-adapters/               # system tool wrappers (10 modules)
-│   ├── lm-core/                   # orchestration + secrets + RealAdapter
-│   └── lm-auth/                   # argon2id + Ed25519 sessions + CSRF
+│   ├── hyperion-adapters/               # system tool wrappers (10 modules)
+│   ├── hyperion-core/                   # orchestration + secrets + RealAdapter
+│   └── hyperion-auth/                   # argon2id + Ed25519 sessions + CSRF
 ├── bin/
-│   ├── lm-agent/                  # daemon (background scheduler too)
+│   ├── hyperion-agent/                  # daemon (background scheduler too)
 │   ├── lm/                        # CLI
-│   └── lm-web/                    # axum admin UI
+│   └── hyperion-web/                    # axum admin UI
 └── docs/
     ├── RUNBOOK.md                 # Debian 12 deployment runbook
     └── superpowers/

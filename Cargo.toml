@@ -1,25 +1,25 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/lm-types",
-    "crates/lm-validate",
-    "crates/lm-rpc",
-    "crates/lm-rpc-server",
-    "crates/lm-rpc-client",
-    "crates/lm-state",
-    "crates/lm-adapters",
-    "crates/lm-core",
-    "crates/lm-auth",
-    "bin/lm-agent",
-    "bin/lm",
-    "bin/lm-web",
+    "crates/hyperion-types",
+    "crates/hyperion-validate",
+    "crates/hyperion-rpc",
+    "crates/hyperion-rpc-server",
+    "crates/hyperion-rpc-client",
+    "crates/hyperion-state",
+    "crates/hyperion-adapters",
+    "crates/hyperion-core",
+    "crates/hyperion-auth",
+    "bin/hyperion-agent",
+    "bin/hctl",
+    "bin/hyperion-web",
 ]
 
 [workspace.package]
 edition = "2021"
 rust-version = "1.80"
 license = "AGPL-3.0-only"
-repository = "https://github.com/kevinnechodom/linux-manager"
+repository = "https://github.com/nechodom/hyperion"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }

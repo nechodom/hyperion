@@ -5,7 +5,7 @@
 | Sub-project | 1 of N — Foundation |
 | Status | Draft, awaiting user review |
 | Date | 2026-05-31 |
-| Project | linux-manager (multi-node Linux hosting control panel) |
+| Project | hyperion (multi-node Linux hosting control panel) |
 | Language | Rust 2024 (MSRV 1.80) |
 | Target OS | Debian 12+ |
 
@@ -16,7 +16,7 @@ and deleting hostings on a single Debian 12 node. It is the substrate on which a
 later sub-projects (controller, admin UI, quotas, expiration, backups, client portal,
 WordPress installer, Node.js stack, hardening) are built.
 
-The deliverable is a working **`lm-agent`** root daemon (Unix-socket RPC),
+The deliverable is a working **`hyperion-agent`** root daemon (Unix-socket RPC),
 an **`lm`** unprivileged CLI client, a SQLite state store, a typed RPC trait
 that is transport-agnostic (so the same trait will later be served over mTLS for
 multi-node), and the system adapters needed for nginx, PHP-FPM, MariaDB,
@@ -34,7 +34,7 @@ templates. Those live in their own sub-projects.
    round out CRUD.
 3. `lm cert renew` renews all certificates within 30 days of expiry.
 4. All privileged operations are confined to a small, audit-ready surface
-   (`lm-agent`'s RPC handlers + `lm-adapters` crate). The CLI runs unprivileged.
+   (`hyperion-agent`'s RPC handlers + `hyperion-adapters` crate). The CLI runs unprivileged.
 5. Every provisioning step is **idempotent** and supports **LIFO rollback** on
    partial failure.
 6. SQLite state is the single source of truth on the node; on-disk artifacts
@@ -67,7 +67,7 @@ decomposition. Listing here so scope cannot drift:
 | # | Decision | Rationale |
 |---|---|---|
 | D1 | Rust 2024, single workspace, multi-crate | Memory safety for root daemon, single binary deploy, fast compile in dev via crate split |
-| D2 | Split: `lm-agent` (root) + `lm` CLI (unpriv.) over Unix socket | Smallest privileged surface; web/UI later cannot escalate |
+| D2 | Split: `hyperion-agent` (root) + `lm` CLI (unpriv.) over Unix socket | Smallest privileged surface; web/UI later cannot escalate |
 | D3 | RPC trait is transport-agnostic | Same `AgentApi` will be served over mTLS for remote agents (sub-project 1.5) without refactor |
 | D4 | SQLite via `sqlx` for state | Zero-deps, file-backed, transactional, good for single-node |
 | D5 | nginx as web server | Standard for this panel class; mature; `nginx -t` validates before reload |
@@ -75,9 +75,9 @@ decomposition. Listing here so scope cannot drift:
 | D7 | MariaDB + PostgreSQL as managed DB engines | MariaDB for WordPress-class workloads; Postgres for app stacks |
 | D8 | TLS via `instant-acme` crate (in-process ACME client) | No external `certbot`/`acme.sh` dep; auditable; no extra privileged process |
 | D9 | Filesystem layout: `/home/<system_user>/<domain>/htdocs` | CloudPanel-like; one Linux user per hosting; SFTP-friendly |
-| D10 | Binary names: `linux-manager` (full) with `lm` symlink for CLI; `lm-agent` for daemon | Discoverable + short |
+| D10 | Binary names: `hyperion` (full) with `lm` symlink for CLI; `hyperion-agent` for daemon | Discoverable + short |
 | D11 | Hash-chain audit log (BLAKE3) | Tamper-evident |
-| D12 | Secrets stored in `/etc/linux-manager/secrets/<id>.json` mode 0600 | Never in SQLite; survives DB compromise |
+| D12 | Secrets stored in `/etc/hyperion/secrets/<id>.json` mode 0600 | Never in SQLite; survives DB compromise |
 | D13 | LIFO rollback stack per orchestrated operation | Partial failures recover without manual cleanup |
 
 ## 5. Architecture
@@ -87,16 +87,16 @@ decomposition. Listing here so scope cannot drift:
                     │            Debian 12 host               │
                     │                                         │
    /run/linux-      │   ┌─────────────┐    ┌──────────────┐   │
-   manager.sock ◄───┼───┤  lm-agent   │    │ lm  (CLI)    │   │
+   manager.sock ◄───┼───┤  hyperion-agent   │    │ lm  (CLI)    │   │
    (0660, root:lm-  │   │  (root)     │◄──►│ uid != 0     │   │
-    admin)          │   │             │    │ in lm-admin  │   │
+    admin)          │   │             │    │ in hyperion-admin  │   │
                     │   └──────┬──────┘    └──────────────┘   │
                     │          │                              │
                     │          ▼                              │
                     │   ┌─────────────────────────────────┐   │
-                    │   │  lm-core (orchestration)        │   │
-                    │   │   + lm-state (SQLite)           │   │
-                    │   │   + lm-adapters                 │   │
+                    │   │  hyperion-core (orchestration)        │   │
+                    │   │   + hyperion-state (SQLite)           │   │
+                    │   │   + hyperion-adapters                 │   │
                     │   └────┬─────┬─────┬─────┬─────┬────┘   │
                     │        ▼     ▼     ▼     ▼     ▼        │
                     │     useradd nginx phpfpm mariadb acme   │
@@ -106,10 +106,10 @@ decomposition. Listing here so scope cannot drift:
 
 ### 5.1 Process model
 
-- **`lm-agent`** runs as `root` via systemd unit. It is the only process with
+- **`hyperion-agent`** runs as `root` via systemd unit. It is the only process with
   privilege.
-- It listens on a Unix domain socket `/run/linux-manager.sock`,
-  owned `root:lm-admin`, mode `0660`. Membership in `lm-admin` group grants
+- It listens on a Unix domain socket `/run/hyperion.sock`,
+  owned `root:hyperion-admin`, mode `0660`. Membership in `hyperion-admin` group grants
   the right to issue RPC requests.
 - **`lm`** CLI runs as the invoking user. It connects to the socket, sends
   a JSON request frame, reads a JSON response frame, exits.
@@ -119,31 +119,31 @@ decomposition. Listing here so scope cannot drift:
 - The socket peer is identified via `SO_PEERCRED`. The agent logs the
   caller's effective UID into the audit log on every request.
 - Group membership is enforced by socket permissions (kernel-level).
-- No further authorization in Foundation: any member of `lm-admin` can
+- No further authorization in Foundation: any member of `hyperion-admin` can
   perform any RPC. Per-action RBAC is sub-project 2.
 
 ## 6. Workspace Layout
 
 ```
-linux-manager/
+hyperion/
 ├── Cargo.toml                          # workspace
 ├── rust-toolchain.toml                 # pin MSRV
 ├── deny.toml                           # cargo-deny config (license, advisories)
 ├── crates/
-│   ├── lm-types/                       # shared serde types
-│   ├── lm-validate/                    # input parsers (regex whitelists)
-│   ├── lm-rpc/                         # AgentApi trait + wire types + RpcError
-│   ├── lm-rpc-server/                  # Unix-socket server framing + dispatcher
-│   ├── lm-rpc-client/                  # Unix-socket client (later: mtls://)
-│   ├── lm-state/                       # SQLite layer (sqlx) + migrations
-│   ├── lm-adapters/                    # thin wrappers around system tools
-│   └── lm-core/                        # HostingService, orchestration, RollbackStack
+│   ├── hyperion-types/                       # shared serde types
+│   ├── hyperion-validate/                    # input parsers (regex whitelists)
+│   ├── hyperion-rpc/                         # AgentApi trait + wire types + RpcError
+│   ├── hyperion-rpc-server/                  # Unix-socket server framing + dispatcher
+│   ├── hyperion-rpc-client/                  # Unix-socket client (later: mtls://)
+│   ├── hyperion-state/                       # SQLite layer (sqlx) + migrations
+│   ├── hyperion-adapters/                    # thin wrappers around system tools
+│   └── hyperion-core/                        # HostingService, orchestration, RollbackStack
 ├── bin/
-│   ├── lm-agent/                       # daemon
+│   ├── hyperion-agent/                       # daemon
 │   └── lm/                             # CLI
 ├── packaging/
 │   ├── debian/                         # source for .deb (dh-cargo)
-│   ├── systemd/lm-agent.service
+│   ├── systemd/hyperion-agent.service
 │   └── nginx-snippets/                 # reusable include files
 ├── tests/
 │   ├── adapters/                       # testcontainers-rs integration tests
@@ -155,13 +155,13 @@ linux-manager/
 
 ### 6.1 Why this split
 
-- `lm-types`, `lm-rpc`, `lm-validate` are leaf crates with zero IO; pure data.
+- `hyperion-types`, `hyperion-rpc`, `hyperion-validate` are leaf crates with zero IO; pure data.
   They compile fast and are heavily fuzzed.
-- `lm-state`, `lm-adapters` each own one external dependency surface (SQLite,
+- `hyperion-state`, `hyperion-adapters` each own one external dependency surface (SQLite,
   system tools). Failures and rollbacks are local to one crate.
-- `lm-core` is the orchestrator. It is the only crate that imports
-  `lm-state + lm-adapters`. Business rules live here.
-- `lm-rpc-server` and `lm-rpc-client` are symmetric; replacing the transport
+- `hyperion-core` is the orchestrator. It is the only crate that imports
+  `hyperion-state + hyperion-adapters`. Business rules live here.
+- `hyperion-rpc-server` and `hyperion-rpc-client` are symmetric; replacing the transport
   later (mTLS TCP) is a new crate, not a rewrite.
 - `bin/` crates are thin: parse args / config, wire up tokio, hand off.
 
@@ -170,7 +170,7 @@ linux-manager/
 ### 7.1 Trait
 
 ```rust
-// crates/lm-rpc/src/api.rs
+// crates/hyperion-rpc/src/api.rs
 #[async_trait::async_trait]
 pub trait AgentApi: Send + Sync + 'static {
     async fn agent_info(&self) -> Result<AgentInfo, RpcError>;
@@ -311,7 +311,7 @@ pub enum RpcError {
 
 ### 8.1 Migrations
 
-Migrations live in `crates/lm-state/migrations/NNN_name.sql`, applied
+Migrations live in `crates/hyperion-state/migrations/NNN_name.sql`, applied
 in lexicographic order via `sqlx::migrate!`. `schema_version` table
 mirrors `_sqlx_migrations`; queries can assert minimum version.
 
@@ -357,7 +357,7 @@ CREATE TABLE databases (
     engine       TEXT NOT NULL CHECK (engine IN ('mariadb','postgres')),
     db_name      TEXT NOT NULL,
     db_user      TEXT NOT NULL,
-    -- secret_id references file at /etc/linux-manager/secrets/<id>.json
+    -- secret_id references file at /etc/hyperion/secrets/<id>.json
     secret_id    TEXT NOT NULL UNIQUE,
     created_at   INTEGER NOT NULL,
     UNIQUE (engine, db_name)
@@ -368,7 +368,7 @@ CREATE TABLE certificates (
     domain       TEXT NOT NULL UNIQUE,
     issued_at    INTEGER NOT NULL,
     not_after    INTEGER NOT NULL,
-    cert_path    TEXT NOT NULL,                     -- /etc/linux-manager/certs/<domain>/fullchain.pem
+    cert_path    TEXT NOT NULL,                     -- /etc/hyperion/certs/<domain>/fullchain.pem
     key_path     TEXT NOT NULL,
     issuer       TEXT NOT NULL CHECK (issuer IN ('letsencrypt','self-signed'))
 );
@@ -398,12 +398,12 @@ CREATE INDEX audit_log_ts ON audit_log(ts);
 - `databases.secret_id` is a ULID, used as filename for the secrets file;
   the password is never in SQLite.
 - `audit_log` is append-only; no `UPDATE` or `DELETE` queries exist in
-  `lm-state`. Integrity verified on agent startup.
+  `hyperion-state`. Integrity verified on agent startup.
 
 ## 9. Filesystem Layout
 
 ```
-/etc/linux-manager/
+/etc/hyperion/
 ├── agent.toml                          # config (paths, ACME account, listen socket)
 ├── secrets/                            # mode 0700
 │   └── <secret_id>.json                # mode 0600, root:root
@@ -411,14 +411,14 @@ CREATE INDEX audit_log_ts ON audit_log(ts);
     ├── fullchain.pem
     └── privkey.pem
 
-/var/lib/linux-manager/
+/var/lib/hyperion/
 ├── state.db                            # SQLite (mode 0600)
 └── state.db-wal, state.db-shm          # SQLite WAL files
 
-/var/log/linux-manager/
+/var/log/hyperion/
 └── agent.log                           # JSON Lines
 
-/run/linux-manager.sock                 # Unix socket (0660 root:lm-admin)
+/run/hyperion.sock                 # Unix socket (0660 root:hyperion-admin)
 
 /home/<system_user>/
 ├── .ssh/authorized_keys                # set up by user; agent does not touch
@@ -434,19 +434,19 @@ CREATE INDEX audit_log_ts ON audit_log(ts);
 
 ## 10. System Adapters
 
-Each adapter is a struct in `lm-adapters` with these obligations:
+Each adapter is a struct in `hyperion-adapters` with these obligations:
 
 1. **No shell interpolation.** Always `Command::new(...).arg(...)`; no
    `sh -c`, no string-formatted commands.
 2. **Validate arguments at the call boundary.** Adapters refuse any input
-   that did not pass through `lm-validate`. Types like `SystemUserName`
+   that did not pass through `hyperion-validate`. Types like `SystemUserName`
    carry their validation proof.
 3. **Idempotency.** "Ensure X" semantics: if X exists and matches the spec,
    no-op; if X exists but mismatches, return `RpcError::Conflict` (do not
    silently mutate); if absent, create.
 4. **Rollback tokens.** Every mutating operation returns a `RollbackToken`
    that, when invoked, undoes the operation if possible. Returned tokens
-   are pushed onto a `RollbackStack` in `lm-core`.
+   are pushed onto a `RollbackStack` in `hyperion-core`.
 5. **Captured stderr on failure.** The last 4 KiB of stderr is included in
    `RpcError::SystemCommand`.
 
@@ -492,7 +492,7 @@ Each adapter is a struct in `lm-adapters` with these obligations:
 ### 10.4 PHP-FPM adapter (`phpfpm.rs`)
 
 - `ensure_pool(system_user, php_version) -> RollbackToken`
-  - Validates `php_version` against `lm-validate::PhpVersion` (whitelist).
+  - Validates `php_version` against `hyperion-validate::PhpVersion` (whitelist).
   - Renders `phpfpm-pool.conf.j2` (per-pool socket at
     `/run/php/<version>/<system_user>.sock`, `listen.owner = system_user`).
   - Atomic write to `/etc/php/<ver>/fpm/pool.d/<user>.conf`.
@@ -507,7 +507,7 @@ Each adapter is a struct in `lm-adapters` with these obligations:
   - Generates db_name `lm_<hash6>_<short_domain>`, user `lm_<hash6>_u`,
     32-char random password (CSPRNG, `[A-Za-z0-9]`).
   - `CREATE DATABASE`, `CREATE USER`, `GRANT ALL ON db.* TO user@'localhost'`.
-  - Writes password to `/etc/linux-manager/secrets/<secret_id>.json`
+  - Writes password to `/etc/hyperion/secrets/<secret_id>.json`
     (mode 0600).
   - Rollback: `DROP USER`, `DROP DATABASE`, `rm secret file`.
 
@@ -521,30 +521,30 @@ Each adapter is a struct in `lm-adapters` with these obligations:
 
 - Uses `instant-acme` crate against Let's Encrypt production directory
   (configurable to staging in `agent.toml`).
-- Account key persisted at `/etc/linux-manager/acme-account.key` (mode 0600).
+- Account key persisted at `/etc/hyperion/acme-account.key` (mode 0600).
 - HTTP-01 challenge served via a temporary nginx vhost stanza in a snippet
   file included by every vhost (resolves
   `/.well-known/acme-challenge/<token>` from a shared directory). Adapter
   writes the token, requests verification, removes the token.
-- Returns cert + key written to `/etc/linux-manager/certs/<domain>/`.
+- Returns cert + key written to `/etc/hyperion/certs/<domain>/`.
 - `renew_all()` selects certs where `not_after - now < 30 days`.
 
 ## 11. Orchestrated Flows
 
 ### 11.1 `hosting_create`
 
-Implemented in `lm-core::HostingService::create`. Order respects the
+Implemented in `hyperion-core::HostingService::create`. Order respects the
 `hostings.system_user_id NOT NULL` FK constraint by creating the user
 before inserting the hosting row.
 
 ```text
-01 lm-validate Domain, aliases, php_version, database
+01 hyperion-validate Domain, aliases, php_version, database
 02 derive system_user name (from domain or override)
 03 ensure_user(spec)  -> returns system_users.id                      [R1: userdel]
 04 ensure_dir /home/<u>/<domain>/htdocs, mode 0750, owner u           [R2: rm -r]
 05 ensure_dir /home/<u>/<domain>/logs,   mode 0750, owner u           [R2 same handle]
 06 ensure_dir /home/<u>/<domain>/tmp,    mode 0750, owner u           [R2 same handle]
-07 lm-state BEGIN; INSERT hostings (state='provisioning',
+07 hyperion-state BEGIN; INSERT hostings (state='provisioning',
         system_user_id=<id from step 03>, returns hosting_id);
    INSERT hosting_aliases; COMMIT                                      [R3: DELETE row]
 08 if php_version is Some: phpfpm ensure_pool(u, ver)                  [R4: del pool]
@@ -552,7 +552,7 @@ before inserting the hosting row.
 10 if database == Postgres: postgres create_db_and_user(hosting_id)    [R5b: drop+rm]
 11 acme issue_cert(domain + aliases)                                   [R6: rm cert]
 12 nginx write_vhost(hosting_detail) — includes nginx -t + reload      [R7: restore/remove]
-13 lm-state: UPDATE hostings SET state='active', updated_at=now WHERE id=?
+13 hyperion-state: UPDATE hostings SET state='active', updated_at=now WHERE id=?
 14 audit_log append (success)
 15 return HostingCreated to caller (includes db credentials returned ONCE)
 ```
@@ -571,7 +571,7 @@ On any error after step 02:
 - Append audit_log entry with full error chain.
 - Return `RpcError::ProvisioningFailed { stage, reason }`.
 
-A separate **cleanup-on-startup** task in `lm-agent` scans for
+A separate **cleanup-on-startup** task in `hyperion-agent` scans for
 `state = 'provisioning'` rows at boot, treats them as crashed, and runs
 the full rollback (using stored on-disk evidence — system users + dirs +
 DBs + certs + vhost files; each adapter has a `find_orphans` helper).
@@ -592,7 +592,7 @@ create time, never again).
 
 ```text
 01 resolve hosting; require state in (active, failed)
-02 lm-state: UPDATE state=deleting
+02 hyperion-state: UPDATE state=deleting
 03 audit append (delete.start)
 04 nginx: remove sites-enabled symlink, remove sites-available file, reload
 05 acme: revoke + delete cert files (best-effort; failures logged not fatal)
@@ -600,7 +600,7 @@ create time, never again).
 07 phpfpm: remove pool file, reload
 08 fs: rm -rf /home/<u>/<domain>/   (the per-domain dir, not the home)
 09 if !opts.keep_user and no other hostings for u: users delete_user
-10 lm-state: DELETE hostings row (CASCADE cleans aliases + databases)
+10 hyperion-state: DELETE hostings row (CASCADE cleans aliases + databases)
 11 audit append (delete.ok)
 ```
 
@@ -611,13 +611,13 @@ from where it stopped.
 ### 11.5 `cert_renew_all`
 
 Cron-like; for Foundation it is called by a systemd timer
-(`lm-agent-cert-renew.timer`) twice daily. The agent itself does not have
+(`hyperion-agent-cert-renew.timer`) twice daily. The agent itself does not have
 a scheduler in Foundation.
 
 ## 12. Error Handling & Rollback
 
 - `thiserror` for typed errors in every library crate.
-- `anyhow` permitted only in `bin/lm-agent/src/main.rs` and
+- `anyhow` permitted only in `bin/hyperion-agent/src/main.rs` and
   `bin/lm/src/main.rs` (top-level).
 - `clippy::unwrap_used = "deny"` and `clippy::expect_used = "deny"` in all
   library crates. Acceptable in `bin/main.rs` only for startup invariants.
@@ -632,11 +632,11 @@ a scheduler in Foundation.
 - The agent is the only privileged process.
 - The CLI talks over a Unix socket; peer credentials are checked
   (`SO_PEERCRED`); audit log records the caller's UID.
-- Group `lm-admin` grants socket access. Group is created at package install.
+- Group `hyperion-admin` grants socket access. Group is created at package install.
 - All secrets live outside SQLite, in mode 0600 files under
-  `/etc/linux-manager/secrets/`.
+  `/etc/hyperion/secrets/`.
 - All shell-invoked commands use argv form; arguments validated by
-  `lm-validate` regexes before being passed to `Command::new`.
+  `hyperion-validate` regexes before being passed to `Command::new`.
 - Audit log is append-only with BLAKE3 hash chain; agent verifies the
   chain on startup and refuses to start if broken (operator must rotate
   the log explicitly).
@@ -647,21 +647,21 @@ a scheduler in Foundation.
 
 ## 14. Configuration
 
-`/etc/linux-manager/agent.toml`:
+`/etc/hyperion/agent.toml`:
 
 ```toml
 [agent]
-socket_path        = "/run/linux-manager.sock"
-socket_group       = "lm-admin"
-state_db           = "/var/lib/linux-manager/state.db"
-secrets_dir        = "/etc/linux-manager/secrets"
-log_path           = "/var/log/linux-manager/agent.log"
+socket_path        = "/run/hyperion.sock"
+socket_group       = "hyperion-admin"
+state_db           = "/var/lib/hyperion/state.db"
+secrets_dir        = "/etc/hyperion/secrets"
+log_path           = "/var/log/hyperion/agent.log"
 
 [acme]
 directory_url      = "https://acme-v02.api.letsencrypt.org/directory"
 contact_email      = "you@example.com"
-account_key_path   = "/etc/linux-manager/acme-account.key"
-challenge_dir      = "/var/lib/linux-manager/acme-challenges"
+account_key_path   = "/etc/hyperion/acme-account.key"
+challenge_dir      = "/var/lib/hyperion/acme-challenges"
 
 [nginx]
 sites_available    = "/etc/nginx/sites-available"
@@ -695,13 +695,13 @@ error if any required path is missing or wrong-permissioned.
 
 ### 16.1 Unit tests
 
-- `lm-validate`: property tests via `proptest` for every parser; check that
+- `hyperion-validate`: property tests via `proptest` for every parser; check that
   every accepted string survives a round-trip and every rejected string
   produces a clear error.
-- `lm-state`: in-memory SQLite per test; each query function has at least
+- `hyperion-state`: in-memory SQLite per test; each query function has at least
   one test for the happy path and one for each constraint it enforces.
-- `lm-rpc`: serde round-trip for every wire type.
-- `lm-core`: orchestration tests with fake adapters (`mockall` traits)
+- `hyperion-rpc`: serde round-trip for every wire type.
+- `hyperion-core`: orchestration tests with fake adapters (`mockall` traits)
   to exercise rollback paths without touching the system.
 
 ### 16.2 Adapter integration tests
@@ -723,30 +723,30 @@ error if any required path is missing or wrong-permissioned.
 
 ### 16.4 Fuzzing
 
-- `cargo-fuzz` targets: each `lm-validate` parser; the `lm-rpc` deserializer.
+- `cargo-fuzz` targets: each `hyperion-validate` parser; the `hyperion-rpc` deserializer.
 - Goal: zero panics on arbitrary input.
 - Runs nightly with a 30-minute budget.
 
 ### 16.5 Coverage targets
 
-- 90%+ on `lm-validate`, `lm-state`, `lm-core`.
+- 90%+ on `hyperion-validate`, `hyperion-state`, `hyperion-core`.
 - Adapters measured by integration coverage (% of public API touched).
 - No coverage target on `bin/` (thin wiring).
 
 ## 17. Build & Packaging
 
-- `cargo build --release` produces `lm-agent`, `linux-manager`, `lm`
+- `cargo build --release` produces `hyperion-agent`, `hyperion`, `lm`
   (symlink installed by deb).
 - Stripped binaries via `[profile.release] strip = "symbols"`.
 - Static linkage against musl is **not** required; `glibc` build is fine
   for Debian-only targeting.
 - `cargo-deny` enforces license + advisory checks in CI.
 - `.deb` built with `cargo-deb`; installs:
-  - binaries under `/usr/sbin/lm-agent`, `/usr/bin/lm`
-  - systemd unit at `/lib/systemd/system/lm-agent.service`
-  - timer at `/lib/systemd/system/lm-agent-cert-renew.timer`
-  - default config under `/etc/linux-manager/agent.toml`
-  - postinst creates `lm-admin` group, creates `/var/lib/linux-manager/`
+  - binaries under `/usr/sbin/hyperion-agent`, `/usr/bin/lm`
+  - systemd unit at `/lib/systemd/system/hyperion-agent.service`
+  - timer at `/lib/systemd/system/hyperion-agent-cert-renew.timer`
+  - default config under `/etc/hyperion/agent.toml`
+  - postinst creates `hyperion-admin` group, creates `/var/lib/hyperion/`
     (mode 0700, root:root), enables and starts the service.
 - Migrations are compiled into the agent binary via the `sqlx::migrate!`
   macro and applied on agent startup (idempotent). No `sqlx` CLI is
@@ -760,7 +760,7 @@ explicitly deferred):
 1. **Multi-PHP version reload coalescing.** If many hostings are created in
    rapid succession, naive per-pool reload causes repeated `systemctl reload
    php<ver>-fpm` calls. **Proposal:** batch reloads via a 500 ms debounce
-   per service inside `lm-core`. Deferred — measure first.
+   per service inside `hyperion-core`. Deferred — measure first.
 2. **PostgreSQL coexistence on the same node as MariaDB.** Both daemons
    running is the default; we do not stop or constrain either. No question
    here — explicit acknowledgement.
@@ -775,13 +775,13 @@ explicitly deferred):
 |---|---|
 | Hosting | One website served by this node, identified by primary domain |
 | System user | Linux user account dedicated to one hosting |
-| Adapter | Module in `lm-adapters` wrapping a single external system tool |
-| Orchestrator | `lm-core::HostingService`, coordinates adapters + state |
+| Adapter | Module in `hyperion-adapters` wrapping a single external system tool |
+| Orchestrator | `hyperion-core::HostingService`, coordinates adapters + state |
 | RollbackToken | Closure-like handle that undoes one adapter step |
 | Rollback stack | LIFO of tokens accumulated during a multi-step operation |
 | Secret file | JSON file under `secrets/`, mode 0600, holds passwords / keys |
 | Audit log | Append-only hash-chained record of all RPC calls |
-| `lm-admin` | Unix group whose members can talk to the agent socket |
+| `hyperion-admin` | Unix group whose members can talk to the agent socket |
 
 ---
 

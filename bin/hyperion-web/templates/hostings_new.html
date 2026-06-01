@@ -1,0 +1,71 @@
+{% extends "base.html" %}
+{% block title %}New hosting · hyperion{% endblock %}
+{% block main %}
+<div class="page-header">
+  <h1>New hosting</h1>
+  <span class="grow"></span>
+  <a href="/hostings" class="btn">← Cancel</a>
+</div>
+
+{% if let Some(e) = error %}<div class="flash error">{{ e }}</div>{% endif %}
+
+<div class="card" style="max-width:42rem">
+  <form method="post" action="/hostings">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+
+    <div class="field">
+      <label for="domain">Primary domain <span class="hint">e.g. example.cz</span></label>
+      <input id="domain" name="domain" type="text" required autofocus
+             value="{{ domain_in|e }}" placeholder="example.cz">
+    </div>
+
+    <div class="field">
+      <label for="aliases">Aliases <span class="hint">comma- or space-separated, optional</span></label>
+      <input id="aliases" name="aliases" type="text"
+             value="{{ aliases_in|e }}" placeholder="www.example.cz">
+    </div>
+
+    <div class="field-row">
+      <div class="field">
+        <label for="php">PHP version</label>
+        <select id="php" name="php">
+          <option value="none" {% if php_in.is_empty() || php_in == "none" %}selected{% endif %}>none (static)</option>
+          <option value="8.1" {% if php_in == "8.1" %}selected{% endif %}>PHP 8.1</option>
+          <option value="8.2" {% if php_in == "8.2" %}selected{% endif %}>PHP 8.2</option>
+          <option value="8.3" {% if php_in == "8.3" %}selected{% endif %}>PHP 8.3</option>
+          <option value="8.4" {% if php_in == "8.4" %}selected{% endif %}>PHP 8.4</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="db">Database</label>
+        <select id="db" name="db">
+          <option value="none" {% if db_in.is_empty() || db_in == "none" %}selected{% endif %}>none</option>
+          <option value="mariadb" {% if db_in == "mariadb" %}selected{% endif %}>MariaDB</option>
+          <option value="postgres" {% if db_in == "postgres" %}selected{% endif %}>PostgreSQL</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="field">
+      <label for="system_user">System user <span class="hint">optional — derived from domain by default</span></label>
+      <input id="system_user" name="system_user" type="text" placeholder="">
+    </div>
+
+    <div class="row" style="margin-top:1rem">
+      <button class="btn primary" type="submit">Provision</button>
+      <a href="/hostings" class="btn">Cancel</a>
+    </div>
+  </form>
+</div>
+
+<div class="card muted" style="max-width:42rem; margin-top:1rem">
+  <h2>What happens next</h2>
+  <ol style="margin:0; padding-left:1.25rem">
+    <li>Linux user is created and given a chroot-style home.</li>
+    <li>Directory tree is laid out under <code>/home/{user}/{domain}</code>.</li>
+    <li>PHP-FPM pool config is rendered and the service reloaded.</li>
+    <li>Database + DB user are provisioned and the password returned <em>once</em>.</li>
+    <li>A TLS cert is issued and the nginx vhost goes live.</li>
+  </ol>
+</div>
+{% endblock %}

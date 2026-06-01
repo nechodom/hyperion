@@ -1,0 +1,30 @@
+[package]
+name = "hyperion-adapters"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+hyperion-types = { path = "../hyperion-types" }
+hyperion-validate = { path = "../hyperion-validate" }
+hyperion-rpc = { path = "../hyperion-rpc" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true }
+tracing.workspace = true
+askama.workspace = true
+instant-acme.workspace = true
+rcgen.workspace = true
+rand.workspace = true
+hex.workspace = true
+async-trait.workspace = true
+blake3.workspace = true
+regex.workspace = true
+once_cell.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt"] }
+mockall.workspace = true

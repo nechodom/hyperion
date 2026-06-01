@@ -1,0 +1,47 @@
+[package]
+name = "hyperion-web"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "hyperion-web"
+path = "src/main.rs"
+
+[dependencies]
+hyperion-rpc = { path = "../../crates/hyperion-rpc" }
+hyperion-rpc-client = { path = "../../crates/hyperion-rpc-client" }
+hyperion-types = { path = "../../crates/hyperion-types" }
+hyperion-validate = { path = "../../crates/hyperion-validate" }
+hyperion-auth = { path = "../../crates/hyperion-auth" }
+tokio = { workspace = true }
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+askama.workspace = true
+axum.workspace = true
+tower.workspace = true
+tower-http.workspace = true
+url.workspace = true
+http-body-util.workspace = true
+once_cell.workspace = true
+subtle.workspace = true
+async-trait.workspace = true
+ulid.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+tempfile.workspace = true
+async-trait.workspace = true
+hyperion-adapters = { path = "../../crates/hyperion-adapters" }
+hyperion-core = { path = "../../crates/hyperion-core" }
+hyperion-state = { path = "../../crates/hyperion-state" }
+hyperion-rpc-server = { path = "../../crates/hyperion-rpc-server" }
+rand.workspace = true
+http-body-util.workspace = true

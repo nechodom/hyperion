@@ -49,7 +49,7 @@ scripts (`start`, `build`) are honored.
 | # | Decision | Rationale |
 |---|---|---|
 | D1 | **NodeSource** apt repo (deb.nodesource.com) for multi-version Node | Mature, fast updates, signed |
-| D2 | Each app = a systemd unit named `lm-app-<hosting_user>.service` | Standard, slice-aware, observable |
+| D2 | Each app = a systemd unit named `hyperion-app-<hosting_user>.service` | Standard, slice-aware, observable |
 | D3 | Port allocation pool `30000–39999`; tracked in agent state | Simple, predictable, plenty of room |
 | D4 | nginx reverse proxies to `127.0.0.1:<allocated_port>` | Loopback only; no public port exposure |
 | D5 | Node version per hosting recorded; binary is `/usr/bin/node<ver>` symlinks (from NodeSource) | Coexistence |
@@ -156,11 +156,11 @@ both `php_version` and `node_app` is an error.
 
 ## 8. systemd Unit Template
 
-`/etc/systemd/system/lm-app-<user>.service` written by agent:
+`/etc/systemd/system/hyperion-app-<user>.service` written by agent:
 
 ```ini
 [Unit]
-Description=lm app: {{ hosting.domain }}
+Description=hyperion app: {{ hosting.domain }}
 After=network.target
 ConditionPathExists=/home/{{ system_user }}/{{ hosting.domain }}/htdocs/package.json
 
@@ -170,13 +170,13 @@ User={{ system_user }}
 Group={{ system_user }}
 WorkingDirectory=/home/{{ system_user }}/{{ hosting.domain }}/htdocs
 Environment=NODE_ENV=production PORT={{ listen_port }} HOME=/home/{{ system_user }}
-EnvironmentFile=/etc/linux-manager/secrets/{{ env_vars_secret_id }}
+EnvironmentFile=/etc/hyperion/secrets/{{ env_vars_secret_id }}
 ExecStart=/usr/bin/node{{ node_version }} {{ app_entry }}
 Restart=on-failure
 RestartSec=5s
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=lm-app-{{ system_user }}
+SyslogIdentifier=hyperion-app-{{ system_user }}
 
 # Resource limits (from hosting_limits + node_apps)
 MemoryMax={{ memory_mb }}M
@@ -207,7 +207,7 @@ WantedBy=multi-user.target
 03 nodejs.ensure_version_installed(node_version)
 04 port_pool.allocate() → port
 05 INSERT node_apps (install_state='pending', listen_port=port)
-06 write env file to /etc/linux-manager/secrets/<env_vars_secret_id> (empty)
+06 write env file to /etc/hyperion/secrets/<env_vars_secret_id> (empty)
 07 acme issue_cert
 08 nginx write_vhost with reverse-proxy variant pointing to port
 09 systemd write_unit + enable (do NOT start yet — no code to run)
@@ -241,19 +241,19 @@ WantedBy=multi-user.target
 
 ## 10. Logs
 
-Each unit writes to systemd journal under `SyslogIdentifier=lm-app-<user>`.
+Each unit writes to systemd journal under `SyslogIdentifier=hyperion-app-<user>`.
 A small `lm-log-forwarder` task in agent (tokio interval, every 60s):
 
 ```text
 - for each ready node app:
-   journalctl --identifier lm-app-<user> --since "65 seconds ago" -o cat
+   journalctl --identifier hyperion-app-<user> --since "65 seconds ago" -o cat
      >> /home/<u>/<dom>/logs/app.log
 - rotate when file > 10 MiB:
    mv app.log app.log.1.gz (with gzip); keep 4 rotations
 ```
 
 Live tail via `node_app_logs(tail: u32)` reads from `journalctl
---identifier lm-app-<user> -n <tail> -o cat`.
+--identifier hyperion-app-<user> -n <tail> -o cat`.
 
 ## 11. CLI
 
@@ -321,7 +321,7 @@ log_rotate_keep    = 4
    `port_pool.used=1` rows with no matching `node_apps.listen_port` and
    reclaims.
 4. **bun / deno / yarn / pnpm as future runtimes.** Slot for a runtime
-   abstraction trait under `lm-adapters::runtime`; PHP, Node currently
+   abstraction trait under `hyperion-adapters::runtime`; PHP, Node currently
    implement it.
 
 ## 16. Glossary Additions

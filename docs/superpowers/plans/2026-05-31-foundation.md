@@ -3,8 +3,8 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:executing-plans
 > to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax.
 
-**Goal:** Build sub-project 1 (Foundation) of linux-manager: privileged
-`lm-agent` daemon + unprivileged `lm` CLI client communicating over a
+**Goal:** Build sub-project 1 (Foundation) of hyperion: privileged
+`hyperion-agent` daemon + unprivileged `lm` CLI client communicating over a
 local Unix-socket RPC, capable of provisioning + managing PHP/static
 hostings on Debian 12 with nginx, PHP-FPM, MariaDB/PostgreSQL, and
 Let's Encrypt certificates.
@@ -40,15 +40,15 @@ hash-chain audit log. LIFO rollback stack for multi-step provisioning.
 [workspace]
 resolver = "3"
 members = [
-    "crates/lm-types",
-    "crates/lm-validate",
-    "crates/lm-rpc",
-    "crates/lm-rpc-server",
-    "crates/lm-rpc-client",
-    "crates/lm-state",
-    "crates/lm-adapters",
-    "crates/lm-core",
-    "bin/lm-agent",
+    "crates/hyperion-types",
+    "crates/hyperion-validate",
+    "crates/hyperion-rpc",
+    "crates/hyperion-rpc-server",
+    "crates/hyperion-rpc-client",
+    "crates/hyperion-state",
+    "crates/hyperion-adapters",
+    "crates/hyperion-core",
+    "bin/hyperion-agent",
     "bin/lm",
 ]
 
@@ -56,7 +56,7 @@ members = [
 edition = "2024"
 rust-version = "1.80"
 license = "AGPL-3.0-only"
-repository = "https://github.com/kevinnechodom/linux-manager"
+repository = "https://github.com/kevinnechodom/hyperion"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -136,24 +136,24 @@ git commit -m "feat(workspace): bootstrap Cargo workspace + pinned toolchain"
 
 ---
 
-### Task 2: `lm-types` crate — shared serde types
+### Task 2: `hyperion-types` crate — shared serde types
 
 **Files:**
-- Create: `crates/lm-types/Cargo.toml`
-- Create: `crates/lm-types/src/lib.rs`
-- Create: `crates/lm-types/src/ids.rs`
-- Create: `crates/lm-types/src/php.rs`
-- Create: `crates/lm-types/src/db.rs`
-- Create: `crates/lm-types/src/cert.rs`
-- Create: `crates/lm-types/src/hosting.rs`
+- Create: `crates/hyperion-types/Cargo.toml`
+- Create: `crates/hyperion-types/src/lib.rs`
+- Create: `crates/hyperion-types/src/ids.rs`
+- Create: `crates/hyperion-types/src/php.rs`
+- Create: `crates/hyperion-types/src/db.rs`
+- Create: `crates/hyperion-types/src/cert.rs`
+- Create: `crates/hyperion-types/src/hosting.rs`
 - Test: inline `#[cfg(test)]` modules in each source
 
 - [ ] **Step 1: Write crate manifest**
 
-`crates/lm-types/Cargo.toml`:
+`crates/hyperion-types/Cargo.toml`:
 ```toml
 [package]
-name = "lm-types"
+name = "hyperion-types"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
@@ -169,7 +169,7 @@ chrono.workspace = true
 - [ ] **Step 2: Write `src/lib.rs` re-exporting modules**
 
 ```rust
-//! Shared serde types for linux-manager.
+//! Shared serde types for hyperion.
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 #![forbid(unsafe_code)]
 
@@ -464,7 +464,7 @@ mod tests {
 
 - [ ] **Step 8: Add dev-dependencies and run tests**
 
-Update `crates/lm-types/Cargo.toml`:
+Update `crates/hyperion-types/Cargo.toml`:
 ```toml
 [dev-dependencies]
 serde_json.workspace = true
@@ -472,7 +472,7 @@ serde_json.workspace = true
 
 Run:
 ```bash
-cargo test -p lm-types
+cargo test -p hyperion-types
 ```
 
 Expected: all tests pass (≥ 10 tests).
@@ -480,25 +480,25 @@ Expected: all tests pass (≥ 10 tests).
 - [ ] **Step 9: Commit**
 
 ```bash
-git add crates/lm-types
-git commit -m "feat(lm-types): shared serde types (ids, php, db, cert, hosting)"
+git add crates/hyperion-types
+git commit -m "feat(hyperion-types): shared serde types (ids, php, db, cert, hosting)"
 ```
 
 ---
 
-### Task 3: `lm-validate` crate — input parsers
+### Task 3: `hyperion-validate` crate — input parsers
 
 **Files:**
-- Create: `crates/lm-validate/Cargo.toml`
-- Create: `crates/lm-validate/src/lib.rs`
-- Create: `crates/lm-validate/src/domain.rs`
-- Create: `crates/lm-validate/src/sysuser.rs`
+- Create: `crates/hyperion-validate/Cargo.toml`
+- Create: `crates/hyperion-validate/src/lib.rs`
+- Create: `crates/hyperion-validate/src/domain.rs`
+- Create: `crates/hyperion-validate/src/sysuser.rs`
 
 - [ ] **Step 1: Manifest**
 
 ```toml
 [package]
-name = "lm-validate"
+name = "hyperion-validate"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
@@ -739,7 +739,7 @@ mod tests {
 - [ ] **Step 5: Run**
 
 ```bash
-cargo test -p lm-validate
+cargo test -p hyperion-validate
 ```
 
 Expected: all tests pass; proptest runs 256 cases each by default.
@@ -747,35 +747,35 @@ Expected: all tests pass; proptest runs 256 cases each by default.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add crates/lm-validate
-git commit -m "feat(lm-validate): Domain + SystemUserName parsers with property tests"
+git add crates/hyperion-validate
+git commit -m "feat(hyperion-validate): Domain + SystemUserName parsers with property tests"
 ```
 
 ---
 
-### Task 4: `lm-rpc` crate — trait + wire types + error + frame codec
+### Task 4: `hyperion-rpc` crate — trait + wire types + error + frame codec
 
 **Files:**
-- Create: `crates/lm-rpc/Cargo.toml`
-- Create: `crates/lm-rpc/src/lib.rs`
-- Create: `crates/lm-rpc/src/error.rs`
-- Create: `crates/lm-rpc/src/wire.rs`
-- Create: `crates/lm-rpc/src/api.rs`
-- Create: `crates/lm-rpc/src/codec.rs`
+- Create: `crates/hyperion-rpc/Cargo.toml`
+- Create: `crates/hyperion-rpc/src/lib.rs`
+- Create: `crates/hyperion-rpc/src/error.rs`
+- Create: `crates/hyperion-rpc/src/wire.rs`
+- Create: `crates/hyperion-rpc/src/api.rs`
+- Create: `crates/hyperion-rpc/src/codec.rs`
 
 - [ ] **Step 1: Manifest**
 
 ```toml
 [package]
-name = "lm-rpc"
+name = "hyperion-rpc"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-lm-types = { path = "../lm-types" }
-lm-validate = { path = "../lm-validate" }
+hyperion-types = { path = "../hyperion-types" }
+hyperion-validate = { path = "../hyperion-validate" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -811,8 +811,8 @@ pub enum RpcError {
     Internal,
 }
 
-impl From<lm_validate::ValidationError> for RpcError {
-    fn from(e: lm_validate::ValidationError) -> Self {
+impl From<hyperion_validate::ValidationError> for RpcError {
+    fn from(e: hyperion_validate::ValidationError) -> Self {
         Self::Validation { message: e.to_string() }
     }
 }
@@ -837,7 +837,7 @@ mod tests {
         }
     }
     #[test] fn from_validation_error() {
-        let e: RpcError = lm_validate::ValidationError::InvalidDomain("x".into(), "bad").into();
+        let e: RpcError = hyperion_validate::ValidationError::InvalidDomain("x".into(), "bad").into();
         match e { RpcError::Validation { .. } => {}, _ => panic!("wrong variant") }
     }
 }
@@ -846,8 +846,8 @@ mod tests {
 - [ ] **Step 3: `wire.rs`**
 
 ```rust
-use lm_types::*;
-use lm_validate::{Domain, SystemUserName};
+use hyperion_types::*;
+use hyperion_validate::{Domain, SystemUserName};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -915,8 +915,8 @@ mod tests {
 ```rust
 use crate::{error::RpcError, wire::*};
 use async_trait::async_trait;
-use lm_types::*;
-use lm_validate::Domain;
+use hyperion_types::*;
+use hyperion_validate::Domain;
 
 #[async_trait]
 pub trait AgentApi: Send + Sync + 'static {
@@ -939,8 +939,8 @@ pub trait AgentApi: Send + Sync + 'static {
 
 ```rust
 use crate::{error::RpcError, wire::*};
-use lm_types::*;
-use lm_validate::Domain;
+use hyperion_types::*;
+use hyperion_validate::Domain;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
@@ -1046,7 +1046,7 @@ pub use wire::*;
 - [ ] **Step 7: Run**
 
 ```bash
-cargo test -p lm-rpc
+cargo test -p hyperion-rpc
 ```
 
 Expected: all tests pass.
@@ -1054,40 +1054,40 @@ Expected: all tests pass.
 - [ ] **Step 8: Commit**
 
 ```bash
-git add crates/lm-rpc
-git commit -m "feat(lm-rpc): typed trait + wire types + JSON frame codec"
+git add crates/hyperion-rpc
+git commit -m "feat(hyperion-rpc): typed trait + wire types + JSON frame codec"
 ```
 
 ---
 
 ## Phase B — State Layer
 
-### Task 5: `lm-state` crate — schema, migrations, queries
+### Task 5: `hyperion-state` crate — schema, migrations, queries
 
 **Files:**
-- Create: `crates/lm-state/Cargo.toml`
-- Create: `crates/lm-state/migrations/001_initial.sql`
-- Create: `crates/lm-state/src/lib.rs`
-- Create: `crates/lm-state/src/db.rs`
-- Create: `crates/lm-state/src/system_users.rs`
-- Create: `crates/lm-state/src/hostings.rs`
-- Create: `crates/lm-state/src/databases.rs`
-- Create: `crates/lm-state/src/certificates.rs`
-- Create: `crates/lm-state/src/audit.rs`
+- Create: `crates/hyperion-state/Cargo.toml`
+- Create: `crates/hyperion-state/migrations/001_initial.sql`
+- Create: `crates/hyperion-state/src/lib.rs`
+- Create: `crates/hyperion-state/src/db.rs`
+- Create: `crates/hyperion-state/src/system_users.rs`
+- Create: `crates/hyperion-state/src/hostings.rs`
+- Create: `crates/hyperion-state/src/databases.rs`
+- Create: `crates/hyperion-state/src/certificates.rs`
+- Create: `crates/hyperion-state/src/audit.rs`
 
 - [ ] **Step 1: Manifest**
 
 ```toml
 [package]
-name = "lm-state"
+name = "hyperion-state"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-lm-types = { path = "../lm-types" }
-lm-validate = { path = "../lm-validate" }
+hyperion-types = { path = "../hyperion-types" }
+hyperion-validate = { path = "../hyperion-validate" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -1172,30 +1172,30 @@ mod tests {
 
 (Each file is ≈80–150 lines; structured queries + a tests module.)
 
-- [ ] **Step 9: Run `cargo test -p lm-state`** — expect all tests pass.
+- [ ] **Step 9: Run `cargo test -p hyperion-state`** — expect all tests pass.
 
 - [ ] **Step 10: Commit**
 
 ```bash
-git add crates/lm-state
-git commit -m "feat(lm-state): SQLite schema, queries, hash-chain audit log"
+git add crates/hyperion-state
+git commit -m "feat(hyperion-state): SQLite schema, queries, hash-chain audit log"
 ```
 
 ---
 
 ## Phase C — RPC Transport (Unix socket)
 
-### Task 6: `lm-rpc-server` + `lm-rpc-client` crates
+### Task 6: `hyperion-rpc-server` + `hyperion-rpc-client` crates
 
 **Files:**
-- Create: `crates/lm-rpc-server/Cargo.toml`
-- Create: `crates/lm-rpc-server/src/lib.rs`
-- Create: `crates/lm-rpc-client/Cargo.toml`
-- Create: `crates/lm-rpc-client/src/lib.rs`
+- Create: `crates/hyperion-rpc-server/Cargo.toml`
+- Create: `crates/hyperion-rpc-server/src/lib.rs`
+- Create: `crates/hyperion-rpc-client/Cargo.toml`
+- Create: `crates/hyperion-rpc-client/src/lib.rs`
 
 - [ ] **Step 1: Server manifest + lib.rs**
 
-Manifest depends on `lm-rpc`, `tokio` (features: `net`), `tracing`,
+Manifest depends on `hyperion-rpc`, `tokio` (features: `net`), `tracing`,
 `thiserror`, `async-trait`.
 
 `lib.rs`:
@@ -1205,8 +1205,8 @@ Manifest depends on `lm-rpc`, `tokio` (features: `net`), `tracing`,
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 #![forbid(unsafe_code)]
 
-use lm_rpc::codec::{read_frame, write_frame, Request, Response};
-use lm_rpc::{AgentApi, RpcError};
+use hyperion_rpc::codec::{read_frame, write_frame, Request, Response};
+use hyperion_rpc::{AgentApi, RpcError};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1228,7 +1228,7 @@ impl Server {
     pub async fn bind(path: &Path, api: Arc<dyn AgentApi>) -> Result<Self, ServerError> {
         if path.exists() { std::fs::remove_file(path)?; }
         let listener = UnixListener::bind(path)?;
-        // mode 0660 (group lm-admin will be added by deployment; here just owner+group rw)
+        // mode 0660 (group hyperion-admin will be added by deployment; here just owner+group rw)
         let perms = std::fs::Permissions::from_mode(0o660);
         std::fs::set_permissions(path, perms)?;
         Ok(Self { listener, api, socket_path: path.to_owned() })
@@ -1278,9 +1278,9 @@ async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use lm_rpc::wire::*;
-    use lm_types::*;
-    use lm_validate::Domain;
+    use hyperion_rpc::wire::*;
+    use hyperion_types::*;
+    use hyperion_validate::Domain;
 
     struct EchoApi;
     #[async_trait]
@@ -1309,7 +1309,7 @@ mod tests {
         tokio::spawn(srv.run());
         // give it a tick
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        let resp = lm_rpc_client::call(&p, Request::AgentInfo).await.unwrap();
+        let resp = hyperion_rpc_client::call(&p, Request::AgentInfo).await.unwrap();
         match resp { Response::AgentInfo(_) => {}, _ => panic!("bad resp") }
     }
 }
@@ -1322,7 +1322,7 @@ mod tests {
 #![deny(clippy::unwrap_used, clippy::expect_used)]
 #![forbid(unsafe_code)]
 
-use lm_rpc::codec::{read_frame, write_frame, Request, Response};
+use hyperion_rpc::codec::{read_frame, write_frame, Request, Response};
 use std::path::Path;
 use tokio::net::UnixStream;
 
@@ -1342,52 +1342,52 @@ pub async fn call(socket: &Path, req: Request) -> Result<Response, ClientError> 
 - [ ] **Step 3: Run tests**
 
 ```bash
-cargo test -p lm-rpc-server -p lm-rpc-client
+cargo test -p hyperion-rpc-server -p hyperion-rpc-client
 ```
 
 - [ ] **Step 4: Commit**
 
 ```bash
-git add crates/lm-rpc-server crates/lm-rpc-client
-git commit -m "feat(lm-rpc): Unix-socket server + client transport"
+git add crates/hyperion-rpc-server crates/hyperion-rpc-client
+git commit -m "feat(hyperion-rpc): Unix-socket server + client transport"
 ```
 
 ---
 
 ## Phase D — Adapters
 
-### Task 7: `lm-adapters` crate skeleton + `fs` + `users` + rollback trait
+### Task 7: `hyperion-adapters` crate skeleton + `fs` + `users` + rollback trait
 
 **Files:**
-- Create: `crates/lm-adapters/Cargo.toml`
-- Create: `crates/lm-adapters/src/lib.rs`
-- Create: `crates/lm-adapters/src/rollback.rs`
-- Create: `crates/lm-adapters/src/fs.rs`
-- Create: `crates/lm-adapters/src/users.rs`
-- Create: `crates/lm-adapters/src/cmd.rs`
-- Create: `crates/lm-adapters/src/nginx.rs`
-- Create: `crates/lm-adapters/src/phpfpm.rs`
-- Create: `crates/lm-adapters/src/mariadb.rs`
-- Create: `crates/lm-adapters/src/postgres.rs`
-- Create: `crates/lm-adapters/src/acme.rs`
-- Create: `crates/lm-adapters/templates/nginx-vhost.conf.j2`
-- Create: `crates/lm-adapters/templates/nginx-vhost-suspended.conf.j2`
-- Create: `crates/lm-adapters/templates/phpfpm-pool.conf.j2`
+- Create: `crates/hyperion-adapters/Cargo.toml`
+- Create: `crates/hyperion-adapters/src/lib.rs`
+- Create: `crates/hyperion-adapters/src/rollback.rs`
+- Create: `crates/hyperion-adapters/src/fs.rs`
+- Create: `crates/hyperion-adapters/src/users.rs`
+- Create: `crates/hyperion-adapters/src/cmd.rs`
+- Create: `crates/hyperion-adapters/src/nginx.rs`
+- Create: `crates/hyperion-adapters/src/phpfpm.rs`
+- Create: `crates/hyperion-adapters/src/mariadb.rs`
+- Create: `crates/hyperion-adapters/src/postgres.rs`
+- Create: `crates/hyperion-adapters/src/acme.rs`
+- Create: `crates/hyperion-adapters/templates/nginx-vhost.conf.j2`
+- Create: `crates/hyperion-adapters/templates/nginx-vhost-suspended.conf.j2`
+- Create: `crates/hyperion-adapters/templates/phpfpm-pool.conf.j2`
 
 - [ ] **Step 1: Manifest**
 
 ```toml
 [package]
-name = "lm-adapters"
+name = "hyperion-adapters"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-lm-types = { path = "../lm-types" }
-lm-validate = { path = "../lm-validate" }
-lm-rpc = { path = "../lm-rpc" }
+hyperion-types = { path = "../hyperion-types" }
+hyperion-validate = { path = "../hyperion-validate" }
+hyperion-rpc = { path = "../hyperion-rpc" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -1431,20 +1431,20 @@ pub enum AdapterError {
     #[error("command {cmd} failed with exit {code}: {stderr_tail}")]
     Command { cmd: String, code: i32, stderr_tail: String },
     #[error("template render: {0}")] Render(#[from] askama::Error),
-    #[error("validation: {0}")] Validation(#[from] lm_validate::ValidationError),
+    #[error("validation: {0}")] Validation(#[from] hyperion_validate::ValidationError),
     #[error("acme: {0}")] Acme(String),
     #[error("conflict: {0}")] Conflict(String),
     #[error("other: {0}")] Other(String),
 }
 
-impl From<AdapterError> for lm_rpc::RpcError {
+impl From<AdapterError> for hyperion_rpc::RpcError {
     fn from(e: AdapterError) -> Self {
         match e {
             AdapterError::Command { cmd, code, stderr_tail } =>
-                lm_rpc::RpcError::SystemCommand { cmd, code, stderr_tail },
-            AdapterError::Conflict(m) => lm_rpc::RpcError::Conflict { message: m },
+                hyperion_rpc::RpcError::SystemCommand { cmd, code, stderr_tail },
+            AdapterError::Conflict(m) => hyperion_rpc::RpcError::Conflict { message: m },
             AdapterError::Validation(v) => v.into(),
-            _ => lm_rpc::RpcError::Internal,
+            _ => hyperion_rpc::RpcError::Internal,
         }
     }
 }
@@ -1703,23 +1703,23 @@ chdir = /
 - [ ] **Step 13: Run + commit**
 
 ```bash
-cargo test -p lm-adapters
-git add crates/lm-adapters
-git commit -m "feat(lm-adapters): fs, users, nginx, phpfpm, mariadb, postgres, acme adapters + rollback"
+cargo test -p hyperion-adapters
+git add crates/hyperion-adapters
+git commit -m "feat(hyperion-adapters): fs, users, nginx, phpfpm, mariadb, postgres, acme adapters + rollback"
 ```
 
 ---
 
 ## Phase E — Orchestration
 
-### Task 8: `lm-core` crate — `HostingService`
+### Task 8: `hyperion-core` crate — `HostingService`
 
 **Files:**
-- Create: `crates/lm-core/Cargo.toml`
-- Create: `crates/lm-core/src/lib.rs`
-- Create: `crates/lm-core/src/service.rs`
-- Create: `crates/lm-core/src/agent.rs`     (implements `AgentApi`)
-- Create: `crates/lm-core/src/secrets.rs`
+- Create: `crates/hyperion-core/Cargo.toml`
+- Create: `crates/hyperion-core/src/lib.rs`
+- Create: `crates/hyperion-core/src/service.rs`
+- Create: `crates/hyperion-core/src/agent.rs`     (implements `AgentApi`)
+- Create: `crates/hyperion-core/src/secrets.rs`
 
 - [ ] **Step 1: Manifest + lib.rs**
 
@@ -1729,7 +1729,7 @@ impl wired to state + adapters).
 - [ ] **Step 2: `secrets.rs` — write/read secret files mode 0600**
 
 ```rust
-use lm_types::SecretId;
+use hyperion_types::SecretId;
 use serde::{Serialize, de::DeserializeOwned};
 use std::path::{Path, PathBuf};
 use tokio::fs;
@@ -1793,33 +1793,33 @@ production `AgentImpl` injects the real ones; in tests we mock via
 `mockall`.
 
 ```rust
-use lm_rpc::{RpcError, wire::*};
-use lm_types::*;
-use lm_validate::{Domain, SystemUserName};
+use hyperion_rpc::{RpcError, wire::*};
+use hyperion_types::*;
+use hyperion_validate::{Domain, SystemUserName};
 use sqlx::SqlitePool;
 use std::sync::Arc;
 
 #[async_trait::async_trait]
 #[cfg_attr(test, mockall::automock)]
 pub trait AdapterPort: Send + Sync {
-    async fn ensure_user(&self, name: &str, home: &str) -> Result<u32, lm_adapters::AdapterError>;
-    async fn delete_user(&self, name: &str) -> Result<(), lm_adapters::AdapterError>;
+    async fn ensure_user(&self, name: &str, home: &str) -> Result<u32, hyperion_adapters::AdapterError>;
+    async fn delete_user(&self, name: &str) -> Result<(), hyperion_adapters::AdapterError>;
     async fn ensure_dirs(&self, htdocs: &str, logs: &str, tmp: &str, owner: &str)
-        -> Result<(), lm_adapters::AdapterError>;
-    async fn rm_tree(&self, root: &str) -> Result<(), lm_adapters::AdapterError>;
+        -> Result<(), hyperion_adapters::AdapterError>;
+    async fn rm_tree(&self, root: &str) -> Result<(), hyperion_adapters::AdapterError>;
     async fn fpm_ensure(&self, user: &str, ver: PhpVersion, domain: &str)
-        -> Result<(), lm_adapters::AdapterError>;
-    async fn fpm_delete(&self, user: &str, ver: PhpVersion) -> Result<(), lm_adapters::AdapterError>;
+        -> Result<(), hyperion_adapters::AdapterError>;
+    async fn fpm_delete(&self, user: &str, ver: PhpVersion) -> Result<(), hyperion_adapters::AdapterError>;
     async fn db_create(&self, eng: DbProvision, id: &HostingId)
-        -> Result<DbCredentials, lm_adapters::AdapterError>;
+        -> Result<DbCredentials, hyperion_adapters::AdapterError>;
     async fn db_drop(&self, eng: DbProvision, name: &str, user: &str)
-        -> Result<(), lm_adapters::AdapterError>;
+        -> Result<(), hyperion_adapters::AdapterError>;
     async fn acme_issue(&self, domain: &str, sans: &[String])
-        -> Result<CertInfo, lm_adapters::AdapterError>;
-    async fn acme_delete(&self, domain: &str) -> Result<(), lm_adapters::AdapterError>;
+        -> Result<CertInfo, hyperion_adapters::AdapterError>;
+    async fn acme_delete(&self, domain: &str) -> Result<(), hyperion_adapters::AdapterError>;
     async fn nginx_write_vhost(&self, detail: &HostingDetail)
-        -> Result<(), lm_adapters::AdapterError>;
-    async fn nginx_delete_vhost(&self, domain: &str) -> Result<(), lm_adapters::AdapterError>;
+        -> Result<(), hyperion_adapters::AdapterError>;
+    async fn nginx_delete_vhost(&self, domain: &str) -> Result<(), hyperion_adapters::AdapterError>;
 }
 
 pub struct HostingService<A: AdapterPort> {
@@ -1830,11 +1830,11 @@ pub struct HostingService<A: AdapterPort> {
 impl<A: AdapterPort + 'static> HostingService<A> {
     pub async fn create(&self, req: HostingCreateReq) -> Result<HostingCreated, RpcError> {
         // … implement steps from spec §11.1 with RollbackStack
-        // 1. validate (lm-validate already does it on parse)
+        // 1. validate (hyperion-validate already does it on parse)
         // 2. derive system user
         // 3. adapters.ensure_user
         // 4. adapters.ensure_dirs
-        // 5. lm-state hostings::insert(state=provisioning)
+        // 5. hyperion-state hostings::insert(state=provisioning)
         // 6. fpm_ensure if php
         // 7. db_create if db
         // 8. acme_issue
@@ -1844,7 +1844,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         todo!("implement; on any err, run rollback stack LIFO, mark state=failed")
     }
     pub async fn list(&self) -> Result<Vec<HostingSummary>, RpcError> {
-        lm_state::hostings::list(&self.pool).await
+        hyperion_state::hostings::list(&self.pool).await
             .map_err(|_| RpcError::Internal)
     }
     pub async fn get(&self, sel: HostingSelector) -> Result<HostingDetail, RpcError> {
@@ -1867,7 +1867,7 @@ sequencing per the spec; tests below cover them.)
 #[cfg(test)] mod tests {
     use super::*;
     use mockall::predicate::*;
-    use lm_state::db::open_memory;
+    use hyperion_state::db::open_memory;
 
     fn req(d: &str) -> HostingCreateReq {
         HostingCreateReq {
@@ -1910,7 +1910,7 @@ sequencing per the spec; tests below cover them.)
         a.expect_acme_issue().returning(|d,_| Ok(CertInfo {
             domain: d.into(), sans: vec![], issuer: "le".into(),
             not_after: 0, fingerprint_sha256: "abc".into() }));
-        a.expect_nginx_write_vhost().returning(|_| Err(lm_adapters::AdapterError::Other("boom".into())));
+        a.expect_nginx_write_vhost().returning(|_| Err(hyperion_adapters::AdapterError::Other("boom".into())));
         // Expect rollbacks invoked:
         a.expect_acme_delete().returning(|_| Ok(()));
         a.expect_db_drop().returning(|_,_,_| Ok(()));
@@ -1932,29 +1932,29 @@ sequencing per the spec; tests below cover them.)
 - [ ] **Step 5: `agent.rs` — production `AgentImpl: AgentApi` glue**
 
 Implements the `AgentApi` trait by delegating to `HostingService` and
-binding the real `AdapterPort` from `lm-adapters`.
+binding the real `AdapterPort` from `hyperion-adapters`.
 
 - [ ] **Step 6: Run + commit**
 
 ```bash
-cargo test -p lm-core
-git add crates/lm-core
-git commit -m "feat(lm-core): orchestration with mockable AdapterPort + secrets store"
+cargo test -p hyperion-core
+git add crates/hyperion-core
+git commit -m "feat(hyperion-core): orchestration with mockable AdapterPort + secrets store"
 ```
 
 ---
 
 ## Phase F — Binaries
 
-### Task 9: `bin/lm-agent` — daemon
+### Task 9: `bin/hyperion-agent` — daemon
 
 **Files:**
-- Create: `bin/lm-agent/Cargo.toml`
-- Create: `bin/lm-agent/src/main.rs`
-- Create: `bin/lm-agent/src/config.rs`
+- Create: `bin/hyperion-agent/Cargo.toml`
+- Create: `bin/hyperion-agent/src/main.rs`
+- Create: `bin/hyperion-agent/src/config.rs`
 
-- [ ] **Step 1: Manifest depends on `lm-core`, `lm-rpc-server`,
-       `lm-state`, `tokio`, `tracing-subscriber`, `clap`, `toml`,
+- [ ] **Step 1: Manifest depends on `hyperion-core`, `hyperion-rpc-server`,
+       `hyperion-state`, `tokio`, `tracing-subscriber`, `clap`, `toml`,
        `serde`, `anyhow`, `tracing`.**
 
 - [ ] **Step 2: `config.rs`** — load `agent.toml`, validate paths.
@@ -1965,24 +1965,24 @@ git commit -m "feat(lm-core): orchestration with mockable AdapterPort + secrets 
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().json().init();
     let cfg = config::load_default()?;
-    let pool = lm_state::db::open(&cfg.state_db).await?;
-    let adapters = std::sync::Arc::new(lm_adapters_facade::Real::new(/* cfg */));
-    let svc = std::sync::Arc::new(lm_core::HostingService { pool, adapters });
-    let agent = std::sync::Arc::new(lm_core::AgentImpl::new(svc));
-    let srv = lm_rpc_server::Server::bind(&cfg.socket_path, agent).await?;
-    tracing::info!(socket=%cfg.socket_path.display(), "lm-agent ready");
+    let pool = hyperion_state::db::open(&cfg.state_db).await?;
+    let adapters = std::sync::Arc::new(hyperion_adapters_facade::Real::new(/* cfg */));
+    let svc = std::sync::Arc::new(hyperion_core::HostingService { pool, adapters });
+    let agent = std::sync::Arc::new(hyperion_core::AgentImpl::new(svc));
+    let srv = hyperion_rpc_server::Server::bind(&cfg.socket_path, agent).await?;
+    tracing::info!(socket=%cfg.socket_path.display(), "hyperion-agent ready");
     srv.run().await?;
     Ok(())
 }
 ```
 
-- [ ] **Step 4: Run `cargo build -p lm-agent` and `cargo run --bin lm-agent -- --help`** (we'll add a `--help` flag via clap).
+- [ ] **Step 4: Run `cargo build -p hyperion-agent` and `cargo run --bin hyperion-agent -- --help`** (we'll add a `--help` flag via clap).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add bin/lm-agent
-git commit -m "feat(lm-agent): daemon binary"
+git add bin/hyperion-agent
+git commit -m "feat(hyperion-agent): daemon binary"
 ```
 
 ---
@@ -1995,8 +1995,8 @@ git commit -m "feat(lm-agent): daemon binary"
 - Create: `bin/lm/src/cmd_hosting.rs`
 - Create: `bin/lm/src/cmd_cert.rs`
 
-- [ ] **Step 1: Manifest** — depends on `lm-rpc`, `lm-rpc-client`,
-       `lm-types`, `lm-validate`, `clap`, `tokio`, `anyhow`, `serde_json`.
+- [ ] **Step 1: Manifest** — depends on `hyperion-rpc`, `hyperion-rpc-client`,
+       `hyperion-types`, `hyperion-validate`, `clap`, `tokio`, `anyhow`, `serde_json`.
 
 - [ ] **Step 2: clap subcommand tree**
 
@@ -2004,7 +2004,7 @@ git commit -m "feat(lm-agent): daemon binary"
 #[derive(clap::Parser)]
 #[command(name = "lm", version)]
 struct Cli {
-    #[arg(long, default_value = "/run/linux-manager.sock")]
+    #[arg(long, default_value = "/run/hyperion.sock")]
     socket: std::path::PathBuf,
     #[command(subcommand)] cmd: Cmd,
 }

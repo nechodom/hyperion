@@ -129,7 +129,7 @@ from sub-projects 1 and 3. Final backup uses sub-project 5's RPC.
 
 ## 7. Scheduler Loop
 
-A single tokio task in `lm-controller` runs:
+A single tokio task in `hyperion-controller` runs:
 
 ```text
 every 5 minutes:
@@ -181,7 +181,7 @@ every 5 minutes:
 
 ## 8. Email Templates
 
-`crates/lm-controller-web/templates/emails/`:
+`crates/hyperion-controller-web/templates/emails/`:
 
 ```
 expiry_warning.subject.txt           "Vaše hosting {{ domain }} vyprší za {{ days }} dní"
@@ -214,7 +214,7 @@ host     = "smtp.example.com"
 port     = 587
 starttls = true
 username = "no-reply@operator.cz"
-password_path = "/etc/linux-manager-controller/smtp-pwd"   # mode 0600
+password_path = "/etc/hyperion-controller/smtp-pwd"   # mode 0600
 from     = "Hosting <no-reply@operator.cz>"
 reply_to = "support@operator.cz"
 ```
@@ -256,7 +256,7 @@ lmc scheduled-actions cancel <id>
 
 ## 13. Security Notes
 
-- SMTP password at `/etc/linux-manager-controller/smtp-pwd` (mode 0600).
+- SMTP password at `/etc/hyperion-controller/smtp-pwd` (mode 0600).
 - Email recipient comes from operator-set field; not user-input — but
   template rendering escapes by default (askama).
 - Templates never include internal IDs or operator infra hostnames.

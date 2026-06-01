@@ -286,7 +286,7 @@ require_shared_transit_target = true
 ## 12. Testing
 
 - Unit: state machine transitions; URL/temp-subdomain generator.
-- Integration: two testcontainers running lm-agent + a shared minio for
+- Integration: two testcontainers running hyperion-agent + a shared minio for
   transit; full prepare→cutover→commit→delete flow asserting both
   sides' DB and FS at each step.
 - e2e: nightly VM scenario with three VMs (controller, agent1, agent2)

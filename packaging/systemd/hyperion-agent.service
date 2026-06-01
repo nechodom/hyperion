@@ -1,0 +1,24 @@
+[Unit]
+Description=hyperion agent
+After=network-online.target nginx.service mariadb.service postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/hyperion-agent --config /etc/hyperion/agent.toml
+Restart=on-failure
+RestartSec=3s
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=false
+ProtectKernelTunables=true
+ProtectKernelModules=true
+PrivateTmp=true
+LogsDirectory=hyperion
+RuntimeDirectory=hyperion
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

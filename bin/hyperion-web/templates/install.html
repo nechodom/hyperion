@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% block title %}Install · hyperion{% endblock %}
+{% block main %}
+<div class="page-header">
+  <h1>Install</h1>
+  <span class="desc muted">Master URL: <code>{{ master_url }}</code></span>
+</div>
+
+{% if let Some(e) = error %}<div class="flash error">{{ e }}</div>{% endif %}
+
+{% if let Some(m) = just_minted %}
+<div class="flash success">
+  ✓ Invite minted for <b>{{ m.label }}</b>.
+  Token (shown <b>once</b>) — paste it into the install command on the new node:
+  <pre class="copy"><code>curl -fsSL {{ master_url }}/install/install-node.sh \
+    | sudo bash -s -- --token={{ m.token }} --master={{ master_url }}</code></pre>
+  <small class="muted">Token hash for revoke: <code>{{ m.token_hash }}</code></small>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>Install on a new node</h2>
+  <p class="muted">Generate a one-time token below, then run the install
+  one-liner on the fresh Debian 12 VPS. The token authenticates the node
+  against this master.</p>
+
+  <form method="post" action="/install/invite">
+    <input type="hidden" name="_csrf" value="{{ csrf_create }}">
+    <div class="field-row">
+      <div class="field">
+        <label for="label">Label <span class="hint">human name, e.g. <code>node5.example.com</code></span></label>
+        <input id="label" name="label" type="text" required placeholder="node5.example.com">
+      </div>
+      <div class="field">
+        <label for="ttl_hours">Token TTL <span class="hint">hours (1–720)</span></label>
+        <input id="ttl_hours" name="ttl_hours" type="number" min="1" max="720" value="24">
+      </div>
+    </div>
+    <button class="btn primary" type="submit">Generate invite</button>
+  </form>
+</div>
+
+<div class="card">
+  <h2>Install this master</h2>
+  <p class="muted">If you ever want to redeploy or set up a sibling master:</p>
+  <pre><code>curl -fsSL https://raw.githubusercontent.com/nechodom/hyperion/main/packaging/install/install-master.sh \
+    | sudo bash</code></pre>
+  <p class="muted">The script installs nginx + PHP-FPM + MariaDB + PostgreSQL,
+  builds hyperion from source, bootstraps the admin user, and enables the
+  systemd services.</p>
+</div>
+
+<div class="card">
+  <h2>Pending invites</h2>
+  {% if invites.is_empty() %}
+    <p class="muted">No pending invites. Generate one above to onboard a new node.</p>
+  {% else %}
+    <table>
+      <thead>
+        <tr>
+          <th>Label</th>
+          <th>Created</th>
+          <th>Expires</th>
+          <th>Token hash</th>
+          <th style="text-align:right">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for i in invites %}
+        <tr>
+          <td><b>{{ i.label }}</b></td>
+          <td class="muted">{{ i.created_at }}</td>
+          <td class="muted">{{ i.expires_at }}</td>
+          <td><code style="font-size:0.75rem">{{ i.token_hash }}</code></td>
+          <td style="text-align:right">
+            <form method="post" action="/install/invite/revoke" style="display:inline"
+                  onsubmit="return confirm('Revoke invite for {{ i.label }}?');">
+              <input type="hidden" name="_csrf" value="{{ csrf_revoke }}">
+              <input type="hidden" name="token_hash" value="{{ i.token_hash }}">
+              <button class="btn small danger" type="submit">Revoke</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+</div>
+
+<div class="card muted">
+  <h2>How node enrollment works</h2>
+  <ol style="margin:0;padding-left:1.25rem">
+    <li>Generate a labeled token above. <b>Plaintext shown once</b> — copy
+    immediately; only its hash is persisted server-side.</li>
+    <li>Paste the printed <code>curl … | sudo bash …</code> on the new VPS.</li>
+    <li>The install script provisions deps, builds hyperion-agent, saves the
+    token + master URL into <code>/etc/hyperion/agent.toml</code>, and starts the service.</li>
+    <li>Full mTLS enrollment (sub-project 1.5 in the design specs) consumes
+    the token and rolls the new node into the cluster. Until that lands the
+    node runs single-node and the operator can manage it via its own socket.</li>
+  </ol>
+</div>
+{% endblock %}

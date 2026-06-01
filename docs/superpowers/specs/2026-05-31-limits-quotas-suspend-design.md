@@ -253,7 +253,7 @@ expected to retry; suspend is the safer state.
 
 ### 8.4 Hourly usage collector
 
-A background task in `lm-agent` (tokio interval, top of each hour, with
+A background task in `hyperion-agent` (tokio interval, top of each hour, with
 randomized 0–60s jitter so multiple agents don't synchronize):
 
 ```text
@@ -292,13 +292,13 @@ collector_interval = "60m"
 month_reset_hour   = 0     # at 00:00 of day 1, reset nftables counters
 
 [suspended_page]
-template_path     = "/etc/linux-manager/templates/suspended.html"
+template_path     = "/etc/hyperion/templates/suspended.html"
 # variables: {{ domain }}, {{ reason_message }}, {{ contact_email }}
 ```
 
 ## 10. Suspended Page Template
 
-`/etc/linux-manager/templates/suspended.html`:
+`/etc/hyperion/templates/suspended.html`:
 
 ```html
 <!doctype html>
@@ -313,12 +313,12 @@ template_path     = "/etc/linux-manager/templates/suspended.html"
 ```
 
 Per-hosting overrides stored in `hosting_suspension.custom_page_html` and
-written to `/etc/linux-manager/suspended-pages/<hosting_id>.html` on
+written to `/etc/hyperion/suspended-pages/<hosting_id>.html` on
 suspend; nginx serves that file via `try_files` when set.
 
 ## 11. Testing
 
-- Unit: `lm-validate` covers limit value ranges; serde round-trip for
+- Unit: `hyperion-validate` covers limit value ranges; serde round-trip for
   `HostingLimits`.
 - Adapter integration (testcontainers):
   - quota adapter against ext4 image (Loop-mounted ext4 with usrquota).
@@ -331,7 +331,7 @@ suspend; nginx serves that file via `try_files` when set.
 ## 12. Security Notes
 
 - `quota`, `nftables`, `usermod` are all root-only; safely confined to
-  `lm-adapters`.
+  `hyperion-adapters`.
 - Bandwidth counter exposure: agents only expose their own uid counters
   via `hosting_usage` joined to `hostings` — never raw nft output.
 - Suspended page never reflects input back into HTML without escaping

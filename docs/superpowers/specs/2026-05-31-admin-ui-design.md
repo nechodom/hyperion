@@ -16,8 +16,8 @@ JavaScript build pipeline. Authentication via **password + TOTP**, sessions
 in signed HttpOnly cookies, **RBAC** roles (Admin / Operator / Viewer),
 and a **searchable audit log viewer** across both controller and agents.
 
-Runs as a new `lm-controller-web` binary (or as an in-process axum module
-of `lm-controller`; see D2 decision below).
+Runs as a new `hyperion-controller-web` binary (or as an in-process axum module
+of `hyperion-controller`; see D2 decision below).
 
 ## 2. Goals
 
@@ -51,11 +51,11 @@ of `lm-controller`; see D2 decision below).
 | # | Decision | Rationale |
 |---|---|---|
 | D1 | axum + tower-http for HTTP | Async, type-safe, idiomatic Rust |
-| D2 | UI lives in **`lm-controller`** binary (same process) | One TLS cert; no extra IPC; controller already has state DB connection. The Unix socket interface for `lmc` CLI remains. |
+| D2 | UI lives in **`hyperion-controller`** binary (same process) | One TLS cert; no extra IPC; controller already has state DB connection. The Unix socket interface for `lmc` CLI remains. |
 | D3 | askama templates compiled-in | Compile-time HTML checking; no runtime template parse cost |
 | D4 | HTMX for partials | No build step; server stays source of truth; tiny payload |
 | D5 | CSS: vanilla, single file, dark+light via prefers-color-scheme | No Tailwind/build complexity |
-| D6 | Sessions: signed cookies (Ed25519 key from `/etc/linux-manager-controller/session.key`) | No server-side session table for the cookie itself; revocation via `admin_sessions` table |
+| D6 | Sessions: signed cookies (Ed25519 key from `/etc/hyperion-controller/session.key`) | No server-side session table for the cookie itself; revocation via `admin_sessions` table |
 | D7 | Password hashing: argon2id, params `m=64MiB t=3 p=1` | OWASP recommended |
 | D8 | TOTP: `totp-rs`, 30s window, 1 step skew | RFC 6238 |
 | D9 | CSRF: double-submit token + Origin/Sec-Fetch-Site check | Standard, no extra storage |
@@ -66,7 +66,7 @@ of `lm-controller`; see D2 decision below).
 ## 5. Architecture
 
 ```
-lm-controller binary
+hyperion-controller binary
 ├── controller-core (existing)
 │   ├── ControllerApi impl
 │   ├── state DB
@@ -83,9 +83,9 @@ lm-controller binary
 
 ```
 crates/
-├── lm-auth/                    password + TOTP + session token primitives
-├── lm-controller-web/          axum routes, templates, middleware
-└── lm-csrf/                    tiny crate: token mint + verify
+├── hyperion-auth/                    password + TOTP + session token primitives
+├── hyperion-controller-web/          axum routes, templates, middleware
+└── hyperion-csrf/                    tiny crate: token mint + verify
 ```
 
 ### 5.2 Routes
@@ -224,7 +224,7 @@ For hosting_delete and agent_remove handlers:
 ## 10. Templates Layout
 
 ```
-crates/lm-controller-web/templates/
+crates/hyperion-controller-web/templates/
 ├── base.html                  layout shell: header, nav, flash, footer
 ├── login.html
 ├── login_totp.html
@@ -276,11 +276,11 @@ async fn audit_query(&self, q: AuditQuery)
 [web]
 listen          = "0.0.0.0:443"
 public_hostname = "master.example.com"
-session_key_path = "/etc/linux-manager-controller/session.key"
-totp_kek_path    = "/etc/linux-manager-controller/totp-kek.key"
+session_key_path = "/etc/hyperion-controller/session.key"
+totp_kek_path    = "/etc/hyperion-controller/totp-kek.key"
 session_idle_ttl = "8h"
 session_abs_ttl  = "30d"
-totp_kek_path    = "/etc/linux-manager-controller/totp-kek.key"
+totp_kek_path    = "/etc/hyperion-controller/totp-kek.key"
 
 [web.rate_limit]
 login_attempts_window = "5m"
@@ -292,7 +292,7 @@ ip_block_after        = 20
 
 - Unit: argon2 verify, TOTP verify, CSRF mint/verify (proptest on
   cookie tamper).
-- Integration: spin up `lm-controller` in a test fixture, drive it with
+- Integration: spin up `hyperion-controller` in a test fixture, drive it with
   `reqwest` cookie jar; flow tests for login + role gating.
 - e2e: `playwright` over a real browser hitting nightly VM
   (headless Chromium) — login, create hosting on a test agent, delete.
@@ -302,7 +302,7 @@ ip_block_after        = 20
 
 - Session cookie payload: `<base64(session_id || created_at)>.<sig>`.
 - TOTP secrets encrypted at rest with a Key-Encryption-Key (KEK) at
-  `/etc/linux-manager-controller/totp-kek.key` (mode 0600). KEK rotation
+  `/etc/hyperion-controller/totp-kek.key` (mode 0600). KEK rotation
   is a future operator runbook; not required for sub-project 2.
 - All cookies have `Secure; HttpOnly; SameSite=Lax`.
 - CSP: `default-src 'self'; img-src 'self' data:; style-src 'self';

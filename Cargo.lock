@@ -889,6 +889,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "hctl"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "hyperion-rpc",
+ "hyperion-rpc-client",
+ "hyperion-types",
+ "hyperion-validate",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "heck"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1043,6 +1057,206 @@ dependencies = [
  "tokio",
  "tower-service",
  "tracing",
+]
+
+[[package]]
+name = "hyperion-adapters"
+version = "0.1.0"
+dependencies = [
+ "askama",
+ "async-trait",
+ "blake3",
+ "hex",
+ "hyperion-rpc",
+ "hyperion-types",
+ "hyperion-validate",
+ "instant-acme",
+ "mockall",
+ "once_cell",
+ "rand 0.8.6",
+ "rcgen",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "hyperion-agent"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "hyperion-core",
+ "hyperion-rpc-server",
+ "hyperion-state",
+ "serde",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "hyperion-auth"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "base64",
+ "blake3",
+ "ed25519-dalek",
+ "hex",
+ "proptest",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "subtle",
+ "tempfile",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "hyperion-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "hyperion-adapters",
+ "hyperion-rpc",
+ "hyperion-state",
+ "hyperion-types",
+ "hyperion-validate",
+ "mockall",
+ "rcgen",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "hyperion-rpc"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "hyperion-types",
+ "hyperion-validate",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
+name = "hyperion-rpc-client"
+version = "0.1.0"
+dependencies = [
+ "hyperion-rpc",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
+name = "hyperion-rpc-server"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "hyperion-adapters",
+ "hyperion-core",
+ "hyperion-rpc",
+ "hyperion-rpc-client",
+ "hyperion-state",
+ "hyperion-types",
+ "hyperion-validate",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "hyperion-state"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "chrono",
+ "hex",
+ "hyperion-types",
+ "hyperion-validate",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "hyperion-types"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+ "ulid",
+ "uuid",
+]
+
+[[package]]
+name = "hyperion-validate"
+version = "0.1.0"
+dependencies = [
+ "once_cell",
+ "proptest",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "hyperion-web"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "askama",
+ "async-trait",
+ "axum",
+ "clap",
+ "http-body-util",
+ "hyperion-adapters",
+ "hyperion-auth",
+ "hyperion-core",
+ "hyperion-rpc",
+ "hyperion-rpc-client",
+ "hyperion-rpc-server",
+ "hyperion-state",
+ "hyperion-types",
+ "hyperion-validate",
+ "once_cell",
+ "rand 0.8.6",
+ "serde",
+ "serde_json",
+ "subtle",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "toml",
+ "tower",
+ "tower-http",
+ "tracing",
+ "tracing-subscriber",
+ "ulid",
+ "url",
 ]
 
 [[package]]
@@ -1297,219 +1511,6 @@ name = "litemap"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "92daf443525c4cce67b150400bc2316076100ce0b3686209eb8cf3c31612e6f0"
-
-[[package]]
-name = "lm"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "lm-rpc",
- "lm-rpc-client",
- "lm-types",
- "lm-validate",
- "serde_json",
- "tokio",
-]
-
-[[package]]
-name = "lm-adapters"
-version = "0.1.0"
-dependencies = [
- "askama",
- "async-trait",
- "blake3",
- "hex",
- "instant-acme",
- "lm-rpc",
- "lm-types",
- "lm-validate",
- "mockall",
- "once_cell",
- "rand 0.8.6",
- "rcgen",
- "regex",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "lm-agent"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "lm-core",
- "lm-rpc-server",
- "lm-state",
- "serde",
- "tempfile",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
-]
-
-[[package]]
-name = "lm-auth"
-version = "0.1.0"
-dependencies = [
- "argon2",
- "base64",
- "blake3",
- "ed25519-dalek",
- "hex",
- "proptest",
- "rand 0.8.6",
- "serde",
- "serde_json",
- "subtle",
- "tempfile",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "lm-core"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "lm-adapters",
- "lm-rpc",
- "lm-state",
- "lm-types",
- "lm-validate",
- "mockall",
- "rcgen",
- "serde",
- "serde_json",
- "sqlx",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "lm-rpc"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "lm-types",
- "lm-validate",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
-]
-
-[[package]]
-name = "lm-rpc-client"
-version = "0.1.0"
-dependencies = [
- "lm-rpc",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
-]
-
-[[package]]
-name = "lm-rpc-server"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "lm-adapters",
- "lm-core",
- "lm-rpc",
- "lm-rpc-client",
- "lm-state",
- "lm-types",
- "lm-validate",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "lm-state"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "chrono",
- "hex",
- "lm-types",
- "lm-validate",
- "serde",
- "serde_json",
- "sqlx",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "lm-types"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "serde",
- "serde_json",
- "ulid",
- "uuid",
-]
-
-[[package]]
-name = "lm-validate"
-version = "0.1.0"
-dependencies = [
- "once_cell",
- "proptest",
- "regex",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
-]
-
-[[package]]
-name = "lm-web"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "askama",
- "async-trait",
- "axum",
- "clap",
- "http-body-util",
- "lm-adapters",
- "lm-auth",
- "lm-core",
- "lm-rpc",
- "lm-rpc-client",
- "lm-rpc-server",
- "lm-state",
- "lm-types",
- "lm-validate",
- "once_cell",
- "rand 0.8.6",
- "serde",
- "serde_json",
- "subtle",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "toml",
- "tower",
- "tower-http",
- "tracing",
- "tracing-subscriber",
- "ulid",
- "url",
-]
 
 [[package]]
 name = "lock_api"

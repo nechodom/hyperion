@@ -10,23 +10,23 @@
 
 ## 1. Summary
 
-Adds a **controller** process that orchestrates one or more `lm-agent` nodes
+Adds a **controller** process that orchestrates one or more `hyperion-agent` nodes
 over **mTLS-encrypted TCP**. Introduces a self-signed CA on the controller,
 one-time **enrollment tokens** for bootstrapping new agents, an agents
 inventory in the controller's state, and a one-liner installer for new VPSes.
 
-The same `AgentApi` trait from Foundation is served by `lm-agent` both on
+The same `AgentApi` trait from Foundation is served by `hyperion-agent` both on
 the **local Unix socket** (for the on-host CLI) and over **mTLS TCP** (for
 the controller). Implementation is identical; only the transport differs.
 
 ## 2. Goals
 
-1. `lm-controller agent invite <hostname>` produces a one-time
+1. `hyperion-controller agent invite <hostname>` produces a one-time
    bootstrap token + a copy-paste installer line.
-2. On a fresh Debian 12 VPS, the installer one-liner sets up `lm-agent`,
+2. On a fresh Debian 12 VPS, the installer one-liner sets up `hyperion-agent`,
    enrolls with the controller, and exposes the RPC over mTLS in under
    3 minutes, with no manual config beyond pasting one command.
-3. `lm-controller agent list` shows status (online/offline), version,
+3. `hyperion-controller agent list` shows status (online/offline), version,
    hosting count, and last-seen timestamp for every enrolled agent.
 4. Every controller→agent RPC call is mTLS-authenticated with **certificate
    pinning** on both sides (controller pins agent cert SHA-256;
@@ -51,7 +51,7 @@ the controller). Implementation is identical; only the transport differs.
 
 | # | Decision | Rationale |
 |---|---|---|
-| D1 | Single controller node, dedicated `lm-controller` binary | Clear deployment story; HA later if needed |
+| D1 | Single controller node, dedicated `hyperion-controller` binary | Clear deployment story; HA later if needed |
 | D2 | mTLS via `rustls` + `rcgen` for CA + cert generation | Pure-Rust, no OpenSSL dep; avoids C ABI surface |
 | D3 | Controller has its own self-signed root CA | We sign all agent certs; no PKI dependency |
 | D4 | Listen on TCP 8443 on agents (configurable) | Standard alt-HTTPS port |
@@ -72,9 +72,9 @@ the controller). Implementation is identical; only the transport differs.
 │  Controller node (Debian 12)                                    │
 │                                                                 │
 │   ┌─────────────────┐      ┌─────────────────────────────┐      │
-│   │ lm-controller   │      │ lm-controller-web (later in │      │
+│   │ hyperion-controller   │      │ hyperion-controller-web (later in │      │
 │   │  (daemon, uid:  │      │  sub-project 2)             │      │
-│   │  lm-controller) │      └─────────────────────────────┘      │
+│   │  hyperion-controller) │      └─────────────────────────────┘      │
 │   │                 │                                           │
 │   │  - state DB     │      ┌─────────────────────────────┐      │
 │   │  - CA           │      │ HTTPS endpoint              │      │
@@ -91,7 +91,7 @@ the controller). Implementation is identical; only the transport differs.
 ┌─────────────────────┐  ┌─────────────────────┐
 │  agent node #1      │  │  agent node #N      │
 │                     │  │                     │
-│  lm-agent (root)    │  │  lm-agent (root)    │
+│  hyperion-agent (root)    │  │  hyperion-agent (root)    │
 │   - Unix socket     │  │   - Unix socket     │
 │     /run/lm.sock    │  │     /run/lm.sock    │
 │   - mTLS TCP 8443   │  │   - mTLS TCP 8443   │
@@ -103,11 +103,11 @@ the controller). Implementation is identical; only the transport differs.
 
 ```
 crates/
-├── lm-ca/                      controller's CA: rcgen + key persistence
-├── lm-rpc-tls/                 mTLS transport: server + client framing
-├── lm-rpc-router/              controller-side trait that routes RPC to
-│                               an agent by id (calls into lm-rpc-tls client)
-└── lm-controller-core/         agent inventory, enrollment service,
+├── hyperion-ca/                      controller's CA: rcgen + key persistence
+├── hyperion-rpc-tls/                 mTLS transport: server + client framing
+├── hyperion-rpc-router/              controller-side trait that routes RPC to
+│                               an agent by id (calls into hyperion-rpc-tls client)
+└── hyperion-controller-core/         agent inventory, enrollment service,
                                 health-check loop
 ```
 
@@ -115,14 +115,14 @@ crates/
 
 ```
 bin/
-├── lm-controller/              daemon: listens on 80/443 for /enroll +
+├── hyperion-controller/              daemon: listens on 80/443 for /enroll +
 │                               /install + /apt; talks mTLS to agents
-└── lm-controller-cli/          short alias `lmc`: agent invite/list/remove
+└── hyperion-controller-cli/          short alias `lmc`: agent invite/list/remove
 ```
 
 ### 5.3 Agent-side changes from Foundation
 
-- `lm-agent` gains a second listener: mTLS-wrapped TCP on the port specified
+- `hyperion-agent` gains a second listener: mTLS-wrapped TCP on the port specified
   in `agent.toml [tls] listen = "0.0.0.0:8443"`.
 - Both listeners (Unix and TCP) dispatch to the **same** `HostingService`
   via the same `AgentApi` trait. The TCP listener additionally captures the
@@ -134,7 +134,7 @@ bin/
 ## 6. State Schema (Controller-side)
 
 The controller has its own SQLite DB at
-`/var/lib/linux-manager-controller/state.db`. Agents do not learn the
+`/var/lib/hyperion-controller/state.db`. Agents do not learn the
 controller's state; the controller is authoritative.
 
 ```sql
@@ -162,7 +162,7 @@ CREATE TABLE ca_state (
     id                   INTEGER PRIMARY KEY CHECK (id = 1),  -- singleton
     ca_cert_pem          TEXT NOT NULL,
     -- ca_private_key NEVER in this table. Lives in
-    -- /etc/linux-manager-controller/ca/ca.key (mode 0600).
+    -- /etc/hyperion-controller/ca/ca.key (mode 0600).
     created_at           INTEGER NOT NULL,
     not_after            INTEGER NOT NULL
 );
@@ -192,8 +192,8 @@ CREATE TABLE controller_audit_log (
 
 ### 7.1 Controller-local API (`ControllerApi`)
 
-New trait, implemented by `lm-controller-core`; used by `lm-controller-cli`
-over a controller-side Unix socket `/run/lm-controller.sock` (same model
+New trait, implemented by `hyperion-controller-core`; used by `hyperion-controller-cli`
+over a controller-side Unix socket `/run/hyperion-controller.sock` (same model
 as Foundation's agent socket).
 
 ```rust
@@ -250,7 +250,7 @@ GET https://master.example.com/install
 ```
 
 Returns a bash script (Content-Type: text/plain). The script is
-generated dynamically from a template baked into `lm-controller` binary;
+generated dynamically from a template baked into `hyperion-controller` binary;
 content depends on the controller's hostname (substituted) and is signed
 inline via a comment trailer (operators can verify with `gpg --verify`
 if they pull the file separately).
@@ -274,15 +274,15 @@ Operator on the new VPS:
   $ <paste line above>
   [+] OS: Debian 12 ✓
   [+] Adding apt repo (signed key SHA-256: e3:b0:...)
-  [+] apt-get update && apt-get install -y lm-agent
+  [+] apt-get update && apt-get install -y hyperion-agent
   [+] Generating agent key (ED25519)
   [+] Building CSR for hostname 'node5.example.com'
   [+] POST /enroll
   [+] Received cert chain, fingerprint: 7c:4a:..
   [+] Pinned controller CA fingerprint:  9e:11:..
-  [+] Writing /etc/linux-manager/agent/tls/{cert.pem,key.pem,ca.pem}
+  [+] Writing /etc/hyperion/agent/tls/{cert.pem,key.pem,ca.pem}
   [+] systemctl daemon-reload
-  [+] systemctl enable --now lm-agent
+  [+] systemctl enable --now hyperion-agent
   [✓] Enrolled. Reachable at node5.example.com:8443.
 
 Controller-side:
@@ -299,7 +299,7 @@ Controller-side:
 ### 8.2 Controller → agent RPC call
 
 ```text
-Caller: lm-controller-core; needs to run hosting_create on agent A:
+Caller: hyperion-controller-core; needs to run hosting_create on agent A:
   1. lookup agents row by id → endpoint + pinned cert_sha256
   2. open mTLS TCP to endpoint using rustls config with:
        - controller's client cert (signed by our own CA)
@@ -330,7 +330,7 @@ $ lmc agent remove node5.example.com [--purge-hostings]
 
 ### 8.4 Cert auto-renewal
 
-A background task in `lm-controller-core` scans `agents` daily for
+A background task in `hyperion-controller-core` scans `agents` daily for
 `cert_not_after - now < 30 days` AND `state = 'active'`. For each:
 
 1. Connect via current mTLS using existing cert (still valid).
@@ -342,7 +342,7 @@ A background task in `lm-controller-core` scans `agents` daily for
 ## 9. Security Model
 
 - **Trust root:** controller's CA private key at
-  `/etc/linux-manager-controller/ca/ca.key` (mode 0600, root:root).
+  `/etc/hyperion-controller/ca/ca.key` (mode 0600, root:root).
   Compromise of this key would allow signing rogue agent certs, but
   pinning (D8) means the attacker would also need to alter the
   controller's `agents.cert_sha256` to be useful.
@@ -362,7 +362,7 @@ A background task in `lm-controller-core` scans `agents` daily for
 
 ## 10. Installer Script (`/install` content)
 
-Sketch (the real script is longer, see `crates/lm-controller-core/templates/install.sh.j2`):
+Sketch (the real script is longer, see `crates/hyperion-controller-core/templates/install.sh.j2`):
 
 ```bash
 #!/usr/bin/env bash
@@ -389,39 +389,39 @@ done
 # 2. Add apt repo (signed)
 mkdir -p /etc/apt/keyrings
 curl -fsSL "https://${CONTROLLER}/apt/key.gpg" \
-  -o /etc/apt/keyrings/linux-manager.gpg
-cat > /etc/apt/sources.list.d/linux-manager.list <<EOF
-deb [signed-by=/etc/apt/keyrings/linux-manager.gpg] \
+  -o /etc/apt/keyrings/hyperion.gpg
+cat > /etc/apt/sources.list.d/hyperion.list <<EOF
+deb [signed-by=/etc/apt/keyrings/hyperion.gpg] \
   https://${CONTROLLER}/apt bookworm main
 EOF
 apt-get update -qq
-apt-get install -y lm-agent
+apt-get install -y hyperion-agent
 
 # 3. Enroll
-mkdir -p /etc/linux-manager/agent/tls
-chmod 0700 /etc/linux-manager/agent/tls
+mkdir -p /etc/hyperion/agent/tls
+chmod 0700 /etc/hyperion/agent/tls
 
-# generate keypair + CSR via lm-agent helper subcommand
-lm-agent enroll \
+# generate keypair + CSR via hyperion-agent helper subcommand
+hyperion-agent enroll \
   --token "$TOKEN" \
   --controller "https://${CONTROLLER}" \
-  --tls-dir /etc/linux-manager/agent/tls
+  --tls-dir /etc/hyperion/agent/tls
 
 # 4. Activate
 systemctl daemon-reload
-systemctl enable --now lm-agent
+systemctl enable --now hyperion-agent
 echo "[✓] Enrolled."
 ```
 
 ## 11. Configuration Additions
 
-`/etc/linux-manager-controller/controller.toml` (new):
+`/etc/hyperion-controller/controller.toml` (new):
 
 ```toml
 [controller]
-state_db        = "/var/lib/linux-manager-controller/state.db"
-socket_path     = "/run/lm-controller.sock"
-socket_group    = "lm-controller-admin"
+state_db        = "/var/lib/hyperion-controller/state.db"
+socket_path     = "/run/hyperion-controller.sock"
+socket_group    = "hyperion-controller-admin"
 
 [http]
 listen          = "0.0.0.0:443"
@@ -430,26 +430,26 @@ acme_email      = "you@example.com"
 # controller obtains its own LE cert for the public hostname
 
 [ca]
-ca_cert_path    = "/etc/linux-manager-controller/ca/ca.crt"
-ca_key_path     = "/etc/linux-manager-controller/ca/ca.key"
+ca_cert_path    = "/etc/hyperion-controller/ca/ca.crt"
+ca_key_path     = "/etc/hyperion-controller/ca/ca.key"
 agent_cert_ttl_days = 365
 ```
 
-`/etc/linux-manager/agent.toml` additions:
+`/etc/hyperion/agent.toml` additions:
 
 ```toml
 [tls]
 listen                = "0.0.0.0:8443"
-cert_path             = "/etc/linux-manager/agent/tls/cert.pem"
-key_path              = "/etc/linux-manager/agent/tls/key.pem"
-controller_ca_path    = "/etc/linux-manager/agent/tls/ca.pem"
+cert_path             = "/etc/hyperion/agent/tls/cert.pem"
+key_path              = "/etc/hyperion/agent/tls/key.pem"
+controller_ca_path    = "/etc/hyperion/agent/tls/ca.pem"
 # pinned fingerprint of expected controller-signed cert presenter:
 controller_cert_sha256 = "9e11ab..."
 ```
 
 ## 12. Testing Additions
 
-- Unit: `lm-ca` round-trip CSR → cert → verify chain. `lm-rpc-tls`
+- Unit: `hyperion-ca` round-trip CSR → cert → verify chain. `hyperion-rpc-tls`
   pin-mismatch tests.
 - Integration: testcontainers spins up two containers (controller +
   agent). The test runs full enrollment via HTTP, then issues mTLS
@@ -477,8 +477,8 @@ controller_cert_sha256 = "9e11ab..."
 
 | Term | Meaning |
 |---|---|
-| Controller | The master node running `lm-controller`; authoritative state |
-| Agent | A managed Debian 12 node running `lm-agent`, identified by hostname |
+| Controller | The master node running `hyperion-controller`; authoritative state |
+| Agent | A managed Debian 12 node running `hyperion-agent`, identified by hostname |
 | Invite | A row in `agent_invites`; expires; single-use |
 | Token | The base32 secret an operator pastes into the installer |
 | Pinning | Storing a peer cert's SHA-256 and refusing any other on connect |

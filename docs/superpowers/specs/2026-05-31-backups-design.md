@@ -43,7 +43,7 @@ re-creates user/pool/DB if missing, then writes content + imports SQL.
 6. Backup integrity is verifiable: `lm backup verify <repo> --quick`
    runs `restic check`.
 7. All backup repos are **encrypted**; passwords live in
-   `/etc/linux-manager/secrets/repo-passwords/`.
+   `/etc/hyperion/secrets/repo-passwords/`.
 
 ## 3. Non-Goals
 
@@ -60,10 +60,10 @@ re-creates user/pool/DB if missing, then writes content + imports SQL.
 | # | Decision | Rationale |
 |---|---|---|
 | D1 | **restic** as the backup engine | Mature, audited, content-addressed, dedup, encrypted, multi-backend, single binary |
-| D2 | Restic binary is a system dependency (`apt install restic`) declared in `lm-agent.deb` | Avoid re-implementing |
+| D2 | Restic binary is a system dependency (`apt install restic`) declared in `hyperion-agent.deb` | Avoid re-implementing |
 | D3 | One restic repo **per target**, multi-hosting; restic dedup helps if many sites share PHP/WP files | Lower mgmt overhead than per-hosting repos |
 | D4 | DB dumps run before fs snapshot so `htdocs/...` is consistent enough; site put into MAINT mode is sub-project 7 | Defensive sequencing |
-| D5 | DB dump location: per-snapshot temp dir under `/var/lib/linux-manager/backup-tmp/`, ingested by restic, removed | Streamed dedup |
+| D5 | DB dump location: per-snapshot temp dir under `/var/lib/hyperion/backup-tmp/`, ingested by restic, removed | Streamed dedup |
 | D6 | Restic password = random 64-byte high-entropy string per repo | Strong, opaque |
 | D7 | FTP/FTPS support via `rclone` mounted as filesystem with restic `local:` backend; SFTP / S3 / local use restic native | rclone bridges legacy FTP |
 | D8 | Retention policy notation: `N-d`, `M-w`, `K-m`, `Y-y` (e.g. `7d-4w-12m-3y`) | Industry idiom |
@@ -158,7 +158,7 @@ async fn restore_from_upload(&self, dest: RestoreDest, archive_handle: UploadHan
 
 The upload itself uses a side-channel (HTTP multipart to the controller
 which streams to the agent, or direct mTLS RPC chunk-stream — preferred,
-defined as a new framed stream type in `lm-rpc`).
+defined as a new framed stream type in `hyperion-rpc`).
 
 ## 7. Backup Composition
 
@@ -170,8 +170,8 @@ restic backup --tag hosting=<H.id> --tag domain=<H.domain> \
 where <list> contains:
   /home/<u>/<H.domain>/htdocs/
   /home/<u>/<H.domain>/logs/
-  /var/lib/linux-manager/backup-tmp/<run-id>/db.sql   (dump)
-  /var/lib/linux-manager/backup-tmp/<run-id>/manifest.json
+  /var/lib/hyperion/backup-tmp/<run-id>/db.sql   (dump)
+  /var/lib/hyperion/backup-tmp/<run-id>/manifest.json
 ```
 
 `manifest.json`:
@@ -199,7 +199,7 @@ This manifest is what `restore_from_upload` reads first.
 ```text
 01 acquire per-hosting backup lock (so two concurrent runs collapse)
 02 INSERT backup_runs (state='running', started_at=now)
-03 mkdir /var/lib/linux-manager/backup-tmp/<run-id>/
+03 mkdir /var/lib/hyperion/backup-tmp/<run-id>/
 04 if hosting has DB:
      mariadb: mysqldump --single-transaction --routines --triggers \
                         --events --add-drop-database -B <db> > db.sql
@@ -244,7 +244,7 @@ the FS+DB are in, plus a warning in audit. Operator can re-try.
 
 ```text
 01 accept upload via UploadHandle (chunked stream over RPC, with SHA-256
-   computed as bytes arrive); writes to /var/lib/linux-manager/uploads/<id>.tar.zst
+   computed as bytes arrive); writes to /var/lib/hyperion/uploads/<id>.tar.zst
 02 once complete, extract into temp dir under /var/lib/.../restore-tmp/<id>/
 03 read manifest.json
 04 if dest specifies an existing hosting_id: same as restore_from_snapshot
@@ -278,9 +278,9 @@ reconciler in the scheduler).
 
 ```toml
 [backup]
-local_repo_root            = "/var/lib/linux-manager/backups/local"
-backup_tmp                 = "/var/lib/linux-manager/backup-tmp"
-upload_tmp                 = "/var/lib/linux-manager/uploads"
+local_repo_root            = "/var/lib/hyperion/backups/local"
+backup_tmp                 = "/var/lib/hyperion/backup-tmp"
+upload_tmp                 = "/var/lib/hyperion/uploads"
 max_upload_bytes           = 8589934592    # 8 GiB
 concurrent_runs            = 2
 restic_path                = "/usr/bin/restic"
@@ -296,7 +296,7 @@ default_kbps_up            = 0             # 0 = unlimited
 SFTP:
 ```json
 { "host":"backup.example.com", "port":22, "user":"backup",
-  "key_path":"/etc/linux-manager/agent/sftp-key",
+  "key_path":"/etc/hyperion/agent/sftp-key",
   "remote_path":"/backups/<agent-hostname>" }
 ```
 
@@ -355,9 +355,9 @@ UI surfaces equivalents in sub-project 2.
 ## 13. Security Notes
 
 - Each repo password lives at
-  `/etc/linux-manager/secrets/repo-passwords/<repo_password_id>` (0600).
+  `/etc/hyperion/secrets/repo-passwords/<repo_password_id>` (0600).
 - DB dumps land in the secrets-mode-equivalent tmp dir
-  (`/var/lib/linux-manager/backup-tmp/` mode 0700, root-only); deleted
+  (`/var/lib/hyperion/backup-tmp/` mode 0700, root-only); deleted
   promptly.
 - Upload size cap enforced both at HTTP receiver and via `prlimit` on
   the writer process.
@@ -378,7 +378,7 @@ UI surfaces equivalents in sub-project 2.
 3. **Per-file change detection vs full FS scan.** restic does its own
    change detection. Inotify-based caching is YAGNI.
 4. **Quota interaction.** Restic temp + DB dump consume disk under
-   `/var/lib/linux-manager/backup-tmp/`. This is NOT under the
+   `/var/lib/hyperion/backup-tmp/`. This is NOT under the
    hosting's quota. **Proposal:** acknowledge; operator sizes the
    agent's root FS accordingly.
 

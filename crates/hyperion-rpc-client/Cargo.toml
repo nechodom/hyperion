@@ -1,0 +1,15 @@
+[package]
+name = "hyperion-rpc-client"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+hyperion-rpc = { path = "../hyperion-rpc" }
+tokio = { workspace = true }
+thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+tempfile.workspace = true

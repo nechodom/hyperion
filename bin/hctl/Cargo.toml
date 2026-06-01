@@ -1,0 +1,23 @@
+[package]
+name = "hctl"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "hctl"
+path = "src/main.rs"
+
+[dependencies]
+hyperion-rpc = { path = "../../crates/hyperion-rpc" }
+hyperion-rpc-client = { path = "../../crates/hyperion-rpc-client" }
+hyperion-types = { path = "../../crates/hyperion-types" }
+hyperion-validate = { path = "../../crates/hyperion-validate" }
+tokio = { workspace = true }
+anyhow.workspace = true
+clap.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
