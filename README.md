@@ -1,249 +1,373 @@
-# hyperion
+# 🦅 Hyperion
 
-A Rust-based hosting control panel for Debian 12+. Built as a privileged
-agent daemon (`hyperion-agent`) plus an unprivileged CLI client (`hctl`) and a
-modern axum web UI (`hyperion-web`), communicating over a local Unix-socket
-RPC. Designed to grow into a multi-node setup (controller + N agents
-over mTLS) — see the design specs under
-[`docs/superpowers/specs/`](docs/superpowers/specs/).
+> A Rust-based hosting control panel for Debian 12+. Build, suspend,
+> back up, schedule expiration of WordPress / PHP / static / Node.js
+> sites — one binary, one Unix socket, one web UI. Designed for
+> agencies who host their clients.
 
-## Status
+[![Tests](https://img.shields.io/badge/tests-233%20passing-success)](#testing)
+[![Rust](https://img.shields.io/badge/rust-stable-orange)](#)
+[![License](https://img.shields.io/badge/license-AGPL--3.0-blue)](#license)
 
-| Phase | Component | Tests | Status |
-|---|---|---|---|
-| A | Workspace + `hyperion-types` + `hyperion-validate` + `hyperion-rpc` | 49 | ✅ |
-| B | `hyperion-state` (SQLite + hash-chain audit) | 48 | ✅ |
-| C | `hyperion-rpc-server` + `hyperion-rpc-client` (Unix socket) | 6 | ✅ |
-| D | `hyperion-adapters` (fs, users, nginx, phpfpm, mariadb, postgres, acme) | 40+4⁻ | ✅ |
-| E | `hyperion-core` (orchestrator + secrets + RealAdapter) | 25 | ✅ |
-| F | `hyperion-agent` daemon + `hctl` CLI | 7 | ✅ |
-| G | End-to-end socket+state+orchestrator integration | 4 | ✅ |
-| H | `hyperion-auth` (argon2id + Ed25519 sessions + CSRF + keys) | 21 | ✅ |
-| I | `hyperion-web` (axum + askama + HTMX modern admin UI) | 4 unit | ✅ |
-| J | hyperion-web full-flow tests (login, dashboard, hosting CRUD) | 12 e2e | ✅ |
-| K | Limits + quotas + suspend/resume (sub-project 3) | 13 | ✅ |
-| L | Expiration + background scheduler (sub-project 4) | 10 | ✅ |
-| M | Audit log viewer | covered by 12 e2e | ✅ |
-| N | Local backups (tar.gz + mysqldump/pg_dump) (sub-project 5) | 5+3⁻ | ✅ |
-| O | Node.js stack (sub-project 8) | 8 | ✅ |
-| P | WordPress installer + app packs (sub-project 7) | 8 | ✅ |
-| Q | Workspace verification + docs | — | ✅ |
+---
 
-⁻ = integration tests gated `#[ignore]` (need root + Debian system tools).
+## ✨ What you get out of the box
 
-**Total: 224 tests passing on macOS** without any privileged
-operations. Real Debian integration tests run with `--ignored`.
+- 🏠 **One-command hosting CRUD** — Linux user, PHP-FPM pool, MariaDB/Postgres DB, nginx vhost, TLS cert. Atomic with LIFO rollback on failure.
+- 🌐 **PHP 8.1 / 8.2 / 8.3 / 8.4** in parallel via deb.sury.org. Static-only sites supported. Node.js stack scaffolding ready.
+- 🛡 **Suspend / resume** with cascade: 503 page, FPM stop, DB lock, login lock, kill user processes. Fully reversible.
+- 📊 **Per-pool limits** — memory, exec time, max children, DB connections — clamped before storage.
+- ⏰ **Expiration + background scheduler** — pre-expiry notifications, auto-suspend, grace window, auto-delete with safety net.
+- 💾 **Local backups** — tar.gz of htdocs + mysqldump/pg_dump + JSON manifest. Restic + SFTP/S3 targets planned.
+- 🧱 **Tamper-evident audit log** — BLAKE3 hash chain, broken-chain refusal at startup.
+- 🔐 **Auth done right** — argon2id passwords (OWASP params), Ed25519 signed cookies, CSRF tokens scoped per session+form, constant-time username compare.
+- 🖥 **Modern web UI** — axum + askama + HTMX, dark + light via `prefers-color-scheme`, zero JS build, single binary.
+- 🎟 **Multi-node enrollment** — invite tokens minted in the UI, install-node.sh one-liner with the token embedded. Plaintext shown once; only hash persisted.
+- 🦀 **`#![forbid(unsafe_code)]` everywhere.** No `shell -c`, every command is `Command::new(..).arg(..)` with regex-validated arguments.
 
-## Features
+---
 
-### Hosting management
-- Create / list / get / delete hostings via CLI or web UI
-- Per-domain Linux user, chrooted home, dedicated PHP-FPM pool, MariaDB
-  or PostgreSQL DB, Let's Encrypt or self-signed cert, nginx vhost
-- Multi-version PHP (8.1 / 8.2 / 8.3 / 8.4) via deb.sury.org
-- Static-only sites (no PHP)
-- Aliases with shared cert (SANs)
+## 🚀 Install
 
-### Operational
-- **Suspend / resume** — nginx 503 page + FPM stop + DB lock +
-  login lock + kill user procs; fully reversible
-- **Per-pool limits** — memory, max execution time, max_children,
-  max_requests, DB max_connections; range-clamped before storage
-- **Expiration** — per-hosting expires_at + grace_days + warning
-  offsets; controller-side scheduler fires notifications, auto-suspend
-  on expiry, auto-delete after grace
-- **Background scheduler** — tokio interval task in hyperion-agent runs every
-  5 minutes; reconciles missing rows from live hostings; pending
-  actions retried 3× with mark_failed_or_retry
+### One-liner (Debian 12+ master)
 
-### Data safety
-- LIFO rollback stack on multi-step provisioning
-- Hash-chain audit log (BLAKE3) with tamper detection
-- Local backups: tar.gz of htdocs + DB dump + JSON manifest
-- Secret files in `/etc/hyperion/secrets/` (mode 0600)
-- No shell interpolation anywhere; every `Command::new(..).arg(..)`
-- `#![forbid(unsafe_code)]` on every crate
-
-### Web UI (`hyperion-web`)
-- Modern axum + askama + HTMX admin panel
-- Single-user bootstrap auth, argon2id passwords, Ed25519-signed
-  session cookies, CSRF tokens scoped per session+form
-- Dashboard with agent + hostings cards, hosting CRUD with form
-  validation feedback, limits form, suspend/resume buttons, audit log
-  viewer
-- Dark + light theme via `prefers-color-scheme`, ~6 KB hand-written
-  CSS, HTMX 2.0.4 embedded into the binary (no JS build)
-
-### CLI (`hctl`)
-- `hctl info` / `hctl hosting create|list|get|delete`
-- `hctl hosting suspend|resume`
-- `hctl hosting set-limits|get-limits|usage`
-- `hctl hosting set-expiry|get-expiry|upcoming-expiries`
-- `hctl hosting backup-now|backup-list`
-- `hctl audit`
-- `--json` flag on every subcommand for machine consumption
-
-## Architecture
-
-```
-                  ┌──────────────────────────┐
-                  │  Unix socket             │
-                  │  /run/hyperion.sock │
-                  │  (mode 0660, hyperion-admin)   │
-                  └────────┬─────────┬───────┘
-                           │         │
-       Server side ▲       │         │       ▼ Client side
-                           │         │
-   ┌───────────────────────┴┐       ┌┴──────────────────────────┐
-   │  hyperion-agent        │       │  hctl (CLI) │ hyperion-web │
-   │  (root daemon)         │       │  unprivileged, in         │
-   │                        │       │  hyperion-admin group           │
-   │  ┌───────────────────┐ │       └───────────────────────────┘
-   │  │ hyperion-rpc-server     │ │
-   │  └────────┬──────────┘ │
-   │  ┌────────▼──────────┐ │
-   │  │ AgentImpl         │ │       hyperion-rpc:
-   │  │  → HostingService │ │       transport-agnostic
-   │  └────────┬──────────┘ │       AgentApi trait
-   │   ┌───────┴──────────┐ │       + length-prefixed JSON codec.
-   │   │ hyperion-state (SQLite) │ │
-   │   │ hyperion-adapters       │ │       Background:
-   │   │   fs/users/nginx  │ │       - scheduler_tick every 5 min
-   │   │   phpfpm/mariadb  │ │         (expiration → suspend → delete)
-   │   │   postgres/acme   │ │       - audit chain verified on startup
-   │   │   backup/wpcli    │ │
-   │   │   nodejs          │ │
-   │   └───────────────────┘ │
-   └────────────────────────┘
-```
-
-## Build
+On a fresh Debian 12 VPS, as root:
 
 ```bash
-git clone <this repo> hyperion
+curl -fsSL https://raw.githubusercontent.com/nechodom/hyperion/main/packaging/install/install-master.sh \
+  | sudo bash
+```
+
+The script:
+
+1. Verifies you're on Debian 12+
+2. apt installs nginx + MariaDB + PostgreSQL + PHP 8.3 (via deb.sury.org)
+3. Installs Rust (rustup, minimal) if missing
+4. Builds Hyperion from source, drops binaries into `/usr/sbin` and `/usr/bin`
+5. Lays down `/etc/hyperion/{agent,web}.toml`
+6. Installs systemd units + enables `hyperion-agent` and `hyperion-web`
+7. Prompts for an admin password and bootstraps the web user
+
+After ~3-5 minutes you get:
+
+```
+============================================================
+  ✓ Hyperion master installed
+  ----------------------------------------
+  Web UI:   https://your-host:8443
+  CLI:      hctl info
+============================================================
+```
+
+Add yourself to the admin group and log out / in:
+
+```bash
+sudo usermod -aG hyperion-admin "$USER"
+```
+
+#### Non-interactive install (CI / Terraform / Ansible)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/nechodom/hyperion/main/packaging/install/install-master.sh \
+  | sudo HYPERION_ADMIN_PASS="<strong>" \
+         HYPERION_LISTEN="0.0.0.0:8443" \
+         HYPERION_ACME_EMAIL="ops@example.com" \
+         bash
+```
+
+All env knobs: `HYPERION_REF` (git branch, default `main`),
+`HYPERION_INSTALL_DIR` (default `/opt/hyperion`),
+`HYPERION_ADMIN_USER` (default `admin`), `HYPERION_ADMIN_PASS`,
+`HYPERION_LISTEN`, `HYPERION_ACME_EMAIL`.
+
+### Adding a node
+
+1. Log in to the master's web UI → **Install** in the navigation
+2. Fill the label (e.g. `node5.example.com`) and TTL, click **Generate invite**
+3. Copy the one-liner shown — it embeds the freshly-minted token. **The plaintext is displayed exactly once**; only its hash is persisted server-side.
+4. Run it on the new VPS as root:
+
+```bash
+curl -fsSL https://<master>/install/install-node.sh \
+  | sudo bash -s -- --token=ABCD-EFGH-… --master=https://<master>
+```
+
+The node bootstraps with the same apt deps, builds `hyperion-agent` +
+`hctl`, writes the token + master URL into `/etc/hyperion/agent.toml`,
+and starts the agent. Once the controller's mTLS enrollment loop ships
+(sub-project 1.5), the agent rolls into the cluster automatically.
+
+### Local development (macOS / dev VPS)
+
+You only need Rust:
+
+```bash
+git clone https://github.com/nechodom/hyperion
 cd hyperion
 cargo build --release --workspace
 ```
 
-Binaries land in `target/release/{hyperion-agent, hctl, hyperion-web}`.
+Three binaries land in `target/release/`:
+`hyperion-agent`, `hyperion-web`, `hctl`.
 
-## Develop
-
-```bash
-cargo test --workspace            # 224 tests
-cargo fmt --all                   # format
-cargo clippy --workspace --all-targets   # lint
-```
-
-Integration tests that require root (useradd) or system services
-(mariadb-dump / pg_dump) are gated `#[ignore]`. Run them on a fresh
-Debian VM:
+For a local single-node dev environment without root:
 
 ```bash
-cargo test --workspace -- --ignored
-```
-
-## Try It Locally (no root)
-
-```bash
-# Terminal A — run the agent
-mkdir -p /tmp/lm-demo
-cat > /tmp/lm-demo/agent.toml <<EOF
+mkdir -p /tmp/hyp-dev
+cat > /tmp/hyp-dev/agent.toml <<EOF
 [agent]
-socket_path = "/tmp/lm-demo/agent.sock"
-state_db    = "/tmp/lm-demo/state.db"
-secrets_dir = "/tmp/lm-demo/secrets"
-log_path    = "/tmp/lm-demo/agent.log"
-home_root   = "/tmp/lm-demo/home"
-backup_root = "/tmp/lm-demo/backups"
+socket_path = "/tmp/hyp-dev/agent.sock"
+state_db    = "/tmp/hyp-dev/state.db"
+secrets_dir = "/tmp/hyp-dev/secrets"
+log_path    = "/tmp/hyp-dev/agent.log"
+home_root   = "/tmp/hyp-dev/home"
+backup_root = "/tmp/hyp-dev/backups"
 
 [acme]
-contact_email = "you@example.com"
-challenge_dir = "/tmp/lm-demo/acme"
+contact_email = "dev@example.com"
+challenge_dir = "/tmp/hyp-dev/acme"
 EOF
-cargo run --bin hyperion-agent -- --config /tmp/lm-demo/agent.toml &
 
-# Terminal B — run the web UI
-cat > /tmp/lm-demo/web.toml <<EOF
+cat > /tmp/hyp-dev/web.toml <<EOF
 [web]
-listen = "127.0.0.1:8443"
-agent_socket = "/tmp/lm-demo/agent.sock"
-admin_user_file = "/tmp/lm-demo/admin.json"
-session_key_file = "/tmp/lm-demo/sess.key"
-csrf_key_file = "/tmp/lm-demo/csrf.key"
-secure_cookies = false   # plain HTTP in dev
+listen           = "127.0.0.1:8443"
+agent_socket     = "/tmp/hyp-dev/agent.sock"
+admin_user_file  = "/tmp/hyp-dev/admin.json"
+session_key_file = "/tmp/hyp-dev/sess.key"
+csrf_key_file    = "/tmp/hyp-dev/csrf.key"
+secure_cookies   = false
 EOF
-cargo run --bin hyperion-web -- --config /tmp/lm-demo/web.toml bootstrap \
-    --username kevin --password "your-strong-password"
-cargo run --bin hyperion-web -- --config /tmp/lm-demo/web.toml
 
-# Browser
-open http://127.0.0.1:8443/         # → /login
+# Bootstrap admin, then run both daemons:
+./target/release/hyperion-web --config /tmp/hyp-dev/web.toml bootstrap \
+  --username admin --password "your-dev-password"
+./target/release/hyperion-agent --config /tmp/hyp-dev/agent.toml &
+./target/release/hyperion-web   --config /tmp/hyp-dev/web.toml &
 
-# CLI alternative
-target/debug/hctl --socket /tmp/lm-demo/agent.sock info
-target/debug/hctl --socket /tmp/lm-demo/agent.sock hosting list
-target/debug/hctl --socket /tmp/lm-demo/agent.sock audit
-# Note: hosting create on macOS will fail at `useradd` — see RUNBOOK.md.
+open http://127.0.0.1:8443
 ```
 
-For production deployment on Debian, see [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
+Hosting create on macOS will fail at `useradd` — that's expected.
+The state, RPC, web, scheduler, audit, backup orchestration etc.
+all work for local exploration.
 
-## Project Layout
+For full production deploy notes (systemd hardening, MariaDB
+secure-install, ufw etc.) see [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
+
+---
+
+## 📸 Tour
+
+### Web UI — Dashboard
+
+```
+hyp·erion           Dashboard  Hostings  Audit  Install              signed in as kevin
+
+┌──────────────┐  ┌──────────────┐  ┌──────────────┐
+│ Agent        │  │ Hostings     │  │ You          │
+│ master.cz    │  │ 12           │  │ kevin        │
+│ v0.1.0       │  │ across this  │  │ admin · solo │
+└──────────────┘  └──────────────┘  └──────────────┘
+
+Recent hostings                                        [+ New hosting]
+DOMAIN              PHP    STATE        CREATED
+example.cz          8.3    ● active     2 hours ago
+blog.kevin.cz       8.4    ● active     yesterday
+staging.client.cz   8.3    ⚠ suspended  3 days ago
+```
+
+### CLI — `hctl`
+
+```
+$ hctl info
+agent: master.example.cz version=0.1.0 schema=2 hostings=12
+
+$ hctl hosting create example.cz --php 8.3 --db mariadb
+✓ created example_cz (id=01K4Z…)
+  root: /home/example_cz/example.cz/htdocs
+  db:   lm_a8c_examplecz (user=lm_a8c_u, password=Hx9k…RnG2)
+  cert: issuer=self-signed, not_after=2027-06-01
+
+$ hctl hosting suspend example.cz --reason="payment overdue"
+✓ suspended
+
+$ hctl hosting backup-now example.cz
+✓ backup 17 ok
+  archive: /var/lib/hyperion/backups/local/example_cz/example.cz-1764672000.tar.gz
+  db_dump: /var/lib/hyperion/backups/local/example_cz/example.cz-1764672000.sql
+  bytes:   148373921
+
+$ hctl audit --limit 5
+   ID TS                 ACTOR          ACTION                  RESULT
+   42 1764672135         agent          hosting.backup          ok
+   41 1764672120         agent          hosting.suspend         ok
+   40 1764672110         cli:root       hosting.set_limits      ok
+   …
+```
+
+---
+
+## 🏗 Architecture
+
+```
+                         ┌──────────────────────────┐
+                         │    Unix socket           │
+                         │    /run/hyperion.sock    │
+                         │    (0660, hyperion-admin)│
+                         └─────┬───────────┬────────┘
+                               │           │
+            Privileged ◀───────┘           └───────▶ Unprivileged
+                               │           │
+            ┌──────────────────┴┐         ┌┴───────────────────────┐
+            │  hyperion-agent   │         │  hctl      hyperion-web│
+            │  (root daemon)    │         │  (CLI)     (web UI)    │
+            │                   │         │  in hyperion-admin grp │
+            │  ┌──────────────┐ │         └────────────────────────┘
+            │  │ hyperion-rpc │ │           Transport-agnostic
+            │  │   -server    │ │           AgentApi + JSON codec.
+            │  └──────┬───────┘ │           Future: mTLS variant
+            │  ┌──────▼───────┐ │           with same trait.
+            │  │ HostingSvc   │ │
+            │  └──────┬───────┘ │           Background loops:
+            │   ┌─────┴──────┐  │             • scheduler tick / 5 min
+            │   │ State DB   │  │             • cert renewal (planned)
+            │   │ Adapters   │  │             • backup retention
+            │   │  fs/users  │  │
+            │   │  nginx/php │  │           Audit chain verified on
+            │   │  mysql/pg  │  │           every startup; broken
+            │   │  acme/bkup │  │           chain refuses to start.
+            │   │  nodejs/wp │  │
+            │   └────────────┘  │
+            └───────────────────┘
+```
+
+Every adapter takes pre-validated typed arguments and shells out only
+via `Command::new(..).arg(..)`. Mass-mocked via the `AdapterPort`
+trait so the orchestrator's rollback paths are unit-tested in
+isolation. Wire protocol is `u32be length || JSON`, max frame 4 MiB.
+
+---
+
+## 📂 Project layout
 
 ```
 hyperion/
 ├── Cargo.toml                     # workspace
 ├── rust-toolchain.toml            # stable
 ├── crates/
-│   ├── hyperion-types/                  # newtype IDs + DTOs (limits/expiry/backup)
-│   ├── hyperion-validate/               # Domain + SystemUserName parsers
-│   ├── hyperion-rpc/                    # trait + wire + codec
-│   ├── hyperion-rpc-server/             # Unix socket server
-│   ├── hyperion-rpc-client/             # Unix socket client
-│   ├── hyperion-state/                  # SQLite + 6 migrations + audit chain
-│   │                              # + limits / scheduler / backups /
-│   │                              #   nodejs / wordpress
-│   ├── hyperion-adapters/               # system tool wrappers (10 modules)
-│   ├── hyperion-core/                   # orchestration + secrets + RealAdapter
-│   └── hyperion-auth/                   # argon2id + Ed25519 sessions + CSRF
+│   ├── hyperion-types/            # newtype IDs + DTOs
+│   ├── hyperion-validate/         # Domain + SystemUserName parsers
+│   ├── hyperion-rpc/              # trait + wire types + codec
+│   ├── hyperion-rpc-server/       # Unix-socket server
+│   ├── hyperion-rpc-client/       # Unix-socket client
+│   ├── hyperion-state/            # SQLite + 7 migrations + audit chain
+│   ├── hyperion-adapters/         # system tool wrappers (12 modules)
+│   ├── hyperion-core/             # orchestration + secrets + RealAdapter
+│   └── hyperion-auth/             # argon2id + Ed25519 sessions + CSRF
 ├── bin/
-│   ├── hyperion-agent/                  # daemon (background scheduler too)
-│   ├── lm/                        # CLI
-│   └── hyperion-web/                    # axum admin UI
+│   ├── hyperion-agent/            # privileged daemon (+ background scheduler)
+│   ├── hyperion-web/              # axum admin UI (single binary, embedded HTMX)
+│   └── hctl/                      # CLI
+├── packaging/
+│   ├── install/install-master.sh  # Debian 12 master bootstrap
+│   ├── install/install-node.sh    # Debian 12 node bootstrap
+│   └── systemd/hyperion-agent.service
 └── docs/
-    ├── RUNBOOK.md                 # Debian 12 deployment runbook
+    ├── RUNBOOK.md                 # production deploy + ops
     └── superpowers/
         ├── specs/                 # 11 design specs (Foundation + 10 subs)
         ├── plans/                 # Foundation implementation plan
-        └── DEFERRED.md            # 1.5 / 5.5 / 9 deferred to Linux deploy
+        └── DEFERRED.md            # 1.5 / 5.5 / 9 + ACME + remote backups
 ```
 
-## Roadmap
+---
 
-Sub-projects 1.5 (controller mTLS + multi-node), 5.5 (inter-agent
-migration), and 9 (security hardening with nftables / fail2ban /
-ModSecurity) require Linux-only system features and are deferred until
-the panel runs against a real Debian deploy. See
-[`docs/superpowers/DEFERRED.md`](docs/superpowers/DEFERRED.md) for the
-specific tasks and dependencies. Each one has a complete design spec
-already and a clear implementation surface — they will land as
-follow-on commits when a Debian CI runner is wired in.
+## ✅ Status
 
-| # | Sub-project | Status |
-|---|---|---|
-| 1 | Foundation | shipped (phases A–G) |
-| 1.5 | Controller + agent enrollment (mTLS, CA, multi-node) | spec done, deferred |
-| 2 | Admin UI + auth + audit | shipped (phases H–J, M) |
-| 3 | Limits / quotas / suspend | shipped (phase K) |
-| 4 | Expiration + scheduler | shipped (phase L) |
-| 5 | Local backups (tar+gzip+dump) | shipped (phase N); remote targets + restic deferred |
-| 5.5 | Inter-agent migration | spec done, depends on 1.5 + remote 5 |
-| 6 | Client portal | spec done, deferred |
-| 7 | WordPress + templates | shipped (phase P) — orchestration loop wires to wpcli wrapper |
-| 8 | Node.js stack | shipped (phase O) — orchestration loop wires to nodejs/systemd module |
-| 9 | Security hardening | spec done, deferred |
+### Shipped today (single-node end-to-end)
 
-## License
+| Capability | Surface |
+|---|---|
+| Hosting CRUD (PHP + static + DB + cert) | UI · CLI · RPC |
+| Multi-version PHP (8.1 / 8.2 / 8.3 / 8.4) | UI · CLI · RPC |
+| MariaDB / PostgreSQL provisioning | UI · CLI · RPC |
+| Suspend / resume with full cascade | UI · CLI · RPC |
+| Per-pool limits (PHP + DB) | UI · CLI · RPC |
+| Expiration with grace + scheduler | CLI · RPC |
+| Local backups (tar.gz + DB dump + manifest) | CLI · RPC |
+| Audit log with BLAKE3 hash chain | UI · CLI · RPC |
+| Web admin UI with auth + CSRF | — |
+| Node enrollment tokens (mint / list / revoke) | UI · CLI · RPC |
+| `install-master.sh` / `install-node.sh` | — |
 
-AGPL-3.0-only.
+### Designed, deferred until first Debian deploy
+
+These have **full design specs + integration paths documented**; they
+require real Linux system tools to test meaningfully. See
+[`docs/superpowers/DEFERRED.md`](docs/superpowers/DEFERRED.md).
+
+- **1.5** Controller + multi-node mTLS enrollment (rcgen CA, rustls TLS, `hyperion-controller` binary). Invite token storage already in place.
+- **5.5** Inter-agent migration (depends on 1.5)
+- **9** Security hardening: nftables management, fail2ban, ModSecurity, SSH/sysctl hardening, 30-point compliance check
+- Real ACME HTTP-01 loop (rcgen self-signed today; `instant-acme` crate already imported)
+- Remote backup targets (restic + SFTP / S3 / FTP via rclone)
+
+---
+
+## 🧪 Testing
+
+```bash
+cargo test --workspace           # 233 tests pass on macOS
+cargo fmt --all                  # format clean
+cargo clippy --workspace --all-targets   # warnings-only
+```
+
+4 integration tests are gated `#[ignore]` (they require `useradd` /
+`mariadb-dump` / `pg_dump` / `systemctl reload`). To run them on
+Debian:
+
+```bash
+cargo test --workspace -- --ignored
+```
+
+The web UI ships with **12 full-flow end-to-end tests** that drive
+the entire stack — login flow, CSRF token round-trip, hosting create
+via form, audit log render — against a real Unix-socket-backed agent
+fixture with mocked adapters.
+
+---
+
+## 📚 Documentation
+
+- **[`docs/RUNBOOK.md`](docs/RUNBOOK.md)** — manual production deploy on Debian (apt deps, configs, systemd, MariaDB hardening, troubleshooting, backup, updates, removal).
+- **[`docs/superpowers/specs/`](docs/superpowers/specs/)** — 11 design specs (Foundation + 10 sub-projects, each with goals, anti-scope, RPC additions, flows, security model).
+- **[`docs/superpowers/plans/`](docs/superpowers/plans/)** — Foundation implementation plan (every task → file paths → code → tests → commit).
+- **[`docs/superpowers/DEFERRED.md`](docs/superpowers/DEFERRED.md)** — what's deferred, what's already in place, exact shape of the follow-on work.
+
+---
+
+## 🤝 Contributing
+
+Spotted a bug or have a feature in mind? Open an issue or PR — the
+codebase is small (~13 000 LOC of Rust) and each crate has a single
+clear responsibility, so onboarding is fast.
+
+When adding a new system effect, follow the existing pattern:
+
+1. Adapter function in `hyperion-adapters` (typed args, no shell interpolation)
+2. Method on `AdapterPort` trait in `hyperion-core::service`
+3. Orchestration in `HostingService` with rollback if it mutates state
+4. RPC variant in `hyperion-rpc::codec` + handler in `AgentApi`
+5. CLI subcommand in `hctl` + UI handler in `hyperion-web` if user-facing
+6. Tests at every layer; integration tests `#[ignore]` if they need root
+
+---
+
+## 📜 License
+
+[AGPL-3.0-only](#license).
+
+Built as the next-generation alternative to CloudPanel / HestiaCP, but
+in Rust, with multi-node orchestration baked in from day one and a
+security model that doesn't require trust in panel-level shell
+templating.
