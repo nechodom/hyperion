@@ -130,6 +130,17 @@ pub async fn issue_http01(req: IssueRequest<'_>) -> Result<CertInfo, AdapterErro
         Account, AuthorizationStatus, ChallengeType, Identifier, NewAccount, NewOrder, OrderStatus,
     };
 
+    // rustls 0.23 demands an explicit process-wide CryptoProvider.
+    // instant-acme uses rustls underneath; if we don't install one here
+    // the whole agent panics on the first ACME request (`Could not
+    // automatically determine the process-level CryptoProvider`).
+    // Install once at startup of every issuance call; OnceLock makes
+    // subsequent calls cheap no-ops.
+    static PROVIDER_INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    PROVIDER_INSTALLED.get_or_init(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+
     let directory_url = if req.staging {
         "https://acme-staging-v02.api.letsencrypt.org/directory"
     } else {

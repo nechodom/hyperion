@@ -1231,6 +1231,7 @@ dependencies = [
  "rand 0.8.6",
  "rcgen",
  "regex",
+ "rustls",
  "serde",
  "serde_json",
  "tempfile",

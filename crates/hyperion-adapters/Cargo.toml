@@ -24,6 +24,7 @@ blake3.workspace = true
 regex.workspace = true
 once_cell.workspace = true
 x509-parser.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
 
 [dev-dependencies]
 tempfile.workspace = true
