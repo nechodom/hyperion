@@ -526,6 +526,72 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .map_err(|e| RpcError::Internal_with(format!("list: {e}")))
     }
 
+    /// Boot-time self-heal: re-render the FPM pool config for every
+    /// active hosting that has PHP. We do this because the pool
+    /// template's `listen.owner` depends on the nginx user, which is
+    /// detected dynamically at startup — old pool files on disk may
+    /// hard-code an outdated owner (e.g. `www-data` when nginx now
+    /// runs as `vito`). After this returns, php-fpm's next reload
+    /// picks up the corrected sockets and nginx 502s go away.
+    ///
+    /// Errors per-hosting are logged but never propagated — one bad
+    /// hosting must not block agent startup. Returns the count of
+    /// pools successfully re-rendered.
+    pub async fn rerender_fpm_pools(&self) -> usize {
+        let summaries = match self.list().await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error=%e, "rerender_fpm_pools: list failed");
+                return 0;
+            }
+        };
+        let mut ok = 0;
+        for s in summaries {
+            let Some(ver) = s.php_version else {
+                continue;
+            };
+            if !matches!(s.state, hyperion_types::HostingState::Active) {
+                continue;
+            }
+            // We need the system_user for fpm_ensure. Pull the detail.
+            let detail = match self
+                .get(crate::service::HostingSelector::Id(s.id.clone()))
+                .await
+            {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::warn!(
+                        domain = %s.domain,
+                        error = %e,
+                        "rerender_fpm_pools: could not fetch detail"
+                    );
+                    continue;
+                }
+            };
+            if detail.system_user.is_empty() {
+                tracing::warn!(
+                    domain = %detail.domain,
+                    "rerender_fpm_pools: skipping (empty system_user)"
+                );
+                continue;
+            }
+            if let Err(e) = self
+                .adapters
+                .fpm_ensure(&detail.system_user, &detail.domain, ver)
+                .await
+            {
+                tracing::warn!(
+                    domain = %detail.domain,
+                    error = %e,
+                    "rerender_fpm_pools: fpm_ensure failed"
+                );
+                continue;
+            }
+            ok += 1;
+        }
+        ok
+    }
+
     pub async fn get(&self, sel: HostingSelector) -> Result<HostingDetail, RpcError> {
         let row = match sel {
             HostingSelector::Id(id) => hostings::get_by_id(&self.pool, &id).await,

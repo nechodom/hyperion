@@ -135,6 +135,21 @@ async fn main() -> anyhow::Result<()> {
             .with_acme_email(cfg.acme.contact_email.clone())
             .with_email(email_cfg, email_to),
     );
+
+    // Self-heal: re-render every Active hosting's FPM pool with the
+    // detected nginx user. Old pool files on disk may still encode a
+    // stale `listen.owner` (e.g. www-data when nginx now runs as
+    // `vito`). Without this an in-place upgrade via update.sh wouldn't
+    // unbreak existing 502'ing hostings.
+    {
+        let rerender_svc = svc.clone();
+        tokio::spawn(async move {
+            let n = rerender_svc.rerender_fpm_pools().await;
+            if n > 0 {
+                tracing::info!(count = n, "boot: re-rendered FPM pools with current nginx user");
+            }
+        });
+    }
     // Background scheduler: fire scheduler_tick (expiry sweep) every 5 minutes.
     {
         let tick_svc = svc.clone();
