@@ -77,12 +77,36 @@ pub async fn delete_pool(system_user: &str, php_version: PhpVersion) -> Result<(
     reload(php_version).await
 }
 
+/// Reload php-fpm — and if the service isn't running, enable + start it
+/// first. On a brand-new install this is the difference between "first
+/// hosting create works" and "first hosting create fails because the
+/// operator forgot `systemctl enable php8.3-fpm`".
 pub async fn reload(php_version: PhpVersion) -> Result<(), AdapterError> {
-    cmd::run(
-        "/usr/bin/systemctl",
-        &["reload", &php_version.service_name()],
-    )
-    .await?;
+    let svc = php_version.service_name();
+    // Liveness probe — systemctl is-active returns 0 iff the unit is
+    // active. We don't propagate the error here (some systems lack the
+    // unit entirely; that case will surface as a clearer reload error).
+    let active = tokio::process::Command::new("/usr/bin/systemctl")
+        .args(["is-active", "--quiet", &svc])
+        .status()
+        .await
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !active {
+        tracing::warn!(service = %svc, "php-fpm not active — enabling + starting");
+        // enable --now is idempotent: enable + start in one shot.
+        if let Err(e) = cmd::run("/usr/bin/systemctl", &["enable", "--now", &svc]).await {
+            return Err(AdapterError::Other(format!(
+                "{svc} is inactive and `systemctl enable --now {svc}` failed: {e}. \
+                 Install it with: apt-get install -y {pkg}",
+                pkg = svc.trim_end_matches(".service"),
+            )));
+        }
+        // After enable --now the daemon is already running; skip reload
+        // since the just-started process picked up our pool file at boot.
+        return Ok(());
+    }
+    cmd::run("/usr/bin/systemctl", &["reload", &svc]).await?;
     Ok(())
 }
 

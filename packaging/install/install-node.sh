@@ -73,6 +73,8 @@ if [[ ! -f /etc/apt/keyrings/sury-php.gpg ]]; then
 fi
 apt-get install -y -qq \
   php8.3-fpm php8.3-cli php8.3-mysql php8.3-pgsql
+systemctl enable --now php8.3-fpm
+systemctl enable --now nginx mariadb postgresql || true
 
 # wp-cli — required for WordPress install requests dispatched from master.
 if [[ ! -x /usr/local/bin/wp ]]; then

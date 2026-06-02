@@ -76,6 +76,9 @@ log "Installing PHP 8.3..."
 apt-get install -y -qq \
   php8.3-fpm php8.3-cli php8.3-mysql php8.3-pgsql \
   php8.3-curl php8.3-gd php8.3-mbstring php8.3-xml php8.3-zip
+systemctl enable --now php8.3-fpm
+# nginx + mariadb + postgres also need to be running for hostings to work.
+systemctl enable --now nginx mariadb postgresql || true
 
 #-------- 3b. wp-cli (WordPress installer dependency) ----------------------
 # wpcli adapter shells out to /usr/local/bin/wp; without it WordPress

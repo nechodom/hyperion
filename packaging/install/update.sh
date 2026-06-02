@@ -138,6 +138,19 @@ refresh_unit() {
 (( HAVE_AGENT )) && refresh_unit hyperion-agent
 (( HAVE_WEB   )) && refresh_unit hyperion-web
 
+#-------- 4-aux. Make sure PHP-FPM + web/db daemons are enabled -----------
+# Older install-master.sh installed the packages but never enabled the
+# services; first hosting create then failed with
+#   "php8.3-fpm.service is not active, cannot reload"
+# Bring them up here so the agent's adapter never has to self-heal.
+for svc in nginx mariadb postgresql \
+           php8.1-fpm php8.2-fpm php8.3-fpm php8.4-fpm; do
+  if systemctl list-unit-files --no-pager "$svc.service" 2>/dev/null \
+       | grep -q "^$svc.service"; then
+    systemctl enable --now "$svc" >/dev/null 2>&1 || true
+  fi
+done
+
 #-------- 4a. TLS cert dir (idempotent) -----------------------------------
 # hyperion-web auto-generates a self-signed cert on first start; we just
 # need to make sure the directory exists and the agent service can write
