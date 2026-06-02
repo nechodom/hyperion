@@ -31,17 +31,28 @@ pub fn validate_args(args: &[&str]) -> Result<(), AdapterError> {
 }
 
 /// Build the full command line for `sudo -u <user> /usr/local/bin/wp --path=<path> <args>`.
-pub fn build_argv<'a>(user: &'a str, htdocs: &'a str, extra: &'a [&'a str]) -> Vec<&'a str> {
-    let mut v = vec![
-        "-u",
-        user,
-        "/usr/local/bin/wp",
-        "--allow-root=false",
-        "--path",
-        htdocs,
+///
+/// wp-cli is strict: `--path <path>` is rejected ("parameter cannot be
+/// empty when provided"). It only accepts the joined `--path=<path>`
+/// form. We materialize the joined arg as a String here so caller
+/// converts via `.iter().map(String::as_str).collect()` before invoking
+/// the command.
+pub fn build_argv(user: &str, htdocs: &str, extra: &[&str]) -> Vec<String> {
+    let mut v: Vec<String> = vec![
+        "-u".into(),
+        user.to_string(),
+        "/usr/local/bin/wp".into(),
+        "--allow-root=false".into(),
+        format!("--path={}", htdocs),
     ];
-    v.extend_from_slice(extra);
+    v.extend(extra.iter().map(|s| s.to_string()));
     v
+}
+
+/// Convenience wrapper — convert the owned Vec<String> from build_argv
+/// into the &[&str] shape that cmd::run expects, scoped to the borrow.
+fn argv_as_refs(argv: &[String]) -> Vec<&str> {
+    argv.iter().map(String::as_str).collect()
 }
 
 /// Run an arbitrary wp-cli subcommand. Refuses inputs that fail
@@ -49,7 +60,7 @@ pub fn build_argv<'a>(user: &'a str, htdocs: &'a str, extra: &'a [&'a str]) -> V
 pub async fn run(user: &str, htdocs: &str, args: &[&str]) -> Result<String, AdapterError> {
     validate_args(args)?;
     let argv = build_argv(user, htdocs, args);
-    cmd::run("/usr/bin/sudo", &argv).await
+    cmd::run("/usr/bin/sudo", &argv_as_refs(&argv)).await
 }
 
 static LOCALE_RX: Lazy<Regex> = Lazy::new(|| {
@@ -162,7 +173,7 @@ pub async fn install_wordpress(
         "--force",
     ];
     let core_argv = build_argv(user, htdocs, &core_args);
-    cmd::run("/usr/bin/sudo", &core_argv).await?;
+    cmd::run("/usr/bin/sudo", &argv_as_refs(&core_argv)).await?;
 
     // 2. wp config create — pipe DB password via stdin (--prompt=dbpass).
     let dbname_arg = format!("--dbname={}", db.name);
@@ -178,10 +189,11 @@ pub async fn install_wordpress(
         "--force",
     ];
     let config_argv = build_argv(user, htdocs, &config_args);
+    let config_argv_refs = argv_as_refs(&config_argv);
     // wp-cli's --prompt reads "field: <value>\n" from stdin per missing arg.
     // We provide a single line for dbpass.
     let stdin = format!("{}\n", db.password);
-    cmd::run_with_stdin("/usr/bin/sudo", &config_argv, stdin.as_bytes()).await?;
+    cmd::run_with_stdin("/usr/bin/sudo", &config_argv_refs, stdin.as_bytes()).await?;
 
     // 3. wp core install — pipe admin password via stdin.
     let url_arg = format!("--url={}", req.site_url);
@@ -199,13 +211,14 @@ pub async fn install_wordpress(
         "--skip-email",
     ];
     let install_argv = build_argv(user, htdocs, &install_args);
+    let install_argv_refs = argv_as_refs(&install_argv);
     let stdin = format!("{}\n", req.admin_password);
-    cmd::run_with_stdin("/usr/bin/sudo", &install_argv, stdin.as_bytes()).await?;
+    cmd::run_with_stdin("/usr/bin/sudo", &install_argv_refs, stdin.as_bytes()).await?;
 
     // 4. What core version did we end up with?
     let v_args: [&str; 2] = ["core", "version"];
     let v_argv = build_argv(user, htdocs, &v_args);
-    let v = cmd::run("/usr/bin/sudo", &v_argv).await?;
+    let v = cmd::run("/usr/bin/sudo", &argv_as_refs(&v_argv)).await?;
     Ok(v.trim().to_string())
 }
 
@@ -249,7 +262,7 @@ mod tests {
     }
 
     #[test]
-    fn build_argv_shape() {
+    fn build_argv_uses_joined_path_form() {
         let v = build_argv(
             "alice_cz",
             "/home/alice_cz/alice.cz/htdocs",
@@ -258,14 +271,13 @@ mod tests {
         assert_eq!(
             v,
             vec![
-                "-u",
-                "alice_cz",
-                "/usr/local/bin/wp",
-                "--allow-root=false",
-                "--path",
-                "/home/alice_cz/alice.cz/htdocs",
-                "core",
-                "download"
+                "-u".to_string(),
+                "alice_cz".into(),
+                "/usr/local/bin/wp".into(),
+                "--allow-root=false".into(),
+                "--path=/home/alice_cz/alice.cz/htdocs".into(),
+                "core".into(),
+                "download".into(),
             ]
         );
     }

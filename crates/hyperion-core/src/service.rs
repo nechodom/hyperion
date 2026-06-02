@@ -121,6 +121,10 @@ pub struct HostingService<A: AdapterPort + 'static> {
     /// Cluster-wide default Slack webhook for notifications.
     /// Per-profile webhooks override this.
     pub slack_default_webhook: Option<String>,
+    /// Contact email used as the ACME account address. Let's Encrypt
+    /// refuses common placeholder domains (example.com, etc.), so the
+    /// operator MUST set a real one in agent.toml.
+    pub acme_contact_email: String,
 }
 
 /// Cluster-wide remote backup destination. When set, every successful
@@ -183,7 +187,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             remote_backup: None,
             retention: BackupRetention::default(),
             slack_default_webhook: None,
+            acme_contact_email: "admin@hyperion.invalid".into(),
         }
+    }
+
+    pub fn with_acme_email(mut self, email: impl Into<String>) -> Self {
+        self.acme_contact_email = email.into();
+        self
     }
 
     pub fn with_slack_webhook(mut self, webhook: Option<String>) -> Self {
@@ -1487,7 +1497,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             &detail.root_dir,
             &wp_args,
         );
-        hyperion_adapters::cmd::run("/usr/bin/sudo", &argv)
+        let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+        hyperion_adapters::cmd::run("/usr/bin/sudo", &argv_refs)
             .await
             .map_err(|e| RpcError::ProvisioningFailed {
                 stage: "wp_reset_password".into(),
@@ -2317,10 +2328,29 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         sans.sort();
         sans.dedup();
 
+        // Reject obvious placeholder addresses early so we don't burn a
+        // failed-account round trip with Let's Encrypt.
+        let email = self.acme_contact_email.trim();
+        if email.is_empty()
+            || email.ends_with("@example.com")
+            || email.ends_with("@example.org")
+            || email.ends_with("@example.net")
+            || email.ends_with("@hyperion.invalid")
+            || !email.contains('@')
+        {
+            return Err(RpcError::Validation {
+                message: format!(
+                    "acme contact email \"{}\" is invalid or a placeholder. \
+                     Edit /etc/hyperion/agent.toml [acme] contact_email and \
+                     restart hyperion-agent.",
+                    email
+                ),
+            });
+        }
         let cert = hyperion_adapters::acme::issue_http01(hyperion_adapters::acme::IssueRequest {
             domain: &detail.domain,
             sans: &sans,
-            contact_email: "admin@example.com", // TODO: from agent config
+            contact_email: email,
             staging: req.staging,
             challenge_root: std::path::Path::new(&self.paths.acme_challenge_root),
             certs_root: "/etc/hyperion/certs",
@@ -3391,6 +3421,7 @@ mod tests {
             remote_backup: None,
             retention: BackupRetention::default(),
             slack_default_webhook: None,
+            acme_contact_email: "test@example.invalid".into(),
         };
         s2.create(HostingCreateReq {
             domain: Domain::parse("b.cz").expect("parse"),
@@ -3426,6 +3457,7 @@ mod tests {
             remote_backup: None,
             retention: BackupRetention::default(),
             slack_default_webhook: None,
+            acme_contact_email: "test@example.invalid".into(),
         };
         let r = s2.create(req("dup.cz")).await;
         match r {

@@ -80,7 +80,8 @@ async fn main() -> anyhow::Result<()> {
             .with_paths(paths)
             .with_remote_backup(remote_backup)
             .with_retention(retention)
-            .with_slack_webhook(slack_webhook),
+            .with_slack_webhook(slack_webhook)
+            .with_acme_email(cfg.acme.contact_email.clone()),
     );
     // Background scheduler: fire scheduler_tick (expiry sweep) every 5 minutes.
     {

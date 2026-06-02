@@ -143,6 +143,7 @@ async fn start_agent() -> (std::path::PathBuf, tempfile::TempDir) {
         remote_backup: None,
         retention: hyperion_core::BackupRetention::default(),
         slack_default_webhook: None,
+        acme_contact_email: "test@example.invalid".into(),
     });
     let _ = adapters; // silence unused warning
     let agent: Arc<dyn AgentApi> = Arc::new(AgentImpl::new(svc));
