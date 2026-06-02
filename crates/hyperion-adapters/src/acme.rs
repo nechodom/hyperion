@@ -175,10 +175,31 @@ pub async fn issue_http01(req: IssueRequest<'_>) -> Result<CertInfo, AdapterErro
         .map(|n| Identifier::Dns(n.clone()))
         .collect();
 
-    let mut order = account
-        .new_order(&NewOrder::new(identifiers.as_slice()))
-        .await
-        .map_err(|e| AdapterError::Acme(format!("new order: {e}")))?;
+    // Retry new_order on transient rate-limits (Boulder "Service busy"
+    // load-shed). Exponential backoff 15s → 30s → 60s — never silent.
+    let mut order = {
+        let new_order = NewOrder::new(identifiers.as_slice());
+        let mut attempt: u32 = 0;
+        loop {
+            match account.new_order(&new_order).await {
+                Ok(o) => break o,
+                Err(e) if is_transient_rate_limit(&e) && attempt < 3 => {
+                    attempt += 1;
+                    let delay = backoff_for(attempt);
+                    tracing::warn!(
+                        attempt,
+                        delay_secs = delay.as_secs(),
+                        error = %e,
+                        "ACME new_order rate-limited (transient); retrying"
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+                Err(e) => {
+                    return Err(AdapterError::Acme(rate_limit_message("new_order", &e)));
+                }
+            }
+        }
+    };
 
     // 3. Authorizations — stream-style in 0.8. For each pending authz,
     // pick the HTTP-01 challenge, write the key authorization to
@@ -208,10 +229,31 @@ pub async fn issue_http01(req: IssueRequest<'_>) -> Result<CertInfo, AdapterErro
             let token_path = req.challenge_root.join(&challenge.token);
             tokio::fs::write(&token_path, key_auth.as_str()).await?;
             written.push(token_path);
-            challenge
-                .set_ready()
-                .await
-                .map_err(|e| AdapterError::Acme(format!("set_ready: {e}")))?;
+            // Same retry shape as new_order. set_ready is where the user
+            // hit "Service busy; retry later" — Boulder's transient
+            // load-shed. Don't propagate it on the first hit if we can
+            // just wait a few seconds.
+            let mut attempt: u32 = 0;
+            loop {
+                match challenge.set_ready().await {
+                    Ok(()) => break,
+                    Err(e) if is_transient_rate_limit(&e) && attempt < 3 => {
+                        attempt += 1;
+                        let delay = backoff_for(attempt);
+                        tracing::warn!(
+                            attempt,
+                            delay_secs = delay.as_secs(),
+                            error = %e,
+                            "ACME set_ready rate-limited (transient); retrying"
+                        );
+                        tokio::time::sleep(delay).await;
+                    }
+                    Err(e) => {
+                        cleanup_challenges(&written).await;
+                        return Err(AdapterError::Acme(rate_limit_message("set_ready", &e)));
+                    }
+                }
+            }
         }
     }
 
@@ -238,14 +280,30 @@ pub async fn issue_http01(req: IssueRequest<'_>) -> Result<CertInfo, AdapterErro
 
     // 5. Finalize — instant-acme 0.8 generates the keypair internally
     // and returns the private key PEM. No more rcgen CSR dance.
-    let key_pem = order
-        .finalize()
-        .await
-        .map_err(|e| AdapterError::Acme(format!("finalize: {e}")))?;
+    let key_pem = {
+        let mut attempt: u32 = 0;
+        loop {
+            match order.finalize().await {
+                Ok(k) => break k,
+                Err(e) if is_transient_rate_limit(&e) && attempt < 3 => {
+                    attempt += 1;
+                    let delay = backoff_for(attempt);
+                    tracing::warn!(
+                        attempt,
+                        delay_secs = delay.as_secs(),
+                        error = %e,
+                        "ACME finalize rate-limited; retrying"
+                    );
+                    tokio::time::sleep(delay).await;
+                }
+                Err(e) => return Err(AdapterError::Acme(rate_limit_message("finalize", &e))),
+            }
+        }
+    };
     let cert_chain_pem = order
         .poll_certificate(&RetryPolicy::default())
         .await
-        .map_err(|e| AdapterError::Acme(format!("poll_certificate: {e}")))?;
+        .map_err(|e| AdapterError::Acme(rate_limit_message("poll_certificate", &e)))?;
     let _ = names; // names was only needed for the old CSR path
 
     // 8. Write to disk: <certs_root>/<domain>/{fullchain,privkey}.pem
@@ -288,6 +346,66 @@ async fn cleanup_challenges(paths: &[PathBuf]) {
     for p in paths {
         let _ = tokio::fs::remove_file(p).await;
     }
+}
+
+/// True if the ACME error is a *transient* rate-limit / load-shed
+/// (Boulder's "Service busy; retry later" or any urn:...:rateLimited
+/// with HTTP 503). False for durable limits like
+/// failedAuthorizations / duplicateCertificate / overall-request — those
+/// won't clear in seconds and we should surface them to the operator
+/// rather than silently waste ACME calls retrying.
+fn is_transient_rate_limit(e: &instant_acme::Error) -> bool {
+    let instant_acme::Error::Api(p) = e else { return false };
+    // The rateLimited URN covers many distinct cases; we only want to
+    // retry the ones that are clearly transient. Boulder's load-shed
+    // path returns HTTP 503 with "Service busy" in detail. Durable
+    // limits return 429.
+    let is_rate_limited =
+        p.r#type.as_deref() == Some("urn:ietf:params:acme:error:rateLimited");
+    if !is_rate_limited {
+        return false;
+    }
+    // Treat 503 OR a "service busy" / "try again" detail as transient.
+    let status_503 = matches!(p.status, Some(503));
+    let detail = p.detail.as_deref().unwrap_or("").to_ascii_lowercase();
+    let says_busy =
+        detail.contains("service busy") || detail.contains("try again") || detail.contains("retry later");
+    status_503 || says_busy
+}
+
+/// Translate an ACME error into a human-readable message with hints
+/// when we can detect a known failure mode. Operator-facing.
+fn rate_limit_message(stage: &str, e: &instant_acme::Error) -> String {
+    use instant_acme::Error as E;
+    let E::Api(p) = e else { return format!("{stage}: {e}") };
+    let urn = p.r#type.as_deref().unwrap_or("");
+    let base = format!("{stage}: {e}");
+    if urn == "urn:ietf:params:acme:error:rateLimited" {
+        format!(
+            "{base}\n\nHint: Let's Encrypt is rate-limiting this account/hostname. \
+             If you saw repeated failures recently, the per-hostname \
+             \"failed validation\" limit is 5/hour. Wait ~60 minutes and \
+             retry, OR re-issue against the staging directory first \
+             (no production limits) by passing --staging in hctl or \
+             toggling Staging in the UI."
+        )
+    } else if urn == "urn:ietf:params:acme:error:badNonce" {
+        format!("{base}\n\nHint: bad nonce is usually transient — retry once.")
+    } else {
+        base
+    }
+}
+
+fn backoff_for(attempt: u32) -> std::time::Duration {
+    // 1 → 15s, 2 → 30s, 3 → 60s. Total wall-clock budget on retry =
+    // 105s — well within any reasonable HTTP timeout the orchestrator
+    // is willing to wait for cert issuance.
+    let secs = match attempt {
+        1 => 15,
+        2 => 30,
+        _ => 60,
+    };
+    std::time::Duration::from_secs(secs)
 }
 
 /// Best-effort: walk the authorizations on a failed order and concatenate
@@ -368,6 +486,91 @@ mod tests {
     fn config_helpers_compile() {
         let _ = AcmeConfig::lets_encrypt_production("a@b.cz");
         let _ = AcmeConfig::lets_encrypt_staging("a@b.cz");
+    }
+
+    fn mk_problem(urn: &str, status: Option<u16>, detail: Option<&str>) -> instant_acme::Problem {
+        // instant_acme::Problem fields are pub but the struct doesn't
+        // derive Default — go through JSON because the test should
+        // exercise the same path Boulder's responses take.
+        let mut body = serde_json::json!({ "type": urn });
+        if let Some(s) = status {
+            body["status"] = serde_json::json!(s);
+        }
+        if let Some(d) = detail {
+            body["detail"] = serde_json::json!(d);
+        }
+        serde_json::from_value(body).expect("problem round-trips")
+    }
+
+    /// Boulder's transient "load shed" returns rateLimited URN + 503
+    /// status + "Service busy" detail. Must be classified as transient
+    /// (retry-able).
+    #[test]
+    fn boulder_service_busy_is_transient() {
+        let p = mk_problem(
+            "urn:ietf:params:acme:error:rateLimited",
+            Some(503),
+            Some("Service busy; retry later."),
+        );
+        let err = instant_acme::Error::Api(p);
+        assert!(is_transient_rate_limit(&err),
+                "Service busy 503 must be classified as transient");
+    }
+
+    /// Per-account-per-hostname failedAuthorization or duplicate-cert
+    /// limits are durable — Boulder uses 429, and the detail won't
+    /// mention "Service busy". Must NOT auto-retry; operator must wait.
+    #[test]
+    fn durable_rate_limit_is_not_transient() {
+        let p = mk_problem(
+            "urn:ietf:params:acme:error:rateLimited",
+            Some(429),
+            Some("too many failed authorizations recently"),
+        );
+        let err = instant_acme::Error::Api(p);
+        assert!(!is_transient_rate_limit(&err),
+                "429 hard rate limit must NOT be classified as transient");
+    }
+
+    /// Non-rate-limit errors (badNonce, accountDoesNotExist, malformed,
+    /// connection errors) are never the retry path's responsibility.
+    #[test]
+    fn non_rate_limit_errors_are_not_transient() {
+        let p = mk_problem("urn:ietf:params:acme:error:badNonce", Some(400), Some("bad"));
+        assert!(!is_transient_rate_limit(&instant_acme::Error::Api(p)));
+        let p2 = mk_problem("urn:ietf:params:acme:error:malformed", Some(400), Some("nope"));
+        assert!(!is_transient_rate_limit(&instant_acme::Error::Api(p2)));
+        let e3 = instant_acme::Error::Str("transport failed");
+        assert!(!is_transient_rate_limit(&e3));
+    }
+
+    /// Operator-facing message must spell out the actionable
+    /// remediations for rate-limited errors (wait OR use staging).
+    /// We hard-assert specific words so the operator-readable copy
+    /// can't silently regress to "rate limited" with no guidance.
+    #[test]
+    fn rate_limit_message_includes_remediation() {
+        let p = mk_problem(
+            "urn:ietf:params:acme:error:rateLimited",
+            Some(429),
+            Some("too many failed authorizations"),
+        );
+        let m = rate_limit_message("set_ready", &instant_acme::Error::Api(p));
+        assert!(m.contains("set_ready"), "stage name preserved");
+        assert!(m.contains("staging"), "must mention the staging escape hatch");
+        assert!(m.contains("60 minutes") || m.contains("hour"), "must mention wait time");
+    }
+
+    /// Backoff: must strictly increase, and never return zero / sub-second
+    /// values (would burn through retry budget before LE has time to recover).
+    #[test]
+    fn backoff_increases_and_is_meaningful() {
+        let a = backoff_for(1);
+        let b = backoff_for(2);
+        let c = backoff_for(3);
+        assert!(a >= std::time::Duration::from_secs(10), "first retry ≥10s");
+        assert!(b > a, "monotonic");
+        assert!(c >= b, "monotonic (non-decreasing at the cap)");
     }
 
     #[tokio::test]
