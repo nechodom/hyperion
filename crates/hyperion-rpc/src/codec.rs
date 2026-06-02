@@ -98,6 +98,11 @@ pub enum Request {
     },
     NodeStats,
     ClusterStats,
+    NodeMetricsHistory {
+        /// Max samples to return (clamped 1..=2000). Typical: 48 for
+        /// ~4 hours @ 5min tick.
+        limit: i64,
+    },
     StatsTick,
     BackupRestore {
         sel: HostingSelector,
@@ -189,6 +194,7 @@ pub enum Response {
     HostingStats(HostingStats),
     NodeStats(NodeStats),
     ClusterStats(ClusterStats),
+    NodeMetricsHistory(hyperion_types::NodeMetricsHistory),
     StatsTick { hostings_sampled: i64 },
     BackupRestore,
     HostingLogs(String),

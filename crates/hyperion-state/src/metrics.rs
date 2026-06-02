@@ -107,6 +107,53 @@ pub async fn latest(pool: &SqlitePool) -> Result<Option<NodeMetricsRow>, StateEr
     ))
 }
 
+/// Last N node_metrics samples ordered oldest → newest (so charts read
+/// left-to-right). Caller picks `limit`; typical: 48 for a "last 4h
+/// @ 5min tick" sparkline, 288 for a 24h window.
+pub async fn history(
+    pool: &SqlitePool,
+    limit: i64,
+) -> Result<Vec<NodeMetricsRow>, StateError> {
+    let limit = limit.clamp(1, 2000);
+    let rows: Vec<(
+        i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64,
+    )> = sqlx::query_as(
+        "SELECT id, sampled_at, hostings_count, hostings_active, hostings_suspended,
+                hostings_failed, total_disk_bytes, total_bw_out_24h,
+                total_requests_24h, loadavg_1m_x100, mem_total_kib, mem_used_kib,
+                uptime_secs
+         FROM node_metrics
+         ORDER BY sampled_at DESC
+         LIMIT ?",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    // We selected DESC for the LIMIT, now flip so callers iterate
+    // left-to-right (oldest first) — the natural reading order for a
+    // line chart.
+    let mut out: Vec<NodeMetricsRow> = rows
+        .into_iter()
+        .map(|t| NodeMetricsRow {
+            id: t.0,
+            sampled_at: t.1,
+            hostings_count: t.2,
+            hostings_active: t.3,
+            hostings_suspended: t.4,
+            hostings_failed: t.5,
+            total_disk_bytes: t.6,
+            total_bw_out_24h: t.7,
+            total_requests_24h: t.8,
+            loadavg_1m_x100: t.9,
+            mem_total_kib: t.10,
+            mem_used_kib: t.11,
+            uptime_secs: t.12,
+        })
+        .collect();
+    out.reverse();
+    Ok(out)
+}
+
 /// Prune samples older than `cutoff_at`. Returns number of rows deleted.
 pub async fn prune_older_than(pool: &SqlitePool, cutoff_at: i64) -> Result<u64, StateError> {
     let r = sqlx::query("DELETE FROM node_metrics WHERE sampled_at < ?")
@@ -163,6 +210,42 @@ mod tests {
         .expect("insert 2");
         let l = latest(&pool).await.expect("latest").expect("present");
         assert_eq!(l.hostings_count, 2);
+    }
+
+    #[tokio::test]
+    async fn history_returns_ascending() {
+        let pool = open_memory().await.expect("open");
+        // Insert in reverse time order to confirm the function sorts.
+        for ts in [300, 100, 200] {
+            insert(&pool, &NodeMetricsInput {
+                sampled_at: ts,
+                hostings_count: ts,
+                ..Default::default()
+            })
+            .await
+            .expect("insert");
+        }
+        let h = history(&pool, 10).await.expect("history");
+        // Should be oldest → newest: 100, 200, 300.
+        let ts: Vec<i64> = h.iter().map(|r| r.sampled_at).collect();
+        assert_eq!(ts, vec![100, 200, 300]);
+    }
+
+    #[tokio::test]
+    async fn history_respects_limit() {
+        let pool = open_memory().await.expect("open");
+        for ts in 1..=20 {
+            insert(&pool, &NodeMetricsInput {
+                sampled_at: ts,
+                ..Default::default()
+            })
+            .await
+            .expect("insert");
+        }
+        // limit=5 → last 5 samples, oldest first within that window.
+        let h = history(&pool, 5).await.expect("history");
+        let ts: Vec<i64> = h.iter().map(|r| r.sampled_at).collect();
+        assert_eq!(ts, vec![16, 17, 18, 19, 20]);
     }
 
     #[tokio::test]

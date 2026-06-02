@@ -432,6 +432,210 @@ pre code {
 .grid.cols-3 { grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); }
 .grid.cols-4 { grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); }
 
+/* ─────────────────────────────────────────────────────────────
+   Stats page — node switcher, KPI strip, sparklines, kv-grid
+   ───────────────────────────────────────────────────────────── */
+
+/* Node switcher tabs at the top of /stats. Pill-style row of buttons. */
+.node-switcher {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 1rem;
+  padding: 0.35rem;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+}
+.node-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.45rem 0.85rem;
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--text-dim);
+  text-decoration: none;
+  border-radius: var(--radius-xs);
+  border: 1px solid transparent;
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
+}
+.node-tab:hover {
+  background: var(--surface);
+  color: var(--text);
+}
+.node-tab.active {
+  background: var(--surface);
+  color: var(--text);
+  border-color: var(--border);
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+}
+.node-tab-meta {
+  font-size: 0.72rem;
+  color: var(--text-soft);
+  font-weight: 400;
+  margin-left: 0.15rem;
+}
+.node-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-soft);
+  box-shadow: 0 0 0 2px color-mix(in oklab, currentColor 12%, transparent);
+}
+.node-dot.on  { background: var(--success); }
+.node-dot.off { background: var(--danger); }
+
+/* KPI strip — full-width responsive grid of summary tiles. */
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 0.85rem;
+  margin-bottom: 1rem;
+}
+.kpi-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 1rem 1.15rem;
+  position: relative;
+  overflow: hidden;
+}
+.kpi-card::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: var(--text-soft);
+}
+.kpi-card.hostings::before { background: var(--primary-h, var(--primary)); }
+.kpi-card.disk::before     { background: var(--info, var(--primary)); }
+.kpi-card.bw::before       { background: var(--success); }
+.kpi-card.reqs::before     { background: var(--warn); }
+.kpi-card.load::before     { background: #a78bfa; }
+.kpi-card.mem::before      { background: #fb7185; }
+.kpi-label {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-soft);
+  font-weight: 600;
+}
+.kpi-value {
+  font-size: 1.7rem;
+  font-weight: 700;
+  margin-top: 0.3rem;
+  letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
+}
+.kpi-meta {
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  margin-top: 0.25rem;
+}
+.kpi-meta .dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  vertical-align: middle;
+  margin-right: 0.15rem;
+}
+.kpi-meta .dot.ok   { background: var(--success); }
+.kpi-meta .dot.warn { background: var(--warn); }
+.kpi-meta .dot.err  { background: var(--danger); }
+
+/* Sparkline mini-charts grid. */
+.spark-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr));
+  gap: 0.85rem;
+}
+.spark-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 0.95rem 1.05rem;
+}
+.spark-load { color: #a78bfa; }
+.spark-mem  { color: #fb7185; }
+.spark-bw   { color: #34d399; }
+.spark-reqs { color: #fbbf24; }
+.spark-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 0.4rem;
+}
+.spark-title {
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-soft);
+  font-weight: 600;
+}
+.spark-now {
+  font-size: 1.1rem;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--text);
+}
+.spark-svg {
+  display: block;
+  width: 100%;
+  height: 60px;
+}
+.spark-empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 60px;
+  font-size: 0.78rem;
+  color: var(--text-soft);
+  font-style: italic;
+  background: linear-gradient(90deg, transparent 0, transparent 8px, var(--surface-2) 8px, var(--surface-2) 16px) 0 0 / 16px 1px repeat-x;
+  border-bottom: 1px dashed var(--border);
+  margin-bottom: 0.4rem;
+}
+.spark-foot {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.74rem;
+  color: var(--text-dim);
+  margin-top: 0.45rem;
+  font-variant-numeric: tabular-nums;
+}
+.spark-foot-label {
+  color: var(--text-soft);
+  text-transform: uppercase;
+  font-size: 0.66rem;
+  letter-spacing: 0.04em;
+  margin-right: 0.2rem;
+}
+
+/* Generic key-value grid used in node detail card. */
+.kv-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 0.75rem 1.5rem;
+}
+.kv-grid > div {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+}
+.kv-grid .text-soft {
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.kv-grid strong {
+  font-size: 0.95rem;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
 /* Stat card (dashboard) */
 .stat-card {
   background: var(--surface);

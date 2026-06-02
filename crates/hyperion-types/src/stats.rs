@@ -90,6 +90,26 @@ pub struct ClusterStats {
     pub total_requests_24h: i64,
 }
 
+/// A single point in a node-metrics time series. Used by the stats
+/// page to render sparklines (load, memory %, BW) without requiring
+/// a JS chart library — the template converts these into inline SVG.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NodeMetricPoint {
+    pub at: i64,
+    pub loadavg_1m_x100: i64,
+    pub mem_used_kib: i64,
+    pub mem_total_kib: i64,
+    pub total_bw_out_24h: i64,
+    pub total_requests_24h: i64,
+    pub hostings_count: i64,
+}
+
+/// Time-series window of node metrics. `samples` are oldest → newest.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct NodeMetricsHistory {
+    pub samples: Vec<NodeMetricPoint>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

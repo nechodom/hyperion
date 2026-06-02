@@ -209,6 +209,10 @@ async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::ClusterStats(v),
             Err(e) => Response::Error(e),
         },
+        Request::NodeMetricsHistory { limit } => match api.node_metrics_history(limit).await {
+            Ok(v) => Response::NodeMetricsHistory(v),
+            Err(e) => Response::Error(e),
+        },
         Request::StatsTick => match api.stats_tick().await {
             Ok(n) => Response::StatsTick {
                 hostings_sampled: n,
@@ -479,6 +483,12 @@ mod tests {
         }
         async fn cluster_stats(&self) -> Result<ClusterStats, RpcError> {
             Err(RpcError::Internal)
+        }
+        async fn node_metrics_history(
+            &self,
+            _: i64,
+        ) -> Result<hyperion_types::NodeMetricsHistory, RpcError> {
+            Ok(hyperion_types::NodeMetricsHistory::default())
         }
         async fn stats_tick(&self) -> Result<i64, RpcError> {
             Ok(0)

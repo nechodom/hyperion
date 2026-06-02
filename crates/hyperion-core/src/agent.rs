@@ -215,6 +215,13 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.cluster_stats(&self.hostname, &self.version).await
     }
 
+    async fn node_metrics_history(
+        &self,
+        limit: i64,
+    ) -> Result<hyperion_types::NodeMetricsHistory, RpcError> {
+        self.svc.node_metrics_history(limit).await
+    }
+
     async fn stats_tick(&self) -> Result<i64, RpcError> {
         self.svc.stats_tick().await
     }

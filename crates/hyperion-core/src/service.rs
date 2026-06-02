@@ -2860,6 +2860,31 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(node_stats_from(hostname, version, latest, &summaries))
     }
 
+    /// Recent samples from `node_metrics` shaped for the stats page's
+    /// sparkline charts. Wrapper around the storage layer that drops
+    /// the columns the template doesn't need.
+    pub async fn node_metrics_history(
+        &self,
+        limit: i64,
+    ) -> Result<hyperion_types::NodeMetricsHistory, RpcError> {
+        let rows = hyperion_state::metrics::history(&self.pool, limit)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("metrics history: {e}")))?;
+        let samples = rows
+            .into_iter()
+            .map(|r| hyperion_types::NodeMetricPoint {
+                at: r.sampled_at,
+                loadavg_1m_x100: r.loadavg_1m_x100,
+                mem_used_kib: r.mem_used_kib,
+                mem_total_kib: r.mem_total_kib,
+                total_bw_out_24h: r.total_bw_out_24h,
+                total_requests_24h: r.total_requests_24h,
+                hostings_count: r.hostings_count,
+            })
+            .collect();
+        Ok(hyperion_types::NodeMetricsHistory { samples })
+    }
+
     pub async fn cluster_stats(
         &self,
         hostname: &str,

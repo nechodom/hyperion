@@ -101,6 +101,13 @@ pub trait AgentApi: Send + Sync + 'static {
     /// Cluster-wide aggregate. Single-node today = wraps node_stats.
     async fn cluster_stats(&self) -> Result<ClusterStats, RpcError>;
 
+    /// Recent samples from `node_metrics` for sparklines / mini charts.
+    /// Returns oldest → newest. `limit` is clamped agent-side.
+    async fn node_metrics_history(
+        &self,
+        limit: i64,
+    ) -> Result<hyperion_types::NodeMetricsHistory, RpcError>;
+
     /// Install WordPress into a hosting (downloads core, writes wp-config.php
     /// against the hosting's DB credentials, runs `wp core install`, records
     /// the result in `wp_installs`).

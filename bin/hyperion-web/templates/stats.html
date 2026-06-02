@@ -4,7 +4,12 @@
 <div class="page-header">
   <div>
     <h1>Stats</h1>
-    <div class="subtitle">Cluster + per-node + per-hosting snapshots, refreshed by the agent sampler every 5 minutes.</div>
+    <div class="subtitle">
+      Cluster + per-node + per-hosting snapshots, sampled every 5 minutes.
+      {% if samples_in_window >= 2 %}
+        · Charts cover the last <strong>{{ window_minutes }}</strong> minutes ({{ samples_in_window }} samples).
+      {% endif %}
+    </div>
   </div>
 </div>
 
@@ -16,104 +21,206 @@
 {% endif %}
 
 {% if let Some(c) = cluster %}
-<div class="grid cols-4">
-  <div class="stat-card">
-    <div class="stat-head">
-      <span class="stat-label">Hostings</span>
-      <div class="stat-icon primary">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>
+  {# Node switcher tabs — even with 1 node, looks polished and hints multi-node future. #}
+  {% if c.nodes.len() > 0 %}
+  <div class="node-switcher" role="tablist" aria-label="Select node">
+    {% for n in c.nodes %}
+      {% if let Some(sel) = selected_node %}
+        <a class="node-tab {% if n.node_id == sel.node_id %}active{% endif %}"
+           href="/stats?node={{ n.node_id|e }}"
+           role="tab"
+           aria-selected="{% if n.node_id == sel.node_id %}true{% else %}false{% endif %}">
+          <span class="node-dot {% if n.agent_online %}on{% else %}off{% endif %}"></span>
+          {{ n.label }}
+          <span class="node-tab-meta">{{ n.hostings_count }} hostings</span>
+        </a>
+      {% else %}
+        <a class="node-tab" href="/stats?node={{ n.node_id|e }}" role="tab">
+          <span class="node-dot {% if n.agent_online %}on{% else %}off{% endif %}"></span>
+          {{ n.label }}
+        </a>
+      {% endif %}
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {# Top KPI strip — full-width, 6 cards covering everything at-a-glance. #}
+  <div class="kpi-grid">
+    <div class="kpi-card hostings">
+      <div class="kpi-label">Hostings</div>
+      <div class="kpi-value">{{ c.total_hostings }}</div>
+      <div class="kpi-meta">
+        <span class="dot ok"></span>{{ c.total_active }} active
+        · <span class="dot warn"></span>{{ c.total_suspended }} susp
+        · <span class="dot err"></span>{{ c.total_failed }} failed
       </div>
     </div>
-    <div class="stat-value">{{ c.total_hostings }}</div>
-    <div class="stat-meta">
-      <span style="color:var(--success)">●</span> {{ c.total_active }} active ·
-      <span style="color:var(--warn)">●</span> {{ c.total_suspended }} susp ·
-      <span style="color:var(--danger)">●</span> {{ c.total_failed }} failed
+
+    <div class="kpi-card disk">
+      <div class="kpi-label">Disk used</div>
+      <div class="kpi-value">{{ crate::handlers::stats::fmt_bytes(c.total_disk_bytes) }}</div>
+      <div class="kpi-meta">across all hostings</div>
+    </div>
+
+    <div class="kpi-card bw">
+      <div class="kpi-label">BW out · 24h</div>
+      <div class="kpi-value">{{ crate::handlers::stats::fmt_bytes(c.total_bw_out_24h) }}</div>
+      <div class="kpi-meta">parsed from nginx access.log</div>
+    </div>
+
+    <div class="kpi-card reqs">
+      <div class="kpi-label">Requests · 24h</div>
+      <div class="kpi-value">{{ c.total_requests_24h }}</div>
+      <div class="kpi-meta">across all hostings</div>
+    </div>
+
+    {% if let Some(n) = selected_node %}
+      <div class="kpi-card load">
+        <div class="kpi-label">Load avg · 1m</div>
+        <div class="kpi-value">{{ crate::handlers::stats::fmt_load(n.loadavg_1m_x100) }}</div>
+        <div class="kpi-meta">uptime {{ crate::handlers::stats::fmt_uptime(n.uptime_secs) }}</div>
+      </div>
+
+      <div class="kpi-card mem">
+        <div class="kpi-label">Memory</div>
+        <div class="kpi-value">
+          {% if n.mem_total_kib > 0 %}
+            {{ crate::handlers::stats::fmt_percent(n.mem_used_kib, n.mem_total_kib) }}
+          {% else %}
+            —
+          {% endif %}
+        </div>
+        <div class="kpi-meta">
+          {% if n.mem_total_kib > 0 %}
+            {{ crate::handlers::stats::fmt_bytes(n.mem_used_kib * 1024) }} / {{ crate::handlers::stats::fmt_bytes(n.mem_total_kib * 1024) }}
+          {% else %}
+            no sample yet
+          {% endif %}
+        </div>
+      </div>
+    {% endif %}
+  </div>
+
+  {# Sparkline grid — 4 mini charts, pure inline SVG, no JS. #}
+  <div class="spark-grid">
+    <div class="spark-card spark-{{ spark_load.kind }}">
+      <div class="spark-head">
+        <span class="spark-title">Load avg · 1m</span>
+        <span class="spark-now">{{ spark_load.latest_label }}</span>
+      </div>
+      {% if spark_load.has_data %}
+        <svg class="spark-svg" viewBox="0 0 600 60" preserveAspectRatio="none" aria-hidden="true">
+          <defs><linearGradient id="grad-load" x1="0" y1="0" x2="0" y2="1"><stop offset="0%"  stop-color="currentColor" stop-opacity="0.35"/><stop offset="100%" stop-color="currentColor" stop-opacity="0"/></linearGradient></defs>
+          <path class="spark-area" d="{{ spark_load.area_d }}" fill="url(#grad-load)"/>
+          <path class="spark-line" d="{{ spark_load.path_d }}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      {% else %}
+        <div class="spark-empty">need at least 2 samples — wait one more tick</div>
+      {% endif %}
+      <div class="spark-foot">
+        <span><span class="spark-foot-label">avg</span> {{ spark_load.avg_label }}</span>
+        <span><span class="spark-foot-label">peak</span> {{ spark_load.peak_label }}</span>
+      </div>
+    </div>
+
+    <div class="spark-card spark-{{ spark_mem.kind }}">
+      <div class="spark-head">
+        <span class="spark-title">Memory used</span>
+        <span class="spark-now">{{ spark_mem.latest_label }}</span>
+      </div>
+      {% if spark_mem.has_data %}
+        <svg class="spark-svg" viewBox="0 0 600 60" preserveAspectRatio="none" aria-hidden="true">
+          <defs><linearGradient id="grad-mem" x1="0" y1="0" x2="0" y2="1"><stop offset="0%"  stop-color="currentColor" stop-opacity="0.35"/><stop offset="100%" stop-color="currentColor" stop-opacity="0"/></linearGradient></defs>
+          <path class="spark-area" d="{{ spark_mem.area_d }}" fill="url(#grad-mem)"/>
+          <path class="spark-line" d="{{ spark_mem.path_d }}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      {% else %}
+        <div class="spark-empty">need at least 2 samples — wait one more tick</div>
+      {% endif %}
+      <div class="spark-foot">
+        <span><span class="spark-foot-label">avg</span> {{ spark_mem.avg_label }}</span>
+        <span><span class="spark-foot-label">peak</span> {{ spark_mem.peak_label }}</span>
+      </div>
+    </div>
+
+    <div class="spark-card spark-{{ spark_bw.kind }}">
+      <div class="spark-head">
+        <span class="spark-title">Bandwidth out</span>
+        <span class="spark-now">{{ spark_bw.latest_label }}</span>
+      </div>
+      {% if spark_bw.has_data %}
+        <svg class="spark-svg" viewBox="0 0 600 60" preserveAspectRatio="none" aria-hidden="true">
+          <defs><linearGradient id="grad-bw" x1="0" y1="0" x2="0" y2="1"><stop offset="0%"  stop-color="currentColor" stop-opacity="0.35"/><stop offset="100%" stop-color="currentColor" stop-opacity="0"/></linearGradient></defs>
+          <path class="spark-area" d="{{ spark_bw.area_d }}" fill="url(#grad-bw)"/>
+          <path class="spark-line" d="{{ spark_bw.path_d }}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      {% else %}
+        <div class="spark-empty">need at least 2 samples — wait one more tick</div>
+      {% endif %}
+      <div class="spark-foot">
+        <span><span class="spark-foot-label">avg</span> {{ spark_bw.avg_label }}</span>
+        <span><span class="spark-foot-label">peak</span> {{ spark_bw.peak_label }}</span>
+      </div>
+    </div>
+
+    <div class="spark-card spark-{{ spark_reqs.kind }}">
+      <div class="spark-head">
+        <span class="spark-title">Requests</span>
+        <span class="spark-now">{{ spark_reqs.latest_label }}</span>
+      </div>
+      {% if spark_reqs.has_data %}
+        <svg class="spark-svg" viewBox="0 0 600 60" preserveAspectRatio="none" aria-hidden="true">
+          <defs><linearGradient id="grad-reqs" x1="0" y1="0" x2="0" y2="1"><stop offset="0%"  stop-color="currentColor" stop-opacity="0.35"/><stop offset="100%" stop-color="currentColor" stop-opacity="0"/></linearGradient></defs>
+          <path class="spark-area" d="{{ spark_reqs.area_d }}" fill="url(#grad-reqs)"/>
+          <path class="spark-line" d="{{ spark_reqs.path_d }}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      {% else %}
+        <div class="spark-empty">need at least 2 samples — wait one more tick</div>
+      {% endif %}
+      <div class="spark-foot">
+        <span><span class="spark-foot-label">avg</span> {{ spark_reqs.avg_label }}</span>
+        <span><span class="spark-foot-label">peak</span> {{ spark_reqs.peak_label }}</span>
+      </div>
     </div>
   </div>
 
-  <div class="stat-card">
-    <div class="stat-head">
-      <span class="stat-label">Disk used</span>
-      <div class="stat-icon info">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
-      </div>
-    </div>
-    <div class="stat-value">{{ crate::handlers::stats::fmt_bytes(c.total_disk_bytes) }}</div>
-    <div class="stat-meta">across all hostings</div>
-  </div>
-
-  <div class="stat-card">
-    <div class="stat-head">
-      <span class="stat-label">BW out · 24h</span>
-      <div class="stat-icon success">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m13 18 6-6-6-6"/></svg>
-      </div>
-    </div>
-    <div class="stat-value">{{ crate::handlers::stats::fmt_bytes(c.total_bw_out_24h) }}</div>
-    <div class="stat-meta">last 24h</div>
-  </div>
-
-  <div class="stat-card">
-    <div class="stat-head">
-      <span class="stat-label">Requests · 24h</span>
-      <div class="stat-icon warn">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
-      </div>
-    </div>
-    <div class="stat-value">{{ c.total_requests_24h }}</div>
-    <div class="stat-meta">parsed from access.log</div>
-  </div>
-</div>
-
-<h2 class="section-title" style="margin-top:2rem">Nodes</h2>
-<div class="grid cols-2">
-{% for n in c.nodes %}
-  <div class="card hover">
-    <div class="spread" style="margin-bottom:1rem">
+  {# Selected node detail card — uptime, sampled, etc. #}
+  {% if let Some(n) = selected_node %}
+  <div class="card" style="margin-top:1.25rem">
+    <div class="spread" style="margin-bottom:0.75rem">
       <div>
-        <div style="font-weight:600;font-size:1.05rem">{{ n.label }}</div>
-        <div class="muted" style="font-size:0.82rem">v{{ n.agent_version }} · uptime {{ n.uptime_secs }}s</div>
+        <h3 style="margin:0;font-size:1.05rem">{{ n.label }}</h3>
+        <div class="text-soft small">
+          <code>{{ n.node_id }}</code> · v{{ n.agent_version }}
+        </div>
       </div>
-      <span class="pill {% if n.agent_online %}ok{% else %}err{% endif %}">{% if n.agent_online %}online{% else %}offline{% endif %}</span>
+      <span class="pill {% if n.agent_online %}ok{% else %}err{% endif %}">
+        {% if n.agent_online %}online{% else %}offline{% endif %}
+      </span>
     </div>
-    <dl class="kv">
-      <dt>Hostings</dt>
-      <dd>
-        {{ n.hostings_count }}
-        <span class="muted">(active {{ n.hostings_active }} · suspended {{ n.hostings_suspended }} · failed {{ n.hostings_failed }})</span>
-      </dd>
-      <dt>Disk used</dt><dd>{{ crate::handlers::stats::fmt_bytes(n.total_disk_bytes) }}</dd>
-      <dt>BW out · 24h</dt><dd>{{ crate::handlers::stats::fmt_bytes(n.total_bw_out_24h) }}</dd>
-      <dt>Requests · 24h</dt><dd class="numeric">{{ n.total_requests_24h }}</dd>
-      <dt>Load avg · 1m</dt><dd class="numeric">{{ crate::handlers::stats::fmt_load(n.loadavg_1m_x100) }}</dd>
-      <dt>Memory</dt>
-      <dd>
-        {% if n.mem_total_kib > 0 %}
-          {{ crate::handlers::stats::fmt_bytes(n.mem_used_kib * 1024) }} / {{ crate::handlers::stats::fmt_bytes(n.mem_total_kib * 1024) }}
-          <span class="muted">({{ crate::handlers::stats::fmt_percent(n.mem_used_kib, n.mem_total_kib) }})</span>
-          <div style="background:var(--surface-2);height:6px;border-radius:999px;margin-top:0.4rem;overflow:hidden">
-            <div style="background:linear-gradient(90deg,var(--success),var(--warn));height:100%;width:{{ n.mem_used_kib * 100 / n.mem_total_kib }}%"></div>
-          </div>
-        {% else %}
-          <span class="text-soft">no sample yet</span>
-        {% endif %}
-      </dd>
-      <dt>Uptime</dt><dd class="muted">{{ crate::handlers::stats::fmt_uptime(n.uptime_secs) }}</dd>
-      <dt>Sampled</dt><dd class="muted numeric">{{ n.sampled_at }}</dd>
-    </dl>
+    <div class="kv-grid">
+      <div><span class="text-soft">Hostings</span><strong>{{ n.hostings_count }}</strong></div>
+      <div><span class="text-soft">Active</span><strong>{{ n.hostings_active }}</strong></div>
+      <div><span class="text-soft">Suspended</span><strong>{{ n.hostings_suspended }}</strong></div>
+      <div><span class="text-soft">Failed</span><strong>{{ n.hostings_failed }}</strong></div>
+      <div><span class="text-soft">Disk</span><strong>{{ crate::handlers::stats::fmt_bytes(n.total_disk_bytes) }}</strong></div>
+      <div><span class="text-soft">BW out · 24h</span><strong>{{ crate::handlers::stats::fmt_bytes(n.total_bw_out_24h) }}</strong></div>
+      <div><span class="text-soft">Requests · 24h</span><strong>{{ n.total_requests_24h }}</strong></div>
+      <div><span class="text-soft">Load avg · 1m</span><strong>{{ crate::handlers::stats::fmt_load(n.loadavg_1m_x100) }}</strong></div>
+      <div><span class="text-soft">Uptime</span><strong>{{ crate::handlers::stats::fmt_uptime(n.uptime_secs) }}</strong></div>
+      <div><span class="text-soft">Last sample</span><strong>{{ crate::handlers::stats::fmt_ago(n.sampled_at) }}</strong></div>
+    </div>
   </div>
-{% endfor %}
-</div>
+  {% endif %}
 {% else %}
-<div class="card">
-  <div class="empty">
-    <div class="empty-illustration">
-      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+  <div class="card">
+    <div class="empty">
+      <div class="empty-illustration">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+      </div>
+      <h3>No stats yet</h3>
+      <p>The sampler runs every 5 minutes. Wait one tick.</p>
     </div>
-    <h3>No stats yet</h3>
-    <p>The sampler runs every 5 minutes. Hit "Refresh now" or wait one tick.</p>
   </div>
-</div>
 {% endif %}
 {% endblock %}

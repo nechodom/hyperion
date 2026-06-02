@@ -612,6 +612,19 @@ fn print_pretty(resp: &Response) {
         Response::Error(e) => {
             eprintln!("ERROR: {e}");
         }
+        Response::NodeMetricsHistory(h) => {
+            println!("metrics-history: {} samples", h.samples.len());
+            for s in h.samples.iter().rev().take(20) {
+                println!(
+                    "  ts={} load={:.2} mem={}/{} hosts={}",
+                    s.at,
+                    s.loadavg_1m_x100 as f64 / 100.0,
+                    s.mem_used_kib,
+                    s.mem_total_kib,
+                    s.hostings_count
+                );
+            }
+        }
     }
 }
 

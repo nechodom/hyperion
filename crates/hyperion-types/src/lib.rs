@@ -29,7 +29,10 @@ pub use limits::{
 pub use php::PhpVersion;
 pub use profile::{HostingProfile, ProfileApply, ProfileInput};
 pub use spf::SpfCheckResult;
-pub use stats::{ClusterStats, DashboardAlert, HostingStats, NodeStats, NodeSummary};
+pub use stats::{
+    ClusterStats, DashboardAlert, HostingStats, NodeMetricPoint, NodeMetricsHistory, NodeStats,
+    NodeSummary,
+};
 pub use wp::{WpInstallRequest, WpInstallStatus};
 
 /// Current Unix epoch seconds. Centralized so tests can replace it if needed.
