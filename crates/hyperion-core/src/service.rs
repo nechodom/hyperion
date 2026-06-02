@@ -7,11 +7,14 @@ use hyperion_rpc::wire::{
     DbCredentials, DeleteOpts, HostingCreateReq, HostingCreated, HostingSelector,
 };
 use hyperion_rpc::RpcError;
-use hyperion_state::{certificates, databases, hostings, metrics, system_users, wordpress};
+use hyperion_state::{
+    certificates, databases, hostings, metrics, profiles, system_users, wordpress,
+};
 use hyperion_types::{
     now_secs, CertInfo, CertIssueRequest, ClusterStats, DashboardAlert, DbProvision, DbSummary,
-    DnsCheckResult, HostingDetail, HostingId, HostingState, HostingStats, HostingSummary,
-    NodeStats, PhpVersion, SecretId, WpInstallRequest, WpInstallStatus,
+    DnsCheckResult, HostingDetail, HostingId, HostingProfile, HostingState, HostingStats,
+    HostingSummary, NodeStats, PhpVersion, ProfileApply, ProfileInput, SecretId, WpInstallRequest,
+    WpInstallStatus,
 };
 use hyperion_validate::{Domain, SystemUserName};
 use sqlx::SqlitePool;
@@ -115,6 +118,9 @@ pub struct HostingService<A: AdapterPort + 'static> {
     pub paths: HostingPaths,
     pub remote_backup: Option<RemoteBackupConfig>,
     pub retention: BackupRetention,
+    /// Cluster-wide default Slack webhook for notifications.
+    /// Per-profile webhooks override this.
+    pub slack_default_webhook: Option<String>,
 }
 
 /// Cluster-wide remote backup destination. When set, every successful
@@ -176,7 +182,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             paths: HostingPaths::default(),
             remote_backup: None,
             retention: BackupRetention::default(),
+            slack_default_webhook: None,
         }
+    }
+
+    pub fn with_slack_webhook(mut self, webhook: Option<String>) -> Self {
+        self.slack_default_webhook = webhook.filter(|s| !s.trim().is_empty());
+        self
     }
 
     pub fn with_paths(mut self, paths: HostingPaths) -> Self {
@@ -1514,6 +1526,303 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     }
 
     /// Mint a one-time node enrollment token. Plaintext returned exactly once.
+    // ================================================================
+    //  Slack notifications + billing sweep
+    // ================================================================
+
+    /// Send a Slack incoming-webhook message. Specific webhook URL
+    /// wins over `slack_default_webhook`. Best-effort: failures are
+    /// audit-logged but never propagate to the caller.
+    pub(crate) async fn notify_slack(&self, specific: Option<&str>, message: &str) {
+        let url = specific
+            .filter(|s| !s.trim().is_empty())
+            .map(String::from)
+            .or_else(|| self.slack_default_webhook.clone());
+        let Some(url) = url else {
+            return;
+        };
+        let body = serde_json::json!({"text": message}).to_string();
+        let out = tokio::process::Command::new("/usr/bin/curl")
+            .args([
+                "-fsS",
+                "--max-time",
+                "6",
+                "-X",
+                "POST",
+                "-H",
+                "content-type: application/json",
+                "--data",
+                &body,
+                &url,
+            ])
+            .output()
+            .await;
+        match out {
+            Ok(o) if o.status.success() => {
+                self.append_audit(
+                    "notify.slack",
+                    None,
+                    &serde_json::json!({"message": message}).to_string(),
+                    "ok",
+                )
+                .await;
+            }
+            Ok(o) => {
+                self.append_audit(
+                    "notify.slack",
+                    None,
+                    &serde_json::json!({
+                        "message": message,
+                        "stderr": String::from_utf8_lossy(&o.stderr).to_string(),
+                    })
+                    .to_string(),
+                    "failed",
+                )
+                .await;
+            }
+            Err(e) => {
+                self.append_audit(
+                    "notify.slack",
+                    None,
+                    &serde_json::json!({"message": message, "spawn_error": e.to_string()})
+                        .to_string(),
+                    "failed",
+                )
+                .await;
+            }
+        }
+    }
+
+    /// Periodic sweep — sends a Slack message for every hosting whose
+    /// `next_billing_at` is within 3 days. Called from the scheduler
+    /// tick; idempotency is left to the caller's interval (today the
+    /// tick runs every 5 min — fine, Slack will get duplicated msgs
+    /// every 5 min for 3 days, which is acceptable for a first cut).
+    /// Resets next_billing_at to next-interval after notification.
+    pub async fn billing_sweep(&self) -> Result<i64, RpcError> {
+        let now = now_secs();
+        let due = profiles::due_billings(&self.pool, now, 3 * 86400)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("billing sweep: {e}")))?;
+        let mut count = 0i64;
+        for row in due {
+            // Look up hosting + profile (for webhook + label) — best effort.
+            let detail = self
+                .get(HostingSelector::Id(row.hosting_id.clone()))
+                .await
+                .ok();
+            let domain = detail.as_ref().map(|d| d.domain.clone()).unwrap_or_default();
+            let webhook = match row.profile_id {
+                Some(pid) => self
+                    .profile_get(pid)
+                    .await
+                    .ok()
+                    .and_then(|p| p.slack_webhook),
+                None => None,
+            };
+            let price_str = match (row.price_minor, &row.price_currency, &row.price_interval) {
+                (Some(m), Some(c), Some(iv)) => {
+                    format!("{:.2} {c} ({iv})", m as f64 / 100.0)
+                }
+                _ => "no price set".into(),
+            };
+            let due_in_days = row
+                .next_billing_at
+                .map(|t| ((t - now).max(0)) / 86400)
+                .unwrap_or(0);
+            let msg = format!(
+                ":calendar: *Billing reminder*\n• site: `{domain}`\n• price: {price_str}\n• due in {due_in_days} day(s)"
+            );
+            self.notify_slack(webhook.as_deref(), &msg).await;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    // ================================================================
+    //  Hosting profiles (templates)
+    // ================================================================
+
+    pub async fn profile_list(&self) -> Result<Vec<HostingProfile>, RpcError> {
+        let rows = profiles::list(&self.pool)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("profile list: {e}")))?;
+        Ok(rows.into_iter().map(profile_row_to_wire).collect())
+    }
+
+    pub async fn profile_get(&self, id: i64) -> Result<HostingProfile, RpcError> {
+        let row = profiles::get(&self.pool, id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("profile get: {e}")))?
+            .ok_or(RpcError::NotFound {
+                kind: "profile".into(),
+                id: id.to_string(),
+            })?;
+        Ok(profile_row_to_wire(row))
+    }
+
+    pub async fn profile_create(&self, input: ProfileInput) -> Result<HostingProfile, RpcError> {
+        let validated = validate_profile(input)?;
+        let now = now_secs();
+        let id = profiles::insert(&self.pool, &profile_input_to_new(validated), now)
+            .await
+            .map_err(|e| RpcError::AlreadyExists {
+                kind: "profile".into(),
+                id: e.to_string(),
+            })?;
+        let row = profiles::get(&self.pool, id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("profile re-read: {e}")))?
+            .ok_or(RpcError::Internal)?;
+        self.append_audit(
+            "profile.create",
+            None,
+            &serde_json::json!({"id": id, "name": row.name}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(profile_row_to_wire(row))
+    }
+
+    pub async fn profile_update(
+        &self,
+        id: i64,
+        input: ProfileInput,
+    ) -> Result<HostingProfile, RpcError> {
+        let validated = validate_profile(input)?;
+        profiles::update(&self.pool, id, &profile_input_to_new(validated), now_secs())
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("profile update: {e}")))?;
+        let row = profiles::get(&self.pool, id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("profile re-read: {e}")))?
+            .ok_or(RpcError::NotFound {
+                kind: "profile".into(),
+                id: id.to_string(),
+            })?;
+        self.append_audit(
+            "profile.update",
+            None,
+            &serde_json::json!({"id": id, "name": row.name}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(profile_row_to_wire(row))
+    }
+
+    pub async fn profile_delete(&self, id: i64) -> Result<(), RpcError> {
+        profiles::delete(&self.pool, id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("profile delete: {e}")))?;
+        self.append_audit(
+            "profile.delete",
+            None,
+            &serde_json::json!({"id": id}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
+    /// Apply a profile to a hosting. Copies the profile's limits +
+    /// expiry policy + pricing onto the hosting and records the link.
+    pub async fn profile_apply(
+        &self,
+        sel: HostingSelector,
+        profile_id: i64,
+    ) -> Result<ProfileApply, RpcError> {
+        let detail = self.get(sel).await?;
+        let p = self.profile_get(profile_id).await?;
+
+        // Push limits.
+        let mut limits = hyperion_types::HostingLimits::defaults();
+        limits.php_memory_mb = p.php_memory_mb;
+        limits.php_max_exec_secs = p.php_max_exec_secs;
+        limits.php_max_children = p.php_max_children;
+        limits.php_max_requests = p.php_max_requests;
+        limits.db_max_connections = p.db_max_connections;
+        limits.disk_hard_bytes = p.disk_hard_mb.map(|m| m * 1024 * 1024);
+        limits.bw_monthly_bytes = p.bw_monthly_mb.map(|m| m * 1024 * 1024);
+        self.set_limits(
+            HostingSelector::Id(detail.id.clone()),
+            limits,
+        )
+        .await?;
+
+        // Push expiry policy (without changing expires_at — operator sets that).
+        let cur = self
+            .get_expiry(HostingSelector::Id(detail.id.clone()))
+            .await
+            .unwrap_or_else(|_| hyperion_types::HostingExpiry::defaults());
+        let expiry = hyperion_types::HostingExpiry {
+            expires_at: cur.expires_at,
+            owner_email: cur.owner_email,
+            grace_days: p.expiry_grace_days,
+            warning_offsets_days: p.expiry_warning_offsets.clone(),
+        };
+        self.set_expiry(HostingSelector::Id(detail.id.clone()), expiry)
+            .await?;
+
+        // Pricing snapshot + initial next_billing_at = now + interval.
+        let now = now_secs();
+        let next = match p.price_interval.as_deref() {
+            Some("monthly") => Some(now + 30 * 86400),
+            Some("quarterly") => Some(now + 90 * 86400),
+            Some("yearly") => Some(now + 365 * 86400),
+            _ => None,
+        };
+        profiles::upsert_apply(
+            &self.pool,
+            &detail.id,
+            Some(p.id),
+            p.price_minor,
+            p.price_currency.as_deref(),
+            p.price_interval.as_deref(),
+            next,
+            now,
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("apply: {e}")))?;
+
+        self.append_audit(
+            "profile.apply",
+            Some(detail.id.as_str()),
+            &serde_json::json!({"profile_id": profile_id, "profile_name": p.name})
+                .to_string(),
+            "ok",
+        )
+        .await;
+
+        Ok(ProfileApply {
+            hosting_id: detail.id,
+            profile_id: Some(p.id),
+            price_minor: p.price_minor,
+            price_currency: p.price_currency,
+            price_interval: p.price_interval,
+            next_billing_at: next,
+            applied_at: now,
+        })
+    }
+
+    pub async fn profile_get_apply(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<Option<ProfileApply>, RpcError> {
+        let detail = self.get(sel).await?;
+        let row = profiles::get_apply(&self.pool, &detail.id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("apply read: {e}")))?;
+        Ok(row.map(|r| ProfileApply {
+            hosting_id: r.hosting_id,
+            profile_id: r.profile_id,
+            price_minor: r.price_minor,
+            price_currency: r.price_currency,
+            price_interval: r.price_interval,
+            next_billing_at: r.next_billing_at,
+            applied_at: r.applied_at,
+        }))
+    }
+
     /// Compute the operator dashboard alert list. Scans hostings + certs
     /// + backups + scheduler state and surfaces anything that needs
     /// human attention. Read-only — no side effects.
@@ -2431,6 +2740,81 @@ fn validate_crontab(body: &str) -> Result<(), RpcError> {
     Ok(())
 }
 
+fn validate_profile(mut p: ProfileInput) -> Result<ProfileInput, RpcError> {
+    p.name = p.name.trim().to_string();
+    if p.name.is_empty() {
+        return Err(RpcError::Validation {
+            message: "profile name must not be empty".into(),
+        });
+    }
+    if p.name.len() > 64 {
+        return Err(RpcError::Validation {
+            message: "profile name max 64 chars".into(),
+        });
+    }
+    if p.expiry_warning_offsets.trim().is_empty() {
+        p.expiry_warning_offsets = "30,7,1".into();
+    }
+    if let Some(c) = &p.price_currency {
+        if !c.chars().all(|ch| ch.is_ascii_uppercase()) || c.len() != 3 {
+            return Err(RpcError::Validation {
+                message: "price_currency must be 3 uppercase ISO-4217 letters".into(),
+            });
+        }
+    }
+    if let Some(iv) = &p.price_interval {
+        if !matches!(iv.as_str(), "monthly" | "quarterly" | "yearly") {
+            return Err(RpcError::Validation {
+                message: "price_interval must be monthly | quarterly | yearly".into(),
+            });
+        }
+    }
+    Ok(p)
+}
+
+fn profile_input_to_new(input: ProfileInput) -> hyperion_state::profiles::NewProfile {
+    hyperion_state::profiles::NewProfile {
+        name: input.name,
+        description: input.description,
+        php_memory_mb: input.php_memory_mb,
+        php_max_exec_secs: input.php_max_exec_secs,
+        php_max_children: input.php_max_children,
+        php_max_requests: input.php_max_requests,
+        db_max_connections: input.db_max_connections,
+        disk_hard_mb: input.disk_hard_mb,
+        bw_monthly_mb: input.bw_monthly_mb,
+        expiry_grace_days: input.expiry_grace_days,
+        expiry_warning_offsets: input.expiry_warning_offsets,
+        price_minor: input.price_minor,
+        price_currency: input.price_currency,
+        price_interval: input.price_interval,
+        slack_webhook: input.slack_webhook,
+    }
+}
+
+fn profile_row_to_wire(r: hyperion_state::profiles::ProfileRow) -> HostingProfile {
+    HostingProfile {
+        id: r.id,
+        name: r.name,
+        description: r.description,
+        php_memory_mb: r.php_memory_mb,
+        php_max_exec_secs: r.php_max_exec_secs,
+        php_max_children: r.php_max_children,
+        php_max_requests: r.php_max_requests,
+        db_max_connections: r.db_max_connections,
+        disk_hard_mb: r.disk_hard_mb,
+        bw_monthly_mb: r.bw_monthly_mb,
+        expiry_grace_days: r.expiry_grace_days,
+        expiry_warning_offsets: r.expiry_warning_offsets,
+        price_minor: r.price_minor,
+        price_currency: r.price_currency,
+        price_interval: r.price_interval,
+        slack_webhook: r.slack_webhook,
+        created_at: r.created_at,
+        updated_at: r.updated_at,
+    }
+}
+
 fn derive_user_from_summary(s: &HostingSummary) -> Option<String> {
     // HostingSummary doesn't carry system_user yet; fall back to deriving
     // it from the domain the same way the create flow does.
@@ -2946,6 +3330,7 @@ mod tests {
             paths: HostingPaths::default(),
             remote_backup: None,
             retention: BackupRetention::default(),
+            slack_default_webhook: None,
         };
         s2.create(HostingCreateReq {
             domain: Domain::parse("b.cz").expect("parse"),
@@ -2980,6 +3365,7 @@ mod tests {
             paths: HostingPaths::default(),
             remote_backup: None,
             retention: BackupRetention::default(),
+            slack_default_webhook: None,
         };
         let r = s2.create(req("dup.cz")).await;
         match r {

@@ -18,3 +18,5 @@ pub use secrets::{SecretsError, SecretsStore};
 pub use service::{
     AdapterPort, BackupRetention, HostingPaths, HostingService, RemoteBackupConfig,
 };
+
+// Re-export profile types via hyperion_types — they live there.

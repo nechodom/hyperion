@@ -170,6 +170,10 @@ user     = ""
 password = ""
 base_path = "/hyperion-backups"
 
+# Optional Slack incoming webhook for cluster-wide notifications.
+[slack]
+default_webhook = ""
+
 # Enrollment with the master. The token persists here; the mTLS
 # handshake that turns this into a fully-managed cluster member is
 # sub-project 1.5 in the design docs. Until that lands the agent runs

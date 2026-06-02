@@ -9,9 +9,9 @@ use crate::{
 };
 use hyperion_types::{
     BackupRunWire, CertInfo, CertIssueRequest, CertRenewResult, ClusterStats, DashboardAlert,
-    DnsCheckResult, ExpiringHosting, HostingDetail, HostingExpiry, HostingLimits, HostingStats,
-    HostingSummary, HostingUsageBucket, NodeInviteMint, NodeInviteSummary, NodeStats, NodeSummary,
-    SuspendReason, WpInstallRequest, WpInstallStatus,
+    DnsCheckResult, ExpiringHosting, HostingDetail, HostingExpiry, HostingLimits, HostingProfile,
+    HostingStats, HostingSummary, HostingUsageBucket, NodeInviteMint, NodeInviteSummary, NodeStats,
+    NodeSummary, ProfileApply, ProfileInput, SuspendReason, WpInstallRequest, WpInstallStatus,
 };
 use hyperion_validate::Domain;
 use serde::{Deserialize, Serialize};
@@ -136,6 +136,13 @@ pub enum Request {
         new_password: String,
     },
     DashboardAlerts,
+    ProfileList,
+    ProfileGet { id: i64 },
+    ProfileCreate(ProfileInput),
+    ProfileUpdate { id: i64, input: ProfileInput },
+    ProfileDelete { id: i64 },
+    ProfileApply { sel: HostingSelector, profile_id: i64 },
+    ProfileGetApply { sel: HostingSelector },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -182,6 +189,13 @@ pub enum Response {
     WpResetPassword,
     DbResetPassword,
     DashboardAlerts(Vec<DashboardAlert>),
+    ProfileList(Vec<HostingProfile>),
+    ProfileGet(HostingProfile),
+    ProfileCreate(HostingProfile),
+    ProfileUpdate(HostingProfile),
+    ProfileDelete,
+    ProfileApply(ProfileApply),
+    ProfileGetApply(Option<ProfileApply>),
     Error(RpcError),
 }
 

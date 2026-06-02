@@ -1,0 +1,169 @@
+{% extends "base.html" %}
+{% block title %}Profiles · hyperion{% endblock %}
+{% block main %}
+<div class="page-header">
+  <div>
+    <h1>Profiles</h1>
+    <div class="subtitle">Pre-defined templates of limits, expiry policy, pricing and notifications. Apply to any hosting in one click.</div>
+  </div>
+</div>
+
+{% if let Some(m) = flash %}
+  <div class="flash success"><div class="flash-body">{{ m }}</div></div>
+{% endif %}
+{% if let Some(e) = error %}
+  <div class="flash error"><div class="flash-body">{{ e }}</div></div>
+{% endif %}
+
+<div class="card no-pad-table">
+  <h2 style="padding:1.4rem 1.5rem 0">Existing profiles</h2>
+  {% if profiles.is_empty() %}
+    <div class="empty">
+      <p>No profiles yet — define one below for your standard plan tiers (Basic, Pro, Enterprise) and apply them to hostings.</p>
+    </div>
+  {% else %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>PHP mem</th>
+          <th>Disk</th>
+          <th>Price</th>
+          <th>Expiry grace</th>
+          <th>Slack</th>
+          <th class="right">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for p in profiles %}
+        <tr>
+          <td>
+            <strong>{{ p.name }}</strong>
+            {% if !p.description.is_empty() %}
+              <div class="muted" style="font-size:0.78rem">{{ p.description }}</div>
+            {% endif %}
+          </td>
+          <td>{{ p.php_memory_mb }} MB</td>
+          <td>{% if let Some(m) = p.disk_hard_mb %}{{ m }} MB{% else %}<span class="text-soft">unlimited</span>{% endif %}</td>
+          <td>{{ p.pretty_price() }}</td>
+          <td>{{ p.expiry_grace_days }} d</td>
+          <td>{% if p.slack_webhook.is_some() %}<span class="pill ok">configured</span>{% else %}<span class="text-soft">—</span>{% endif %}</td>
+          <td class="right">
+            <form method="post" action="/profiles/delete" style="display:inline"
+                  onsubmit="return confirm('Delete profile {{ p.name }}? Hostings keep their current values.');">
+              <input type="hidden" name="_csrf" value="{{ csrf_delete }}">
+              <input type="hidden" name="id" value="{{ p.id }}">
+              <button class="btn small danger" type="submit">Delete</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+
+<div class="card hover">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+    Create a new profile
+  </h2>
+  <form method="post" action="/profiles/create">
+    <input type="hidden" name="_csrf" value="{{ csrf_create }}">
+    <div class="field-row">
+      <div class="field">
+        <label for="p_name">Name <span class="hint">unique short label, e.g. "Pro"</span></label>
+        <input id="p_name" name="name" type="text" required maxlength="64">
+      </div>
+      <div class="field">
+        <label for="p_desc">Description <span class="hint">optional</span></label>
+        <input id="p_desc" name="description" type="text" maxlength="200">
+      </div>
+    </div>
+
+    <h2 style="font-size:0.95rem;margin:1.5rem 0 0.6rem">Limits</h2>
+    <div class="field-row">
+      <div class="field">
+        <label for="p_php_memory">PHP memory <span class="hint">MB</span></label>
+        <input id="p_php_memory" name="php_memory_mb" type="number" min="16" max="8192" value="256">
+      </div>
+      <div class="field">
+        <label for="p_php_exec">PHP max_exec <span class="hint">sec</span></label>
+        <input id="p_php_exec" name="php_max_exec_secs" type="number" min="1" max="3600" value="60">
+      </div>
+    </div>
+    <div class="field-row">
+      <div class="field">
+        <label for="p_php_children">PHP-FPM max_children</label>
+        <input id="p_php_children" name="php_max_children" type="number" min="1" max="200" value="10">
+      </div>
+      <div class="field">
+        <label for="p_php_reqs">PHP-FPM max_requests</label>
+        <input id="p_php_reqs" name="php_max_requests" type="number" min="0" value="1000">
+      </div>
+    </div>
+    <div class="field-row">
+      <div class="field">
+        <label for="p_db_max">DB max connections</label>
+        <input id="p_db_max" name="db_max_connections" type="number" min="1" max="1000" value="50">
+      </div>
+      <div class="field">
+        <label for="p_disk">Disk limit <span class="hint">MB · blank = unlimited</span></label>
+        <input id="p_disk" name="disk_hard_mb" type="number" min="0" placeholder="2048">
+      </div>
+    </div>
+    <div class="field">
+      <label for="p_bw">Monthly bandwidth <span class="hint">MB · blank = unlimited</span></label>
+      <input id="p_bw" name="bw_monthly_mb" type="number" min="0" placeholder="10000">
+    </div>
+
+    <h2 style="font-size:0.95rem;margin:1.5rem 0 0.6rem">Expiration policy</h2>
+    <div class="field-row">
+      <div class="field">
+        <label for="p_grace">Grace period <span class="hint">days after expiry → auto-delete</span></label>
+        <input id="p_grace" name="expiry_grace_days" type="number" min="0" max="365" value="30">
+      </div>
+      <div class="field">
+        <label for="p_off">Warning offsets <span class="hint">days before expiry, comma-sep</span></label>
+        <input id="p_off" name="expiry_warning_offsets" type="text" value="30,7,1">
+      </div>
+    </div>
+
+    <h2 style="font-size:0.95rem;margin:1.5rem 0 0.6rem">Pricing <span class="muted" style="font-weight:400;font-size:0.82rem">— optional</span></h2>
+    <div class="field-row three">
+      <div class="field">
+        <label for="p_price">Price <span class="hint">major units, e.g. 199.00</span></label>
+        <input id="p_price" name="price_major" type="text" inputmode="decimal" placeholder="199.00">
+      </div>
+      <div class="field">
+        <label for="p_currency">Currency <span class="hint">ISO 4217</span></label>
+        <input id="p_currency" name="price_currency" type="text" maxlength="3" placeholder="CZK" style="text-transform:uppercase">
+      </div>
+      <div class="field">
+        <label for="p_interval">Interval</label>
+        <select id="p_interval" name="price_interval">
+          <option value="">none</option>
+          <option value="monthly">monthly</option>
+          <option value="quarterly">quarterly</option>
+          <option value="yearly">yearly</option>
+        </select>
+      </div>
+    </div>
+
+    <h2 style="font-size:0.95rem;margin:1.5rem 0 0.6rem">Notifications <span class="muted" style="font-weight:400;font-size:0.82rem">— optional</span></h2>
+    <div class="field">
+      <label for="p_slack">Slack incoming webhook URL <span class="hint">overrides the global default</span></label>
+      <input id="p_slack" name="slack_webhook" type="url" placeholder="https://hooks.slack.com/services/T.../B.../...">
+    </div>
+
+    <div class="row" style="margin-top:1rem">
+      <button class="btn primary" type="submit">
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+        Create profile
+      </button>
+    </div>
+  </form>
+</div>
+{% endblock %}

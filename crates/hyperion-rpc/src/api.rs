@@ -8,9 +8,9 @@ use crate::{
 use async_trait::async_trait;
 use hyperion_types::{
     BackupRunWire, CertInfo, CertIssueRequest, CertRenewResult, ClusterStats, DashboardAlert,
-    DnsCheckResult, ExpiringHosting, HostingDetail, HostingExpiry, HostingLimits, HostingStats,
-    HostingSummary, HostingUsageBucket, NodeInviteMint, NodeInviteSummary, NodeStats, NodeSummary,
-    SuspendReason, WpInstallRequest, WpInstallStatus,
+    DnsCheckResult, ExpiringHosting, HostingDetail, HostingExpiry, HostingLimits, HostingProfile,
+    HostingStats, HostingSummary, HostingUsageBucket, NodeInviteMint, NodeInviteSummary, NodeStats,
+    NodeSummary, ProfileApply, ProfileInput, SuspendReason, WpInstallRequest, WpInstallStatus,
 };
 use hyperion_validate::Domain;
 
@@ -155,6 +155,26 @@ pub trait AgentApi: Send + Sync + 'static {
     /// Compute operator alerts (cert expiring, failed hostings, stale
     /// backups, high load) at request time.
     async fn dashboard_alerts(&self) -> Result<Vec<DashboardAlert>, RpcError>;
+
+    /// List operator-defined hosting profiles (templates).
+    async fn profile_list(&self) -> Result<Vec<HostingProfile>, RpcError>;
+    async fn profile_get(&self, id: i64) -> Result<HostingProfile, RpcError>;
+    async fn profile_create(&self, input: ProfileInput) -> Result<HostingProfile, RpcError>;
+    async fn profile_update(&self, id: i64, input: ProfileInput)
+        -> Result<HostingProfile, RpcError>;
+    async fn profile_delete(&self, id: i64) -> Result<(), RpcError>;
+    /// Apply a profile to a hosting — copies limits + expiry policy +
+    /// pricing onto the hosting and links it.
+    async fn profile_apply(
+        &self,
+        sel: HostingSelector,
+        profile_id: i64,
+    ) -> Result<ProfileApply, RpcError>;
+    /// Return the profile-apply row for a hosting, if any.
+    async fn profile_get_apply(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<Option<ProfileApply>, RpcError>;
 
     /// Reset the WordPress admin password (wp user update --user_pass).
     /// Returns the new password (the caller usually shows it to the

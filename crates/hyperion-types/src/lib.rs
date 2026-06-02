@@ -12,6 +12,7 @@ pub mod hosting;
 pub mod ids;
 pub mod limits;
 pub mod php;
+pub mod profile;
 pub mod stats;
 pub mod wp;
 
@@ -25,6 +26,7 @@ pub use limits::{
     NodeInviteMint, NodeInviteSummary, OverBwPolicy, SuspendReason,
 };
 pub use php::PhpVersion;
+pub use profile::{HostingProfile, ProfileApply, ProfileInput};
 pub use stats::{ClusterStats, DashboardAlert, HostingStats, NodeStats, NodeSummary};
 pub use wp::{WpInstallRequest, WpInstallStatus};
 

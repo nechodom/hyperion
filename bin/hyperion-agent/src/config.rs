@@ -9,6 +9,7 @@ pub struct Config {
     pub backup_remote: BackupRemoteSection,
     pub backup_retention: BackupRetentionSection,
     pub enrollment: EnrollmentSection,
+    pub slack: SlackSection,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -74,6 +75,15 @@ pub struct BackupRetentionSection {
     pub keep_latest_n: i64,
 }
 
+/// Default Slack incoming webhook for cluster-wide notifications
+/// (backup failures, billing reminders, cert renewals). Profiles can
+/// override per-profile.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct SlackSection {
+    pub default_webhook: String,
+}
+
 impl Default for BackupRetentionSection {
     fn default() -> Self {
         Self {
@@ -91,6 +101,7 @@ impl Default for Config {
             backup_remote: BackupRemoteSection::default(),
             backup_retention: BackupRetentionSection::default(),
             enrollment: EnrollmentSection::default(),
+            slack: SlackSection::default(),
         }
     }
 }

@@ -9,9 +9,9 @@ use hyperion_rpc::wire::{
 use hyperion_rpc::{AgentApi, AuditEntryWire, RpcError};
 use hyperion_types::{
     BackupRunWire, CertInfo, CertIssueRequest, CertRenewResult, ClusterStats, DashboardAlert,
-    DnsCheckResult, ExpiringHosting, HostingDetail, HostingExpiry, HostingLimits, HostingStats,
-    HostingSummary, HostingUsageBucket, NodeInviteMint, NodeInviteSummary, NodeStats, NodeSummary,
-    SuspendReason, WpInstallRequest, WpInstallStatus,
+    DnsCheckResult, ExpiringHosting, HostingDetail, HostingExpiry, HostingLimits, HostingProfile,
+    HostingStats, HostingSummary, HostingUsageBucket, NodeInviteMint, NodeInviteSummary, NodeStats,
+    NodeSummary, ProfileApply, ProfileInput, SuspendReason, WpInstallRequest, WpInstallStatus,
 };
 use hyperion_validate::Domain;
 use std::sync::Arc;
@@ -289,5 +289,38 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
 
     async fn dashboard_alerts(&self) -> Result<Vec<DashboardAlert>, RpcError> {
         self.svc.dashboard_alerts().await
+    }
+
+    async fn profile_list(&self) -> Result<Vec<HostingProfile>, RpcError> {
+        self.svc.profile_list().await
+    }
+    async fn profile_get(&self, id: i64) -> Result<HostingProfile, RpcError> {
+        self.svc.profile_get(id).await
+    }
+    async fn profile_create(&self, input: ProfileInput) -> Result<HostingProfile, RpcError> {
+        self.svc.profile_create(input).await
+    }
+    async fn profile_update(
+        &self,
+        id: i64,
+        input: ProfileInput,
+    ) -> Result<HostingProfile, RpcError> {
+        self.svc.profile_update(id, input).await
+    }
+    async fn profile_delete(&self, id: i64) -> Result<(), RpcError> {
+        self.svc.profile_delete(id).await
+    }
+    async fn profile_apply(
+        &self,
+        sel: HostingSelector,
+        profile_id: i64,
+    ) -> Result<ProfileApply, RpcError> {
+        self.svc.profile_apply(sel, profile_id).await
+    }
+    async fn profile_get_apply(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<Option<ProfileApply>, RpcError> {
+        self.svc.profile_get_apply(sel).await
     }
 }

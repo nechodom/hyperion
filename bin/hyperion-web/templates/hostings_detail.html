@@ -132,6 +132,18 @@
     <div class="flash-body">{{ m }}</div>
   </div>
 {% endif %}
+{% if let Some(m) = profile_flash %}
+  <div class="flash success">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+    <div class="flash-body">{{ m }}</div>
+  </div>
+{% endif %}
+{% if let Some(e) = profile_error %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body"><strong>Profile apply failed:</strong> {{ e }}</div>
+  </div>
+{% endif %}
 {% if let Some(e) = cron_error %}
   <div class="flash error">
     <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
@@ -195,6 +207,18 @@
     {% endif %}
     <dt>Created</dt><dd class="muted numeric" title="{{ detail.created_at }}">{{ crate::handlers::stats::fmt_ago(detail.created_at) }}</dd>
     <dt>Updated</dt><dd class="muted numeric" title="{{ detail.updated_at }}">{{ crate::handlers::stats::fmt_ago(detail.updated_at) }}</dd>
+    {% if let Some(pa) = profile_apply %}
+      {% if let Some(name) = applied_profile_name %}
+        <dt>Plan</dt>
+        <dd>
+          <span class="tag" style="background:var(--primary-soft);color:var(--primary-h);border-color:transparent">{{ name }}</span>
+          {% if pa.price_minor.is_some() %} · {{ pa.pretty_price() }}{% endif %}
+        </dd>
+      {% endif %}
+      {% if let Some(ts) = pa.next_billing_at %}
+        <dt>Next billing</dt><dd class="muted numeric" title="{{ ts }}">{{ crate::handlers::stats::fmt_ago(ts) }}</dd>
+      {% endif %}
+    {% endif %}
   </dl>
 </div>
 
@@ -531,6 +555,46 @@
       Save expiry
     </button>
   </form>
+</div>
+
+<div class="card hover">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7h-9"/><path d="M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></svg>
+    Apply profile
+  </h2>
+  <p class="muted" style="font-size:0.85rem;margin-top:-0.4rem;margin-bottom:0.8rem">
+    {% if let Some(name) = applied_profile_name %}
+      Currently applied: <strong>{{ name }}</strong>. Re-applying refreshes limits, expiry policy + pricing snapshot.
+    {% else %}
+      Pick a profile to push limits + expiry policy + pricing in one step.
+    {% endif %}
+    <a href="/profiles" style="margin-left:0.4rem">manage profiles →</a>
+  </p>
+  {% if profiles.is_empty() %}
+    <p class="muted">No profiles defined yet. <a href="/profiles">Create one</a> first.</p>
+  {% else %}
+    <form method="post" action="/profiles/apply"
+          onsubmit="return confirm('Apply this profile to {{ detail.domain }}? Will overwrite current limits + expiry policy + price snapshot.');">
+      <input type="hidden" name="_csrf" value="{{ csrf_profile_apply }}">
+      <input type="hidden" name="selector" value="{{ detail.domain }}">
+      <div class="row" style="gap:0.5rem;align-items:flex-end">
+        <div class="field" style="flex:1;margin:0">
+          <label for="apply_profile">Profile</label>
+          <select id="apply_profile" name="profile_id" required>
+            {% for p in profiles %}
+              <option value="{{ p.id }}">
+                {{ p.name }}{% if !p.description.is_empty() %} — {{ p.description }}{% endif %} ({{ p.pretty_price() }})
+              </option>
+            {% endfor %}
+          </select>
+        </div>
+        <button class="btn primary" type="submit">
+          <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+          Apply
+        </button>
+      </div>
+    </form>
+  {% endif %}
 </div>
 
 </div><!-- /tab-settings -->

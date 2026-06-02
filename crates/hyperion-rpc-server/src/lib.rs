@@ -277,6 +277,36 @@ async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::DashboardAlerts(v),
             Err(e) => Response::Error(e),
         },
+        Request::ProfileList => match api.profile_list().await {
+            Ok(v) => Response::ProfileList(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::ProfileGet { id } => match api.profile_get(id).await {
+            Ok(v) => Response::ProfileGet(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::ProfileCreate(input) => match api.profile_create(input).await {
+            Ok(v) => Response::ProfileCreate(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::ProfileUpdate { id, input } => match api.profile_update(id, input).await {
+            Ok(v) => Response::ProfileUpdate(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::ProfileDelete { id } => match api.profile_delete(id).await {
+            Ok(_) => Response::ProfileDelete,
+            Err(e) => Response::Error(e),
+        },
+        Request::ProfileApply { sel, profile_id } => {
+            match api.profile_apply(sel, profile_id).await {
+                Ok(v) => Response::ProfileApply(v),
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::ProfileGetApply { sel } => match api.profile_get_apply(sel).await {
+            Ok(v) => Response::ProfileGetApply(v),
+            Err(e) => Response::Error(e),
+        },
     }
 }
 
@@ -290,9 +320,10 @@ mod tests {
     use hyperion_rpc::{AuditEntryWire, RpcError};
     use hyperion_types::{
         BackupRunWire, CertInfo, CertIssueRequest, CertRenewResult, ClusterStats, DashboardAlert,
-        DnsCheckResult, ExpiringHosting, HostingDetail, HostingExpiry, HostingLimits, HostingStats,
-        HostingSummary, HostingUsageBucket, NodeInviteMint, NodeInviteSummary, NodeStats,
-        NodeSummary, SuspendReason, WpInstallRequest, WpInstallStatus,
+        DnsCheckResult, ExpiringHosting, HostingDetail, HostingExpiry, HostingLimits,
+        HostingProfile, HostingStats, HostingSummary, HostingUsageBucket, NodeInviteMint,
+        NodeInviteSummary, NodeStats, NodeSummary, ProfileApply, ProfileInput, SuspendReason,
+        WpInstallRequest, WpInstallStatus,
     };
     use hyperion_validate::Domain;
 
@@ -496,6 +527,38 @@ mod tests {
         }
         async fn dashboard_alerts(&self) -> Result<Vec<DashboardAlert>, RpcError> {
             Ok(vec![])
+        }
+        async fn profile_list(&self) -> Result<Vec<HostingProfile>, RpcError> {
+            Ok(vec![])
+        }
+        async fn profile_get(&self, _: i64) -> Result<HostingProfile, RpcError> {
+            Err(RpcError::Internal)
+        }
+        async fn profile_create(&self, _: ProfileInput) -> Result<HostingProfile, RpcError> {
+            Err(RpcError::Internal)
+        }
+        async fn profile_update(
+            &self,
+            _: i64,
+            _: ProfileInput,
+        ) -> Result<HostingProfile, RpcError> {
+            Err(RpcError::Internal)
+        }
+        async fn profile_delete(&self, _: i64) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn profile_apply(
+            &self,
+            _: HostingSelector,
+            _: i64,
+        ) -> Result<ProfileApply, RpcError> {
+            Err(RpcError::Internal)
+        }
+        async fn profile_get_apply(
+            &self,
+            _: HostingSelector,
+        ) -> Result<Option<ProfileApply>, RpcError> {
+            Ok(None)
         }
     }
 

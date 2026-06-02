@@ -554,6 +554,36 @@ fn print_pretty(resp: &Response) {
         }
         Response::WpResetPassword => println!("✓ WordPress admin password reset"),
         Response::DbResetPassword => println!("✓ DB password reset (secret updated)"),
+        Response::ProfileList(rows) => {
+            for p in rows {
+                println!(
+                    "{}\t{}\t{}",
+                    p.id,
+                    p.name,
+                    p.pretty_price()
+                );
+            }
+        }
+        Response::ProfileGet(p) | Response::ProfileCreate(p) | Response::ProfileUpdate(p) => {
+            println!("id:    {}", p.id);
+            println!("name:  {}", p.name);
+            println!("price: {}", p.pretty_price());
+        }
+        Response::ProfileDelete => println!("✓ profile deleted"),
+        Response::ProfileApply(a) => {
+            println!("✓ profile applied");
+            if let Some(ts) = a.next_billing_at {
+                println!("  next billing: {ts}");
+            }
+        }
+        Response::ProfileGetApply(maybe) => match maybe {
+            Some(a) => {
+                println!("profile_id: {:?}", a.profile_id);
+                println!("price_minor: {:?}", a.price_minor);
+                println!("next_billing_at: {:?}", a.next_billing_at);
+            }
+            None => println!("(no profile applied to this hosting)"),
+        },
         Response::DashboardAlerts(alerts) => {
             if alerts.is_empty() {
                 println!("(no alerts)");

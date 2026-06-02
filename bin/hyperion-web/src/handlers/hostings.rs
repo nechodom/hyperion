@@ -8,8 +8,8 @@ use axum::Form;
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
 use hyperion_rpc::wire::{DeleteOpts, HostingCreateReq, HostingCreated, HostingSelector};
 use hyperion_types::{
-    CertIssueRequest, DbProvision, DnsCheckResult, HostingDetail, HostingStats, HostingSummary,
-    PhpVersion, WpInstallRequest, WpInstallStatus,
+    CertIssueRequest, DbProvision, DnsCheckResult, HostingDetail, HostingProfile, HostingStats,
+    HostingSummary, PhpVersion, ProfileApply, WpInstallRequest, WpInstallStatus,
 };
 use hyperion_validate::{Domain, SystemUserName};
 use serde::Deserialize;
@@ -81,6 +81,10 @@ struct DetailTpl<'a> {
     cron_body: String,
     csrf_wp_reset: String,
     csrf_db_reset: String,
+    csrf_profile_apply: String,
+    profile_apply: Option<ProfileApply>,
+    applied_profile_name: Option<String>,
+    profiles: Vec<HostingProfile>,
     error: Option<&'a str>,
     wp_error: Option<String>,
     wp_flash: Option<String>,
@@ -96,6 +100,8 @@ struct DetailTpl<'a> {
     cron_flash: Option<String>,
     db_error: Option<String>,
     db_flash: Option<String>,
+    profile_error: Option<String>,
+    profile_flash: Option<String>,
     just_created: Option<HostingCreated>,
 }
 
@@ -267,6 +273,10 @@ pub async fn post_create(
                 cron_body: String::new(),
                 csrf_wp_reset: csrf_token_for(&state, &ctx, "/hostings/wp/reset-password"),
                 csrf_db_reset: csrf_token_for(&state, &ctx, "/hostings/db/reset-password"),
+                csrf_profile_apply: csrf_token_for(&state, &ctx, "/profiles/apply"),
+                profile_apply: None,
+                applied_profile_name: None,
+                profiles: vec![],
                 error: None,
                 wp_error: None,
                 wp_flash: None,
@@ -282,6 +292,8 @@ pub async fn post_create(
                 cron_flash: None,
                 db_error: None,
                 db_flash: None,
+                profile_error: None,
+                profile_flash: None,
                 just_created: Some(created),
             };
             Ok(Html(tpl.render()?).into_response())
@@ -326,7 +338,13 @@ pub async fn get_detail(
         .await
         .unwrap_or_default();
     let stats = fetch_stats(&state, sel_id.clone()).await.ok();
-    let cron_body = fetch_cron(&state, sel_id).await.unwrap_or_default();
+    let cron_body = fetch_cron(&state, sel_id.clone()).await.unwrap_or_default();
+    let profile_apply = fetch_profile_apply(&state, sel_id).await.unwrap_or(None);
+    let profiles = fetch_all_profiles(&state).await.unwrap_or_default();
+    let applied_profile_name = profile_apply
+        .as_ref()
+        .and_then(|a| a.profile_id)
+        .and_then(|pid| profiles.iter().find(|p| p.id == pid).map(|p| p.name.clone()));
     let tpl = DetailTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -355,6 +373,10 @@ pub async fn get_detail(
         cron_body,
         csrf_wp_reset: csrf_token_for(&state, &ctx, "/hostings/wp/reset-password"),
         csrf_db_reset: csrf_token_for(&state, &ctx, "/hostings/db/reset-password"),
+        csrf_profile_apply: csrf_token_for(&state, &ctx, "/profiles/apply"),
+        profile_apply,
+        applied_profile_name,
+        profiles,
         error: None,
         wp_error: q.wp_error,
         wp_flash: q.wp.map(|s| {
@@ -388,9 +410,33 @@ pub async fn get_detail(
         cron_flash: q.cron.map(|_| "Crontab saved.".into()),
         db_error: q.db_error,
         db_flash: q.db.map(|_| "Database password reset.".into()),
+        profile_error: q.profile_error,
+        profile_flash: q.profile.map(|_| "Profile applied.".into()),
         just_created: None,
     };
     Ok(Html(tpl.render()?).into_response())
+}
+
+async fn fetch_profile_apply(
+    state: &SharedState,
+    sel: HostingSelector,
+) -> Result<Option<ProfileApply>, AppError> {
+    let resp =
+        hyperion_rpc_client::call(&state.agent_socket, Request::ProfileGetApply { sel }).await?;
+    match resp {
+        RpcResponse::ProfileGetApply(v) => Ok(v),
+        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+async fn fetch_all_profiles(state: &SharedState) -> Result<Vec<HostingProfile>, AppError> {
+    let resp = hyperion_rpc_client::call(&state.agent_socket, Request::ProfileList).await?;
+    match resp {
+        RpcResponse::ProfileList(v) => Ok(v),
+        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
 }
 
 async fn fetch_cron(state: &SharedState, sel: HostingSelector) -> Result<String, AppError> {
@@ -447,6 +493,10 @@ pub struct DetailQuery {
     pub db: Option<String>,
     #[serde(default)]
     pub db_error: Option<String>,
+    #[serde(default)]
+    pub profile: Option<String>,
+    #[serde(default)]
+    pub profile_error: Option<String>,
 }
 
 async fn fetch_expiry(
@@ -838,6 +888,11 @@ fn parse_aliases(input: &str) -> Result<Vec<Domain>, String> {
         }
     }
     Ok(out)
+}
+
+/// Re-export of parse_selector for sibling handler modules.
+pub fn parse_selector_public(s: &str) -> Result<HostingSelector, AppError> {
+    parse_selector(s)
 }
 
 fn parse_selector(s: &str) -> Result<HostingSelector, AppError> {

@@ -201,6 +201,12 @@ base_path = "/hyperion-backups"
 [backup_retention]
 max_age_days  = 30
 keep_latest_n = 5
+
+# Default Slack incoming webhook. Used for billing reminders, backup
+# failures, cert renewals. Per-profile webhooks (defined in
+# /profiles in the UI) override this.
+[slack]
+default_webhook = ""
 EOF
 fi
 

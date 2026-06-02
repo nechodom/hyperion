@@ -70,11 +70,17 @@ async fn main() -> anyhow::Result<()> {
         max_age_days: cfg.backup_retention.max_age_days.max(1),
         keep_latest_n: cfg.backup_retention.keep_latest_n.max(1),
     };
+    let slack_webhook = if cfg.slack.default_webhook.trim().is_empty() {
+        None
+    } else {
+        Some(cfg.slack.default_webhook.clone())
+    };
     let svc = Arc::new(
         hyperion_core::HostingService::new(pool, adapter, secrets)
             .with_paths(paths)
             .with_remote_backup(remote_backup)
-            .with_retention(retention),
+            .with_retention(retention)
+            .with_slack_webhook(slack_webhook),
     );
     // Background scheduler: fire scheduler_tick (expiry sweep) every 5 minutes.
     {
@@ -104,6 +110,24 @@ async fn main() -> anyhow::Result<()> {
                 match stats_svc.stats_tick().await {
                     Ok(n) => tracing::info!(sampled = n, "stats tick"),
                     Err(e) => tracing::warn!(error=%e, "stats tick failed"),
+                }
+                interval.tick().await;
+            }
+        });
+    }
+    // Billing sweep — once per hour. Sends Slack reminders for hostings
+    // with next_billing_at <= now + 3d.
+    {
+        let bs = svc.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+            interval.tick().await;
+            loop {
+                match bs.billing_sweep().await {
+                    Ok(n) if n > 0 => tracing::info!(notified = n, "billing sweep"),
+                    Ok(_) => tracing::debug!("billing sweep: nothing due"),
+                    Err(e) => tracing::warn!(error=%e, "billing sweep failed"),
                 }
                 interval.tick().await;
             }
