@@ -39,6 +39,11 @@ pub struct RealAdapter {
     pub acme_challenge_root: PathBuf,
     pub acme_email: String,
     pub acme_directory_url: String,
+    /// User nginx workers run as — detected once at adapter
+    /// construction time and used as the FPM pool's `listen.owner`
+    /// so nginx can `connect(2)` to the socket. Defaults to
+    /// "www-data" until `detect_nginx_user_blocking()` runs.
+    pub nginx_user: String,
 }
 
 impl Default for RealAdapter {
@@ -49,7 +54,24 @@ impl Default for RealAdapter {
             acme_challenge_root: PathBuf::from("/var/lib/hyperion/acme-challenges"),
             acme_email: "admin@example.com".into(),
             acme_directory_url: "https://acme-v02.api.letsencrypt.org/directory".into(),
+            nginx_user: hyperion_adapters::nginx::DEFAULT_NGINX_USER.to_string(),
         }
+    }
+}
+
+impl RealAdapter {
+    /// Replace the default www-data with whatever nginx is actually
+    /// running as on this node. Called once at agent startup.
+    pub async fn detect_nginx_user(&mut self) {
+        let detected = hyperion_adapters::nginx::detect_user().await;
+        if detected != self.nginx_user {
+            tracing::info!(
+                detected = %detected,
+                "nginx is running as `{detected}`, will use it as FPM listen.owner"
+            );
+        }
+        hyperion_adapters::nginx::warn_if_user_missing(&detected).await;
+        self.nginx_user = detected;
     }
 }
 
@@ -141,7 +163,13 @@ impl AdapterPort for RealAdapter {
         domain: &str,
         version: PhpVersion,
     ) -> Result<(), AdapterError> {
-        let input = hyperion_adapters::phpfpm::PoolInput::defaults(system_user, domain, version);
+        let input = hyperion_adapters::phpfpm::PoolInput::defaults_with_owner(
+            system_user,
+            domain,
+            version,
+            &self.nginx_user,
+            &self.nginx_user,
+        );
         hyperion_adapters::phpfpm::ensure_pool(&input).await?;
         Ok(())
     }
@@ -307,7 +335,13 @@ impl AdapterPort for RealAdapter {
         let Some(ver) = version else {
             return Ok(());
         };
-        let mut input = hyperion_adapters::phpfpm::PoolInput::defaults(system_user, domain, ver);
+        let mut input = hyperion_adapters::phpfpm::PoolInput::defaults_with_owner(
+            system_user,
+            domain,
+            ver,
+            &self.nginx_user,
+            &self.nginx_user,
+        );
         input.memory_mb = php_memory_mb.max(16) as u32;
         input.max_exec_secs = php_max_exec_secs.max(1) as u32;
         input.max_children = php_max_children.max(1) as u32;

@@ -2,8 +2,8 @@
 user = {{ system_user }}
 group = {{ system_user }}
 listen = /run/php/{{ php_version }}/{{ system_user }}.sock
-listen.owner = www-data
-listen.group = www-data
+listen.owner = {{ listen_owner }}
+listen.group = {{ listen_group }}
 listen.mode = 0660
 
 pm = dynamic

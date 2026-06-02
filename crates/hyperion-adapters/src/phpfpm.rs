@@ -15,6 +15,14 @@ pub struct PoolInput<'a> {
     pub max_requests: u32,
     pub memory_mb: u32,
     pub max_exec_secs: u32,
+    /// Owner of the FPM listen socket — MUST be the user nginx workers
+    /// run as, otherwise `nginx → fastcgi_pass unix:...` returns 502
+    /// with `connect() failed (13: Permission denied)`. Resolved at
+    /// runtime via `crate::nginx::detect_user()` so an existing nginx
+    /// with `user vito;` (CloudPanel inheritance) works without
+    /// editing nginx.conf.
+    pub listen_owner: &'a str,
+    pub listen_group: &'a str,
 }
 
 impl<'a> PoolInput<'a> {
@@ -27,6 +35,23 @@ impl<'a> PoolInput<'a> {
             max_requests: 1000,
             memory_mb: 256,
             max_exec_secs: 60,
+            listen_owner: crate::nginx::DEFAULT_NGINX_USER,
+            listen_group: crate::nginx::DEFAULT_NGINX_USER,
+        }
+    }
+
+    /// Convenience: copy `defaults()` but override socket owner/group.
+    pub fn defaults_with_owner(
+        system_user: &'a str,
+        domain: &'a str,
+        php_version: PhpVersion,
+        listen_owner: &'a str,
+        listen_group: &'a str,
+    ) -> Self {
+        Self {
+            listen_owner,
+            listen_group,
+            ..Self::defaults(system_user, domain, php_version)
         }
     }
 }
@@ -41,6 +66,8 @@ struct PoolTpl<'a> {
     max_requests: u32,
     memory_mb: u32,
     max_exec_secs: u32,
+    listen_owner: &'a str,
+    listen_group: &'a str,
 }
 
 pub fn render(input: &PoolInput<'_>) -> Result<String, AdapterError> {
@@ -52,6 +79,8 @@ pub fn render(input: &PoolInput<'_>) -> Result<String, AdapterError> {
         max_requests: input.max_requests,
         memory_mb: input.memory_mb,
         max_exec_secs: input.max_exec_secs,
+        listen_owner: input.listen_owner,
+        listen_group: input.listen_group,
     };
     Ok(tpl.render()?)
 }
@@ -197,6 +226,36 @@ mod tests {
         assert!(out.contains("pm.max_children = 5"));
         assert!(out.contains("php_admin_value[memory_limit] = 256M"));
         assert!(out.contains("open_basedir] = /home/alice_cz/alice.cz:/tmp"));
+        // Default owner is www-data (the Debian convention) when no
+        // override is supplied.
+        assert!(out.contains("listen.owner = www-data"));
+        assert!(out.contains("listen.group = www-data"));
+    }
+
+    /// Regression test for the "502 nginx user mismatch" bug.
+    /// When the operator's nginx is configured `user vito;`, we MUST
+    /// render `listen.owner = vito` (not www-data), otherwise nginx
+    /// can't open the FPM socket and every PHP request 502s.
+    #[test]
+    fn render_uses_overridden_socket_owner() {
+        let input = PoolInput::defaults_with_owner(
+            "alice_cz",
+            "alice.cz",
+            PhpVersion::V8_3,
+            "vito",
+            "vito",
+        );
+        let out = render(&input).expect("render");
+        assert!(
+            out.contains("listen.owner = vito"),
+            "pool must declare listen.owner = vito. got: {out}"
+        );
+        assert!(out.contains("listen.group = vito"));
+        // www-data must NOT appear anywhere as the owner.
+        assert!(
+            !out.contains("listen.owner = www-data"),
+            "rendering with overridden owner must NOT leak the default"
+        );
     }
 
     #[test]

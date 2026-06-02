@@ -198,6 +198,16 @@ refresh_unit() {
 (( HAVE_AGENT )) && refresh_unit hyperion-agent
 (( HAVE_WEB   )) && refresh_unit hyperion-web
 
+# vsftpd may have been missing on this node (master install did
+# `apt install ... vsftpd` but it can fail silently or get removed).
+# Detect, log, install. Idempotent.
+if ! systemctl list-unit-files --no-pager vsftpd.service 2>/dev/null \
+     | grep -q "^vsftpd.service"; then
+  log "vsftpd.service unit missing — installing package ..."
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq vsftpd || \
+    warn "vsftpd install failed — FTP for hostings will not work until you fix this manually."
+fi
+
 # Per-version /run/php/<ver>/ subdirs for FPM sockets — without this
 # hyperion's per-user FPM pools (listen = /run/php/8.x/<user>.sock)
 # fail to open and nginx returns 502. /run is tmpfs so the snippet

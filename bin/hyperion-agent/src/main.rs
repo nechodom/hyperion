@@ -67,12 +67,21 @@ async fn main() -> anyhow::Result<()> {
     let secrets = Arc::new(hyperion_core::SecretsStore::new(
         cfg.agent.secrets_dir.clone(),
     ));
-    let adapter = Arc::new(hyperion_core::RealAdapter {
+    // Detect the user nginx workers run as so FPM pool sockets get the
+    // right `listen.owner`. Without this, a system where nginx inherited
+    // a non-default user (e.g. CloudPanel sets `user vito;`) gets 502
+    // Bad Gateway on every PHP request because nginx can't connect to a
+    // socket owned by www-data. Build the adapter mutable, detect, then
+    // freeze into Arc.
+    let mut adapter_inner = hyperion_core::RealAdapter {
         acme_email: cfg.acme.contact_email.clone(),
         acme_directory_url: cfg.acme.directory_url.clone(),
         acme_challenge_root: cfg.acme.challenge_dir.clone(),
         ..Default::default()
-    });
+    };
+    adapter_inner.detect_nginx_user().await;
+    let adapter = Arc::new(adapter_inner);
+
     let paths = hyperion_core::HostingPaths {
         home_root: cfg.agent.home_root.to_string_lossy().to_string(),
         acme_challenge_root: cfg.acme.challenge_dir.to_string_lossy().to_string(),

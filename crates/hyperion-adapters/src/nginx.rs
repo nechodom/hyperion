@@ -140,6 +140,129 @@ pub async fn reload() -> Result<(), AdapterError> {
     Ok(())
 }
 
+/// The Unix user that nginx worker processes run as. PHP-FPM pool sockets
+/// must be owned by THIS user (via `listen.owner = ...`) so nginx can
+/// `connect(2)` to them — otherwise every request to a `.php` URL returns
+/// 502 Bad Gateway with `connect() failed (13: Permission denied)` in
+/// the error log.
+///
+/// Fresh Debian installs have `user www-data;` in `/etc/nginx/nginx.conf`,
+/// so the historical hardcoded default works. But if the operator
+/// inherited nginx from a previous panel (CloudPanel, RunCloud, etc.) the
+/// user directive may be something else (e.g. `vito`). This module is
+/// the single source of truth for the answer.
+pub const DEFAULT_NGINX_USER: &str = "www-data";
+
+/// Try to detect the user nginx workers run as.
+///
+/// Order:
+///   1. Parse `nginx -T` output for a top-level `user <name>;` directive.
+///      This is most reliable because it reflects the effective config
+///      including includes.
+///   2. If `nginx -T` isn't available (nginx not installed, or test env),
+///      fall back to grepping a worker process via `ps`.
+///   3. Last resort: the Debian default `www-data`.
+///
+/// Always returns a non-empty string. Never panics. Best-effort.
+pub async fn detect_user() -> String {
+    // 1. Authoritative: ask nginx itself what it parsed.
+    if let Some(u) = detect_user_via_nginx_t().await {
+        if is_valid_user_token(&u) {
+            return u;
+        }
+    }
+    // 2. Fallback: snoop a running worker.
+    if let Some(u) = detect_user_via_ps().await {
+        if is_valid_user_token(&u) {
+            return u;
+        }
+    }
+    // 3. Give up, return the Debian default.
+    DEFAULT_NGINX_USER.to_string()
+}
+
+async fn detect_user_via_nginx_t() -> Option<String> {
+    let out = tokio::process::Command::new("/usr/sbin/nginx")
+        .args(["-T"])
+        .output()
+        .await
+        .ok()?;
+    // nginx -T prints config to stdout. The directive can also appear
+    // with a group as second arg: "user www-data www-data;".
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    parse_user_directive(&stdout).or_else(|| parse_user_directive(&stderr))
+}
+
+fn parse_user_directive(text: &str) -> Option<String> {
+    for raw_line in text.lines() {
+        let line = raw_line.trim_start();
+        let Some(rest) = line.strip_prefix("user ") else {
+            continue;
+        };
+        let rest = rest.trim_end_matches(';').trim();
+        let Some(first) = rest.split_whitespace().next() else {
+            continue;
+        };
+        if !first.is_empty() {
+            return Some(first.to_string());
+        }
+    }
+    None
+}
+
+async fn detect_user_via_ps() -> Option<String> {
+    // `nginx: worker process` is the conventional comm string.
+    let out = tokio::process::Command::new("/bin/ps")
+        .args(["-eo", "user=,comm="])
+        .output()
+        .await
+        .ok()?;
+    let s = String::from_utf8_lossy(&out.stdout);
+    for line in s.lines() {
+        // ps formats columns separated by whitespace; comm is last.
+        let mut it = line.split_whitespace();
+        let user = it.next()?;
+        let comm = it.next().unwrap_or("");
+        if comm == "nginx" && user != "root" {
+            return Some(user.to_string());
+        }
+    }
+    None
+}
+
+fn is_valid_user_token(s: &str) -> bool {
+    // Defensive: avoid pathological values. POSIX user names are
+    // [A-Za-z0-9._-] and must not start with -. Limit length too.
+    !s.is_empty()
+        && s.len() <= 32
+        && !s.starts_with('-')
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// Self-heal companion: if `/etc/nginx/nginx.conf` lists a `user`
+/// directive whose target Unix user doesn't actually exist on the
+/// system, that's the operator's misconfiguration — log loud and
+/// continue using the value anyway. Returns `Ok(())` regardless; the
+/// caller can still use the detected user for FPM socket ownership
+/// (where `listen.owner` would fail clearly at FPM reload).
+pub async fn warn_if_user_missing(detected_user: &str) {
+    let out = tokio::process::Command::new("/usr/bin/getent")
+        .args(["passwd", detected_user])
+        .output()
+        .await;
+    match out {
+        Ok(o) if o.status.success() => {}
+        _ => {
+            tracing::warn!(
+                user = %detected_user,
+                "nginx is configured to run as `{detected_user}` but that user is not in /etc/passwd. \
+                 PHP-FPM pools will fail to bind. Fix /etc/nginx/nginx.conf or create the user."
+            );
+        }
+    }
+}
+
 async fn backup_existing(path: &Path) -> Result<Option<PathBuf>, AdapterError> {
     if tokio::fs::metadata(path).await.is_ok() {
         let mut backup = path.as_os_str().to_owned();
@@ -238,6 +361,49 @@ mod tests {
         assert!(out.contains("server_name example.cz www.example.cz example.com;"));
         assert!(out.contains("fastcgi_pass unix:/run/php/8.3/example_cz.sock"));
         assert!(out.contains("try_files $uri $uri/ /index.php?$args"));
+    }
+
+    /// Regression test for the "502 because nginx runs as vito but the
+    /// FPM socket is owned by www-data" bug. parse_user_directive must
+    /// pick up whatever name is between `user ` and `;`.
+    #[test]
+    fn parse_user_directive_real_world_samples() {
+        // Debian default (single arg).
+        assert_eq!(
+            parse_user_directive("user www-data;\nhttp { ... }"),
+            Some("www-data".to_string())
+        );
+        // nginx -T emits config with leading whitespace + comments before
+        // the user directive.
+        let sample = "# configuration file /etc/nginx/nginx.conf:\n\
+                      user vito;\n\
+                      worker_processes auto;\n";
+        assert_eq!(parse_user_directive(sample), Some("vito".to_string()));
+        // Two-arg form (user + group).
+        assert_eq!(
+            parse_user_directive("user nginx nginx;"),
+            Some("nginx".to_string())
+        );
+        // No user directive → None (caller falls back).
+        assert_eq!(parse_user_directive("http { server { } }"), None);
+    }
+
+    /// is_valid_user_token rejects injection attempts and absurd values
+    /// so we never paste garbage straight into FPM's `listen.owner =`.
+    #[test]
+    fn is_valid_user_token_accepts_real_users_rejects_garbage() {
+        assert!(is_valid_user_token("www-data"));
+        assert!(is_valid_user_token("vito"));
+        assert!(is_valid_user_token("nginx"));
+        assert!(is_valid_user_token("user_42"));
+        assert!(is_valid_user_token("a.b"));
+        assert!(!is_valid_user_token(""));
+        assert!(!is_valid_user_token("-rm"));
+        assert!(!is_valid_user_token("foo bar"));
+        assert!(!is_valid_user_token("foo;rm -rf /"));
+        assert!(!is_valid_user_token("foo\nbar"));
+        // 33 chars — over the limit.
+        assert!(!is_valid_user_token(&"a".repeat(33)));
     }
 
     #[test]
