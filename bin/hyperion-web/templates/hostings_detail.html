@@ -139,6 +139,47 @@
   </div>
 {% endif %}
 
+<nav class="tabs" role="tablist">
+  <a class="tab" data-tab="overview" href="#overview" role="tab">
+    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+    Overview
+  </a>
+  <a class="tab" data-tab="settings" href="#settings" role="tab">
+    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+    Settings &amp; limits
+  </a>
+  <a class="tab" data-tab="wordpress" href="#wordpress" role="tab">
+    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20l9-5-9-5-9 5 9 5z"/><path d="M12 12l9-5-9-5-9 5 9 5z"/></svg>
+    WordPress
+  </a>
+  <a class="tab" data-tab="ssl" href="#ssl" role="tab">
+    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+    SSL
+  </a>
+  <a class="tab" data-tab="backups" href="#backups" role="tab">
+    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+    Backups
+    {% if !backups.is_empty() %}<span class="tab-badge">{{ backups.len() }}</span>{% endif %}
+  </a>
+  <a class="tab" data-tab="logs" href="#logs" role="tab">
+    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+    Logs
+  </a>
+  <a class="tab" data-tab="cron" href="#cron" role="tab">
+    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+    Cron
+  </a>
+  <a class="tab" data-tab="danger" href="#danger" role="tab" style="margin-left:auto;color:var(--danger)">
+    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+    Danger
+  </a>
+</nav>
+
+<div class="tab-panels">
+
+<!-- ============== OVERVIEW TAB ============== -->
+<div class="tab-panel" id="tab-overview">
+
 <div class="card hover">
   <h2>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
@@ -192,6 +233,29 @@
   </div>
 </div>
 {% endif %}
+
+{% if let Some(s) = stats %}
+<div class="card hover">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+    Stats
+  </h2>
+  <dl class="kv">
+    <dt>Disk used</dt><dd>{{ crate::handlers::stats::fmt_bytes(s.disk_bytes) }}</dd>
+    <dt>BW in · 24h</dt><dd>{{ crate::handlers::stats::fmt_bytes(s.bw_in_bytes_24h) }}</dd>
+    <dt>BW out · 24h</dt><dd>{{ crate::handlers::stats::fmt_bytes(s.bw_out_bytes_24h) }}</dd>
+    <dt>Requests · 24h</dt><dd class="numeric">{{ s.requests_24h }}</dd>
+    <dt>Last sampled</dt><dd class="muted numeric" title="{{ s.sampled_at }}">{{ crate::handlers::stats::fmt_ago(s.sampled_at) }}</dd>
+  </dl>
+  <p class="muted" style="font-size:0.82rem;margin-top:0.8rem;margin-bottom:0">
+    Numbers come from the agent's 5-minute sampler — du on the hosting tree + tail-parse of nginx access.log.
+  </p>
+</div>
+{% endif %}
+
+</div><!-- /tab-overview -->
+
+<div class="tab-panel" id="tab-ssl">
 
 {% if let Some(cert) = detail.cert %}
 <div class="card hover">
@@ -258,24 +322,9 @@
 </div>
 {% endif %}
 
-{% if let Some(s) = stats %}
-<div class="card hover">
-  <h2>
-    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
-    Stats
-  </h2>
-  <dl class="kv">
-    <dt>Disk used</dt><dd>{{ crate::handlers::stats::fmt_bytes(s.disk_bytes) }}</dd>
-    <dt>BW in · 24h</dt><dd>{{ crate::handlers::stats::fmt_bytes(s.bw_in_bytes_24h) }}</dd>
-    <dt>BW out · 24h</dt><dd>{{ crate::handlers::stats::fmt_bytes(s.bw_out_bytes_24h) }}</dd>
-    <dt>Requests · 24h</dt><dd class="numeric">{{ s.requests_24h }}</dd>
-    <dt>Last sampled</dt><dd class="muted numeric" title="{{ s.sampled_at }}">{{ crate::handlers::stats::fmt_ago(s.sampled_at) }}</dd>
-  </dl>
-  <p class="muted" style="font-size:0.82rem;margin-top:0.8rem;margin-bottom:0">
-    Numbers come from the agent's 5-minute sampler — du on the hosting tree + tail-parse of nginx access.log.
-  </p>
-</div>
-{% endif %}
+</div><!-- /tab-ssl -->
+
+<div class="tab-panel" id="tab-wordpress">
 
 <div class="card hover">
   <h2>
@@ -371,6 +420,10 @@
     </form>
   {% endif %}
 </div>
+
+</div><!-- /tab-wordpress -->
+
+<div class="tab-panel" id="tab-settings">
 
 <div class="card hover">
   <h2>
@@ -480,6 +533,10 @@
   </form>
 </div>
 
+</div><!-- /tab-settings -->
+
+<div class="tab-panel" id="tab-backups">
+
 <div class="card hover">
   <h2>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
@@ -577,6 +634,10 @@
   </div>
 </div>
 
+</div><!-- /tab-backups -->
+
+<div class="tab-panel" id="tab-logs">
+
 <div class="card hover">
   <h2>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
@@ -615,6 +676,10 @@
   </div>
 </div>
 
+</div><!-- /tab-logs -->
+
+<div class="tab-panel" id="tab-cron">
+
 <div class="card hover">
   <h2>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
@@ -639,6 +704,10 @@
   </form>
 </div>
 
+</div><!-- /tab-cron -->
+
+<div class="tab-panel" id="tab-danger">
+
 <div class="card danger">
   <h2>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
@@ -660,4 +729,34 @@
     </button>
   </form>
 </div>
+
+</div><!-- /tab-danger -->
+
+</div><!-- /tab-panels -->
+
+<script>
+(function () {
+  const tabs = document.querySelectorAll('.tabs .tab');
+  const panels = document.querySelectorAll('.tab-panels > .tab-panel');
+  if (!tabs.length) return;
+  function activate(id) {
+    let matched = false;
+    tabs.forEach(t => {
+      const isMe = t.dataset.tab === id;
+      t.classList.toggle('active', isMe);
+      if (isMe) matched = true;
+    });
+    panels.forEach(p => p.classList.toggle('active', p.id === 'tab-' + id));
+    return matched;
+  }
+  tabs.forEach(t => t.addEventListener('click', ev => {
+    ev.preventDefault();
+    const id = t.dataset.tab;
+    activate(id);
+    if (history.replaceState) history.replaceState(null, '', '#' + id);
+  }));
+  const hashId = (location.hash || '').replace(/^#/, '');
+  if (!activate(hashId)) activate('overview');
+})();
+</script>
 {% endblock %}

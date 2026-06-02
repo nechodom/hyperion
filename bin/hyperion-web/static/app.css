@@ -1065,6 +1065,68 @@ hr.divider {
 }
 
 /* ============================================================
+ *  Tabs (hosting detail and similar multi-section pages)
+ * ============================================================ */
+
+.tabs {
+  display: flex;
+  gap: 0.15rem;
+  padding: 0.35rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow-x: auto;
+  scrollbar-width: thin;
+  margin-bottom: 1rem;
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  backdrop-filter: blur(8px);
+}
+.tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.55rem 0.85rem;
+  font-size: 0.88rem;
+  font-weight: 500;
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all var(--t-fast);
+  text-decoration: none;
+}
+.tab:hover { color: var(--text); background: var(--surface-2); text-decoration: none; }
+.tab.active {
+  color: var(--text);
+  background: var(--surface-2);
+  border-color: var(--border);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+}
+.tab .tab-icon { width: 15px; height: 15px; stroke-width: 2; flex-shrink: 0; }
+.tab .tab-badge {
+  background: var(--primary-soft);
+  color: var(--primary-h);
+  border-radius: var(--radius-pill);
+  padding: 0.05rem 0.45rem;
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+.tab.active .tab-badge { background: var(--primary); color: var(--primary-fg); }
+
+.tab-panels > .tab-panel { display: none; }
+.tab-panels > .tab-panel.active {
+  display: block;
+  animation: tabIn 200ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+@keyframes tabIn {
+  from { opacity: 0; transform: translateY(2px); }
+}
+
+/* ============================================================
  *  Dashboard layout
  * ============================================================ */
 
