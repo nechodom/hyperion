@@ -136,6 +136,47 @@ pub async fn list_for(
 }
 
 /// Delete a backup_run row by id.
+/// Single backup run by id. Used by `backup_delete` to find the
+/// archive path on disk before deleting it.
+pub async fn get_by_id(pool: &SqlitePool, id: i64) -> Result<Option<BackupRun>, StateError> {
+    let row: Option<(
+        i64, String, String, i64, Option<i64>, String, Option<String>, Option<String>, i64,
+        Option<String>,
+    )> = sqlx::query_as(
+        "SELECT id, hosting_id, target, started_at, finished_at, state, archive_path,
+                db_dump_path, bytes_total, error_message
+         FROM backup_runs WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(
+        |(
+            id,
+            hosting_id,
+            target,
+            started_at,
+            finished_at,
+            state,
+            archive_path,
+            db_dump_path,
+            bytes_total,
+            error_message,
+        )| BackupRun {
+            id,
+            hosting_id: HostingId(hosting_id),
+            target,
+            started_at,
+            finished_at,
+            state,
+            archive_path,
+            db_dump_path,
+            bytes_total,
+            error_message,
+        },
+    ))
+}
+
 pub async fn delete_by_id(pool: &SqlitePool, id: i64) -> Result<(), StateError> {
     sqlx::query("DELETE FROM backup_runs WHERE id = ?")
         .bind(id)

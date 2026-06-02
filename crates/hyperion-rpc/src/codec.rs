@@ -113,6 +113,11 @@ pub enum Request {
     /// (nginx, mariadb, postgresql, php-fpm versions, vsftpd, etc.)
     /// for the /health page + dashboard widget.
     ServicesHealth,
+    /// Delete a single backup run + its archive file(s) on disk.
+    /// Refuses if the backup is still "running". Audits the action.
+    BackupDelete {
+        backup_id: i64,
+    },
     StatsTick,
     BackupRestore {
         sel: HostingSelector,
@@ -207,6 +212,7 @@ pub enum Response {
     NodeMetricsHistory(hyperion_types::NodeMetricsHistory),
     SetHostingAcmeEmail,
     ServicesHealth(hyperion_types::ServicesHealth),
+    BackupDelete,
     StatsTick { hostings_sampled: i64 },
     BackupRestore,
     HostingLogs(String),

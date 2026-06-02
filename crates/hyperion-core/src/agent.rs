@@ -234,6 +234,10 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.services_health().await
     }
 
+    async fn backup_delete(&self, backup_id: i64) -> Result<(), RpcError> {
+        self.svc.backup_delete(backup_id).await
+    }
+
     async fn stats_tick(&self) -> Result<i64, RpcError> {
         self.svc.stats_tick().await
     }

@@ -123,6 +123,10 @@ pub trait AgentApi: Send + Sync + 'static {
     /// hyperion-web). Computed live via `systemctl is-active/is-enabled`.
     async fn services_health(&self) -> Result<hyperion_types::ServicesHealth, RpcError>;
 
+    /// Delete a single backup run + its archive file from disk.
+    /// Refuses to act on a backup that is still `running`.
+    async fn backup_delete(&self, backup_id: i64) -> Result<(), RpcError>;
+
     /// Install WordPress into a hosting (downloads core, writes wp-config.php
     /// against the hosting's DB credentials, runs `wp core install`, records
     /// the result in `wp_installs`).

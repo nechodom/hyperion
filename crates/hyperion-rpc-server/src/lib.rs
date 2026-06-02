@@ -223,6 +223,10 @@ async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::ServicesHealth(v),
             Err(e) => Response::Error(e),
         },
+        Request::BackupDelete { backup_id } => match api.backup_delete(backup_id).await {
+            Ok(()) => Response::BackupDelete,
+            Err(e) => Response::Error(e),
+        },
         Request::StatsTick => match api.stats_tick().await {
             Ok(n) => Response::StatsTick {
                 hostings_sampled: n,
@@ -509,6 +513,9 @@ mod tests {
         }
         async fn services_health(&self) -> Result<hyperion_types::ServicesHealth, RpcError> {
             Ok(hyperion_types::ServicesHealth::default())
+        }
+        async fn backup_delete(&self, _: i64) -> Result<(), RpcError> {
+            Ok(())
         }
         async fn stats_tick(&self) -> Result<i64, RpcError> {
             Ok(0)

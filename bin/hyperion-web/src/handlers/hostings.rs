@@ -882,6 +882,35 @@ pub struct SetLimitsForm {
 }
 
 #[derive(Deserialize)]
+pub struct BackupDeleteForm {
+    selector: String,
+    backup_id: i64,
+}
+
+/// POST /hostings/backups/delete — remove a single backup run + its
+/// archive file. Refuses if the backup is still running.
+pub async fn post_backup_delete(
+    State(state): State<SharedState>,
+    Form(form): Form<BackupDeleteForm>,
+) -> Result<Response, AppError> {
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::BackupDelete {
+            backup_id: form.backup_id,
+        },
+    )
+    .await?;
+    match resp {
+        RpcResponse::BackupDelete => {
+            Ok(Redirect::to(&format!("/hostings/{}#backups", urlencoding(&form.selector)))
+                .into_response())
+        }
+        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+#[derive(Deserialize)]
 pub struct SetAcmeEmailForm {
     selector: String,
     #[serde(default)]
@@ -1047,6 +1076,47 @@ pub struct DnsCheckForm {
 
 /// HTMX-style endpoint: returns just the result fragment (not a full page)
 /// so the operator can poll without losing the rest of the screen.
+/// HTMX endpoint for the **create form**: DNS preflight against a
+/// raw domain string (no existing hosting yet). Returns the same
+/// HTML fragment as `post_dns_check` so the visual feedback is
+/// identical to the post-create flow.
+#[derive(Deserialize)]
+pub struct DnsCheckDomainForm {
+    domain: String,
+}
+
+pub async fn post_dns_check_domain(
+    State(state): State<SharedState>,
+    Form(form): Form<DnsCheckDomainForm>,
+) -> Result<Response, AppError> {
+    let trimmed = form.domain.trim();
+    let parsed = match Domain::parse(trimmed) {
+        Ok(d) => d,
+        Err(e) => {
+            return Ok(Html(format!(
+                "<div class=\"flash error\"><div class=\"flash-body\">Invalid domain: {}</div></div>",
+                askama_escape::escape(&e.to_string(), askama_escape::Html)
+            ))
+            .into_response());
+        }
+    };
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::DnsCheck { domain: parsed },
+    )
+    .await?;
+    let html = match resp {
+        RpcResponse::DnsCheck(r) => render_dns_fragment(&r),
+        RpcResponse::Error(e) => format!(
+            "<div class=\"flash error\"><div class=\"flash-body\">DNS check failed: {}</div></div>",
+            askama_escape::escape(&e.to_string(), askama_escape::Html)
+        ),
+        _ => "<div class=\"flash error\"><div class=\"flash-body\">Unexpected response.</div></div>"
+            .into(),
+    };
+    Ok(Html(html).into_response())
+}
+
 pub async fn post_dns_check(
     State(state): State<SharedState>,
     Form(form): Form<DnsCheckForm>,

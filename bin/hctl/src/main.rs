@@ -640,6 +640,9 @@ fn print_pretty(resp: &Response) {
                 );
             }
         }
+        Response::BackupDelete => {
+            println!("backup deleted");
+        }
     }
 }
 

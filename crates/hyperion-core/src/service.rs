@@ -2921,6 +2921,64 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(())
     }
 
+    /// Delete a single backup run + its archive file(s) on disk.
+    /// Refuses when the backup is still `running` (would orphan the
+    /// in-flight process). Logs `backup.delete` in the audit log
+    /// regardless of disk-removal success — DB row removal is the
+    /// source of truth and we want the audit chain to reflect it.
+    pub async fn backup_delete(&self, backup_id: i64) -> Result<(), RpcError> {
+        let row = hyperion_state::backups::get_by_id(&self.pool, backup_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("get backup: {e}")))?
+            .ok_or_else(|| RpcError::NotFound {
+                kind: "backup".into(),
+                id: backup_id.to_string(),
+            })?;
+        if row.state == "running" {
+            return Err(RpcError::Validation {
+                message: "refusing to delete a backup that is still running. \
+                          Wait for it to finish (or fail) first."
+                    .into(),
+            });
+        }
+        // Best-effort disk removal — don't block the DB delete if the
+        // archive is already gone (operator can delete the row to clean
+        // up zombie entries). Track outcomes for audit.
+        let mut disk_removed = 0u8;
+        let mut disk_errors: Vec<String> = Vec::new();
+        for p in [row.archive_path.clone(), row.db_dump_path.clone()].into_iter().flatten() {
+            match tokio::fs::remove_file(&p).await {
+                Ok(()) => disk_removed += 1,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    // Already gone — fine.
+                }
+                Err(e) => {
+                    disk_errors.push(format!("{p}: {e}"));
+                }
+            }
+        }
+        // Now drop the DB row regardless of disk outcomes.
+        hyperion_state::backups::delete_by_id(&self.pool, backup_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("delete backup row: {e}")))?;
+
+        self.append_audit(
+            "backup.delete",
+            Some(row.hosting_id.as_str()),
+            &serde_json::json!({
+                "backup_id": backup_id,
+                "target": row.target,
+                "state": row.state,
+                "files_removed": disk_removed,
+                "disk_errors": disk_errors,
+            })
+            .to_string(),
+            if disk_errors.is_empty() { "ok" } else { "partial" },
+        )
+        .await;
+        Ok(())
+    }
+
     /// Status of every system service Hyperion depends on. Run via
     /// `systemctl is-active/is-enabled` so the answer is always live
     /// — we don't cache because operator restarts/disables happen

@@ -840,7 +840,7 @@
       <table>
         <thead><tr>
           <th>Started</th><th>Target</th><th>State</th>
-          <th class="right">Size</th><th>Archive</th><th class="right">Restore</th>
+          <th class="right">Size</th><th>Archive</th><th class="right">Actions</th>
         </tr></thead>
         <tbody>
         {% for b in backups %}
@@ -857,17 +857,27 @@
               {% if let Some(p) = b.archive_path %}<code style="font-size:0.74rem">{{ p }}</code>{% endif %}
             </td>
             <td class="right">
-              {% if b.state == "ok" %}
-                {% if let Some(p) = b.archive_path %}
-                <form method="post" action="/hostings/restore" style="display:inline"
-                      onsubmit="return confirm('Restore {{ detail.domain }} from this backup? Current files + DB will be overwritten.');">
-                  <input type="hidden" name="_csrf" value="{{ csrf_restore }}">
+              <div style="display:inline-flex;gap:0.3rem;align-items:center;justify-content:flex-end;flex-wrap:wrap">
+                {% if b.state == "ok" %}
+                  {% if let Some(p) = b.archive_path %}
+                  <form method="post" action="/hostings/restore" style="display:inline"
+                        onsubmit="return confirm('Restore {{ detail.domain }} from this backup? Current files + DB will be overwritten.');">
+                    <input type="hidden" name="_csrf" value="{{ csrf_restore }}">
+                    <input type="hidden" name="selector" value="{{ detail.domain }}">
+                    <input type="hidden" name="archive_path" value="{{ p }}">
+                    <button class="btn small" type="submit">Restore</button>
+                  </form>
+                  {% endif %}
+                {% endif %}
+                {% if b.state != "running" %}
+                <form method="post" action="/hostings/backups/delete" style="display:inline"
+                      onsubmit="return confirm('Delete this backup? The archive file will be removed from disk.');">
                   <input type="hidden" name="selector" value="{{ detail.domain }}">
-                  <input type="hidden" name="archive_path" value="{{ p }}">
-                  <button class="btn small" type="submit">Restore</button>
+                  <input type="hidden" name="backup_id" value="{{ b.id }}">
+                  <button class="btn small danger" type="submit">Delete</button>
                 </form>
                 {% endif %}
-              {% endif %}
+              </div>
             </td>
           </tr>
         {% endfor %}
