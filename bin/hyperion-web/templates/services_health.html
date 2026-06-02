@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% block title %}Service health · hyperion{% endblock %}
+{% block main %}
+<div class="page-header">
+  <div>
+    <h1>Service health</h1>
+    <div class="subtitle">
+      Live status of the systemd units Hyperion depends on.
+      {% if health.critical_down > 0 %}
+        <strong style="color:var(--danger)">{{ health.critical_down }} critical service(s) down.</strong>
+      {% else if health.warn_down > 0 %}
+        <strong style="color:var(--warn)">{{ health.warn_down }} optional service(s) down.</strong>
+      {% else %}
+        All services healthy.
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+{% if let Some(e) = error %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">{{ e }}</div>
+  </div>
+{% endif %}
+
+{# Summary card at top. #}
+<div class="kpi-grid" style="margin-bottom:1rem">
+  <div class="kpi-card" style="{% if health.critical_down > 0 %}border-left:4px solid var(--danger){% else if health.warn_down > 0 %}border-left:4px solid var(--warn){% else %}border-left:4px solid var(--success){% endif %}">
+    <div class="kpi-label">Overall</div>
+    <div class="kpi-value">
+      {% if health.critical_down > 0 %}
+        Degraded
+      {% else if health.warn_down > 0 %}
+        Limited
+      {% else %}
+        Healthy
+      {% endif %}
+    </div>
+    <div class="kpi-meta">{{ health.services.len() }} services tracked</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-label">Critical down</div>
+    <div class="kpi-value" style="{% if health.critical_down > 0 %}color:var(--danger){% endif %}">{{ health.critical_down }}</div>
+    <div class="kpi-meta">nginx, hyperion-agent, hyperion-web</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-label">Optional down</div>
+    <div class="kpi-value" style="{% if health.warn_down > 0 %}color:var(--warn){% endif %}">{{ health.warn_down }}</div>
+    <div class="kpi-meta">FPM, DBs, vsftpd</div>
+  </div>
+</div>
+
+<div class="card no-pad-table">
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Service</th>
+          <th>Status</th>
+          <th>Active</th>
+          <th>Enabled</th>
+          <th>SubState</th>
+          <th class="right">Severity</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for s in health.services %}
+        <tr>
+          <td>
+            <strong>{{ s.label }}</strong>
+            <div class="text-soft small"><code>{{ s.name }}</code></div>
+          </td>
+          <td>
+            {% if !s.present %}
+              <span class="pill" style="background:var(--surface-2);color:var(--text-soft)">not installed</span>
+            {% else if s.active %}
+              <span class="pill ok">running</span>
+            {% else %}
+              <span class="pill err">down</span>
+            {% endif %}
+          </td>
+          <td>{% if s.active %}<span class="text-soft">yes</span>{% else %}<strong style="color:var(--danger)">no</strong>{% endif %}</td>
+          <td>{% if s.enabled %}<span class="text-soft">yes</span>{% else %}<span style="color:var(--warn)">no</span>{% endif %}</td>
+          <td><code class="text-soft">{{ s.sub_state }}</code></td>
+          <td class="right">
+            {% if s.severity == "error" %}<span class="pill err">CRITICAL</span>
+            {% else if s.severity == "warn" %}<span class="pill warn">WARN</span>
+            {% else if s.severity == "info" %}<span class="pill" style="background:var(--surface-2);color:var(--text-soft)">INFO</span>
+            {% else %}<span class="pill ok">OK</span>{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p class="text-soft small" style="margin-top:1rem">
+  Status is live (re-evaluated on every page load via
+  <code>systemctl is-active</code> / <code>is-enabled</code> / <code>show -p SubState</code>).
+  To restart a down service: <code>ssh root@&lt;node&gt; systemctl restart &lt;name&gt;</code>.
+</p>
+{% endblock %}

@@ -110,6 +110,41 @@ pub struct NodeMetricsHistory {
     pub samples: Vec<NodeMetricPoint>,
 }
 
+/// Status of one systemd unit on the node — collected by
+/// `services_health()` for the system-health page.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServiceHealth {
+    /// Unit name without the `.service` suffix, e.g. `nginx`, `php8.3-fpm`.
+    pub name: String,
+    /// Display label / one-line description.
+    pub label: String,
+    /// `systemctl is-active <unit>` was true.
+    pub active: bool,
+    /// `systemctl is-enabled <unit>` was true (will autostart at boot).
+    pub enabled: bool,
+    /// `present` if the unit exists at all on this node.
+    /// Reading `services_health` from a node where vsftpd isn't
+    /// installed yet should surface "missing" rather than "down".
+    pub present: bool,
+    /// Short status sub-state, e.g. "running", "failed", "dead",
+    /// "exited". Empty if not present.
+    pub sub_state: String,
+    /// Severity ranking for sorting: `error` (down + critical),
+    /// `warn` (down but optional), `info` (missing optional unit),
+    /// `ok` (active + enabled). UI may colour rows accordingly.
+    pub severity: String,
+}
+
+/// Bundle of all service-health rows.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ServicesHealth {
+    pub services: Vec<ServiceHealth>,
+    /// Convenience: number of services with severity == "error".
+    pub critical_down: usize,
+    /// Number of services with severity == "warn".
+    pub warn_down: usize,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

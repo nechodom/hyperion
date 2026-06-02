@@ -23,6 +23,48 @@ pub mod rollback;
 pub mod users;
 pub mod wpcli;
 
+/// Probe one systemd unit's status. Returns (active, enabled, sub_state).
+/// Never panics; on any error returns `(false, false, "?")`.
+/// Used by both the health-check page and the dashboard widget.
+pub async fn systemctl_status(unit: &str) -> (bool, bool, String) {
+    let active = tokio::process::Command::new("/usr/bin/systemctl")
+        .args(["is-active", "--quiet", unit])
+        .status()
+        .await
+        .map(|s| s.success())
+        .unwrap_or(false);
+    let enabled = tokio::process::Command::new("/usr/bin/systemctl")
+        .args(["is-enabled", "--quiet", unit])
+        .status()
+        .await
+        .map(|s| s.success())
+        .unwrap_or(false);
+    // SubState gives nicer detail than the boolean: "running",
+    // "failed", "dead", "exited"… empty/"?" if probe failed.
+    let sub_state = tokio::process::Command::new("/usr/bin/systemctl")
+        .args(["show", "-p", "SubState", "--value", unit])
+        .output()
+        .await
+        .ok()
+        .and_then(|o| {
+            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            if s.is_empty() { None } else { Some(s) }
+        })
+        .unwrap_or_else(|| "?".into());
+    (active, enabled, sub_state)
+}
+
+/// Is a unit file present at all on the system?
+pub async fn systemctl_unit_present(unit: &str) -> bool {
+    let out = tokio::process::Command::new("/usr/bin/systemctl")
+        .args(["list-unit-files", "--no-pager", unit])
+        .output()
+        .await;
+    let Ok(o) = out else { return false };
+    let stdout = String::from_utf8_lossy(&o.stdout);
+    stdout.lines().any(|l| l.starts_with(unit))
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum AdapterError {
     #[error("io: {0}")]

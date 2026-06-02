@@ -219,6 +219,10 @@ async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::ServicesHealth => match api.services_health().await {
+            Ok(v) => Response::ServicesHealth(v),
+            Err(e) => Response::Error(e),
+        },
         Request::StatsTick => match api.stats_tick().await {
             Ok(n) => Response::StatsTick {
                 hostings_sampled: n,
@@ -502,6 +506,9 @@ mod tests {
             _: Option<String>,
         ) -> Result<(), RpcError> {
             Ok(())
+        }
+        async fn services_health(&self) -> Result<hyperion_types::ServicesHealth, RpcError> {
+            Ok(hyperion_types::ServicesHealth::default())
         }
         async fn stats_tick(&self) -> Result<i64, RpcError> {
             Ok(0)

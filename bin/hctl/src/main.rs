@@ -628,6 +628,18 @@ fn print_pretty(resp: &Response) {
         Response::SetHostingAcmeEmail => {
             println!("acme email override updated");
         }
+        Response::ServicesHealth(h) => {
+            println!(
+                "services health: {} critical down, {} optional down",
+                h.critical_down, h.warn_down
+            );
+            for s in &h.services {
+                println!(
+                    "  [{}] {} active={} enabled={} sub={}",
+                    s.severity, s.name, s.active, s.enabled, s.sub_state
+                );
+            }
+        }
     }
 }
 

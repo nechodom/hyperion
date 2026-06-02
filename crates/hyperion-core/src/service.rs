@@ -2921,6 +2921,96 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(())
     }
 
+    /// Status of every system service Hyperion depends on. Run via
+    /// `systemctl is-active/is-enabled` so the answer is always live
+    /// — we don't cache because operator restarts/disables happen
+    /// out-of-band.
+    ///
+    /// "Critical" services (severity=error if down): nginx,
+    /// hyperion-agent, hyperion-web.
+    /// "Warning" services (severity=warn if down): mariadb, postgresql,
+    /// any installed php-fpm version, vsftpd (FTP optional).
+    /// "Missing optional" (severity=info): php-fpm units / vsftpd
+    /// that aren't installed.
+    pub async fn services_health(&self) -> Result<hyperion_types::ServicesHealth, RpcError> {
+        // (unit_name, display_label, critical)
+        let critical: &[(&str, &str)] = &[
+            ("nginx", "nginx (web server)"),
+            ("hyperion-agent", "hyperion-agent (RPC daemon)"),
+            ("hyperion-web", "hyperion-web (admin UI)"),
+        ];
+        let optional: &[(&str, &str)] = &[
+            ("mariadb", "MariaDB (database)"),
+            ("postgresql", "PostgreSQL (database)"),
+            ("vsftpd", "vsftpd (FTP)"),
+            ("php8.1-fpm", "PHP 8.1 FPM"),
+            ("php8.2-fpm", "PHP 8.2 FPM"),
+            ("php8.3-fpm", "PHP 8.3 FPM"),
+            ("php8.4-fpm", "PHP 8.4 FPM"),
+        ];
+        let mut services: Vec<hyperion_types::ServiceHealth> = Vec::new();
+        let mut critical_down = 0usize;
+        let mut warn_down = 0usize;
+
+        for (unit, label) in critical {
+            let present = hyperion_adapters::systemctl_unit_present(unit).await;
+            let (active, enabled, sub) = if present {
+                hyperion_adapters::systemctl_status(unit).await
+            } else {
+                (false, false, "missing".into())
+            };
+            let severity = if !present {
+                // A critical unit being absent is a configuration bug.
+                critical_down += 1;
+                "error".to_string()
+            } else if !active {
+                critical_down += 1;
+                "error".to_string()
+            } else {
+                "ok".to_string()
+            };
+            services.push(hyperion_types::ServiceHealth {
+                name: unit.to_string(),
+                label: label.to_string(),
+                active,
+                enabled,
+                present,
+                sub_state: sub,
+                severity,
+            });
+        }
+        for (unit, label) in optional {
+            let present = hyperion_adapters::systemctl_unit_present(unit).await;
+            let (active, enabled, sub) = if present {
+                hyperion_adapters::systemctl_status(unit).await
+            } else {
+                (false, false, "not installed".into())
+            };
+            let severity = if !present {
+                "info".to_string()
+            } else if !active {
+                warn_down += 1;
+                "warn".to_string()
+            } else {
+                "ok".to_string()
+            };
+            services.push(hyperion_types::ServiceHealth {
+                name: unit.to_string(),
+                label: label.to_string(),
+                active,
+                enabled,
+                present,
+                sub_state: sub,
+                severity,
+            });
+        }
+        Ok(hyperion_types::ServicesHealth {
+            services,
+            critical_down,
+            warn_down,
+        })
+    }
+
     /// Recent samples from `node_metrics` shaped for the stats page's
     /// sparkline charts. Wrapper around the storage layer that drops
     /// the columns the template doesn't need.

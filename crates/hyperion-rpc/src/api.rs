@@ -118,6 +118,11 @@ pub trait AgentApi: Send + Sync + 'static {
         email: Option<String>,
     ) -> Result<(), RpcError>;
 
+    /// Status of system services Hyperion depends on (nginx, mariadb,
+    /// postgresql, php-fpm versions, vsftpd, hyperion-agent,
+    /// hyperion-web). Computed live via `systemctl is-active/is-enabled`.
+    async fn services_health(&self) -> Result<hyperion_types::ServicesHealth, RpcError>;
+
     /// Install WordPress into a hosting (downloads core, writes wp-config.php
     /// against the hosting's DB credentials, runs `wp core install`, records
     /// the result in `wp_installs`).

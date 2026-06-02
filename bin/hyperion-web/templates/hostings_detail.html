@@ -9,15 +9,127 @@
 </div>
 
 {% if let Some(c) = just_created %}
-<div class="flash success">
-  <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-  <div class="flash-body">
-    <strong>Provisioned {{ detail.domain }}.</strong>
+<div class="creds-panel">
+  <div class="creds-header">
+    <div>
+      <div class="creds-eyebrow">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+        Provisioned successfully
+      </div>
+      <h2 style="margin:0.25rem 0 0;font-size:1.25rem">Credentials for {{ detail.domain }}</h2>
+      <p class="text-soft" style="margin:0.3rem 0 0;font-size:0.82rem">
+        These are shown only on this page. <strong>Copy them now</strong> — they
+        are not stored anywhere recoverable in plain text.
+      </p>
+    </div>
+  </div>
+
+  <div class="creds-grid">
+    {# Site #}
+    <div class="creds-section">
+      <div class="creds-section-title">Site</div>
+      <div class="creds-row">
+        <span class="creds-label">URL</span>
+        <code class="creds-value" data-copy="https://{{ detail.domain }}">https://{{ detail.domain }}</code>
+        <button class="creds-copy" type="button" data-target-value="https://{{ detail.domain }}">Copy</button>
+      </div>
+      <div class="creds-row">
+        <span class="creds-label">System user</span>
+        <code class="creds-value" data-copy="{{ c.system_user }}">{{ c.system_user }}</code>
+        <button class="creds-copy" type="button" data-target-value="{{ c.system_user }}">Copy</button>
+      </div>
+      <div class="creds-row">
+        <span class="creds-label">htdocs path</span>
+        <code class="creds-value" data-copy="{{ c.root_dir }}">{{ c.root_dir }}</code>
+        <button class="creds-copy" type="button" data-target-value="{{ c.root_dir }}">Copy</button>
+      </div>
+    </div>
+
     {% if let Some(db) = c.db %}
-      <br>Database password (shown <strong>once</strong>): <span class="secret">{{ db.password }}</span>
+    {# Database #}
+    <div class="creds-section">
+      <div class="creds-section-title">Database — {{ db.engine.as_str() }}</div>
+      <div class="creds-row">
+        <span class="creds-label">Host</span>
+        <code class="creds-value" data-copy="localhost">localhost</code>
+        <button class="creds-copy" type="button" data-target-value="localhost">Copy</button>
+      </div>
+      <div class="creds-row">
+        <span class="creds-label">Database</span>
+        <code class="creds-value" data-copy="{{ db.db_name }}">{{ db.db_name }}</code>
+        <button class="creds-copy" type="button" data-target-value="{{ db.db_name }}">Copy</button>
+      </div>
+      <div class="creds-row">
+        <span class="creds-label">Username</span>
+        <code class="creds-value" data-copy="{{ db.db_user }}">{{ db.db_user }}</code>
+        <button class="creds-copy" type="button" data-target-value="{{ db.db_user }}">Copy</button>
+      </div>
+      <div class="creds-row creds-row-secret">
+        <span class="creds-label">Password</span>
+        <code class="creds-value secret" data-copy="{{ db.password }}">{{ db.password }}</code>
+        <button class="creds-copy" type="button" data-target-value="{{ db.password }}">Copy</button>
+      </div>
+    </div>
+    {% endif %}
+
+    {% if let Some(cert) = c.cert %}
+    {# Certificate #}
+    <div class="creds-section">
+      <div class="creds-section-title">TLS certificate</div>
+      <div class="creds-row">
+        <span class="creds-label">Issuer</span>
+        <code class="creds-value">{{ cert.issuer }}</code>
+        {% if cert.issuer == "self-signed" %}
+          <span class="pill warn small">browsers will warn</span>
+        {% else %}
+          <span class="pill ok small">trusted</span>
+        {% endif %}
+      </div>
+    </div>
     {% endif %}
   </div>
+
+  <div class="creds-footnote">
+    <kbd>Tip</kbd> Pin this page or paste these into your password
+    manager before navigating away. The DB password is not
+    recoverable; use the "Reset password" form below if you lose it.
+  </div>
 </div>
+
+<script>
+// Tiny self-contained click-to-copy. No deps, no module loader.
+// Listens once on the document so HTMX swaps don't need re-binding.
+(function(){
+  if (window.__hyperionCopyWired) return;
+  window.__hyperionCopyWired = true;
+  document.addEventListener('click', function(ev) {
+    var btn = ev.target.closest('.creds-copy');
+    if (!btn) return;
+    var v = btn.getAttribute('data-target-value') || '';
+    if (!v) return;
+    (navigator.clipboard ? navigator.clipboard.writeText(v) : Promise.reject('no api'))
+      .then(function(){
+        var old = btn.textContent;
+        btn.textContent = 'Copied';
+        btn.classList.add('ok');
+        setTimeout(function(){ btn.textContent = old; btn.classList.remove('ok'); }, 1400);
+      })
+      .catch(function(){
+        // Fallback for non-HTTPS contexts: select + execCommand.
+        var ta = document.createElement('textarea');
+        ta.value = v;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand('copy'); btn.textContent = 'Copied'; btn.classList.add('ok'); }
+        catch(_) { btn.textContent = 'Copy failed'; }
+        setTimeout(function(){ btn.textContent = 'Copy'; btn.classList.remove('ok'); }, 1400);
+        document.body.removeChild(ta);
+      });
+  });
+})();
+</script>
 {% endif %}
 
 <div class="page-header">

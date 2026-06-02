@@ -636,6 +636,125 @@ pre code {
   font-variant-numeric: tabular-nums;
 }
 
+/* ─────────────────────────────────────────────────────────────
+   "Ready to copy" credentials panel after hosting creation
+   ───────────────────────────────────────────────────────────── */
+
+.creds-panel {
+  background: linear-gradient(180deg,
+    color-mix(in oklab, var(--success) 8%, var(--surface)) 0%,
+    var(--surface) 35%);
+  border: 1px solid color-mix(in oklab, var(--success) 45%, var(--border));
+  border-radius: var(--radius-md);
+  padding: 1.25rem 1.4rem 1rem;
+  margin-bottom: 1.25rem;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.04), 0 0 0 4px color-mix(in oklab, var(--success) 8%, transparent);
+}
+.creds-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--success);
+  font-weight: 700;
+}
+.creds-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr));
+  gap: 1rem 1.4rem;
+  margin-top: 1rem;
+}
+.creds-section {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.creds-section-title {
+  font-size: 0.74rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-soft);
+  font-weight: 700;
+  margin-bottom: 0.15rem;
+}
+.creds-row {
+  display: grid;
+  grid-template-columns: 7rem 1fr auto;
+  gap: 0.5rem;
+  align-items: center;
+}
+.creds-row-secret {
+  background: color-mix(in oklab, var(--warn) 8%, transparent);
+  border-radius: var(--radius-xs);
+  padding: 0.25rem 0.4rem;
+  margin-left: -0.4rem;
+}
+.creds-label {
+  font-size: 0.78rem;
+  color: var(--text-soft);
+}
+.creds-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.82rem;
+  background: var(--surface-2);
+  padding: 0.28rem 0.55rem;
+  border-radius: var(--radius-xs);
+  word-break: break-all;
+  user-select: all;
+  border: 1px solid var(--border);
+}
+.creds-value.secret {
+  font-weight: 600;
+  color: var(--warn);
+  background: color-mix(in oklab, var(--warn) 12%, var(--surface));
+  border-color: color-mix(in oklab, var(--warn) 30%, transparent);
+}
+.creds-copy {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  padding: 0.32rem 0.7rem;
+  font-size: 0.74rem;
+  font-weight: 600;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
+}
+.creds-copy:hover {
+  background: var(--surface-2);
+  color: var(--text);
+  border-color: var(--border-strong, var(--border));
+}
+.creds-copy.ok {
+  background: color-mix(in oklab, var(--success) 22%, var(--surface));
+  color: var(--success);
+  border-color: color-mix(in oklab, var(--success) 50%, transparent);
+}
+.creds-footnote {
+  margin-top: 1rem;
+  padding-top: 0.8rem;
+  border-top: 1px dashed color-mix(in oklab, var(--success) 35%, transparent);
+  font-size: 0.78rem;
+  color: var(--text-dim);
+}
+.creds-footnote kbd {
+  display: inline-block;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: var(--radius-xs);
+  padding: 0.05rem 0.4rem;
+  font-size: 0.72rem;
+  font-weight: 600;
+  margin-right: 0.4rem;
+}
+.pill.small {
+  padding: 0.1rem 0.45rem;
+  font-size: 0.7rem;
+}
+
 /* Stat card (dashboard) */
 .stat-card {
   background: var(--surface);

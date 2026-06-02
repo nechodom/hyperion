@@ -31,7 +31,7 @@ pub use profile::{HostingProfile, ProfileApply, ProfileInput};
 pub use spf::SpfCheckResult;
 pub use stats::{
     ClusterStats, DashboardAlert, HostingStats, NodeMetricPoint, NodeMetricsHistory, NodeStats,
-    NodeSummary,
+    NodeSummary, ServiceHealth, ServicesHealth,
 };
 pub use wp::{WpInstallRequest, WpInstallStatus};
 

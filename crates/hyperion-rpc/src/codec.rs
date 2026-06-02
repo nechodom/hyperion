@@ -109,6 +109,10 @@ pub enum Request {
         sel: HostingSelector,
         email: Option<String>,
     },
+    /// Get status of all system services Hyperion depends on
+    /// (nginx, mariadb, postgresql, php-fpm versions, vsftpd, etc.)
+    /// for the /health page + dashboard widget.
+    ServicesHealth,
     StatsTick,
     BackupRestore {
         sel: HostingSelector,
@@ -202,6 +206,7 @@ pub enum Response {
     ClusterStats(ClusterStats),
     NodeMetricsHistory(hyperion_types::NodeMetricsHistory),
     SetHostingAcmeEmail,
+    ServicesHealth(hyperion_types::ServicesHealth),
     StatsTick { hostings_sampled: i64 },
     BackupRestore,
     HostingLogs(String),

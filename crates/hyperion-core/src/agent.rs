@@ -230,6 +230,10 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.set_hosting_acme_email(sel, email).await
     }
 
+    async fn services_health(&self) -> Result<hyperion_types::ServicesHealth, RpcError> {
+        self.svc.services_health().await
+    }
+
     async fn stats_tick(&self) -> Result<i64, RpcError> {
         self.svc.stats_tick().await
     }
