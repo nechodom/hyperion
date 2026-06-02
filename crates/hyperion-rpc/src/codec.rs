@@ -103,6 +103,12 @@ pub enum Request {
         /// ~4 hours @ 5min tick.
         limit: i64,
     },
+    /// Set or clear the per-hosting ACME contact email override.
+    /// `email: None` means "clear → fall back to agent-wide default".
+    SetHostingAcmeEmail {
+        sel: HostingSelector,
+        email: Option<String>,
+    },
     StatsTick,
     BackupRestore {
         sel: HostingSelector,
@@ -195,6 +201,7 @@ pub enum Response {
     NodeStats(NodeStats),
     ClusterStats(ClusterStats),
     NodeMetricsHistory(hyperion_types::NodeMetricsHistory),
+    SetHostingAcmeEmail,
     StatsTick { hostings_sampled: i64 },
     BackupRestore,
     HostingLogs(String),

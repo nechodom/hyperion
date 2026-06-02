@@ -493,6 +493,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             cert: Some(cert.clone()),
             created_at: now_secs(),
             updated_at: now_secs(),
+            acme_contact_email: None,
         };
         if let Err(e) = self.adapters.nginx_write_vhost(&detail).await {
             let _ = stack.rollback_all().await;
@@ -692,6 +693,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             cert,
             created_at: row.created_at,
             updated_at: row.updated_at,
+            acme_contact_email: row.acme_contact_email,
         })
     }
 
@@ -2858,6 +2860,65 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .map_err(|e| RpcError::Internal_with(format!("metrics: {e}")))?;
         let summaries = self.list().await?;
         Ok(node_stats_from(hostname, version, latest, &summaries))
+    }
+
+    /// Set or clear the per-hosting ACME contact email override.
+    /// `email: None` (or empty) clears the override; the next cert
+    /// issuance reverts to `[acme] contact_email` from agent.toml.
+    /// Validates RFC-5321-shaped email when present (rejects
+    /// placeholders + obviously-malformed addresses).
+    pub async fn set_hosting_acme_email(
+        &self,
+        sel: HostingSelector,
+        email: Option<String>,
+    ) -> Result<(), RpcError> {
+        let detail = self.get(sel).await?;
+        // Normalise: empty / whitespace → clear.
+        let cleaned: Option<String> = email
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        if let Some(ref e) = cleaned {
+            // Same validation as the global acme_contact_email
+            // sanity check in issue_real_cert. Refuse placeholders +
+            // values that obviously can't reach LE.
+            let lc = e.to_lowercase();
+            if !e.contains('@')
+                || lc.ends_with("@example.com")
+                || lc.ends_with("@example.org")
+                || lc.ends_with("@example.net")
+                || lc.ends_with("@hyperion.invalid")
+                || e.len() > 254
+            {
+                return Err(RpcError::Validation {
+                    message: format!(
+                        "acme email `{e}` is invalid or a placeholder — \
+                         use a real address (or leave blank to fall back to the agent default)."
+                    ),
+                });
+            }
+        }
+        hostings::set_acme_contact_email(
+            &self.pool,
+            &detail.id,
+            cleaned.as_deref(),
+            now_secs(),
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("update: {e}")))?;
+        self.append_audit(
+            "hosting.acme_email.set",
+            Some(detail.id.as_str()),
+            &serde_json::json!({
+                "domain": detail.domain,
+                "cleared": cleaned.is_none(),
+                // We log presence (was-set / was-cleared) but not the
+                // actual value — emails are PII.
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
     }
 
     /// Recent samples from `node_metrics` shaped for the stats page's

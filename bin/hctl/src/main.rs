@@ -625,6 +625,9 @@ fn print_pretty(resp: &Response) {
                 );
             }
         }
+        Response::SetHostingAcmeEmail => {
+            println!("acme email override updated");
+        }
     }
 }
 

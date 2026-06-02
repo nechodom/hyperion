@@ -222,6 +222,14 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.node_metrics_history(limit).await
     }
 
+    async fn set_hosting_acme_email(
+        &self,
+        sel: HostingSelector,
+        email: Option<String>,
+    ) -> Result<(), RpcError> {
+        self.svc.set_hosting_acme_email(sel, email).await
+    }
+
     async fn stats_tick(&self) -> Result<i64, RpcError> {
         self.svc.stats_tick().await
     }

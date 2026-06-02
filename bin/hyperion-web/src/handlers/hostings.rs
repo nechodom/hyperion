@@ -881,6 +881,41 @@ pub struct SetLimitsForm {
     bw_monthly_mb: String,
 }
 
+#[derive(Deserialize)]
+pub struct SetAcmeEmailForm {
+    selector: String,
+    #[serde(default)]
+    acme_email: String,
+}
+
+/// POST /hostings/acme-email — set or clear the per-hosting ACME
+/// contact email override. An empty `acme_email` field clears the
+/// override, falling back to `[acme] contact_email` from agent.toml.
+pub async fn post_set_acme_email(
+    State(state): State<SharedState>,
+    Form(form): Form<SetAcmeEmailForm>,
+) -> Result<Response, AppError> {
+    let sel = parse_selector(&form.selector)?;
+    let trimmed = form.acme_email.trim();
+    let email = if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    };
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::SetHostingAcmeEmail { sel, email },
+    )
+    .await?;
+    match resp {
+        RpcResponse::SetHostingAcmeEmail => {
+            Ok(Redirect::to(&format!("/hostings/{}", urlencoding(&form.selector))).into_response())
+        }
+        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
 pub async fn post_set_limits(
     State(state): State<SharedState>,
     Form(form): Form<SetLimitsForm>,

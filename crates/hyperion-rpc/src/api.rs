@@ -108,6 +108,16 @@ pub trait AgentApi: Send + Sync + 'static {
         limit: i64,
     ) -> Result<hyperion_types::NodeMetricsHistory, RpcError>;
 
+    /// Set / clear the per-hosting ACME contact email override.
+    /// Passing `None` or an empty string clears the override; the
+    /// next cert issuance reverts to the agent-wide default from
+    /// `[acme] contact_email`. Validates email format when present.
+    async fn set_hosting_acme_email(
+        &self,
+        sel: crate::wire::HostingSelector,
+        email: Option<String>,
+    ) -> Result<(), RpcError>;
+
     /// Install WordPress into a hosting (downloads core, writes wp-config.php
     /// against the hosting's DB credentials, runs `wp core install`, records
     /// the result in `wp_installs`).

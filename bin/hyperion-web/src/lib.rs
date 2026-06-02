@@ -29,6 +29,10 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::hostings::post_set_limits),
         )
         .route(
+            "/hostings/acme-email",
+            post(handlers::hostings::post_set_acme_email),
+        )
+        .route(
             "/hostings/wp/install",
             post(handlers::hostings::post_wp_install),
         )

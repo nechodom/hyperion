@@ -69,6 +69,10 @@ pub struct HostingDetail {
     pub cert: Option<CertInfo>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Per-hosting ACME contact email override. `None` means "use
+    /// the agent-wide default from `[acme] contact_email`".
+    #[serde(default)]
+    pub acme_contact_email: Option<String>,
 }
 
 #[cfg(test)]
@@ -110,10 +114,20 @@ mod tests {
             cert: None,
             created_at: 1,
             updated_at: 2,
+            acme_contact_email: Some("ops@example.cz".into()),
         };
         let j = serde_json::to_string(&d).expect("serialize");
         let back: HostingDetail = serde_json::from_str(&j).expect("deserialize");
         assert_eq!(d, back);
+
+        // None case also round-trips (serde default).
+        let d2 = HostingDetail {
+            acme_contact_email: None,
+            ..d
+        };
+        let j2 = serde_json::to_string(&d2).expect("serialize");
+        let back2: HostingDetail = serde_json::from_str(&j2).expect("deserialize");
+        assert_eq!(d2, back2);
     }
 
     #[test]

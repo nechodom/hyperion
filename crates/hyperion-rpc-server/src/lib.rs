@@ -213,6 +213,12 @@ async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::NodeMetricsHistory(v),
             Err(e) => Response::Error(e),
         },
+        Request::SetHostingAcmeEmail { sel, email } => {
+            match api.set_hosting_acme_email(sel, email).await {
+                Ok(()) => Response::SetHostingAcmeEmail,
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::StatsTick => match api.stats_tick().await {
             Ok(n) => Response::StatsTick {
                 hostings_sampled: n,
@@ -489,6 +495,13 @@ mod tests {
             _: i64,
         ) -> Result<hyperion_types::NodeMetricsHistory, RpcError> {
             Ok(hyperion_types::NodeMetricsHistory::default())
+        }
+        async fn set_hosting_acme_email(
+            &self,
+            _: HostingSelector,
+            _: Option<String>,
+        ) -> Result<(), RpcError> {
+            Ok(())
         }
         async fn stats_tick(&self) -> Result<i64, RpcError> {
             Ok(0)

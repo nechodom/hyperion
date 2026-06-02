@@ -373,6 +373,30 @@
     </form>
   </div>
 </div>
+
+{# ACME contact email override — per-hosting, falls back to agent-wide default. #}
+<div class="card" style="margin-top:1rem">
+  <h2 style="font-size:0.95rem;margin:0 0 0.35rem">ACME contact email</h2>
+  <p class="text-soft" style="margin:0 0 0.85rem">
+    Let's Encrypt sends expiry warnings + ToS updates here. Leave blank to
+    use the agent-wide default from <code>/etc/hyperion/agent.toml</code>
+    <code>[acme] contact_email</code>.
+  </p>
+  <form method="post" action="/hostings/acme-email" autocomplete="off"
+        style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
+    <input type="hidden" name="selector" value="{{ detail.domain }}">
+    <input type="email" name="acme_email"
+           placeholder="ops@customer.cz (leave blank to clear)"
+           value="{% if let Some(e) = detail.acme_contact_email %}{{ e|e }}{% endif %}"
+           style="flex:1;min-width:16rem;margin:0">
+    <button class="btn small primary" type="submit">Save</button>
+    {% if let Some(_) = detail.acme_contact_email %}
+      <span class="pill ok">override active</span>
+    {% else %}
+      <span class="pill" style="background:var(--surface-2);color:var(--text-soft)">using default</span>
+    {% endif %}
+  </form>
+</div>
 {% endif %}
 
 </div><!-- /tab-ssl -->
