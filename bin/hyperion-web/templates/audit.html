@@ -58,7 +58,7 @@
           {% for r in rows %}
           <tr>
             <td><code>{{ r.id }}</code></td>
-            <td class="muted numeric">{{ r.ts }}</td>
+            <td class="muted numeric" title="{{ r.ts }}">{{ crate::handlers::stats::fmt_ago(r.ts) }}</td>
             <td><strong>{{ r.actor_label }}</strong></td>
             <td><code>{{ r.action }}</code></td>
             <td>{% if let Some(t) = r.target %}<code>{{ t }}</code>{% else %}<span class="text-soft">—</span>{% endif %}</td>

@@ -152,8 +152,8 @@
     {% if !detail.aliases.is_empty() %}
     <dt>Aliases</dt><dd>{{ detail.aliases.join(", ") }}</dd>
     {% endif %}
-    <dt>Created</dt><dd class="muted numeric">{{ detail.created_at }}</dd>
-    <dt>Updated</dt><dd class="muted numeric">{{ detail.updated_at }}</dd>
+    <dt>Created</dt><dd class="muted numeric" title="{{ detail.created_at }}">{{ crate::handlers::stats::fmt_ago(detail.created_at) }}</dd>
+    <dt>Updated</dt><dd class="muted numeric" title="{{ detail.updated_at }}">{{ crate::handlers::stats::fmt_ago(detail.updated_at) }}</dd>
   </dl>
 </div>
 
@@ -210,7 +210,7 @@
     {% if !cert.sans.is_empty() %}
     <dt>SANs</dt><dd>{{ cert.sans.join(", ") }}</dd>
     {% endif %}
-    <dt>Not after</dt><dd class="muted numeric">{{ cert.not_after }}</dd>
+    <dt>Not after</dt><dd class="muted numeric" title="{{ cert.not_after }}">{{ crate::handlers::stats::fmt_ago(cert.not_after) }}</dd>
     <dt>Fingerprint</dt><dd><code style="font-size:0.74rem">{{ cert.fingerprint_sha256 }}</code></dd>
   </dl>
 
@@ -269,7 +269,7 @@
     <dt>BW in · 24h</dt><dd>{{ crate::handlers::stats::fmt_bytes(s.bw_in_bytes_24h) }}</dd>
     <dt>BW out · 24h</dt><dd>{{ crate::handlers::stats::fmt_bytes(s.bw_out_bytes_24h) }}</dd>
     <dt>Requests · 24h</dt><dd class="numeric">{{ s.requests_24h }}</dd>
-    <dt>Last sampled</dt><dd class="muted numeric">{{ s.sampled_at }}</dd>
+    <dt>Last sampled</dt><dd class="muted numeric" title="{{ s.sampled_at }}">{{ crate::handlers::stats::fmt_ago(s.sampled_at) }}</dd>
   </dl>
   <p class="muted" style="font-size:0.82rem;margin-top:0.8rem;margin-bottom:0">
     Numbers come from the agent's 5-minute sampler — du on the hosting tree + tail-parse of nginx access.log.
@@ -286,7 +286,7 @@
     <dl class="kv">
       <dt>Site URL</dt><dd><a href="{{ wp.site_url }}" target="_blank" rel="noopener">{{ wp.site_url }} ↗</a></dd>
       <dt>WP version</dt><dd><span class="tag">{{ wp.wp_version }}</span></dd>
-      <dt>Installed</dt><dd class="muted numeric">{{ wp.installed_at }}</dd>
+      <dt>Installed</dt><dd class="muted numeric" title="{{ wp.installed_at }}">{{ crate::handlers::stats::fmt_ago(wp.installed_at) }}</dd>
     </dl>
     <p class="muted" style="font-size:0.85rem;margin-top:0.7rem">To reinstall, drop the row from <code>wp_installs</code> and clear the DB tables first.</p>
 
@@ -506,7 +506,7 @@
         <tbody>
         {% for b in backups %}
           <tr>
-            <td class="muted numeric">{{ b.started_at }}</td>
+            <td class="muted numeric" title="{{ b.started_at }}">{{ crate::handlers::stats::fmt_ago(b.started_at) }}</td>
             <td><span class="tag">{{ b.target }}</span></td>
             <td>
               {% if b.state == "ok" %}<span class="pill ok">{{ b.state }}</span>

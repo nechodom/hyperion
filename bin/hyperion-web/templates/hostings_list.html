@@ -109,7 +109,7 @@
               {% else if r.state.as_str() == "failed" %}err
               {% else %}warn pulse{% endif %}">{{ r.state.as_str() }}</span>
           </td>
-          <td class="muted numeric">{{ r.created_at }}</td>
+          <td class="muted numeric" title="{{ r.created_at }}">{{ crate::handlers::stats::fmt_ago(r.created_at) }}</td>
           <td class="right">
             <div class="row-actions">
               <a class="btn small" href="/hostings/{{ r.domain }}">View</a>

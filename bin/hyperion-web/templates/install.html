@@ -92,8 +92,8 @@
           <td><code style="font-size:0.74rem">{{ n.node_id }}</code></td>
           <td><span class="tag">v{{ n.agent_version }}</span></td>
           <td>{% if let Some(ip) = n.public_ip %}<code>{{ ip }}</code>{% else %}<span class="text-soft">—</span>{% endif %}</td>
-          <td class="muted numeric">{{ n.enrolled_at }}</td>
-          <td class="muted numeric">{{ n.last_seen_at }}</td>
+          <td class="muted numeric" title="{{ n.enrolled_at }}">{{ crate::handlers::stats::fmt_ago(n.enrolled_at) }}</td>
+          <td class="muted numeric" title="{{ n.last_seen_at }}">{{ crate::handlers::stats::fmt_ago(n.last_seen_at) }}</td>
         </tr>
         {% endfor %}
       </tbody>
@@ -127,8 +127,8 @@
         {% for i in invites %}
         <tr>
           <td><strong>{{ i.label }}</strong></td>
-          <td class="muted numeric">{{ i.created_at }}</td>
-          <td class="muted numeric">{{ i.expires_at }}</td>
+          <td class="muted numeric" title="{{ i.created_at }}">{{ crate::handlers::stats::fmt_ago(i.created_at) }}</td>
+          <td class="muted numeric" title="{{ i.expires_at }}">{{ crate::handlers::stats::fmt_ago(i.expires_at) }}</td>
           <td><code style="font-size:0.74rem">{{ i.token_hash }}</code></td>
           <td class="right">
             <form method="post" action="/install/invite/revoke" style="display:inline"
