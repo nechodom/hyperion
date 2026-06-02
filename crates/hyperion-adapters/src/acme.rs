@@ -225,9 +225,14 @@ pub async fn issue_http01(req: IssueRequest<'_>) -> Result<CertInfo, AdapterErro
             AdapterError::Acme(format!("poll_ready: {e}"))
         })?;
     if !matches!(status, OrderStatus::Ready | OrderStatus::Valid) {
+        // Pull the per-authorization / per-challenge error messages so
+        // the operator sees WHY LE rejected the order (DNS doesn't
+        // resolve, port 80 unreachable, 404, served bad content, etc.)
+        // instead of a useless generic "DNS/challenge problem".
+        let details = collect_authz_errors(&mut order).await;
         cleanup_challenges(&written).await;
         return Err(AdapterError::Acme(format!(
-            "ACME order status={status:?} (DNS/challenge problem)"
+            "ACME order status={status:?}: {details}"
         )));
     }
 
@@ -282,6 +287,46 @@ pub async fn issue_http01(req: IssueRequest<'_>) -> Result<CertInfo, AdapterErro
 async fn cleanup_challenges(paths: &[PathBuf]) {
     for p in paths {
         let _ = tokio::fs::remove_file(p).await;
+    }
+}
+
+/// Best-effort: walk the authorizations on a failed order and concatenate
+/// every challenge error LE reported. Returns a single human-readable
+/// string suitable for logs / UI. Never panics, never propagates errors —
+/// if we can't fetch details we say so but never replace the parent error.
+async fn collect_authz_errors(order: &mut instant_acme::Order) -> String {
+    use instant_acme::AuthorizationStatus;
+    let mut bits: Vec<String> = Vec::new();
+    let mut authzs = order.authorizations();
+    loop {
+        let next = authzs.next().await;
+        let Some(item) = next else { break };
+        match item {
+            Err(e) => bits.push(format!("(refresh failed: {e})")),
+            Ok(handle) => {
+                let ident = handle.identifier();
+                let status = handle.status;
+                if matches!(status, AuthorizationStatus::Valid) {
+                    continue;
+                }
+                let mut local: Vec<String> = Vec::new();
+                for c in &handle.challenges {
+                    if let Some(err) = &c.error {
+                        local.push(format!("{:?}: {err}", c.r#type));
+                    }
+                }
+                if local.is_empty() {
+                    bits.push(format!("{ident} {status:?} (no specific error from CA)"));
+                } else {
+                    bits.push(format!("{ident} {status:?}: {}", local.join(" | ")));
+                }
+            }
+        }
+    }
+    if bits.is_empty() {
+        "no authorization details from ACME server".into()
+    } else {
+        bits.join(" || ")
     }
 }
 

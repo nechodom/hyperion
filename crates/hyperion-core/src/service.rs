@@ -2526,6 +2526,37 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 ),
             });
         }
+        // Re-render the vhost BEFORE we ask LE to validate. This is a
+        // self-heal: if an older agent build wrote a broken vhost (e.g.
+        // the `root` instead of `alias` bug for .well-known/acme-challenge),
+        // re-rendering with the current template fixes it. Cheap, safe,
+        // idempotent. Without this an operator hitting "Issue Cert" on an
+        // existing hosting would keep getting Invalid from LE forever
+        // because the broken vhost stays on disk.
+        if let Err(e) = self.adapters.nginx_write_vhost(&detail).await {
+            tracing::warn!(
+                error=%e,
+                domain=%detail.domain,
+                "pre-issue vhost re-render failed (continuing anyway)"
+            );
+        }
+
+        // Ensure the acme-challenge root exists with the right perms
+        // BEFORE we ask LE. nginx (www-data) must be able to traverse +
+        // read; the dir itself only needs world-x.
+        if let Err(e) = tokio::fs::create_dir_all(&self.paths.acme_challenge_root).await {
+            tracing::warn!(
+                error=%e,
+                path=%self.paths.acme_challenge_root,
+                "could not pre-create acme challenge root"
+            );
+        }
+        let _ = tokio::process::Command::new("/usr/bin/chmod")
+            .arg("0755")
+            .arg(&self.paths.acme_challenge_root)
+            .output()
+            .await;
+
         let cert = hyperion_adapters::acme::issue_http01(hyperion_adapters::acme::IssueRequest {
             domain: &detail.domain,
             sans: &sans,

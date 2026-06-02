@@ -202,6 +202,22 @@ mod tests {
         assert!(out.contains("Strict-Transport-Security"));
         assert!(out.contains("ssl_certificate     /etc/lm/certs/example.cz/fullchain.pem"));
         assert!(out.contains("/var/lib/lm/acme-challenges"));
+        // CRITICAL: the well-known challenge location MUST use `alias`,
+        // not `root`. With `root`, nginx would serve files from
+        // <acme_root>/.well-known/acme-challenge/<token>, but our ACME
+        // client writes them flat at <acme_root>/<token> — so LE would
+        // 404 and mark the order Invalid. Regression test for the
+        // "ACME order status=Invalid" bug.
+        assert!(
+            out.contains("location /.well-known/acme-challenge/ {")
+                && out.contains("alias /var/lib/lm/acme-challenges/;"),
+            "vhost must use `alias` (with trailing slash) for the ACME challenge location, not `root`. \
+             Rendered output:\n{out}"
+        );
+        assert!(
+            !out.contains("root /var/lib/lm/acme-challenges"),
+            "vhost MUST NOT use `root` for the ACME challenge location"
+        );
     }
 
     #[test]

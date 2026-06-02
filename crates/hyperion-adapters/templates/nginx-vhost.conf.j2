@@ -3,8 +3,15 @@ server {
     listen [::]:80;
     server_name {{ domain }}{% for a in aliases %} {{ a }}{% endfor %};
 
+    # `alias` (not `root`) so nginx serves
+    # <acme_challenge_root>/<token>, not
+    # <acme_challenge_root>/.well-known/acme-challenge/<token>.
+    # The trailing slash on both location and alias is required.
     location /.well-known/acme-challenge/ {
-        root {{ acme_challenge_root }};
+        alias {{ acme_challenge_root }}/;
+        try_files $uri =404;
+        default_type "text/plain";
+        autoindex off;
     }
 
     location / {
