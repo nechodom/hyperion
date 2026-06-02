@@ -27,6 +27,7 @@ askama.workspace = true
 axum.workspace = true
 axum-server = { version = "0.7", features = ["tls-rustls"] }
 rcgen.workspace = true
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
 tower.workspace = true
 tower-http.workspace = true
 url.workspace = true

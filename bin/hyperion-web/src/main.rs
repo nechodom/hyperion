@@ -74,6 +74,10 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
         .with_context(|| format!("bad listen address: {listen}"))?;
 
     if tls_enabled {
+        // rustls 0.23 wants an explicit process-wide CryptoProvider.
+        // Set the `ring` provider once at startup; subsequent calls
+        // (e.g. in tests) are harmless no-ops.
+        let _ = rustls::crypto::ring::default_provider().install_default();
         ensure_self_signed(&tls_cert, &tls_key)
             .context("TLS cert/key auto-provision")?;
         let rustls_config =
