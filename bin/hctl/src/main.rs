@@ -470,6 +470,12 @@ fn print_pretty(resp: &Response) {
             }
             None => println!("(no WordPress install on this hosting)"),
         },
+        Response::DnsSpfCheck(s) => {
+            println!("domain:    {}", s.domain);
+            println!("status:    {}", s.status);
+            println!("existing:  {:?}", s.existing);
+            println!("suggested: {}", s.suggested);
+        }
         Response::DnsCheck(c) => {
             println!("domain:   {}", c.domain);
             println!("A:        {:?}", c.resolved_a);

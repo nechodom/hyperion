@@ -258,6 +258,35 @@
 </div>
 {% endif %}
 
+{% if let Some(sp) = spf %}
+<div class="card hover">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+    Email DNS (SPF)
+    {% if sp.status == "matches" %}<span class="pill ok" style="margin-left:0.4rem;font-size:0.65rem">configured</span>
+    {% else if sp.status == "differs" %}<span class="pill warn" style="margin-left:0.4rem;font-size:0.65rem">differs</span>
+    {% else %}<span class="pill err" style="margin-left:0.4rem;font-size:0.65rem">missing</span>{% endif %}
+  </h2>
+  <dl class="kv">
+    <dt>Existing TXT</dt>
+    <dd>
+      {% if sp.existing.is_empty() %}<span class="text-soft">none — emails from this hosting will be flagged as spam</span>
+      {% else %}{% for e in sp.existing %}<code style="font-size:0.78rem;display:block;margin-bottom:0.2rem">{{ e }}</code>{% endfor %}{% endif %}
+    </dd>
+    <dt>Suggested</dt>
+    <dd>
+      <code style="font-size:0.82rem;display:block;padding:0.5rem;background:var(--bg-2);border-radius:var(--radius-xs);word-break:break-all">{{ sp.suggested }}</code>
+      <div class="muted" style="font-size:0.78rem;margin-top:0.4rem">
+        Add this as a <code>TXT</code> record on the apex of <code>{{ detail.domain }}</code> in your DNS provider, then re-check.
+      </div>
+    </dd>
+    {% if let Some(ip) = sp.our_public_ipv4 %}
+    <dt>Our IPv4</dt><dd><code>{{ ip }}</code></dd>
+    {% endif %}
+  </dl>
+</div>
+{% endif %}
+
 {% if let Some(s) = stats %}
 <div class="card hover">
   <h2>

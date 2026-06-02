@@ -18,5 +18,8 @@ pub use secrets::{SecretsError, SecretsStore};
 pub use service::{
     AdapterPort, BackupRetention, HostingPaths, HostingService, RemoteBackupConfig,
 };
+// Re-export the email config struct so the agent binary can construct
+// it without depending on hyperion-adapters directly.
+pub use hyperion_adapters::email::EmailConfig;
 
 // Re-export profile types via hyperion_types — they live there.

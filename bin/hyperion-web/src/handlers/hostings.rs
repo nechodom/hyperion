@@ -9,7 +9,7 @@ use hyperion_rpc::codec::{Request, Response as RpcResponse};
 use hyperion_rpc::wire::{DeleteOpts, HostingCreateReq, HostingCreated, HostingSelector};
 use hyperion_types::{
     CertIssueRequest, DbProvision, DnsCheckResult, HostingDetail, HostingProfile, HostingStats,
-    HostingSummary, PhpVersion, ProfileApply, WpInstallRequest, WpInstallStatus,
+    HostingSummary, PhpVersion, ProfileApply, SpfCheckResult, WpInstallRequest, WpInstallStatus,
 };
 use hyperion_validate::{Domain, SystemUserName};
 use serde::Deserialize;
@@ -85,6 +85,7 @@ struct DetailTpl<'a> {
     profile_apply: Option<ProfileApply>,
     applied_profile_name: Option<String>,
     profiles: Vec<HostingProfile>,
+    spf: Option<SpfCheckResult>,
     error: Option<&'a str>,
     wp_error: Option<String>,
     wp_flash: Option<String>,
@@ -277,6 +278,7 @@ pub async fn post_create(
                 profile_apply: None,
                 applied_profile_name: None,
                 profiles: vec![],
+                spf: None,
                 error: None,
                 wp_error: None,
                 wp_flash: None,
@@ -345,6 +347,18 @@ pub async fn get_detail(
         .as_ref()
         .and_then(|a| a.profile_id)
         .and_then(|pid| profiles.iter().find(|p| p.id == pid).map(|p| p.name.clone()));
+    let spf = match Domain::parse(&detail.domain) {
+        Ok(d) => match hyperion_rpc_client::call(
+            &state.agent_socket,
+            Request::DnsSpfCheck { domain: d },
+        )
+        .await
+        {
+            Ok(RpcResponse::DnsSpfCheck(r)) => Some(r),
+            _ => None,
+        },
+        Err(_) => None,
+    };
     let tpl = DetailTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -377,6 +391,7 @@ pub async fn get_detail(
         profile_apply,
         applied_profile_name,
         profiles,
+        spf,
         error: None,
         wp_error: q.wp_error,
         wp_flash: q.wp.map(|s| {

@@ -189,6 +189,10 @@ async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::DnsCheck(v),
             Err(e) => Response::Error(e),
         },
+        Request::DnsSpfCheck { domain } => match api.dns_spf_check(domain).await {
+            Ok(v) => Response::DnsSpfCheck(v),
+            Err(e) => Response::Error(e),
+        },
         Request::CertIssueAcme { sel, req } => match api.cert_issue_acme(sel, req).await {
             Ok(v) => Response::CertIssueAcme(v),
             Err(e) => Response::Error(e),
@@ -442,6 +446,12 @@ mod tests {
             Ok(None)
         }
         async fn dns_check(&self, _: Domain) -> Result<DnsCheckResult, RpcError> {
+            Err(RpcError::Internal)
+        }
+        async fn dns_spf_check(
+            &self,
+            _: Domain,
+        ) -> Result<hyperion_types::SpfCheckResult, RpcError> {
             Err(RpcError::Internal)
         }
         async fn cert_issue_acme(

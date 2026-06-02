@@ -75,13 +75,32 @@ async fn main() -> anyhow::Result<()> {
     } else {
         Some(cfg.slack.default_webhook.clone())
     };
+    let email_cfg = if cfg.email.enabled {
+        Some(hyperion_core::EmailConfig {
+            smtp_host: cfg.email.smtp_host.clone(),
+            smtp_port: cfg.email.smtp_port,
+            smtp_user: cfg.email.smtp_user.clone(),
+            smtp_password: cfg.email.smtp_password.clone(),
+            from_address: cfg.email.from_address.clone(),
+            from_name: cfg.email.from_name.clone(),
+            security: cfg.email.security.clone(),
+        })
+    } else {
+        None
+    };
+    let email_to = if cfg.email.default_to.trim().is_empty() {
+        None
+    } else {
+        Some(cfg.email.default_to.clone())
+    };
     let svc = Arc::new(
         hyperion_core::HostingService::new(pool, adapter, secrets)
             .with_paths(paths)
             .with_remote_backup(remote_backup)
             .with_retention(retention)
             .with_slack_webhook(slack_webhook)
-            .with_acme_email(cfg.acme.contact_email.clone()),
+            .with_acme_email(cfg.acme.contact_email.clone())
+            .with_email(email_cfg, email_to),
     );
     // Background scheduler: fire scheduler_tick (expiry sweep) every 5 minutes.
     {

@@ -10,6 +10,7 @@ pub struct Config {
     pub backup_retention: BackupRetentionSection,
     pub enrollment: EnrollmentSection,
     pub slack: SlackSection,
+    pub email: EmailSection,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -84,6 +85,44 @@ pub struct SlackSection {
     pub default_webhook: String,
 }
 
+/// SMTP relay credentials for transactional email (billing reminders,
+/// cert expiry, backup failures). Operator should use any
+/// production-grade relay — Postmark, SendGrid, Mailgun, Brevo, AWS
+/// SES, or a self-hosted postfix-with-auth. Direct-from-VPS sends to
+/// public mailboxes are NOT recommended (will land in spam).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct EmailSection {
+    pub enabled: bool,
+    pub smtp_host: String,
+    pub smtp_port: u16,
+    pub smtp_user: String,
+    pub smtp_password: String,
+    pub from_address: String,
+    pub from_name: String,
+    /// "starttls" (587) | "tls" (465) | "plain" (dev only)
+    pub security: String,
+    /// Default operator address that gets cluster-wide notifications
+    /// (billing reminders for hostings with no owner_email set).
+    pub default_to: String,
+}
+
+impl Default for EmailSection {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            smtp_host: "smtp.example.com".into(),
+            smtp_port: 587,
+            smtp_user: String::new(),
+            smtp_password: String::new(),
+            from_address: "hyperion@example.com".into(),
+            from_name: "Hyperion".into(),
+            security: "starttls".into(),
+            default_to: String::new(),
+        }
+    }
+}
+
 impl Default for BackupRetentionSection {
     fn default() -> Self {
         Self {
@@ -102,6 +141,7 @@ impl Default for Config {
             backup_retention: BackupRetentionSection::default(),
             enrollment: EnrollmentSection::default(),
             slack: SlackSection::default(),
+            email: EmailSection::default(),
         }
     }
 }

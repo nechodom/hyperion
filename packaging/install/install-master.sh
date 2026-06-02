@@ -210,6 +210,21 @@ keep_latest_n = 5
 # /profiles in the UI) override this.
 [slack]
 default_webhook = ""
+
+# Transactional email (send-only). Use any production SMTP relay:
+# Postmark, SendGrid, Mailgun, Brevo (free 300/day), AWS SES, or a
+# self-hosted postfix-with-auth. Direct-from-VPS sends to public
+# mailboxes will land in spam — always go through a relay.
+[email]
+enabled       = false
+smtp_host     = "smtp.example.com"
+smtp_port     = 587
+smtp_user     = ""
+smtp_password = ""
+from_address  = "hyperion@example.com"
+from_name     = "Hyperion"
+security      = "starttls"   # "starttls" (587) | "tls" (465) | "plain" (dev only)
+default_to    = ""           # cluster-wide ops address for hostings with no owner_email
 EOF
 fi
 

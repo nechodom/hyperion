@@ -59,6 +59,7 @@ subtle = "2"
 url = "2"
 http-body-util = "0.1"
 x509-parser = "0.16"
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "builder", "ring"] }
 
 [profile.release]
 strip = "symbols"

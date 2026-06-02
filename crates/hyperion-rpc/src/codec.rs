@@ -86,6 +86,9 @@ pub enum Request {
     DnsCheck {
         domain: Domain,
     },
+    DnsSpfCheck {
+        domain: Domain,
+    },
     CertIssueAcme {
         sel: HostingSelector,
         req: CertIssueRequest,
@@ -174,6 +177,7 @@ pub enum Response {
     WpInstall(WpInstallStatus),
     WpStatus(Option<WpInstallStatus>),
     DnsCheck(DnsCheckResult),
+    DnsSpfCheck(hyperion_types::SpfCheckResult),
     CertIssueAcme(CertInfo),
     HostingStats(HostingStats),
     NodeStats(NodeStats),

@@ -13,6 +13,7 @@ pub mod ids;
 pub mod limits;
 pub mod php;
 pub mod profile;
+pub mod spf;
 pub mod stats;
 pub mod wp;
 
@@ -27,6 +28,7 @@ pub use limits::{
 };
 pub use php::PhpVersion;
 pub use profile::{HostingProfile, ProfileApply, ProfileInput};
+pub use spf::SpfCheckResult;
 pub use stats::{ClusterStats, DashboardAlert, HostingStats, NodeStats, NodeSummary};
 pub use wp::{WpInstallRequest, WpInstallStatus};
 

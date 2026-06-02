@@ -125,6 +125,11 @@ pub struct HostingService<A: AdapterPort + 'static> {
     /// refuses common placeholder domains (example.com, etc.), so the
     /// operator MUST set a real one in agent.toml.
     pub acme_contact_email: String,
+    /// Optional SMTP relay for transactional email. None = email
+    /// notifications are skipped (Slack still fires if configured).
+    pub email_config: Option<hyperion_adapters::email::EmailConfig>,
+    /// Default operator address for cluster-wide notifications.
+    pub email_default_to: Option<String>,
 }
 
 /// Cluster-wide remote backup destination. When set, every successful
@@ -188,11 +193,23 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             retention: BackupRetention::default(),
             slack_default_webhook: None,
             acme_contact_email: "admin@hyperion.invalid".into(),
+            email_config: None,
+            email_default_to: None,
         }
     }
 
     pub fn with_acme_email(mut self, email: impl Into<String>) -> Self {
         self.acme_contact_email = email.into();
+        self
+    }
+
+    pub fn with_email(
+        mut self,
+        cfg: Option<hyperion_adapters::email::EmailConfig>,
+        default_to: Option<String>,
+    ) -> Self {
+        self.email_config = cfg;
+        self.email_default_to = default_to.filter(|s| !s.trim().is_empty());
         self
     }
 
@@ -1598,6 +1615,88 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
     /// Mint a one-time node enrollment token. Plaintext returned exactly once.
     // ================================================================
+    //  Email + DNS helpers (SPF)
+    // ================================================================
+
+    /// Send a plain-text email through the configured SMTP relay.
+    /// No-op if email isn't configured. Failures are audit-logged but
+    /// never propagate.
+    pub(crate) async fn notify_email(&self, to: &str, subject: &str, body: &str) {
+        let Some(cfg) = self.email_config.as_ref() else {
+            return;
+        };
+        let to = if to.is_empty() {
+            match self.email_default_to.as_deref() {
+                Some(t) => t,
+                None => return,
+            }
+        } else {
+            to
+        };
+        match hyperion_adapters::email::send_text(cfg, to, subject, body).await {
+            Ok(code) => {
+                self.append_audit(
+                    "notify.email",
+                    None,
+                    &serde_json::json!({"to": to, "subject": subject, "code": code}).to_string(),
+                    "ok",
+                )
+                .await;
+            }
+            Err(e) => {
+                self.append_audit(
+                    "notify.email",
+                    None,
+                    &serde_json::json!({
+                        "to": to,
+                        "subject": subject,
+                        "error": e.to_string()
+                    })
+                    .to_string(),
+                    "failed",
+                )
+                .await;
+                tracing::warn!(to = %to, subject = %subject, error=%e, "email send failed");
+            }
+        }
+    }
+
+    /// Read TXT records for `domain` via dig; pluck out SPF (starts with
+    /// `v=spf1`). Returns (existing_spf, suggested_record).
+    pub async fn dns_spf_check(
+        &self,
+        domain: hyperion_validate::Domain,
+    ) -> Result<hyperion_types::SpfCheckResult, RpcError> {
+        let d = domain.as_str().to_string();
+        let txts = dig_records(&d, "TXT").await.unwrap_or_default();
+        // dig +short TXT returns quoted strings; strip quotes.
+        let existing: Vec<String> = txts
+            .iter()
+            .map(|s| s.trim_matches('"').to_string())
+            .filter(|s| s.starts_with("v=spf1"))
+            .collect();
+        let our_ipv4 = fetch_public_ip("https://api.ipify.org").await.ok();
+        let suggested = match our_ipv4.as_deref() {
+            Some(ip) => format!("v=spf1 ip4:{ip} a mx ~all"),
+            None => "v=spf1 a mx ~all".into(),
+        };
+        let status = if existing.is_empty() {
+            "missing"
+        } else if existing.iter().any(|s| s == &suggested) {
+            "matches"
+        } else {
+            "differs"
+        };
+        Ok(hyperion_types::SpfCheckResult {
+            domain: d,
+            existing,
+            suggested,
+            our_public_ipv4: our_ipv4,
+            status: status.into(),
+        })
+    }
+
+    // ================================================================
     //  Slack notifications + billing sweep
     // ================================================================
 
@@ -1705,6 +1804,20 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 ":calendar: *Billing reminder*\n• site: `{domain}`\n• price: {price_str}\n• due in {due_in_days} day(s)"
             );
             self.notify_slack(webhook.as_deref(), &msg).await;
+            // Also send email if configured. Use the hosting's
+            // owner_email when set (from expiry config), else the
+            // cluster-wide email_default_to.
+            let owner = self
+                .get_expiry(HostingSelector::Id(row.hosting_id.clone()))
+                .await
+                .ok()
+                .and_then(|e| e.owner_email);
+            let to = owner.unwrap_or_default();
+            let subj = format!("[Hyperion] Billing reminder — {domain}");
+            let body = format!(
+                "Hosting:    {domain}\nPrice:      {price_str}\nDue in:     {due_in_days} day(s)\n\n--\nHyperion\n"
+            );
+            self.notify_email(&to, &subj, &body).await;
             count += 1;
         }
         Ok(count)
@@ -3422,6 +3535,8 @@ mod tests {
             retention: BackupRetention::default(),
             slack_default_webhook: None,
             acme_contact_email: "test@example.invalid".into(),
+            email_config: None,
+            email_default_to: None,
         };
         s2.create(HostingCreateReq {
             domain: Domain::parse("b.cz").expect("parse"),
@@ -3458,6 +3573,8 @@ mod tests {
             retention: BackupRetention::default(),
             slack_default_webhook: None,
             acme_contact_email: "test@example.invalid".into(),
+            email_config: None,
+            email_default_to: None,
         };
         let r = s2.create(req("dup.cz")).await;
         match r {

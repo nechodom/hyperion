@@ -11,6 +11,7 @@
 pub mod acme;
 pub mod backup;
 pub mod cmd;
+pub mod email;
 pub mod fs;
 pub mod mariadb;
 pub mod nginx;

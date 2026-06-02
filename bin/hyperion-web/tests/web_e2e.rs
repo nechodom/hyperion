@@ -145,6 +145,8 @@ async fn start_agent() -> (PathBuf, tempfile::TempDir) {
         retention: hyperion_core::BackupRetention::default(),
         slack_default_webhook: None,
         acme_contact_email: "test@example.invalid".into(),
+        email_config: None,
+        email_default_to: None,
     });
     let agent: Arc<dyn AgentApi> = Arc::new(AgentImpl::new(svc));
     let path = dir.path().join("agent.sock");

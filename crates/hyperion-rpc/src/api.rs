@@ -76,6 +76,13 @@ pub trait AgentApi: Send + Sync + 'static {
     /// Resolve `domain`'s A + AAAA records (via `dig`) and report whether
     /// they point at this agent's externally-visible IP.
     async fn dns_check(&self, domain: Domain) -> Result<DnsCheckResult, RpcError>;
+
+    /// Resolve `domain`'s SPF TXT record + suggest one based on this
+    /// agent's public IP.
+    async fn dns_spf_check(
+        &self,
+        domain: Domain,
+    ) -> Result<hyperion_types::SpfCheckResult, RpcError>;
     /// Issue a real Let's Encrypt cert (HTTP-01) for the hosting at
     /// `sel`. Respects `req.staging` / `req.require_dns_match`.
     async fn cert_issue_acme(

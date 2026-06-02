@@ -188,6 +188,13 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.dns_check(domain).await
     }
 
+    async fn dns_spf_check(
+        &self,
+        domain: Domain,
+    ) -> Result<hyperion_types::SpfCheckResult, RpcError> {
+        self.svc.dns_spf_check(domain).await
+    }
+
     async fn cert_issue_acme(
         &self,
         sel: HostingSelector,
