@@ -192,7 +192,12 @@ install -m 0755 target/release/hctl           /usr/bin/hctl
 groupadd --system hyperion-admin 2>/dev/null || true
 install -d -m 0700 /etc/hyperion
 install -d -m 0700 /etc/hyperion/secrets
-install -d -m 0700 /var/lib/hyperion
+# 0o711 — owner full, others traverse-only. NOT 0o700: nginx
+# (www-data) needs the x-bit to traverse this dir on the way to
+# /var/lib/hyperion/acme-challenges/<token> for HTTP-01 ACME. The
+# sensitive content (state.db, secrets/, backups/) keeps its own
+# 0o600/0o700 perms — listing the dir reveals only well-known names.
+install -d -m 0711 /var/lib/hyperion
 install -d -m 0750 /var/log/hyperion
 install -d -m 0755 /var/lib/hyperion/acme-challenges
 install -d -m 0700 /var/lib/hyperion/backups/local

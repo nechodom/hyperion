@@ -22,4 +22,8 @@ pub use service::{
 // it without depending on hyperion-adapters directly.
 pub use hyperion_adapters::email::EmailConfig;
 
+// Re-export the path-traversability self-heal so the agent's main()
+// can call it at startup without adding a hyperion-adapters dep.
+pub use hyperion_adapters::fs::ensure_ancestors_traversable;
+
 // Re-export profile types via hyperion_types — they live there.

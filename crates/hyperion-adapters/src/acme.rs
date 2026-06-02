@@ -11,6 +11,7 @@
 
 use crate::AdapterError;
 use hyperion_types::CertInfo;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 /// What the acme adapter needs the orchestrator to do during HTTP-01.
@@ -228,6 +229,18 @@ pub async fn issue_http01(req: IssueRequest<'_>) -> Result<CertInfo, AdapterErro
             // ChallengeHandle derefs to Challenge, which has `.token`.
             let token_path = req.challenge_root.join(&challenge.token);
             tokio::fs::write(&token_path, key_auth.as_str()).await?;
+            // Explicit 0o644 — don't trust the inherited umask. If
+            // systemd ever sets UMask=0077 on the agent service, files
+            // would be 0o600 and nginx (www-data) couldn't read the
+            // token even though it could traverse the dir.
+            if let Err(e) = tokio::fs::set_permissions(
+                &token_path,
+                std::fs::Permissions::from_mode(0o644),
+            )
+            .await
+            {
+                tracing::warn!(error=%e, path=%token_path.display(), "chmod 0644 on challenge token failed");
+            }
             written.push(token_path);
             // Same retry shape as new_order. set_ready is where the user
             // hit "Service busy; retry later" — Boulder's transient

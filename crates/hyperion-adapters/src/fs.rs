@@ -51,6 +51,64 @@ pub async fn remove_dir_all(path: &Path) -> Result<(), AdapterError> {
     Ok(())
 }
 
+/// Walk up from `leaf` and OR `0o011` (group-x + world-x) into the mode
+/// of every ancestor directory. Used to ensure paths like
+/// `/var/lib/hyperion/acme-challenges/<token>` are reachable by nginx
+/// (running as `www-data`) without having to widen them to 0o755 and
+/// expose directory *listings*.
+///
+/// Best-effort by design: each chmod is independent, failures (e.g.
+/// a system dir we don't own) are logged via `tracing::warn!` and
+/// skipped. Idempotent — a re-run on already-traversable dirs is a
+/// no-op. Symlinks are followed (we want to fix the *target* dir's
+/// mode, not the link itself).
+///
+/// Stops at filesystem root.
+pub async fn ensure_ancestors_traversable(leaf: &Path) {
+    let mut current: Option<&Path> = Some(leaf);
+    while let Some(p) = current {
+        match fs::metadata(p).await {
+            Ok(md) if md.is_dir() => {
+                let mode = md.permissions().mode() & 0o777;
+                let new_mode = mode | 0o011;
+                if new_mode != mode {
+                    if let Err(e) = fs::set_permissions(
+                        p,
+                        std::fs::Permissions::from_mode(new_mode),
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            path = %p.display(),
+                            old_mode = format!("{:o}", mode),
+                            new_mode = format!("{:o}", new_mode),
+                            error = %e,
+                            "could not OR traverse bits into ancestor; nginx may 404 on ACME challenges"
+                        );
+                    } else {
+                        tracing::info!(
+                            path = %p.display(),
+                            old_mode = format!("{:o}", mode),
+                            new_mode = format!("{:o}", new_mode),
+                            "made ancestor world-traversable for ACME challenges"
+                        );
+                    }
+                }
+            }
+            Ok(_) => break, // not a dir → can't traverse further sensibly
+            Err(_) => break, // path missing or unreadable
+        }
+        current = p.parent();
+        // Stop at filesystem root.
+        if matches!(current.map(|c| c.as_os_str().is_empty()), Some(true)) {
+            break;
+        }
+        if current == Some(Path::new("/")) {
+            break;
+        }
+    }
+}
+
 fn with_extension(p: &Path, ext: &str) -> PathBuf {
     let mut s = p.as_os_str().to_owned();
     s.push(".");
@@ -116,6 +174,71 @@ mod tests {
             AdapterError::Other(m) => assert!(m.contains("not a directory"), "got: {m}"),
             other => panic!("wrong: {other:?}"),
         }
+    }
+
+    /// Regression test for the nginx 404-on-ACME-challenge bug. The
+    /// install script created /var/lib/hyperion at mode 0o700, so nginx
+    /// (running as www-data — not the agent's user) couldn't traverse
+    /// into the acme-challenges/ subdir below. Verifies the helper
+    /// flips that 0o700 → 0o711 while leaving the deeper, already-755
+    /// subdir untouched (no over-widening).
+    #[tokio::test]
+    async fn ensure_ancestors_traversable_adds_world_x() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let mid = root.path().join("hyperion");        // simulate /var/lib/hyperion
+        let leaf = mid.join("acme-challenges");        // simulate the subdir
+        std::fs::create_dir_all(&leaf).expect("mkdir");
+        std::fs::set_permissions(&mid, std::fs::Permissions::from_mode(0o700))
+            .expect("chmod mid 0700");
+        std::fs::set_permissions(&leaf, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod leaf 0755");
+
+        ensure_ancestors_traversable(&leaf).await;
+
+        let mid_mode = std::fs::metadata(&mid).expect("md mid").permissions().mode() & 0o777;
+        let leaf_mode = std::fs::metadata(&leaf).expect("md leaf").permissions().mode() & 0o777;
+        assert_eq!(mid_mode, 0o711, "parent must have world-x added (0700 → 0711)");
+        assert_eq!(leaf_mode, 0o755, "leaf already had world-x, must NOT be widened further");
+    }
+
+    /// Idempotent: running twice produces the same result and doesn't
+    /// keep flipping bits.
+    #[tokio::test]
+    async fn ensure_ancestors_traversable_is_idempotent() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let p = root.path().join("a/b/c");
+        std::fs::create_dir_all(&p).expect("mkdir");
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o700)).expect("c 0700");
+        std::fs::set_permissions(p.parent().unwrap(), std::fs::Permissions::from_mode(0o700))
+            .expect("b 0700");
+
+        ensure_ancestors_traversable(&p).await;
+        let after_first = std::fs::metadata(&p).expect("md").permissions().mode() & 0o777;
+        ensure_ancestors_traversable(&p).await;
+        let after_second = std::fs::metadata(&p).expect("md").permissions().mode() & 0o777;
+        assert_eq!(after_first, after_second, "idempotent");
+        assert_eq!(after_first & 0o001, 0o001, "world-x is set");
+    }
+
+    /// Must NOT touch owner/group bits — only OR the x-for-others.
+    /// If the install script intentionally restricted group access, we
+    /// must preserve that. Only the world-x bit is the surgical fix.
+    #[tokio::test]
+    async fn ensure_ancestors_traversable_preserves_owner_group_bits() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let p = root.path().join("d");
+        std::fs::create_dir_all(&p).expect("mkdir");
+        // 0o740: owner=rwx, group=r, others=---
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o740)).expect("chmod");
+
+        ensure_ancestors_traversable(&p).await;
+
+        let m = std::fs::metadata(&p).expect("md").permissions().mode() & 0o777;
+        // owner stays rwx (7), group stays r (4) + we add x → 5, others gets x (1).
+        // But wait — our helper OR-s in 0o011 = 0o001 for others AND 0o010 for group.
+        // 0o740 | 0o011 = 0o751.
+        assert_eq!(m, 0o751,
+            "owner stays rwx, group adds x (so it can traverse too), others adds x. got {:o}", m);
     }
 
     #[tokio::test]

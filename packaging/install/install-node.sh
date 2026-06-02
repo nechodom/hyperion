@@ -167,7 +167,11 @@ install -m 0755 target/release/hctl           /usr/bin/hctl
 
 #-------- 5. Users + dirs --------------------------------------------------
 groupadd --system hyperion-admin 2>/dev/null || true
-install -d -m 0700 /etc/hyperion /etc/hyperion/secrets /var/lib/hyperion
+install -d -m 0700 /etc/hyperion /etc/hyperion/secrets
+# 0o711 — owner full, others traverse-only. See install-master.sh for
+# the rationale (nginx needs to traverse this on the way to
+# /var/lib/hyperion/acme-challenges/<token> for HTTP-01).
+install -d -m 0711 /var/lib/hyperion
 install -d -m 0750 /var/log/hyperion
 install -d -m 0755 /var/lib/hyperion/acme-challenges
 install -d -m 0700 /var/lib/hyperion/backups/local

@@ -39,6 +39,22 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!(socket=%cfg.agent.socket_path.display(), "starting hyperion-agent");
 
+    // Self-heal: every ancestor of the ACME challenge dir must be
+    // world-traversable (the x-bit for "others"), otherwise nginx
+    // (running as www-data) cannot reach challenge tokens and every
+    // HTTP-01 cert issuance returns 404 → Invalid. Older install
+    // scripts created /var/lib/hyperion at mode 0o700; this OR-s in
+    // the traverse bits on every restart so an in-place upgrade
+    // (via update.sh) is enough — no manual chmod required.
+    if let Err(e) = tokio::fs::create_dir_all(&cfg.acme.challenge_dir).await {
+        tracing::warn!(
+            error = %e,
+            path = %cfg.acme.challenge_dir.display(),
+            "could not create ACME challenge dir at startup (HTTP-01 will fail)"
+        );
+    }
+    hyperion_core::ensure_ancestors_traversable(&cfg.acme.challenge_dir).await;
+
     let pool = hyperion_state::open(&cfg.agent.state_db).await?;
     let secrets = Arc::new(hyperion_core::SecretsStore::new(
         cfg.agent.secrets_dir.clone(),
