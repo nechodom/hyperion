@@ -531,8 +531,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// template's `listen.owner` depends on the nginx user, which is
     /// detected dynamically at startup — old pool files on disk may
     /// hard-code an outdated owner (e.g. `www-data` when nginx now
-    /// runs as `vito`). After this returns, php-fpm's next reload
-    /// picks up the corrected sockets and nginx 502s go away.
+    /// runs as `vito`).
+    ///
+    /// IMPORTANT: after the pools are re-written we issue a `systemctl
+    /// restart php<ver>-fpm` for every PHP version that owned at least
+    /// one rewritten pool. `reload` alone is not enough — FPM keeps
+    /// the existing UNIX socket open even when the pool config's
+    /// `listen.owner` changes, and `chown(2)` is not re-applied to an
+    /// already-bound socket. Only a full restart re-creates the
+    /// socket with the new ownership. We accept the (~50ms per
+    /// version) brief PHP availability gap on agent startup as a
+    /// worthy trade — without it 502 persists until manual fix.
     ///
     /// Errors per-hosting are logged but never propagated — one bad
     /// hosting must not block agent startup. Returns the count of
@@ -546,6 +555,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
         };
         let mut ok = 0;
+        let mut touched_versions: std::collections::HashSet<PhpVersion> = Default::default();
         for s in summaries {
             let Some(ver) = s.php_version else {
                 continue;
@@ -587,8 +597,37 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 );
                 continue;
             }
+            touched_versions.insert(ver);
             ok += 1;
         }
+
+        // Full restart per touched version — see doc comment above for
+        // why reload isn't enough. We swallow errors: if FPM can't be
+        // restarted by us, the operator will see the pool config is
+        // correct on disk and can fix manually.
+        for ver in touched_versions {
+            let svc = format!("{}.service", ver.service_name());
+            let res = tokio::process::Command::new("/usr/bin/systemctl")
+                .args(["restart", &svc])
+                .output()
+                .await;
+            match res {
+                Ok(out) if out.status.success() => {
+                    tracing::info!(service = %svc, "boot self-heal: restarted FPM to apply new listen.owner");
+                }
+                Ok(out) => {
+                    tracing::warn!(
+                        service = %svc,
+                        stderr = %String::from_utf8_lossy(&out.stderr),
+                        "boot self-heal: systemctl restart failed"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(error=%e, service=%svc, "boot self-heal: could not invoke systemctl");
+                }
+            }
+        }
+
         ok
     }
 

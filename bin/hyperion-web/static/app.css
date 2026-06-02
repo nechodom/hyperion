@@ -638,6 +638,39 @@ a.btn {
   line-height: 1.2;
   border-radius: var(--radius-xs);
 }
+
+/* Filter chips — clickable links that act like compact toggle buttons.
+   Used in audit search (time-range row + quick-filter row). */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.22rem 0.65rem;
+  font-size: 0.76rem;
+  line-height: 1.2;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-dim);
+  text-decoration: none;
+  transition: background var(--t-fast), color var(--t-fast), border-color var(--t-fast);
+}
+.chip:hover {
+  background: var(--surface-3, var(--surface-2));
+  color: var(--text);
+  border-color: color-mix(in oklab, var(--text-dim) 30%, transparent);
+}
+.chip.chip-on,
+a.chip.chip-on {
+  background: color-mix(in oklab, var(--primary) 18%, var(--surface-2));
+  color: var(--text);
+  border-color: color-mix(in oklab, var(--primary) 55%, transparent);
+  font-weight: 600;
+}
+.text-soft.small,
+.small {
+  font-size: 0.78rem;
+}
 .btn.small .btn-icon { width: 13px; height: 13px; }
 
 /* When a small button sits inside a table row, the row should still
