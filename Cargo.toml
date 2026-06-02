@@ -39,7 +39,7 @@ tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
 blake3 = "1"
 clap = { version = "4", features = ["derive"] }
 askama = "0.12"
-instant-acme = "0.7"
+instant-acme = "0.8"
 rcgen = "0.13"
 regex = "1"
 proptest = "1"
