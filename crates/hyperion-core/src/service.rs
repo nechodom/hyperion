@@ -259,12 +259,62 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         {
             Ok(id) => id,
             Err(e) => {
-                // If the user is already in the DB (re-run after partial create), fetch.
-                match system_users::get_by_name(&self.pool, system_user.as_str()).await {
-                    Ok(Some(row)) => row.id,
-                    _ => {
+                // Failure cases worth recovering from automatically:
+                //   (a) Same NAME already in the DB — we're re-running a
+                //       partial create; reuse the existing row.
+                //   (b) Same UID already in the DB but DIFFERENT name —
+                //       stale orphan from a previous hosting delete that
+                //       predated the system_users cleanup fix. Verify
+                //       nothing references it, drop it, retry.
+                let by_name = system_users::get_by_name(&self.pool, system_user.as_str())
+                    .await
+                    .ok()
+                    .flatten();
+                if let Some(row) = by_name {
+                    row.id
+                } else {
+                    let by_uid = system_users::get_by_uid(&self.pool, uid as i64)
+                        .await
+                        .ok()
+                        .flatten();
+                    let orphan = match by_uid {
+                        Some(r) => match system_users::has_hostings(&self.pool, r.id).await {
+                            Ok(false) => Some(r),
+                            _ => None,
+                        },
+                        None => None,
+                    };
+                    if let Some(orphan) = orphan {
+                        tracing::warn!(
+                            uid = uid,
+                            old_name = %orphan.name,
+                            new_name = %system_user.as_str(),
+                            "dropping orphan system_users row to free UID"
+                        );
+                        let _ = system_users::delete(&self.pool, orphan.id).await;
+                        match system_users::insert(
+                            &self.pool,
+                            system_user.as_str(),
+                            uid as i64,
+                            &home_dir,
+                            "/usr/sbin/nologin",
+                            now_secs(),
+                        )
+                        .await
+                        {
+                            Ok(id) => id,
+                            Err(e2) => {
+                                let _ = stack.rollback_all().await;
+                                return Err(RpcError::Internal_with(format!(
+                                    "system_users insert (retry after orphan cleanup): {e2}"
+                                )));
+                            }
+                        }
+                    } else {
                         let _ = stack.rollback_all().await;
-                        return Err(RpcError::Internal_with(format!("system_users insert: {e}")));
+                        return Err(RpcError::Internal_with(format!(
+                            "system_users insert: {e}"
+                        )));
                     }
                 }
             }
@@ -555,6 +605,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     .map_err(|e| RpcError::Internal_with(format!("count: {e}")))?;
             if others == 0 {
                 let _ = self.adapters.delete_user(&detail.system_user).await;
+                // Also drop the system_users row so the UID can be reused
+                // for a future hosting (Linux frees the UID via userdel;
+                // without this cleanup the next useradd allocates the same
+                // UID and `system_users` INSERT hits its UNIQUE(uid)
+                // constraint).
+                if let Ok(Some(row)) =
+                    system_users::get_by_name(&self.pool, &detail.system_user).await
+                {
+                    let _ = system_users::delete(&self.pool, row.id).await;
+                }
             }
         }
 
