@@ -15,6 +15,10 @@ pub struct HostingRow {
     pub root_dir: String,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Per-hosting ACME contact email. `None` means "fall back to
+    /// agent-wide [acme] contact_email from agent.toml" — the same
+    /// value that issue_real_cert defaults to when this is missing.
+    pub acme_contact_email: Option<String>,
 }
 
 pub async fn insert(
@@ -146,12 +150,13 @@ type RawHostingRow = (
     String,
     i64,
     i64,
+    Option<String>,
 );
 
 const QUERY_BASE: &str =
-    "SELECT id, domain, state, system_user_id, php_version, root_dir, created_at, updated_at FROM hostings WHERE id = ?";
+    "SELECT id, domain, state, system_user_id, php_version, root_dir, created_at, updated_at, acme_contact_email FROM hostings WHERE id = ?";
 const QUERY_DOMAIN: &str =
-    "SELECT id, domain, state, system_user_id, php_version, root_dir, created_at, updated_at FROM hostings WHERE domain = ?";
+    "SELECT id, domain, state, system_user_id, php_version, root_dir, created_at, updated_at, acme_contact_email FROM hostings WHERE domain = ?";
 
 async fn fetch_one<'a>(
     pool: &'a SqlitePool,
@@ -159,8 +164,17 @@ async fn fetch_one<'a>(
     q: sqlx::query::QueryAs<'a, sqlx::Sqlite, RawHostingRow, sqlx::sqlite::SqliteArguments<'a>>,
 ) -> Result<Option<HostingRow>, StateError> {
     let row = q.fetch_optional(pool).await?;
-    let Some((id, domain, state, system_user_id, php_version, root_dir, created_at, updated_at)) =
-        row
+    let Some((
+        id,
+        domain,
+        state,
+        system_user_id,
+        php_version,
+        root_dir,
+        created_at,
+        updated_at,
+        acme_contact_email,
+    )) = row
     else {
         return Ok(None);
     };
@@ -176,7 +190,28 @@ async fn fetch_one<'a>(
         root_dir,
         created_at,
         updated_at,
+        acme_contact_email,
     }))
+}
+
+/// Update (or clear) the per-hosting ACME contact email. `None` means
+/// "use agent-wide default". Returns the row count touched (0 if the
+/// hosting wasn't found).
+pub async fn set_acme_contact_email(
+    pool: &SqlitePool,
+    id: &HostingId,
+    email: Option<&str>,
+    now: i64,
+) -> Result<u64, StateError> {
+    let r = sqlx::query(
+        "UPDATE hostings SET acme_contact_email = ?, updated_at = ? WHERE id = ?",
+    )
+    .bind(email)
+    .bind(now)
+    .bind(id.as_str())
+    .execute(pool)
+    .await?;
+    Ok(r.rows_affected())
 }
 
 #[cfg(test)]
@@ -240,6 +275,53 @@ mod tests {
             .execute(&pool)
             .await;
         assert!(bad.is_err(), "CHECK should refuse 'bogus'");
+    }
+
+    /// Verify the new acme_contact_email column round-trips.
+    /// New hostings get NULL (= fall back to agent-wide email);
+    /// set_acme_contact_email writes; reading via get_by_id returns it.
+    #[tokio::test]
+    async fn acme_contact_email_round_trip() {
+        let pool = open_memory().await.expect("open");
+        let suid = fresh_user(&pool, "ex_cz", 1042).await;
+        let id = HostingId::new_v7();
+        insert(&pool, &id, "example.cz", suid, None, "/x", 1)
+            .await
+            .expect("insert");
+
+        // Default: NULL — operator hasn't set anything.
+        let got = get_by_id(&pool, &id).await.expect("get").expect("present");
+        assert_eq!(got.acme_contact_email, None,
+            "fresh hostings must have NULL acme_contact_email so they fall back to the agent default");
+
+        // Set to a concrete value.
+        let n = set_acme_contact_email(&pool, &id, Some("ops@example.cz"), 2)
+            .await
+            .expect("set");
+        assert_eq!(n, 1, "exactly one row updated");
+        let got = get_by_id(&pool, &id).await.expect("get").expect("present");
+        assert_eq!(got.acme_contact_email.as_deref(), Some("ops@example.cz"));
+        assert_eq!(got.updated_at, 2, "updated_at bumped on set");
+
+        // Clear (NULL → fall back to default again).
+        let n = set_acme_contact_email(&pool, &id, None, 3)
+            .await
+            .expect("clear");
+        assert_eq!(n, 1);
+        let got = get_by_id(&pool, &id).await.expect("get").expect("present");
+        assert_eq!(got.acme_contact_email, None);
+    }
+
+    /// Updating a non-existent hosting must return 0 rows touched
+    /// rather than raising.
+    #[tokio::test]
+    async fn acme_contact_email_unknown_hosting_returns_zero() {
+        let pool = open_memory().await.expect("open");
+        let id = HostingId::new_v7();
+        let n = set_acme_contact_email(&pool, &id, Some("x@y.z"), 1)
+            .await
+            .expect("update");
+        assert_eq!(n, 0);
     }
 
     #[tokio::test]

@@ -2612,9 +2612,25 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         sans.sort();
         sans.dedup();
 
+        // Prefer the per-hosting override (if set + non-empty), fall
+        // back to the agent-wide default. Lets one operator-managed
+        // host get expiry notices at the end-customer's address while
+        // siblings keep the default.
+        let row = hostings::get_by_id(&self.pool, &detail.id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("get hosting: {e}")))?
+            .ok_or_else(|| RpcError::NotFound {
+                kind: "hosting".into(),
+                id: detail.id.as_str().to_string(),
+            })?;
+        let effective_email = row
+            .acme_contact_email
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(self.acme_contact_email.as_str());
         // Reject obvious placeholder addresses early so we don't burn a
         // failed-account round trip with Let's Encrypt.
-        let email = self.acme_contact_email.trim();
+        let email = effective_email.trim();
         if email.is_empty()
             || email.ends_with("@example.com")
             || email.ends_with("@example.org")
