@@ -1,0 +1,93 @@
+name: Build and publish release binaries
+
+# Trigger on every push to main and on manual dispatch. We don't gate
+# on tags because we want every commit on main to ship — operators
+# pull "main" via update.sh and get the latest build.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # required to create + overwrite the rolling release
+
+# Cancel in-flight builds when a new commit lands — only the latest
+# main matters for a rolling release.
+concurrency:
+  group: release-main
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04   # glibc 2.35; binaries run on Debian 12 (glibc 2.36+)
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0    # we need the commit history for SHA-based naming
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Build release binaries
+        run: |
+          cargo build --release \
+            --bin hyperion-agent \
+            --bin hyperion-web \
+            --bin hctl
+          ls -lh target/release/{hyperion-agent,hyperion-web,hctl}
+
+      - name: Stage build artefacts + checksums
+        run: |
+          mkdir -p dist
+          cp target/release/hyperion-agent dist/
+          cp target/release/hyperion-web   dist/
+          cp target/release/hctl           dist/
+          ( cd dist && sha256sum hyperion-agent hyperion-web hctl > SHA256SUMS )
+          cat dist/SHA256SUMS
+
+      - name: Compute version metadata
+        id: meta
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          echo "short_sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
+          echo "build_date=$BUILD_DATE" >> "$GITHUB_OUTPUT"
+
+      - name: Publish "main" rolling release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: main
+          name: "Rolling build (main)"
+          body: |
+            Auto-built rolling release. Always tracks `main`.
+
+            - **commit**: `${{ github.sha }}` (`${{ steps.meta.outputs.short_sha }}`)
+            - **built**: ${{ steps.meta.outputs.build_date }}
+            - **runner**: ubuntu-22.04 · glibc 2.35
+            - **target**: x86_64-unknown-linux-gnu (Debian 12+ compatible)
+
+            ```
+            curl -fsSL https://github.com/${{ github.repository }}/releases/download/main/hyperion-agent -o /usr/sbin/hyperion-agent
+            curl -fsSL https://github.com/${{ github.repository }}/releases/download/main/hyperion-web   -o /usr/sbin/hyperion-web
+            curl -fsSL https://github.com/${{ github.repository }}/releases/download/main/hctl           -o /usr/bin/hctl
+            ```
+
+            But the recommended path is `sudo /opt/hyperion/packaging/install/update.sh` — it auto-detects this release and falls back to local build if unavailable.
+
+            **Checksums** (`SHA256SUMS`) are uploaded alongside the binaries.
+          files: |
+            dist/hyperion-agent
+            dist/hyperion-web
+            dist/hctl
+            dist/SHA256SUMS
+          draft: false
+          prerelease: false
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -25,29 +25,46 @@
 #   HYPERION_INSTALL_DIR   default /opt/hyperion
 #   HYPERION_REF           default main (branch/tag/sha)
 #   HYPERION_GIT_TOKEN     PAT for private-repo HTTPS auth
+#   HYPERION_RELEASE_REPO  default nechodom/hyperion — owner/repo for releases
+#   HYPERION_RELEASE_TAG   default main — release tag to pull (rolling)
 #
 # Flags:
-#   --repair    Also drop orphan hostings rows in
-#               state IN ('provisioning','failed','deleting'). Does NOT
-#               touch on-disk artefacts (vhost, db, system user) — use
-#               the diagnostic snippet printed on screen if those linger.
-#   --no-build  Skip cargo build (useful for unit-only refreshes).
-#   --ref=REF   Override $HYPERION_REF for this run.
+#   --repair       Also drop orphan hostings rows in
+#                  state IN ('provisioning','failed','deleting'). Does NOT
+#                  touch on-disk artefacts (vhost, db, system user) — use
+#                  the diagnostic snippet printed on screen if those linger.
+#   --no-build     Skip binary install (useful for unit/config-only refreshes).
+#   --from-source  Skip the pre-built release; cargo build locally.
+#                  Useful for testing local commits before they're pushed.
+#   --release=TAG  Pull a specific release tag instead of "main" (rolling).
+#   --ref=REF      Override $HYPERION_REF for git fetch.
+#
+# Default behaviour:
+#   1. git fetch + reset to origin/$HYPERION_REF
+#   2. Try to download pre-built binaries (+ SHA256SUMS verification)
+#      from the GitHub release tagged $HYPERION_RELEASE_TAG.
+#   3. If the release isn't there OR checksum fails, cargo build from
+#      the freshly-fetched source.
 
 set -euo pipefail
 
 INSTALL_DIR="${HYPERION_INSTALL_DIR:-/opt/hyperion}"
 REF="${HYPERION_REF:-main}"
 GIT_TOKEN="${HYPERION_GIT_TOKEN:-}"
+RELEASE_REPO="${HYPERION_RELEASE_REPO:-nechodom/hyperion}"
+RELEASE_TAG="${HYPERION_RELEASE_TAG:-main}"   # rolling tag, set by GH Actions
 REPAIR=0
 DO_BUILD=1
+PREFER_PREBUILT=1
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --repair)   REPAIR=1; shift;;
-    --no-build) DO_BUILD=0; shift;;
-    --ref=*)    REF="${1#*=}"; shift;;
-    -h|--help)  sed -n '2,40p' "$0"; exit 0;;
+    --repair)        REPAIR=1; shift;;
+    --no-build)      DO_BUILD=0; shift;;
+    --from-source)   PREFER_PREBUILT=0; shift;;
+    --release=*)     RELEASE_TAG="${1#*=}"; shift;;
+    --ref=*)         REF="${1#*=}"; shift;;
+    -h|--help)       sed -n '2,40p' "$0"; exit 0;;
     *) printf 'unknown arg: %s\n' "$1" >&2; exit 2;;
   esac
 done
@@ -108,9 +125,43 @@ git reset --hard "origin/$REF"
 NEW=$(git rev-parse --short HEAD)
 log "Source: $PREV → $NEW"
 
-#-------- 3. Build --------------------------------------------------------
-if (( DO_BUILD )); then
-  log "Building release binaries ..."
+#-------- 3. Install binaries — prefer GitHub release, fall back to local build
+PREBUILT_OK=0
+if (( DO_BUILD && PREFER_PREBUILT )); then
+  log "Attempting pre-built binaries from github.com/$RELEASE_REPO@$RELEASE_TAG ..."
+  TMP=$(mktemp -d /tmp/hyperion-update.XXXXXX)
+  trap "rm -rf '$TMP'" EXIT
+  REL_BASE="https://github.com/$RELEASE_REPO/releases/download/$RELEASE_TAG"
+  fetch_ok=1
+  for f in hyperion-agent hctl SHA256SUMS $((( HAVE_WEB )) && echo hyperion-web); do
+    [[ -z "$f" ]] && continue
+    if ! curl -fsSL --max-time 60 "$REL_BASE/$f" -o "$TMP/$f"; then
+      log "  no $f in release — falling back to cargo build"
+      fetch_ok=0
+      break
+    fi
+  done
+  if (( fetch_ok )); then
+    # Verify SHA256 of each downloaded file matches SHA256SUMS.
+    if ( cd "$TMP" && sha256sum --quiet --check SHA256SUMS 2>/dev/null ); then
+      log "Pre-built binaries verified by SHA256SUMS — installing"
+      install -m 0755 "$TMP/hyperion-agent" /usr/sbin/hyperion-agent
+      install -m 0755 "$TMP/hctl"           /usr/bin/hctl
+      if (( HAVE_WEB )); then
+        install -m 0755 "$TMP/hyperion-web" /usr/sbin/hyperion-web
+      fi
+      PREBUILT_OK=1
+    else
+      log "  SHA256 mismatch on downloaded files — falling back to cargo build"
+    fi
+  fi
+fi
+
+if (( DO_BUILD && PREBUILT_OK == 0 )); then
+  if ! command -v cargo >/dev/null 2>&1; then
+    fail "cargo not found and no usable pre-built release. Re-run install-master.sh."
+  fi
+  log "Building release binaries from source ..."
   cargo build --release \
     --bin hyperion-agent --bin hyperion-web --bin hctl --quiet
   log "Installing binaries ..."
@@ -119,8 +170,8 @@ if (( DO_BUILD )); then
   if (( HAVE_WEB )); then
     install -m 0755 target/release/hyperion-web /usr/sbin/hyperion-web
   fi
-else
-  log "--no-build: skipping cargo build."
+elif (( ! DO_BUILD )); then
+  log "--no-build: skipping binary install."
 fi
 
 #-------- 4. Refresh systemd units ----------------------------------------
