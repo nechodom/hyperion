@@ -3,6 +3,7 @@
 use crate::{cmd, fs::atomic_write, AdapterError};
 use askama::Template;
 use hyperion_types::PhpVersion;
+use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
@@ -59,8 +60,76 @@ pub fn pool_path(input: &PoolInput<'_>) -> PathBuf {
     PathBuf::from(input.php_version.pool_dir()).join(format!("{}.conf", input.system_user))
 }
 
+/// Self-heal: ensure `/run/php/<ver>/` exists with mode 0755 for
+/// every supported PHP version. Best-effort, never errors. Called from
+/// the agent's startup so an upgrade via `update.sh` (which restarts
+/// the agent) is enough to recover from the previous "missing dir →
+/// 502" bug on existing installs — no manual systemd-tmpfiles run
+/// required. Idempotent: running twice on a healthy system is a no-op.
+pub async fn ensure_socket_dirs() {
+    for v in PhpVersion::all() {
+        let dir = socket_parent_dir(*v);
+        if let Err(e) = tokio::fs::create_dir_all(&dir).await {
+            tracing::warn!(
+                error = %e,
+                path = %dir.display(),
+                "could not create FPM socket parent dir at startup"
+            );
+            continue;
+        }
+        let _ = tokio::fs::set_permissions(
+            &dir,
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .await;
+    }
+}
+
+/// Parent dir for the per-pool listen socket — e.g. `/run/php/8.3/`.
+///
+/// The pool template declares
+/// `listen = /run/php/<ver>/<user>.sock`, and the socket's parent dir
+/// must exist for PHP-FPM to bind successfully. Debian's php-fpm package
+/// creates `/run/php` but NOT per-version subdirs, and `/run` is a
+/// tmpfs that's wiped on reboot — without our tmpfiles.d snippet + this
+/// runtime mkdir, every fresh boot leaves PHP-FPM unable to open its
+/// socket and nginx returns 502 Bad Gateway.
+pub fn socket_parent_dir(php_version: PhpVersion) -> PathBuf {
+    PathBuf::from(format!("/run/php/{}", php_version.as_str()))
+}
+
 /// Render + atomic-write + reload. Idempotent.
+///
+/// Before writing the pool config we create `/run/php/<ver>/` (if it
+/// doesn't already exist) at mode 0755, owned by root. PHP-FPM master
+/// runs as root and opens the listen socket — we then chown the socket
+/// file itself to www-data:www-data via the `listen.owner/listen.group`
+/// directives in the pool template.
 pub async fn ensure_pool(input: &PoolInput<'_>) -> Result<PathBuf, AdapterError> {
+    // Make sure the socket's parent dir exists BEFORE we hand the pool
+    // config to PHP-FPM. Mode 0755 = world-traversable; nginx
+    // (www-data) needs the x-bit to reach the socket file inside.
+    let sock_parent = socket_parent_dir(input.php_version);
+    if let Err(e) = tokio::fs::create_dir_all(&sock_parent).await {
+        // Don't bail — log + continue. On a system with a healthy
+        // tmpfiles.d setup the dir already exists and this is a no-op;
+        // on a broken setup the FPM reload below will surface the real
+        // error with full context.
+        tracing::warn!(
+            error = %e,
+            path = %sock_parent.display(),
+            "could not pre-create FPM socket parent dir; FPM may fail to open its socket"
+        );
+    } else {
+        // Force 0755 even if the dir already existed — defends against
+        // an operator who restricted it manually.
+        let _ = tokio::fs::set_permissions(
+            &sock_parent,
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .await;
+    }
+
     let body = render(input)?;
     let path = pool_path(input);
     atomic_write(&path, body.as_bytes(), 0o644).await?;
@@ -148,5 +217,25 @@ mod tests {
     fn pool_path_shape() {
         let p = pool_path(&PoolInput::defaults("x", "x.cz", PhpVersion::V8_2));
         assert_eq!(p.to_string_lossy(), "/etc/php/8.2/fpm/pool.d/x.conf");
+    }
+
+    /// The socket parent dir is derived directly from the version. If
+    /// this drifts away from what the pool template writes into
+    /// `listen = ...`, FPM would try to bind in a different directory
+    /// than what we mkdir → 502. Lock the two together.
+    #[test]
+    fn socket_parent_dir_matches_rendered_listen() {
+        for v in PhpVersion::all() {
+            let parent = socket_parent_dir(*v);
+            let rendered = render(&PoolInput::defaults("user1", "u.cz", *v)).expect("render");
+            // The template emits `listen = /run/php/<ver>/user1.sock`.
+            // The first '/' of /user1.sock starts immediately after the
+            // dir. Strip it and compare.
+            let expected_listen = format!("listen = {}/user1.sock", parent.display());
+            assert!(
+                rendered.contains(&expected_listen),
+                "pool config must declare `{expected_listen}`. got: {rendered}"
+            );
+        }
     }
 }

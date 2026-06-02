@@ -296,6 +296,16 @@ for unit in hyperion-agent hyperion-web; do
 done
 systemctl daemon-reload
 
+# Per-version /run/php/<ver>/ subdirs for FPM sockets. Without this
+# reboot wipes /run/* and PHP-FPM fails to open its per-pool socket on
+# the next boot → nginx returns 502. Drop the snippet AND materialize
+# the dirs right now so the first hosting create after install works.
+tmpfiles_src="$INSTALL_DIR/packaging/systemd/hyperion-php-fpm-runtime.conf"
+if [[ -f "$tmpfiles_src" ]]; then
+  install -m 0644 "$tmpfiles_src" /etc/tmpfiles.d/hyperion-php-fpm-runtime.conf
+  systemd-tmpfiles --create /etc/tmpfiles.d/hyperion-php-fpm-runtime.conf || true
+fi
+
 #-------- 9. MariaDB hardening (one-shot) ---------------------------------
 if ! mariadb -e "SELECT 1" >/dev/null 2>&1; then
   log "NOTE: mariadb-secure-installation requires interactive input."

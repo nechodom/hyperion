@@ -55,6 +55,14 @@ async fn main() -> anyhow::Result<()> {
     }
     hyperion_core::ensure_ancestors_traversable(&cfg.acme.challenge_dir).await;
 
+    // Same shape of self-heal for /run/php/<ver>/ socket dirs. Without
+    // these, PHP-FPM can't open its per-pool sockets and nginx 502s.
+    // /run is tmpfs (wiped on reboot) — the install scripts drop a
+    // tmpfiles.d snippet so systemd recreates them at boot, but this
+    // call covers in-place upgrades where the snippet isn't installed
+    // yet or systemd-tmpfiles hasn't run since.
+    hyperion_core::ensure_phpfpm_socket_dirs().await;
+
     let pool = hyperion_state::open(&cfg.agent.state_db).await?;
     let secrets = Arc::new(hyperion_core::SecretsStore::new(
         cfg.agent.secrets_dir.clone(),

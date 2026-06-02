@@ -198,6 +198,22 @@ refresh_unit() {
 (( HAVE_AGENT )) && refresh_unit hyperion-agent
 (( HAVE_WEB   )) && refresh_unit hyperion-web
 
+# Per-version /run/php/<ver>/ subdirs for FPM sockets — without this
+# hyperion's per-user FPM pools (listen = /run/php/8.x/<user>.sock)
+# fail to open and nginx returns 502. /run is tmpfs so the snippet
+# must be in /etc/tmpfiles.d/ to survive reboots.
+tmpfiles_src="$INSTALL_DIR/packaging/systemd/hyperion-php-fpm-runtime.conf"
+if [[ -f "$tmpfiles_src" ]]; then
+  if ! cmp -s "$tmpfiles_src" /etc/tmpfiles.d/hyperion-php-fpm-runtime.conf 2>/dev/null; then
+    log "Installing systemd-tmpfiles snippet for /run/php/<ver>/ ..."
+    install -m 0644 "$tmpfiles_src" /etc/tmpfiles.d/hyperion-php-fpm-runtime.conf
+    systemd-tmpfiles --create /etc/tmpfiles.d/hyperion-php-fpm-runtime.conf || true
+  fi
+  # Always re-materialize the dirs (idempotent + heals borked installs
+  # where /run/php/8.x was missing from a previous reboot).
+  systemd-tmpfiles --create /etc/tmpfiles.d/hyperion-php-fpm-runtime.conf >/dev/null 2>&1 || true
+fi
+
 #-------- 4-aux. Make sure PHP-FPM + web/db daemons are enabled -----------
 # Older install-master.sh installed the packages but never enabled the
 # services; first hosting create then failed with

@@ -26,4 +26,9 @@ pub use hyperion_adapters::email::EmailConfig;
 // can call it at startup without adding a hyperion-adapters dep.
 pub use hyperion_adapters::fs::ensure_ancestors_traversable;
 
+// Same pattern — agent calls this at startup to ensure /run/php/<ver>/
+// exists for every supported PHP version. Without it nginx 502s on
+// every fresh boot until something triggers ensure_pool.
+pub use hyperion_adapters::phpfpm::ensure_socket_dirs as ensure_phpfpm_socket_dirs;
+
 // Re-export profile types via hyperion_types — they live there.

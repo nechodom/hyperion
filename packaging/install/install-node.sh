@@ -223,6 +223,14 @@ if [[ -f "$INSTALL_DIR/packaging/systemd/hyperion-agent.service" ]]; then
     /etc/systemd/system/hyperion-agent.service
 fi
 systemctl daemon-reload
+
+# /run/php/<ver>/ subdirs for FPM sockets — see install-master.sh for
+# the rationale. Required for HTTP requests to reach PHP-FPM.
+tmpfiles_src="$INSTALL_DIR/packaging/systemd/hyperion-php-fpm-runtime.conf"
+if [[ -f "$tmpfiles_src" ]]; then
+  install -m 0644 "$tmpfiles_src" /etc/tmpfiles.d/hyperion-php-fpm-runtime.conf
+  systemd-tmpfiles --create /etc/tmpfiles.d/hyperion-php-fpm-runtime.conf || true
+fi
 systemctl enable --now hyperion-agent
 sleep 1
 systemctl --no-pager --quiet is-active hyperion-agent || \
