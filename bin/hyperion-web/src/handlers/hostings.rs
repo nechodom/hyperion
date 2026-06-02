@@ -86,6 +86,9 @@ struct DetailTpl<'a> {
     applied_profile_name: Option<String>,
     profiles: Vec<HostingProfile>,
     spf: Option<SpfCheckResult>,
+    csrf_ftp_set: String,
+    csrf_ftp_disable: String,
+    ftp_new_password: Option<String>,
     error: Option<&'a str>,
     wp_error: Option<String>,
     wp_flash: Option<String>,
@@ -103,6 +106,8 @@ struct DetailTpl<'a> {
     db_flash: Option<String>,
     profile_error: Option<String>,
     profile_flash: Option<String>,
+    ftp_error: Option<String>,
+    ftp_flash: Option<String>,
     just_created: Option<HostingCreated>,
 }
 
@@ -279,6 +284,9 @@ pub async fn post_create(
                 applied_profile_name: None,
                 profiles: vec![],
                 spf: None,
+                csrf_ftp_set: csrf_token_for(&state, &ctx, "/hostings/ftp/set"),
+                csrf_ftp_disable: csrf_token_for(&state, &ctx, "/hostings/ftp/disable"),
+                ftp_new_password: None,
                 error: None,
                 wp_error: None,
                 wp_flash: None,
@@ -296,6 +304,8 @@ pub async fn post_create(
                 db_flash: None,
                 profile_error: None,
                 profile_flash: None,
+                ftp_error: None,
+                ftp_flash: None,
                 just_created: Some(created),
             };
             Ok(Html(tpl.render()?).into_response())
@@ -392,6 +402,9 @@ pub async fn get_detail(
         applied_profile_name,
         profiles,
         spf,
+        csrf_ftp_set: csrf_token_for(&state, &ctx, "/hostings/ftp/set"),
+        csrf_ftp_disable: csrf_token_for(&state, &ctx, "/hostings/ftp/disable"),
+        ftp_new_password: q.ftp_pw,
         error: None,
         wp_error: q.wp_error,
         wp_flash: q.wp.map(|s| {
@@ -427,6 +440,14 @@ pub async fn get_detail(
         db_flash: q.db.map(|_| "Database password reset.".into()),
         profile_error: q.profile_error,
         profile_flash: q.profile.map(|_| "Profile applied.".into()),
+        ftp_error: q.ftp_error,
+        ftp_flash: q.ftp.map(|s| {
+            if s == "disabled" {
+                "FTP disabled — password cleared.".into()
+            } else {
+                "FTP password set.".into()
+            }
+        }),
         just_created: None,
     };
     Ok(Html(tpl.render()?).into_response())
@@ -512,6 +533,15 @@ pub struct DetailQuery {
     pub profile: Option<String>,
     #[serde(default)]
     pub profile_error: Option<String>,
+    #[serde(default)]
+    pub ftp: Option<String>,
+    #[serde(default)]
+    pub ftp_error: Option<String>,
+    /// Newly-set FTP password — shown ONCE then dropped. Carried in
+    /// the query string after a successful POST so the redirect lands
+    /// the operator on the page WITH the password visible.
+    #[serde(default)]
+    pub ftp_pw: Option<String>,
 }
 
 async fn fetch_expiry(
@@ -1396,6 +1426,72 @@ pub async fn post_db_reset(
         RpcResponse::Error(e) => {
             let msg = urlencoding(&e.to_string());
             Ok(Redirect::to(&format!("/hostings/{}?db_error={}", sel_url, msg)).into_response())
+        }
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct FtpSetForm {
+    pub selector: String,
+    /// Empty → server generates one.
+    #[serde(default)]
+    pub new_password: String,
+}
+
+pub async fn post_ftp_set(
+    State(state): State<SharedState>,
+    Form(form): Form<FtpSetForm>,
+) -> Result<Response, AppError> {
+    let sel = parse_selector(&form.selector)?;
+    let sel_url = urlencoding(&form.selector);
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::FtpSetPassword {
+            sel,
+            new_password: form.new_password,
+        },
+    )
+    .await?;
+    match resp {
+        RpcResponse::FtpSetPassword { password } => {
+            Ok(Redirect::to(&format!(
+                "/hostings/{}?ftp=set&ftp_pw={}#settings",
+                sel_url,
+                urlencoding(&password)
+            ))
+            .into_response())
+        }
+        RpcResponse::Error(e) => {
+            let msg = urlencoding(&e.to_string());
+            Ok(Redirect::to(&format!("/hostings/{}?ftp_error={}#settings", sel_url, msg))
+                .into_response())
+        }
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct FtpDisableForm {
+    pub selector: String,
+}
+
+pub async fn post_ftp_disable(
+    State(state): State<SharedState>,
+    Form(form): Form<FtpDisableForm>,
+) -> Result<Response, AppError> {
+    let sel = parse_selector(&form.selector)?;
+    let sel_url = urlencoding(&form.selector);
+    let resp =
+        hyperion_rpc_client::call(&state.agent_socket, Request::FtpDisable { sel }).await?;
+    match resp {
+        RpcResponse::FtpDisable => {
+            Ok(Redirect::to(&format!("/hostings/{}?ftp=disabled#settings", sel_url)).into_response())
+        }
+        RpcResponse::Error(e) => {
+            let msg = urlencoding(&e.to_string());
+            Ok(Redirect::to(&format!("/hostings/{}?ftp_error={}#settings", sel_url, msg))
+                .into_response())
         }
         _ => Err(AppError::Internal("unexpected response".into())),
     }

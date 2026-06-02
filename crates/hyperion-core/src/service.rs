@@ -1531,6 +1531,72 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(())
     }
 
+    /// Set / replace the FTP (Linux) password for the hosting's
+    /// system user. Empty input → generate a random 20-char password
+    /// and return it. Caller is expected to show the returned password
+    /// to the operator exactly once.
+    pub async fn ftp_set_password(
+        &self,
+        sel: HostingSelector,
+        new_password: String,
+    ) -> Result<String, RpcError> {
+        let detail = self.get(sel).await?;
+        if detail.state == HostingState::Deleting {
+            return Err(RpcError::Conflict {
+                message: "cannot set FTP password on a deleting hosting".into(),
+            });
+        }
+        let password = if new_password.trim().is_empty() {
+            hyperion_adapters::random_password()
+        } else {
+            if new_password.len() < 12 {
+                return Err(RpcError::Validation {
+                    message: "FTP password must be at least 12 characters".into(),
+                });
+            }
+            new_password
+        };
+        hyperion_adapters::ftp::ensure_vsftpd_running()
+            .await
+            .map_err(|e| RpcError::ProvisioningFailed {
+                stage: "vsftpd".into(),
+                reason: e.to_string(),
+            })?;
+        hyperion_adapters::ftp::set_user_password(&detail.system_user, &password)
+            .await
+            .map_err(|e| RpcError::ProvisioningFailed {
+                stage: "chpasswd".into(),
+                reason: e.to_string(),
+            })?;
+        self.append_audit(
+            "hosting.ftp.set_password",
+            Some(detail.id.as_str()),
+            &serde_json::json!({"user": detail.system_user}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(password)
+    }
+
+    /// Disable FTP for the hosting's system user (`passwd -d <user>`).
+    pub async fn ftp_disable(&self, sel: HostingSelector) -> Result<(), RpcError> {
+        let detail = self.get(sel).await?;
+        hyperion_adapters::ftp::clear_user_password(&detail.system_user)
+            .await
+            .map_err(|e| RpcError::ProvisioningFailed {
+                stage: "passwd_disable".into(),
+                reason: e.to_string(),
+            })?;
+        self.append_audit(
+            "hosting.ftp.disable",
+            Some(detail.id.as_str()),
+            &serde_json::json!({"user": detail.system_user}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
     /// Reset the DB password for a hosting, persisting the new secret.
     pub async fn db_reset_password(
         &self,

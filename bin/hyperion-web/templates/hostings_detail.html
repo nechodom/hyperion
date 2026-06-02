@@ -626,6 +626,59 @@
   {% endif %}
 </div>
 
+<div class="card hover">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+    FTP access
+  </h2>
+  <p class="muted" style="font-size:0.85rem;margin-top:-0.4rem;margin-bottom:0.8rem">
+    Give the client FTP/FTPS credentials for <code>{{ detail.system_user }}</code> — vsftpd authenticates against the system user and chroots them to <code>/home/{{ detail.system_user }}</code>.
+  </p>
+
+  {% if let Some(m) = ftp_flash %}<div class="flash success" style="margin-bottom:1rem"><div class="flash-body">{{ m }}</div></div>{% endif %}
+  {% if let Some(e) = ftp_error %}<div class="flash error" style="margin-bottom:1rem"><div class="flash-body">{{ e }}</div></div>{% endif %}
+
+  {% if let Some(pw) = ftp_new_password %}
+    <div class="flash success">
+      <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+      <div class="flash-body">
+        <strong>New FTP password (shown once)</strong>
+        <div style="display:flex;gap:0.5rem;align-items:center;margin-top:0.4rem">
+          <code style="flex:1;padding:0.5rem;background:var(--surface-2);border-radius:var(--radius-xs);font-size:0.92rem">{{ pw }}</code>
+        </div>
+        <div class="muted" style="font-size:0.82rem;margin-top:0.5rem">
+          Connect with:<br>
+          <code style="font-size:0.8rem">ftp://{{ detail.system_user }}@&lt;server-host&gt;</code> · port 21 (FTPS) · chroot <code>/home/{{ detail.system_user }}</code>
+        </div>
+      </div>
+    </div>
+  {% endif %}
+
+  <dl class="kv">
+    <dt>System user</dt><dd><code>{{ detail.system_user }}</code></dd>
+    <dt>Chroot dir</dt><dd><code>/home/{{ detail.system_user }}</code></dd>
+    <dt>Files at</dt><dd><code>/home/{{ detail.system_user }}/{{ detail.domain }}/htdocs</code></dd>
+  </dl>
+
+  <div class="row" style="margin-top:0.7rem;gap:0.5rem">
+    <form method="post" action="/hostings/ftp/set" style="display:inline">
+      <input type="hidden" name="_csrf" value="{{ csrf_ftp_set }}">
+      <input type="hidden" name="selector" value="{{ detail.domain }}">
+      <input type="hidden" name="new_password" value="">
+      <button class="btn primary" type="submit">
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+        Generate &amp; set FTP password
+      </button>
+    </form>
+    <form method="post" action="/hostings/ftp/disable" style="display:inline"
+          onsubmit="return confirm('Disable FTP for {{ detail.system_user }}? Current password is cleared.');">
+      <input type="hidden" name="_csrf" value="{{ csrf_ftp_disable }}">
+      <input type="hidden" name="selector" value="{{ detail.domain }}">
+      <button class="btn" type="submit">Disable FTP</button>
+    </form>
+  </div>
+</div>
+
 </div><!-- /tab-settings -->
 
 <div class="tab-panel" id="tab-backups">

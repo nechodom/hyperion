@@ -13,6 +13,7 @@ pub mod backup;
 pub mod cmd;
 pub mod email;
 pub mod fs;
+pub mod ftp;
 pub mod mariadb;
 pub mod nginx;
 pub mod nodejs;

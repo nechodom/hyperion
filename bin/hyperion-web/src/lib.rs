@@ -73,6 +73,14 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::hostings::post_db_reset),
         )
         .route(
+            "/hostings/ftp/set",
+            post(handlers::hostings::post_ftp_set),
+        )
+        .route(
+            "/hostings/ftp/disable",
+            post(handlers::hostings::post_ftp_disable),
+        )
+        .route(
             "/hostings/restore-upload",
             post(handlers::hostings::post_restore_upload)
                 .layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024 * 1024)),

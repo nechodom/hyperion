@@ -138,6 +138,13 @@ pub enum Request {
         sel: HostingSelector,
         new_password: String,
     },
+    FtpSetPassword {
+        sel: HostingSelector,
+        new_password: String,
+    },
+    FtpDisable {
+        sel: HostingSelector,
+    },
     DashboardAlerts,
     ProfileList,
     ProfileGet { id: i64 },
@@ -192,6 +199,8 @@ pub enum Response {
     NodeHeartbeat,
     WpResetPassword,
     DbResetPassword,
+    FtpSetPassword { password: String },
+    FtpDisable,
     DashboardAlerts(Vec<DashboardAlert>),
     ProfileList(Vec<HostingProfile>),
     ProfileGet(HostingProfile),

@@ -277,6 +277,16 @@ async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::FtpSetPassword { sel, new_password } => {
+            match api.ftp_set_password(sel, new_password).await {
+                Ok(password) => Response::FtpSetPassword { password },
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::FtpDisable { sel } => match api.ftp_disable(sel).await {
+            Ok(_) => Response::FtpDisable,
+            Err(e) => Response::Error(e),
+        },
         Request::DashboardAlerts => match api.dashboard_alerts().await {
             Ok(v) => Response::DashboardAlerts(v),
             Err(e) => Response::Error(e),
@@ -533,6 +543,16 @@ mod tests {
             _: HostingSelector,
             _: String,
         ) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn ftp_set_password(
+            &self,
+            _: HostingSelector,
+            _: String,
+        ) -> Result<String, RpcError> {
+            Ok("test-ftp-pw".into())
+        }
+        async fn ftp_disable(&self, _: HostingSelector) -> Result<(), RpcError> {
             Ok(())
         }
         async fn dashboard_alerts(&self) -> Result<Vec<DashboardAlert>, RpcError> {

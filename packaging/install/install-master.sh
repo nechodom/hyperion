@@ -59,7 +59,7 @@ apt-get update -qq
 log "Installing base packages..."
 apt-get install -y -qq \
   curl ca-certificates gnupg lsb-release pkg-config build-essential git \
-  nginx mariadb-server postgresql
+  nginx mariadb-server postgresql vsftpd
 
 mkdir -p /etc/apt/keyrings
 
@@ -79,6 +79,35 @@ apt-get install -y -qq \
 systemctl enable --now php8.3-fpm
 # nginx + mariadb + postgres also need to be running for hostings to work.
 systemctl enable --now nginx mariadb postgresql || true
+
+# vsftpd: PAM-auth + chroot + local users. Operator opts in per hosting
+# via "Set FTP password" in the UI. We tighten the default config and
+# allow /usr/sbin/nologin so the hosting system_users (who have that
+# shell to block SSH) can still FTP in.
+if ! grep -q "/usr/sbin/nologin" /etc/shells 2>/dev/null; then
+  echo "/usr/sbin/nologin" >> /etc/shells
+fi
+if [[ ! -f /etc/vsftpd.conf.hyperion-orig && -f /etc/vsftpd.conf ]]; then
+  cp /etc/vsftpd.conf /etc/vsftpd.conf.hyperion-orig
+  cat > /etc/vsftpd.conf <<'EOFV'
+listen=YES
+listen_ipv6=NO
+anonymous_enable=NO
+local_enable=YES
+write_enable=YES
+local_umask=022
+chroot_local_user=YES
+allow_writeable_chroot=YES
+pam_service_name=vsftpd
+secure_chroot_dir=/var/run/vsftpd/empty
+user_sub_token=$USER
+local_root=/home/$USER
+xferlog_enable=YES
+xferlog_std_format=YES
+seccomp_sandbox=NO
+EOFV
+fi
+systemctl enable --now vsftpd || true
 
 #-------- 3b. wp-cli (WordPress installer dependency) ----------------------
 # wpcli adapter shells out to /usr/local/bin/wp; without it WordPress

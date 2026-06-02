@@ -194,7 +194,7 @@ refresh_unit() {
 # services; first hosting create then failed with
 #   "php8.3-fpm.service is not active, cannot reload"
 # Bring them up here so the agent's adapter never has to self-heal.
-for svc in nginx mariadb postgresql \
+for svc in nginx mariadb postgresql vsftpd \
            php8.1-fpm php8.2-fpm php8.3-fpm php8.4-fpm; do
   if systemctl list-unit-files --no-pager "$svc.service" 2>/dev/null \
        | grep -q "^$svc.service"; then

@@ -294,6 +294,18 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.db_reset_password(sel, new_password).await
     }
 
+    async fn ftp_set_password(
+        &self,
+        sel: HostingSelector,
+        new_password: String,
+    ) -> Result<String, RpcError> {
+        self.svc.ftp_set_password(sel, new_password).await
+    }
+
+    async fn ftp_disable(&self, sel: HostingSelector) -> Result<(), RpcError> {
+        self.svc.ftp_disable(sel).await
+    }
+
     async fn dashboard_alerts(&self) -> Result<Vec<DashboardAlert>, RpcError> {
         self.svc.dashboard_alerts().await
     }

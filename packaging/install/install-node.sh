@@ -61,7 +61,7 @@ log "Installing base packages..."
 apt-get update -qq
 apt-get install -y -qq \
   curl ca-certificates gnupg lsb-release pkg-config build-essential git \
-  nginx mariadb-server postgresql
+  nginx mariadb-server postgresql vsftpd
 
 mkdir -p /etc/apt/keyrings
 if [[ ! -f /etc/apt/keyrings/sury-php.gpg ]]; then
@@ -75,6 +75,32 @@ apt-get install -y -qq \
   php8.3-fpm php8.3-cli php8.3-mysql php8.3-pgsql
 systemctl enable --now php8.3-fpm
 systemctl enable --now nginx mariadb postgresql || true
+
+# vsftpd setup (same as install-master.sh)
+if ! grep -q "/usr/sbin/nologin" /etc/shells 2>/dev/null; then
+  echo "/usr/sbin/nologin" >> /etc/shells
+fi
+if [[ ! -f /etc/vsftpd.conf.hyperion-orig && -f /etc/vsftpd.conf ]]; then
+  cp /etc/vsftpd.conf /etc/vsftpd.conf.hyperion-orig
+  cat > /etc/vsftpd.conf <<'EOFV'
+listen=YES
+listen_ipv6=NO
+anonymous_enable=NO
+local_enable=YES
+write_enable=YES
+local_umask=022
+chroot_local_user=YES
+allow_writeable_chroot=YES
+pam_service_name=vsftpd
+secure_chroot_dir=/var/run/vsftpd/empty
+user_sub_token=$USER
+local_root=/home/$USER
+xferlog_enable=YES
+xferlog_std_format=YES
+seccomp_sandbox=NO
+EOFV
+fi
+systemctl enable --now vsftpd || true
 
 # wp-cli — required for WordPress install requests dispatched from master.
 if [[ ! -x /usr/local/bin/wp ]]; then

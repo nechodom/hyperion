@@ -202,6 +202,17 @@ pub trait AgentApi: Send + Sync + 'static {
         new_password: String,
     ) -> Result<(), RpcError>;
 
+    /// Set / generate the FTP password for the hosting's system user.
+    /// Empty `new_password` → server generates one. Returns the
+    /// password that was set (caller shows it once).
+    async fn ftp_set_password(
+        &self,
+        sel: HostingSelector,
+        new_password: String,
+    ) -> Result<String, RpcError>;
+    /// Disable FTP (passwd -d <user>).
+    async fn ftp_disable(&self, sel: HostingSelector) -> Result<(), RpcError>;
+
     /// Restore a hosting from a previously-taken backup archive. The path
     /// must point at one of OUR archives (under /var/lib/hyperion/backups
     /// or an operator-uploaded copy in /var/lib/hyperion/backups/incoming).

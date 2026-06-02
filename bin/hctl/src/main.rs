@@ -560,6 +560,11 @@ fn print_pretty(resp: &Response) {
         }
         Response::WpResetPassword => println!("✓ WordPress admin password reset"),
         Response::DbResetPassword => println!("✓ DB password reset (secret updated)"),
+        Response::FtpSetPassword { password } => {
+            println!("✓ FTP password set");
+            println!("  password (shown once): {password}");
+        }
+        Response::FtpDisable => println!("✓ FTP disabled (password cleared)"),
         Response::ProfileList(rows) => {
             for p in rows {
                 println!(
