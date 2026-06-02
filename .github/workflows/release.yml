@@ -59,11 +59,11 @@ jobs:
           echo "short_sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
           echo "build_date=$BUILD_DATE" >> "$GITHUB_OUTPUT"
 
-      - name: Publish "main" rolling release
+      - name: Publish rolling release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: main
-          name: "Rolling build (main)"
+          tag_name: rolling
+          name: "Rolling build (latest main)"
           body: |
             Auto-built rolling release. Always tracks `main`.
 
@@ -73,9 +73,9 @@ jobs:
             - **target**: x86_64-unknown-linux-gnu (Debian 12+ compatible)
 
             ```
-            curl -fsSL https://github.com/${{ github.repository }}/releases/download/main/hyperion-agent -o /usr/sbin/hyperion-agent
-            curl -fsSL https://github.com/${{ github.repository }}/releases/download/main/hyperion-web   -o /usr/sbin/hyperion-web
-            curl -fsSL https://github.com/${{ github.repository }}/releases/download/main/hctl           -o /usr/bin/hctl
+            curl -fsSL https://github.com/${{ github.repository }}/releases/download/rolling/hyperion-agent -o /usr/sbin/hyperion-agent
+            curl -fsSL https://github.com/${{ github.repository }}/releases/download/rolling/hyperion-web   -o /usr/sbin/hyperion-web
+            curl -fsSL https://github.com/${{ github.repository }}/releases/download/rolling/hctl           -o /usr/bin/hctl
             ```
 
             But the recommended path is `sudo /opt/hyperion/packaging/install/update.sh` — it auto-detects this release and falls back to local build if unavailable.

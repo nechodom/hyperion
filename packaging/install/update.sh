@@ -26,7 +26,8 @@
 #   HYPERION_REF           default main (branch/tag/sha)
 #   HYPERION_GIT_TOKEN     PAT for private-repo HTTPS auth
 #   HYPERION_RELEASE_REPO  default nechodom/hyperion — owner/repo for releases
-#   HYPERION_RELEASE_TAG   default main — release tag to pull (rolling)
+#   HYPERION_RELEASE_TAG   default rolling — release tag to pull
+#                          (CI overwrites it on every push to main)
 #
 # Flags:
 #   --repair       Also drop orphan hostings rows in
@@ -52,7 +53,7 @@ INSTALL_DIR="${HYPERION_INSTALL_DIR:-/opt/hyperion}"
 REF="${HYPERION_REF:-main}"
 GIT_TOKEN="${HYPERION_GIT_TOKEN:-}"
 RELEASE_REPO="${HYPERION_RELEASE_REPO:-nechodom/hyperion}"
-RELEASE_TAG="${HYPERION_RELEASE_TAG:-main}"   # rolling tag, set by GH Actions
+RELEASE_TAG="${HYPERION_RELEASE_TAG:-rolling}"   # rolling tag, set by GH Actions
 REPAIR=0
 DO_BUILD=1
 PREFER_PREBUILT=1
@@ -116,11 +117,19 @@ esac
 AP
   chmod 0700 "$GIT_ASKPASS"
   trap "rm -f $GIT_ASKPASS" EXIT
-  git -c core.askPass="$GIT_ASKPASS" fetch origin "$REF"
+  # Prune stale refs + fetch the BRANCH ref explicitly (CI publishes a
+  # release tag also called "main", and a plain `git fetch origin main`
+  # picks the tag over the branch — leaving you stuck on whatever
+  # commit the last release was built from).
+  git -c core.askPass="$GIT_ASKPASS" fetch --prune --tags --force origin \
+      "refs/heads/$REF:refs/remotes/origin/$REF"
 else
   log "Fetching origin ..."
-  git fetch origin "$REF"
+  git fetch --prune --tags --force origin \
+      "refs/heads/$REF:refs/remotes/origin/$REF"
 fi
+# Reset to the BRANCH tip (origin/$REF is now unambiguously the remote
+# tracking branch, not the rolling release tag of the same name).
 git reset --hard "origin/$REF"
 NEW=$(git rev-parse --short HEAD)
 log "Source: $PREV → $NEW"
