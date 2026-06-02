@@ -89,6 +89,14 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/stats", get(handlers::stats::get_stats))
         .route("/profiles", get(handlers::profiles::get_profiles))
         .route("/profiles/create", post(handlers::profiles::post_create))
+        .route(
+            "/profiles/:id/edit",
+            get(handlers::profiles::get_edit),
+        )
+        .route(
+            "/profiles/:id/update",
+            post(handlers::profiles::post_update),
+        )
         .route("/profiles/delete", post(handlers::profiles::post_delete))
         .route("/profiles/apply", post(handlers::profiles::post_apply))
         .route("/audit", get(handlers::audit::get_audit))

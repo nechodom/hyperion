@@ -1,0 +1,128 @@
+{% extends "base.html" %}
+{% block title %}Edit profile · {{ profile.name }} · hyperion{% endblock %}
+{% block main %}
+<div class="breadcrumbs">
+  <a href="/profiles">Profiles</a>
+  <span class="sep">›</span>
+  <span>{{ profile.name }}</span>
+</div>
+<div class="page-header">
+  <div>
+    <h1>Edit profile: {{ profile.name }}</h1>
+    <div class="subtitle">Changes apply only to hostings you (re-)apply this profile to from now on. Already-applied hostings keep their current values until re-applied.</div>
+  </div>
+  <span class="grow"></span>
+  <div class="actions">
+    <a href="/profiles" class="btn ghost">
+      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+      Back
+    </a>
+  </div>
+</div>
+
+{% if let Some(e) = error %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">{{ e }}</div>
+  </div>
+{% endif %}
+
+<div class="card hover">
+  <form method="post" action="/profiles/{{ profile.id }}/update">
+    <input type="hidden" name="_csrf" value="{{ csrf_update }}">
+    <div class="field-row">
+      <div class="field">
+        <label for="p_name">Name <span class="hint">unique short label</span></label>
+        <input id="p_name" name="name" type="text" required maxlength="64" value="{{ profile.name }}">
+      </div>
+      <div class="field">
+        <label for="p_desc">Description <span class="hint">optional</span></label>
+        <input id="p_desc" name="description" type="text" maxlength="200" value="{{ profile.description }}">
+      </div>
+    </div>
+
+    <h2 style="font-size:0.95rem;margin:1.5rem 0 0.6rem">Limits</h2>
+    <div class="field-row">
+      <div class="field">
+        <label for="p_php_memory">PHP memory <span class="hint">MB</span></label>
+        <input id="p_php_memory" name="php_memory_mb" type="number" min="16" max="8192" value="{{ profile.php_memory_mb }}">
+      </div>
+      <div class="field">
+        <label for="p_php_exec">PHP max_exec <span class="hint">sec</span></label>
+        <input id="p_php_exec" name="php_max_exec_secs" type="number" min="1" max="3600" value="{{ profile.php_max_exec_secs }}">
+      </div>
+    </div>
+    <div class="field-row">
+      <div class="field">
+        <label for="p_php_children">PHP-FPM max_children</label>
+        <input id="p_php_children" name="php_max_children" type="number" min="1" max="200" value="{{ profile.php_max_children }}">
+      </div>
+      <div class="field">
+        <label for="p_php_reqs">PHP-FPM max_requests</label>
+        <input id="p_php_reqs" name="php_max_requests" type="number" min="0" value="{{ profile.php_max_requests }}">
+      </div>
+    </div>
+    <div class="field-row">
+      <div class="field">
+        <label for="p_db_max">DB max connections</label>
+        <input id="p_db_max" name="db_max_connections" type="number" min="1" max="1000" value="{{ profile.db_max_connections }}">
+      </div>
+      <div class="field">
+        <label for="p_disk">Disk limit <span class="hint">MB · blank = unlimited</span></label>
+        <input id="p_disk" name="disk_hard_mb" type="number" min="0" value="{% if let Some(m) = profile.disk_hard_mb %}{{ m }}{% endif %}">
+      </div>
+    </div>
+    <div class="field">
+      <label for="p_bw">Monthly bandwidth <span class="hint">MB · blank = unlimited</span></label>
+      <input id="p_bw" name="bw_monthly_mb" type="number" min="0" value="{% if let Some(m) = profile.bw_monthly_mb %}{{ m }}{% endif %}">
+    </div>
+
+    <h2 style="font-size:0.95rem;margin:1.5rem 0 0.6rem">Expiration policy</h2>
+    <div class="field-row">
+      <div class="field">
+        <label for="p_grace">Grace period <span class="hint">days after expiry → auto-delete</span></label>
+        <input id="p_grace" name="expiry_grace_days" type="number" min="0" max="365" value="{{ profile.expiry_grace_days }}">
+      </div>
+      <div class="field">
+        <label for="p_off">Warning offsets <span class="hint">days before expiry, comma-sep</span></label>
+        <input id="p_off" name="expiry_warning_offsets" type="text" value="{{ profile.expiry_warning_offsets }}">
+      </div>
+    </div>
+
+    <h2 style="font-size:0.95rem;margin:1.5rem 0 0.6rem">Pricing <span class="muted" style="font-weight:400;font-size:0.82rem">— blank to remove</span></h2>
+    <div class="field-row three">
+      <div class="field">
+        <label for="p_price">Price <span class="hint">major units, e.g. 199.00</span></label>
+        <input id="p_price" name="price_major" type="text" inputmode="decimal" value="{{ price_major }}">
+      </div>
+      <div class="field">
+        <label for="p_currency">Currency <span class="hint">ISO 4217</span></label>
+        <input id="p_currency" name="price_currency" type="text" maxlength="3" value="{% if let Some(c) = profile.price_currency %}{{ c }}{% endif %}" style="text-transform:uppercase">
+      </div>
+      <div class="field">
+        <label for="p_interval">Interval</label>
+        <select id="p_interval" name="price_interval">
+          <option value="">none</option>
+          <option value="monthly"   {% if let Some(iv) = profile.price_interval %}{% if iv == "monthly"   %}selected{% endif %}{% endif %}>monthly</option>
+          <option value="quarterly" {% if let Some(iv) = profile.price_interval %}{% if iv == "quarterly" %}selected{% endif %}{% endif %}>quarterly</option>
+          <option value="yearly"    {% if let Some(iv) = profile.price_interval %}{% if iv == "yearly"    %}selected{% endif %}{% endif %}>yearly</option>
+        </select>
+      </div>
+    </div>
+
+    <h2 style="font-size:0.95rem;margin:1.5rem 0 0.6rem">Notifications <span class="muted" style="font-weight:400;font-size:0.82rem">— optional</span></h2>
+    <div class="field">
+      <label for="p_slack">Slack incoming webhook URL <span class="hint">overrides the global default</span></label>
+      <input id="p_slack" name="slack_webhook" type="url" value="{% if let Some(w) = profile.slack_webhook %}{{ w }}{% endif %}" placeholder="https://hooks.slack.com/services/T.../B.../...">
+    </div>
+
+    <div class="row" style="margin-top:1rem;gap:0.5rem">
+      <button class="btn primary" type="submit">
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+        Save changes
+      </button>
+      <a class="btn ghost" href="/profiles">Cancel</a>
+    </div>
+  </form>
+</div>
+{% endblock %}

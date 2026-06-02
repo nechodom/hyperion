@@ -27,6 +27,22 @@ struct ProfilesTpl<'a> {
     error: Option<String>,
 }
 
+#[derive(Template)]
+#[template(path = "profile_edit.html")]
+struct ProfileEditTpl<'a> {
+    username: &'a str,
+    user_initial: char,
+    active: &'static str,
+    css_version: &'static str,
+    htmx_version: &'static str,
+    profile: HostingProfile,
+    /// Pre-computed "price in major units" string so the form has a
+    /// clean default like "199.00" instead of "19900".
+    price_major: String,
+    csrf_update: String,
+    error: Option<String>,
+}
+
 #[derive(Deserialize, Default)]
 pub struct ProfilesQuery {
     #[serde(default)]
@@ -176,6 +192,103 @@ pub async fn post_create(
 #[derive(Deserialize)]
 pub struct DeleteForm {
     pub id: i64,
+}
+
+pub async fn get_edit(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+    Query(q): Query<EditQuery>,
+) -> Result<Response, AppError> {
+    let resp = hyperion_rpc_client::call(&state.agent_socket, Request::ProfileGet { id }).await?;
+    let profile = match resp {
+        RpcResponse::ProfileGet(p) => p,
+        RpcResponse::Error(hyperion_rpc::RpcError::NotFound { .. }) => {
+            return Err(AppError::NotFound)
+        }
+        RpcResponse::Error(e) => return Err(AppError::Rpc(e.to_string())),
+        _ => return Err(AppError::Internal("unexpected response".into())),
+    };
+    let price_major = match profile.price_minor {
+        Some(m) => format!("{:.2}", m as f64 / 100.0),
+        None => String::new(),
+    };
+    let tpl = ProfileEditTpl {
+        username: &ctx.username,
+        user_initial: super::user_initial(&ctx.username),
+        active: "profiles",
+        css_version: super::css_version(),
+        htmx_version: super::htmx_version(),
+        profile,
+        price_major,
+        csrf_update: csrf_token(&state, &ctx, &format!("/profiles/{}/update", id)),
+        error: q.error,
+    };
+    Ok(Html(tpl.render()?).into_response())
+}
+
+#[derive(Deserialize, Default)]
+pub struct EditQuery {
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+pub async fn post_update(
+    State(state): State<SharedState>,
+    axum::extract::Path(id): axum::extract::Path<i64>,
+    Form(form): Form<CreateForm>,
+) -> Result<Response, AppError> {
+    let price_minor = parse_price_major(&form.price_major)?;
+    let currency = form.price_currency.trim().to_string();
+    let interval = form.price_interval.trim().to_string();
+    let input = ProfileInput {
+        name: form.name,
+        description: form.description,
+        php_memory_mb: form.php_memory_mb,
+        php_max_exec_secs: form.php_max_exec_secs,
+        php_max_children: form.php_max_children,
+        php_max_requests: form.php_max_requests,
+        db_max_connections: form.db_max_connections,
+        disk_hard_mb: parse_opt_i64(&form.disk_hard_mb),
+        bw_monthly_mb: parse_opt_i64(&form.bw_monthly_mb),
+        expiry_grace_days: form.expiry_grace_days,
+        expiry_warning_offsets: form.expiry_warning_offsets,
+        price_minor,
+        price_currency: if currency.is_empty() {
+            None
+        } else {
+            Some(currency)
+        },
+        price_interval: if interval.is_empty() {
+            None
+        } else {
+            Some(interval)
+        },
+        slack_webhook: if form.slack_webhook.trim().is_empty() {
+            None
+        } else {
+            Some(form.slack_webhook.trim().to_string())
+        },
+    };
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::ProfileUpdate { id, input },
+    )
+    .await?;
+    match resp {
+        RpcResponse::ProfileUpdate(p) => Ok(Redirect::to(&format!(
+            "/profiles?flash={}",
+            urlencoding(&format!("Profile \"{}\" updated.", p.name))
+        ))
+        .into_response()),
+        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
+            "/profiles/{}/edit?error={}",
+            id,
+            urlencoding(&e.to_string())
+        ))
+        .into_response()),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
 }
 
 pub async fn post_delete(

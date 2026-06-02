@@ -50,12 +50,15 @@
           <td>{{ p.expiry_grace_days }} d</td>
           <td>{% if p.slack_webhook.is_some() %}<span class="pill ok">configured</span>{% else %}<span class="text-soft">—</span>{% endif %}</td>
           <td class="right">
-            <form method="post" action="/profiles/delete" style="display:inline"
-                  onsubmit="return confirm('Delete profile {{ p.name }}? Hostings keep their current values.');">
-              <input type="hidden" name="_csrf" value="{{ csrf_delete }}">
-              <input type="hidden" name="id" value="{{ p.id }}">
-              <button class="btn small danger" type="submit">Delete</button>
-            </form>
+            <div class="row-actions">
+              <a class="btn small" href="/profiles/{{ p.id }}/edit">Edit</a>
+              <form method="post" action="/profiles/delete" style="display:inline"
+                    onsubmit="return confirm('Delete profile {{ p.name }}? Hostings keep their current values.');">
+                <input type="hidden" name="_csrf" value="{{ csrf_delete }}">
+                <input type="hidden" name="id" value="{{ p.id }}">
+                <button class="btn small danger" type="submit">Delete</button>
+              </form>
+            </div>
           </td>
         </tr>
         {% endfor %}

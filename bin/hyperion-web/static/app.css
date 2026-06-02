@@ -502,9 +502,14 @@ table {
 .card.no-pad-table table { margin-top: 0.25rem; }
 th, td {
   text-align: left;
-  padding: 0.75rem 0.85rem;
+  padding: 0.6rem 0.85rem;
   border-bottom: 1px solid var(--border);
   vertical-align: middle;
+  line-height: 1.45;
+}
+th {
+  padding-top: 0.7rem;
+  padding-bottom: 0.7rem;
 }
 th {
   font-size: 0.72rem;
@@ -518,13 +523,20 @@ th:first-child, td:first-child { padding-left: 1.5rem; }
 th:last-child, td:last-child { padding-right: 1.5rem; }
 tbody tr {
   transition: background var(--t-fast);
+  background: var(--surface);  /* baseline so non-hover rows have a defined surface */
 }
-tbody tr:hover { background: var(--surface-2); }
+tbody tr:nth-child(even) {
+  background: color-mix(in oklab, var(--surface-2) 40%, var(--surface));
+}
+tbody tr:hover {
+  background: var(--surface-2);
+}
 tr:last-child td { border-bottom: none; }
 td .row-actions {
   display: flex;
   gap: 0.35rem;
   justify-content: flex-end;
+  align-items: center;
 }
 td a:not(.btn) {
   color: var(--text);
@@ -621,11 +633,17 @@ a.btn {
 }
 
 .btn.small {
-  padding: 0.35rem 0.7rem;
-  font-size: 0.8rem;
+  padding: 0.3rem 0.7rem;
+  font-size: 0.78rem;
+  line-height: 1.2;
   border-radius: var(--radius-xs);
 }
 .btn.small .btn-icon { width: 13px; height: 13px; }
+
+/* When a small button sits inside a table row, the row should still
+   measure to the height of plain text cells in the same row — tighten
+   the vertical rhythm so the actions cell doesn't push every row tall. */
+td .btn.small { padding: 0.25rem 0.6rem; }
 
 .btn.lg {
   padding: 0.75rem 1.4rem;
