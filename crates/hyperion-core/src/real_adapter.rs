@@ -9,6 +9,30 @@ use hyperion_types::{CertInfo, DbProvision, HostingDetail, HostingId, PhpVersion
 use hyperion_validate::SystemUserName;
 use std::path::PathBuf;
 
+const HOSTING_PLACEHOLDER_HTML: &str = r##"<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Hyperion · site ready</title>
+<style>
+:root { color-scheme: light dark; --fg:#0d1117; --bg:#fafbfc; --accent:#34d399; --dim:#666; }
+@media (prefers-color-scheme: dark) { :root { --fg:#e7e9ee; --bg:#0a0b0e; --dim:#9aa0ab; } }
+html, body { margin:0; padding:0; height:100%; font:16px/1.55 -apple-system,BlinkMacSystemFont,"Inter","Segoe UI",system-ui,sans-serif; background:var(--bg); color:var(--fg); }
+.wrap { min-height:100vh; display:grid; place-items:center; padding:2rem; }
+.card { max-width:32rem; text-align:center; }
+.brand { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-weight:800; letter-spacing:.04em; font-size:1.05rem; margin-bottom:2rem; }
+.brand .a { color:var(--accent); text-shadow:0 0 18px color-mix(in oklab, var(--accent) 55%, transparent); }
+h1 { font-size:1.6rem; margin:0 0 .6rem; letter-spacing:-.02em; }
+p { color:var(--dim); margin:.4rem 0; }
+code { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; background:rgba(127,127,127,.12); padding:.12em .4em; border-radius:6px; font-size:.9em; }
+</style></head>
+<body>
+<div class="wrap"><div class="card">
+<div class="brand"><span class="a">HY</span>·PERION</div>
+<h1>Your site is ready.</h1>
+<p>Drop your files into <code>htdocs/</code> and they show up here.</p>
+<p style="margin-top:1.4rem;font-size:.85rem">FTP into the system user from the hosting admin, or SCP your code up.</p>
+</div></div></body></html>
+"##;
+
 pub struct RealAdapter {
     pub nginx_paths: hyperion_adapters::nginx::Paths,
     pub certs_root: PathBuf,
@@ -52,14 +76,15 @@ impl AdapterPort for RealAdapter {
         tmp: &str,
         owner_uid: u32,
     ) -> Result<(), AdapterError> {
-        for p in [htdocs, logs, tmp] {
-            hyperion_adapters::fs::ensure_dir(std::path::Path::new(p), 0o750).await?;
-            // chown best-effort via Unix syscall; ignore EPERM on non-root setups.
-            let path_c = std::ffi::CString::new(p)
-                .map_err(|e| AdapterError::Other(format!("path C-string: {e}")))?;
-            // SAFETY: We DO NOT use unsafe code anywhere — call chown via the `nix` crate
-            // (forbid(unsafe_code) at lib root). We use std::process::Command instead.
-            let _ = path_c;
+        // htdocs must be world-readable so nginx (www-data, NOT in the
+        // hosting user's group) can serve static files — without the
+        // x-for-others bit nginx returns 403. logs + tmp stay tight
+        // because only PHP-FPM (running AS the hosting user) writes to
+        // them. Also: every ancestor dir up to /home needs x-for-others
+        // so nginx can traverse — but useradd -m defaults home to 0755
+        // so that's already fine.
+        for (p, mode) in [(htdocs, 0o755u32), (logs, 0o750), (tmp, 0o750)] {
+            hyperion_adapters::fs::ensure_dir(std::path::Path::new(p), mode).await?;
             let res = tokio::process::Command::new("/usr/bin/chown")
                 .arg(format!("{}:{}", owner_uid, owner_uid))
                 .arg(p)
@@ -67,6 +92,40 @@ impl AdapterPort for RealAdapter {
                 .await;
             if let Err(e) = res {
                 tracing::warn!(error=%e, path=%p, "chown failed (non-fatal on non-root)");
+            }
+        }
+        // The hosting-root directory (parent of htdocs/logs/tmp) also
+        // needs world-x so nginx can descend into htdocs. useradd makes
+        // /home/<user> 0755 by default; we only need to tighten / fix
+        // <hosting_root> here. Best-effort: derive it as htdocs's parent.
+        if let Some(host_root) = std::path::Path::new(htdocs).parent() {
+            let _ = tokio::process::Command::new("/usr/bin/chmod")
+                .arg("0755")
+                .arg(host_root)
+                .output()
+                .await;
+        }
+
+        // Drop a placeholder index.html so a fresh site shows a friendly
+        // "Hello from Hyperion" page instead of an nginx 403 (which is
+        // what happens when the directory is empty + autoindex is off).
+        // Operator/client replaces it with real content.
+        let index_path = std::path::Path::new(htdocs).join("index.html");
+        if !index_path.exists() {
+            let body = HOSTING_PLACEHOLDER_HTML;
+            if let Err(e) = tokio::fs::write(&index_path, body).await {
+                tracing::warn!(error=%e, "could not write placeholder index.html");
+            } else {
+                let _ = tokio::process::Command::new("/usr/bin/chown")
+                    .arg(format!("{}:{}", owner_uid, owner_uid))
+                    .arg(&index_path)
+                    .output()
+                    .await;
+                let _ = tokio::process::Command::new("/usr/bin/chmod")
+                    .arg("0644")
+                    .arg(&index_path)
+                    .output()
+                    .await;
             }
         }
         Ok(())
@@ -318,6 +377,112 @@ mod tests {
             "/etc/nginx/sites-available/x.cz.conf"
         );
         assert_eq!(a.certs_root.display().to_string(), "/etc/hyperion/certs");
+    }
+
+    /// Regression test for the "403 Forbidden on fresh hosting" bug.
+    ///
+    /// Two failures had to be fixed simultaneously:
+    /// 1. htdocs was created with mode 0o750 → nginx (www-data) is in
+    ///    "others" and had no rx access → 403 even with a valid index.
+    /// 2. htdocs was empty → nginx with autoindex off returns 403 on
+    ///    an empty dir even when it CAN read the dir.
+    ///
+    /// This test verifies that after ensure_dirs:
+    ///   - htdocs exists and is world-readable+executable (others can rx)
+    ///   - logs + tmp are owner-only (0o750)
+    ///   - htdocs/index.html exists, is non-empty, and is world-readable
+    ///
+    /// We run as the current (non-root) UID — chown will fail
+    /// best-effort and that's fine; we only assert MODE bits here.
+    #[tokio::test]
+    async fn ensure_dirs_makes_htdocs_world_readable_and_writes_index() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().expect("tempdir");
+        let htdocs = root.path().join("site").join("htdocs");
+        let logs = root.path().join("site").join("logs");
+        let tmp = root.path().join("site").join("tmp");
+
+        let a = RealAdapter::default();
+        let uid = nix_uid();
+        a.ensure_dirs(
+            htdocs.to_str().unwrap(),
+            logs.to_str().unwrap(),
+            tmp.to_str().unwrap(),
+            uid,
+        )
+        .await
+        .expect("ensure_dirs");
+
+        // htdocs: world rx required (others execute → 0o005 minimum).
+        let m = std::fs::metadata(&htdocs).expect("htdocs metadata").permissions().mode() & 0o777;
+        assert_eq!(m, 0o755, "htdocs mode must be 0755, got {:o}", m);
+
+        // logs + tmp: must NOT be world-readable.
+        for p in [&logs, &tmp] {
+            let m = std::fs::metadata(p).expect("metadata").permissions().mode() & 0o777;
+            assert_eq!(m, 0o750, "{} mode must be 0750, got {:o}", p.display(), m);
+        }
+
+        // index.html exists, non-empty, world-readable.
+        let idx = htdocs.join("index.html");
+        let body = std::fs::read_to_string(&idx).expect("read index.html");
+        assert!(!body.is_empty(), "index.html must not be empty");
+        assert!(
+            body.contains("Hyperion"),
+            "placeholder should be the hyperion branded one"
+        );
+        let im = std::fs::metadata(&idx).expect("idx meta").permissions().mode() & 0o777;
+        assert_eq!(im, 0o644, "index.html mode must be 0644, got {:o}", im);
+    }
+
+    /// Re-running ensure_dirs on a hosting that already has a real
+    /// index.html (operator uploaded their own) MUST NOT overwrite it.
+    /// Idempotency matters because the service flow can re-run this on
+    /// edit / repair operations.
+    #[tokio::test]
+    async fn ensure_dirs_does_not_clobber_existing_index() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let htdocs = root.path().join("htdocs");
+        let logs = root.path().join("logs");
+        let tmp = root.path().join("tmp");
+        std::fs::create_dir_all(&htdocs).unwrap();
+        let idx = htdocs.join("index.html");
+        std::fs::write(&idx, "<h1>my real site</h1>").unwrap();
+
+        let a = RealAdapter::default();
+        a.ensure_dirs(
+            htdocs.to_str().unwrap(),
+            logs.to_str().unwrap(),
+            tmp.to_str().unwrap(),
+            nix_uid(),
+        )
+        .await
+        .expect("ensure_dirs");
+
+        let body = std::fs::read_to_string(&idx).expect("read");
+        assert_eq!(body, "<h1>my real site</h1>", "existing index was overwritten");
+    }
+
+    /// Current process UID — we use it for ensure_dirs so chown becomes
+    /// a no-op (we already own everything in the tempdir).
+    fn nix_uid() -> u32 {
+        // SAFETY-free path: read from /proc on linux, fall back to env.
+        // We avoid pulling in the nix crate just for getuid().
+        if let Ok(s) = std::fs::read_to_string("/proc/self/status") {
+            for line in s.lines() {
+                if let Some(rest) = line.strip_prefix("Uid:") {
+                    if let Some(first) = rest.split_whitespace().next() {
+                        if let Ok(u) = first.parse::<u32>() {
+                            return u;
+                        }
+                    }
+                }
+            }
+        }
+        // macOS / fallback: USER → id -u via env not reliable; just use 1000.
+        // chown of a non-existent uid will fail best-effort, which is fine.
+        std::env::var("UID").ok().and_then(|s| s.parse().ok()).unwrap_or(1000)
     }
 
     #[tokio::test]
