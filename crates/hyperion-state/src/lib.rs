@@ -14,6 +14,7 @@ pub mod hostings;
 pub mod invites;
 pub mod limits;
 pub mod metrics;
+pub mod monitors;
 pub mod nodejs;
 pub mod nodes;
 pub mod profiles;

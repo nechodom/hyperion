@@ -3474,6 +3474,319 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(())
     }
 
+    // ════════════════════════════════════════════════════════════
+    //  Per-hosting monitoring
+    // ════════════════════════════════════════════════════════════
+
+    pub async fn monitor_get(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<(hyperion_types::MonitorConfigView, hyperion_types::MonitorHistory), RpcError> {
+        let detail = self.get(sel).await?;
+        let cfg = hyperion_state::monitors::get(&self.pool, &detail.id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("monitor get: {e}")))?
+            .ok_or_else(|| RpcError::NotFound {
+                kind: "hosting".into(),
+                id: detail.id.as_str().to_string(),
+            })?;
+        let view = hyperion_types::MonitorConfigView {
+            enabled: cfg.enabled,
+            url_path: cfg.url_path,
+            interval_secs: cfg.interval_secs,
+            alert_after_fails: cfg.alert_after_fails,
+            alert_email: cfg.alert_email,
+            alert_slack_webhook_set: cfg.alert_slack_webhook.is_some(),
+            alert_webhook_url: cfg.alert_webhook_url,
+            consecutive_fails: cfg.consecutive_fails,
+            last_alert_at: cfg.last_alert_at,
+            alert_state: cfg.alert_state,
+        };
+        // 96 samples = 8 hours @ 5min default cadence.
+        let rows = hyperion_state::monitors::history(&self.pool, &detail.id, 96)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("history: {e}")))?;
+        let history = hyperion_types::MonitorHistory {
+            samples: rows
+                .into_iter()
+                .map(|s| hyperion_types::MonitorSamplePoint {
+                    at: s.sampled_at,
+                    success: s.success,
+                    http_status: s.http_status,
+                    response_ms: s.response_ms,
+                })
+                .collect(),
+        };
+        Ok((view, history))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn monitor_set(
+        &self,
+        sel: HostingSelector,
+        enabled: bool,
+        url_path: Option<String>,
+        interval_secs: Option<i64>,
+        alert_after_fails: Option<i64>,
+        alert_email: Option<String>,
+        alert_slack_webhook: Option<String>,
+        alert_webhook_url: Option<String>,
+    ) -> Result<(), RpcError> {
+        let detail = self.get(sel).await?;
+        // Validate URLs / path shape.
+        let path_norm: Option<String> = url_path.map(|p| {
+            let p = p.trim();
+            if p.is_empty() {
+                "/".to_string()
+            } else if !p.starts_with('/') {
+                format!("/{p}")
+            } else {
+                p.to_string()
+            }
+        });
+        if let Some(ref u) = alert_slack_webhook {
+            if !u.trim().is_empty() && !u.starts_with("https://") {
+                return Err(RpcError::Validation {
+                    message: "slack webhook must start with https://".into(),
+                });
+            }
+        }
+        if let Some(ref u) = alert_webhook_url {
+            if !u.trim().is_empty()
+                && !(u.starts_with("https://") || u.starts_with("http://"))
+            {
+                return Err(RpcError::Validation {
+                    message: "webhook URL must start with http:// or https://".into(),
+                });
+            }
+        }
+        let to_opt_str = |s: Option<String>| -> Option<String> {
+            s.map(|t| t.trim().to_string()).filter(|t| !t.is_empty())
+        };
+        hyperion_state::monitors::set_config(
+            &self.pool,
+            &detail.id,
+            enabled,
+            path_norm.as_deref(),
+            interval_secs,
+            alert_after_fails,
+            to_opt_str(alert_email).as_deref(),
+            to_opt_str(alert_slack_webhook).as_deref(),
+            to_opt_str(alert_webhook_url).as_deref(),
+            now_secs(),
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("set: {e}")))?;
+        self.append_audit(
+            "monitor.config.set",
+            Some(detail.id.as_str()),
+            &serde_json::json!({"enabled": enabled, "interval_secs": interval_secs})
+                .to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
+    pub async fn monitor_probe_now(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::MonitorSamplePoint, RpcError> {
+        let detail = self.get(sel).await?;
+        let cfg = hyperion_state::monitors::get(&self.pool, &detail.id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("get: {e}")))?
+            .ok_or_else(|| RpcError::NotFound {
+                kind: "hosting".into(),
+                id: detail.id.as_str().to_string(),
+            })?;
+        let url = format!(
+            "https://{}{}",
+            detail.domain,
+            if cfg.url_path.is_empty() {
+                "/"
+            } else {
+                cfg.url_path.as_str()
+            }
+        );
+        let sample = probe_http(&url).await;
+        let now = now_secs();
+        hyperion_state::monitors::insert_sample(
+            &self.pool,
+            &detail.id,
+            now,
+            sample.success,
+            sample.http_status,
+            sample.response_ms,
+            sample.error_message.as_deref(),
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("insert sample: {e}")))?;
+        Ok(hyperion_types::MonitorSamplePoint {
+            at: now,
+            success: sample.success,
+            http_status: sample.http_status,
+            response_ms: sample.response_ms,
+        })
+    }
+
+    /// One pass of the per-hosting monitor scheduler — checks every
+    /// enabled hosting whose `monitor_interval_secs` has elapsed since
+    /// the last sample. Fires alerts on threshold crossings. Returns
+    /// the number of hostings sampled (for telemetry).
+    pub async fn monitor_tick(&self) -> Result<i64, RpcError> {
+        let now = now_secs();
+        let configs = hyperion_state::monitors::list_enabled(&self.pool)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("list: {e}")))?;
+        let mut sampled = 0i64;
+        for cfg in configs {
+            // Skip if we've sampled within the configured interval.
+            let recent = hyperion_state::monitors::history(&self.pool, &cfg.hosting_id, 1)
+                .await
+                .ok()
+                .and_then(|v| v.last().map(|s| s.sampled_at))
+                .unwrap_or(0);
+            if recent > 0 && now - recent < cfg.interval_secs {
+                continue;
+            }
+            let url = format!(
+                "https://{}{}",
+                cfg.domain,
+                if cfg.url_path.is_empty() {
+                    "/"
+                } else {
+                    cfg.url_path.as_str()
+                }
+            );
+            let result = probe_http(&url).await;
+            if let Err(e) = hyperion_state::monitors::insert_sample(
+                &self.pool,
+                &cfg.hosting_id,
+                now,
+                result.success,
+                result.http_status,
+                result.response_ms,
+                result.error_message.as_deref(),
+            )
+            .await
+            {
+                tracing::warn!(error=%e, "monitor: insert sample failed");
+                continue;
+            }
+            sampled += 1;
+            if result.success {
+                let _ = hyperion_state::monitors::reset_streak(&self.pool, &cfg.hosting_id).await;
+                // Resolved alert?
+                if cfg.alert_state == "alerting" {
+                    self.dispatch_monitor_alert(&cfg, &result, true).await;
+                    let _ = hyperion_state::monitors::set_alert_state(
+                        &self.pool,
+                        &cfg.hosting_id,
+                        "ok",
+                        Some(now),
+                    )
+                    .await;
+                }
+            } else {
+                let n = hyperion_state::monitors::record_fail(&self.pool, &cfg.hosting_id)
+                    .await
+                    .unwrap_or(cfg.consecutive_fails + 1);
+                if n >= cfg.alert_after_fails && cfg.alert_state != "alerting" {
+                    self.dispatch_monitor_alert(&cfg, &result, false).await;
+                    let _ = hyperion_state::monitors::set_alert_state(
+                        &self.pool,
+                        &cfg.hosting_id,
+                        "alerting",
+                        Some(now),
+                    )
+                    .await;
+                }
+            }
+        }
+        Ok(sampled)
+    }
+
+    /// Send an alert through every configured channel. `resolved`
+    /// changes the subject + body wording.
+    async fn dispatch_monitor_alert(
+        &self,
+        cfg: &hyperion_state::monitors::MonitorConfig,
+        sample: &HttpProbeResult,
+        resolved: bool,
+    ) {
+        let kind = if resolved { "RESOLVED" } else { "DOWN" };
+        let subject = format!("[Hyperion] {kind} — {}", cfg.domain);
+        let body = if resolved {
+            format!(
+                "Site recovered: https://{}{}\n\nLatest probe: {} ({} ms).\n\nThis is an automated message from Hyperion.\n",
+                cfg.domain, cfg.url_path,
+                sample.http_status.map(|s| s.to_string()).unwrap_or_else(|| "ok".into()),
+                sample.response_ms
+            )
+        } else {
+            format!(
+                "Site failing: https://{}{}\n\nConsecutive failures: {}\nLast error: {}\nLast response: {} ms\n\nThis is an automated message from Hyperion.\n",
+                cfg.domain, cfg.url_path,
+                cfg.consecutive_fails + 1,
+                sample.error_message.as_deref().unwrap_or("(none)"),
+                sample.response_ms
+            )
+        };
+
+        // Email channel.
+        if let (Some(email), Some(email_cfg)) =
+            (cfg.alert_email.as_deref(), self.email_config.as_ref())
+        {
+            for to in email.split(',') {
+                let to = to.trim();
+                if to.is_empty() {
+                    continue;
+                }
+                if let Err(e) = hyperion_adapters::email::send_text(email_cfg, to, &subject, &body)
+                    .await
+                {
+                    tracing::warn!(error=%e, "monitor alert email failed");
+                }
+            }
+        }
+        // Slack webhook channel.
+        if let Some(url) = cfg.alert_slack_webhook.as_deref() {
+            let payload = serde_json::json!({"text": format!("{subject}\n{body}")}).to_string();
+            let _ = http_post_json(url, &payload).await;
+        }
+        // Generic JSON webhook channel.
+        if let Some(url) = cfg.alert_webhook_url.as_deref() {
+            let payload = serde_json::json!({
+                "kind": kind,
+                "domain": cfg.domain,
+                "url_path": cfg.url_path,
+                "resolved": resolved,
+                "consecutive_fails": cfg.consecutive_fails + 1,
+                "http_status": sample.http_status,
+                "response_ms": sample.response_ms,
+                "error": sample.error_message,
+            })
+            .to_string();
+            let _ = http_post_json(url, &payload).await;
+        }
+        self.append_audit(
+            "monitor.alert",
+            Some(cfg.hosting_id.as_str()),
+            &serde_json::json!({
+                "kind": kind,
+                "channels": {
+                    "email": cfg.alert_email.is_some(),
+                    "slack": cfg.alert_slack_webhook.is_some(),
+                    "webhook": cfg.alert_webhook_url.is_some(),
+                }
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+    }
+
     /// List one directory inside a hosting's htdocs root. Returns the
     /// (echoed) relative path + the entries. All entries are RELATIVE
     /// to htdocs — operators can navigate without leaking the absolute
@@ -4449,6 +4762,100 @@ async fn read_proc_metrics() -> (i64, i64, i64, i64) {
         .unwrap_or(0);
 
     (la_1m, mem_total, mem_used, uptime)
+}
+
+/// Result of a single HTTP probe. Internal — service builds the wire
+/// shape from this.
+#[derive(Debug, Clone)]
+struct HttpProbeResult {
+    success: bool,
+    http_status: Option<i64>,
+    response_ms: i64,
+    error_message: Option<String>,
+}
+
+/// 5-second timeout, follow up to 3 redirects, ignore TLS hostname
+/// verification (operator picks the URL — they're targeting their own
+/// host). Considered "success" iff status is 2xx OR 3xx.
+async fn probe_http(url: &str) -> HttpProbeResult {
+    use std::time::Instant;
+    let start = Instant::now();
+    // Shell out to curl — adds an external dep that's already on
+    // every node (we use it for backups). Avoids pulling in a full
+    // reqwest+tls stack and the rustls CryptoProvider dance.
+    let res = tokio::process::Command::new("/usr/bin/curl")
+        .args([
+            "-skLI",                  // silent + insecure + follow + HEAD
+            "--max-time",
+            "5",
+            "--max-redirs",
+            "3",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            url,
+        ])
+        .output()
+        .await;
+    let elapsed = start.elapsed().as_millis() as i64;
+    match res {
+        Ok(out) => {
+            let code_str = String::from_utf8_lossy(&out.stdout);
+            let code: i64 = code_str.trim().parse().unwrap_or(0);
+            let success = (200..400).contains(&code);
+            HttpProbeResult {
+                success,
+                http_status: if code > 0 { Some(code) } else { None },
+                response_ms: elapsed,
+                error_message: if success {
+                    None
+                } else if code == 0 {
+                    Some(String::from_utf8_lossy(&out.stderr).to_string())
+                } else {
+                    Some(format!("HTTP {code}"))
+                },
+            }
+        }
+        Err(e) => HttpProbeResult {
+            success: false,
+            http_status: None,
+            response_ms: elapsed,
+            error_message: Some(e.to_string()),
+        },
+    }
+}
+
+/// POST a JSON payload to a webhook. Used by both Slack (which
+/// accepts the same `{"text": "..."}` shape) and the generic webhook
+/// channel. Best-effort — returns the curl exit status as Result so
+/// the caller can log without taking down the tick.
+async fn http_post_json(url: &str, json_body: &str) -> Result<(), String> {
+    let out = tokio::process::Command::new("/usr/bin/curl")
+        .args([
+            "-skL",
+            "--max-time",
+            "10",
+            "-H",
+            "Content-Type: application/json",
+            "-X",
+            "POST",
+            "-d",
+            json_body,
+            url,
+        ])
+        .output()
+        .await
+        .map_err(|e| e.to_string())?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(format!(
+            "curl exit {}: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        ))
+    }
 }
 
 fn row_to_summary(u: hyperion_state::web_users::WebUserRow) -> hyperion_types::WebUserSummary {

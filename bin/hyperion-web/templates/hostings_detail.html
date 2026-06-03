@@ -324,6 +324,17 @@
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
     Cron
   </a>
+  <a class="tab" data-tab="monitor" href="#monitor" role="tab">
+    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+    Monitor
+    {% if monitor_config.enabled %}
+      {% if monitor_config.alert_state == "alerting" %}
+        <span class="tab-badge" style="background:var(--danger);color:white">!</span>
+      {% else %}
+        <span class="tab-badge" style="background:var(--success);color:white">●</span>
+      {% endif %}
+    {% endif %}
+  </a>
   {% if is_super_admin %}
   <a class="tab" data-tab="access" href="#access" role="tab">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="7" r="4"/><path d="M3 21v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2"/><path d="M16 11h6"/><path d="M19 8v6"/></svg>
@@ -1035,6 +1046,119 @@
 </div>
 
 </div><!-- /tab-cron -->
+
+<div class="tab-panel" id="tab-monitor">
+<div class="card">
+  <div class="spread" style="margin-bottom:0.8rem">
+    <h2 style="margin:0">
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
+      HTTP availability monitor
+    </h2>
+    <div>
+      {% if monitor_config.enabled %}
+        {% if monitor_config.alert_state == "alerting" %}
+          <span class="pill err">ALERTING — last {{ monitor_config.consecutive_fails }} probes failed</span>
+        {% else %}
+          <span class="pill ok">healthy</span>
+        {% endif %}
+      {% else %}
+        <span class="pill" style="background:var(--surface-2);color:var(--text-soft)">disabled</span>
+      {% endif %}
+    </div>
+  </div>
+
+  {# Sparkline of recent probes — green dots = ok, red = fail #}
+  {% if monitor_history.samples.len() >= 2 %}
+    <div style="display:flex;gap:2px;height:38px;align-items:flex-end;margin-bottom:0.6rem;padding:0.4rem;background:var(--surface-2);border-radius:var(--radius-xs)">
+      {% for s in monitor_history.samples %}
+        {% if s.success %}
+          <span title="ok · {{ s.response_ms }}ms · {{ s.at }}" style="display:inline-block;width:4px;background:var(--success);height:{{ crate::handlers::stats::clamp_height_percent(s.response_ms) }}%;border-radius:1px;min-height:6px"></span>
+        {% else %}
+          <span title="FAIL · {{ s.response_ms }}ms · {{ s.at }}" style="display:inline-block;width:4px;background:var(--danger);height:100%;border-radius:1px"></span>
+        {% endif %}
+      {% endfor %}
+    </div>
+    <p class="text-soft small" style="margin:0 0 1rem">
+      {{ monitor_history.samples.len() }} recent samples — bar height encodes response time, red = failed probe.
+    </p>
+  {% else %}
+    <p class="text-soft small">No samples yet. Save settings + wait one tick, or click "Probe now".</p>
+  {% endif %}
+
+  <form method="post" action="/hostings/monitor/set" autocomplete="off">
+    <input type="hidden" name="selector" value="{{ detail.domain }}">
+
+    <label class="field-checkbox" style="font-weight:600">
+      <input type="checkbox" name="enabled" value="on" {% if monitor_config.enabled %}checked{% endif %}>
+      Enable HTTP availability monitoring
+    </label>
+
+    <div class="field-row" style="margin-top:0.6rem">
+      <div class="field" style="flex:1">
+        <label for="m_url_path">URL path to probe</label>
+        <input id="m_url_path" name="url_path" type="text"
+               placeholder="/" value="{{ monitor_config.url_path }}">
+      </div>
+      <div class="field" style="width:9rem">
+        <label for="m_interval">Interval (sec)</label>
+        <input id="m_interval" name="interval_secs" type="number"
+               min="60" max="3600" value="{{ monitor_config.interval_secs }}">
+      </div>
+      <div class="field" style="width:9rem">
+        <label for="m_after">Alert after N fails</label>
+        <input id="m_after" name="alert_after_fails" type="number"
+               min="1" max="20" value="{{ monitor_config.alert_after_fails }}">
+      </div>
+    </div>
+
+    <h3 style="font-size:0.95rem;margin:1rem 0 0.4rem">Alert channels</h3>
+    <p class="text-soft small" style="margin:0 0 0.6rem">
+      Configure any combination. Channels with no value are skipped.
+      Email requires <code>[email]</code> configured in agent.toml.
+    </p>
+    <div class="field">
+      <label for="m_email">Email recipients <span class="hint">comma-separated</span></label>
+      <input id="m_email" name="alert_email" type="text"
+             placeholder="ops@example.cz,sre@example.cz"
+             value="{% if let Some(e) = monitor_config.alert_email %}{{ e|e }}{% endif %}">
+    </div>
+    <div class="field">
+      <label for="m_slack">Slack incoming webhook URL</label>
+      <input id="m_slack" name="alert_slack_webhook" type="url"
+             placeholder="{% if monitor_config.alert_slack_webhook_set %}(set — type new URL to replace, or leave blank to keep){% else %}https://hooks.slack.com/services/…{% endif %}"
+             value="">
+      {% if monitor_config.alert_slack_webhook_set %}
+        <p class="text-soft small" style="margin:0.2rem 0 0">A webhook is currently configured. Leave blank to keep, type a new URL to replace.</p>
+      {% endif %}
+    </div>
+    <div class="field">
+      <label for="m_webhook">Generic JSON webhook URL</label>
+      <input id="m_webhook" name="alert_webhook_url" type="url"
+             placeholder="https://your-pipeline.example.cz/hyperion"
+             value="{% if let Some(u) = monitor_config.alert_webhook_url %}{{ u|e }}{% endif %}">
+      <p class="text-soft small" style="margin:0.2rem 0 0">
+        POSTs <code>{"kind":"DOWN|RESOLVED","domain":...,"http_status":...}</code> on every alert + recovery.
+      </p>
+    </div>
+
+    <div class="btn-group" style="margin-top:1rem">
+      <button type="submit" class="btn primary">Save</button>
+    </div>
+  </form>
+
+  <div class="card-section" style="margin-top:1rem">
+    <h3 style="font-size:0.95rem;margin:0 0 0.5rem">Probe now</h3>
+    <p class="text-soft small" style="margin:0 0 0.5rem">Fire one probe immediately. Records a sample regardless of the enabled flag.</p>
+    <form method="post" action="/hostings/monitor/probe" style="display:inline">
+      <input type="hidden" name="selector" value="{{ detail.domain }}">
+      <button type="submit" class="btn small">
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+        Probe now
+      </button>
+    </form>
+  </div>
+</div>
+</div><!-- /tab-monitor -->
 
 {% if is_super_admin %}
 <div class="tab-panel" id="tab-access">

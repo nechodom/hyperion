@@ -353,6 +353,46 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     ) -> Result<hyperion_types::HostingFileContent, RpcError> {
         self.svc.hosting_file_read(sel, rel_path).await
     }
+    async fn monitor_get(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<(hyperion_types::MonitorConfigView, hyperion_types::MonitorHistory), RpcError>
+    {
+        self.svc.monitor_get(sel).await
+    }
+    async fn monitor_set(
+        &self,
+        sel: HostingSelector,
+        enabled: bool,
+        url_path: Option<String>,
+        interval_secs: Option<i64>,
+        alert_after_fails: Option<i64>,
+        alert_email: Option<String>,
+        alert_slack_webhook: Option<String>,
+        alert_webhook_url: Option<String>,
+    ) -> Result<(), RpcError> {
+        self.svc
+            .monitor_set(
+                sel,
+                enabled,
+                url_path,
+                interval_secs,
+                alert_after_fails,
+                alert_email,
+                alert_slack_webhook,
+                alert_webhook_url,
+            )
+            .await
+    }
+    async fn monitor_probe_now(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::MonitorSamplePoint, RpcError> {
+        self.svc.monitor_probe_now(sel).await
+    }
+    async fn monitor_tick(&self) -> Result<i64, RpcError> {
+        self.svc.monitor_tick().await
+    }
 
     async fn stats_tick(&self) -> Result<i64, RpcError> {
         self.svc.stats_tick().await

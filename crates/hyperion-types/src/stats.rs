@@ -325,6 +325,36 @@ pub struct HostingFileContent {
     pub truncated: bool,
 }
 
+/// Per-hosting monitor config — read back to the operator's settings
+/// form on the hosting detail page.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct MonitorConfigView {
+    pub enabled: bool,
+    pub url_path: String,
+    pub interval_secs: i64,
+    pub alert_after_fails: i64,
+    pub alert_email: Option<String>,
+    pub alert_slack_webhook_set: bool,
+    pub alert_webhook_url: Option<String>,
+    pub consecutive_fails: i64,
+    pub last_alert_at: Option<i64>,
+    pub alert_state: String,
+}
+
+/// One probe sample for the per-hosting monitor mini-chart.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MonitorSamplePoint {
+    pub at: i64,
+    pub success: bool,
+    pub http_status: Option<i64>,
+    pub response_ms: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct MonitorHistory {
+    pub samples: Vec<MonitorSamplePoint>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

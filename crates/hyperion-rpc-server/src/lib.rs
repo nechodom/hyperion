@@ -327,6 +327,31 @@ async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::MonitorGet { sel } => match api.monitor_get(sel).await {
+            Ok((config, history)) => Response::MonitorGet { config, history },
+            Err(e) => Response::Error(e),
+        },
+        Request::MonitorSet {
+            sel, enabled, url_path, interval_secs, alert_after_fails,
+            alert_email, alert_slack_webhook, alert_webhook_url,
+        } => match api
+            .monitor_set(
+                sel, enabled, url_path, interval_secs, alert_after_fails,
+                alert_email, alert_slack_webhook, alert_webhook_url,
+            )
+            .await
+        {
+            Ok(()) => Response::MonitorSet,
+            Err(e) => Response::Error(e),
+        },
+        Request::MonitorProbeNow { sel } => match api.monitor_probe_now(sel).await {
+            Ok(s) => Response::MonitorProbeNow(s),
+            Err(e) => Response::Error(e),
+        },
+        Request::MonitorTick => match api.monitor_tick().await {
+            Ok(n) => Response::MonitorTick { sampled: n },
+            Err(e) => Response::Error(e),
+        },
         Request::StatsTick => match api.stats_tick().await {
             Ok(n) => Response::StatsTick {
                 hostings_sampled: n,
@@ -726,6 +751,43 @@ mod tests {
                 content: String::new(),
                 truncated: false,
             })
+        }
+        async fn monitor_get(
+            &self,
+            _: HostingSelector,
+        ) -> Result<(hyperion_types::MonitorConfigView, hyperion_types::MonitorHistory), RpcError>
+        {
+            Ok((
+                hyperion_types::MonitorConfigView::default(),
+                hyperion_types::MonitorHistory::default(),
+            ))
+        }
+        async fn monitor_set(
+            &self,
+            _: HostingSelector,
+            _: bool,
+            _: Option<String>,
+            _: Option<i64>,
+            _: Option<i64>,
+            _: Option<String>,
+            _: Option<String>,
+            _: Option<String>,
+        ) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn monitor_probe_now(
+            &self,
+            _: HostingSelector,
+        ) -> Result<hyperion_types::MonitorSamplePoint, RpcError> {
+            Ok(hyperion_types::MonitorSamplePoint {
+                at: 0,
+                success: false,
+                http_status: None,
+                response_ms: 0,
+            })
+        }
+        async fn monitor_tick(&self) -> Result<i64, RpcError> {
+            Ok(0)
         }
         async fn stats_tick(&self) -> Result<i64, RpcError> {
             Ok(0)

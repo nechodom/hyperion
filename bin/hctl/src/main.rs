@@ -750,6 +750,24 @@ fn print_pretty(resp: &Response) {
             println!("---");
             println!("{}", c.content);
         }
+        Response::MonitorGet { config, history } => {
+            println!("monitor: enabled={} interval={}s alert_after={} state={}",
+                config.enabled, config.interval_secs,
+                config.alert_after_fails, config.alert_state);
+            println!("samples (last {}):", history.samples.len());
+            for s in history.samples.iter().rev().take(10) {
+                println!("  ts={} ok={} status={:?} ms={}",
+                    s.at, s.success, s.http_status, s.response_ms);
+            }
+        }
+        Response::MonitorSet => println!("monitor config saved"),
+        Response::MonitorProbeNow(s) => {
+            println!("probe: ok={} status={:?} ms={}",
+                s.success, s.http_status, s.response_ms);
+        }
+        Response::MonitorTick { sampled } => {
+            println!("monitor tick: {sampled} hosting(s) sampled");
+        }
     }
 }
 

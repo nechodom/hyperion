@@ -126,6 +126,9 @@ struct DetailTpl<'a> {
     /// Users available to grant to (operator/viewer roles; super_admin
     /// and admin are excluded since they already see everything).
     users_for_access: Vec<hyperion_types::WebUserSummary>,
+    /// Per-hosting monitor config + sample history (for the Monitor tab).
+    monitor_config: hyperion_types::MonitorConfigView,
+    monitor_history: hyperion_types::MonitorHistory,
 }
 
 #[derive(Deserialize, Default)]
@@ -438,6 +441,8 @@ pub async fn post_create(
                 is_super_admin: ctx.is_super_admin(),
                 access_grants: vec![],
                 users_for_access: vec![],
+                monitor_config: hyperion_types::MonitorConfigView::default(),
+                monitor_history: hyperion_types::MonitorHistory::default(),
             };
             Ok(Html(tpl.render()?).into_response())
         }
@@ -489,7 +494,7 @@ pub async fn get_detail(
         .unwrap_or_default();
     let stats = fetch_stats(&state, sel_id.clone()).await.ok();
     let cron_body = fetch_cron(&state, sel_id.clone()).await.unwrap_or_default();
-    let profile_apply = fetch_profile_apply(&state, sel_id).await.unwrap_or(None);
+    let profile_apply = fetch_profile_apply(&state, sel_id.clone()).await.unwrap_or(None);
     let profiles = fetch_all_profiles(&state).await.unwrap_or_default();
     let applied_profile_name = profile_apply
         .as_ref()
@@ -506,6 +511,19 @@ pub async fn get_detail(
             _ => None,
         },
         Err(_) => None,
+    };
+    // Per-hosting monitor config + history for the Monitor tab.
+    let (monitor_config, monitor_history) = match hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::MonitorGet { sel: sel_id.clone() },
+    )
+    .await
+    {
+        Ok(RpcResponse::MonitorGet { config, history }) => (config, history),
+        _ => (
+            hyperion_types::MonitorConfigView::default(),
+            hyperion_types::MonitorHistory::default(),
+        ),
     };
     // Access tab data — fetched only for super_admin since they're the
     // only ones who see the tab. Empty vec for everyone else is cheap
@@ -620,6 +638,8 @@ pub async fn get_detail(
         is_super_admin: ctx.is_super_admin(),
         access_grants: access_grants_for_detail,
         users_for_access: users_for_access_for_detail,
+        monitor_config,
+        monitor_history,
     };
     Ok(Html(tpl.render()?).into_response())
 }
@@ -1224,6 +1244,124 @@ pub async fn post_access_revoke(
         RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
+}
+
+#[derive(Deserialize)]
+pub struct MonitorSetForm {
+    pub selector: String,
+    #[serde(default)]
+    pub enabled: String,
+    #[serde(default)]
+    pub url_path: String,
+    #[serde(default)]
+    pub interval_secs: String,
+    #[serde(default)]
+    pub alert_after_fails: String,
+    #[serde(default)]
+    pub alert_email: String,
+    #[serde(default)]
+    pub alert_slack_webhook: String,
+    #[serde(default)]
+    pub alert_webhook_url: String,
+}
+
+pub async fn post_monitor_set(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<MonitorSetForm>,
+) -> Result<Response, AppError> {
+    let sel = parse_selector(&form.selector)?;
+    // Guard with manage-level access. super_admin / admin bypass.
+    let detail_resp =
+        hyperion_rpc_client::call(&state.agent_socket, Request::HostingGet(sel.clone())).await?;
+    let detail = match detail_resp {
+        RpcResponse::HostingGet(d) => d,
+        _ => return Err(AppError::Internal("expected HostingGet".into())),
+    };
+    if let Err(r) = require_hosting_access(&state, &ctx, detail.id.as_str(), true).await {
+        return Ok(r);
+    }
+    let enabled = form.enabled == "on" || form.enabled == "true" || form.enabled == "1";
+    let path = if form.url_path.trim().is_empty() {
+        None
+    } else {
+        Some(form.url_path.trim().to_string())
+    };
+    let interval = form
+        .interval_secs
+        .trim()
+        .parse::<i64>()
+        .ok()
+        .filter(|n| *n > 0);
+    let after = form
+        .alert_after_fails
+        .trim()
+        .parse::<i64>()
+        .ok()
+        .filter(|n| *n > 0);
+    let email = if form.alert_email.trim().is_empty() {
+        None
+    } else {
+        Some(form.alert_email.trim().to_string())
+    };
+    let slack = if form.alert_slack_webhook.trim().is_empty() {
+        None
+    } else {
+        Some(form.alert_slack_webhook.trim().to_string())
+    };
+    let webhook = if form.alert_webhook_url.trim().is_empty() {
+        None
+    } else {
+        Some(form.alert_webhook_url.trim().to_string())
+    };
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::MonitorSet {
+            sel: sel.clone(),
+            enabled,
+            url_path: path,
+            interval_secs: interval,
+            alert_after_fails: after,
+            alert_email: email,
+            alert_slack_webhook: slack,
+            alert_webhook_url: webhook,
+        },
+    )
+    .await?;
+    match resp {
+        RpcResponse::MonitorSet => {
+            Ok(Redirect::to(&format!("/hostings/{}#monitor", urlencoding(&form.selector)))
+                .into_response())
+        }
+        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct MonitorProbeForm {
+    pub selector: String,
+}
+
+pub async fn post_monitor_probe(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<MonitorProbeForm>,
+) -> Result<Response, AppError> {
+    let sel = parse_selector(&form.selector)?;
+    let detail_resp =
+        hyperion_rpc_client::call(&state.agent_socket, Request::HostingGet(sel.clone())).await?;
+    let detail = match detail_resp {
+        RpcResponse::HostingGet(d) => d,
+        _ => return Err(AppError::Internal("expected HostingGet".into())),
+    };
+    if let Err(r) = require_hosting_access(&state, &ctx, detail.id.as_str(), true).await {
+        return Ok(r);
+    }
+    let _ =
+        hyperion_rpc_client::call(&state.agent_socket, Request::MonitorProbeNow { sel }).await?;
+    Ok(Redirect::to(&format!("/hostings/{}#monitor", urlencoding(&form.selector)))
+        .into_response())
 }
 
 /// Drop hosting summaries the caller doesn't have access to.

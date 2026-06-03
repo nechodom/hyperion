@@ -32,9 +32,9 @@ pub use spf::SpfCheckResult;
 pub use stats::{
     AcmeConfigView, AgentConfigView, BackupRemoteConfigView, BackupRetentionConfigView,
     ClusterStats, DashboardAlert, EmailConfigView, HostingFileContent, HostingFileEntry,
-    HostingStats, NodeMetricPoint, NodeMetricsHistory, NodeStats, NodeSummary, ServiceHealth,
-    ServicesHealth, SlackConfigView, Web2faEnrollment, WebHostingAccess, WebLoginResult,
-    WebUserSummary, WebVerify2faResult,
+    HostingStats, MonitorConfigView, MonitorHistory, MonitorSamplePoint, NodeMetricPoint,
+    NodeMetricsHistory, NodeStats, NodeSummary, ServiceHealth, ServicesHealth, SlackConfigView,
+    Web2faEnrollment, WebHostingAccess, WebLoginResult, WebUserSummary, WebVerify2faResult,
 };
 pub use wp::{WpInstallRequest, WpInstallStatus};
 

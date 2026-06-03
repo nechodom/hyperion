@@ -214,6 +214,24 @@ where
     }
 }
 
+/// Clamp a response-time-ish ms value into a 10-100% bar height for
+/// the monitor sparkline. <50ms = 30%, 5000ms = 100%, log scale-ish.
+pub fn clamp_height_percent(ms: &i64) -> i64 {
+    let ms = (*ms).max(0);
+    let p = if ms < 50 {
+        30
+    } else if ms < 200 {
+        50
+    } else if ms < 1000 {
+        70
+    } else if ms < 3000 {
+        85
+    } else {
+        100
+    };
+    p
+}
+
 /// Format a byte count as a short string (e.g. "1.4 GiB"). Public for use
 /// from other handlers + templates.
 pub fn fmt_bytes(n: &i64) -> String {

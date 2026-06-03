@@ -211,6 +211,29 @@ pub trait AgentApi: Send + Sync + 'static {
         rel_path: String,
     ) -> Result<hyperion_types::HostingFileContent, RpcError>;
 
+    /// Per-hosting monitor: get config + recent samples.
+    async fn monitor_get(
+        &self,
+        sel: crate::wire::HostingSelector,
+    ) -> Result<(hyperion_types::MonitorConfigView, hyperion_types::MonitorHistory), RpcError>;
+    #[allow(clippy::too_many_arguments)]
+    async fn monitor_set(
+        &self,
+        sel: crate::wire::HostingSelector,
+        enabled: bool,
+        url_path: Option<String>,
+        interval_secs: Option<i64>,
+        alert_after_fails: Option<i64>,
+        alert_email: Option<String>,
+        alert_slack_webhook: Option<String>,
+        alert_webhook_url: Option<String>,
+    ) -> Result<(), RpcError>;
+    async fn monitor_probe_now(
+        &self,
+        sel: crate::wire::HostingSelector,
+    ) -> Result<hyperion_types::MonitorSamplePoint, RpcError>;
+    async fn monitor_tick(&self) -> Result<i64, RpcError>;
+
     /// Install WordPress into a hosting (downloads core, writes wp-config.php
     /// against the hosting's DB credentials, runs `wp core install`, records
     /// the result in `wp_installs`).

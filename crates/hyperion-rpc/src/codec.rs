@@ -231,6 +231,30 @@ pub enum Request {
         rel_path: String,
     },
 
+    /// Read the per-hosting monitor config + sample history.
+    MonitorGet {
+        sel: HostingSelector,
+    },
+    /// Write the per-hosting monitor config.
+    MonitorSet {
+        sel: HostingSelector,
+        enabled: bool,
+        url_path: Option<String>,
+        interval_secs: Option<i64>,
+        alert_after_fails: Option<i64>,
+        alert_email: Option<String>,
+        alert_slack_webhook: Option<String>,
+        alert_webhook_url: Option<String>,
+    },
+    /// Operator-driven manual probe (the "Test now" button). Always
+    /// records a sample regardless of `monitor_enabled`.
+    MonitorProbeNow {
+        sel: HostingSelector,
+    },
+    /// One tick of the background monitor scheduler. Returns the count
+    /// of hostings sampled.
+    MonitorTick,
+
     StatsTick,
     BackupRestore {
         sel: HostingSelector,
@@ -349,6 +373,13 @@ pub enum Response {
         entries: Vec<hyperion_types::HostingFileEntry>,
     },
     HostingFileRead(hyperion_types::HostingFileContent),
+    MonitorGet {
+        config: hyperion_types::MonitorConfigView,
+        history: hyperion_types::MonitorHistory,
+    },
+    MonitorSet,
+    MonitorProbeNow(hyperion_types::MonitorSamplePoint),
+    MonitorTick { sampled: i64 },
     StatsTick { hostings_sampled: i64 },
     BackupRestore,
     HostingLogs(String),

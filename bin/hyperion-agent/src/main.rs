@@ -183,6 +183,28 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
+    // Background per-hosting HTTP monitor: every 60s the tick walks all
+    // enabled hostings whose `monitor_interval_secs` has elapsed since
+    // the last sample, probes each, records, and dispatches alerts.
+    // 60s is a fine outer cadence because the per-hosting interval
+    // gates work; we just want enough resolution that a 60s interval
+    // (the minimum) actually fires every minute.
+    {
+        let monitor_svc = svc.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(45)).await;
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            interval.tick().await; // immediate-first-tick consumption
+            loop {
+                match monitor_svc.monitor_tick().await {
+                    Ok(0) => tracing::debug!("monitor tick: nothing due"),
+                    Ok(n) => tracing::info!(sampled = n, "monitor tick"),
+                    Err(e) => tracing::warn!(error=%e, "monitor tick failed"),
+                }
+                interval.tick().await;
+            }
+        });
+    }
     // Billing sweep — once per hour. Sends Slack reminders for hostings
     // with next_billing_at <= now + 3d.
     {
