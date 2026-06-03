@@ -548,6 +548,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             root_dir: htdocs,
             db: db_creds,
             cert: Some(cert),
+            wp: None,
         })
     }
 

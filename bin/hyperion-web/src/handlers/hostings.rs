@@ -56,6 +56,11 @@ struct NewTpl<'a> {
     proxy_upstream_url_in: String,
 }
 
+/// Per-field append to `CreateForm` for the optional WP install
+/// checkbox + its admin fields. Standalone struct so older code that
+/// only uses the basic fields keeps compiling — Form picks both
+/// because axum Form derives Deserialize on the whole body.
+
 #[derive(Template)]
 #[template(path = "hostings_detail.html")]
 struct DetailTpl<'a> {
@@ -197,6 +202,21 @@ pub struct CreateForm {
     /// Upstream URL when kind=reverse_proxy.
     #[serde(default)]
     pub proxy_upstream_url: String,
+    /// "on" if the user checked the "install WordPress" checkbox.
+    #[serde(default)]
+    pub install_wp: String,
+    /// WP admin email (also gets the install confirmation email).
+    #[serde(default)]
+    pub wp_admin_email: String,
+    /// WP admin password — what the operator types.
+    #[serde(default)]
+    pub wp_admin_password: String,
+    /// `wp_options.blogname` — default to the domain if blank.
+    #[serde(default)]
+    pub wp_title: String,
+    /// Locale; defaults to en_US if blank.
+    #[serde(default)]
+    pub wp_locale: String,
 }
 
 pub async fn post_create(
@@ -272,7 +292,69 @@ pub async fn post_create(
         .await
         .map_err(AppError::from)?;
     match resp {
-        RpcResponse::HostingCreate(created) => {
+        RpcResponse::HostingCreate(mut created) => {
+            // Optional WordPress install — only when checkbox ticked,
+            // database is provisioned, and kind is php (no point
+            // installing WP on a static or reverse_proxy hosting).
+            let wp_was_requested = form.install_wp.eq_ignore_ascii_case("on") ||
+                                   form.install_wp == "true" || form.install_wp == "1";
+            if wp_was_requested && created.db.is_some() && req.kind == "php" {
+                let admin_email = form.wp_admin_email.trim();
+                let admin_password = form.wp_admin_password.clone();
+                if admin_email.is_empty() || admin_password.len() < 6 {
+                    // Don't fail the whole create — the hosting is
+                    // alive. Just leave WP uninstalled.
+                    tracing::warn!(
+                        "WP install requested but missing/short credentials; skipping"
+                    );
+                } else {
+                    let title = if form.wp_title.trim().is_empty() {
+                        req.domain.as_str().to_string()
+                    } else {
+                        form.wp_title.trim().to_string()
+                    };
+                    let locale = if form.wp_locale.trim().is_empty() {
+                        "en_US".to_string()
+                    } else {
+                        form.wp_locale.trim().to_string()
+                    };
+                    let site_url = format!("https://{}", req.domain.as_str());
+                    let wp_req = hyperion_types::WpInstallRequest {
+                        site_url: site_url.clone(),
+                        title,
+                        admin_user: "admin".to_string(),
+                        admin_email: admin_email.to_string(),
+                        admin_password: admin_password.clone(),
+                        locale,
+                        version: "latest".to_string(),
+                    };
+                    let install_resp = hyperion_rpc_client::call(
+                        &state.agent_socket,
+                        Request::WpInstall {
+                            sel: HostingSelector::Id(created.id.clone()),
+                            req: wp_req,
+                        },
+                    )
+                    .await;
+                    match install_resp {
+                        Ok(RpcResponse::WpInstall(_status)) => {
+                            // Tuck the WP creds into the response so
+                            // the credential panel renders them.
+                            created.wp = Some(hyperion_rpc::wire::WpCreatedInfo {
+                                admin_user: "admin".into(),
+                                admin_email: admin_email.to_string(),
+                                admin_password,
+                                admin_login_url: format!("{}/wp-login.php", site_url),
+                            });
+                        }
+                        Ok(RpcResponse::Error(e)) => {
+                            tracing::warn!(error=%e, "WP install failed");
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
             // Re-fetch detail for nice display.
             let detail_resp = hyperion_rpc_client::call(
                 &state.agent_socket,

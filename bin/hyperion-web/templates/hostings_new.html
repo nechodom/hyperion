@@ -127,6 +127,46 @@
       </div>
     </div>
 
+    {# Install WordPress on create — toggle reveals extra fields. #}
+    <div class="card-section" id="wp-install-row" style="margin-top:1rem">
+      <label class="field-checkbox" style="font-weight:600">
+        <input type="checkbox" name="install_wp" value="on"
+               onchange="document.getElementById('wp-fields').style.display=this.checked?'grid':'none';">
+        Install WordPress on this hosting after provisioning
+      </label>
+      <div id="wp-fields" style="display:none;grid-template-columns:1fr 1fr;gap:0.5rem;margin-top:0.6rem">
+        <div class="field" style="margin:0">
+          <label for="wp_admin_email">Admin email</label>
+          <input id="wp_admin_email" name="wp_admin_email" type="email" placeholder="you@example.cz">
+        </div>
+        <div class="field" style="margin:0">
+          <label for="wp_admin_password">Admin password</label>
+          <input id="wp_admin_password" name="wp_admin_password" type="text" minlength="8" placeholder="≥ 8 characters">
+        </div>
+        <div class="field" style="margin:0">
+          <label for="wp_title">Site title (optional)</label>
+          <input id="wp_title" name="wp_title" type="text" placeholder="defaults to the domain">
+        </div>
+        <div class="field" style="margin:0">
+          <label for="wp_locale">Locale</label>
+          <select id="wp_locale" name="wp_locale">
+            <option value="en_US" selected>English (en_US)</option>
+            <option value="cs_CZ">Čeština (cs_CZ)</option>
+            <option value="sk_SK">Slovenčina (sk_SK)</option>
+            <option value="de_DE">Deutsch (de_DE)</option>
+            <option value="es_ES">Español (es_ES)</option>
+            <option value="fr_FR">Français (fr_FR)</option>
+            <option value="pl_PL">Polski (pl_PL)</option>
+          </select>
+        </div>
+      </div>
+      <p class="text-soft small" style="margin-top:0.4rem">
+        Default admin username is <code>admin</code>. After provisioning,
+        WordPress is installed at the site root and you'll see admin
+        credentials in the credentials panel.
+      </p>
+    </div>
+
     <div class="btn-group" style="margin-top:1rem">
       <button class="btn primary lg" type="submit">
         <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>

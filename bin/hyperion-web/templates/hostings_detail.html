@@ -87,6 +87,33 @@
       </div>
     </div>
     {% endif %}
+
+    {% if let Some(wp) = c.wp %}
+    {# WordPress — installed at create time. #}
+    <div class="creds-section">
+      <div class="creds-section-title">WordPress</div>
+      <div class="creds-row">
+        <span class="creds-label">Admin URL</span>
+        <code class="creds-value" data-copy="{{ wp.admin_login_url }}">{{ wp.admin_login_url }}</code>
+        <button class="creds-copy" type="button" data-target-value="{{ wp.admin_login_url }}">Copy</button>
+      </div>
+      <div class="creds-row">
+        <span class="creds-label">Username</span>
+        <code class="creds-value" data-copy="{{ wp.admin_user }}">{{ wp.admin_user }}</code>
+        <button class="creds-copy" type="button" data-target-value="{{ wp.admin_user }}">Copy</button>
+      </div>
+      <div class="creds-row">
+        <span class="creds-label">Email</span>
+        <code class="creds-value" data-copy="{{ wp.admin_email }}">{{ wp.admin_email }}</code>
+        <button class="creds-copy" type="button" data-target-value="{{ wp.admin_email }}">Copy</button>
+      </div>
+      <div class="creds-row creds-row-secret">
+        <span class="creds-label">Password</span>
+        <code class="creds-value secret" data-copy="{{ wp.admin_password }}">{{ wp.admin_password }}</code>
+        <button class="creds-copy" type="button" data-target-value="{{ wp.admin_password }}">Copy</button>
+      </div>
+    </div>
+    {% endif %}
   </div>
 
   <div class="creds-footnote">

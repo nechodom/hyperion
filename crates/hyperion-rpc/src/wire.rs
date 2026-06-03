@@ -43,6 +43,18 @@ pub struct HostingCreated {
     pub root_dir: String,
     pub db: Option<DbCredentials>,
     pub cert: Option<CertInfo>,
+    /// Populated when WordPress was installed inline at create time.
+    /// Returned ONCE — same security model as the DB password.
+    #[serde(default)]
+    pub wp: Option<WpCreatedInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WpCreatedInfo {
+    pub admin_user: String,
+    pub admin_email: String,
+    pub admin_password: String,
+    pub admin_login_url: String,
 }
 
 /// Returned ONCE at creation time; never reread from the agent.
