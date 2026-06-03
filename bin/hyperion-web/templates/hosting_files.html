@@ -1,0 +1,128 @@
+{% extends "base.html" %}
+{% block title %}Files · {{ domain }} · hyperion{% endblock %}
+{% block main %}
+<div class="breadcrumbs">
+  <a href="/hostings">Hostings</a>
+  <span class="sep">›</span>
+  <a href="/hostings/{{ selector }}">{{ domain }}</a>
+  <span class="sep">›</span>
+  <span>Files</span>
+</div>
+
+<div class="page-header">
+  <div>
+    <h1>Files · {{ domain }}</h1>
+    <div class="subtitle">
+      Read-only browser scoped to <code>htdocs/</code>. Path traversal +
+      symlinks refused at the agent layer.
+    </div>
+  </div>
+</div>
+
+{% if let Some(e) = error %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">{{ e }}</div>
+  </div>
+{% endif %}
+
+<div class="card" style="margin-bottom:1rem;padding:0.7rem 1rem">
+  <div style="display:flex;align-items:center;gap:0.4rem;flex-wrap:wrap;font-size:0.92rem">
+    <strong>Path:</strong>
+    {% for c in breadcrumbs %}
+      {% if loop.last %}
+        <span><code>{{ c.0 }}</code></span>
+      {% else %}
+        <a href="/hostings/{{ selector }}/files?path={{ c.1|e }}"><code>{{ c.0 }}</code></a>
+        <span class="text-soft">/</span>
+      {% endif %}
+    {% endfor %}
+  </div>
+</div>
+
+<div style="display:grid;grid-template-columns:minmax(0,1fr){% if viewer.is_some() %} minmax(0,2fr){% endif %};gap:1rem;align-items:start">
+
+<div class="card no-pad-table">
+  {% if entries.is_empty() %}
+    <div class="empty">
+      <div class="empty-illustration">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+      </div>
+      <h3>Empty directory</h3>
+      <p>Drop files into <code>{{ domain }}/htdocs</code> via FTP, SCP, or wp-cli to see them here.</p>
+    </div>
+  {% else %}
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th class="right">Size</th>
+            <th>Modified</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% if !rel_path.is_empty() %}
+            <tr>
+              <td colspan="4">
+                <a href="/hostings/{{ selector }}/files?path={{ crate::handlers::files::parent_path_for_template(rel_path)|e }}" style="display:inline-flex;align-items:center;gap:0.4rem">
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><polyline points="15 18 9 12 15 6"/></svg>
+                  Up one level
+                </a>
+              </td>
+            </tr>
+          {% endif %}
+          {% for e in entries %}
+            <tr>
+              <td>
+                {% if e.kind == "dir" %}
+                  <a href="/hostings/{{ selector }}/files?path={{ e.rel_path|e }}" style="display:inline-flex;gap:0.4rem;align-items:center">
+                    <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+                    <strong>{{ e.name }}</strong>
+                  </a>
+                {% else %}
+                  {% if e.inline_viewable %}
+                    <a href="/hostings/{{ selector }}/files?path={{ rel_path|e }}&file={{ e.rel_path|e }}" style="display:inline-flex;gap:0.4rem;align-items:center">
+                      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                      {{ e.name }}
+                    </a>
+                  {% else %}
+                    <span style="display:inline-flex;gap:0.4rem;align-items:center">
+                      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+                      <span class="text-soft">{{ e.name }}</span>
+                    </span>
+                  {% endif %}
+                {% endif %}
+                <div class="text-soft small">{{ e.mime }}</div>
+              </td>
+              <td class="right text-soft small">
+                {% if e.kind == "dir" %}—{% else %}{{ crate::handlers::files::fmt_size_u64(e.size) }}{% endif %}
+              </td>
+              <td class="text-soft small">{{ crate::handlers::stats::fmt_ago(e.modified_at) }}</td>
+              <td></td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% endif %}
+</div>
+
+{% if let Some(v) = viewer %}
+<div class="card">
+  <div class="spread" style="margin-bottom:0.6rem">
+    <h3 style="margin:0;font-size:0.95rem">{{ v.rel_path }}</h3>
+    <span class="text-soft small">{{ v.mime }} · {{ crate::handlers::files::fmt_size_u64(v.size) }}</span>
+  </div>
+  {% if v.truncated %}
+    <div class="flash warn">
+      <div class="flash-body">File is larger than the 1 MiB inline cap — only a partial preview is rendered. Use scp/sftp for the full contents.</div>
+    </div>
+  {% endif %}
+  <pre style="margin:0;padding:0.85rem;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-md);overflow:auto;max-height:70vh;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:0.82rem;line-height:1.5"><code>{{ v.content }}</code></pre>
+</div>
+{% endif %}
+
+</div>
+{% endblock %}

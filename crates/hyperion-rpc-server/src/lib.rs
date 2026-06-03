@@ -315,6 +315,18 @@ async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::HostingFileList { sel, rel_path } => {
+            match api.hosting_file_list(sel, rel_path).await {
+                Ok((rel_path, entries)) => Response::HostingFileList { rel_path, entries },
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::HostingFileRead { sel, rel_path } => {
+            match api.hosting_file_read(sel, rel_path).await {
+                Ok(v) => Response::HostingFileRead(v),
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::StatsTick => match api.stats_tick().await {
             Ok(n) => Response::StatsTick {
                 hostings_sampled: n,
@@ -694,6 +706,26 @@ mod tests {
             _: String,
         ) -> Result<Vec<hyperion_types::WebHostingAccess>, RpcError> {
             Ok(vec![])
+        }
+        async fn hosting_file_list(
+            &self,
+            _: HostingSelector,
+            _: String,
+        ) -> Result<(String, Vec<hyperion_types::HostingFileEntry>), RpcError> {
+            Ok((String::new(), vec![]))
+        }
+        async fn hosting_file_read(
+            &self,
+            _: HostingSelector,
+            _: String,
+        ) -> Result<hyperion_types::HostingFileContent, RpcError> {
+            Ok(hyperion_types::HostingFileContent {
+                rel_path: String::new(),
+                mime: String::new(),
+                size: 0,
+                content: String::new(),
+                truncated: false,
+            })
         }
         async fn stats_tick(&self) -> Result<i64, RpcError> {
             Ok(0)

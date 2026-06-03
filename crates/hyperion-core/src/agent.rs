@@ -339,6 +339,21 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.web_list_hosting_access(hosting_id).await
     }
 
+    async fn hosting_file_list(
+        &self,
+        sel: HostingSelector,
+        rel_path: String,
+    ) -> Result<(String, Vec<hyperion_types::HostingFileEntry>), RpcError> {
+        self.svc.hosting_file_list(sel, rel_path).await
+    }
+    async fn hosting_file_read(
+        &self,
+        sel: HostingSelector,
+        rel_path: String,
+    ) -> Result<hyperion_types::HostingFileContent, RpcError> {
+        self.svc.hosting_file_read(sel, rel_path).await
+    }
+
     async fn stats_tick(&self) -> Result<i64, RpcError> {
         self.svc.stats_tick().await
     }

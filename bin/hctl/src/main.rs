@@ -735,6 +735,21 @@ fn print_pretty(resp: &Response) {
                 );
             }
         }
+        Response::HostingFileList { rel_path, entries } => {
+            println!("{} ({} entries):", rel_path, entries.len());
+            for e in entries {
+                println!(
+                    "  [{}] {:>10} {} {}",
+                    e.kind, e.size, e.mime, e.name
+                );
+            }
+        }
+        Response::HostingFileRead(c) => {
+            println!("{} ({} bytes, {}){}", c.rel_path, c.size, c.mime,
+                if c.truncated { " — TRUNCATED" } else { "" });
+            println!("---");
+            println!("{}", c.content);
+        }
     }
 }
 

@@ -3474,6 +3474,144 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(())
     }
 
+    /// List one directory inside a hosting's htdocs root. Returns the
+    /// (echoed) relative path + the entries. All entries are RELATIVE
+    /// to htdocs — operators can navigate without leaking the absolute
+    /// filesystem layout.
+    pub async fn hosting_file_list(
+        &self,
+        sel: HostingSelector,
+        rel_path: String,
+    ) -> Result<(String, Vec<hyperion_types::HostingFileEntry>), RpcError> {
+        let detail = self.get(sel).await?;
+        let jail = std::path::PathBuf::from(&detail.root_dir);
+        let abs = hyperion_adapters::files::resolve_inside_jail(&jail, &rel_path)
+            .await
+            .map_err(|e| RpcError::Validation {
+                message: e.to_string(),
+            })?;
+        let mut entries = Vec::new();
+        let mut rd = tokio::fs::read_dir(&abs).await.map_err(|e| {
+            RpcError::Validation {
+                message: format!("read_dir: {e}"),
+            }
+        })?;
+        while let Some(entry) = rd
+            .next_entry()
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("read entry: {e}")))?
+        {
+            let name = entry.file_name().to_string_lossy().to_string();
+            // Skip dotfiles starting with .. (paranoia — they shouldn't
+            // be there) and hidden control files like .DS_Store noise.
+            if name.starts_with("..") {
+                continue;
+            }
+            let md = match entry.metadata().await {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            let kind = if md.is_dir() {
+                "dir"
+            } else if md.file_type().is_symlink() {
+                "symlink"
+            } else if md.is_file() {
+                "file"
+            } else {
+                "other"
+            };
+            let mime = if kind == "file" {
+                hyperion_adapters::files::guess_mime(&name).to_string()
+            } else {
+                String::new()
+            };
+            let inline_viewable = kind == "file"
+                && md.len() <= hyperion_adapters::files::MAX_INLINE_BYTES
+                && hyperion_adapters::files::is_inline_text(&mime);
+            let rel = if rel_path.is_empty() || rel_path == "/" {
+                name.clone()
+            } else {
+                format!("{}/{}", rel_path.trim_end_matches('/'), name)
+            };
+            let modified_at = md
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            entries.push(hyperion_types::HostingFileEntry {
+                name,
+                rel_path: rel,
+                kind: kind.to_string(),
+                size: md.len(),
+                modified_at,
+                mime,
+                inline_viewable,
+            });
+        }
+        // Directories first, then alphabetical.
+        entries.sort_by(|a, b| match (a.kind.as_str(), b.kind.as_str()) {
+            ("dir", "dir") | ("file", "file") => a.name.cmp(&b.name),
+            ("dir", _) => std::cmp::Ordering::Less,
+            (_, "dir") => std::cmp::Ordering::Greater,
+            _ => a.name.cmp(&b.name),
+        });
+        Ok((rel_path, entries))
+    }
+
+    pub async fn hosting_file_read(
+        &self,
+        sel: HostingSelector,
+        rel_path: String,
+    ) -> Result<hyperion_types::HostingFileContent, RpcError> {
+        let detail = self.get(sel).await?;
+        let jail = std::path::PathBuf::from(&detail.root_dir);
+        let abs = hyperion_adapters::files::resolve_inside_jail(&jail, &rel_path)
+            .await
+            .map_err(|e| RpcError::Validation {
+                message: e.to_string(),
+            })?;
+        let md = tokio::fs::metadata(&abs).await.map_err(|e| {
+            RpcError::Validation {
+                message: format!("stat: {e}"),
+            }
+        })?;
+        if !md.is_file() {
+            return Err(RpcError::Validation {
+                message: "not a regular file".into(),
+            });
+        }
+        let mime = hyperion_adapters::files::guess_mime(
+            abs.file_name().and_then(|n| n.to_str()).unwrap_or(""),
+        )
+        .to_string();
+        if !hyperion_adapters::files::is_inline_text(&mime) {
+            return Err(RpcError::Validation {
+                message: format!("binary file (mime={mime}) — download separately"),
+            });
+        }
+        if md.len() > hyperion_adapters::files::MAX_INLINE_BYTES {
+            return Ok(hyperion_types::HostingFileContent {
+                rel_path,
+                mime,
+                size: md.len(),
+                content: String::new(),
+                truncated: true,
+            });
+        }
+        let bytes = tokio::fs::read(&abs)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("read: {e}")))?;
+        let content = String::from_utf8_lossy(&bytes).to_string();
+        Ok(hyperion_types::HostingFileContent {
+            rel_path,
+            mime,
+            size: md.len(),
+            content,
+            truncated: false,
+        })
+    }
+
     pub async fn web_list_hosting_access(
         &self,
         hosting_id: String,

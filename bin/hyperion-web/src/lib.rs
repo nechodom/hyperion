@@ -117,6 +117,10 @@ pub fn build_router(state: SharedState) -> Router {
             "/hostings/access/revoke",
             post(handlers::hostings::post_access_revoke),
         )
+        .route(
+            "/hostings/:selector/files",
+            get(handlers::files::get_files),
+        )
         .route("/profile", get(handlers::profile::get_profile))
         .route("/profile/2fa/start", post(handlers::profile::post_2fa_start))
         .route("/profile/2fa/confirm", post(handlers::profile::post_2fa_confirm))

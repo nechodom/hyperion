@@ -198,6 +198,19 @@ pub trait AgentApi: Send + Sync + 'static {
         hosting_id: String,
     ) -> Result<Vec<hyperion_types::WebHostingAccess>, RpcError>;
 
+    /// List one directory inside a hosting's htdocs jail.
+    async fn hosting_file_list(
+        &self,
+        sel: crate::wire::HostingSelector,
+        rel_path: String,
+    ) -> Result<(String, Vec<hyperion_types::HostingFileEntry>), RpcError>;
+    /// Read one text file inside a hosting's htdocs jail.
+    async fn hosting_file_read(
+        &self,
+        sel: crate::wire::HostingSelector,
+        rel_path: String,
+    ) -> Result<hyperion_types::HostingFileContent, RpcError>;
+
     /// Install WordPress into a hosting (downloads core, writes wp-config.php
     /// against the hosting's DB credentials, runs `wp core install`, records
     /// the result in `wp_installs`).

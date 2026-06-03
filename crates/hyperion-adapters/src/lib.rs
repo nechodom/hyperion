@@ -23,6 +23,8 @@ pub mod rollback;
 pub mod users;
 pub mod wpcli;
 
+pub mod files;
+
 /// Probe one systemd unit's status. Returns (active, enabled, sub_state).
 /// Never panics; on any error returns `(false, false, "?")`.
 /// Used by both the health-check page and the dashboard widget.

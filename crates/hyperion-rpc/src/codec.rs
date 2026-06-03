@@ -217,6 +217,20 @@ pub enum Request {
         hosting_id: String,
     },
 
+    /// List one directory under a hosting's htdocs root. Path is
+    /// RELATIVE to htdocs; empty / "/" mean the root itself.
+    /// Read-only — file browser MVP.
+    HostingFileList {
+        sel: HostingSelector,
+        rel_path: String,
+    },
+    /// Read a single text file (≤ 1 MiB) under a hosting's htdocs root.
+    /// Binary files are refused — UI offers a download link instead.
+    HostingFileRead {
+        sel: HostingSelector,
+        rel_path: String,
+    },
+
     StatsTick,
     BackupRestore {
         sel: HostingSelector,
@@ -330,6 +344,11 @@ pub enum Response {
     WebGrantHostingAccess,
     WebRevokeHostingAccess,
     WebListHostingAccess(Vec<hyperion_types::WebHostingAccess>),
+    HostingFileList {
+        rel_path: String,
+        entries: Vec<hyperion_types::HostingFileEntry>,
+    },
+    HostingFileRead(hyperion_types::HostingFileContent),
     StatsTick { hostings_sampled: i64 },
     BackupRestore,
     HostingLogs(String),

@@ -293,6 +293,38 @@ pub struct WebHostingAccess {
     pub granted_at: i64,
 }
 
+/// One entry returned by `HostingFileList`. The path is RELATIVE to
+/// the hosting's htdocs root — UI breadcrumbs use this directly.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HostingFileEntry {
+    /// Just the basename (last path component).
+    pub name: String,
+    /// Path RELATIVE to htdocs (e.g. "wp-content/themes").
+    pub rel_path: String,
+    /// "file" | "dir" | "symlink" | "other"
+    pub kind: String,
+    pub size: u64,
+    pub modified_at: i64,
+    /// MIME guess from extension (text files render inline; binary
+    /// shows a download hint).
+    pub mime: String,
+    /// True iff this file is below the inline-render size cap AND
+    /// has a text MIME we recognise. UI uses this to decide whether
+    /// to show "View" or "Download" only.
+    pub inline_viewable: bool,
+}
+
+/// Body of one viewed file. Returned by `HostingFileRead`. Capped
+/// at 1 MiB; oversized files return an empty `content` and `truncated: true`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HostingFileContent {
+    pub rel_path: String,
+    pub mime: String,
+    pub size: u64,
+    pub content: String,
+    pub truncated: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

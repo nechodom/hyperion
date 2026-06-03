@@ -31,10 +31,10 @@ pub use profile::{HostingProfile, ProfileApply, ProfileInput};
 pub use spf::SpfCheckResult;
 pub use stats::{
     AcmeConfigView, AgentConfigView, BackupRemoteConfigView, BackupRetentionConfigView,
-    ClusterStats, DashboardAlert, EmailConfigView, HostingStats, NodeMetricPoint,
-    NodeMetricsHistory, NodeStats, NodeSummary, ServiceHealth, ServicesHealth,
-    SlackConfigView, Web2faEnrollment, WebHostingAccess, WebLoginResult, WebUserSummary,
-    WebVerify2faResult,
+    ClusterStats, DashboardAlert, EmailConfigView, HostingFileContent, HostingFileEntry,
+    HostingStats, NodeMetricPoint, NodeMetricsHistory, NodeStats, NodeSummary, ServiceHealth,
+    ServicesHealth, SlackConfigView, Web2faEnrollment, WebHostingAccess, WebLoginResult,
+    WebUserSummary, WebVerify2faResult,
 };
 pub use wp::{WpInstallRequest, WpInstallStatus};
 
