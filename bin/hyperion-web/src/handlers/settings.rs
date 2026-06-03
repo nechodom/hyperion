@@ -109,6 +109,75 @@ pub async fn post_email_test(
     }
 }
 
+#[derive(Deserialize)]
+pub struct ConfigEditForm {
+    /// "acme" | "email" | "slack" | "backup_remote" | "backup_retention"
+    pub section: String,
+    /// Field name -> string-encoded value. Service does the typing.
+    /// Empty string clears (or sets the field to "" depending on
+    /// type — int parsing rejects empty).
+    #[serde(flatten)]
+    pub fields: std::collections::BTreeMap<String, String>,
+}
+
+/// POST /settings/config — super_admin only. Updates one section of
+/// agent.toml in place, preserving comments. Operator must restart the
+/// agent to apply.
+pub async fn post_config(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<ConfigEditForm>,
+) -> Result<Response, AppError> {
+    if !ctx.is_super_admin() {
+        return Ok(Redirect::to("/").into_response());
+    }
+    // Strip the `section` field from the bag — it's not a TOML field
+    // itself, it's the routing key. axum's `#[serde(flatten)]` collects
+    // every form field including `section`, so filter it out.
+    let mut fields = form.fields;
+    fields.remove("section");
+    fields.remove("_csrf");
+    // "Leave blank to keep" for sensitive fields — empty string would
+    // overwrite a real password / webhook URL with "".
+    let drop_if_empty: &[&str] = match form.section.as_str() {
+        "email" => &["smtp_password"],
+        "slack" => &["default_webhook"],
+        "backup_remote" => &["password"],
+        _ => &[],
+    };
+    for k in drop_if_empty {
+        if fields.get(*k).map(|v| v.trim().is_empty()).unwrap_or(false) {
+            fields.remove(*k);
+        }
+    }
+    // Unchecked checkboxes don't show up in the form at all — but our
+    // service knows the field is required. Synthesise `enabled=false`
+    // when the checkbox is absent in sections that use it.
+    if matches!(form.section.as_str(), "email" | "backup_remote")
+        && !fields.contains_key("enabled")
+    {
+        fields.insert("enabled".to_string(), "false".to_string());
+    }
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::AgentConfigUpdate {
+            section: form.section.clone(),
+            fields,
+        },
+    )
+    .await
+    .map_err(AppError::from)?;
+    let dest = match resp {
+        RpcResponse::AgentConfigUpdate => format!(
+            "/settings?flash=Section+%5B{}%5D+saved+%E2%80%94+restart+hyperion-agent+to+apply",
+            urlencode(&form.section)
+        ),
+        RpcResponse::Error(e) => format!("/settings?flash_error={}", urlencode(&e.to_string())),
+        _ => return Err(AppError::Internal("unexpected response".into())),
+    };
+    Ok(Redirect::to(&dest).into_response())
+}
+
 fn urlencode(s: &str) -> String {
     s.bytes()
         .map(|b| match b {

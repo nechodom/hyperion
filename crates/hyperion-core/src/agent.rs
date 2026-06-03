@@ -233,6 +233,19 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     async fn services_health(&self) -> Result<hyperion_types::ServicesHealth, RpcError> {
         self.svc.services_health().await
     }
+    async fn service_restart(&self, name: String) -> Result<(), RpcError> {
+        self.svc.service_restart(name).await
+    }
+    async fn service_install(&self, name: String) -> Result<(), RpcError> {
+        self.svc.service_install(name).await
+    }
+    async fn agent_config_update(
+        &self,
+        section: String,
+        fields: std::collections::BTreeMap<String, String>,
+    ) -> Result<(), RpcError> {
+        self.svc.agent_config_update(section, fields).await
+    }
 
     async fn backup_delete(&self, backup_id: i64) -> Result<(), RpcError> {
         self.svc.backup_delete(backup_id).await

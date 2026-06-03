@@ -146,6 +146,7 @@ async fn start_agent() -> (std::path::PathBuf, tempfile::TempDir) {
         acme_contact_email: "test@example.invalid".into(),
         email_config: None,
         email_default_to: None,
+        agent_config_path: None,
     });
     let _ = adapters; // silence unused warning
     let agent: Arc<dyn AgentApi> = Arc::new(AgentImpl::new(svc));

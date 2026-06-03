@@ -223,6 +223,20 @@ async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::ServicesHealth(v),
             Err(e) => Response::Error(e),
         },
+        Request::ServiceRestart { name } => match api.service_restart(name).await {
+            Ok(()) => Response::ServiceRestart,
+            Err(e) => Response::Error(e),
+        },
+        Request::ServiceInstall { name } => match api.service_install(name).await {
+            Ok(()) => Response::ServiceInstall,
+            Err(e) => Response::Error(e),
+        },
+        Request::AgentConfigUpdate { section, fields } => {
+            match api.agent_config_update(section, fields).await {
+                Ok(()) => Response::AgentConfigUpdate,
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::BackupDelete { backup_id } => match api.backup_delete(backup_id).await {
             Ok(()) => Response::BackupDelete,
             Err(e) => Response::Error(e),
@@ -638,6 +652,19 @@ mod tests {
         }
         async fn services_health(&self) -> Result<hyperion_types::ServicesHealth, RpcError> {
             Ok(hyperion_types::ServicesHealth::default())
+        }
+        async fn service_restart(&self, _: String) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn service_install(&self, _: String) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn agent_config_update(
+            &self,
+            _: String,
+            _: std::collections::BTreeMap<String, String>,
+        ) -> Result<(), RpcError> {
+            Ok(())
         }
         async fn backup_delete(&self, _: i64) -> Result<(), RpcError> {
             Ok(())

@@ -8,6 +8,7 @@
 #![forbid(unsafe_code)]
 
 pub mod agent;
+pub mod config_persist;
 pub mod real_adapter;
 pub mod secrets;
 pub mod service;

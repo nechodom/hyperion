@@ -137,6 +137,9 @@ pub struct HostingService<A: AdapterPort + 'static> {
     pub email_config: Option<hyperion_adapters::email::EmailConfig>,
     /// Default operator address for cluster-wide notifications.
     pub email_default_to: Option<String>,
+    /// Path to agent.toml on disk, for the per-section settings editor.
+    /// None disables UI-driven config writes (operator hand-edits only).
+    pub agent_config_path: Option<std::path::PathBuf>,
 }
 
 /// Cluster-wide remote backup destination. When set, every successful
@@ -202,7 +205,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             acme_contact_email: "admin@hyperion.invalid".into(),
             email_config: None,
             email_default_to: None,
+            agent_config_path: None,
         }
+    }
+
+    /// Wire the on-disk agent.toml path so the /settings page can
+    /// write back to it. Called from `bin/hyperion-agent/src/main.rs`
+    /// at startup.
+    pub fn with_agent_config_path(mut self, path: std::path::PathBuf) -> Self {
+        self.agent_config_path = Some(path);
+        self
     }
 
     pub fn with_acme_email(mut self, email: impl Into<String>) -> Self {
@@ -4120,6 +4132,136 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(())
     }
 
+    /// Whitelist of unit names we'll restart/install. Refusing
+    /// anything else prevents a compromised UI from convincing the
+    /// agent to enable a random unit ("docker", "ssh", "ufw"…).
+    /// Refusing `hyperion-agent` specifically prevents tearing the
+    /// RPC pipe out from under our own response.
+    fn service_whitelist_for(name: &str, allow_self_restart: bool) -> Option<&'static str> {
+        match name {
+            "nginx" => Some("nginx"),
+            "mariadb" => Some("mariadb-server"),
+            "postgresql" => Some("postgresql"),
+            "vsftpd" => Some("vsftpd"),
+            "php8.1-fpm" => Some("php8.1-fpm"),
+            "php8.2-fpm" => Some("php8.2-fpm"),
+            "php8.3-fpm" => Some("php8.3-fpm"),
+            "php8.4-fpm" => Some("php8.4-fpm"),
+            "hyperion-web" => Some("hyperion-web"),
+            "hyperion-agent" if allow_self_restart => Some("hyperion-agent"),
+            _ => None,
+        }
+    }
+
+    pub async fn service_restart(&self, name: String) -> Result<(), RpcError> {
+        let _pkg = Self::service_whitelist_for(&name, false).ok_or_else(|| {
+            RpcError::Validation {
+                message: format!(
+                    "service `{name}` is not on the restart whitelist (refuse self-restart of hyperion-agent — would kill this RPC; SSH for that)"
+                ),
+            }
+        })?;
+        let out = tokio::process::Command::new("/usr/bin/systemctl")
+            .args(["restart", &name])
+            .output()
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("systemctl: {e}")))?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+            return Err(RpcError::Internal_with(format!(
+                "systemctl restart {name} failed: {stderr}"
+            )));
+        }
+        self.append_audit(
+            "service.restart",
+            None,
+            &serde_json::json!({"name": name}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
+    /// Apply per-section updates to agent.toml on disk. Operator
+    /// still needs to `systemctl restart hyperion-agent` for the
+    /// running daemon to pick up the new values — the UI reminds
+    /// them with a flash message.
+    pub async fn agent_config_update(
+        &self,
+        section: String,
+        fields: std::collections::BTreeMap<String, String>,
+    ) -> Result<(), RpcError> {
+        let path = self.agent_config_path.as_ref().ok_or_else(|| {
+            RpcError::Validation {
+                message: "agent_config_path not wired — UI editing disabled".into(),
+            }
+        })?;
+        let parsed = parse_agent_section_fields(&section, &fields)?;
+        // Convert to the &[(&str, FieldValue)] shape the persist module
+        // wants. Done in two steps so the &str references live long
+        // enough for the slice.
+        let owned: Vec<(String, crate::config_persist::FieldValue)> = parsed;
+        let view: Vec<(&str, crate::config_persist::FieldValue)> = owned
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.clone()))
+            .collect();
+        crate::config_persist::set_many(path, &section, &view).map_err(|e| {
+            RpcError::Internal_with(format!("config write failed: {e}"))
+        })?;
+        // Audit. Don't echo field values (might be a password).
+        let field_names: Vec<&str> = fields.keys().map(|s| s.as_str()).collect();
+        self.append_audit(
+            "agent.config.update",
+            None,
+            &serde_json::json!({"section": section, "fields": field_names}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
+    pub async fn service_install(&self, name: String) -> Result<(), RpcError> {
+        let pkg = Self::service_whitelist_for(&name, false).ok_or_else(|| {
+            RpcError::Validation {
+                message: format!("service `{name}` is not on the install whitelist"),
+            }
+        })?;
+        // 1. apt-get install. DEBIAN_FRONTEND=noninteractive so apt
+        //    doesn't try to open an interactive prompt and hang.
+        let install = tokio::process::Command::new("/usr/bin/apt-get")
+            .args(["install", "-y", "-qq", pkg])
+            .env("DEBIAN_FRONTEND", "noninteractive")
+            .output()
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("apt-get spawn: {e}")))?;
+        if !install.status.success() {
+            let stderr = String::from_utf8_lossy(&install.stderr).to_string();
+            return Err(RpcError::Internal_with(format!(
+                "apt-get install {pkg} failed: {stderr}"
+            )));
+        }
+        // 2. enable + start (--now). Idempotent.
+        let enable = tokio::process::Command::new("/usr/bin/systemctl")
+            .args(["enable", "--now", &name])
+            .output()
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("systemctl spawn: {e}")))?;
+        if !enable.status.success() {
+            let stderr = String::from_utf8_lossy(&enable.stderr).to_string();
+            return Err(RpcError::Internal_with(format!(
+                "systemctl enable --now {name} failed: {stderr}"
+            )));
+        }
+        self.append_audit(
+            "service.install",
+            None,
+            &serde_json::json!({"name": name, "pkg": pkg}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
     /// Status of every system service Hyperion depends on. Run via
     /// `systemctl is-active/is-enabled` so the answer is always live
     /// — we don't cache because operator restarts/disables happen
@@ -4858,6 +5000,87 @@ async fn http_post_json(url: &str, json_body: &str) -> Result<(), String> {
     }
 }
 
+/// Per-section + field validation. Returns owned (field, FieldValue)
+/// pairs ready for the persist module.
+fn parse_agent_section_fields(
+    section: &str,
+    fields: &std::collections::BTreeMap<String, String>,
+) -> Result<Vec<(String, crate::config_persist::FieldValue)>, RpcError> {
+    let bad = |msg: String| RpcError::Validation { message: msg };
+    let mut out = Vec::with_capacity(fields.len());
+    for (k, v) in fields {
+        let parsed = match (section, k.as_str()) {
+            // [acme]
+            ("acme", "contact_email") => {
+                if !v.contains('@') || v.len() > 254 {
+                    return Err(bad("invalid email".into()));
+                }
+                crate::config_persist::FieldValue::Str(v.clone())
+            }
+            ("acme", "directory_url") | ("acme", "challenge_dir") => {
+                crate::config_persist::FieldValue::Str(v.clone())
+            }
+            // [email]
+            ("email", "enabled") => crate::config_persist::FieldValue::Bool(parse_bool(v)?),
+            ("email", "smtp_host")
+            | ("email", "smtp_user")
+            | ("email", "smtp_password")
+            | ("email", "from_address")
+            | ("email", "from_name")
+            | ("email", "security")
+            | ("email", "default_to") => {
+                crate::config_persist::FieldValue::Str(v.clone())
+            }
+            ("email", "smtp_port") => crate::config_persist::FieldValue::Int(parse_int(v)?),
+            // [slack]
+            ("slack", "default_webhook") => crate::config_persist::FieldValue::Str(v.clone()),
+            // [backup_remote]
+            ("backup_remote", "enabled") => {
+                crate::config_persist::FieldValue::Bool(parse_bool(v)?)
+            }
+            ("backup_remote", "scheme")
+            | ("backup_remote", "host")
+            | ("backup_remote", "user")
+            | ("backup_remote", "password")
+            | ("backup_remote", "base_path") => {
+                crate::config_persist::FieldValue::Str(v.clone())
+            }
+            ("backup_remote", "port") => {
+                crate::config_persist::FieldValue::Int(parse_int(v)?)
+            }
+            // [backup_retention]
+            ("backup_retention", "max_age_days")
+            | ("backup_retention", "keep_latest_n") => {
+                crate::config_persist::FieldValue::Int(parse_int(v)?)
+            }
+            // Reject anything else.
+            _ => {
+                return Err(bad(format!(
+                    "field `{k}` is not editable in section `{section}` (or section unknown)"
+                )));
+            }
+        };
+        out.push((k.clone(), parsed));
+    }
+    Ok(out)
+}
+
+fn parse_bool(v: &str) -> Result<bool, RpcError> {
+    match v.to_ascii_lowercase().as_str() {
+        "true" | "on" | "yes" | "1" => Ok(true),
+        "false" | "off" | "no" | "0" | "" => Ok(false),
+        _ => Err(RpcError::Validation {
+            message: format!("expected bool, got {v:?}"),
+        }),
+    }
+}
+
+fn parse_int(v: &str) -> Result<i64, RpcError> {
+    v.trim().parse::<i64>().map_err(|_| RpcError::Validation {
+        message: format!("expected integer, got {v:?}"),
+    })
+}
+
 fn row_to_summary(u: hyperion_state::web_users::WebUserRow) -> hyperion_types::WebUserSummary {
     hyperion_types::WebUserSummary {
         id: u.id,
@@ -5241,6 +5464,7 @@ mod tests {
             acme_contact_email: "test@example.invalid".into(),
             email_config: None,
             email_default_to: None,
+            agent_config_path: None,
         };
         s2.create(HostingCreateReq {
             domain: Domain::parse("b.cz").expect("parse"),
@@ -5281,6 +5505,7 @@ mod tests {
             acme_contact_email: "test@example.invalid".into(),
             email_config: None,
             email_default_to: None,
+            agent_config_path: None,
         };
         let r = s2.create(req("dup.cz")).await;
         match r {

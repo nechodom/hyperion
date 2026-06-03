@@ -113,6 +113,28 @@ pub enum Request {
     /// (nginx, mariadb, postgresql, php-fpm versions, vsftpd, etc.)
     /// for the /health page + dashboard widget.
     ServicesHealth,
+    /// `systemctl restart <name>` on a whitelisted unit. Restarts
+    /// hyperion-agent itself are refused (would terminate this RPC
+    /// session); operator must SSH for self-restart.
+    ServiceRestart {
+        name: String,
+    },
+    /// `apt-get install -y <pkg>` then `systemctl enable --now <name>`.
+    /// `name` must be in the same whitelist as restart. Maps service
+    /// name to apt package name (typically identical).
+    ServiceInstall {
+        name: String,
+    },
+    /// Update one section of agent.toml. Validated server-side per
+    /// section + field. Operator must `systemctl restart hyperion-agent`
+    /// to load the new values (UI tells them).
+    AgentConfigUpdate {
+        /// "acme" | "email" | "slack" | "backup_remote" | "backup_retention"
+        section: String,
+        /// Field → string-encoded value. Service knows the expected
+        /// types per (section, field) and parses accordingly.
+        fields: std::collections::BTreeMap<String, String>,
+    },
     /// Delete a single backup run + its archive file(s) on disk.
     /// Refuses if the backup is still "running". Audits the action.
     BackupDelete {
@@ -352,6 +374,9 @@ pub enum Response {
     BackupDelete,
     AgentConfigView(hyperion_types::AgentConfigView),
     EmailSendTest,
+    ServiceRestart,
+    ServiceInstall,
+    AgentConfigUpdate,
     // Web users / roles / 2FA
     WebLogin(hyperion_types::WebLoginResult),
     WebVerify2fa(hyperion_types::WebVerify2faResult),

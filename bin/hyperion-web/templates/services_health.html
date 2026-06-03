@@ -24,6 +24,20 @@
   </div>
 {% endif %}
 
+{% if let Some(m) = flash %}
+  <div class="flash success">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+    <div class="flash-body">{{ m }}</div>
+  </div>
+{% endif %}
+
+{% if let Some(e) = flash_error %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">{{ e }}</div>
+  </div>
+{% endif %}
+
 {# Summary card at top. #}
 <div class="kpi-grid" style="margin-bottom:1rem">
   <div class="kpi-card" style="{% if health.critical_down > 0 %}border-left:4px solid var(--danger){% else if health.warn_down > 0 %}border-left:4px solid var(--warn){% else %}border-left:4px solid var(--success){% endif %}">
@@ -61,7 +75,8 @@
           <th>Active</th>
           <th>Enabled</th>
           <th>SubState</th>
-          <th class="right">Severity</th>
+          <th>Severity</th>
+          {% if is_super_admin %}<th class="right">Actions</th>{% endif %}
         </tr>
       </thead>
       <tbody>
@@ -83,12 +98,39 @@
           <td>{% if s.active %}<span class="text-soft">yes</span>{% else %}<strong style="color:var(--danger)">no</strong>{% endif %}</td>
           <td>{% if s.enabled %}<span class="text-soft">yes</span>{% else %}<span style="color:var(--warn)">no</span>{% endif %}</td>
           <td><code class="text-soft">{{ s.sub_state }}</code></td>
-          <td class="right">
+          <td>
             {% if s.severity == "error" %}<span class="pill err">CRITICAL</span>
             {% else if s.severity == "warn" %}<span class="pill warn">WARN</span>
             {% else if s.severity == "info" %}<span class="pill" style="background:var(--surface-2);color:var(--text-soft)">INFO</span>
             {% else %}<span class="pill ok">OK</span>{% endif %}
           </td>
+          {% if is_super_admin %}
+          <td class="right">
+            <div style="display:inline-flex;gap:0.3rem;justify-content:flex-end;flex-wrap:wrap">
+              {% if !s.present %}
+                {# Don't offer self-install for hyperion-agent / hyperion-web — they're already this binary. #}
+                {% if s.name != "hyperion-agent" && s.name != "hyperion-web" %}
+                  <form method="post" action="/services/install" style="display:inline"
+                        onsubmit="return confirm('apt-install + enable {{ s.label }}? This runs apt-get on the node.');">
+                    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                    <input type="hidden" name="name" value="{{ s.name }}">
+                    <button type="submit" class="btn small primary">Install</button>
+                  </form>
+                {% endif %}
+              {% else %}
+                {# Refuse self-restart of hyperion-agent — would terminate the RPC pipe. #}
+                {% if s.name != "hyperion-agent" %}
+                  <form method="post" action="/services/restart" style="display:inline"
+                        onsubmit="return confirm('Restart {{ s.label }}? Active connections may briefly drop.');">
+                    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                    <input type="hidden" name="name" value="{{ s.name }}">
+                    <button type="submit" class="btn small">Restart</button>
+                  </form>
+                {% endif %}
+              {% endif %}
+            </div>
+          </td>
+          {% endif %}
         </tr>
         {% endfor %}
       </tbody>
@@ -99,6 +141,13 @@
 <p class="text-soft small" style="margin-top:1rem">
   Status is live (re-evaluated on every page load via
   <code>systemctl is-active</code> / <code>is-enabled</code> / <code>show -p SubState</code>).
-  To restart a down service: <code>ssh root@&lt;node&gt; systemctl restart &lt;name&gt;</code>.
+  {% if is_super_admin %}
+    <strong>Install</strong> runs <code>apt-get install -y</code> + <code>systemctl enable --now</code>;
+    <strong>Restart</strong> runs <code>systemctl restart &lt;name&gt;</code>.
+    Self-restart of <code>hyperion-agent</code> is intentionally refused (would kill this RPC).
+    All actions are audited.
+  {% else %}
+    To restart a down service: <code>ssh root@&lt;node&gt; systemctl restart &lt;name&gt;</code>.
+  {% endif %}
 </p>
 {% endblock %}

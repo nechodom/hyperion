@@ -768,6 +768,9 @@ fn print_pretty(resp: &Response) {
         Response::MonitorTick { sampled } => {
             println!("monitor tick: {sampled} hosting(s) sampled");
         }
+        Response::ServiceRestart => println!("service restarted"),
+        Response::ServiceInstall => println!("service installed"),
+        Response::AgentConfigUpdate => println!("agent.toml updated"),
     }
 }
 

@@ -123,6 +123,17 @@ pub trait AgentApi: Send + Sync + 'static {
     /// hyperion-web). Computed live via `systemctl is-active/is-enabled`.
     async fn services_health(&self) -> Result<hyperion_types::ServicesHealth, RpcError>;
 
+    /// Restart a whitelisted systemd unit.
+    async fn service_restart(&self, name: String) -> Result<(), RpcError>;
+    /// apt-install + enable a whitelisted unit.
+    async fn service_install(&self, name: String) -> Result<(), RpcError>;
+    /// Update one section of `/etc/hyperion/agent.toml`.
+    async fn agent_config_update(
+        &self,
+        section: String,
+        fields: std::collections::BTreeMap<String, String>,
+    ) -> Result<(), RpcError>;
+
     /// Delete a single backup run + its archive file from disk.
     /// Refuses to act on a backup that is still `running`.
     async fn backup_delete(&self, backup_id: i64) -> Result<(), RpcError>;

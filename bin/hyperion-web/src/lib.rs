@@ -95,10 +95,22 @@ pub fn build_router(state: SharedState) -> Router {
             "/services",
             get(handlers::services_health::get_services_health),
         )
+        .route(
+            "/services/restart",
+            post(handlers::services_health::post_service_restart),
+        )
+        .route(
+            "/services/install",
+            post(handlers::services_health::post_service_install),
+        )
         .route("/settings", get(handlers::settings::get_settings))
         .route(
             "/settings/email-test",
             post(handlers::settings::post_email_test),
+        )
+        .route(
+            "/settings/config",
+            post(handlers::settings::post_config),
         )
         .route("/admin/users", get(handlers::users::get_users))
         .route("/admin/users", post(handlers::users::post_create))
