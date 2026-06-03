@@ -118,6 +118,16 @@ pub enum Request {
     BackupDelete {
         backup_id: i64,
     },
+    /// View the agent's effective config — agent.toml minus secrets,
+    /// plus a few derived bits (detected nginx user, cluster role).
+    /// Operator-facing settings page reads from this.
+    AgentConfigView,
+    /// Send a test email through the configured SMTP relay to verify
+    /// deliverability. Returns ok or a clean error string the
+    /// operator can act on.
+    EmailSendTest {
+        to: String,
+    },
     StatsTick,
     BackupRestore {
         sel: HostingSelector,
@@ -213,6 +223,8 @@ pub enum Response {
     SetHostingAcmeEmail,
     ServicesHealth(hyperion_types::ServicesHealth),
     BackupDelete,
+    AgentConfigView(hyperion_types::AgentConfigView),
+    EmailSendTest,
     StatsTick { hostings_sampled: i64 },
     BackupRestore,
     HostingLogs(String),

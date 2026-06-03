@@ -127,6 +127,14 @@ pub trait AgentApi: Send + Sync + 'static {
     /// Refuses to act on a backup that is still `running`.
     async fn backup_delete(&self, backup_id: i64) -> Result<(), RpcError>;
 
+    /// Sanitised view of the agent's effective config — no secrets.
+    /// Powers the operator-facing /settings page.
+    async fn agent_config_view(&self) -> Result<hyperion_types::AgentConfigView, RpcError>;
+
+    /// Send a one-off test email through the configured SMTP relay.
+    /// Returns Ok on a successful relay handshake + DATA accept.
+    async fn email_send_test(&self, to: String) -> Result<(), RpcError>;
+
     /// Install WordPress into a hosting (downloads core, writes wp-config.php
     /// against the hosting's DB credentials, runs `wp core install`, records
     /// the result in `wp_installs`).

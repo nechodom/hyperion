@@ -238,6 +238,14 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.backup_delete(backup_id).await
     }
 
+    async fn agent_config_view(&self) -> Result<hyperion_types::AgentConfigView, RpcError> {
+        self.svc.agent_config_view(&self.hostname, &self.version).await
+    }
+
+    async fn email_send_test(&self, to: String) -> Result<(), RpcError> {
+        self.svc.email_send_test(to).await
+    }
+
     async fn stats_tick(&self) -> Result<i64, RpcError> {
         self.svc.stats_tick().await
     }

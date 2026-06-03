@@ -30,8 +30,10 @@ pub use php::PhpVersion;
 pub use profile::{HostingProfile, ProfileApply, ProfileInput};
 pub use spf::SpfCheckResult;
 pub use stats::{
-    ClusterStats, DashboardAlert, HostingStats, NodeMetricPoint, NodeMetricsHistory, NodeStats,
-    NodeSummary, ServiceHealth, ServicesHealth,
+    AcmeConfigView, AgentConfigView, BackupRemoteConfigView, BackupRetentionConfigView,
+    ClusterStats, DashboardAlert, EmailConfigView, HostingStats, NodeMetricPoint,
+    NodeMetricsHistory, NodeStats, NodeSummary, ServiceHealth, ServicesHealth,
+    SlackConfigView,
 };
 pub use wp::{WpInstallRequest, WpInstallStatus};
 

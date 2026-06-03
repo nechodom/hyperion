@@ -1,0 +1,166 @@
+{% extends "base.html" %}
+{% block title %}Settings · hyperion{% endblock %}
+{% block main %}
+<div class="page-header">
+  <div>
+    <h1>Settings</h1>
+    <div class="subtitle">
+      Live view of <code>/etc/hyperion/agent.toml</code> (passwords + tokens
+      hidden). Edits are made on disk; restart the agent to apply.
+    </div>
+  </div>
+</div>
+
+{% if let Some(e) = error %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">{{ e }}</div>
+  </div>
+{% endif %}
+
+{% if let Some(m) = flash %}
+  <div class="flash success">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+    <div class="flash-body">{{ m }}</div>
+  </div>
+{% endif %}
+
+{% if let Some(e) = flash_error %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">{{ e }}</div>
+  </div>
+{% endif %}
+
+<div class="kpi-grid" style="margin-bottom:1rem">
+  <div class="kpi-card hostings">
+    <div class="kpi-label">Node</div>
+    <div class="kpi-value" style="font-size:1.1rem">{{ config.hostname }}</div>
+    <div class="kpi-meta">agent v{{ config.agent_version }}</div>
+  </div>
+  <div class="kpi-card disk">
+    <div class="kpi-label">nginx user</div>
+    <div class="kpi-value" style="font-size:1.1rem">
+      {% if config.nginx_user.is_empty() %}—{% else %}{{ config.nginx_user }}{% endif %}
+    </div>
+    <div class="kpi-meta">FPM listen.owner</div>
+  </div>
+  <div class="kpi-card bw">
+    <div class="kpi-label">ACME contact</div>
+    <div class="kpi-value" style="font-size:1.05rem">{{ config.acme.contact_email }}</div>
+    <div class="kpi-meta">expiry notices land here</div>
+  </div>
+</div>
+
+<div class="grid cols-2">
+  {# ACME #}
+  <div class="card">
+    <h2>
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+      ACME (Let's Encrypt)
+    </h2>
+    <div class="kv-grid" style="grid-template-columns:1fr">
+      <div><span class="text-soft">Contact email</span><strong>{{ config.acme.contact_email }}</strong></div>
+      <div><span class="text-soft">Challenge dir</span><strong><code>{{ config.acme.challenge_dir }}</code></strong></div>
+    </div>
+  </div>
+
+  {# Email #}
+  <div class="card">
+    <h2>
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+      Email (SMTP relay)
+      {% if config.email.enabled %}
+        <span class="pill ok small" style="margin-left:0.5rem">enabled</span>
+      {% else %}
+        <span class="pill warn small" style="margin-left:0.5rem">disabled</span>
+      {% endif %}
+    </h2>
+    {% if config.email.enabled %}
+      <div class="kv-grid" style="grid-template-columns:1fr">
+        <div><span class="text-soft">SMTP host</span><strong>{{ config.email.smtp_host }}:{{ config.email.smtp_port }}</strong></div>
+        <div><span class="text-soft">Security</span><strong>{{ config.email.security }}</strong></div>
+        <div><span class="text-soft">SMTP user</span><strong>{{ config.email.smtp_user }}</strong></div>
+        <div><span class="text-soft">SMTP password</span><strong>{% if config.email.smtp_password_set %}<span class="pill ok small">set</span>{% else %}<span class="pill warn small">not set</span>{% endif %}</strong></div>
+        <div><span class="text-soft">From</span><strong>{{ config.email.from_name }} &lt;{{ config.email.from_address }}&gt;</strong></div>
+        <div><span class="text-soft">Default to</span><strong>{% if config.email.default_to.is_empty() %}<span class="text-soft">not set</span>{% else %}{{ config.email.default_to }}{% endif %}</strong></div>
+      </div>
+      <div class="card-section" style="margin-top:1rem">
+        <h3 style="font-size:0.9rem;margin:0 0 0.5rem">Send test email</h3>
+        <form method="post" action="/settings/email-test" style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
+          <input type="email" name="to" placeholder="you@example.cz" required
+                 value="{% if !config.email.default_to.is_empty() %}{{ config.email.default_to }}{% endif %}"
+                 style="flex:1;min-width:15rem;margin:0">
+          <button class="btn small primary" type="submit">Send</button>
+        </form>
+        <p class="text-soft small" style="margin-top:0.4rem">
+          A short test message is sent through the configured relay so you can
+          confirm deliverability. Watch your inbox + spam folder.
+        </p>
+      </div>
+    {% else %}
+      <p class="text-soft">Email notifications are not configured. Set <code>[email] enabled = true</code> + SMTP relay in <code>agent.toml</code> and restart the agent.</p>
+    {% endif %}
+  </div>
+
+  {# Slack #}
+  <div class="card">
+    <h2>
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 10c-.83 0-1.5-.67-1.5-1.5v-5c0-.83.67-1.5 1.5-1.5s1.5.67 1.5 1.5v5c0 .83-.67 1.5-1.5 1.5z"/><path d="M20.5 10H19V8.5c0-.83.67-1.5 1.5-1.5s1.5.67 1.5 1.5-.67 1.5-1.5 1.5z"/></svg>
+      Slack
+      {% if config.slack.default_webhook_set %}
+        <span class="pill ok small" style="margin-left:0.5rem">webhook set</span>
+      {% else %}
+        <span class="pill warn small" style="margin-left:0.5rem">not configured</span>
+      {% endif %}
+    </h2>
+    <p class="text-soft">
+      Cluster-wide default Slack webhook for hosting profile alerts. Per-profile
+      overrides take precedence.
+    </p>
+  </div>
+
+  {# Backup remote #}
+  <div class="card">
+    <h2>
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+      Remote backup target
+      {% if config.backup_remote.enabled %}
+        <span class="pill ok small" style="margin-left:0.5rem">enabled</span>
+      {% else %}
+        <span class="pill warn small" style="margin-left:0.5rem">local only</span>
+      {% endif %}
+    </h2>
+    {% if config.backup_remote.enabled %}
+      <div class="kv-grid" style="grid-template-columns:1fr">
+        <div><span class="text-soft">Protocol</span><strong>{{ config.backup_remote.scheme }}</strong></div>
+        <div><span class="text-soft">Host</span><strong>{{ config.backup_remote.host }}:{{ config.backup_remote.port }}</strong></div>
+        <div><span class="text-soft">User</span><strong>{{ config.backup_remote.user }}</strong></div>
+        <div><span class="text-soft">Password</span><strong>{% if config.backup_remote.password_set %}<span class="pill ok small">set</span>{% else %}<span class="pill warn small">not set</span>{% endif %}</strong></div>
+        <div><span class="text-soft">Base path</span><strong><code>{{ config.backup_remote.base_path }}</code></strong></div>
+      </div>
+    {% else %}
+      <p class="text-soft">No remote target configured. Backups stay on local disk only.</p>
+    {% endif %}
+  </div>
+
+  {# Retention #}
+  <div class="card">
+    <h2>
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+      Backup retention
+    </h2>
+    <div class="kv-grid" style="grid-template-columns:1fr">
+      <div><span class="text-soft">Max age</span><strong>{{ config.backup_retention.max_age_days }} days</strong></div>
+      <div><span class="text-soft">Keep latest</span><strong>{{ config.backup_retention.keep_latest_n }} per hosting</strong></div>
+    </div>
+  </div>
+</div>
+
+<p class="text-soft small" style="margin-top:1rem">
+  This page reflects the agent's loaded config. To change values, edit
+  <code>/etc/hyperion/agent.toml</code> on the node and restart the agent
+  (<code>systemctl restart hyperion-agent</code>). UI editing comes in a
+  future revision.
+</p>
+{% endblock %}

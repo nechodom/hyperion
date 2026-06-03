@@ -643,6 +643,26 @@ fn print_pretty(resp: &Response) {
         Response::BackupDelete => {
             println!("backup deleted");
         }
+        Response::AgentConfigView(c) => {
+            println!("agent: {} v{} (nginx user: {})",
+                c.hostname, c.agent_version,
+                if c.nginx_user.is_empty() { "unknown" } else { c.nginx_user.as_str() });
+            println!("acme: contact={} challenge_dir={}",
+                c.acme.contact_email, c.acme.challenge_dir);
+            println!("email: enabled={} smtp={}:{} from={} security={}",
+                c.email.enabled, c.email.smtp_host, c.email.smtp_port,
+                c.email.from_address, c.email.security);
+            println!("slack: webhook_set={}", c.slack.default_webhook_set);
+            println!("backup_remote: enabled={} {}://{}@{}:{}{}",
+                c.backup_remote.enabled, c.backup_remote.scheme,
+                c.backup_remote.user, c.backup_remote.host,
+                c.backup_remote.port, c.backup_remote.base_path);
+            println!("backup_retention: max_age_days={} keep_latest_n={}",
+                c.backup_retention.max_age_days, c.backup_retention.keep_latest_n);
+        }
+        Response::EmailSendTest => {
+            println!("test email sent");
+        }
     }
 }
 

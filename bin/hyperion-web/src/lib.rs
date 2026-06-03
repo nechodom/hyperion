@@ -95,6 +95,11 @@ pub fn build_router(state: SharedState) -> Router {
             "/services",
             get(handlers::services_health::get_services_health),
         )
+        .route("/settings", get(handlers::settings::get_settings))
+        .route(
+            "/settings/email-test",
+            post(handlers::settings::post_email_test),
+        )
         .route(
             "/hostings/dns-check-domain",
             post(handlers::hostings::post_dns_check_domain),

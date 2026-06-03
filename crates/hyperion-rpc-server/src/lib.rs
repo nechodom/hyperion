@@ -227,6 +227,14 @@ async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(()) => Response::BackupDelete,
             Err(e) => Response::Error(e),
         },
+        Request::AgentConfigView => match api.agent_config_view().await {
+            Ok(v) => Response::AgentConfigView(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::EmailSendTest { to } => match api.email_send_test(to).await {
+            Ok(()) => Response::EmailSendTest,
+            Err(e) => Response::Error(e),
+        },
         Request::StatsTick => match api.stats_tick().await {
             Ok(n) => Response::StatsTick {
                 hostings_sampled: n,
@@ -515,6 +523,12 @@ mod tests {
             Ok(hyperion_types::ServicesHealth::default())
         }
         async fn backup_delete(&self, _: i64) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn agent_config_view(&self) -> Result<hyperion_types::AgentConfigView, RpcError> {
+            Ok(hyperion_types::AgentConfigView::default())
+        }
+        async fn email_send_test(&self, _: String) -> Result<(), RpcError> {
             Ok(())
         }
         async fn stats_tick(&self) -> Result<i64, RpcError> {

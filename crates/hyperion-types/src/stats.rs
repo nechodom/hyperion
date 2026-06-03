@@ -145,6 +145,72 @@ pub struct ServicesHealth {
     pub warn_down: usize,
 }
 
+/// Operator-facing view of the agent's effective config — minus
+/// secrets. The `Request::AgentConfigView` RPC returns this; the
+/// `/settings` UI page reads it. We deliberately do NOT echo
+/// passwords or invite tokens here — the operator already has the
+/// agent.toml file, this is for at-a-glance visibility.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AgentConfigView {
+    pub hostname: String,
+    pub agent_version: String,
+    /// Detected nginx user — relevant because FPM pool ownership
+    /// depends on it; surfacing here makes the "why 502" debugging
+    /// path trivial.
+    pub nginx_user: String,
+    pub acme: AcmeConfigView,
+    pub email: EmailConfigView,
+    pub slack: SlackConfigView,
+    pub backup_remote: BackupRemoteConfigView,
+    pub backup_retention: BackupRetentionConfigView,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct AcmeConfigView {
+    pub contact_email: String,
+    pub directory_url: String,
+    pub challenge_dir: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct EmailConfigView {
+    pub enabled: bool,
+    pub smtp_host: String,
+    pub smtp_port: u16,
+    pub smtp_user: String,
+    /// True if a password is configured (we don't return the password).
+    pub smtp_password_set: bool,
+    pub from_address: String,
+    pub from_name: String,
+    pub security: String,
+    pub default_to: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SlackConfigView {
+    /// True if a default webhook is configured (we never echo the
+    /// webhook URL — it's a credential).
+    pub default_webhook_set: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct BackupRemoteConfigView {
+    pub enabled: bool,
+    pub scheme: String,
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    /// True if a password is configured. We never echo the password.
+    pub password_set: bool,
+    pub base_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct BackupRetentionConfigView {
+    pub max_age_days: i64,
+    pub keep_latest_n: i64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

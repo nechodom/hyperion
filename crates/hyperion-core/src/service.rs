@@ -2921,6 +2921,104 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(())
     }
 
+    /// Sanitised view of the agent's effective config — no secrets.
+    /// Reads from the live `HostingService` state (which mirrors
+    /// agent.toml as loaded at startup). For values stored on
+    /// `RealAdapter`, the agent.rs forwarder doesn't have access
+    /// here; the nginx_user is left empty if unavailable.
+    pub async fn agent_config_view(
+        &self,
+        hostname: &str,
+        version: &str,
+    ) -> Result<hyperion_types::AgentConfigView, RpcError> {
+        let email_view = match &self.email_config {
+            Some(cfg) => hyperion_types::EmailConfigView {
+                enabled: true,
+                smtp_host: cfg.smtp_host.clone(),
+                smtp_port: cfg.smtp_port,
+                smtp_user: cfg.smtp_user.clone(),
+                smtp_password_set: !cfg.smtp_password.is_empty(),
+                from_address: cfg.from_address.clone(),
+                from_name: cfg.from_name.clone(),
+                security: cfg.security.clone(),
+                default_to: self.email_default_to.clone().unwrap_or_default(),
+            },
+            None => hyperion_types::EmailConfigView::default(),
+        };
+        let slack_view = hyperion_types::SlackConfigView {
+            default_webhook_set: self
+                .slack_default_webhook
+                .as_deref()
+                .map(|s| !s.is_empty())
+                .unwrap_or(false),
+        };
+        let backup_remote_view = match &self.remote_backup {
+            Some(r) => hyperion_types::BackupRemoteConfigView {
+                enabled: true,
+                scheme: r.scheme.clone(),
+                host: r.host.clone(),
+                port: r.port,
+                user: r.user.clone(),
+                password_set: !r.password.is_empty(),
+                base_path: r.base_path.clone(),
+            },
+            None => hyperion_types::BackupRemoteConfigView::default(),
+        };
+        let backup_retention_view = hyperion_types::BackupRetentionConfigView {
+            max_age_days: self.retention.max_age_days,
+            keep_latest_n: self.retention.keep_latest_n,
+        };
+        let acme_view = hyperion_types::AcmeConfigView {
+            contact_email: self.acme_contact_email.clone(),
+            directory_url: String::new(), // not stored here
+            challenge_dir: self.paths.acme_challenge_root.clone(),
+        };
+        Ok(hyperion_types::AgentConfigView {
+            hostname: hostname.to_string(),
+            agent_version: version.to_string(),
+            nginx_user: String::new(), // detected on RealAdapter, plumbed elsewhere
+            acme: acme_view,
+            email: email_view,
+            slack: slack_view,
+            backup_remote: backup_remote_view,
+            backup_retention: backup_retention_view,
+        })
+    }
+
+    /// Send a one-off test email through the configured SMTP relay
+    /// to confirm the operator's config works end-to-end.
+    pub async fn email_send_test(&self, to: String) -> Result<(), RpcError> {
+        let to = to.trim();
+        if to.is_empty() || !to.contains('@') {
+            return Err(RpcError::Validation {
+                message: "destination address is required and must contain '@'".into(),
+            });
+        }
+        let cfg = self.email_config.as_ref().ok_or_else(|| RpcError::Validation {
+            message: "email is not configured — set [email] enabled=true + SMTP relay in agent.toml".into(),
+        })?;
+        let subject = "Hyperion test email";
+        let body = format!(
+            "This is a test email from hyperion-agent.\n\
+             Sent to: {to}\n\
+             From: {} <{}>\n\
+             SMTP: {}:{} ({})\n\n\
+             If you can read this in your inbox, your relay is configured correctly.\n",
+            cfg.from_name, cfg.from_address, cfg.smtp_host, cfg.smtp_port, cfg.security
+        );
+        hyperion_adapters::email::send_text(cfg, to, subject, &body)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("email send failed: {e}")))?;
+        self.append_audit(
+            "email.test.send",
+            None,
+            &serde_json::json!({ "to": to }).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
     /// Delete a single backup run + its archive file(s) on disk.
     /// Refuses when the backup is still `running` (would orphan the
     /// in-flight process). Logs `backup.delete` in the audit log
