@@ -241,6 +241,16 @@ async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::UpdateCheck(v),
             Err(e) => Response::Error(e),
         },
+        Request::WpPluginList { hosting } => match api.wp_plugin_list(hosting).await {
+            Ok(v) => Response::WpPluginList(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::WpPluginAction { hosting, slug, action } => {
+            match api.wp_plugin_action(hosting, slug, action).await {
+                Ok(v) => Response::WpPluginAction(v),
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::BackupDelete { backup_id } => match api.backup_delete(backup_id).await {
             Ok(()) => Response::BackupDelete,
             Err(e) => Response::Error(e),
@@ -675,6 +685,24 @@ mod tests {
             _: bool,
         ) -> Result<hyperion_types::UpdateStatus, RpcError> {
             Ok(hyperion_types::UpdateStatus::default())
+        }
+        async fn wp_plugin_list(
+            &self,
+            _: hyperion_rpc::HostingSelector,
+        ) -> Result<hyperion_types::WpPluginListResponse, RpcError> {
+            Ok(hyperion_types::WpPluginListResponse::default())
+        }
+        async fn wp_plugin_action(
+            &self,
+            _: hyperion_rpc::HostingSelector,
+            _: String,
+            _: hyperion_types::WpPluginAction,
+        ) -> Result<hyperion_types::WpPluginActionResult, RpcError> {
+            Ok(hyperion_types::WpPluginActionResult {
+                state: "ok".into(),
+                message: "mock".into(),
+                output_tail: String::new(),
+            })
         }
         async fn backup_delete(&self, _: i64) -> Result<(), RpcError> {
             Ok(())

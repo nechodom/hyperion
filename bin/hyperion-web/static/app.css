@@ -10,77 +10,95 @@
 :root {
   color-scheme: light dark;
 
-  /* Default = dark. Light-mode overrides come below. */
-  --bg:           #0a0b0e;
-  --bg-2:         #0f1115;
-  --surface:      #15171c;
-  --surface-2:    #1c1f26;
-  --surface-3:    #232730;
-  --border:       #262932;
-  --border-strong:#363a44;
-  --text:         #e7e9ee;
-  --text-dim:     #9aa0ab;
-  --text-soft:    #6b6f7a;
+  /* ============================================================
+   *  Hyperion design system — Vercel-inspired monochrome.
+   *  Pure black/white base with grayscale steps. Accent colors
+   *  reserved for state (success/warn/error) and never for chrome.
+   *  Buttons are high-contrast (white-on-black or inverse), not
+   *  blue. Borders are barely-there (#1f1f1f) so the eye reads
+   *  layout from spacing, not lines.
+   * ============================================================ */
 
-  --primary:      #6366f1;
-  --primary-h:    #818cf8;
-  --primary-soft: #312e81;
-  --primary-fg:   #ffffff;
+  /* Dark = default. Light overrides come further down. */
+  --bg:           #000000;
+  --bg-2:         #0a0a0a;
+  --surface:      #0a0a0a;
+  --surface-2:    #111111;
+  --surface-3:    #1a1a1a;
+  --border:       #1f1f1f;
+  --border-strong:#2e2e2e;
+  --text:         #fafafa;
+  --text-dim:     #a1a1aa;
+  --text-soft:    #71717a;
 
-  /* Brand accent — emerald glow for the wordmark, distinct from primary CTAs */
-  --brand-accent: #34d399;
+  /* "Primary" = white. Vercel buttons are white-on-black, full stop. */
+  --primary:      #ffffff;
+  --primary-h:    #ededed;
+  --primary-soft: #1a1a1a;
+  --primary-fg:   #000000;
 
-  --success:      #34d399;
-  --success-soft: #064e3b;
-  --warn:         #fbbf24;
-  --warn-soft:    #78350f;
-  --danger:       #f87171;
-  --danger-soft:  #7f1d1d;
-  --info:         #38bdf8;
-  --info-soft:    #0c4a6e;
+  /* Brand accent — kept subtle. Used ONLY on the wordmark + active
+     sidebar indicator. NOT on buttons. */
+  --brand-accent: #ffffff;
 
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.25);
-  --shadow:    0 4px 12px rgba(0, 0, 0, 0.25), 0 1px 3px rgba(0, 0, 0, 0.2);
-  --shadow-lg: 0 16px 40px rgba(0, 0, 0, 0.35);
+  /* State colors — semantic only. Used sparingly. */
+  --success:      #00d97e;
+  --success-soft: #052e1a;
+  --warn:         #f5a524;
+  --warn-soft:    #2d1f08;
+  --danger:       #ff4d4f;
+  --danger-soft:  #2d0e10;
+  --info:         #3b82f6;
+  --info-soft:    #0f1a2e;
 
-  --radius:     12px;
-  --radius-sm:  8px;
-  --radius-xs:  6px;
+  /* Vercel cards have NO shadow — just borders. Keep these for
+     elevated overlays (cmdk, toasts) only. */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.5);
+  --shadow:    0 8px 24px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(0, 0, 0, 0.3);
+  --shadow-lg: 0 24px 48px rgba(0, 0, 0, 0.6);
+
+  /* Tighter radii — Vercel uses 6–8px almost everywhere. */
+  --radius:     8px;
+  --radius-md:  10px;   /* used by KPI/spark/creds cards (was undefined → fell back to 0) */
+  --radius-sm:  6px;
+  --radius-xs:  4px;
   --radius-pill:9999px;
 
-  --t-fast: 120ms cubic-bezier(0.16, 1, 0.3, 1);
-  --t-med:  220ms cubic-bezier(0.16, 1, 0.3, 1);
+  --t-fast: 100ms cubic-bezier(0.4, 0, 0.2, 1);
+  --t-med:  200ms cubic-bezier(0.4, 0, 0.2, 1);
 
-  --font-ui:   -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI",
-               system-ui, "Helvetica Neue", sans-serif;
-  --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono",
-               Menlo, Consolas, monospace;
+  /* Geist falls back gracefully to Inter then system. */
+  --font-ui:   "Geist", "Inter", -apple-system, BlinkMacSystemFont,
+               "Segoe UI", system-ui, "Helvetica Neue", sans-serif;
+  --font-mono: "Geist Mono", "JetBrains Mono", ui-monospace, "SF Mono",
+               "Cascadia Mono", Menlo, Consolas, monospace;
 
   --sidebar-w: 240px;
 }
 
 @media (prefers-color-scheme: light) {
   :root {
-    --bg:           #f4f5f7;
-    --bg-2:         #ffffff;
+    --bg:           #ffffff;
+    --bg-2:         #fafafa;
     --surface:      #ffffff;
-    --surface-2:    #f4f5f7;
-    --surface-3:    #e9eaee;
-    --border:       #e3e5ea;
-    --border-strong:#cfd2d9;
-    --text:         #0d1117;
-    --text-dim:     #51545b;
-    --text-soft:    #797d86;
+    --surface-2:    #fafafa;
+    --surface-3:    #f4f4f5;
+    --border:       #eaeaea;
+    --border-strong:#d4d4d8;
+    --text:         #000000;
+    --text-dim:     #52525b;
+    --text-soft:    #71717a;
 
-    --primary:      #4f46e5;
-    --primary-h:    #4338ca;
-    --primary-soft: #e0e7ff;
+    --primary:      #000000;
+    --primary-h:    #1f1f1f;
+    --primary-soft: #f4f4f5;
+    --primary-fg:   #ffffff;
 
-    --brand-accent: #059669;
+    --brand-accent: #000000;
 
-    --success:      #059669;
-    --success-soft: #d1fae5;
-    --warn:         #b45309;
+    --success:      #16a34a;
+    --success-soft: #dcfce7;
+    --warn:         #d97706;
     --warn-soft:    #fef3c7;
     --danger:       #dc2626;
     --danger-soft:  #fee2e2;
@@ -300,14 +318,16 @@ pre code {
 }
 
 .content {
-  /* Fill the available width. The previous 80rem cap left a big
-     empty gutter on wide monitors. Inner grids use auto-fit so they
-     expand to fill the new space without us having to revisit each
-     page. Long-form text (paragraphs, descriptions) is kept readable
-     by the per-element max-width on `.prose` etc. below. */
-  padding: 2rem clamp(1.25rem, 2vw, 2.5rem) 4rem;
+  /* Page gutter — generous on wide monitors, comfortable on narrow.
+     Outer cap at 1800px keeps line lengths readable on ultrawides
+     without leaving the page hugging the sidebar. The original tight
+     2.5rem cap is the reason the page felt "stacked" on big screens —
+     widening the gutter is more impactful than removing the max-width. */
+  padding: 2rem clamp(1.5rem, 3vw, 3rem) 4rem;
+  max-width: 1800px;
+  margin: 0 auto;
   width: 100%;
-  min-width: 0; /* allow grid children to actually shrink */
+  min-width: 0;
 }
 
 /* Long-form text blocks (settings descriptions, profile help text)
@@ -395,17 +415,20 @@ pre code {
  *  Cards
  * ============================================================ */
 
+/* Vercel cards: border-only, no shadow. The reading hierarchy comes
+   from typography weight + the bg ↔ surface contrast, not from
+   elevation tricks. */
 .card {
   background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 1.4rem 1.5rem;
-  box-shadow: var(--shadow-sm);
-  transition: box-shadow var(--t-med), border-color var(--t-med);
+  box-shadow: none;
+  transition: border-color var(--t-fast), background var(--t-fast);
 }
 .card.hover:hover {
   border-color: var(--border-strong);
-  box-shadow: var(--shadow);
+  background: var(--surface-2);
 }
 .card + .card { margin-top: 1rem; }
 .card h2 {
@@ -503,7 +526,9 @@ pre code {
 /* KPI strip — full-width responsive grid of summary tiles. */
 .kpi-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  /* Bumped from 11rem so tiles never look cramped on wide monitors
+     and still wrap cleanly at laptop widths. */
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
   gap: 0.85rem;
   margin-bottom: 1rem;
 }
@@ -923,16 +948,17 @@ a.btn {
 
 .btn .btn-icon { width: 15px; height: 15px; stroke-width: 2; }
 
+/* Vercel-style primary: solid inverse, no gradient, no shadow. The
+   crisp white-on-black (or black-on-white in light mode) is the whole
+   visual language — buttons are the brightest thing on the page. */
 .btn.primary {
-  background: linear-gradient(180deg, var(--primary) 0%, var(--primary-h) 100%);
+  background: var(--primary);
   color: var(--primary-fg);
   border-color: var(--primary);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.12),
-    0 1px 2px rgba(0, 0, 0, 0.1);
+  box-shadow: none;
 }
 .btn.primary:hover {
-  background: linear-gradient(180deg, var(--primary-h) 0%, var(--primary) 100%);
+  background: var(--primary-h);
   color: var(--primary-fg);
   border-color: var(--primary-h);
 }
@@ -1465,10 +1491,9 @@ hr.divider {
   overflow-x: auto;
   scrollbar-width: thin;
   margin-bottom: 1rem;
-  position: sticky;
-  top: 0;
-  z-index: 5;
-  backdrop-filter: blur(8px);
+  /* Previously sticky — collided with sticky sidebar on tablet
+     widths and the blur muddied underlying text. The page is short
+     enough that scrolling back up to switch tabs is fine. */
 }
 .tab {
   display: inline-flex;
@@ -1519,12 +1544,14 @@ hr.divider {
 
 .dashboard-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.6fr) minmax(20rem, 1fr);
+  grid-template-columns: minmax(0, 1.6fr) minmax(18rem, 1fr);
   gap: 1rem;
   margin-top: 1.5rem;
   align-items: start;
 }
-@media (max-width: 1100px) {
+/* Stack only when the sidebar collapses too (was 1100px which broke
+   1366×768 + 1440×900 laptops unnecessarily). */
+@media (max-width: 880px) {
   .dashboard-grid { grid-template-columns: 1fr; }
 }
 
@@ -1851,54 +1878,58 @@ hr.divider {
   color: var(--primary-h);
 }
 
-/* When user picked an explicit theme, override prefers-color-scheme */
+/* Explicit theme override (set via theme-toggle button). Mirrors the
+   :root + prefers-color-scheme blocks above so the operator-chosen
+   palette wins regardless of the OS setting. */
 :root[data-theme="light"] {
-  --bg:           #f4f5f7;
-  --bg-2:         #ffffff;
+  --bg:           #ffffff;
+  --bg-2:         #fafafa;
   --surface:      #ffffff;
-  --surface-2:    #f4f5f7;
-  --surface-3:    #e9eaee;
-  --border:       #e3e5ea;
-  --border-strong:#cfd2d9;
-  --text:         #0d1117;
-  --text-dim:     #51545b;
-  --text-soft:    #797d86;
-  --primary:      #4f46e5;
-  --primary-h:    #4338ca;
-  --primary-soft: #e0e7ff;
-  --brand-accent: #059669;
-  --success:      #059669;
-  --success-soft: #d1fae5;
-  --warn:         #b45309;
+  --surface-2:    #fafafa;
+  --surface-3:    #f4f4f5;
+  --border:       #eaeaea;
+  --border-strong:#d4d4d8;
+  --text:         #000000;
+  --text-dim:     #52525b;
+  --text-soft:    #71717a;
+  --primary:      #000000;
+  --primary-h:    #1f1f1f;
+  --primary-soft: #f4f4f5;
+  --primary-fg:   #ffffff;
+  --brand-accent: #000000;
+  --success:      #16a34a;
+  --success-soft: #dcfce7;
+  --warn:         #d97706;
   --warn-soft:    #fef3c7;
   --danger:       #dc2626;
   --danger-soft:  #fee2e2;
   --info:         #0284c7;
-  --info-soft:    #dbeafe;
+  --info-soft:    #e0f2fe;
 }
 :root[data-theme="dark"] {
-  --bg:           #0a0b0e;
-  --bg-2:         #0f1115;
-  --surface:      #15171c;
-  --surface-2:    #1c1f26;
-  --surface-3:    #232730;
-  --border:       #262932;
-  --border-strong:#363a44;
-  --text:         #e7e9ee;
-  --text-dim:     #9aa0ab;
-  --text-soft:    #6b6f7a;
-  --primary:      #6366f1;
-  --primary-h:    #818cf8;
-  --primary-soft: #312e81;
-  --brand-accent: #34d399;
-  --success:      #34d399;
-  --success-soft: #064e3b;
-  --warn:         #fbbf24;
-  --warn-soft:    #78350f;
-  --danger:       #f87171;
-  --danger-soft:  #7f1d1d;
-  --info:         #38bdf8;
-  --info-soft:    #0c4a6e;
+  --bg:           #000000;
+  --bg-2:         #0a0a0a;
+  --surface:      #0a0a0a;
+  --surface-2:    #111111;
+  --surface-3:    #1a1a1a;
+  --border:       #1f1f1f;
+  --border-strong:#2e2e2e;
+  --text:         #fafafa;
+  --text-dim:     #a1a1aa;
+  --text-soft:    #71717a;
+  --primary:      #ffffff;
+  --primary-h:    #ededed;
+  --primary-soft: #1a1a1a;
+  --primary-fg:   #000000;
+  --brand-accent: #ffffff;
+  --success:      #00d97e;
+  --success-soft: #052e1a;
+  --warn:         #f5a524;
+  --warn-soft:    #2d1f08;
+  --danger:       #ff4d4f;
+  --danger-soft:  #2d0e10;
+  --info:         #3b82f6;
+  --info-soft:    #0f1a2e;
 }
 
 /* ============================================================
@@ -1951,6 +1982,44 @@ hr.divider {
   color: var(--text-soft);
   font-size: 0.78rem;
   text-align: center;
+}
+
+/* ============================================================
+ *  Interactive sparkline tooltips + crosshair
+ * ============================================================ */
+.spark-card { position: relative; }
+.spark-svg { cursor: crosshair; }
+.spark-tip {
+  position: absolute;
+  background: var(--surface-3);
+  color: var(--text);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-xs);
+  padding: 0.32rem 0.55rem;
+  font: 600 0.78rem var(--font-mono);
+  white-space: nowrap;
+  z-index: 50;
+  pointer-events: none;
+  box-shadow: var(--shadow);
+  letter-spacing: 0.01em;
+}
+.spark-tip-t {
+  color: var(--text-dim);
+  font-weight: 400;
+  margin-left: 0.5rem;
+}
+.spark-dot {
+  fill: currentColor;
+  stroke: var(--bg);
+  stroke-width: 1.2;
+  pointer-events: none;
+}
+.spark-vline {
+  stroke: currentColor;
+  stroke-opacity: 0.4;
+  stroke-width: 0.8;
+  stroke-dasharray: 2 2;
+  pointer-events: none;
 }
 
 /* ============================================================

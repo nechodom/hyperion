@@ -128,6 +128,26 @@ impl hyperion_core::AdapterPort for StubAdapters {
     ) -> Result<String, AdapterError> {
         Ok("6.5.3".into())
     }
+    async fn wp_plugin_list(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> Result<(Vec<hyperion_types::WpPlugin>, String), AdapterError> {
+        Ok((vec![], "6.5.3".into()))
+    }
+    async fn wp_plugin_action(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &hyperion_types::WpPluginAction,
+    ) -> Result<hyperion_types::WpPluginActionResult, AdapterError> {
+        Ok(hyperion_types::WpPluginActionResult {
+            state: "ok".into(),
+            message: "stub".into(),
+            output_tail: String::new(),
+        })
+    }
 }
 
 /// Start a stub hyperion-agent on a temp Unix socket. Returns the socket path

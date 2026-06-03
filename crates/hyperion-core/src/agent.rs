@@ -254,6 +254,22 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.update_check(force_refresh).await
     }
 
+    async fn wp_plugin_list(
+        &self,
+        hosting: hyperion_rpc::HostingSelector,
+    ) -> Result<hyperion_types::WpPluginListResponse, RpcError> {
+        self.svc.wp_plugin_list(hosting).await
+    }
+
+    async fn wp_plugin_action(
+        &self,
+        hosting: hyperion_rpc::HostingSelector,
+        slug: String,
+        action: hyperion_types::WpPluginAction,
+    ) -> Result<hyperion_types::WpPluginActionResult, RpcError> {
+        self.svc.wp_plugin_action(hosting, slug, action).await
+    }
+
     async fn backup_delete(&self, backup_id: i64) -> Result<(), RpcError> {
         self.svc.backup_delete(backup_id).await
     }

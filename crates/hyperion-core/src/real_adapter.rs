@@ -420,6 +420,24 @@ impl AdapterPort for RealAdapter {
         };
         hyperion_adapters::wpcli::install_wordpress(system_user, htdocs, db, req).await
     }
+
+    async fn wp_plugin_list(
+        &self,
+        system_user: &str,
+        htdocs: &str,
+    ) -> Result<(Vec<hyperion_types::WpPlugin>, String), AdapterError> {
+        hyperion_adapters::wpcli::plugin_list(system_user, htdocs).await
+    }
+
+    async fn wp_plugin_action(
+        &self,
+        system_user: &str,
+        htdocs: &str,
+        slug: &str,
+        action: &hyperion_types::WpPluginAction,
+    ) -> Result<hyperion_types::WpPluginActionResult, AdapterError> {
+        hyperion_adapters::wpcli::plugin_action(system_user, htdocs, slug, action).await
+    }
 }
 
 #[cfg(test)]

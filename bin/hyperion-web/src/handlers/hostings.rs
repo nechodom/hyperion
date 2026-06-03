@@ -129,6 +129,10 @@ struct DetailTpl<'a> {
     /// Per-hosting monitor config + sample history (for the Monitor tab).
     monitor_config: hyperion_types::MonitorConfigView,
     monitor_history: hyperion_types::MonitorHistory,
+    /// WordPress plugin list — populated only when wp_status is Some.
+    /// Empty otherwise; the template's WP tab shows an "install WP first"
+    /// state instead of an empty table.
+    wp_plugins: hyperion_types::WpPluginListResponse,
     /// Session-wide CSRF token used by the newer forms that don't have
     /// dedicated csrf_* fields plumbed (access, acme-email, monitor,
     /// backup delete). Middleware accepts both.
@@ -450,6 +454,7 @@ pub async fn post_create(
                 users_for_access: vec![],
                 monitor_config: hyperion_types::MonitorConfigView::default(),
                 monitor_history: hyperion_types::MonitorHistory::default(),
+                wp_plugins: hyperion_types::WpPluginListResponse::default(),
                 csrf_token: super::session_csrf_token(&state, &ctx),
             };
             Ok(Html(tpl.render()?).into_response())
@@ -494,6 +499,22 @@ pub async fn get_detail(
     let wp_status = fetch_wp_status(&state, sel_id.clone())
         .await
         .unwrap_or(None);
+    // Only ask the agent for the plugin list when WP is actually
+    // installed — otherwise wp-cli fails with "Error: This does not
+    // seem to be a WordPress installation." and we'd render a flash.
+    let wp_plugins = if wp_status.is_some() {
+        match hyperion_rpc_client::call(
+            &state.agent_socket,
+            Request::WpPluginList { hosting: sel_id.clone() },
+        )
+        .await
+        {
+            Ok(RpcResponse::WpPluginList(r)) => r,
+            _ => hyperion_types::WpPluginListResponse::default(),
+        }
+    } else {
+        hyperion_types::WpPluginListResponse::default()
+    };
     let expiry = fetch_expiry(&state, sel_id.clone())
         .await
         .unwrap_or_else(|_| hyperion_types::HostingExpiry::defaults());
@@ -648,6 +669,7 @@ pub async fn get_detail(
         users_for_access: users_for_access_for_detail,
         monitor_config,
         monitor_history,
+        wp_plugins,
         csrf_token: super::session_csrf_token(&state, &ctx),
     };
     Ok(Html(tpl.render()?).into_response())
@@ -1949,6 +1971,109 @@ pub async fn post_bulk(
     };
     let q = urlencoding(&flash);
     Ok(Redirect::to(&format!("/hostings?bulk_flash={}", q)).into_response())
+}
+
+/// POST /hostings/:sel/wp/plugins/action
+///
+/// Single endpoint that dispatches every plugin operation by reading
+/// the `action` form field. Keeps the WP plugin tab from sprouting
+/// six separate routes (one per verb), and lets the audit log carry
+/// the same `wp.plugin.action` event for all of them — the operator
+/// only needs to grep for one prefix.
+///
+/// Form fields:
+///   - selector: hosting selector (domain or id)
+///   - slug: plugin slug; empty for "update_all"
+///   - action: "install" | "activate" | "deactivate" | "update"
+///             | "update_all" | "delete" | "auto_update_enable"
+///             | "auto_update_disable"
+///   - source: only required when action="install" — wp.org slug or URL
+#[derive(Deserialize)]
+pub struct WpPluginActionForm {
+    pub selector: String,
+    #[serde(default)]
+    pub slug: String,
+    pub action: String,
+    #[serde(default)]
+    pub source: String,
+}
+
+pub async fn post_wp_plugin_action(
+    State(state): State<SharedState>,
+    Form(form): Form<WpPluginActionForm>,
+) -> Result<Response, AppError> {
+    let sel = parse_selector(&form.selector)?;
+    let sel_url = urlencoding(&form.selector);
+    // Map the form's `action` string into the typed enum. Anything not
+    // on the whitelist gets a 400 — the UI shouldn't be able to send it.
+    let action = match form.action.as_str() {
+        "install" => {
+            let source = form.source.trim().to_string();
+            if source.is_empty() {
+                return Err(AppError::BadRequest(
+                    "plugin install requires a source (slug or https URL)".into(),
+                ));
+            }
+            hyperion_types::WpPluginAction::Install { source }
+        }
+        "activate" => hyperion_types::WpPluginAction::Activate,
+        "deactivate" => hyperion_types::WpPluginAction::Deactivate,
+        "update" => hyperion_types::WpPluginAction::Update,
+        "update_all" => hyperion_types::WpPluginAction::UpdateAll,
+        "delete" => hyperion_types::WpPluginAction::Delete,
+        "auto_update_enable" => hyperion_types::WpPluginAction::SetAutoUpdate { enabled: true },
+        "auto_update_disable" => hyperion_types::WpPluginAction::SetAutoUpdate { enabled: false },
+        other => {
+            return Err(AppError::BadRequest(format!(
+                "unknown wp plugin action: {}",
+                askama_escape::escape(other, askama_escape::Html)
+            )));
+        }
+    };
+    // slug is meaningless for `update_all` and `install` (the latter
+    // gets the slug from `source`). For everything else it MUST validate.
+    let slug = match &action {
+        hyperion_types::WpPluginAction::UpdateAll => String::new(),
+        hyperion_types::WpPluginAction::Install { source } => source.clone(),
+        _ => {
+            let s = form.slug.trim().to_string();
+            if s.is_empty() {
+                return Err(AppError::BadRequest("missing plugin slug".into()));
+            }
+            s
+        }
+    };
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::WpPluginAction { hosting: sel, slug, action },
+    )
+    .await?;
+    match resp {
+        RpcResponse::WpPluginAction(r) => {
+            // Encode the state + a short message into the redirect so the
+            // detail page can pop a toast on next render.
+            let flash = format!(
+                "Plugin {}: {}",
+                r.state,
+                r.message.chars().take(140).collect::<String>(),
+            );
+            let q = urlencoding(&flash);
+            let key = if r.state == "ok" || r.state == "noop" {
+                "flash"
+            } else {
+                "flash_error"
+            };
+            Ok(Redirect::to(&format!("/hostings/{}?{}={}#wp", sel_url, key, q)).into_response())
+        }
+        RpcResponse::Error(e) => {
+            let msg = urlencoding(&format!("Plugin action failed: {}", e));
+            Ok(
+                Redirect::to(&format!("/hostings/{}?flash_error={}#wp", sel_url, msg))
+                    .into_response(),
+            )
+        }
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
 }
 
 pub async fn post_wp_reset(

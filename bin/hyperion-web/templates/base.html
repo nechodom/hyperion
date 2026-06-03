@@ -456,6 +456,101 @@ function isShortcutContext(ev) {
   if (t.isContentEditable) return false;
   return true;
 }
+
+// ============================================================
+//  Interactive sparklines — hover tooltips with value + time.
+//  Every <svg class="spark-svg" data-points='[...]'> gets a marker
+//  dot + vertical line + tooltip that follow the mouse to the
+//  nearest data point. The data-points array carries {x, y, v, t}
+//  in viewBox coords (0..600 wide, 0..60 tall).
+// ============================================================
+(function () {
+  const NS = 'http://www.w3.org/2000/svg';
+
+  function init(svg) {
+    let points;
+    try { points = JSON.parse(svg.dataset.points); } catch (_) { return; }
+    if (!Array.isArray(points) || points.length < 2) return;
+
+    // Tooltip lives in the spark-card parent (or any positioned
+    // ancestor we make). We make the SVG's direct parent the
+    // anchor so positioning math is uniform.
+    const host = svg.parentElement;
+    if (!host) return;
+    if (getComputedStyle(host).position === 'static') {
+      host.style.position = 'relative';
+    }
+    const tip = document.createElement('div');
+    tip.className = 'spark-tip';
+    tip.style.display = 'none';
+    host.appendChild(tip);
+
+    // SVG-side marker dot + vertical crosshair line.
+    const vline = document.createElementNS(NS, 'line');
+    vline.setAttribute('y1', '0'); vline.setAttribute('y2', '60');
+    vline.setAttribute('class', 'spark-vline');
+    vline.style.display = 'none';
+    svg.appendChild(vline);
+    const dot = document.createElementNS(NS, 'circle');
+    dot.setAttribute('r', '3');
+    dot.setAttribute('class', 'spark-dot');
+    dot.style.display = 'none';
+    svg.appendChild(dot);
+
+    function nearest(svgX) {
+      let best = points[0], bestDist = Math.abs(points[0].x - svgX);
+      for (const p of points) {
+        const d = Math.abs(p.x - svgX);
+        if (d < bestDist) { best = p; bestDist = d; }
+      }
+      return best;
+    }
+
+    svg.addEventListener('mousemove', (ev) => {
+      const r = svg.getBoundingClientRect();
+      if (r.width === 0) return;
+      const svgX = ((ev.clientX - r.left) / r.width) * 600;
+      const p = nearest(svgX);
+      dot.setAttribute('cx', p.x);
+      dot.setAttribute('cy', p.y);
+      dot.style.display = '';
+      vline.setAttribute('x1', p.x);
+      vline.setAttribute('x2', p.x);
+      vline.style.display = '';
+      // Tip position in CSS pixels relative to the host.
+      const pxX = (p.x / 600) * r.width;
+      const pxY = (p.y / 60) * r.height;
+      tip.style.display = '';
+      tip.innerHTML = `<strong>${escapeText(p.v)}</strong><span class="spark-tip-t">${escapeText(p.t)}</span>`;
+      // Clamp so the tooltip stays inside the host.
+      const tipW = tip.offsetWidth || 100;
+      let left = pxX + 10;
+      if (left + tipW > r.width) left = pxX - tipW - 10;
+      tip.style.left = Math.max(2, left) + 'px';
+      tip.style.top = Math.max(2, pxY - 34) + 'px';
+    });
+    svg.addEventListener('mouseleave', () => {
+      tip.style.display = 'none';
+      dot.style.display = 'none';
+      vline.style.display = 'none';
+    });
+  }
+
+  function escapeText(s) {
+    return String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+  }
+
+  function mountAll() {
+    document.querySelectorAll('svg.spark-svg[data-points]').forEach((el) => {
+      if (el.dataset.sparkMounted === '1') return;
+      el.dataset.sparkMounted = '1';
+      init(el);
+    });
+  }
+  mountAll();
+  // Re-mount after HTMX swaps so dynamically-loaded sparklines also wire up.
+  document.addEventListener('htmx:afterSettle', mountAll);
+})();
 </script>
 </body>
 </html>

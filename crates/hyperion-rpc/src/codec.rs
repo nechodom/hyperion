@@ -142,6 +142,15 @@ pub enum Request {
         /// If true, bypass the cache and re-probe the upstream.
         force_refresh: bool,
     },
+    /// List installed WordPress plugins for `hosting`.
+    WpPluginList { hosting: HostingSelector },
+    /// Apply one plugin action via wp-cli. `slug` is the plugin
+    /// folder name (ignored for `UpdateAll`).
+    WpPluginAction {
+        hosting: HostingSelector,
+        slug: String,
+        action: hyperion_types::WpPluginAction,
+    },
     /// Delete a single backup run + its archive file(s) on disk.
     /// Refuses if the backup is still "running". Audits the action.
     BackupDelete {
@@ -385,6 +394,8 @@ pub enum Response {
     ServiceInstall,
     AgentConfigUpdate,
     UpdateCheck(hyperion_types::UpdateStatus),
+    WpPluginList(hyperion_types::WpPluginListResponse),
+    WpPluginAction(hyperion_types::WpPluginActionResult),
     // Web users / roles / 2FA
     WebLogin(hyperion_types::WebLoginResult),
     WebVerify2fa(hyperion_types::WebVerify2faResult),

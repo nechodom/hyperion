@@ -780,6 +780,22 @@ fn print_pretty(resp: &Response) {
                 println!("  → run `sudo /opt/hyperion/packaging/install/update.sh` to upgrade");
             }
         }
+        Response::WpPluginList(r) => {
+            println!("WordPress {} — {} plugin(s), {} update(s) pending:",
+                r.wp_version, r.plugins.len(), r.updates_pending);
+            println!("{:<40} {:<10} {:<14} {:<20}", "SLUG", "STATUS", "VERSION", "LATEST");
+            for p in &r.plugins {
+                let latest = if p.update_available { &p.latest_version[..] } else { "-" };
+                println!("{:<40} {:<10} {:<14} {:<20}", p.slug, p.status, p.version, latest);
+            }
+        }
+        Response::WpPluginAction(r) => {
+            println!("wp plugin action: {} — {}", r.state, r.message);
+            if !r.output_tail.is_empty() {
+                println!("--- tail ---");
+                println!("{}", r.output_tail);
+            }
+        }
     }
 }
 

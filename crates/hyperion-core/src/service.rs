@@ -115,6 +115,27 @@ pub trait AdapterPort: Send + Sync {
         db_host: &str,
         req: &WpInstallRequest,
     ) -> Result<String, AdapterError>;
+
+    /// List installed WP plugins for `htdocs` under `system_user`.
+    /// Returns the plugin table + parsed wp-version, ready for
+    /// `WpPluginListResponse` after the service adds bulk-auto-update
+    /// from `wp_installs`.
+    async fn wp_plugin_list(
+        &self,
+        system_user: &str,
+        htdocs: &str,
+    ) -> Result<(Vec<hyperion_types::WpPlugin>, String), AdapterError>;
+
+    /// Apply one whitelisted plugin action via wp-cli. `slug` is the
+    /// plugin folder name (or empty for `UpdateAll`). Returns the
+    /// stdout/stderr tail so the UI can show what happened.
+    async fn wp_plugin_action(
+        &self,
+        system_user: &str,
+        htdocs: &str,
+        slug: &str,
+        action: &hyperion_types::WpPluginAction,
+    ) -> Result<hyperion_types::WpPluginActionResult, AdapterError>;
 }
 
 #[derive(Clone)]
@@ -1879,6 +1900,91 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             installed_at: r.installed_at,
             last_pack_hash: r.last_pack_hash,
         }))
+    }
+
+    /// List installed WordPress plugins for a hosting. Returns the
+    /// plugin table + wp version + Hyperion's bulk auto-update flag
+    /// (which controls whether the daily updater touches plugins at
+    /// all; per-plugin auto-update is a separate WP-level setting).
+    pub async fn wp_plugin_list(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::WpPluginListResponse, RpcError> {
+        let detail = self.get(sel).await?;
+        if detail.state != HostingState::Active {
+            return Err(RpcError::Conflict {
+                message: "hosting must be active to list plugins".into(),
+            });
+        }
+        let (plugins, wp_version) = self
+            .adapters
+            .wp_plugin_list(&detail.system_user, &detail.root_dir)
+            .await
+            .map_err(|e| RpcError::ProvisioningFailed {
+                stage: "wp_plugin_list".into(),
+                reason: e.to_string(),
+            })?;
+        let bulk_auto_update = wordpress::get_install(&self.pool, &detail.id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("wp lookup: {e}")))?
+            .map(|r| r.auto_update_plugins)
+            .unwrap_or(false);
+        let updates_pending = plugins.iter().filter(|p| p.update_available).count() as i64;
+        Ok(hyperion_types::WpPluginListResponse {
+            plugins,
+            wp_version,
+            updates_pending,
+            bulk_auto_update,
+        })
+    }
+
+    /// Apply one plugin action (install/activate/deactivate/update/
+    /// delete/auto-update toggle) via wp-cli. Every action is
+    /// audit-logged with the action kind + slug (never the source URL
+    /// when it carries auth).
+    pub async fn wp_plugin_action(
+        &self,
+        sel: HostingSelector,
+        slug: String,
+        action: hyperion_types::WpPluginAction,
+    ) -> Result<hyperion_types::WpPluginActionResult, RpcError> {
+        let detail = self.get(sel).await?;
+        if detail.state != HostingState::Active {
+            return Err(RpcError::Conflict {
+                message: "hosting must be active to manage plugins".into(),
+            });
+        }
+        let out = self
+            .adapters
+            .wp_plugin_action(&detail.system_user, &detail.root_dir, &slug, &action)
+            .await
+            .map_err(|e| RpcError::ProvisioningFailed {
+                stage: "wp_plugin_action".into(),
+                reason: e.to_string(),
+            })?;
+        let action_label = match &action {
+            hyperion_types::WpPluginAction::Install { .. } => "install",
+            hyperion_types::WpPluginAction::Activate => "activate",
+            hyperion_types::WpPluginAction::Deactivate => "deactivate",
+            hyperion_types::WpPluginAction::Update => "update",
+            hyperion_types::WpPluginAction::UpdateAll => "update_all",
+            hyperion_types::WpPluginAction::Delete => "delete",
+            hyperion_types::WpPluginAction::SetAutoUpdate { enabled } => {
+                if *enabled { "auto_update_enable" } else { "auto_update_disable" }
+            }
+        };
+        self.append_audit(
+            "wp.plugin.action",
+            Some(detail.id.as_str()),
+            &serde_json::json!({
+                "action": action_label,
+                "slug": slug,
+                "state": out.state,
+            }).to_string(),
+            &out.state,
+        )
+        .await;
+        Ok(out)
     }
 
     /// Mint a one-time node enrollment token. Plaintext returned exactly once.

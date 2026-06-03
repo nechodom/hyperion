@@ -222,6 +222,214 @@ pub async fn install_wordpress(
     Ok(v.trim().to_string())
 }
 
+// =====================================================================
+//  Plugin management
+// =====================================================================
+
+/// wp-cli plugin slug pattern. Plugin folder names on wordpress.org are
+/// `[a-z0-9-]+` (no underscores, no caps). We accept underscores too
+/// because a handful of older premium plugins use them.
+static SLUG_RX: once_cell::sync::Lazy<regex::Regex> =
+    once_cell::sync::Lazy::new(|| regex::Regex::new(r"^[a-zA-Z0-9_\-]{1,80}$").expect("rx"));
+
+/// HTTP URL pattern for `wp plugin install <url>`. Bounded length; no
+/// embedded credentials; scheme http/https only.
+static URL_RX: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+    regex::Regex::new(r"^https?://[A-Za-z0-9_\-./%~=&?+:]{1,512}$").expect("rx")
+});
+
+/// Validate a plugin slug. Used at the boundary before `wp` argv build.
+pub fn validate_plugin_slug(s: &str) -> Result<(), AdapterError> {
+    if !SLUG_RX.is_match(s) {
+        return Err(AdapterError::Other(format!(
+            "plugin slug refused: {s} (must match {})",
+            SLUG_RX.as_str()
+        )));
+    }
+    Ok(())
+}
+
+/// Validate an install URL.
+pub fn validate_plugin_url(s: &str) -> Result<(), AdapterError> {
+    if !URL_RX.is_match(s) {
+        return Err(AdapterError::Other(format!(
+            "plugin install URL refused: {s}"
+        )));
+    }
+    Ok(())
+}
+
+/// List installed WP plugins via `wp plugin list --format=json` and
+/// `wp core version`. Both calls run under `system_user` against
+/// `htdocs`. Returns the parsed plugin table + wp version string.
+pub async fn plugin_list(
+    user: &str,
+    htdocs: &str,
+) -> Result<(Vec<hyperion_types::WpPlugin>, String), AdapterError> {
+    ensure_wp_cli_present().await?;
+    // `--format=json` gives a stable schema across wp-cli versions.
+    // `--fields=name,status,update,version,update_version,auto_update`
+    // selects the columns we care about and elides everything else
+    // (which is occasionally not present, e.g. on older wp-cli builds).
+    let args: [&str; 4] = [
+        "plugin",
+        "list",
+        "--format=json",
+        "--fields=name,status,update,version,update_version,auto_update",
+    ];
+    let argv = build_argv(user, htdocs, &args);
+    let stdout = cmd::run("/usr/bin/sudo", &argv_as_refs(&argv)).await?;
+    let rows: Vec<RawPluginRow> = serde_json::from_str(stdout.trim()).map_err(|e| {
+        AdapterError::Other(format!("wp plugin list returned non-JSON: {e} — body: {}", &stdout[..stdout.len().min(200)]))
+    })?;
+    let plugins: Vec<hyperion_types::WpPlugin> = rows
+        .into_iter()
+        .map(|r| hyperion_types::WpPlugin {
+            slug: r.name,
+            // wp-cli's `name` column is actually the folder slug. We
+            // don't have a separate "display name" available without
+            // `wp plugin get`, which would mean one RPC per plugin.
+            // Reuse the slug; the UI titlecases it.
+            name: String::new(),
+            version: r.version,
+            status: r.status,
+            update_available: r.update.as_deref() == Some("available"),
+            latest_version: r.update_version.unwrap_or_default(),
+            auto_update: matches!(r.auto_update.as_deref(), Some("on")),
+        })
+        .map(|mut p| {
+            if p.name.is_empty() {
+                p.name = humanize_slug(&p.slug);
+            }
+            p
+        })
+        .collect();
+
+    // wp core version — separate one-line call. Cheap.
+    let v_args: [&str; 2] = ["core", "version"];
+    let v_argv = build_argv(user, htdocs, &v_args);
+    let wp_version = cmd::run("/usr/bin/sudo", &argv_as_refs(&v_argv))
+        .await
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|_| String::new());
+    Ok((plugins, wp_version))
+}
+
+/// Apply one whitelisted plugin action via wp-cli under `system_user`.
+pub async fn plugin_action(
+    user: &str,
+    htdocs: &str,
+    slug: &str,
+    action: &hyperion_types::WpPluginAction,
+) -> Result<hyperion_types::WpPluginActionResult, AdapterError> {
+    ensure_wp_cli_present().await?;
+    // UpdateAll is the only branch that doesn't need a slug.
+    if !matches!(action, hyperion_types::WpPluginAction::UpdateAll) {
+        validate_plugin_slug(slug)?;
+    }
+    let args_owned: Vec<String> = match action {
+        hyperion_types::WpPluginAction::Install { source } => {
+            // `source` is either a wordpress.org slug or an https URL.
+            let is_url = source.starts_with("http://") || source.starts_with("https://");
+            if is_url {
+                validate_plugin_url(source)?;
+            } else {
+                validate_plugin_slug(source)?;
+            }
+            vec!["plugin".into(), "install".into(), source.clone(), "--activate".into()]
+        }
+        hyperion_types::WpPluginAction::Activate => vec!["plugin".into(), "activate".into(), slug.into()],
+        hyperion_types::WpPluginAction::Deactivate => vec!["plugin".into(), "deactivate".into(), slug.into()],
+        hyperion_types::WpPluginAction::Update => vec!["plugin".into(), "update".into(), slug.into()],
+        hyperion_types::WpPluginAction::UpdateAll => vec!["plugin".into(), "update".into(), "--all".into()],
+        hyperion_types::WpPluginAction::Delete => vec!["plugin".into(), "delete".into(), slug.into()],
+        hyperion_types::WpPluginAction::SetAutoUpdate { enabled } => {
+            let sub = if *enabled { "enable" } else { "disable" };
+            vec!["plugin".into(), "auto-updates".into(), sub.into(), slug.into()]
+        }
+    };
+    let args_refs: Vec<&str> = args_owned.iter().map(|s| s.as_str()).collect();
+    let argv = build_argv(user, htdocs, &args_refs);
+    let result = cmd::run("/usr/bin/sudo", &argv_as_refs(&argv)).await;
+    let (state, message, tail) = match result {
+        Ok(out) => {
+            let tail = tail_4k(&out);
+            // wp-cli prints "Success:" on happy path and "Warning:" on
+            // noop ("Plugin already activated").
+            let noop = out.contains("already active") || out.contains("already deactivated")
+                || out.contains("Warning: ");
+            let state = if noop { "noop" } else { "ok" };
+            (state.to_string(), short_summary(&out), tail)
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            ("failed".into(), msg.clone(), tail_4k(&msg))
+        }
+    };
+    Ok(hyperion_types::WpPluginActionResult {
+        state,
+        message,
+        output_tail: tail,
+    })
+}
+
+/// Last ~4 KiB of a long output buffer, char-boundary safe.
+fn tail_4k(s: &str) -> String {
+    const N: usize = 4096;
+    if s.len() <= N {
+        return s.to_string();
+    }
+    // Walk back from the end until we hit a char boundary.
+    let mut start = s.len() - N;
+    while !s.is_char_boundary(start) && start > 0 {
+        start -= 1;
+    }
+    s[start..].to_string()
+}
+
+/// Pull a one-liner from wp-cli's output for the toast / flash message.
+fn short_summary(out: &str) -> String {
+    out.lines()
+        .find(|l| l.contains("Success:") || l.contains("Warning:") || l.contains("Error:"))
+        .map(|s| s.trim().to_string())
+        .unwrap_or_else(|| out.lines().next().unwrap_or("").trim().to_string())
+}
+
+/// Convert "akismet-anti-spam" → "Akismet Anti Spam" for the UI when
+/// we don't have the plugin's display name (wp-cli's `plugin list`
+/// doesn't return it without an extra `plugin get` call per row).
+fn humanize_slug(slug: &str) -> String {
+    let mut out = String::with_capacity(slug.len() + 4);
+    let mut at_word = true;
+    for c in slug.chars() {
+        if c == '-' || c == '_' {
+            out.push(' ');
+            at_word = true;
+        } else if at_word {
+            out.extend(c.to_uppercase());
+            at_word = false;
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+#[derive(serde::Deserialize)]
+struct RawPluginRow {
+    name: String,
+    status: String,
+    /// "available" | "none" | "" (older wp-cli)
+    #[serde(default)]
+    update: Option<String>,
+    version: String,
+    #[serde(default)]
+    update_version: Option<String>,
+    /// "on" | "off" | None (very old wp-cli)
+    #[serde(default)]
+    auto_update: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

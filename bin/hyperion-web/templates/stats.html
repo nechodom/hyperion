@@ -109,7 +109,7 @@
         <span class="spark-now">{{ spark_load.latest_label }}</span>
       </div>
       {% if spark_load.has_data %}
-        <svg class="spark-svg" viewBox="0 0 600 60" preserveAspectRatio="none" aria-hidden="true">
+        <svg class="spark-svg" viewBox="0 0 600 60" preserveAspectRatio="none" aria-hidden="true" data-points='{{ spark_load.points_json|safe }}' data-spark-mount>
           <defs><linearGradient id="grad-load" x1="0" y1="0" x2="0" y2="1"><stop offset="0%"  stop-color="currentColor" stop-opacity="0.35"/><stop offset="100%" stop-color="currentColor" stop-opacity="0"/></linearGradient></defs>
           <path class="spark-area" d="{{ spark_load.area_d }}" fill="url(#grad-load)"/>
           <path class="spark-line" d="{{ spark_load.path_d }}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
@@ -129,7 +129,7 @@
         <span class="spark-now">{{ spark_mem.latest_label }}</span>
       </div>
       {% if spark_mem.has_data %}
-        <svg class="spark-svg" viewBox="0 0 600 60" preserveAspectRatio="none" aria-hidden="true">
+        <svg class="spark-svg" viewBox="0 0 600 60" preserveAspectRatio="none" aria-hidden="true" data-points='{{ spark_mem.points_json|safe }}' data-spark-mount>
           <defs><linearGradient id="grad-mem" x1="0" y1="0" x2="0" y2="1"><stop offset="0%"  stop-color="currentColor" stop-opacity="0.35"/><stop offset="100%" stop-color="currentColor" stop-opacity="0"/></linearGradient></defs>
           <path class="spark-area" d="{{ spark_mem.area_d }}" fill="url(#grad-mem)"/>
           <path class="spark-line" d="{{ spark_mem.path_d }}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
@@ -149,7 +149,7 @@
         <span class="spark-now">{{ spark_bw.latest_label }}</span>
       </div>
       {% if spark_bw.has_data %}
-        <svg class="spark-svg" viewBox="0 0 600 60" preserveAspectRatio="none" aria-hidden="true">
+        <svg class="spark-svg" viewBox="0 0 600 60" preserveAspectRatio="none" aria-hidden="true" data-points='{{ spark_bw.points_json|safe }}' data-spark-mount>
           <defs><linearGradient id="grad-bw" x1="0" y1="0" x2="0" y2="1"><stop offset="0%"  stop-color="currentColor" stop-opacity="0.35"/><stop offset="100%" stop-color="currentColor" stop-opacity="0"/></linearGradient></defs>
           <path class="spark-area" d="{{ spark_bw.area_d }}" fill="url(#grad-bw)"/>
           <path class="spark-line" d="{{ spark_bw.path_d }}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
@@ -169,7 +169,7 @@
         <span class="spark-now">{{ spark_reqs.latest_label }}</span>
       </div>
       {% if spark_reqs.has_data %}
-        <svg class="spark-svg" viewBox="0 0 600 60" preserveAspectRatio="none" aria-hidden="true">
+        <svg class="spark-svg" viewBox="0 0 600 60" preserveAspectRatio="none" aria-hidden="true" data-points='{{ spark_reqs.points_json|safe }}' data-spark-mount>
           <defs><linearGradient id="grad-reqs" x1="0" y1="0" x2="0" y2="1"><stop offset="0%"  stop-color="currentColor" stop-opacity="0.35"/><stop offset="100%" stop-color="currentColor" stop-opacity="0"/></linearGradient></defs>
           <path class="spark-area" d="{{ spark_reqs.area_d }}" fill="url(#grad-reqs)"/>
           <path class="spark-line" d="{{ spark_reqs.path_d }}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>

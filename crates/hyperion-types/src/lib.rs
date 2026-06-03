@@ -37,7 +37,10 @@ pub use stats::{
     UpdateStatus, Web2faEnrollment, WebHostingAccess, WebLoginResult, WebUserSummary,
     WebVerify2faResult,
 };
-pub use wp::{WpInstallRequest, WpInstallStatus};
+pub use wp::{
+    WpInstallRequest, WpInstallStatus, WpPlugin, WpPluginAction, WpPluginActionResult,
+    WpPluginListResponse,
+};
 
 /// Current Unix epoch seconds. Centralized so tests can replace it if needed.
 pub fn now_secs() -> i64 {

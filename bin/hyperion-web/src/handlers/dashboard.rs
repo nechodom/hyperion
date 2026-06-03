@@ -92,12 +92,12 @@ pub async fn get_dashboard(
     let update_latest_short = short_sha(&update_status.latest_sha);
     let samples_in_window = history.samples.len();
     let spark_load = build_sparkline(
-        history.samples.iter().map(|s| s.loadavg_1m_x100 as f64 / 100.0),
+        history.samples.iter().map(|s| (s.at, s.loadavg_1m_x100 as f64 / 100.0)),
         "load",
         |v| format!("{v:.2}"),
     );
     let spark_bw = build_sparkline(
-        history.samples.iter().map(|s| s.total_bw_out_24h as f64),
+        history.samples.iter().map(|s| (s.at, s.total_bw_out_24h as f64)),
         "bw",
         |v| crate::handlers::stats::fmt_bytes(&(v as i64)),
     );

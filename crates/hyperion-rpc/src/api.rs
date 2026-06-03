@@ -142,6 +142,20 @@ pub trait AgentApi: Send + Sync + 'static {
         force_refresh: bool,
     ) -> Result<hyperion_types::UpdateStatus, RpcError>;
 
+    /// List installed WordPress plugins for a hosting.
+    async fn wp_plugin_list(
+        &self,
+        hosting: HostingSelector,
+    ) -> Result<hyperion_types::WpPluginListResponse, RpcError>;
+
+    /// Apply one whitelisted plugin action via wp-cli.
+    async fn wp_plugin_action(
+        &self,
+        hosting: HostingSelector,
+        slug: String,
+        action: hyperion_types::WpPluginAction,
+    ) -> Result<hyperion_types::WpPluginActionResult, RpcError>;
+
     /// Delete a single backup run + its archive file from disk.
     /// Refuses to act on a backup that is still `running`.
     async fn backup_delete(&self, backup_id: i64) -> Result<(), RpcError>;

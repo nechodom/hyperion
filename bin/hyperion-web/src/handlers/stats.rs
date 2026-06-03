@@ -11,7 +11,9 @@ use hyperion_types::{ClusterStats, NodeMetricsHistory, NodeStats};
 use serde::Deserialize;
 
 /// Inline-SVG sparkline derived from a metric series. The template
-/// pastes `path_d` directly into an SVG `<path d="...">` element.
+/// pastes `path_d` directly into an SVG `<path d="...">` element AND
+/// exposes `points_json` on the SVG as `data-points` so the
+/// interactive-chart JS in base.html can render hover tooltips.
 #[derive(Debug, Clone)]
 pub struct Sparkline {
     /// SVG path data — single polyline from (0,h) → (w,h) baseline.
@@ -28,6 +30,12 @@ pub struct Sparkline {
     pub kind: &'static str,
     /// Whether we had enough data for a meaningful chart (≥2 samples).
     pub has_data: bool,
+    /// JSON-serialized list of `{x, y, v, t}` for every sample, in
+    /// viewBox coordinates. JS uses this to locate the nearest point
+    /// on mousemove and pop a tooltip. `v` is the formatted value
+    /// label, `t` is the formatted time label. Empty when has_data
+    /// is false; the JS no-ops in that case.
+    pub points_json: String,
 }
 
 #[derive(Template)]
@@ -113,28 +121,29 @@ pub async fn get_stats(
     };
 
     let spark_load = build_sparkline(
-        history.samples.iter().map(|s| s.loadavg_1m_x100 as f64 / 100.0),
+        history.samples.iter().map(|s| (s.at, s.loadavg_1m_x100 as f64 / 100.0)),
         "load",
         |v| format!("{v:.2}"),
     );
     let spark_mem = build_sparkline(
         history.samples.iter().map(|s| {
-            if s.mem_total_kib > 0 {
+            let pct = if s.mem_total_kib > 0 {
                 (s.mem_used_kib as f64 / s.mem_total_kib as f64) * 100.0
             } else {
                 0.0
-            }
+            };
+            (s.at, pct)
         }),
         "mem",
         |v| format!("{:.0}%", v),
     );
     let spark_bw = build_sparkline(
-        history.samples.iter().map(|s| s.total_bw_out_24h as f64),
+        history.samples.iter().map(|s| (s.at, s.total_bw_out_24h as f64)),
         "bw",
         |v| fmt_bytes(&(v as i64)),
     );
     let spark_reqs = build_sparkline(
-        history.samples.iter().map(|s| s.total_requests_24h as f64),
+        history.samples.iter().map(|s| (s.at, s.total_requests_24h as f64)),
         "reqs",
         |v| format!("{}", v as i64),
     );
@@ -158,19 +167,20 @@ pub async fn get_stats(
     Ok(Html(tpl.render()?).into_response())
 }
 
-/// Generate an SVG path data string + summary stats for a series of
-/// numeric samples. Auto-scales the Y axis to fit within `H`.
-pub fn build_sparkline<I, F>(values: I, kind: &'static str, fmt: F) -> Sparkline
+/// Generate an SVG path + per-point JSON for hover tooltips. Callers
+/// pass `(timestamp_unix, value)` pairs so the tooltip can show the
+/// real time bucket instead of just an index.
+pub fn build_sparkline<I, F>(points: I, kind: &'static str, fmt: F) -> Sparkline
 where
-    I: IntoIterator<Item = f64>,
+    I: IntoIterator<Item = (i64, f64)>,
     F: Fn(f64) -> String,
 {
-    const W: f64 = 600.0; // viewBox width
-    const H: f64 = 60.0; // viewBox height
-    const PAD: f64 = 4.0; // top/bottom inset so peaks don't clip
+    const W: f64 = 600.0;
+    const H: f64 = 60.0;
+    const PAD: f64 = 4.0;
 
-    let vs: Vec<f64> = values.into_iter().collect();
-    if vs.len() < 2 {
+    let pts: Vec<(i64, f64)> = points.into_iter().collect();
+    if pts.len() < 2 {
         return Sparkline {
             path_d: String::new(),
             area_d: String::new(),
@@ -179,29 +189,46 @@ where
             avg_label: "—".into(),
             kind,
             has_data: false,
+            points_json: "[]".into(),
         };
     }
-    let max = vs.iter().copied().fold(f64::NEG_INFINITY, f64::max).max(0.0);
-    let min = vs.iter().copied().fold(f64::INFINITY, f64::min).min(max);
+    let values: Vec<f64> = pts.iter().map(|(_, v)| *v).collect();
+    let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max).max(0.0);
+    let min = values.iter().copied().fold(f64::INFINITY, f64::min).min(max);
     let range = (max - min).max(1e-9);
-    let n = vs.len() as f64;
+    let n = pts.len() as f64;
     let dx = W / (n - 1.0);
 
-    let mut path = String::with_capacity(vs.len() * 16);
-    for (i, &v) in vs.iter().enumerate() {
+    let mut path = String::with_capacity(pts.len() * 16);
+    // Build the points_json on the same pass so they share coords.
+    let mut pj: Vec<String> = Vec::with_capacity(pts.len());
+    for (i, (ts, v)) in pts.iter().enumerate() {
         let x = i as f64 * dx;
-        let norm = (v - min) / range;
+        let norm = (*v - min) / range;
         let y = PAD + (1.0 - norm) * (H - 2.0 * PAD);
         if i == 0 {
             path.push_str(&format!("M{x:.1},{y:.1}"));
         } else {
             path.push_str(&format!(" L{x:.1},{y:.1}"));
         }
+        // Escape the value label for JSON — it's already operator-
+        // generated text but may contain quotes (unlikely) or
+        // backslashes (also unlikely). serde_json handles it cleanly.
+        let v_label = fmt(*v);
+        let t_label = fmt_time_label(*ts);
+        pj.push(format!(
+            "{{\"x\":{:.1},\"y\":{:.1},\"v\":{},\"t\":{}}}",
+            x,
+            y,
+            json_str(&v_label),
+            json_str(&t_label),
+        ));
     }
     let area = format!("{path} L{:.1},{H} L0,{H} Z", W);
+    let points_json = format!("[{}]", pj.join(","));
 
-    let latest = *vs.last().unwrap();
-    let sum: f64 = vs.iter().sum();
+    let latest = *values.last().unwrap_or(&0.0);
+    let sum: f64 = values.iter().sum();
     let avg = sum / n;
     Sparkline {
         path_d: path,
@@ -211,7 +238,39 @@ where
         avg_label: fmt(avg),
         kind,
         has_data: true,
+        points_json,
     }
+}
+
+/// Render a Unix timestamp as `HH:MM` UTC for the chart tooltip.
+/// We DON'T bother with the operator's local timezone because the
+/// stats page is server-internal — UTC is consistent across nodes.
+fn fmt_time_label(ts: i64) -> String {
+    use chrono::{DateTime, Utc};
+    DateTime::<Utc>::from_timestamp(ts, 0)
+        .map(|d| d.format("%H:%M").to_string())
+        .unwrap_or_else(|| "—".into())
+}
+
+/// Minimal JSON string escaper. Avoids pulling serde_json into this
+/// hot path for the sake of a label that's almost always a clean
+/// ASCII number — but we still need to handle the occasional quote.
+fn json_str(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// Clamp a response-time-ish ms value into a 10-100% bar height for
@@ -332,7 +391,7 @@ mod tests {
 
     #[test]
     fn build_sparkline_empty_returns_placeholder() {
-        let s = build_sparkline(std::iter::empty(), "load", |v| format!("{v}"));
+        let s = build_sparkline(std::iter::empty::<(i64, f64)>(), "load", |v| format!("{v}"));
         assert!(!s.has_data, "empty input must mark sparkline as no-data");
         assert_eq!(s.latest_label, "—");
         assert_eq!(s.peak_label, "—");
@@ -342,13 +401,13 @@ mod tests {
     #[test]
     fn build_sparkline_single_sample_returns_placeholder() {
         // 1 sample = no line to draw (need at least 2 endpoints).
-        let s = build_sparkline(std::iter::once(1.0), "mem", |v| format!("{v}"));
+        let s = build_sparkline(std::iter::once((1700_000_000_i64, 1.0)), "mem", |v| format!("{v}"));
         assert!(!s.has_data);
     }
 
     #[test]
     fn build_sparkline_two_samples_renders_line() {
-        let s = build_sparkline([1.0, 3.0].into_iter(), "load", |v| format!("{v:.1}"));
+        let s = build_sparkline([(1_700_000_000_i64, 1.0), (1_700_000_060, 3.0)].into_iter(), "load", |v| format!("{v:.1}"));
         assert!(s.has_data);
         // Two points → one M + one L.
         assert!(s.path_d.starts_with('M'), "path must start with Move");
@@ -369,7 +428,11 @@ mod tests {
     fn build_sparkline_flat_series_does_not_divide_by_zero() {
         // All samples equal → range collapses to 0; must not produce
         // NaN/Inf in path data.
-        let s = build_sparkline([5.0, 5.0, 5.0].into_iter(), "load", |v| format!("{v}"));
+        let s = build_sparkline(
+            [(1_700_000_000_i64, 5.0), (1_700_000_060, 5.0), (1_700_000_120, 5.0)].into_iter(),
+            "load",
+            |v| format!("{v}"),
+        );
         assert!(s.has_data);
         assert!(!s.path_d.contains("NaN"));
         assert!(!s.path_d.contains("inf"));
@@ -382,7 +445,11 @@ mod tests {
         // Load avg shouldn't go negative in practice, but mem % could
         // when total=0 (we coerce to 0.0). Make sure negatives
         // don't break the path.
-        let s = build_sparkline([-1.0, 0.0, 1.0].into_iter(), "load", |v| format!("{v:.1}"));
+        let s = build_sparkline(
+            [(1_700_000_000_i64, -1.0), (1_700_000_060, 0.0), (1_700_000_120, 1.0)].into_iter(),
+            "load",
+            |v| format!("{v:.1}"),
+        );
         assert!(s.has_data);
         assert_eq!(s.latest_label, "1.0");
         assert_eq!(s.peak_label, "1.0");

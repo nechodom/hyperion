@@ -660,6 +660,155 @@
   {% endif %}
 </div>
 
+{# Plugin manager — visible only once a real WP install exists. The
+   server populates wp_plugins by shelling out to `wp plugin list
+   --format=json`. The action endpoint dispatches install / activate
+   / deactivate / update / delete via one POST. #}
+{% if let Some(_) = wp_status %}
+<div class="card hover" style="margin-top:1rem">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="15" x2="15" y2="15"/><line x1="9" y1="11" x2="15" y2="11"/></svg>
+    Plugins
+    {% if wp_plugins.updates_pending > 0 %}
+      <span class="tag warn" style="margin-left:0.4rem">{{ wp_plugins.updates_pending }} update{% if wp_plugins.updates_pending != 1 %}s{% endif %} available</span>
+    {% endif %}
+  </h2>
+
+  <div class="row" style="gap:0.5rem;margin-bottom:0.85rem;flex-wrap:wrap">
+    <form method="post" action="/hostings/wp/plugin-action" style="display:inline">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="selector" value="{{ detail.domain }}">
+      <input type="hidden" name="action" value="update_all">
+      <button class="btn small" type="submit"
+              {% if wp_plugins.updates_pending == 0 %}disabled{% endif %}>
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/><path d="M20.49 15a9 9 0 0 1-14.85 3.36L1 14"/></svg>
+        Update all
+      </button>
+    </form>
+
+    <details class="inline-action" style="position:relative">
+      <summary class="btn small primary" style="list-style:none;cursor:pointer">+ Install plugin</summary>
+      <form method="post" action="/hostings/wp/plugin-action" autocomplete="off"
+            style="position:absolute;z-index:10;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:0.7rem;margin-top:0.4rem;box-shadow:var(--shadow);min-width:22rem">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="selector" value="{{ detail.domain }}">
+        <input type="hidden" name="action" value="install">
+        <div class="field" style="margin:0">
+          <label for="wp_install_source">Source <span class="hint">wordpress.org slug or full https:// URL</span></label>
+          <input id="wp_install_source" name="source" type="text" required
+                 pattern="[a-zA-Z0-9_\-./%~:?=+&amp;]+"
+                 placeholder="e.g. akismet · https://example.com/my-plugin.zip">
+        </div>
+        <div class="row" style="gap:0.4rem;margin-top:0.6rem;justify-content:flex-end">
+          <button type="submit" class="btn small primary">Install &amp; activate</button>
+        </div>
+      </form>
+    </details>
+  </div>
+
+  {% if wp_plugins.plugins.is_empty() %}
+    <div class="empty" style="padding:1.5rem 1rem">
+      <p class="muted">No plugins installed yet. Use <strong>Install plugin</strong> above to add one from wordpress.org or upload a .zip URL.</p>
+    </div>
+  {% else %}
+  <div class="table-wrap" style="margin:0 -1.5rem">
+    <table>
+      <thead>
+        <tr>
+          <th>Plugin</th>
+          <th>Status</th>
+          <th>Version</th>
+          <th>Auto-update</th>
+          <th class="right">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for p in wp_plugins.plugins %}
+        <tr>
+          <td>
+            <strong>{{ p.name }}</strong>
+            <div class="muted" style="font-size:0.78rem;font-family:var(--font-mono)">{{ p.slug }}</div>
+          </td>
+          <td>
+            {% if p.status == "active" || p.status == "active-network" %}
+              <span class="tag success">active</span>
+            {% else if p.status == "must-use" %}
+              <span class="tag info">must-use</span>
+            {% else if p.status == "dropin" %}
+              <span class="tag info">drop-in</span>
+            {% else %}
+              <span class="tag muted">inactive</span>
+            {% endif %}
+          </td>
+          <td>
+            <span class="numeric">{{ p.version }}</span>
+            {% if p.update_available %}
+              <div class="muted" style="font-size:0.76rem">→ {{ p.latest_version }} available</div>
+            {% endif %}
+          </td>
+          <td>
+            <form method="post" action="/hostings/wp/plugin-action" style="display:inline">
+              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+              <input type="hidden" name="selector" value="{{ detail.domain }}">
+              <input type="hidden" name="slug" value="{{ p.slug }}">
+              <input type="hidden" name="action" value="{% if p.auto_update %}auto_update_disable{% else %}auto_update_enable{% endif %}">
+              <button class="btn small ghost" type="submit"
+                      title="{% if p.auto_update %}Disable auto-update{% else %}Enable auto-update{% endif %}">
+                {% if p.auto_update %}
+                  <span class="tag success">on</span>
+                {% else %}
+                  <span class="tag muted">off</span>
+                {% endif %}
+              </button>
+            </form>
+          </td>
+          <td class="right">
+            <div class="row" style="gap:0.3rem;justify-content:flex-end;flex-wrap:wrap">
+              {% if p.update_available %}
+                <form method="post" action="/hostings/wp/plugin-action" style="display:inline">
+                  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                  <input type="hidden" name="selector" value="{{ detail.domain }}">
+                  <input type="hidden" name="slug" value="{{ p.slug }}">
+                  <input type="hidden" name="action" value="update">
+                  <button class="btn small" type="submit" title="Update to {{ p.latest_version }}">Update</button>
+                </form>
+              {% endif %}
+              {% if p.status == "active" || p.status == "active-network" %}
+                <form method="post" action="/hostings/wp/plugin-action" style="display:inline">
+                  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                  <input type="hidden" name="selector" value="{{ detail.domain }}">
+                  <input type="hidden" name="slug" value="{{ p.slug }}">
+                  <input type="hidden" name="action" value="deactivate">
+                  <button class="btn small ghost" type="submit">Deactivate</button>
+                </form>
+              {% else %}
+                <form method="post" action="/hostings/wp/plugin-action" style="display:inline">
+                  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                  <input type="hidden" name="selector" value="{{ detail.domain }}">
+                  <input type="hidden" name="slug" value="{{ p.slug }}">
+                  <input type="hidden" name="action" value="activate">
+                  <button class="btn small primary" type="submit">Activate</button>
+                </form>
+                <form method="post" action="/hostings/wp/plugin-action" style="display:inline"
+                      onsubmit="return confirm('Delete plugin {{ p.slug }}? This removes the files from disk.');">
+                  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                  <input type="hidden" name="selector" value="{{ detail.domain }}">
+                  <input type="hidden" name="slug" value="{{ p.slug }}">
+                  <input type="hidden" name="action" value="delete">
+                  <button class="btn small danger" type="submit">Delete</button>
+                </form>
+              {% endif %}
+            </div>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+
 </div><!-- /tab-wordpress -->
 
 <div class="tab-panel" id="tab-settings">
