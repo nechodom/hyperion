@@ -680,6 +680,166 @@ async fn invalid_domain_re_renders_form_with_error() {
     assert!(body.contains("BAD DOMAIN")); // value preserved
 }
 
+/// CSRF token accepted from the `X-CSRF-Token` header. Verifies the
+/// new header-based path added so HTMX / fetch clients don't have to
+/// embed the token in the body. Uses a real authenticated session.
+#[tokio::test]
+async fn csrf_via_x_csrf_token_header_is_accepted() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock, admin);
+    let login_body = b"username=kevin&password=good-pw&next=/";
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/login")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(login_body.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    let cookie = extract_cookie(&resp);
+    // Grab a token off /hostings/new — that page injects the session-wide
+    // wildcard CSRF token, which the middleware accepts on any path.
+    let form = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/hostings/new")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    let html = body_string(form).await;
+    let csrf = extract_csrf(&html);
+    // POST a delete with the token ONLY in the header, NOT in the body.
+    let body = "selector=does-not-exist";
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/hostings/delete")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, &cookie)
+                .header("x-csrf-token", &csrf)
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    // Header carried CSRF — middleware passes. Handler then 404s or
+    // 400s on the selector (we sent a bogus one); the point is it
+    // ISN'T 403.
+    assert_ne!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "header CSRF should be accepted",
+    );
+}
+
+/// CSRF token accepted from a `?_csrf=…` query string. This is the path
+/// multipart file uploads take — the middleware can't parse a 2 GB
+/// upload body to find a hidden form field.
+#[tokio::test]
+async fn csrf_via_query_string_is_accepted() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock, admin);
+    let login_body = b"username=kevin&password=good-pw&next=/";
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/login")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(login_body.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    let cookie = extract_cookie(&resp);
+    let form = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/hostings/new")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    let html = body_string(form).await;
+    let csrf = extract_csrf(&html);
+    // The token goes in the URL — not the body.
+    let urlencoded_csrf: String = url::form_urlencoded::byte_serialize(csrf.as_bytes()).collect();
+    let uri = format!("/hostings/delete?_csrf={urlencoded_csrf}");
+    let body = "selector=does-not-exist";
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(&uri)
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, &cookie)
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert_ne!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "query-string CSRF should be accepted",
+    );
+}
+
+/// Logout POST is exempted from CSRF — the base-layout button has no
+/// `_csrf` field (and shouldn't need one — a forged logout is annoying,
+/// not a vulnerability). Verifies the exemption works.
+#[tokio::test]
+async fn logout_post_is_exempt_from_csrf() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock, admin);
+    let login_body = b"username=kevin&password=good-pw&next=/";
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/login")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(login_body.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    let cookie = extract_cookie(&resp);
+    // No CSRF token. Just a bare logout POST.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/logout")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    // Logout redirects to /login on success.
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+    let loc = resp.headers().get(header::LOCATION).expect("loc");
+    assert_eq!(loc.to_str().unwrap(), "/login");
+}
+
 fn extract_cookie(resp: &axum::response::Response) -> String {
     let raw = resp
         .headers()

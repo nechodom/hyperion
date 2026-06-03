@@ -72,7 +72,12 @@ fn clear_throttle(ip: &str) {
 #[derive(Template)]
 #[template(path = "login.html")]
 struct LoginTpl<'a> {
-    error: Option<&'a str>,
+    /// Error code from `?error=…` query param — `"invalid"`, `"expired"`,
+    /// `"locked"`, `"csrf"`, or any custom message. Template branches
+    /// on the known codes and falls through to literal rendering for
+    /// anything else. Owned because askama's `==` comparison on `&str`
+    /// vs string literal trips up its derive macro.
+    error: Option<String>,
     next: &'a str,
     css_version: &'static str,
 }
@@ -102,7 +107,7 @@ pub async fn get_login(
         return Ok(Redirect::to(redirect_target(&q.next)).into_response());
     }
     let tpl = LoginTpl {
-        error: q.error.as_deref(),
+        error: q.error.clone(),
         next: &q.next,
         css_version: crate::handlers::css_version(),
     };

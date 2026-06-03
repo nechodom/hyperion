@@ -943,7 +943,11 @@
       Upload a previously-taken archive (max 2 GiB). Saved to
       <code>/var/lib/hyperion/backups/incoming/</code> then restored.
     </p>
-    <form method="post" action="/hostings/restore-upload" enctype="multipart/form-data"
+    {# CSRF token rides in the action URL because multipart bodies
+       aren't parsed by the middleware (it would buffer the whole
+       upload just to find a hidden field). See auth::check_csrf. #}
+    <form method="post" action="/hostings/restore-upload?_csrf={{ csrf_token }}"
+          enctype="multipart/form-data"
           onsubmit="return confirm('Restore {{ detail.domain }} from the uploaded archive?');">
       <input type="hidden" name="selector" value="{{ detail.domain }}">
       <div class="row" style="gap:0.5rem;align-items:flex-end">

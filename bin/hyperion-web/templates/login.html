@@ -27,10 +27,22 @@
         </div>
         <h2>Welcome back</h2>
         <p class="subtitle">Sign in to manage your hostings.</p>
-        {% if let Some(_) = error %}
+        {% if let Some(e) = error %}
           <div class="flash error">
             <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-            <div class="flash-body">Invalid username or password.</div>
+            <div class="flash-body">
+              {% if e == "invalid" %}
+                Invalid username or password.
+              {% else if e == "expired" %}
+                Your sign-in session expired. Please log in again.
+              {% else if e == "locked" %}
+                Account is locked. Contact an administrator.
+              {% else if e == "csrf" %}
+                Your form expired (CSRF). Please log in again and retry the action.
+              {% else %}
+                {{ e }}
+              {% endif %}
+            </div>
           </div>
         {% endif %}
         <form method="post" action="/login">

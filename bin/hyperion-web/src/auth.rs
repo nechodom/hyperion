@@ -146,7 +146,21 @@ pub fn clear_cookie(state: &SharedState) -> HeaderValue {
 }
 
 /// CSRF guard for POST requests. Returns 403 if missing/invalid token.
-/// The token is read from a form field named `_csrf` (sent by every form).
+///
+/// The token is accepted from THREE places, in this priority order:
+///   1. `X-CSRF-Token` request header — for fetch/XHR/HTMX flows
+///      that don't want to embed the token in the body.
+///   2. `?_csrf=…` query string — for `multipart/form-data` uploads
+///      where parsing the body in middleware would mean buffering
+///      potentially gigabytes of file content just to find one
+///      hidden field. The form template appends the token to the
+///      action URL instead.
+///   3. `_csrf` body field — the original path, used by every
+///      `application/x-www-form-urlencoded` form.
+///
+/// Multipart bodies are NEVER buffered by the middleware — they
+/// stream straight to the handler. Urlencoded bodies are buffered
+/// (small, bounded by tower-http body limits) and re-injected.
 pub async fn check_csrf(
     State(state): State<SharedState>,
     req: Request<Body>,
@@ -162,20 +176,70 @@ pub async fn check_csrf(
     if req.uri().path() == "/logout" {
         return next.run(req).await;
     }
-    let (parts, body) = req.into_parts();
-    let bytes = match http_body_util::BodyExt::collect(body).await {
-        Ok(c) => c.to_bytes(),
-        Err(_) => {
-            return (StatusCode::BAD_REQUEST, "bad body").into_response();
+
+    // 1. Header — works for any content type, doesn't touch body.
+    let header_token: Option<String> = req
+        .headers()
+        .get("x-csrf-token")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+
+    // 2. Query string — for multipart uploads. Also a no-cost fallback
+    //    for any form that wants to put the token in the action URL.
+    let query_token: Option<String> = req
+        .uri()
+        .query()
+        .and_then(|q| {
+            url::form_urlencoded::parse(q.as_bytes())
+                .find(|(k, _)| k == "_csrf")
+                .map(|(_, v)| v.into_owned())
+        });
+
+    // Decide whether we need to read the body. Skip it entirely for
+    // multipart — a 2 GB upload would otherwise sit in memory just to
+    // find a 100-byte hidden field that the template should have put
+    // in the URL anyway.
+    let is_multipart = req
+        .headers()
+        .get(axum::http::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_ascii_lowercase().starts_with("multipart/"))
+        .unwrap_or(false);
+
+    let (parts, body, body_bytes_opt) = if is_multipart || header_token.is_some()
+        || query_token.is_some()
+    {
+        // Don't buffer — re-attach the body unread.
+        let (p, b) = req.into_parts();
+        (p, b, None)
+    } else {
+        // Urlencoded path: buffer + parse for `_csrf`.
+        let (p, b) = req.into_parts();
+        match http_body_util::BodyExt::collect(b).await {
+            Ok(c) => {
+                let bytes = c.to_bytes();
+                (p, Body::from(bytes.clone()), Some(bytes))
+            }
+            Err(_) => {
+                return (StatusCode::BAD_REQUEST, "bad body").into_response();
+            }
         }
     };
-    let mut token: Option<String> = None;
-    for (k, v) in url::form_urlencoded::parse(&bytes) {
-        if k == "_csrf" {
-            token = Some(v.into_owned());
-            break;
-        }
-    }
+
+    let body_token: Option<String> = body_bytes_opt
+        .as_ref()
+        .and_then(|bytes| {
+            url::form_urlencoded::parse(bytes)
+                .find(|(k, _)| k == "_csrf")
+                .map(|(_, v)| v.into_owned())
+        });
+
+    // Pick the first non-empty token, in priority order.
+    let token: Option<String> = header_token
+        .filter(|s| !s.is_empty())
+        .or(query_token.filter(|s| !s.is_empty()))
+        .or(body_token.filter(|s| !s.is_empty()));
+
     let ctx = {
         let mut p = parts.clone();
         extract_auth(&mut p, &state)
@@ -205,8 +269,35 @@ pub async fn check_csrf(
         })
         .unwrap_or(false);
     if !ok {
+        tracing::warn!(
+            path = %form_id,
+            had_session = %ctx.is_authenticated(),
+            token_source = ?token_source(token.as_deref(), &parts),
+            "CSRF check failed",
+        );
         return (StatusCode::FORBIDDEN, "CSRF check failed").into_response();
     }
-    let req = Request::from_parts(parts, Body::from(bytes));
+    let req = Request::from_parts(parts, body);
     next.run(req).await
+}
+
+/// Diagnostic label for the source we picked the CSRF token from.
+/// Used only for log lines on a failed check — helps debug "the form
+/// definitely has a token, why is the middleware rejecting it".
+fn token_source(token: Option<&str>, parts: &Parts) -> &'static str {
+    if token.is_none() {
+        return "none";
+    }
+    if parts.headers.contains_key("x-csrf-token") {
+        return "header";
+    }
+    if parts
+        .uri
+        .query()
+        .map(|q| q.contains("_csrf="))
+        .unwrap_or(false)
+    {
+        return "query";
+    }
+    "body"
 }
