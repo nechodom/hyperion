@@ -4293,15 +4293,25 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let mut critical_down = 0usize;
         let mut warn_down = 0usize;
 
+        // ALWAYS run the active/enabled probe in parallel with the
+        // file-existence probe — a running service obviously exists
+        // even if our file-detection heuristics miss it. This catches
+        // the s4 case where `list-unit-files` returned an unexpected
+        // shape and nginx/mariadb were both flagged "not installed"
+        // despite being live.
         for (unit, label) in critical {
-            let present = hyperion_adapters::systemctl_unit_present(unit).await;
-            let (active, enabled, sub) = if present {
-                hyperion_adapters::systemctl_status(unit).await
-            } else {
-                (false, false, "missing".into())
-            };
+            let (status, mut present) = tokio::join!(
+                hyperion_adapters::systemctl_status(unit),
+                hyperion_adapters::systemctl_unit_present(unit),
+            );
+            let (active, enabled, mut sub) = status;
+            if active || enabled {
+                present = true;
+            }
+            if !present {
+                sub = "missing".into();
+            }
             let severity = if !present {
-                // A critical unit being absent is a configuration bug.
                 critical_down += 1;
                 "error".to_string()
             } else if !active {
@@ -4321,12 +4331,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             });
         }
         for (unit, label) in optional {
-            let present = hyperion_adapters::systemctl_unit_present(unit).await;
-            let (active, enabled, sub) = if present {
-                hyperion_adapters::systemctl_status(unit).await
-            } else {
-                (false, false, "not installed".into())
-            };
+            let (status, mut present) = tokio::join!(
+                hyperion_adapters::systemctl_status(unit),
+                hyperion_adapters::systemctl_unit_present(unit),
+            );
+            let (active, enabled, mut sub) = status;
+            if active || enabled {
+                present = true;
+            }
+            if !present {
+                sub = "not installed".into();
+            }
             let severity = if !present {
                 "info".to_string()
             } else if !active {
