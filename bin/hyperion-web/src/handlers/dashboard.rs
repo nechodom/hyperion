@@ -1,5 +1,6 @@
 use crate::auth::AuthCtx;
 use crate::error::AppError;
+use crate::handlers::stats::{build_sparkline, Sparkline};
 use crate::state::SharedState;
 use askama::Template;
 use axum::extract::State;
@@ -7,7 +8,9 @@ use axum::response::{Html, IntoResponse, Response};
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
 use hyperion_rpc::wire::AgentInfo;
 use hyperion_rpc::AuditEntryWire;
-use hyperion_types::{ClusterStats, DashboardAlert, HostingSummary};
+use hyperion_types::{
+    ClusterStats, DashboardAlert, HostingSummary, NodeMetricsHistory, ServicesHealth,
+};
 
 #[derive(Template)]
 #[template(path = "dashboard.html")]
@@ -22,6 +25,10 @@ struct DashboardTpl<'a> {
     cluster: Option<ClusterStats>,
     activity: Vec<AuditEntryWire>,
     alerts: Vec<DashboardAlert>,
+    services_health: ServicesHealth,
+    spark_load: Sparkline,
+    spark_bw: Sparkline,
+    samples_in_window: usize,
     error: Option<String>,
 }
 
@@ -30,25 +37,49 @@ pub async fn get_dashboard(
     ctx: AuthCtx,
 ) -> Result<Response, AppError> {
     let (info, recent, error) = fetch(&state).await;
-    let cluster = match hyperion_rpc_client::call(&state.agent_socket, Request::ClusterStats).await
-    {
+    // Fetch all the dashboard inputs in parallel — they're independent
+    // and the page renders against whatever survives.
+    let (cluster_res, activity_res, alerts_res, health_res, history_res) = tokio::join!(
+        hyperion_rpc_client::call(&state.agent_socket, Request::ClusterStats),
+        hyperion_rpc_client::call(&state.agent_socket, Request::AuditList { limit: 10 }),
+        hyperion_rpc_client::call(&state.agent_socket, Request::DashboardAlerts),
+        hyperion_rpc_client::call(&state.agent_socket, Request::ServicesHealth),
+        hyperion_rpc_client::call(
+            &state.agent_socket,
+            Request::NodeMetricsHistory { limit: 48 }
+        ),
+    );
+    let cluster = match cluster_res {
         Ok(RpcResponse::ClusterStats(c)) => Some(c),
         _ => None,
     };
-    let activity = match hyperion_rpc_client::call(
-        &state.agent_socket,
-        Request::AuditList { limit: 10 },
-    )
-    .await
-    {
+    let activity = match activity_res {
         Ok(RpcResponse::AuditList(v)) => v,
         _ => vec![],
     };
-    let alerts = match hyperion_rpc_client::call(&state.agent_socket, Request::DashboardAlerts).await
-    {
+    let alerts = match alerts_res {
         Ok(RpcResponse::DashboardAlerts(v)) => v,
         _ => vec![],
     };
+    let services_health = match health_res {
+        Ok(RpcResponse::ServicesHealth(h)) => h,
+        _ => ServicesHealth::default(),
+    };
+    let history: NodeMetricsHistory = match history_res {
+        Ok(RpcResponse::NodeMetricsHistory(h)) => h,
+        _ => NodeMetricsHistory::default(),
+    };
+    let samples_in_window = history.samples.len();
+    let spark_load = build_sparkline(
+        history.samples.iter().map(|s| s.loadavg_1m_x100 as f64 / 100.0),
+        "load",
+        |v| format!("{v:.2}"),
+    );
+    let spark_bw = build_sparkline(
+        history.samples.iter().map(|s| s.total_bw_out_24h as f64),
+        "bw",
+        |v| crate::handlers::stats::fmt_bytes(&(v as i64)),
+    );
     let tpl = DashboardTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -60,6 +91,10 @@ pub async fn get_dashboard(
         cluster,
         activity,
         alerts,
+        services_health,
+        spark_load,
+        spark_bw,
+        samples_in_window,
         error,
     };
     Ok(Html(tpl.render()?).into_response())
