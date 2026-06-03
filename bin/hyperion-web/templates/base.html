@@ -69,6 +69,11 @@
           <div class="user-name">{{ username }}</div>
           <div class="user-role">admin</div>
         </div>
+        <button class="theme-toggle" id="theme-toggle" title="Toggle theme (cycles auto → light → dark)" aria-label="Toggle theme">
+          <svg class="theme-dark-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
+          <svg class="theme-light-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
+          <svg class="theme-auto-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 0 0 18z" fill="currentColor"/></svg>
+        </button>
         <form method="post" action="/logout" style="margin:0">
           <button class="signout" type="submit" title="Sign out" aria-label="Sign out">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
@@ -84,11 +89,53 @@
 </div>
 {% endblock %}
 
+{# ============================================================
+   Command palette — Cmd+K / Ctrl+K. Indexed client-side from the
+   nav items + a small set of quick actions. For live entity
+   search (hostings, users) we hit /api/search which returns JSON.
+   ============================================================ #}
+<div class="cmdk-backdrop" id="cmdk" role="dialog" aria-modal="true" aria-label="Command palette">
+  <div class="cmdk-panel">
+    <div class="cmdk-input-row">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input class="cmdk-input" id="cmdk-input" placeholder="Search pages, hostings, users, or run a command…" autocomplete="off" spellcheck="false">
+      <span class="cmdk-hint">esc</span>
+    </div>
+    <ul class="cmdk-list" id="cmdk-list" role="listbox"></ul>
+  </div>
+</div>
+
+{# Keyboard shortcuts overlay — toggled by ? #}
+<div class="shortcuts-backdrop" id="shortcuts" role="dialog" aria-modal="true" aria-label="Keyboard shortcuts">
+  <div class="shortcuts-panel">
+    <h2>Keyboard shortcuts</h2>
+    <div class="shortcuts-grid">
+      <kbd>⌘ K</kbd><span class="desc">Open command palette</span>
+      <kbd>g</kbd> <kbd>h</kbd><span class="desc">Go to Hostings</span>
+      <kbd>g</kbd> <kbd>d</kbd><span class="desc">Go to Dashboard</span>
+      <kbd>g</kbd> <kbd>s</kbd><span class="desc">Go to Stats</span>
+      <kbd>g</kbd> <kbd>u</kbd><span class="desc">Go to Users</span>
+      <kbd>g</kbd> <kbd>a</kbd><span class="desc">Go to Audit log</span>
+      <kbd>n</kbd><span class="desc">New hosting</span>
+      <kbd>t</kbd><span class="desc">Toggle theme</span>
+      <kbd>?</kbd><span class="desc">Show this overlay</span>
+      <kbd>esc</kbd><span class="desc">Close modals / palette</span>
+    </div>
+    <div class="close-hint">Press <kbd>esc</kbd> or click outside to close.</div>
+  </div>
+</div>
+
+{# Toast container — appended into by toast() JS API #}
+<div class="toast-container" id="toasts" aria-live="polite" aria-atomic="false"></div>
+
 <script src="/static/htmx.min.js?v={{ htmx_version }}" defer></script>
 <script>
-// Auto-generate strong password into the input designated by data-genpw="<input-id>".
-// 24 chars from a-zA-Z0-9 + punctuation. Used by reset-password forms; we
-// surface the generated value once so the operator can copy it before submit.
+'use strict';
+
+// ============================================================
+//  Password generator — existing feature, untouched.
+//  Generates a strong password into [data-genpw="<input-id>"].
+// ============================================================
 document.addEventListener('click', function (ev) {
   const btn = ev.target.closest('[data-genpw]');
   if (!btn) return;
@@ -102,13 +149,313 @@ document.addEventListener('click', function (ev) {
   let out = '';
   for (const b of bytes) out += alphabet[b % alphabet.length];
   input.value = out;
-  input.type = 'text'; // briefly reveal so operator can copy
+  input.type = 'text';
   setTimeout(() => { input.type = 'password'; }, 8000);
-  // Visual feedback on the button.
   const orig = btn.textContent;
   btn.textContent = 'Generated · revealed for 8s';
   setTimeout(() => { btn.textContent = orig; }, 8000);
 });
+
+// ============================================================
+//  Theme toggle — auto / light / dark cycles, persisted in
+//  localStorage. We apply it before paint by reading and
+//  setting :root[data-theme] in a tiny inline head script (this
+//  runs deferred so the first paint already has the right theme
+//  via prefers-color-scheme — the explicit toggle only kicks in
+//  when the operator clicks).
+// ============================================================
+(function () {
+  const STORAGE_KEY = 'hyperion.theme';   // values: '', 'light', 'dark'
+  const root = document.documentElement;
+  const saved = localStorage.getItem(STORAGE_KEY) || '';
+  applyTheme(saved);
+
+  const btn = document.getElementById('theme-toggle');
+  if (!btn) return;
+  btn.addEventListener('click', cycle);
+  document.addEventListener('keydown', (ev) => {
+    if (!isShortcutContext(ev)) return;
+    if (ev.key === 't' || ev.key === 'T') { cycle(); ev.preventDefault(); }
+  });
+
+  function cycle() {
+    const cur = localStorage.getItem(STORAGE_KEY) || '';
+    const next = cur === ''     ? 'light'
+              : cur === 'light' ? 'dark'
+              :                   '';
+    if (next) localStorage.setItem(STORAGE_KEY, next);
+    else      localStorage.removeItem(STORAGE_KEY);
+    applyTheme(next);
+    toast(`Theme: ${next || 'auto (system)'}`, 'info', 1800);
+  }
+  function applyTheme(t) {
+    if (t === 'light' || t === 'dark') root.setAttribute('data-theme', t);
+    else                                root.removeAttribute('data-theme');
+    // Highlight the active icon
+    const dark = btn && btn.querySelector('.theme-dark-icon');
+    const light = btn && btn.querySelector('.theme-light-icon');
+    const auto = btn && btn.querySelector('.theme-auto-icon');
+    if (dark)  dark.style.display  = t === 'dark'  ? '' : 'none';
+    if (light) light.style.display = t === 'light' ? '' : 'none';
+    if (auto)  auto.style.display  = t === ''      ? '' : 'none';
+  }
+})();
+
+// ============================================================
+//  Toast notifications. Surface flash messages, HTMX errors,
+//  and one-off operator feedback. API: window.toast(msg, kind, ms).
+// ============================================================
+(function () {
+  const host = document.getElementById('toasts');
+  if (!host) return;
+
+  window.toast = function (msg, kind = 'info', ms = 4000) {
+    const el = document.createElement('div');
+    el.className = `toast ${kind}`;
+    el.innerHTML = `
+      <span class="toast-msg"></span>
+      <button class="toast-close" aria-label="Dismiss">×</button>`;
+    el.querySelector('.toast-msg').textContent = msg;
+    el.querySelector('.toast-close').addEventListener('click', () => dismiss(el));
+    host.appendChild(el);
+    if (ms > 0) setTimeout(() => dismiss(el), ms);
+  };
+  function dismiss(el) {
+    if (!el || el.classList.contains('leaving')) return;
+    el.classList.add('leaving');
+    setTimeout(() => el.remove(), 200);
+  }
+
+  // Auto-surface HTMX errors as red toasts.
+  document.addEventListener('htmx:responseError', (ev) => {
+    const code = ev.detail?.xhr?.status ?? '???';
+    window.toast(`Request failed (${code}). Check audit log.`, 'error');
+  });
+  document.addEventListener('htmx:sendError', () => {
+    window.toast('Network error — couldn’t reach the server.', 'error');
+  });
+
+  // Translate ?flash= / ?flash_error= query params into toasts on page load
+  // so handlers don't have to render their own flash divs.
+  const params = new URLSearchParams(location.search);
+  const ok = params.get('flash');
+  const er = params.get('flash_error');
+  if (ok) window.toast(ok, 'success', 5000);
+  if (er) window.toast(er, 'error', 7000);
+  if (ok || er) {
+    // Drop the flash from the URL so a refresh doesn't replay it.
+    params.delete('flash'); params.delete('flash_error');
+    const q = params.toString();
+    history.replaceState(null, '', location.pathname + (q ? '?' + q : '') + location.hash);
+  }
+})();
+
+// ============================================================
+//  Command palette — Cmd+K / Ctrl+K. Static index of nav routes
+//  + dynamic search via /api/search when the input is non-empty.
+//  Keyboard: ↑ ↓ to move, Enter to follow, Esc to close.
+// ============================================================
+(function () {
+  const STATIC_ITEMS = [
+    { group: 'Pages', label: 'Dashboard',       href: '/',           keys: ['dashboard', 'home', 'overview'] },
+    { group: 'Pages', label: 'Hostings',        href: '/hostings',   keys: ['hostings', 'sites', 'domains'] },
+    { group: 'Pages', label: 'New hosting',     href: '/hostings/new', keys: ['new', 'create', 'add', 'hosting'] },
+    { group: 'Pages', label: 'Stats',           href: '/stats',      keys: ['stats', 'metrics', 'bandwidth'] },
+    { group: 'Pages', label: 'Profiles',        href: '/profiles',   keys: ['profiles', 'limits', 'templates'] },
+    { group: 'Pages', label: 'Service health',  href: '/services',   keys: ['services', 'health', 'systemctl'] },
+    { group: 'Pages', label: 'Audit log',       href: '/audit',      keys: ['audit', 'log', 'history'] },
+    { group: 'Pages', label: 'Users',           href: '/admin/users',keys: ['users', 'admin', 'rbac', 'roles'] },
+    { group: 'Pages', label: 'My profile',      href: '/profile',    keys: ['profile', 'me', 'account', '2fa'] },
+    { group: 'Pages', label: 'Settings',        href: '/settings',   keys: ['settings', 'config', 'agent', 'smtp', 'slack'] },
+    { group: 'Pages', label: 'Nodes / install', href: '/install',    keys: ['nodes', 'install', 'invite', 'enroll'] },
+    { group: 'Actions', label: 'Toggle theme',  action: 'theme',     keys: ['theme', 'dark', 'light', 'mode'] },
+    { group: 'Actions', label: 'Show keyboard shortcuts', action: 'shortcuts', keys: ['shortcuts', 'keys', 'help'] },
+    { group: 'Actions', label: 'Sign out',      action: 'logout',    keys: ['logout', 'signout', 'exit'] },
+  ];
+
+  const backdrop = document.getElementById('cmdk');
+  const input    = document.getElementById('cmdk-input');
+  const list     = document.getElementById('cmdk-list');
+  if (!backdrop || !input || !list) return;
+
+  let items = STATIC_ITEMS.slice();
+  let active = 0;
+  let dynamicFetch = null;
+
+  function open() {
+    backdrop.classList.add('open');
+    input.value = '';
+    items = STATIC_ITEMS.slice();
+    active = 0;
+    render();
+    setTimeout(() => input.focus(), 30);
+  }
+  function close() {
+    backdrop.classList.remove('open');
+  }
+  function render() {
+    list.innerHTML = '';
+    if (items.length === 0) {
+      list.innerHTML = '<li class="cmdk-empty">No matches. Try a different query.</li>';
+      return;
+    }
+    let lastGroup = '';
+    items.forEach((it, idx) => {
+      if (it.group !== lastGroup) {
+        const h = document.createElement('li');
+        h.className = 'cmdk-group';
+        h.textContent = it.group;
+        list.appendChild(h);
+        lastGroup = it.group;
+      }
+      const li = document.createElement('li');
+      li.role = 'option';
+      const btn = document.createElement('button');
+      btn.className = 'cmdk-item' + (idx === active ? ' active' : '');
+      btn.dataset.idx = String(idx);
+      btn.innerHTML = `<span>${escapeHtml(it.label)}</span>` +
+        (it.meta ? `<span class="cmdk-meta">${escapeHtml(it.meta)}</span>` : '');
+      btn.addEventListener('click', () => activate(idx));
+      btn.addEventListener('mouseenter', () => { active = idx; updateActive(); });
+      li.appendChild(btn);
+      list.appendChild(li);
+    });
+  }
+  function updateActive() {
+    list.querySelectorAll('.cmdk-item').forEach((el) => {
+      el.classList.toggle('active', Number(el.dataset.idx) === active);
+    });
+    const cur = list.querySelector('.cmdk-item.active');
+    if (cur) cur.scrollIntoView({ block: 'nearest' });
+  }
+  function activate(idx) {
+    const it = items[idx];
+    if (!it) return;
+    close();
+    if (it.action === 'theme') {
+      document.getElementById('theme-toggle')?.click();
+    } else if (it.action === 'shortcuts') {
+      document.getElementById('shortcuts')?.classList.add('open');
+    } else if (it.action === 'logout') {
+      // Build a tiny form so we go through the CSRF-exempt POST /logout.
+      const f = document.createElement('form');
+      f.method = 'post';
+      f.action = '/logout';
+      document.body.appendChild(f);
+      f.submit();
+    } else if (it.href) {
+      location.assign(it.href);
+    }
+  }
+  function filterStatic(q) {
+    const needle = q.trim().toLowerCase();
+    if (!needle) return STATIC_ITEMS.slice();
+    return STATIC_ITEMS.filter((it) =>
+      it.label.toLowerCase().includes(needle) ||
+      it.keys.some((k) => k.includes(needle))
+    );
+  }
+  async function liveSearch(q) {
+    const needle = q.trim();
+    if (needle.length < 2) return [];
+    if (dynamicFetch) dynamicFetch.abort?.();
+    const ac = new AbortController();
+    dynamicFetch = ac;
+    try {
+      const r = await fetch(`/api/search?q=${encodeURIComponent(needle)}`, {
+        signal: ac.signal,
+        headers: { 'accept': 'application/json' },
+      });
+      if (!r.ok) return [];
+      const j = await r.json();
+      const out = [];
+      for (const h of (j.hostings || [])) {
+        out.push({ group: 'Hostings', label: h.domain, href: `/hostings/${encodeURIComponent(h.domain)}`, meta: h.state, keys: [h.domain] });
+      }
+      for (const u of (j.users || [])) {
+        out.push({ group: 'Users', label: u.username, href: '/admin/users', meta: u.role, keys: [u.username] });
+      }
+      return out;
+    } catch (e) {
+      return [];
+    }
+  }
+  input.addEventListener('input', async () => {
+    const q = input.value;
+    items = filterStatic(q);
+    active = 0;
+    render();
+    if (q.trim().length >= 2) {
+      const live = await liveSearch(q);
+      if (input.value === q) {
+        items = [...live, ...filterStatic(q)];
+        active = 0;
+        render();
+      }
+    }
+  });
+  input.addEventListener('keydown', (ev) => {
+    if (ev.key === 'ArrowDown') { active = Math.min(active + 1, items.length - 1); updateActive(); ev.preventDefault(); }
+    else if (ev.key === 'ArrowUp')   { active = Math.max(active - 1, 0); updateActive(); ev.preventDefault(); }
+    else if (ev.key === 'Enter')     { activate(active); ev.preventDefault(); }
+    else if (ev.key === 'Escape')    { close(); ev.preventDefault(); }
+  });
+  backdrop.addEventListener('click', (ev) => {
+    if (ev.target === backdrop) close();
+  });
+
+  document.addEventListener('keydown', (ev) => {
+    if ((ev.metaKey || ev.ctrlKey) && (ev.key === 'k' || ev.key === 'K')) {
+      ev.preventDefault();
+      backdrop.classList.contains('open') ? close() : open();
+    }
+  });
+
+  // Expose for the shortcut overlay.
+  window.openCommandPalette = open;
+})();
+
+// ============================================================
+//  Keyboard shortcuts overlay + global navigation shortcuts.
+// ============================================================
+(function () {
+  const overlay = document.getElementById('shortcuts');
+  if (!overlay) return;
+  function show() { overlay.classList.add('open'); }
+  function hide() { overlay.classList.remove('open'); }
+  overlay.addEventListener('click', (ev) => { if (ev.target === overlay) hide(); });
+
+  let lastG = 0;
+  document.addEventListener('keydown', (ev) => {
+    if (!isShortcutContext(ev)) return;
+    if (ev.key === 'Escape') {
+      document.querySelectorAll('.cmdk-backdrop.open, .shortcuts-backdrop.open')
+        .forEach((el) => el.classList.remove('open'));
+      return;
+    }
+    if (ev.key === '?') { show(); ev.preventDefault(); return; }
+    if (ev.key === 'g') { lastG = Date.now(); return; }
+    if (Date.now() - lastG < 900 && ev.key.length === 1) {
+      const k = ev.key.toLowerCase();
+      const map = { h: '/hostings', d: '/', s: '/stats', u: '/admin/users', a: '/audit', p: '/profiles', n: '/install' };
+      if (map[k]) { location.assign(map[k]); ev.preventDefault(); }
+      lastG = 0;
+      return;
+    }
+    if (ev.key === 'n' || ev.key === 'N') { location.assign('/hostings/new'); ev.preventDefault(); }
+  });
+})();
+
+// Shared: only fire global shortcuts when the user isn't typing.
+function isShortcutContext(ev) {
+  if (ev.metaKey || ev.ctrlKey || ev.altKey) return false;
+  const t = ev.target;
+  if (!t) return true;
+  const tag = (t.tagName || '').toLowerCase();
+  if (tag === 'input' || tag === 'textarea' || tag === 'select') return false;
+  if (t.isContentEditable) return false;
+  return true;
+}
 </script>
 </body>
 </html>

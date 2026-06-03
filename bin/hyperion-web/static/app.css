@@ -300,9 +300,22 @@ pre code {
 }
 
 .content {
-  padding: 2rem 2.25rem 4rem;
-  max-width: 80rem;
+  /* Fill the available width. The previous 80rem cap left a big
+     empty gutter on wide monitors. Inner grids use auto-fit so they
+     expand to fill the new space without us having to revisit each
+     page. Long-form text (paragraphs, descriptions) is kept readable
+     by the per-element max-width on `.prose` etc. below. */
+  padding: 2rem clamp(1.25rem, 2vw, 2.5rem) 4rem;
   width: 100%;
+  min-width: 0; /* allow grid children to actually shrink */
+}
+
+/* Long-form text blocks (settings descriptions, profile help text)
+   stay capped so lines don't run 200ch wide on a 4K monitor. Apply
+   this class to any paragraph that's "body copy", NOT to dashboards
+   or tables. */
+.prose {
+  max-width: 70ch;
 }
 
 /* Mobile: collapse sidebar to a top bar */
@@ -1613,4 +1626,351 @@ hr.divider {
     animation-duration: 0.01ms !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* ============================================================
+ *  Command palette (Cmd+K / Ctrl+K)
+ *  Modal backdrop + centered card with live-filterable list.
+ * ============================================================ */
+
+.cmdk-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(8, 9, 12, 0.6);
+  backdrop-filter: blur(6px);
+  display: none;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 12vh;
+  animation: cmdkFade var(--t-fast) ease-out;
+}
+.cmdk-backdrop.open { display: flex; }
+@keyframes cmdkFade {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+.cmdk-panel {
+  width: min(640px, 92vw);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+  animation: cmdkRise var(--t-med);
+}
+@keyframes cmdkRise {
+  from { transform: translateY(-12px); opacity: 0; }
+  to   { transform: translateY(0);     opacity: 1; }
+}
+.cmdk-input-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.85rem 1rem;
+  border-bottom: 1px solid var(--border);
+}
+.cmdk-input-row svg { color: var(--text-dim); flex-shrink: 0; }
+.cmdk-input {
+  flex: 1;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 1rem;
+  outline: none;
+  font-family: inherit;
+}
+.cmdk-input::placeholder { color: var(--text-soft); }
+.cmdk-hint {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--text-soft);
+  background: var(--surface-2);
+  padding: 0.15rem 0.4rem;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border);
+}
+.cmdk-list {
+  list-style: none;
+  margin: 0;
+  padding: 0.4rem 0;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+.cmdk-group {
+  font-size: 0.68rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-soft);
+  padding: 0.5rem 1rem 0.25rem;
+  font-weight: 600;
+}
+.cmdk-item {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  padding: 0.6rem 1rem;
+  cursor: pointer;
+  font-size: 0.92rem;
+  color: var(--text);
+  text-decoration: none;
+  border: 0;
+  background: transparent;
+  width: 100%;
+  text-align: left;
+  font-family: inherit;
+}
+.cmdk-item .cmdk-meta {
+  color: var(--text-soft);
+  font-size: 0.78rem;
+  margin-left: auto;
+  font-family: var(--font-mono);
+}
+.cmdk-item.active,
+.cmdk-item:hover {
+  background: var(--surface-2);
+}
+.cmdk-item.active::before {
+  content: '';
+  width: 3px;
+  align-self: stretch;
+  background: var(--primary);
+  margin-right: -0.4rem;
+  margin-left: -1rem;
+}
+.cmdk-empty {
+  padding: 1.5rem 1rem;
+  text-align: center;
+  color: var(--text-soft);
+  font-size: 0.88rem;
+}
+
+/* Hint widget in the page-header that says "press Cmd+K" */
+.cmdk-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.35rem 0.6rem;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  font-size: 0.82rem;
+  cursor: pointer;
+  transition: border-color var(--t-fast), color var(--t-fast);
+  font-family: inherit;
+}
+.cmdk-trigger:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+.cmdk-trigger kbd {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  background: var(--surface-3);
+  padding: 0.1rem 0.35rem;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border);
+}
+
+/* ============================================================
+ *  Toast notifications (HTMX-aware)
+ * ============================================================ */
+
+.toast-container {
+  position: fixed;
+  bottom: 1.5rem;
+  right: 1.5rem;
+  z-index: 999;
+  display: flex;
+  flex-direction: column-reverse;
+  gap: 0.6rem;
+  pointer-events: none;
+  max-width: 24rem;
+}
+.toast {
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--primary);
+  border-radius: var(--radius-sm);
+  padding: 0.7rem 0.9rem;
+  box-shadow: var(--shadow);
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  font-size: 0.88rem;
+  pointer-events: auto;
+  animation: toastSlide 220ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.toast.success { border-left-color: var(--success); }
+.toast.warn    { border-left-color: var(--warn); }
+.toast.error   { border-left-color: var(--danger); }
+.toast.info    { border-left-color: var(--info); }
+.toast .toast-msg { flex: 1; color: var(--text); }
+.toast button.toast-close {
+  background: transparent;
+  border: 0;
+  color: var(--text-soft);
+  cursor: pointer;
+  font-size: 1.1rem;
+  line-height: 1;
+  padding: 0;
+}
+.toast button.toast-close:hover { color: var(--text); }
+.toast.leaving { animation: toastExit 180ms ease-in forwards; }
+@keyframes toastSlide {
+  from { transform: translateX(110%); opacity: 0; }
+  to   { transform: translateX(0);    opacity: 1; }
+}
+@keyframes toastExit {
+  to { transform: translateX(110%); opacity: 0; }
+}
+
+/* ============================================================
+ *  Theme toggle button in sidebar footer
+ * ============================================================ */
+.theme-toggle {
+  background: transparent;
+  border: 0;
+  color: var(--text-dim);
+  cursor: pointer;
+  padding: 0.4rem;
+  border-radius: var(--radius-xs);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.theme-toggle:hover {
+  background: var(--surface-3);
+  color: var(--text);
+}
+/* When user explicitly picks a theme, the chosen icon is highlighted */
+:root[data-theme="dark"] .theme-toggle .theme-dark-icon,
+:root[data-theme="light"] .theme-toggle .theme-light-icon {
+  color: var(--primary-h);
+}
+
+/* When user picked an explicit theme, override prefers-color-scheme */
+:root[data-theme="light"] {
+  --bg:           #f4f5f7;
+  --bg-2:         #ffffff;
+  --surface:      #ffffff;
+  --surface-2:    #f4f5f7;
+  --surface-3:    #e9eaee;
+  --border:       #e3e5ea;
+  --border-strong:#cfd2d9;
+  --text:         #0d1117;
+  --text-dim:     #51545b;
+  --text-soft:    #797d86;
+  --primary:      #4f46e5;
+  --primary-h:    #4338ca;
+  --primary-soft: #e0e7ff;
+  --brand-accent: #059669;
+  --success:      #059669;
+  --success-soft: #d1fae5;
+  --warn:         #b45309;
+  --warn-soft:    #fef3c7;
+  --danger:       #dc2626;
+  --danger-soft:  #fee2e2;
+  --info:         #0284c7;
+  --info-soft:    #dbeafe;
+}
+:root[data-theme="dark"] {
+  --bg:           #0a0b0e;
+  --bg-2:         #0f1115;
+  --surface:      #15171c;
+  --surface-2:    #1c1f26;
+  --surface-3:    #232730;
+  --border:       #262932;
+  --border-strong:#363a44;
+  --text:         #e7e9ee;
+  --text-dim:     #9aa0ab;
+  --text-soft:    #6b6f7a;
+  --primary:      #6366f1;
+  --primary-h:    #818cf8;
+  --primary-soft: #312e81;
+  --brand-accent: #34d399;
+  --success:      #34d399;
+  --success-soft: #064e3b;
+  --warn:         #fbbf24;
+  --warn-soft:    #78350f;
+  --danger:       #f87171;
+  --danger-soft:  #7f1d1d;
+  --info:         #38bdf8;
+  --info-soft:    #0c4a6e;
+}
+
+/* ============================================================
+ *  Keyboard shortcuts overlay (press ?)
+ * ============================================================ */
+.shortcuts-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1001;
+  background: rgba(8, 9, 12, 0.65);
+  backdrop-filter: blur(6px);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  animation: cmdkFade var(--t-fast);
+}
+.shortcuts-backdrop.open { display: flex; }
+.shortcuts-panel {
+  width: min(560px, 92vw);
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  padding: 1.4rem 1.6rem;
+  box-shadow: var(--shadow-lg);
+  animation: cmdkRise var(--t-med);
+}
+.shortcuts-panel h2 {
+  margin: 0 0 1rem;
+  font-size: 1.1rem;
+}
+.shortcuts-grid {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 0.55rem 1rem;
+  font-size: 0.9rem;
+}
+.shortcuts-grid kbd {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  background: var(--surface-2);
+  padding: 0.18rem 0.45rem;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border);
+  color: var(--text);
+  white-space: nowrap;
+}
+.shortcuts-grid .desc { color: var(--text-dim); align-self: center; }
+.shortcuts-panel .close-hint {
+  margin-top: 1.2rem;
+  color: var(--text-soft);
+  font-size: 0.78rem;
+  text-align: center;
+}
+
+/* ============================================================
+ *  Sidebar live status pulse dot
+ * ============================================================ */
+.live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--success);
+  display: inline-block;
+  flex-shrink: 0;
+  box-shadow: 0 0 0 0 color-mix(in oklab, var(--success) 80%, transparent);
+  animation: livePulse 1.8s ease-out infinite;
+  margin-left: auto;
+}
+.live-dot.warn  { background: var(--warn); }
+.live-dot.error { background: var(--danger); animation-duration: 0.9s; }
+@keyframes livePulse {
+  0%   { box-shadow: 0 0 0 0   color-mix(in oklab, currentColor 0%, transparent); }
+  60%  { box-shadow: 0 0 0 8px color-mix(in oklab, currentColor 0%, transparent); }
+  100% { box-shadow: 0 0 0 0   color-mix(in oklab, currentColor 0%, transparent); }
 }

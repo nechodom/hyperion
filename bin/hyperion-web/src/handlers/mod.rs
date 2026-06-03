@@ -8,6 +8,7 @@ pub mod login;
 pub mod files;
 pub mod profile;
 pub mod profiles;
+pub mod search;
 pub mod services_health;
 pub mod settings;
 pub mod statics;

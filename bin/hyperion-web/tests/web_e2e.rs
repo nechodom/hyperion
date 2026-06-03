@@ -680,6 +680,64 @@ async fn invalid_domain_re_renders_form_with_error() {
     assert!(body.contains("BAD DOMAIN")); // value preserved
 }
 
+/// `/api/search?q=` returns a JSON envelope with hostings + users
+/// substring-matching the query. Behind require_auth — anonymous
+/// requests get redirected. Locks in the contract the ⌘K command
+/// palette depends on.
+#[tokio::test]
+async fn api_search_returns_json_envelope() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock, admin);
+    let login_body = b"username=kevin&password=good-pw&next=/";
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/login")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(login_body.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    let cookie = extract_cookie(&resp);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/search?q=kev")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp).await;
+    // Schema check — both keys present even if empty.
+    assert!(body.contains("\"hostings\""), "body: {body}");
+    assert!(body.contains("\"users\""), "body: {body}");
+}
+
+#[tokio::test]
+async fn api_search_requires_auth() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock, admin);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/search?q=x")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    // No cookie → middleware redirects to /login.
+    assert_eq!(resp.status(), StatusCode::SEE_OTHER);
+}
+
 /// CSRF token accepted from the `X-CSRF-Token` header. Verifies the
 /// new header-based path added so HTMX / fetch clients don't have to
 /// embed the token in the body. Uses a real authenticated session.

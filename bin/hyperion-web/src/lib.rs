@@ -141,6 +141,7 @@ pub fn build_router(state: SharedState) -> Router {
             "/hostings/monitor/probe",
             post(handlers::hostings::post_monitor_probe),
         )
+        .route("/api/search", get(handlers::search::get_search))
         .route("/profile", get(handlers::profile::get_profile))
         .route("/profile/2fa/start", post(handlers::profile::post_2fa_start))
         .route("/profile/2fa/confirm", post(handlers::profile::post_2fa_confirm))
