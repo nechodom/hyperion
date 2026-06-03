@@ -38,6 +38,24 @@
     <div class="kpi-value" style="font-size:1.1rem">{{ config.hostname }}</div>
     <div class="kpi-meta">agent v{{ config.agent_version }}</div>
   </div>
+  <div class="kpi-card {% if update_status.update_available %}bw{% else %}disk{% endif %}">
+    <div class="kpi-label">Version</div>
+    <div class="kpi-value" style="font-size:1.05rem">
+      {% if update_status.update_available %}
+        Update available
+      {% else if update_status.current_sha == "dev-unknown" %}
+        dev build
+      {% else %}
+        Up to date
+      {% endif %}
+    </div>
+    <div class="kpi-meta">
+      running <code>{{ update_current_short }}</code>
+      {% if !update_status.latest_sha.is_empty() %}
+        · upstream <code>{{ update_latest_short }}</code>
+      {% endif %}
+    </div>
+  </div>
   <div class="kpi-card disk">
     <div class="kpi-label">nginx user</div>
     <div class="kpi-value" style="font-size:1.1rem">

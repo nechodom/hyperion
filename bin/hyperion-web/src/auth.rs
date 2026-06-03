@@ -155,6 +155,13 @@ pub async fn check_csrf(
     if req.method() != axum::http::Method::POST {
         return next.run(req).await;
     }
+    // Routes whose POST is idempotent + has no destructive side
+    // effect beyond the caller's own session. Skipping CSRF here is
+    // defensible (a forced logout is annoying, not a vulnerability)
+    // and avoids plumbing csrf tokens into base.html on every page.
+    if req.uri().path() == "/logout" {
+        return next.run(req).await;
+    }
     let (parts, body) = req.into_parts();
     let bytes = match http_body_util::BodyExt::collect(body).await {
         Ok(c) => c.to_bytes(),

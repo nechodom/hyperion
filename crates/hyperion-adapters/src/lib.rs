@@ -58,7 +58,7 @@ pub async fn systemctl_status(unit: &str) -> (bool, bool, String) {
 
 /// Is a unit file present at all on the system?
 ///
-/// Three checks in order — first true wins, so we save subprocess
+/// Four checks in order — first true wins, so we save subprocess
 /// roundtrips in the common case:
 ///   1. `systemctl cat <unit>` exits 0 iff the unit file exists on
 ///      disk (works for vendor-shipped + drop-in units). MOST
@@ -66,10 +66,13 @@ pub async fn systemctl_status(unit: &str) -> (bool, bool, String) {
 ///      formatting, which varies by systemd version.
 ///   2. `systemctl is-active --quiet` succeeds → the unit is
 ///      definitely present (you can't activate something that
-///      doesn't exist). Catches edge cases where `cat` is finicky
-///      about templated units.
-///   3. `systemctl list-unit-files <unit>` table contains the name
-///      somewhere on a non-header line. Last-resort tolerant match
+///      doesn't exist).
+///   3. **Templated-instance match** — Debian's PostgreSQL ships as
+///      `postgresql@15-main.service`, not bare `postgresql.service`.
+///      `systemctl list-units --no-pager --no-legend` shows running
+///      instances; if any line starts with `<unit>@`, that template
+///      is present.
+///   4. `systemctl list-unit-files <unit>` table tolerant match
 ///      (handles ANSI colour codes + indentation).
 pub async fn systemctl_unit_present(unit: &str) -> bool {
     // 1. cat — most authoritative.
@@ -92,7 +95,43 @@ pub async fn systemctl_unit_present(unit: &str) -> bool {
             return true;
         }
     }
-    // 3. Tolerant `list-unit-files` parse. systemd ships output like
+    // 3. Templated-instance match. Debian PostgreSQL doesn't run
+    //    `postgresql.service` directly; it runs
+    //    `postgresql@<version>-<cluster>.service` (e.g.
+    //    postgresql@15-main.service). Same pattern for getty@,
+    //    systemd-fsck@, and others.
+    //
+    //    `systemctl list-units --no-legend <unit>@*.service` lists
+    //    every running instance. Any hit means the template (and
+    //    therefore the unit) is present.
+    if let Ok(out) = tokio::process::Command::new("/usr/bin/systemctl")
+        .args([
+            "list-units",
+            "--no-pager",
+            "--no-legend",
+            "--all",
+            "--type=service",
+            &format!("{unit}@*"),
+        ])
+        .output()
+        .await
+    {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        if templated_instance_present(&stdout, unit) {
+            return true;
+        }
+    }
+    // Also check if the @ template unit file itself exists on disk.
+    if let Ok(out) = tokio::process::Command::new("/usr/bin/systemctl")
+        .args(["cat", "--no-pager", &format!("{unit}@.service")])
+        .output()
+        .await
+    {
+        if out.status.success() && !out.stdout.is_empty() {
+            return true;
+        }
+    }
+    // 4. Tolerant `list-unit-files` parse. systemd ships output like
     //
     //     UNIT FILE              STATE   VENDOR PRESET
     //     nginx.service          enabled enabled
@@ -113,6 +152,26 @@ pub async fn systemctl_unit_present(unit: &str) -> bool {
     stdout.lines().any(|raw| {
         let l = strip_ansi(raw.trim());
         l.starts_with(&unit_with_suffix) || l.starts_with(unit)
+    })
+}
+
+/// True if the `systemctl list-units` output mentions a templated
+/// instance of `unit` (e.g. `postgresql@15-main.service` for
+/// `postgresql`). Pulled out into a pure helper so the parsing rule
+/// can be unit-tested without mocking systemctl.
+///
+/// Tolerates leading whitespace and ANSI colour codes (some systemd
+/// builds emit them even with --no-legend), and rejects lines that
+/// merely *contain* the unit name (e.g. `apt-daily-postgresql.service`).
+pub(crate) fn templated_instance_present(stdout: &str, unit: &str) -> bool {
+    let prefix = format!("{unit}@");
+    stdout.lines().any(|raw| {
+        let l = strip_ansi(raw.trim());
+        // Drop a leading bullet "●" + space that systemctl emits when
+        // the unit is failed/active — its raw bytes can survive
+        // strip_ansi because it isn't a CSI sequence.
+        let l = l.trim_start_matches('●').trim_start();
+        l.starts_with(&prefix)
     })
 }
 
@@ -245,6 +304,46 @@ mod tests {
         let a = random_password();
         let b = random_password();
         assert_ne!(a, b);
+    }
+
+    /// Templated-instance detection: the s4 regression was postgresql
+    /// running as `postgresql@15-main.service` while the bare
+    /// `postgresql.service` doesn't exist, so the 3-tier check missed
+    /// it. This locks in the parse rule that fixes that.
+    #[test]
+    fn templated_instance_matches_postgresql_at_15_main() {
+        let stdout = "  postgresql@15-main.service    loaded active running PostgreSQL Cluster 15-main\n";
+        assert!(templated_instance_present(stdout, "postgresql"));
+    }
+
+    #[test]
+    fn templated_instance_tolerates_ansi_and_bullet() {
+        // Real systemctl output on a failed instance carries a "●"
+        // bullet + bold ANSI before the unit name.
+        let stdout = "● \x1b[1mpostgresql@15-main.service\x1b[0m loaded failed failed PostgreSQL Cluster 15-main\n";
+        assert!(templated_instance_present(stdout, "postgresql"));
+    }
+
+    #[test]
+    fn templated_instance_rejects_unrelated_units_with_substring() {
+        // `apt-daily-postgresql.service` contains "postgresql" but
+        // isn't an @-instance of it — must not match.
+        let stdout = "  apt-daily-postgresql.service loaded active waiting Daily apt activity\n";
+        assert!(!templated_instance_present(stdout, "postgresql"));
+    }
+
+    #[test]
+    fn templated_instance_empty_output_is_false() {
+        assert!(!templated_instance_present("", "postgresql"));
+    }
+
+    #[test]
+    fn templated_instance_multiple_at_pattern_units() {
+        // Multiple templates (getty@tty1, getty@tty2) — any hit suffices.
+        let stdout = "\
+            getty@tty1.service loaded active running Getty on tty1\n\
+            getty@tty2.service loaded active running Getty on tty2\n";
+        assert!(templated_instance_present(stdout, "getty"));
     }
 
     #[test]

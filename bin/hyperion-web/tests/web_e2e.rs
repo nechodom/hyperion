@@ -148,6 +148,8 @@ async fn start_agent() -> (PathBuf, tempfile::TempDir) {
         email_config: None,
         email_default_to: None,
         agent_config_path: None,
+        update_cache: Arc::new(tokio::sync::RwLock::new(None)),
+        current_git_sha: "dev-unknown".into(),
     });
     let agent: Arc<dyn AgentApi> = Arc::new(AgentImpl::new(svc));
     let path = dir.path().join("agent.sock");

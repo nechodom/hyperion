@@ -22,6 +22,19 @@
   </div>
 {% endif %}
 
+{% if update_status.update_available %}
+  <div class="flash warn" style="margin-bottom:1rem">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+    <div class="flash-body">
+      <strong>Update available.</strong>
+      Running <code>{{ update_current_short }}</code>,
+      upstream <code>{{ update_latest_short }}</code>
+      (tag <code>{{ update_status.latest_tag }}</code>).
+      Run <code>sudo /opt/hyperion/packaging/install/update.sh</code> on this node to upgrade.
+    </div>
+  </div>
+{% endif %}
+
 {% for a in alerts %}
   <div class="flash {% if a.severity == "error" %}error{% else if a.severity == "warn" %}warn{% else %}info{% endif %}">
     <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">

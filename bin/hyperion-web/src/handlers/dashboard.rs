@@ -10,7 +10,15 @@ use hyperion_rpc::wire::AgentInfo;
 use hyperion_rpc::AuditEntryWire;
 use hyperion_types::{
     ClusterStats, DashboardAlert, HostingSummary, NodeMetricsHistory, ServicesHealth,
+    UpdateStatus,
 };
+
+/// Truncate a git SHA to the first 12 chars (or fewer if the SHA is
+/// shorter). Pre-computed in the handler so the template doesn't need
+/// a custom askama filter for this.
+fn short_sha(s: &str) -> String {
+    s.chars().take(12).collect()
+}
 
 #[derive(Template)]
 #[template(path = "dashboard.html")]
@@ -29,6 +37,9 @@ struct DashboardTpl<'a> {
     spark_load: Sparkline,
     spark_bw: Sparkline,
     samples_in_window: usize,
+    update_status: UpdateStatus,
+    update_current_short: String,
+    update_latest_short: String,
     error: Option<String>,
 }
 
@@ -39,7 +50,7 @@ pub async fn get_dashboard(
     let (info, recent, error) = fetch(&state).await;
     // Fetch all the dashboard inputs in parallel — they're independent
     // and the page renders against whatever survives.
-    let (cluster_res, activity_res, alerts_res, health_res, history_res) = tokio::join!(
+    let (cluster_res, activity_res, alerts_res, health_res, history_res, update_res) = tokio::join!(
         hyperion_rpc_client::call(&state.agent_socket, Request::ClusterStats),
         hyperion_rpc_client::call(&state.agent_socket, Request::AuditList { limit: 10 }),
         hyperion_rpc_client::call(&state.agent_socket, Request::DashboardAlerts),
@@ -47,6 +58,10 @@ pub async fn get_dashboard(
         hyperion_rpc_client::call(
             &state.agent_socket,
             Request::NodeMetricsHistory { limit: 48 }
+        ),
+        hyperion_rpc_client::call(
+            &state.agent_socket,
+            Request::UpdateCheck { force_refresh: false }
         ),
     );
     let cluster = match cluster_res {
@@ -69,6 +84,12 @@ pub async fn get_dashboard(
         Ok(RpcResponse::NodeMetricsHistory(h)) => h,
         _ => NodeMetricsHistory::default(),
     };
+    let update_status: UpdateStatus = match update_res {
+        Ok(RpcResponse::UpdateCheck(u)) => u,
+        _ => UpdateStatus::default(),
+    };
+    let update_current_short = short_sha(&update_status.current_sha);
+    let update_latest_short = short_sha(&update_status.latest_sha);
     let samples_in_window = history.samples.len();
     let spark_load = build_sparkline(
         history.samples.iter().map(|s| s.loadavg_1m_x100 as f64 / 100.0),
@@ -95,6 +116,9 @@ pub async fn get_dashboard(
         spark_load,
         spark_bw,
         samples_in_window,
+        update_status,
+        update_current_short,
+        update_latest_short,
         error,
     };
     Ok(Html(tpl.render()?).into_response())

@@ -134,6 +134,14 @@ pub trait AgentApi: Send + Sync + 'static {
         fields: std::collections::BTreeMap<String, String>,
     ) -> Result<(), RpcError>;
 
+    /// Compare the running binary's git SHA against the upstream
+    /// `rolling` release. Cached agent-side; pass `force_refresh: true`
+    /// to bypass the cache.
+    async fn update_check(
+        &self,
+        force_refresh: bool,
+    ) -> Result<hyperion_types::UpdateStatus, RpcError>;
+
     /// Delete a single backup run + its archive file from disk.
     /// Refuses to act on a backup that is still `running`.
     async fn backup_delete(&self, backup_id: i64) -> Result<(), RpcError>;

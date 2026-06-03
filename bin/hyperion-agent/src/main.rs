@@ -134,7 +134,8 @@ async fn main() -> anyhow::Result<()> {
             .with_slack_webhook(slack_webhook)
             .with_acme_email(cfg.acme.contact_email.clone())
             .with_email(email_cfg, email_to)
-            .with_agent_config_path(cli.config.clone()),
+            .with_agent_config_path(cli.config.clone())
+            .with_git_sha(env!("HYPERION_GIT_SHA")),
     );
 
     // Self-heal: re-render every Active hosting's FPM pool with the

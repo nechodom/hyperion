@@ -140,6 +140,46 @@ pub struct HostingService<A: AdapterPort + 'static> {
     /// Path to agent.toml on disk, for the per-section settings editor.
     /// None disables UI-driven config writes (operator hand-edits only).
     pub agent_config_path: Option<std::path::PathBuf>,
+    /// In-memory cache of the last upstream `rolling` release check.
+    /// Shared across `HostingService` clones so every RPC sees the
+    /// same answer. Re-probed every `UPDATE_CHECK_TTL_SECS`.
+    pub update_cache: Arc<tokio::sync::RwLock<Option<hyperion_types::UpdateStatus>>>,
+    /// Compile-time git SHA of the running binary — set via build.rs
+    /// in `bin/hyperion-agent`. Used by `update_check` to compare
+    /// against the upstream rolling release.
+    pub current_git_sha: String,
+}
+
+/// Cache TTL for the GitHub release check. One hour is enough to
+/// keep the dashboard banner fresh without hammering the API or
+/// hitting their unauthenticated rate limit (60 req/hour/IP).
+pub const UPDATE_CHECK_TTL_SECS: i64 = 3600;
+
+/// Decide whether `current` and `latest` git SHAs identify the same
+/// commit. Both sides are lowercased, then compared on the shorter
+/// length (a 7-char short SHA vs. a 40-char full SHA from the remote
+/// must match if the short is a prefix of the long).
+///
+/// "dev-unknown" / empty `current` always reports "no update" — a
+/// developer running an unversioned local build shouldn't see a nag
+/// banner just because their SHA isn't known.
+///
+/// Returns (`update_available`, `message_suffix`).
+pub fn compare_git_shas(current: &str, latest: &str) -> (bool, &'static str) {
+    let cur = current.to_lowercase();
+    let lat = latest.to_lowercase();
+    if cur == "dev-unknown" || cur.is_empty() {
+        return (false, "running an unversioned dev build");
+    }
+    if lat.is_empty() {
+        return (false, "probe failed: empty latest sha");
+    }
+    let n = cur.len().min(lat.len());
+    if n > 0 && cur[..n] == lat[..n] {
+        (false, "up to date")
+    } else {
+        (true, "update available")
+    }
 }
 
 /// Cluster-wide remote backup destination. When set, every successful
@@ -206,7 +246,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             email_config: None,
             email_default_to: None,
             agent_config_path: None,
+            update_cache: Arc::new(tokio::sync::RwLock::new(None)),
+            current_git_sha: "dev-unknown".into(),
         }
+    }
+
+    /// Wire the compile-time git SHA so `update_check` knows what
+    /// version is actually running. Called from `hyperion-agent`'s
+    /// startup with `env!("HYPERION_GIT_SHA")`.
+    pub fn with_git_sha(mut self, sha: impl Into<String>) -> Self {
+        self.current_git_sha = sha.into();
+        self
     }
 
     /// Wire the on-disk agent.toml path so the /settings page can
@@ -4220,6 +4270,96 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(())
     }
 
+    /// Compare the running binary's compile-time git SHA against the
+    /// SHA the upstream `rolling` tag points to. Cached for
+    /// `UPDATE_CHECK_TTL_SECS` so the dashboard banner doesn't trigger
+    /// a network call on every page load.
+    ///
+    /// We use `git ls-remote` rather than the GitHub REST API — git is
+    /// already installed on every node (the installer uses it), and
+    /// ls-remote against the public mirror is unauthenticated, has no
+    /// rate limit per IP, and returns the answer in one round trip
+    /// without JSON parsing. The downside (slightly slower TCP/TLS
+    /// vs. a HEAD request) is irrelevant once per hour.
+    pub async fn update_check(
+        &self,
+        force_refresh: bool,
+    ) -> Result<hyperion_types::UpdateStatus, RpcError> {
+        let now = now_secs();
+        // Fast path: serve cached if still fresh and caller didn't ask
+        // for a forced refresh. We use a separate read scope so the
+        // (uncommon) refresh path can take the write lock without
+        // upgrading.
+        if !force_refresh {
+            let cache = self.update_cache.read().await;
+            if let Some(s) = cache.as_ref() {
+                if now - s.last_checked_at < UPDATE_CHECK_TTL_SECS {
+                    return Ok(s.clone());
+                }
+            }
+        }
+
+        // Re-probe upstream. We don't read /etc/hyperion/agent.toml for
+        // a configurable repo URL because the install scripts hard-code
+        // nechodom/hyperion too — if the operator forks, they patch the
+        // installer and this together.
+        let repo_url = "https://github.com/nechodom/hyperion";
+        let probe = tokio::process::Command::new("/usr/bin/git")
+            .args(["ls-remote", "--tags", repo_url, "refs/tags/rolling"])
+            .output()
+            .await;
+
+        let mut status = hyperion_types::UpdateStatus {
+            current_sha: self.current_git_sha.clone(),
+            latest_sha: String::new(),
+            latest_tag: "rolling".into(),
+            latest_built: String::new(),
+            last_checked_at: now,
+            update_available: false,
+            message: String::new(),
+        };
+
+        match probe {
+            Ok(out) if out.status.success() => {
+                // Output: "<sha>\trefs/tags/rolling\n"
+                let raw = String::from_utf8_lossy(&out.stdout);
+                let sha = raw
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                if sha.is_empty() {
+                    status.message = "probe failed: empty ls-remote output".into();
+                } else {
+                    status.latest_sha = sha;
+                    let (avail, msg) =
+                        compare_git_shas(&status.current_sha, &status.latest_sha);
+                    status.update_available = avail;
+                    status.message = msg.to_string();
+                }
+            }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                status.message = format!(
+                    "probe failed: git ls-remote exit {}: {stderr}",
+                    out.status.code().unwrap_or(-1),
+                );
+            }
+            Err(e) => {
+                status.message = format!("probe failed: spawn git: {e}");
+            }
+        }
+
+        // Persist into cache (write lock) regardless of probe outcome —
+        // a recent failure is still worth caching so we don't spam the
+        // upstream on every page load when the network's flaky.
+        {
+            let mut w = self.update_cache.write().await;
+            *w = Some(status.clone());
+        }
+        Ok(status)
+    }
+
     pub async fn service_install(&self, name: String) -> Result<(), RpcError> {
         let pkg = Self::service_whitelist_for(&name, false).ok_or_else(|| {
             RpcError::Validation {
@@ -5480,6 +5620,8 @@ mod tests {
             email_config: None,
             email_default_to: None,
             agent_config_path: None,
+            update_cache: Arc::new(tokio::sync::RwLock::new(None)),
+            current_git_sha: "dev-unknown".into(),
         };
         s2.create(HostingCreateReq {
             domain: Domain::parse("b.cz").expect("parse"),
@@ -5494,6 +5636,66 @@ mod tests {
         .expect("b");
         let rows = s.list().await.expect("list");
         assert_eq!(rows.len(), 2);
+    }
+
+    /// SHA comparison: identical full SHAs ⇒ no update.
+    #[test]
+    fn compare_git_shas_identical_no_update() {
+        let (avail, msg) =
+            compare_git_shas("abcdef0123456789abcdef0123456789abcdef01", "abcdef0123456789abcdef0123456789abcdef01");
+        assert!(!avail);
+        assert_eq!(msg, "up to date");
+    }
+
+    /// Mixed-length prefix match — agent compiled with 12-char short,
+    /// remote returns full 40-char. Must NOT report "update available".
+    #[test]
+    fn compare_git_shas_prefix_match() {
+        let cur = "abcdef012345"; // 12-char short
+        let lat = "abcdef0123456789abcdef0123456789abcdef01"; // 40-char full
+        let (avail, msg) = compare_git_shas(cur, lat);
+        assert!(!avail, "12-char prefix of 40-char SHA should not flag update");
+        assert_eq!(msg, "up to date");
+    }
+
+    /// Different SHAs ⇒ flag update.
+    #[test]
+    fn compare_git_shas_different_flags_update() {
+        let (avail, msg) =
+            compare_git_shas("aaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbb");
+        assert!(avail);
+        assert_eq!(msg, "update available");
+    }
+
+    /// "dev-unknown" current ⇒ never nag the operator.
+    #[test]
+    fn compare_git_shas_dev_unknown_suppresses_banner() {
+        let (avail, msg) = compare_git_shas("dev-unknown", "abc123def456");
+        assert!(!avail);
+        assert_eq!(msg, "running an unversioned dev build");
+    }
+
+    /// Empty current ⇒ same as dev-unknown.
+    #[test]
+    fn compare_git_shas_empty_current_suppresses_banner() {
+        let (avail, _) = compare_git_shas("", "abc123def456");
+        assert!(!avail);
+    }
+
+    /// Empty latest ⇒ probe-failure path, no nag.
+    #[test]
+    fn compare_git_shas_empty_latest_no_update() {
+        let (avail, msg) = compare_git_shas("abc123", "");
+        assert!(!avail);
+        assert!(msg.starts_with("probe failed"));
+    }
+
+    /// Case-insensitive: GitHub's lowercase SHA vs. a mixed-case
+    /// build-time embed must still match.
+    #[test]
+    fn compare_git_shas_case_insensitive() {
+        let (avail, _) = compare_git_shas("ABCDEF012345", "abcdef012345xyz");
+        assert!(!avail);
     }
 
     #[tokio::test]
@@ -5521,6 +5723,8 @@ mod tests {
             email_config: None,
             email_default_to: None,
             agent_config_path: None,
+            update_cache: Arc::new(tokio::sync::RwLock::new(None)),
+            current_git_sha: "dev-unknown".into(),
         };
         let r = s2.create(req("dup.cz")).await;
         match r {

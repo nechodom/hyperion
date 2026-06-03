@@ -771,6 +771,15 @@ fn print_pretty(resp: &Response) {
         Response::ServiceRestart => println!("service restarted"),
         Response::ServiceInstall => println!("service installed"),
         Response::AgentConfigUpdate => println!("agent.toml updated"),
+        Response::UpdateCheck(s) => {
+            println!("update check:");
+            println!("  current: {}", s.current_sha);
+            println!("  latest:  {} (tag {})", s.latest_sha, s.latest_tag);
+            println!("  status:  {}", s.message);
+            if s.update_available {
+                println!("  → run `sudo /opt/hyperion/packaging/install/update.sh` to upgrade");
+            }
+        }
     }
 }
 

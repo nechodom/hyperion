@@ -135,6 +135,13 @@ pub enum Request {
         /// types per (section, field) and parses accordingly.
         fields: std::collections::BTreeMap<String, String>,
     },
+    /// Compare the running binary's git SHA against the upstream
+    /// `rolling` release tag's SHA. Cached agent-side for an hour
+    /// so the dashboard banner doesn't hammer the GitHub API.
+    UpdateCheck {
+        /// If true, bypass the cache and re-probe the upstream.
+        force_refresh: bool,
+    },
     /// Delete a single backup run + its archive file(s) on disk.
     /// Refuses if the backup is still "running". Audits the action.
     BackupDelete {
@@ -377,6 +384,7 @@ pub enum Response {
     ServiceRestart,
     ServiceInstall,
     AgentConfigUpdate,
+    UpdateCheck(hyperion_types::UpdateStatus),
     // Web users / roles / 2FA
     WebLogin(hyperion_types::WebLoginResult),
     WebVerify2fa(hyperion_types::WebVerify2faResult),

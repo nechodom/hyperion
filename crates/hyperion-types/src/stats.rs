@@ -355,6 +355,45 @@ pub struct MonitorHistory {
     pub samples: Vec<MonitorSamplePoint>,
 }
 
+/// What we know about whether Hyperion is up-to-date. Returned by
+/// `Request::UpdateCheck`; cached agent-side so the GitHub Releases
+/// API isn't hit on every page load.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UpdateStatus {
+    /// Currently-installed binary git SHA / version string.
+    pub current_sha: String,
+    /// Latest known remote SHA from the rolling release. Empty if
+    /// we've never checked successfully.
+    pub latest_sha: String,
+    /// Tag name of the upstream release (e.g. "rolling").
+    pub latest_tag: String,
+    /// When upstream was built (ISO 8601 string from the release body).
+    pub latest_built: String,
+    /// Last time we successfully reached the remote registry.
+    pub last_checked_at: i64,
+    /// True if current_sha != latest_sha AND we have both. Falls back
+    /// to false on probe failure (don't nag operators about a probe
+    /// we couldn't make).
+    pub update_available: bool,
+    /// Human-readable status — "up to date", "update available",
+    /// "never checked", "probe failed: <reason>".
+    pub message: String,
+}
+
+impl Default for UpdateStatus {
+    fn default() -> Self {
+        Self {
+            current_sha: env!("CARGO_PKG_VERSION").to_string(),
+            latest_sha: String::new(),
+            latest_tag: "rolling".into(),
+            latest_built: String::new(),
+            last_checked_at: 0,
+            update_available: false,
+            message: "never checked".into(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

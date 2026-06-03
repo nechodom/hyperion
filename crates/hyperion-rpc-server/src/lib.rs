@@ -237,6 +237,10 @@ async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::UpdateCheck { force_refresh } => match api.update_check(force_refresh).await {
+            Ok(v) => Response::UpdateCheck(v),
+            Err(e) => Response::Error(e),
+        },
         Request::BackupDelete { backup_id } => match api.backup_delete(backup_id).await {
             Ok(()) => Response::BackupDelete,
             Err(e) => Response::Error(e),
@@ -665,6 +669,12 @@ mod tests {
             _: std::collections::BTreeMap<String, String>,
         ) -> Result<(), RpcError> {
             Ok(())
+        }
+        async fn update_check(
+            &self,
+            _: bool,
+        ) -> Result<hyperion_types::UpdateStatus, RpcError> {
+            Ok(hyperion_types::UpdateStatus::default())
         }
         async fn backup_delete(&self, _: i64) -> Result<(), RpcError> {
             Ok(())

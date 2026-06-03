@@ -247,6 +247,13 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.agent_config_update(section, fields).await
     }
 
+    async fn update_check(
+        &self,
+        force_refresh: bool,
+    ) -> Result<hyperion_types::UpdateStatus, RpcError> {
+        self.svc.update_check(force_refresh).await
+    }
+
     async fn backup_delete(&self, backup_id: i64) -> Result<(), RpcError> {
         self.svc.backup_delete(backup_id).await
     }
