@@ -50,6 +50,66 @@ pub struct SuspendedInput<'a> {
     pub reason_message: &'a str,
 }
 
+/// Reverse-proxy variant: forwards every request to a single upstream
+/// URL. WebSocket upgrade is on by default per MVP spec. No PHP-FPM,
+/// no static root.
+#[derive(Debug, Clone)]
+pub struct ProxyVhostInput<'a> {
+    pub domain: &'a str,
+    pub aliases: &'a [String],
+    pub logs_dir: &'a str,
+    pub cert_path: &'a str,
+    pub key_path: &'a str,
+    pub acme_challenge_root: &'a str,
+    /// Upstream URL — e.g. "http://localhost:3000" or "https://api.internal:8443".
+    pub upstream_url: &'a str,
+}
+
+#[derive(askama::Template)]
+#[template(path = "nginx-vhost-proxy.conf.j2", escape = "none")]
+struct ProxyVhostTpl<'a> {
+    domain: &'a str,
+    aliases: &'a [String],
+    logs_dir: &'a str,
+    cert_path: &'a str,
+    key_path: &'a str,
+    acme_challenge_root: &'a str,
+    upstream_url: &'a str,
+}
+
+pub fn render_proxy(input: &ProxyVhostInput<'_>) -> Result<String, AdapterError> {
+    let tpl = ProxyVhostTpl {
+        domain: input.domain,
+        aliases: input.aliases,
+        logs_dir: input.logs_dir,
+        cert_path: input.cert_path,
+        key_path: input.key_path,
+        acme_challenge_root: input.acme_challenge_root,
+        upstream_url: input.upstream_url,
+    };
+    Ok(tpl.render()?)
+}
+
+/// Write reverse-proxy vhost — same shape as `write_vhost` but uses
+/// the proxy template. Atomic + reload + restore-on-failure.
+pub async fn write_vhost_proxy(
+    paths: &Paths,
+    input: &ProxyVhostInput<'_>,
+) -> Result<(), AdapterError> {
+    let body = render_proxy(input)?;
+    let vhost = paths.vhost_file(input.domain);
+    let backup = backup_existing(&vhost).await?;
+    atomic_write(&vhost, body.as_bytes(), 0o644).await?;
+    let symlink = paths.symlink_file(input.domain);
+    ensure_symlink(&vhost, &symlink).await?;
+    if let Err(e) = cmd::run("/usr/sbin/nginx", &["-t"]).await {
+        restore_or_remove(&vhost, backup.as_deref()).await;
+        let _ = tokio::fs::remove_file(&symlink).await;
+        return Err(e);
+    }
+    reload().await
+}
+
 /// Render the suspended-state vhost.
 pub fn render_suspended(input: &SuspendedInput<'_>) -> Result<String, AdapterError> {
     let tpl = SuspendedTpl {

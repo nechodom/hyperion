@@ -73,6 +73,17 @@ pub struct HostingDetail {
     /// the agent-wide default from `[acme] contact_email`".
     #[serde(default)]
     pub acme_contact_email: Option<String>,
+    /// "php" | "static" | "reverse_proxy". Defaults to "php" for
+    /// pre-multi-kind rows.
+    #[serde(default = "default_kind")]
+    pub kind: String,
+    /// Upstream URL for kind=reverse_proxy.
+    #[serde(default)]
+    pub proxy_upstream_url: Option<String>,
+}
+
+fn default_kind() -> String {
+    "php".to_string()
 }
 
 #[cfg(test)]
@@ -115,6 +126,8 @@ mod tests {
             created_at: 1,
             updated_at: 2,
             acme_contact_email: Some("ops@example.cz".into()),
+            kind: "php".into(),
+            proxy_upstream_url: None,
         };
         let j = serde_json::to_string(&d).expect("serialize");
         let back: HostingDetail = serde_json::from_str(&j).expect("deserialize");

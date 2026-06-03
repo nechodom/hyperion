@@ -148,6 +148,8 @@ fn build_create(
         php_version,
         database,
         system_user,
+        kind: "php".into(),
+        proxy_upstream_url: None,
     })
 }
 

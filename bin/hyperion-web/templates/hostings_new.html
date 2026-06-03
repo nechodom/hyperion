@@ -33,6 +33,33 @@
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
 
     <h2>
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 22h20"/><path d="M2 12h20"/><path d="M2 2h20"/><path d="M6 22V2"/><path d="M18 22V2"/></svg>
+      Hosting type
+    </h2>
+    <div class="field">
+      <label for="kind">What kind of site is this?</label>
+      <select id="kind" name="kind"
+              onchange="document.getElementById('proxy-row').style.display=this.value==='reverse_proxy'?'block':'none';
+                       document.getElementById('php-row').style.display=this.value==='php'?'block':'none';
+                       document.getElementById('db-row').style.display=this.value==='php'?'block':'none';">
+        <option value="php" selected>PHP site (nginx + PHP-FPM + optional DB)</option>
+        <option value="static">Static HTML/CSS/JS only (nginx serves files)</option>
+        <option value="reverse_proxy">Reverse proxy to upstream URL (Node, Python, container, etc.)</option>
+      </select>
+    </div>
+    <div class="field" id="proxy-row" style="display:none">
+      <label for="proxy_upstream_url">Upstream URL <span class="hint">required for reverse proxy</span></label>
+      <input id="proxy_upstream_url" name="proxy_upstream_url" type="url"
+             placeholder="http://localhost:3000 or http://10.0.0.5:8080"
+             value="{{ proxy_upstream_url_in|e }}">
+      <p class="text-soft small" style="margin:0.3rem 0 0">
+        nginx will <code>proxy_pass</code> every request to this URL.
+        WebSocket upgrade is enabled by default. Standard headers
+        (<code>X-Real-IP</code>, <code>X-Forwarded-For</code>, <code>Host</code>) are set.
+      </p>
+    </div>
+
+    <h2 style="margin-top:1.4rem">
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
       Domains
     </h2>
@@ -74,8 +101,8 @@
         <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
         Runtime
       </h2>
-      <div class="field-row">
-        <div class="field">
+      <div class="field-row" id="php-row">
+        <div class="field" style="flex:1">
           <label for="php">PHP version</label>
           <select id="php" name="php">
             <option value="none" {% if php_in.is_empty() || php_in == "none" %}selected{% endif %}>none (static)</option>

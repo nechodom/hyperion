@@ -19,6 +19,11 @@ pub struct HostingRow {
     /// agent-wide [acme] contact_email from agent.toml" — the same
     /// value that issue_real_cert defaults to when this is missing.
     pub acme_contact_email: Option<String>,
+    /// "php" | "static" | "reverse_proxy". Defaults to "php" for
+    /// pre-migration-014 rows.
+    pub kind: String,
+    /// Upstream URL for kind=reverse_proxy. None for other kinds.
+    pub proxy_upstream_url: Option<String>,
 }
 
 pub async fn insert(
@@ -151,12 +156,14 @@ type RawHostingRow = (
     i64,
     i64,
     Option<String>,
+    String,
+    Option<String>,
 );
 
 const QUERY_BASE: &str =
-    "SELECT id, domain, state, system_user_id, php_version, root_dir, created_at, updated_at, acme_contact_email FROM hostings WHERE id = ?";
+    "SELECT id, domain, state, system_user_id, php_version, root_dir, created_at, updated_at, acme_contact_email, kind, proxy_upstream_url FROM hostings WHERE id = ?";
 const QUERY_DOMAIN: &str =
-    "SELECT id, domain, state, system_user_id, php_version, root_dir, created_at, updated_at, acme_contact_email FROM hostings WHERE domain = ?";
+    "SELECT id, domain, state, system_user_id, php_version, root_dir, created_at, updated_at, acme_contact_email, kind, proxy_upstream_url FROM hostings WHERE domain = ?";
 
 async fn fetch_one<'a>(
     pool: &'a SqlitePool,
@@ -174,6 +181,8 @@ async fn fetch_one<'a>(
         created_at,
         updated_at,
         acme_contact_email,
+        kind,
+        proxy_upstream_url,
     )) = row
     else {
         return Ok(None);
@@ -191,7 +200,64 @@ async fn fetch_one<'a>(
         created_at,
         updated_at,
         acme_contact_email,
+        kind,
+        proxy_upstream_url,
     }))
+}
+
+/// Set the hosting kind + upstream URL on an existing row.
+/// `proxy_url` must be Some when `kind == "reverse_proxy"`, None otherwise.
+pub async fn set_kind(
+    pool: &SqlitePool,
+    id: &HostingId,
+    kind: &str,
+    proxy_upstream_url: Option<&str>,
+    now: i64,
+) -> Result<(), StateError> {
+    sqlx::query(
+        "UPDATE hostings SET kind = ?, proxy_upstream_url = ?, updated_at = ? WHERE id = ?",
+    )
+    .bind(kind)
+    .bind(proxy_upstream_url)
+    .bind(now)
+    .bind(id.as_str())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Insert with explicit kind + optional proxy URL — used by the
+/// reverse-proxy create flow. Falls back to the simpler `insert`
+/// when kind=php.
+pub async fn insert_with_kind(
+    pool: &SqlitePool,
+    id: &HostingId,
+    domain: &str,
+    system_user_id: i64,
+    php_version: Option<PhpVersion>,
+    root_dir: &str,
+    kind: &str,
+    proxy_upstream_url: Option<&str>,
+    now: i64,
+) -> Result<(), StateError> {
+    sqlx::query(
+        r#"INSERT INTO hostings
+           (id, domain, state, system_user_id, php_version, root_dir,
+            created_at, updated_at, kind, proxy_upstream_url)
+           VALUES (?, ?, 'provisioning', ?, ?, ?, ?, ?, ?, ?)"#,
+    )
+    .bind(id.as_str())
+    .bind(domain)
+    .bind(system_user_id)
+    .bind(php_version.map(|v| v.as_str()))
+    .bind(root_dir)
+    .bind(now)
+    .bind(now)
+    .bind(kind)
+    .bind(proxy_upstream_url)
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
 /// Update (or clear) the per-hosting ACME contact email. `None` means

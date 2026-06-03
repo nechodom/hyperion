@@ -23,6 +23,17 @@ pub struct HostingCreateReq {
     pub database: Option<DbProvision>,
     #[serde(default)]
     pub system_user: Option<SystemUserName>,
+    /// Hosting kind. Default "php" for back-compat with older clients.
+    /// "reverse_proxy" requires `proxy_upstream_url` to be Some.
+    #[serde(default = "default_kind")]
+    pub kind: String,
+    /// Upstream URL for kind=reverse_proxy. Ignored for other kinds.
+    #[serde(default)]
+    pub proxy_upstream_url: Option<String>,
+}
+
+fn default_kind() -> String {
+    "php".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -70,6 +81,8 @@ mod tests {
             php_version: None,
             database: None,
             system_user: None,
+            kind: "php".into(),
+            proxy_upstream_url: None,
         };
         let s = serde_json::to_string(&r).expect("serialize");
         let back: HostingCreateReq = serde_json::from_str(&s).expect("deserialize");
@@ -84,6 +97,8 @@ mod tests {
             php_version: Some(PhpVersion::V8_3),
             database: Some(DbProvision::MariaDB),
             system_user: Some(SystemUserName::parse("example_cz").expect("parse")),
+            kind: "php".into(),
+            proxy_upstream_url: None,
         };
         let s = serde_json::to_string(&r).expect("serialize");
         let back: HostingCreateReq = serde_json::from_str(&s).expect("deserialize");

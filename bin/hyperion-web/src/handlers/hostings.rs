@@ -49,6 +49,11 @@ struct NewTpl<'a> {
     php_in: String,
     /// "" = none, otherwise "mariadb"/"postgres"
     db_in: String,
+    /// "" = default php, otherwise echoes back kind selector
+    #[allow(dead_code)]
+    kind_in: String,
+    /// Echoed-back upstream URL when create failed and kind=reverse_proxy
+    proxy_upstream_url_in: String,
 }
 
 #[derive(Template)]
@@ -169,6 +174,8 @@ pub async fn get_new(State(state): State<SharedState>, ctx: AuthCtx) -> Result<R
         aliases_in: "",
         php_in: "8.3".to_string(),
         db_in: "mariadb".to_string(),
+        kind_in: "php".to_string(),
+        proxy_upstream_url_in: String::new(),
     };
     Ok(Html(tpl.render()?).into_response())
 }
@@ -184,6 +191,12 @@ pub struct CreateForm {
     db: String,
     #[serde(default)]
     system_user: String,
+    /// "php" | "static" | "reverse_proxy" — defaults to "php".
+    #[serde(default)]
+    pub kind: String,
+    /// Upstream URL when kind=reverse_proxy.
+    #[serde(default)]
+    pub proxy_upstream_url: String,
 }
 
 pub async fn post_create(
@@ -225,12 +238,35 @@ pub async fn post_create(
             Err(e) => return Ok(render_new_error(&ctx, &csrf_token, &form, &e.to_string())),
         }
     };
+    let kind = if form.kind == "reverse_proxy" {
+        "reverse_proxy".to_string()
+    } else if form.kind == "static" {
+        "static".to_string()
+    } else {
+        "php".to_string()
+    };
+    let proxy_upstream_url = if kind == "reverse_proxy" {
+        let u = form.proxy_upstream_url.trim().to_string();
+        if u.is_empty() {
+            return Ok(render_new_error(
+                &ctx,
+                &csrf_token,
+                &form,
+                "Reverse proxy requires an upstream URL.",
+            ));
+        }
+        Some(u)
+    } else {
+        None
+    };
     let req = HostingCreateReq {
         domain,
         aliases,
         php_version,
         database,
         system_user,
+        kind,
+        proxy_upstream_url,
     };
     let resp = hyperion_rpc_client::call(&state.agent_socket, Request::HostingCreate(req.clone()))
         .await
@@ -1046,6 +1082,8 @@ fn render_new_error<'a>(
         aliases_in: &form.aliases,
         php_in: form.php.clone(),
         db_in: form.db.clone(),
+        kind_in: form.kind.clone(),
+        proxy_upstream_url_in: form.proxy_upstream_url.clone(),
     };
     Html(
         tpl.render()

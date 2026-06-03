@@ -353,14 +353,33 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 }
             }
         };
+        // For reverse_proxy validate upstream URL is present + parseable
+        // before we touch system_users / DB / nginx. Bail clean.
+        if req.kind == "reverse_proxy" {
+            let upstream = req
+                .proxy_upstream_url
+                .as_deref()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| RpcError::Validation {
+                    message: "reverse_proxy requires proxy_upstream_url".into(),
+                })?;
+            if !(upstream.starts_with("http://") || upstream.starts_with("https://")) {
+                return Err(RpcError::Validation {
+                    message: "proxy_upstream_url must start with http:// or https://".into(),
+                });
+            }
+        }
         let hosting_id = HostingId::new_v7();
-        if let Err(e) = hostings::insert(
+        if let Err(e) = hostings::insert_with_kind(
             &self.pool,
             &hosting_id,
             domain,
             suid_row,
             req.php_version,
             &htdocs,
+            &req.kind,
+            req.proxy_upstream_url.as_deref(),
             now_secs(),
         )
         .await
@@ -388,21 +407,23 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
         }
 
-        // 5. PHP-FPM pool
-        if let Some(ver) = req.php_version {
-            if let Err(e) = self
-                .adapters
-                .fpm_ensure(system_user.as_str(), domain, ver)
-                .await
-            {
-                let _ = stack.rollback_all().await;
-                return Err(e.into());
+        // 5. PHP-FPM pool — only for kind=php hostings.
+        if req.kind == "php" {
+            if let Some(ver) = req.php_version {
+                if let Err(e) = self
+                    .adapters
+                    .fpm_ensure(system_user.as_str(), domain, ver)
+                    .await
+                {
+                    let _ = stack.rollback_all().await;
+                    return Err(e.into());
+                }
+                stack.push(Box::new(FpmDelete {
+                    adapters: self.adapters.clone(),
+                    system_user: system_user.as_str().to_string(),
+                    version: ver,
+                }));
             }
-            stack.push(Box::new(FpmDelete {
-                adapters: self.adapters.clone(),
-                system_user: system_user.as_str().to_string(),
-                version: ver,
-            }));
         }
 
         // 6. database
@@ -501,6 +522,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             created_at: now_secs(),
             updated_at: now_secs(),
             acme_contact_email: None,
+            kind: req.kind.clone(),
+            proxy_upstream_url: req.proxy_upstream_url.clone(),
         };
         if let Err(e) = self.adapters.nginx_write_vhost(&detail).await {
             let _ = stack.rollback_all().await;
@@ -701,6 +724,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             created_at: row.created_at,
             updated_at: row.updated_at,
             acme_contact_email: row.acme_contact_email,
+            kind: row.kind,
+            proxy_upstream_url: row.proxy_upstream_url,
         })
     }
 
@@ -4436,6 +4461,8 @@ mod tests {
             php_version: Some(PhpVersion::V8_3),
             database: Some(DbProvision::MariaDB),
             system_user: None,
+            kind: "php".into(),
+            proxy_upstream_url: None,
         }
     }
 
@@ -4572,6 +4599,8 @@ mod tests {
             php_version: None,
             database: None,
             system_user: None,
+            kind: "php".into(),
+            proxy_upstream_url: None,
         })
         .await
         .expect("b");

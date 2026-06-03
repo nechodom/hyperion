@@ -289,6 +289,25 @@ impl AdapterPort for RealAdapter {
         );
         let logs_dir = detail.root_dir.replace("/htdocs", "/logs");
         let acme_root = self.acme_challenge_root.display().to_string();
+        // Dispatch on hosting kind. Reverse-proxy uses a completely
+        // different template (proxy_pass instead of root + PHP-FPM);
+        // static = same as php template but with no fastcgi_pass.
+        if detail.kind == "reverse_proxy" {
+            let upstream = detail
+                .proxy_upstream_url
+                .as_deref()
+                .unwrap_or("http://127.0.0.1:0");
+            let input = hyperion_adapters::nginx::ProxyVhostInput {
+                domain: &detail.domain,
+                aliases: &detail.aliases,
+                logs_dir: &logs_dir,
+                cert_path: &cert_path,
+                key_path: &key_path,
+                acme_challenge_root: &acme_root,
+                upstream_url: upstream,
+            };
+            return hyperion_adapters::nginx::write_vhost_proxy(&self.nginx_paths, &input).await;
+        }
         let php = detail.php_version.map(|v| v.as_str());
         let input = hyperion_adapters::nginx::VhostInput {
             domain: &detail.domain,

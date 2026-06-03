@@ -179,6 +179,8 @@ async fn e2e_create_then_list_then_get_then_delete() {
         php_version: Some(PhpVersion::V8_3),
         database: Some(DbProvision::MariaDB),
         system_user: None,
+        kind: "php".into(),
+        proxy_upstream_url: None,
     };
     let resp = hyperion_rpc_client::call(&path, Request::HostingCreate(req))
         .await
@@ -271,6 +273,8 @@ async fn e2e_duplicate_domain_is_already_exists() {
         php_version: None,
         database: None,
         system_user: None,
+        kind: "php".into(),
+        proxy_upstream_url: None,
     };
     hyperion_rpc_client::call(&path, Request::HostingCreate(req.clone()))
         .await
