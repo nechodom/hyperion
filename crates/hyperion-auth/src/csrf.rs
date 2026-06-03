@@ -4,7 +4,15 @@ use base64::Engine;
 use subtle::ConstantTimeEq;
 
 const B64: base64::engine::GeneralPurpose = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-const TTL_SECS: i64 = 30 * 60;
+/// Tokens valid for 4 hours. Long enough that an operator who opens a
+/// form, gets distracted, and comes back later doesn't lose their work.
+/// The blast radius of a stolen token is bounded by the session
+/// cookie (HttpOnly, SameSite) — token alone is useless without it.
+const TTL_SECS: i64 = 4 * 60 * 60;
+/// Sentinel `form_id` for session-wide tokens — one token that works
+/// for any POST in the same session. Used by the universal `csrf_token`
+/// template variable.
+pub const SESSION_WIDE_FORM_ID: &str = "*";
 
 /// Mint a CSRF token scoped to `(session_id, form_id)` valid for 30 minutes.
 pub fn mint(key: &[u8], session_id: &str, form_id: &str, now: i64) -> String {
@@ -98,7 +106,22 @@ mod tests {
     fn expired_rejected() {
         let key = b"some-secret-key-with-enough-bytes-to-fill-32";
         let tok = mint(key, "sid-1", "x", 1000);
-        assert!(!verify(key, "sid-1", "x", &tok, 1000 + 30 * 60 + 1));
+        // Reject just after the 4-hour TTL window.
+        assert!(!verify(key, "sid-1", "x", &tok, 1000 + 4 * 60 * 60 + 1));
+        // Still valid within the window.
+        assert!(verify(key, "sid-1", "x", &tok, 1000 + 30 * 60));
+    }
+
+    #[test]
+    fn session_wide_token_works_for_any_form_id() {
+        let key = b"some-secret-key-with-enough-bytes-to-fill-32";
+        // Mint with the wildcard form_id.
+        let tok = mint(key, "sid-1", SESSION_WIDE_FORM_ID, 1000);
+        // Verifies against the same wildcard.
+        assert!(verify(key, "sid-1", SESSION_WIDE_FORM_ID, &tok, 1100));
+        // Does NOT verify against a specific form_id (caller must
+        // explicitly try the wildcard alongside the scoped check).
+        assert!(!verify(key, "sid-1", "/some/route", &tok, 1100));
     }
 
     #[test]

@@ -88,6 +88,7 @@
       <div class="card-section" style="margin-top:1rem">
         <h3 style="font-size:0.9rem;margin:0 0 0.5rem">Send test email</h3>
         <form method="post" action="/settings/email-test" style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
+          <input type="hidden" name="_csrf" value="{{ csrf_token }}">
           <input type="email" name="to" placeholder="you@example.cz" required
                  value="{% if !config.email.default_to.is_empty() %}{{ config.email.default_to }}{% endif %}"
                  style="flex:1;min-width:15rem;margin:0">

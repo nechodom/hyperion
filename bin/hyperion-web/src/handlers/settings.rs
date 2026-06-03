@@ -27,6 +27,7 @@ struct SettingsTpl<'a> {
     error: Option<String>,
     flash: Option<String>,
     flash_error: Option<String>,
+    csrf_token: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -56,6 +57,7 @@ pub async fn get_settings(
         ),
         Err(e) => (AgentConfigView::default(), Some(format!("rpc: {e}"))),
     };
+    let csrf_token = super::session_csrf_token(&state, &ctx);
     let tpl = SettingsTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -66,6 +68,7 @@ pub async fn get_settings(
         error,
         flash: q.flash,
         flash_error: q.flash_error,
+        csrf_token,
     };
     Ok(Html(tpl.render()?).into_response())
 }

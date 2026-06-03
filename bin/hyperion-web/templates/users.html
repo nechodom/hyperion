@@ -28,6 +28,7 @@
   <h2 style="margin:0 0 0.6rem">Add user</h2>
   <form method="post" action="/admin/users" autocomplete="off"
         style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr auto;gap:0.5rem;align-items:end">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <div class="field" style="margin:0">
       <label for="new_username">Username</label>
       <input id="new_username" name="username" type="text" required
@@ -83,6 +84,7 @@
           </td>
           <td>
             <form method="post" action="/admin/users/role" style="display:inline-flex;gap:0.4rem;align-items:center">
+              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
               <input type="hidden" name="user_id" value="{{ u.id }}">
               <select name="role">
                 <option value="viewer" {% if u.role == "viewer" %}selected{% endif %}>viewer</option>
@@ -124,6 +126,7 @@
               <summary class="btn small ghost" style="cursor:pointer">Actions</summary>
               <div style="display:flex;flex-direction:column;gap:0.4rem;margin-top:0.4rem;align-items:flex-end">
                 <form method="post" action="/admin/users/lock" style="display:flex;gap:0.3rem;align-items:center">
+                  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                   <input type="hidden" name="user_id" value="{{ u.id }}">
                   {% if u.locked %}
                     <input type="hidden" name="locked" value="false">
@@ -137,6 +140,7 @@
                 <form method="post" action="/admin/users/password" autocomplete="off"
                       onsubmit="return confirm('Reset password for this user?');"
                       style="display:flex;gap:0.3rem;align-items:center">
+                  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                   <input type="hidden" name="user_id" value="{{ u.id }}">
                   <input name="new_password" type="text" placeholder="new password" minlength="8" required style="width:10rem;margin:0">
                   <button type="submit" class="btn small">Reset</button>
@@ -144,6 +148,7 @@
                 <form method="post" action="/admin/users/delete"
                       onsubmit="return confirm('Delete this user? This cannot be undone.');"
                       style="display:inline">
+                  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                   <input type="hidden" name="user_id" value="{{ u.id }}">
                   <button type="submit" class="btn small danger">Delete</button>
                 </form>

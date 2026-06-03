@@ -545,6 +545,7 @@
   </p>
   <form method="post" action="/hostings/acme-email" autocomplete="off"
         style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <input type="hidden" name="selector" value="{{ detail.domain }}">
     <input type="email" name="acme_email"
            placeholder="ops@customer.cz (leave blank to clear)"
@@ -921,6 +922,7 @@
                 {% if b.state != "running" %}
                 <form method="post" action="/hostings/backups/delete" style="display:inline"
                       onsubmit="return confirm('Delete this backup? The archive file will be removed from disk.');">
+                  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                   <input type="hidden" name="selector" value="{{ detail.domain }}">
                   <input type="hidden" name="backup_id" value="{{ b.id }}">
                   <button class="btn small danger" type="submit">Delete</button>
@@ -1086,6 +1088,7 @@
   {% endif %}
 
   <form method="post" action="/hostings/monitor/set" autocomplete="off">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <input type="hidden" name="selector" value="{{ detail.domain }}">
 
     <label class="field-checkbox" style="font-weight:600">
@@ -1150,6 +1153,7 @@
     <h3 style="font-size:0.95rem;margin:0 0 0.5rem">Probe now</h3>
     <p class="text-soft small" style="margin:0 0 0.5rem">Fire one probe immediately. Records a sample regardless of the enabled flag.</p>
     <form method="post" action="/hostings/monitor/probe" style="display:inline">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <input type="hidden" name="selector" value="{{ detail.domain }}">
       <button type="submit" class="btn small">
         <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
@@ -1176,6 +1180,7 @@
 
   <form method="post" action="/hostings/access/grant" autocomplete="off"
         style="display:grid;grid-template-columns:1fr 1fr auto;gap:0.5rem;align-items:end;margin-bottom:1rem">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <input type="hidden" name="hosting_id" value="{{ detail.id }}">
     <div class="field" style="margin:0">
       <label for="grant_user">User</label>
@@ -1220,6 +1225,7 @@
           <td class="right">
             <form method="post" action="/hostings/access/revoke" style="display:inline"
                   onsubmit="return confirm('Revoke this access?');">
+              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
               <input type="hidden" name="hosting_id" value="{{ detail.id }}">
               <input type="hidden" name="user_id" value="{{ g.user_id }}">
               <button type="submit" class="btn small danger">Revoke</button>

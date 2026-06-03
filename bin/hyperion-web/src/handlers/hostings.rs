@@ -129,6 +129,10 @@ struct DetailTpl<'a> {
     /// Per-hosting monitor config + sample history (for the Monitor tab).
     monitor_config: hyperion_types::MonitorConfigView,
     monitor_history: hyperion_types::MonitorHistory,
+    /// Session-wide CSRF token used by the newer forms that don't have
+    /// dedicated csrf_* fields plumbed (access, acme-email, monitor,
+    /// backup delete). Middleware accepts both.
+    csrf_token: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -179,7 +183,10 @@ pub async fn get_list(
 }
 
 pub async fn get_new(State(state): State<SharedState>, ctx: AuthCtx) -> Result<Response, AppError> {
-    let csrf_token = csrf_token_for(&state, &ctx, "/hostings");
+    // Wildcard CSRF token so it also covers the DNS-preflight HTMX
+    // button (form_id /hostings/dns-check-domain) in addition to the
+    // main /hostings POST.
+    let csrf_token = super::session_csrf_token(&state, &ctx);
     let tpl = NewTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -237,7 +244,7 @@ pub async fn post_create(
     ctx: AuthCtx,
     Form(form): Form<CreateForm>,
 ) -> Result<Response, AppError> {
-    let csrf_token = csrf_token_for(&state, &ctx, "/hostings");
+    let csrf_token = super::session_csrf_token(&state, &ctx);
     // Parse inputs; render the form with an error if anything is malformed.
     let domain = match Domain::parse(form.domain.trim()) {
         Ok(d) => d,
@@ -443,6 +450,7 @@ pub async fn post_create(
                 users_for_access: vec![],
                 monitor_config: hyperion_types::MonitorConfigView::default(),
                 monitor_history: hyperion_types::MonitorHistory::default(),
+                csrf_token: super::session_csrf_token(&state, &ctx),
             };
             Ok(Html(tpl.render()?).into_response())
         }
@@ -640,6 +648,7 @@ pub async fn get_detail(
         users_for_access: users_for_access_for_detail,
         monitor_config,
         monitor_history,
+        csrf_token: super::session_csrf_token(&state, &ctx),
     };
     Ok(Html(tpl.render()?).into_response())
 }

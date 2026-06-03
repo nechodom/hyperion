@@ -27,6 +27,7 @@ struct UsersTpl<'a> {
     users: Vec<WebUserSummary>,
     #[allow(dead_code)] // accessed by template; will surface via askama macros
     is_super_admin: bool,
+    csrf_token: String,
     error: Option<String>,
     flash: Option<String>,
 }
@@ -58,6 +59,7 @@ pub async fn get_users(
         Ok(_) => (vec![], Some("unexpected agent response".into())),
         Err(e) => (vec![], Some(format!("rpc: {e}"))),
     };
+    let csrf_token = super::session_csrf_token(&state, &ctx);
     let tpl = UsersTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -68,6 +70,7 @@ pub async fn get_users(
         is_super_admin: ctx.is_super_admin(),
         error: error.or(q.error),
         flash: q.flash,
+        csrf_token,
     };
     Ok(Html(tpl.render()?).into_response())
 }

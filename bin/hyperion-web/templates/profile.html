@@ -82,6 +82,7 @@
   </div>
 
   <form method="post" action="/profile/2fa/confirm" style="margin-top:1rem;display:flex;gap:0.5rem;align-items:flex-end;flex-wrap:wrap">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <div class="field" style="margin:0">
       <label for="confirm_code">Verification code (from your app)</label>
       <input id="confirm_code" name="code" type="text" inputmode="numeric"
@@ -102,11 +103,13 @@
       <p>You have 2FA enabled. On every login you'll be asked for a code from your authenticator app (or a one-time backup code).</p>
       <form method="post" action="/profile/2fa/disable"
             onsubmit="return confirm('Disable 2FA on your account? Your login will only require a password again.');">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
         <button class="btn danger small" type="submit">Disable 2FA</button>
       </form>
     {% else %}
       <p>You don't have 2FA enabled. Set it up to protect your account with a 6-digit code from an authenticator app.</p>
       <form method="post" action="/profile/2fa/start">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
         <button class="btn primary small" type="submit">Set up 2FA</button>
       </form>
     {% endif %}
@@ -117,6 +120,7 @@
 <div class="card">
   <h2 style="margin:0 0 0.6rem">Change password</h2>
   <form method="post" action="/profile/password" autocomplete="off" style="display:flex;flex-direction:column;gap:0.4rem">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <input type="password" name="new_password" placeholder="new password" minlength="8" required>
     <input type="password" name="new_password_confirm" placeholder="repeat password" minlength="8" required>
     <button type="submit" class="btn primary small" style="align-self:flex-start">Change password</button>

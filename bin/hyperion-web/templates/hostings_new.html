@@ -87,7 +87,8 @@
                   hx-post="/hostings/dns-check-domain"
                   hx-target="#dns-create-result"
                   hx-swap="innerHTML"
-                  hx-include="closest form > input[name='domain']">
+                  hx-include="closest form > input[name='domain']"
+                  hx-vals='{"_csrf": "{{ csrf_token }}"}'>
             Check DNS for primary domain
           </button>
           <span class="text-soft small">Verifies the primary domain resolves to this node's public IP.</span>

@@ -28,6 +28,7 @@ struct ProfileTpl<'a> {
     enrollment: Option<Web2faEnrollmentView>,
     error: Option<String>,
     flash: Option<String>,
+    csrf_token: String,
 }
 
 /// View-shape — the SVG is rendered server-side.
@@ -65,6 +66,7 @@ pub async fn get_profile(
         RpcResponse::WebUserGet(u) => u,
         _ => None,
     };
+    let csrf_token = super::session_csrf_token(&state, &ctx);
     let tpl = ProfileTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -75,6 +77,7 @@ pub async fn get_profile(
         enrollment: None,
         error: q.error,
         flash: q.flash,
+        csrf_token,
     };
     Ok(Html(tpl.render()?).into_response())
 }
@@ -135,6 +138,7 @@ pub async fn post_2fa_start(
         qr_svg,
         backup_codes: enrollment.backup_codes,
     };
+    let csrf_token = super::session_csrf_token(&state, &ctx);
     let tpl = ProfileTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -145,6 +149,7 @@ pub async fn post_2fa_start(
         enrollment: Some(view),
         error: None,
         flash: None,
+        csrf_token,
     };
     Ok(Html(tpl.render()?).into_response())
 }

@@ -180,9 +180,22 @@ pub async fn check_csrf(
         .unwrap_or_default();
     let form_id = parts.uri.path().to_string();
     let now = hyperion_types::now_secs();
+    // Accept either the legacy path-scoped token OR a session-wide
+    // wildcard token. New forms can use the simpler wildcard via the
+    // global `csrf_token` template variable; older forms continue to
+    // work with their per-route scoped tokens.
     let ok = token
         .as_deref()
-        .map(|t| hyperion_auth::csrf::verify(state.csrf_key.as_ref(), &sid, &form_id, t, now))
+        .map(|t| {
+            hyperion_auth::csrf::verify(state.csrf_key.as_ref(), &sid, &form_id, t, now)
+                || hyperion_auth::csrf::verify(
+                    state.csrf_key.as_ref(),
+                    &sid,
+                    hyperion_auth::csrf::SESSION_WIDE_FORM_ID,
+                    t,
+                    now,
+                )
+        })
         .unwrap_or(false);
     if !ok {
         return (StatusCode::FORBIDDEN, "CSRF check failed").into_response();
