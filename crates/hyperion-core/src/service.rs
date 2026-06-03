@@ -27,6 +27,13 @@ use std::sync::Arc;
 #[cfg_attr(test, mockall::automock)]
 #[async_trait]
 pub trait AdapterPort: Send + Sync {
+    /// User nginx workers run as (detected at agent startup).
+    /// Default impl returns "www-data" so MockAdapterPort tests
+    /// don't need to override.
+    fn nginx_user(&self) -> String {
+        "www-data".to_string()
+    }
+
     async fn ensure_user(&self, name: &str, home_dir: &str) -> Result<u32, AdapterError>;
     async fn delete_user(&self, name: &str) -> Result<(), AdapterError>;
     async fn ensure_dirs(
@@ -2976,7 +2983,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(hyperion_types::AgentConfigView {
             hostname: hostname.to_string(),
             agent_version: version.to_string(),
-            nginx_user: String::new(), // detected on RealAdapter, plumbed elsewhere
+            nginx_user: self.adapters.nginx_user(),
             acme: acme_view,
             email: email_view,
             slack: slack_view,

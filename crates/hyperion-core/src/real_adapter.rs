@@ -77,6 +77,10 @@ impl RealAdapter {
 
 #[async_trait]
 impl AdapterPort for RealAdapter {
+    fn nginx_user(&self) -> String {
+        self.nginx_user.clone()
+    }
+
     async fn ensure_user(&self, name: &str, home_dir: &str) -> Result<u32, AdapterError> {
         let spec = hyperion_adapters::users::UserSpec::new_with_default_shell(
             SystemUserName::parse(name)?,
