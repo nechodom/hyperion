@@ -1,0 +1,128 @@
+{% extends "base.html" %}
+{% block title %}Profile · hyperion{% endblock %}
+{% block main %}
+<div class="page-header">
+  <div>
+    <h1>Profile</h1>
+    <div class="subtitle">Your account · 2-factor authentication · password</div>
+  </div>
+</div>
+
+{% if let Some(e) = error %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">{{ e }}</div>
+  </div>
+{% endif %}
+
+{% if let Some(m) = flash %}
+  <div class="flash success">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+    <div class="flash-body">{{ m }}</div>
+  </div>
+{% endif %}
+
+{% if let Some(u) = user %}
+<div class="kpi-grid" style="margin-bottom:1rem">
+  <div class="kpi-card hostings">
+    <div class="kpi-label">Account</div>
+    <div class="kpi-value" style="font-size:1.1rem">{{ u.username }}</div>
+    <div class="kpi-meta">{{ u.email }}</div>
+  </div>
+  <div class="kpi-card disk">
+    <div class="kpi-label">Role</div>
+    <div class="kpi-value" style="font-size:1.1rem">{{ u.role }}</div>
+    <div class="kpi-meta">access scope</div>
+  </div>
+  <div class="kpi-card bw">
+    <div class="kpi-label">2FA</div>
+    <div class="kpi-value" style="font-size:1.1rem">
+      {% if u.totp_enrolled %}
+        <span style="color:var(--success)">enabled</span>
+      {% else %}
+        <span style="color:var(--warn)">disabled</span>
+      {% endif %}
+    </div>
+    <div class="kpi-meta">
+      {% if u.totp_required %}required by admin{% else %}voluntary{% endif %}
+    </div>
+  </div>
+</div>
+{% endif %}
+
+{# 2FA SECTION — three states: enrollment-in-progress | enrolled | disabled. #}
+<div class="grid cols-2">
+
+{# Enrollment-in-progress: show QR + secret + backup codes. #}
+{% if let Some(en) = enrollment %}
+<div class="card" style="grid-column:1/-1">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+    Set up 2-factor authentication
+  </h2>
+  <ol style="line-height:1.7;font-size:0.92rem">
+    <li><strong>Open your authenticator app</strong> (Google Authenticator, 1Password, Authy, Bitwarden, etc.) and <strong>scan the QR code</strong> below — or enter the secret manually.</li>
+    <li><strong>Save the backup codes</strong> in your password manager. Each works exactly once if you lose access to your authenticator.</li>
+    <li><strong>Enter the 6-digit code</strong> your app generates to confirm enrollment.</li>
+  </ol>
+
+  <div style="display:grid;grid-template-columns:auto 1fr;gap:1.5rem;align-items:start;margin-top:1rem">
+    <div style="background:white;border-radius:var(--radius-md);padding:0.4rem">{{ en.qr_svg|safe }}</div>
+    <div>
+      <div class="text-soft small" style="margin-bottom:0.2rem">SECRET (manual entry)</div>
+      <code style="display:block;font-size:0.95rem;padding:0.4rem 0.6rem;background:var(--surface-2);border-radius:var(--radius-xs);word-break:break-all;border:1px solid var(--border)">{{ en.secret_base32 }}</code>
+
+      <div class="text-soft small" style="margin-top:0.8rem;margin-bottom:0.3rem">BACKUP CODES (save NOW — shown only once)</div>
+      <div style="display:grid;grid-template-columns:repeat(2, 1fr);gap:0.3rem">
+        {% for c in en.backup_codes %}
+          <code style="background:var(--surface-2);padding:0.25rem 0.5rem;border-radius:var(--radius-xs);text-align:center;font-size:0.95rem;border:1px solid var(--border)">{{ c }}</code>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+
+  <form method="post" action="/profile/2fa/confirm" style="margin-top:1rem;display:flex;gap:0.5rem;align-items:flex-end;flex-wrap:wrap">
+    <div class="field" style="margin:0">
+      <label for="confirm_code">Verification code (from your app)</label>
+      <input id="confirm_code" name="code" type="text" inputmode="numeric"
+             pattern="[0-9]{6}" maxlength="6" required placeholder="123456" autofocus
+             style="font-size:1.1rem;letter-spacing:0.2em;width:8rem">
+    </div>
+    <button type="submit" class="btn primary">Confirm enrollment</button>
+    <a class="btn ghost" href="/profile">Cancel</a>
+  </form>
+</div>
+
+{# Steady states. #}
+{% else %}
+<div class="card">
+  <h2 style="margin:0 0 0.6rem">2-factor authentication</h2>
+  {% if let Some(u) = user %}
+    {% if u.totp_enrolled %}
+      <p>You have 2FA enabled. On every login you'll be asked for a code from your authenticator app (or a one-time backup code).</p>
+      <form method="post" action="/profile/2fa/disable"
+            onsubmit="return confirm('Disable 2FA on your account? Your login will only require a password again.');">
+        <button class="btn danger small" type="submit">Disable 2FA</button>
+      </form>
+    {% else %}
+      <p>You don't have 2FA enabled. Set it up to protect your account with a 6-digit code from an authenticator app.</p>
+      <form method="post" action="/profile/2fa/start">
+        <button class="btn primary small" type="submit">Set up 2FA</button>
+      </form>
+    {% endif %}
+  {% endif %}
+</div>
+{% endif %}
+
+<div class="card">
+  <h2 style="margin:0 0 0.6rem">Change password</h2>
+  <form method="post" action="/profile/password" autocomplete="off" style="display:flex;flex-direction:column;gap:0.4rem">
+    <input type="password" name="new_password" placeholder="new password" minlength="8" required>
+    <input type="password" name="new_password_confirm" placeholder="repeat password" minlength="8" required>
+    <button type="submit" class="btn primary small" style="align-self:flex-start">Change password</button>
+  </form>
+  <p class="text-soft small" style="margin-top:0.4rem">Min 8 characters. You'll stay logged in — no need to re-authenticate.</p>
+</div>
+
+</div>
+{% endblock %}

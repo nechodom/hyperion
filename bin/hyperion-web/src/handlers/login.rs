@@ -4,7 +4,7 @@ use crate::error::AppError;
 use crate::state::SharedState;
 use askama::Template;
 use axum::extract::{Query, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Form;
 use hyperion_auth::Session;
@@ -168,11 +168,12 @@ async fn post_login_via_rpc(
                 clear_throttle(ip);
                 mint_session_redirect(&state, user_id, username, role, &form.next)
             }
-            hyperion_types::WebLoginResult::NeedsTotp { .. } => {
-                // 2FA prompt not implemented in the UI yet — surface a
-                // clear error. Operator can disable 2FA via hctl until
-                // the /login/2fa page ships.
-                Ok(Redirect::to("/login?error=2fa_required").into_response())
+            hyperion_types::WebLoginResult::NeedsTotp { user_id, .. } => {
+                // Stash user_id in a short-lived signed pending cookie
+                // (reuses the session signer but with a 5-minute TTL).
+                // Redirect to /login/2fa to enter the code.
+                clear_throttle(ip);
+                mint_pending_2fa_cookie(&state, user_id, &form.next)
             }
             hyperion_types::WebLoginResult::Locked { reason: _ } => {
                 Ok(Redirect::to("/login?error=locked").into_response())
@@ -235,6 +236,164 @@ async fn post_login_bootstrap(
         "super_admin".into(),
         &form.next,
     )
+}
+
+/// Mint a 5-minute "pending 2FA" cookie carrying `user_id`. Same
+/// signer as full sessions but expires fast — operator must enter
+/// the TOTP code within that window or restart the login.
+fn mint_pending_2fa_cookie(
+    state: &SharedState,
+    user_id: i64,
+    next: &str,
+) -> Result<Response, AppError> {
+    let now = hyperion_types::now_secs();
+    let pending = Session {
+        sid: format!("p2fa-{}", ulid::Ulid::new()),
+        user_id,
+        created_at: now,
+        expires_at: now + 300, // 5 minutes
+        username: String::new(),
+        role: "pending_2fa".to_string(),
+    };
+    let token = state
+        .session
+        .sign(&pending)
+        .map_err(|e| AppError::Internal(e.to_string()))?;
+    let cookie = format!(
+        "{}_pending2fa={}; Path=/; HttpOnly; SameSite=Lax; Max-Age=300{}",
+        state.cookie_name(),
+        token,
+        if state.secure_cookies() {
+            "; Secure"
+        } else {
+            ""
+        }
+    );
+    let mut headers = HeaderMap::new();
+    if let Ok(v) = HeaderValue::from_str(&cookie) {
+        headers.insert(header::SET_COOKIE, v);
+    }
+    let next_enc: String = url::form_urlencoded::byte_serialize(next.as_bytes()).collect();
+    let mut resp = Redirect::to(&format!("/login/2fa?next={next_enc}")).into_response();
+    resp.headers_mut().extend(headers);
+    Ok(resp)
+}
+
+#[derive(Deserialize, Default)]
+pub struct Login2faQuery {
+    #[serde(default)]
+    pub next: String,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct Login2faForm {
+    code: String,
+    #[serde(default)]
+    next: String,
+}
+
+#[derive(askama::Template)]
+#[template(path = "login_2fa.html")]
+struct Login2faTpl<'a> {
+    error: Option<&'a str>,
+    next: &'a str,
+    css_version: &'static str,
+}
+
+pub async fn get_login_2fa(
+    State(state): State<SharedState>,
+    Query(q): Query<Login2faQuery>,
+) -> Result<Response, AppError> {
+    let _ = state;
+    // Translate `?error=invalid` into a human message before passing
+    // to the template (askama can't compare *str to literal cleanly).
+    let err: Option<String> = q.error.map(|e| match e.as_str() {
+        "invalid" => "Invalid code. Try again.".to_string(),
+        other => other.to_string(),
+    });
+    let tpl = Login2faTpl {
+        error: err.as_deref(),
+        next: &q.next,
+        css_version: crate::handlers::css_version(),
+    };
+    Ok(Html(tpl.render()?).into_response())
+}
+
+pub async fn post_login_2fa(
+    State(state): State<SharedState>,
+    headers_in: HeaderMap,
+    Form(form): Form<Login2faForm>,
+) -> Result<Response, AppError> {
+    // Recover the pending-2fa cookie.
+    let cookie_name = format!("{}_pending2fa", state.cookie_name());
+    let token = headers_in
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|s| s.split(';'))
+        .map(|s| s.trim())
+        .find_map(|kv| {
+            let (k, v) = kv.split_once('=')?;
+            if k == cookie_name {
+                Some(v.to_string())
+            } else {
+                None
+            }
+        });
+    let Some(t) = token else {
+        return Ok(Redirect::to("/login?error=expired").into_response());
+    };
+    let now = hyperion_types::now_secs();
+    let pending = match state.session.verify(&t, now) {
+        Ok(s) if s.role == "pending_2fa" => s,
+        _ => return Ok(Redirect::to("/login?error=expired").into_response()),
+    };
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        hyperion_rpc::codec::Request::WebVerify2fa {
+            user_id: pending.user_id,
+            code: form.code,
+        },
+    )
+    .await
+    .map_err(AppError::from)?;
+    match resp {
+        hyperion_rpc::codec::Response::WebVerify2fa(hyperion_types::WebVerify2faResult::Ok {
+            user_id,
+            username,
+            role,
+            ..
+        }) => {
+            // Clear the pending cookie + mint the real session.
+            let mut headers = HeaderMap::new();
+            let clear = format!(
+                "{}=; Path=/; HttpOnly; Max-Age=0; SameSite=Lax",
+                cookie_name
+            );
+            if let Ok(v) = HeaderValue::from_str(&clear) {
+                headers.insert(header::SET_COOKIE, v);
+            }
+            let r = mint_session_redirect(&state, user_id, username, role, &form.next)?;
+            let mut combined = r;
+            // Append the cookie-clear header.
+            if let Some(v) = HeaderValue::from_str(&format!(
+                "{}=; Path=/; HttpOnly; Max-Age=0; SameSite=Lax",
+                cookie_name
+            ))
+            .ok()
+            {
+                combined.headers_mut().append(header::SET_COOKIE, v);
+            }
+            Ok(combined)
+        }
+        hyperion_rpc::codec::Response::WebVerify2fa(hyperion_types::WebVerify2faResult::Invalid) => {
+            Ok(Redirect::to("/login/2fa?error=invalid").into_response())
+        }
+        hyperion_rpc::codec::Response::Error(e) => Err(AppError::Rpc(e.to_string())),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
 }
 
 fn mint_session_redirect(

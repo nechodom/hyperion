@@ -1,0 +1,270 @@
+//! `/profile` — self-service for the currently signed-in user.
+//!
+//! Right now: 2FA enrollment + disable + change own password. Future:
+//! email change, session list, recent activity.
+
+use crate::auth::AuthCtx;
+use crate::error::AppError;
+use crate::state::SharedState;
+use askama::Template;
+use axum::extract::State;
+use axum::response::{Html, IntoResponse, Redirect, Response};
+use axum::Form;
+use hyperion_rpc::codec::{Request, Response as RpcResponse};
+use hyperion_types::WebUserSummary;
+use qrcode::render::svg;
+use qrcode::QrCode;
+use serde::Deserialize;
+
+#[derive(Template)]
+#[template(path = "profile.html")]
+struct ProfileTpl<'a> {
+    username: &'a str,
+    user_initial: char,
+    active: &'static str,
+    css_version: &'static str,
+    htmx_version: &'static str,
+    user: Option<WebUserSummary>,
+    enrollment: Option<Web2faEnrollmentView>,
+    error: Option<String>,
+    flash: Option<String>,
+}
+
+/// View-shape — the SVG is rendered server-side.
+#[derive(Debug, Clone)]
+pub struct Web2faEnrollmentView {
+    pub secret_base32: String,
+    pub otpauth_url: String,
+    pub qr_svg: String,
+    pub backup_codes: Vec<String>,
+}
+
+#[derive(Deserialize, Default)]
+pub struct ProfileQuery {
+    #[serde(default)]
+    flash: Option<String>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+pub async fn get_profile(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    axum::extract::Query(q): axum::extract::Query<ProfileQuery>,
+) -> Result<Response, AppError> {
+    let Some(session) = ctx.session.clone() else {
+        return Ok(Redirect::to("/login").into_response());
+    };
+    let user_resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::WebUserGet { id: session.user_id },
+    )
+    .await
+    .map_err(AppError::from)?;
+    let user = match user_resp {
+        RpcResponse::WebUserGet(u) => u,
+        _ => None,
+    };
+    let tpl = ProfileTpl {
+        username: &ctx.username,
+        user_initial: super::user_initial(&ctx.username),
+        active: "profile",
+        css_version: super::css_version(),
+        htmx_version: super::htmx_version(),
+        user,
+        enrollment: None,
+        error: q.error,
+        flash: q.flash,
+    };
+    Ok(Html(tpl.render()?).into_response())
+}
+
+/// POST /profile/2fa/start — generate a fresh TOTP secret + 10 backup
+/// codes for the current user. Renders the QR + codes in-place so the
+/// operator can scan + save before confirming.
+pub async fn post_2fa_start(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+) -> Result<Response, AppError> {
+    let Some(session) = ctx.session.clone() else {
+        return Ok(Redirect::to("/login").into_response());
+    };
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::Web2faEnrollStart {
+            user_id: session.user_id,
+        },
+    )
+    .await
+    .map_err(AppError::from)?;
+    let enrollment = match resp {
+        RpcResponse::Web2faEnrollStart(e) => e,
+        RpcResponse::Error(e) => {
+            return Ok(Redirect::to(&format!(
+                "/profile?error={}",
+                urlencode(&e.to_string())
+            ))
+            .into_response());
+        }
+        _ => return Err(AppError::Internal("unexpected response".into())),
+    };
+    // Render QR as SVG server-side.
+    let qr_svg = match QrCode::new(enrollment.otpauth_url.as_bytes()) {
+        Ok(code) => code
+            .render::<svg::Color>()
+            .min_dimensions(220, 220)
+            .max_dimensions(260, 260)
+            .light_color(svg::Color("#ffffff"))
+            .dark_color(svg::Color("#111111"))
+            .build(),
+        Err(_) => "<p>QR generation failed — use the secret to enter manually.</p>".to_string(),
+    };
+    let user_resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::WebUserGet { id: session.user_id },
+    )
+    .await
+    .map_err(AppError::from)?;
+    let user = match user_resp {
+        RpcResponse::WebUserGet(u) => u,
+        _ => None,
+    };
+    let view = Web2faEnrollmentView {
+        secret_base32: enrollment.secret_base32,
+        otpauth_url: enrollment.otpauth_url,
+        qr_svg,
+        backup_codes: enrollment.backup_codes,
+    };
+    let tpl = ProfileTpl {
+        username: &ctx.username,
+        user_initial: super::user_initial(&ctx.username),
+        active: "profile",
+        css_version: super::css_version(),
+        htmx_version: super::htmx_version(),
+        user,
+        enrollment: Some(view),
+        error: None,
+        flash: None,
+    };
+    Ok(Html(tpl.render()?).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct ConfirmForm {
+    code: String,
+}
+
+/// POST /profile/2fa/confirm — verify the first TOTP code. Flips
+/// `totp_enrolled_at` on success.
+pub async fn post_2fa_confirm(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<ConfirmForm>,
+) -> Result<Response, AppError> {
+    let Some(session) = ctx.session.clone() else {
+        return Ok(Redirect::to("/login").into_response());
+    };
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::Web2faConfirmEnroll {
+            user_id: session.user_id,
+            code: form.code,
+        },
+    )
+    .await
+    .map_err(AppError::from)?;
+    match resp {
+        RpcResponse::Web2faConfirmEnroll { ok: true } => {
+            Ok(Redirect::to("/profile?flash=2FA+enrolled+successfully").into_response())
+        }
+        RpcResponse::Web2faConfirmEnroll { ok: false } => Ok(Redirect::to(
+            "/profile?error=Code+rejected+%E2%80%94+make+sure+your+device+clock+is+correct+and+the+code+is+fresh",
+        )
+        .into_response()),
+        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
+            "/profile?error={}",
+            urlencode(&e.to_string())
+        ))
+        .into_response()),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+/// POST /profile/2fa/disable — clears the secret + backup codes after
+/// the user explicitly confirms.
+pub async fn post_2fa_disable(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+) -> Result<Response, AppError> {
+    let Some(session) = ctx.session.clone() else {
+        return Ok(Redirect::to("/login").into_response());
+    };
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::Web2faDisable {
+            user_id: session.user_id,
+        },
+    )
+    .await
+    .map_err(AppError::from)?;
+    match resp {
+        RpcResponse::Web2faDisable => Ok(Redirect::to("/profile?flash=2FA+disabled").into_response()),
+        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
+            "/profile?error={}",
+            urlencode(&e.to_string())
+        ))
+        .into_response()),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ChangePwForm {
+    new_password: String,
+    new_password_confirm: String,
+}
+
+/// POST /profile/password — self-service password change.
+pub async fn post_change_password(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<ChangePwForm>,
+) -> Result<Response, AppError> {
+    let Some(session) = ctx.session.clone() else {
+        return Ok(Redirect::to("/login").into_response());
+    };
+    if form.new_password != form.new_password_confirm {
+        return Ok(Redirect::to("/profile?error=passwords+do+not+match").into_response());
+    }
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::WebUserSetPassword {
+            user_id: session.user_id,
+            new_password: form.new_password,
+        },
+    )
+    .await
+    .map_err(AppError::from)?;
+    match resp {
+        RpcResponse::WebUserSetPassword => {
+            Ok(Redirect::to("/profile?flash=password+changed").into_response())
+        }
+        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
+            "/profile?error={}",
+            urlencode(&e.to_string())
+        ))
+        .into_response()),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+fn urlencode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b' ' => "+".to_string(),
+            b'-' | b'.' | b'_' | b'~' => (b as char).to_string(),
+            b if b.is_ascii_alphanumeric() => (b as char).to_string(),
+            b => format!("%{:02X}", b),
+        })
+        .collect()
+}

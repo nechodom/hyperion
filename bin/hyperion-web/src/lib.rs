@@ -109,6 +109,14 @@ pub fn build_router(state: SharedState) -> Router {
             "/admin/users/password",
             post(handlers::users::post_reset_password),
         )
+        .route("/profile", get(handlers::profile::get_profile))
+        .route("/profile/2fa/start", post(handlers::profile::post_2fa_start))
+        .route("/profile/2fa/confirm", post(handlers::profile::post_2fa_confirm))
+        .route("/profile/2fa/disable", post(handlers::profile::post_2fa_disable))
+        .route(
+            "/profile/password",
+            post(handlers::profile::post_change_password),
+        )
         .route(
             "/hostings/dns-check-domain",
             post(handlers::hostings::post_dns_check_domain),
@@ -145,6 +153,8 @@ pub fn build_router(state: SharedState) -> Router {
         .merge(protected)
         .route("/login", get(handlers::login::get_login))
         .route("/login", post(handlers::login::post_login))
+        .route("/login/2fa", get(handlers::login::get_login_2fa))
+        .route("/login/2fa", post(handlers::login::post_login_2fa))
         .route("/static/app.css", get(handlers::statics::app_css))
         .route("/static/htmx.min.js", get(handlers::statics::htmx_js))
         // Node enrollment — no session auth (the token IS the credential).

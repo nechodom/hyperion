@@ -5,6 +5,7 @@ pub mod health;
 pub mod hostings;
 pub mod install;
 pub mod login;
+pub mod profile;
 pub mod profiles;
 pub mod services_health;
 pub mod settings;

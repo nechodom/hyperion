@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Two-factor authentication · hyperion</title>
+  <link rel="stylesheet" href="/static/app.css?v={{ css_version }}">
+</head>
+<body class="login-page">
+  <main class="login-card">
+    <div class="login-brand">
+      <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
+      <span>hyperion</span>
+    </div>
+    <h1>Two-factor authentication</h1>
+    <p class="login-sub">Enter the 6-digit code from your authenticator app, or one of your backup codes.</p>
+
+    {% if let Some(e) = error %}
+      <div class="flash error">
+        <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+        <div class="flash-body">{{ e }}</div>
+      </div>
+    {% endif %}
+
+    <form method="post" action="/login/2fa" autocomplete="off">
+      <input type="hidden" name="next" value="{{ next|e }}">
+      <div class="field">
+        <label for="code">Code</label>
+        <input id="code" name="code" type="text" inputmode="numeric" pattern="[0-9A-Za-z\-]{6,9}"
+               maxlength="9" required autofocus
+               placeholder="123456 or backup code"
+               style="font-size:1.2rem;letter-spacing:0.2em;text-align:center">
+      </div>
+      <button class="btn primary lg" type="submit" style="width:100%">Verify</button>
+    </form>
+
+    <p class="login-foot text-soft small" style="margin-top:1rem">
+      Lost your authenticator? Use one of the backup codes you saved
+      during enrollment. Each works exactly once. After login, set up
+      a new authenticator on the profile page.
+    </p>
+  </main>
+</body>
+</html>
