@@ -41,6 +41,10 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::hostings::post_wp_plugin_action),
         )
         .route(
+            "/hostings/migration/export",
+            post(handlers::hostings::post_migration_export),
+        )
+        .route(
             "/hostings/backup-now",
             post(handlers::hostings::post_backup_now),
         )

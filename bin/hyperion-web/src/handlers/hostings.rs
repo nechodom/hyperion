@@ -1998,6 +1998,52 @@ pub struct WpPluginActionForm {
     pub source: String,
 }
 
+/// POST /hostings/migration/export
+///
+/// Trigger a migration-bundle export on the source node. Returns a
+/// redirect to the detail page with the bundle paths flashed —
+/// operator copies the scp one-liner from there. The bundle stays on
+/// disk until the operator deletes it (no auto-prune for now).
+#[derive(Deserialize)]
+pub struct MigrationExportForm {
+    pub selector: String,
+}
+
+pub async fn post_migration_export(
+    State(state): State<SharedState>,
+    Form(form): Form<MigrationExportForm>,
+) -> Result<Response, AppError> {
+    let sel = parse_selector(&form.selector)?;
+    let sel_url = urlencoding(&form.selector);
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::HostingExport { hosting: sel },
+    )
+    .await?;
+    match resp {
+        RpcResponse::HostingExport(b) => {
+            let flash = format!(
+                "Migration bundle ready · archive={} · manifest={} · {} bytes · digest={}…",
+                b.archive_path,
+                b.manifest_path,
+                b.archive_bytes,
+                b.archive_sha256.chars().take(16).collect::<String>(),
+            );
+            let q = urlencoding(&flash);
+            Ok(
+                Redirect::to(&format!("/hostings/{}?flash={}#migration", sel_url, q))
+                    .into_response(),
+            )
+        }
+        RpcResponse::Error(e) => {
+            let msg = urlencoding(&format!("Migration export failed: {}", e));
+            Ok(Redirect::to(&format!("/hostings/{}?flash_error={}#migration", sel_url, msg))
+                .into_response())
+        }
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
 pub async fn post_wp_plugin_action(
     State(state): State<SharedState>,
     Form(form): Form<WpPluginActionForm>,

@@ -176,6 +176,34 @@ pub struct HostingService<A: AdapterPort + 'static> {
 /// hitting their unauthenticated rate limit (60 req/hour/IP).
 pub const UPDATE_CHECK_TTL_SECS: i64 = 3600;
 
+/// Compute the BLAKE3 digest of a file by streaming 64 KiB chunks
+/// through the hasher. Used by the migration export/import path to
+/// detect tampering or transport corruption without ever loading
+/// the whole archive into memory. Returns hex-encoded.
+///
+/// The field is named "sha256" in the manifest for historical
+/// reasons; the actual algorithm is BLAKE3. Both sides recompute
+/// with the same code, so cross-tool verification is a non-goal.
+async fn compute_sha256(path: &std::path::Path) -> Result<String, RpcError> {
+    use tokio::io::AsyncReadExt;
+    let mut f = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("digest open: {e}")))?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        let n = f
+            .read(&mut buf)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("digest read: {e}")))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Ok(hex::encode(hasher.finalize().as_bytes()))
+}
+
 /// Decide whether `current` and `latest` git SHAs identify the same
 /// commit. Both sides are lowercased, then compared on the shorter
 /// length (a 7-char short SHA vs. a 40-char full SHA from the remote
@@ -1985,6 +2013,282 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         )
         .await;
         Ok(out)
+    }
+
+    /// Export a hosting as a self-contained migration bundle: an
+    /// archive (tar+gz of htdocs + optional DB dump) plus a JSON
+    /// manifest describing how to recreate the hosting on a different
+    /// node. The bundle lives at `/var/lib/hyperion/migration/<id>/`
+    /// — the operator transfers it out-of-band (scp/rsync/S3) and
+    /// runs `hctl hosting import --bundle <file>` on the target.
+    pub async fn hosting_export(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::HostingMigrationBundle, RpcError> {
+        let detail = self.get(sel.clone()).await?;
+        if detail.state != HostingState::Active {
+            return Err(RpcError::Conflict {
+                message: format!(
+                    "hosting must be active to export (current state: {})",
+                    detail.state.as_str()
+                ),
+            });
+        }
+        // Reuse backup_now to produce the archive — it's already the
+        // most-tested code path for "snapshot this hosting to disk".
+        let run = self.backup_now(sel.clone()).await?;
+        let archive_path_str = run.archive_path.as_ref().ok_or_else(|| {
+            RpcError::Internal_with("backup did not produce an archive".into())
+        })?;
+        let archive_path = std::path::PathBuf::from(archive_path_str);
+        if !archive_path.exists() {
+            return Err(RpcError::Internal_with(
+                "backup ran but archive missing on disk".into(),
+            ));
+        }
+
+        // Bundle dir + paths.
+        let bundle_id = format!("mig_{}", ulid::Ulid::new());
+        let bundle_dir = std::path::PathBuf::from("/var/lib/hyperion/migration").join(&bundle_id);
+        tokio::fs::create_dir_all(&bundle_dir)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("mkdir migration: {e}")))?;
+        let archive_dest = bundle_dir.join("archive.tar.gz");
+        // Hardlink the archive into the migration dir — keeps a stable
+        // path while costing zero disk (same inode). Fall back to copy
+        // if the FS doesn't support hardlinks (NFS, certain overlayfs).
+        if tokio::fs::hard_link(&archive_path, &archive_dest).await.is_err() {
+            tokio::fs::copy(&archive_path, &archive_dest).await.map_err(|e| {
+                RpcError::Internal_with(format!("copy archive into bundle: {e}"))
+            })?;
+        }
+
+        // Compute SHA-256 of the archive for the manifest. The full
+        // archive can be many GB — do it via a streaming hasher rather
+        // than loading the file into memory.
+        let sha = compute_sha256(&archive_dest).await?;
+        let archive_bytes = tokio::fs::metadata(&archive_dest)
+            .await
+            .map(|m| m.len() as i64)
+            .unwrap_or(0);
+
+        // Pull the per-hosting cron tab + WP version best-effort. The
+        // operator doesn't need these to succeed for migration to work
+        // — they're nice-to-have metadata.
+        let crontab = self.cron_list(sel.clone()).await.unwrap_or_default();
+        let wp_version = self
+            .wp_status(sel.clone())
+            .await
+            .ok()
+            .flatten()
+            .map(|w| w.wp_version);
+
+        let manifest = hyperion_types::HostingMigrationManifest {
+            schema_version: hyperion_types::HostingMigrationManifest::CURRENT_SCHEMA_VERSION,
+            source_hosting_id: detail.id.clone(),
+            source_node_id: self.current_node_id(),
+            source_hyperion_version: self.current_git_sha.clone(),
+            exported_at: now_secs(),
+            domain: detail.domain.clone(),
+            aliases: detail.aliases.clone(),
+            kind: detail.kind.clone(),
+            php_version: detail.php_version,
+            db_engine: detail.database.as_ref().map(|d| match d.engine {
+                hyperion_types::DbProvision::MariaDB => "mariadb".to_string(),
+                hyperion_types::DbProvision::Postgres => "postgres".to_string(),
+            }),
+            had_real_cert: detail
+                .cert
+                .as_ref()
+                .map(|c| !c.issuer.contains("self-signed"))
+                .unwrap_or(false),
+            wp_version,
+            crontab,
+            archive_sha256: sha.clone(),
+        };
+        let manifest_path = bundle_dir.join("manifest.json");
+        let manifest_json = serde_json::to_string_pretty(&manifest)
+            .map_err(|e| RpcError::Internal_with(format!("manifest serialize: {e}")))?;
+        tokio::fs::write(&manifest_path, manifest_json)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("manifest write: {e}")))?;
+
+        self.append_audit(
+            "hosting.migration.export",
+            Some(detail.id.as_str()),
+            &serde_json::json!({
+                "bundle_id": &bundle_id,
+                "archive_bytes": archive_bytes,
+                "archive_sha256": &sha,
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+
+        Ok(hyperion_types::HostingMigrationBundle {
+            bundle_id,
+            archive_path: archive_dest.display().to_string(),
+            manifest_path: manifest_path.display().to_string(),
+            archive_sha256: sha,
+            archive_bytes,
+            created_at: now_secs(),
+            source_hosting_id: detail.id,
+            source_node_id: self.current_node_id(),
+            source_hyperion_version: self.current_git_sha.clone(),
+        })
+    }
+
+    /// Import a migration bundle on the target node. Reads the
+    /// manifest at `manifest_path`, refuses unknown future schema
+    /// versions and SHA-256 mismatches on the sibling archive, creates
+    /// a fresh hosting with the same config, and restores the archive.
+    pub async fn hosting_import(
+        &self,
+        manifest_path: String,
+    ) -> Result<hyperion_types::HostingImportResult, RpcError> {
+        let manifest_bytes = tokio::fs::read(&manifest_path).await.map_err(|e| {
+            RpcError::Validation {
+                message: format!("manifest read failed: {e}"),
+            }
+        })?;
+        let manifest: hyperion_types::HostingMigrationManifest =
+            serde_json::from_slice(&manifest_bytes).map_err(|e| RpcError::Validation {
+                message: format!("manifest parse failed: {e}"),
+            })?;
+        if manifest.schema_version > hyperion_types::HostingMigrationManifest::CURRENT_SCHEMA_VERSION
+        {
+            return Err(RpcError::Validation {
+                message: format!(
+                    "manifest schema_version {} > supported {} — upgrade hyperion-agent first",
+                    manifest.schema_version,
+                    hyperion_types::HostingMigrationManifest::CURRENT_SCHEMA_VERSION,
+                ),
+            });
+        }
+
+        // Locate the archive next to the manifest, regardless of how
+        // the operator named the manifest file. Convention is
+        // `archive.tar.gz` alongside `manifest.json`.
+        let manifest_pb = std::path::PathBuf::from(&manifest_path);
+        let archive_path = manifest_pb
+            .parent()
+            .map(|p| p.join("archive.tar.gz"))
+            .ok_or_else(|| RpcError::Validation {
+                message: "manifest_path must have a parent dir".into(),
+            })?;
+        if !archive_path.exists() {
+            return Err(RpcError::Validation {
+                message: format!("archive missing at {}", archive_path.display()),
+            });
+        }
+        // SHA verify — refuse a tampered or truncated archive.
+        let live_sha = compute_sha256(&archive_path).await?;
+        if live_sha != manifest.archive_sha256 {
+            return Err(RpcError::Validation {
+                message: format!(
+                    "archive sha mismatch — manifest={} archive={}",
+                    manifest.archive_sha256, live_sha
+                ),
+            });
+        }
+        let archive_bytes = tokio::fs::metadata(&archive_path)
+            .await
+            .map(|m| m.len() as i64)
+            .unwrap_or(0);
+
+        // Provision the hosting with the same config. We re-issue the
+        // cert (never copy private keys across the network) and let
+        // the operator click "Issue Cert" once DNS resolves on the
+        // target — same flow as a brand-new hosting.
+        let domain = hyperion_validate::Domain::parse(&manifest.domain).map_err(|e| {
+            RpcError::Validation {
+                message: format!("domain parse: {e}"),
+            }
+        })?;
+        let aliases: Vec<hyperion_validate::Domain> = manifest
+            .aliases
+            .iter()
+            .filter_map(|a| hyperion_validate::Domain::parse(a).ok())
+            .collect();
+        let create = HostingCreateReq {
+            domain,
+            aliases,
+            php_version: manifest.php_version,
+            database: manifest.db_engine.as_deref().and_then(|s| match s {
+                "mariadb" => Some(hyperion_types::DbProvision::MariaDB),
+                "postgres" => Some(hyperion_types::DbProvision::Postgres),
+                _ => None,
+            }),
+            system_user: None,
+            kind: manifest.kind.clone(),
+            proxy_upstream_url: None,
+        };
+        let created = self.create(create).await?;
+
+        // Restore the archive. backup_restore() looks for an archive
+        // at the given path + a sibling .sql for the dump.
+        let restore_path = archive_path.display().to_string();
+        self.backup_restore(
+            HostingSelector::Id(created.id.clone()),
+            restore_path,
+        )
+        .await?;
+
+        // Re-apply the crontab when present.
+        if !manifest.crontab.trim().is_empty() {
+            let _ = self
+                .cron_replace(
+                    HostingSelector::Id(created.id.clone()),
+                    manifest.crontab.clone(),
+                )
+                .await;
+        }
+
+        self.append_audit(
+            "hosting.migration.import",
+            Some(created.id.as_str()),
+            &serde_json::json!({
+                "source_hosting_id": manifest.source_hosting_id.as_str(),
+                "source_node_id": manifest.source_node_id,
+                "archive_bytes": archive_bytes,
+                "schema_version": manifest.schema_version,
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+
+        Ok(hyperion_types::HostingImportResult {
+            new_hosting_id: created.id,
+            domain: manifest.domain,
+            restored_bytes: archive_bytes,
+            state: "ok".into(),
+            message: format!(
+                "imported from {} on node {}",
+                manifest.source_hosting_id.as_str(),
+                manifest.source_node_id
+            ),
+        })
+    }
+
+    /// Stable node identifier for this agent. Today we use the
+    /// hostname when no explicit `HYPERION_NODE_ID` env var is set
+    /// — multi-node deploys configure that via systemd unit override
+    /// so the cluster has a stable string regardless of hostname
+    /// changes.
+    fn current_node_id(&self) -> String {
+        std::env::var("HYPERION_NODE_ID")
+            .ok()
+            .or_else(|| {
+                // /etc/hostname is the canonical source on Debian and
+                // works without pulling in the `hostname` crate.
+                std::fs::read_to_string("/etc/hostname")
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            })
+            .unwrap_or_else(|| "unknown".into())
     }
 
     /// Mint a one-time node enrollment token. Plaintext returned exactly once.

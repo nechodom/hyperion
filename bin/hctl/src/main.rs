@@ -101,6 +101,21 @@ enum HostingCmd {
         #[arg(long, default_value_t = 24)]
         limit: i64,
     },
+    /// Export a hosting as a migration bundle (archive + manifest)
+    /// on this node's disk. The bundle lives at
+    /// /var/lib/hyperion/migration/<bundle_id>/. Transfer it to the
+    /// target node out-of-band, then `hctl hosting import` there.
+    Export { selector: String },
+    /// Import a migration bundle produced by `hosting export` on
+    /// another node. The manifest's sibling archive.tar.gz must be
+    /// in the same directory. Re-creates the hosting from scratch
+    /// (re-issues the cert; never copies private keys across nodes)
+    /// and restores the archive + DB dump.
+    Import {
+        /// Path to manifest.json on this node's disk.
+        #[arg(long)]
+        manifest: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -254,6 +269,12 @@ async fn call(cli: &Cli) -> anyhow::Result<Response> {
         Cmd::Hosting(HostingCmd::Usage { selector, limit }) => Request::HostingUsage {
             sel: parse_selector(selector)?,
             limit: *limit,
+        },
+        Cmd::Hosting(HostingCmd::Export { selector }) => Request::HostingExport {
+            hosting: parse_selector(selector)?,
+        },
+        Cmd::Hosting(HostingCmd::Import { manifest }) => Request::HostingImport {
+            manifest_path: manifest.clone(),
         },
         Cmd::Audit { limit } => Request::AuditList { limit: *limit },
         Cmd::Cert(CertCmd::RenewAll) => Request::CertRenewAll,
@@ -795,6 +816,25 @@ fn print_pretty(resp: &Response) {
                 println!("--- tail ---");
                 println!("{}", r.output_tail);
             }
+        }
+        Response::HostingExport(b) => {
+            println!("migration bundle ready:");
+            println!("  archive : {}", b.archive_path);
+            println!("  manifest: {}", b.manifest_path);
+            println!("  size    : {} bytes", b.archive_bytes);
+            println!("  digest  : {}", b.archive_sha256);
+            println!();
+            println!("transfer to the target node, then on the target run:");
+            println!("  sudo hctl hosting import --manifest {}", b.manifest_path);
+            println!("(typical transfer: scp -r {} root@target:/var/lib/hyperion/migration/)",
+                std::path::Path::new(&b.manifest_path).parent().map(|p| p.display().to_string()).unwrap_or_default());
+        }
+        Response::HostingImport(r) => {
+            println!("imported hosting {}", r.domain);
+            println!("  new id : {}", r.new_hosting_id.as_str());
+            println!("  bytes  : {}", r.restored_bytes);
+            println!("  state  : {}", r.state);
+            println!("  note   : {}", r.message);
         }
     }
 }

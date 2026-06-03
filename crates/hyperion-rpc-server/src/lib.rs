@@ -241,6 +241,14 @@ async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::UpdateCheck(v),
             Err(e) => Response::Error(e),
         },
+        Request::HostingExport { hosting } => match api.hosting_export(hosting).await {
+            Ok(v) => Response::HostingExport(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::HostingImport { manifest_path } => match api.hosting_import(manifest_path).await {
+            Ok(v) => Response::HostingImport(v),
+            Err(e) => Response::Error(e),
+        },
         Request::WpPluginList { hosting } => match api.wp_plugin_list(hosting).await {
             Ok(v) => Response::WpPluginList(v),
             Err(e) => Response::Error(e),
@@ -685,6 +693,34 @@ mod tests {
             _: bool,
         ) -> Result<hyperion_types::UpdateStatus, RpcError> {
             Ok(hyperion_types::UpdateStatus::default())
+        }
+        async fn hosting_export(
+            &self,
+            _: hyperion_rpc::HostingSelector,
+        ) -> Result<hyperion_types::HostingMigrationBundle, RpcError> {
+            Ok(hyperion_types::HostingMigrationBundle {
+                bundle_id: "mock".into(),
+                archive_path: "/tmp/a".into(),
+                manifest_path: "/tmp/m.json".into(),
+                archive_sha256: "00".into(),
+                archive_bytes: 0,
+                created_at: 0,
+                source_hosting_id: hyperion_types::HostingId("01J".into()),
+                source_node_id: "mock".into(),
+                source_hyperion_version: "mock".into(),
+            })
+        }
+        async fn hosting_import(
+            &self,
+            _: String,
+        ) -> Result<hyperion_types::HostingImportResult, RpcError> {
+            Ok(hyperion_types::HostingImportResult {
+                new_hosting_id: hyperion_types::HostingId("01J".into()),
+                domain: "mock".into(),
+                restored_bytes: 0,
+                state: "ok".into(),
+                message: "mock".into(),
+            })
         }
         async fn wp_plugin_list(
             &self,

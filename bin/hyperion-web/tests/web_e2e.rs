@@ -135,6 +135,8 @@ impl hyperion_core::AdapterPort for StubAdapters {
     ) -> Result<(Vec<hyperion_types::WpPlugin>, String), AdapterError> {
         Ok((vec![], "6.5.3".into()))
     }
+    // Note: migration export/import don't go through AdapterPort — they
+    // are higher-level service methods. No stub needed here.
     async fn wp_plugin_action(
         &self,
         _: &str,

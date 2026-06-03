@@ -142,6 +142,13 @@ pub enum Request {
         /// If true, bypass the cache and re-probe the upstream.
         force_refresh: bool,
     },
+    /// Produce a migration bundle (archive + manifest) for `hosting`.
+    /// The bundle lives on the source node's disk; the operator
+    /// transfers it out-of-band and imports on the target.
+    HostingExport { hosting: HostingSelector },
+    /// Import a migration bundle by manifest path. Sibling
+    /// `archive.tar.gz` is expected next to the manifest.
+    HostingImport { manifest_path: String },
     /// List installed WordPress plugins for `hosting`.
     WpPluginList { hosting: HostingSelector },
     /// Apply one plugin action via wp-cli. `slug` is the plugin
@@ -394,6 +401,8 @@ pub enum Response {
     ServiceInstall,
     AgentConfigUpdate,
     UpdateCheck(hyperion_types::UpdateStatus),
+    HostingExport(hyperion_types::HostingMigrationBundle),
+    HostingImport(hyperion_types::HostingImportResult),
     WpPluginList(hyperion_types::WpPluginListResponse),
     WpPluginAction(hyperion_types::WpPluginActionResult),
     // Web users / roles / 2FA

@@ -254,6 +254,20 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.update_check(force_refresh).await
     }
 
+    async fn hosting_export(
+        &self,
+        hosting: hyperion_rpc::HostingSelector,
+    ) -> Result<hyperion_types::HostingMigrationBundle, RpcError> {
+        self.svc.hosting_export(hosting).await
+    }
+
+    async fn hosting_import(
+        &self,
+        manifest_path: String,
+    ) -> Result<hyperion_types::HostingImportResult, RpcError> {
+        self.svc.hosting_import(manifest_path).await
+    }
+
     async fn wp_plugin_list(
         &self,
         hosting: hyperion_rpc::HostingSelector,

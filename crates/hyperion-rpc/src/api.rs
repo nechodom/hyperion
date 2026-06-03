@@ -142,6 +142,18 @@ pub trait AgentApi: Send + Sync + 'static {
         force_refresh: bool,
     ) -> Result<hyperion_types::UpdateStatus, RpcError>;
 
+    /// Export a hosting as a self-contained migration bundle.
+    async fn hosting_export(
+        &self,
+        hosting: HostingSelector,
+    ) -> Result<hyperion_types::HostingMigrationBundle, RpcError>;
+
+    /// Import a migration bundle on this node.
+    async fn hosting_import(
+        &self,
+        manifest_path: String,
+    ) -> Result<hyperion_types::HostingImportResult, RpcError>;
+
     /// List installed WordPress plugins for a hosting.
     async fn wp_plugin_list(
         &self,

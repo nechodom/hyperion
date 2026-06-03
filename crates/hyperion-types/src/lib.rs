@@ -11,6 +11,7 @@ pub mod dns;
 pub mod hosting;
 pub mod ids;
 pub mod limits;
+pub mod migration;
 pub mod php;
 pub mod profile;
 pub mod spf;
@@ -26,6 +27,7 @@ pub use limits::{
     BackupRunWire, ExpiringHosting, HostingExpiry, HostingLimits, HostingUsageBucket,
     NodeInviteMint, NodeInviteSummary, OverBwPolicy, SuspendReason,
 };
+pub use migration::{HostingImportResult, HostingMigrationBundle, HostingMigrationManifest};
 pub use php::PhpVersion;
 pub use profile::{HostingProfile, ProfileApply, ProfileInput};
 pub use spf::SpfCheckResult;

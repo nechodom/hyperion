@@ -25,6 +25,7 @@ hex.workspace = true
 blake3.workspace = true
 rand.workspace = true
 toml_edit.workspace = true
+ulid = "1"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }

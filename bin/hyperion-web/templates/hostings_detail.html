@@ -342,6 +342,10 @@
     {% if access_grants.len() > 0 %}<span class="tab-badge">{{ access_grants.len() }}</span>{% endif %}
   </a>
   {% endif %}
+  <a class="tab" data-tab="migration" href="#migration" role="tab">
+    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12l18-9-3 18-7-7-8-2z"/><path d="M11 14l7-7"/></svg>
+    Migration
+  </a>
   <a class="tab" data-tab="danger" href="#danger" role="tab" style="margin-left:auto;color:var(--danger)">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
     Danger
@@ -1393,6 +1397,53 @@
 </div>
 </div><!-- /tab-access -->
 {% endif %}
+
+<!-- ============== MIGRATION TAB ============== -->
+<div class="tab-panel" id="tab-migration">
+
+<div class="card hover">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12l18-9-3 18-7-7-8-2z"/><path d="M11 14l7-7"/></svg>
+    Migrate to another node
+  </h2>
+  <p class="muted">
+    Produces a self-contained migration bundle on this node's disk
+    (<code>/var/lib/hyperion/migration/&lt;id&gt;/</code>). Transfer it to the
+    target node via <code>scp</code> / <code>rsync</code>, then run
+    <code>sudo hctl hosting import --manifest &lt;path&gt;</code> on the
+    target. The importer recreates the hosting with the same domain,
+    aliases, PHP version, DB engine, and crontab — and re-issues the
+    TLS cert from scratch (private keys never travel between nodes).
+  </p>
+
+  {% if detail.state.as_str() == "active" %}
+  <form method="post" action="/hostings/migration/export"
+        onsubmit="return confirm('Snapshot {{ detail.domain }} for migration? This runs a full backup_now (htdocs tar + DB dump) and stores the bundle on disk.');">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <input type="hidden" name="selector" value="{{ detail.domain }}">
+    <button class="btn primary" type="submit">
+      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+      Export migration bundle
+    </button>
+  </form>
+  {% else %}
+  <p class="muted"><strong>Hosting must be active</strong> before it can be exported.
+    Current state: <code>{{ detail.state.as_str() }}</code>.</p>
+  {% endif %}
+
+  <div class="card-section" style="margin-top:1.2rem">
+    <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Operator transfer cheatsheet</h2>
+    <ol class="muted" style="font-size:0.85rem;line-height:1.7;padding-left:1.2rem;margin:0">
+      <li>Click <strong>Export</strong> above on the source node.</li>
+      <li>On your workstation: <code>scp -r root@source:/var/lib/hyperion/migration/&lt;bundle_id&gt; root@target:/var/lib/hyperion/migration/</code></li>
+      <li>On the target node: <code>sudo hctl hosting import --manifest /var/lib/hyperion/migration/&lt;bundle_id&gt;/manifest.json</code></li>
+      <li>Update DNS to point at the target's IP. The importer logs say "click Issue Cert" when LE-ready.</li>
+      <li>Once the migration is verified live: <code>hctl hosting delete &lt;domain&gt;</code> on the source.</li>
+    </ol>
+  </div>
+</div>
+
+</div><!-- /tab-migration -->
 
 <div class="tab-panel" id="tab-danger">
 
