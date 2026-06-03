@@ -1349,13 +1349,16 @@ dependencies = [
  "blake3",
  "ed25519-dalek",
  "hex",
+ "hmac",
  "proptest",
  "rand 0.8.6",
  "serde",
  "serde_json",
+ "sha1",
  "subtle",
  "tempfile",
  "thiserror 1.0.69",
+ "url",
 ]
 
 [[package]]

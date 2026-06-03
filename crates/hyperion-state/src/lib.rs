@@ -19,6 +19,7 @@ pub mod nodes;
 pub mod profiles;
 pub mod scheduler;
 pub mod system_users;
+pub mod web_users;
 pub mod wordpress;
 
 pub use db::{open, open_memory, StateError};

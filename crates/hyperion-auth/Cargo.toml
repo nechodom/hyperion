@@ -17,6 +17,9 @@ subtle.workspace = true
 hex.workspace = true
 
 blake3.workspace = true
+hmac = "0.12"
+sha1 = "0.10"
+url.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
