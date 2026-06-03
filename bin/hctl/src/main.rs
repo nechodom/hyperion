@@ -724,6 +724,17 @@ fn print_pretty(resp: &Response) {
             println!("2FA enrollment {}", if *ok { "confirmed" } else { "rejected" });
         }
         Response::Web2faDisable => println!("2FA disabled"),
+        Response::WebGrantHostingAccess => println!("access granted"),
+        Response::WebRevokeHostingAccess => println!("access revoked"),
+        Response::WebListHostingAccess(rows) => {
+            println!("{} grants:", rows.len());
+            for r in rows {
+                println!(
+                    "  user={} ({}) {} level={}",
+                    r.user_id, r.username, r.email, r.level
+                );
+            }
+        }
     }
 }
 

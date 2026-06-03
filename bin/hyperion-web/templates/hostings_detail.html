@@ -320,6 +320,13 @@
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
     Cron
   </a>
+  {% if is_super_admin %}
+  <a class="tab" data-tab="access" href="#access" role="tab">
+    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="7" r="4"/><path d="M3 21v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2"/><path d="M16 11h6"/><path d="M19 8v6"/></svg>
+    Access
+    {% if access_grants.len() > 0 %}<span class="tab-badge">{{ access_grants.len() }}</span>{% endif %}
+  </a>
+  {% endif %}
   <a class="tab" data-tab="danger" href="#danger" role="tab" style="margin-left:auto;color:var(--danger)">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
     Danger
@@ -1024,6 +1031,81 @@
 </div>
 
 </div><!-- /tab-cron -->
+
+{% if is_super_admin %}
+<div class="tab-panel" id="tab-access">
+<div class="card">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="7" r="4"/><path d="M3 21v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2"/></svg>
+    Per-user access
+  </h2>
+  <p class="text-soft" style="margin:0 0 0.85rem">
+    super_admin + admin already see every hosting. This grants
+    <strong>operator</strong> (manage = full CRUD) or <strong>viewer</strong>
+    (read = view only) access for specific users to this hosting. Other
+    hostings are unaffected.
+  </p>
+
+  <form method="post" action="/hostings/access/grant" autocomplete="off"
+        style="display:grid;grid-template-columns:1fr 1fr auto;gap:0.5rem;align-items:end;margin-bottom:1rem">
+    <input type="hidden" name="hosting_id" value="{{ detail.id }}">
+    <div class="field" style="margin:0">
+      <label for="grant_user">User</label>
+      <select id="grant_user" name="user_id" required>
+        <option value="">— pick a user —</option>
+        {% for u in users_for_access %}
+          <option value="{{ u.id }}">{{ u.username }} ({{ u.role }})</option>
+        {% endfor %}
+      </select>
+    </div>
+    <div class="field" style="margin:0">
+      <label for="grant_level">Level</label>
+      <select id="grant_level" name="level">
+        <option value="manage">manage (full CRUD)</option>
+        <option value="read">read (view only)</option>
+      </select>
+    </div>
+    <button type="submit" class="btn primary">Grant</button>
+  </form>
+
+  {% if access_grants.is_empty() %}
+    <p class="text-soft small">No grants yet.</p>
+  {% else %}
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>User</th><th>Level</th><th>Granted</th><th class="right"></th></tr></thead>
+      <tbody>
+        {% for g in access_grants %}
+        <tr>
+          <td>
+            <strong>{{ g.username }}</strong>
+            <div class="text-soft small">{{ g.email }}</div>
+          </td>
+          <td>
+            {% if g.level == "manage" %}
+              <span class="pill ok small">manage</span>
+            {% else %}
+              <span class="pill small" style="background:var(--surface-2);color:var(--text-soft)">read</span>
+            {% endif %}
+          </td>
+          <td class="muted small" title="{{ g.granted_at }}">{{ crate::handlers::stats::fmt_ago(g.granted_at) }}</td>
+          <td class="right">
+            <form method="post" action="/hostings/access/revoke" style="display:inline"
+                  onsubmit="return confirm('Revoke this access?');">
+              <input type="hidden" name="hosting_id" value="{{ detail.id }}">
+              <input type="hidden" name="user_id" value="{{ g.user_id }}">
+              <button type="submit" class="btn small danger">Revoke</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+</div><!-- /tab-access -->
+{% endif %}
 
 <div class="tab-panel" id="tab-danger">
 

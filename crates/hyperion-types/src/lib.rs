@@ -33,7 +33,8 @@ pub use stats::{
     AcmeConfigView, AgentConfigView, BackupRemoteConfigView, BackupRetentionConfigView,
     ClusterStats, DashboardAlert, EmailConfigView, HostingStats, NodeMetricPoint,
     NodeMetricsHistory, NodeStats, NodeSummary, ServiceHealth, ServicesHealth,
-    SlackConfigView, Web2faEnrollment, WebLoginResult, WebUserSummary, WebVerify2faResult,
+    SlackConfigView, Web2faEnrollment, WebHostingAccess, WebLoginResult, WebUserSummary,
+    WebVerify2faResult,
 };
 pub use wp::{WpInstallRequest, WpInstallStatus};
 

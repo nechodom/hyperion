@@ -179,6 +179,25 @@ pub trait AgentApi: Send + Sync + 'static {
     async fn web_2fa_confirm_enroll(&self, user_id: i64, code: String) -> Result<bool, RpcError>;
     async fn web_2fa_disable(&self, user_id: i64) -> Result<(), RpcError>;
 
+    /// Grant a user access to one hosting. `level` is "read" or "manage".
+    /// Idempotent — re-granting upserts the level.
+    async fn web_grant_hosting_access(
+        &self,
+        user_id: i64,
+        hosting_id: String,
+        level: String,
+        granted_by: Option<i64>,
+    ) -> Result<(), RpcError>;
+    async fn web_revoke_hosting_access(
+        &self,
+        user_id: i64,
+        hosting_id: String,
+    ) -> Result<(), RpcError>;
+    async fn web_list_hosting_access(
+        &self,
+        hosting_id: String,
+    ) -> Result<Vec<hyperion_types::WebHostingAccess>, RpcError>;
+
     /// Install WordPress into a hosting (downloads core, writes wp-config.php
     /// against the hosting's DB credentials, runs `wp core install`, records
     /// the result in `wp_installs`).

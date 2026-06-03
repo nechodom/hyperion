@@ -3392,6 +3392,109 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(true)
     }
 
+    /// Grant a user access to one hosting. Idempotent — calling
+    /// again upserts the level. super_admin / admin already see
+    /// everything so granting them is redundant but allowed.
+    pub async fn web_grant_hosting_access(
+        &self,
+        user_id: i64,
+        hosting_id: String,
+        level: String,
+        granted_by: Option<i64>,
+    ) -> Result<(), RpcError> {
+        let lvl: hyperion_state::web_users::AccessLevel = level.parse()
+            .map_err(|e: String| RpcError::Validation { message: e })?;
+        // Validate user + hosting exist before writing.
+        let user = hyperion_state::web_users::get_by_id(&self.pool, user_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("user: {e}")))?
+            .ok_or_else(|| RpcError::NotFound {
+                kind: "web_user".into(),
+                id: user_id.to_string(),
+            })?;
+        let hid = hyperion_types::HostingId(hosting_id.clone());
+        if hostings::get_by_id(&self.pool, &hid)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("hosting: {e}")))?
+            .is_none()
+        {
+            return Err(RpcError::NotFound {
+                kind: "hosting".into(),
+                id: hosting_id,
+            });
+        }
+        hyperion_state::web_users::grant_hosting_access(
+            &self.pool,
+            user_id,
+            &hid,
+            lvl,
+            granted_by,
+            now_secs(),
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("grant: {e}")))?;
+        self.append_audit(
+            "web.access.grant",
+            Some(hid.as_str()),
+            &serde_json::json!({
+                "user_id": user_id,
+                "username": user.username,
+                "level": lvl.as_str(),
+                "granted_by": granted_by,
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
+    pub async fn web_revoke_hosting_access(
+        &self,
+        user_id: i64,
+        hosting_id: String,
+    ) -> Result<(), RpcError> {
+        let hid = hyperion_types::HostingId(hosting_id.clone());
+        let removed = hyperion_state::web_users::revoke_hosting_access(&self.pool, user_id, &hid)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("revoke: {e}")))?;
+        if removed == 0 {
+            return Err(RpcError::NotFound {
+                kind: "web_user_hosting_access".into(),
+                id: format!("user={user_id} hosting={hosting_id}"),
+            });
+        }
+        self.append_audit(
+            "web.access.revoke",
+            Some(&hosting_id),
+            &serde_json::json!({"user_id": user_id}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
+    pub async fn web_list_hosting_access(
+        &self,
+        hosting_id: String,
+    ) -> Result<Vec<hyperion_types::WebHostingAccess>, RpcError> {
+        let hid = hyperion_types::HostingId(hosting_id);
+        let rows = hyperion_state::web_users::list_access_for_hosting(&self.pool, &hid)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("list: {e}")))?;
+        Ok(rows
+            .into_iter()
+            .map(|(uid, username, email, lvl, by, at)| hyperion_types::WebHostingAccess {
+                user_id: uid,
+                username,
+                email,
+                level: lvl.as_str().to_string(),
+                granted_by: by,
+                granted_at: at,
+            })
+            .collect())
+    }
+
     pub async fn web_2fa_disable(&self, user_id: i64) -> Result<(), RpcError> {
         hyperion_state::web_users::set_totp(&self.pool, user_id, None, None, now_secs())
             .await

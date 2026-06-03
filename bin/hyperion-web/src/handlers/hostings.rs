@@ -119,6 +119,13 @@ struct DetailTpl<'a> {
     ftp_error: Option<String>,
     ftp_flash: Option<String>,
     just_created: Option<HostingCreated>,
+    /// Drives the per-user Access tab — super_admin only.
+    is_super_admin: bool,
+    /// Existing access grants for this hosting (populated for super_admin).
+    access_grants: Vec<hyperion_types::WebHostingAccess>,
+    /// Users available to grant to (operator/viewer roles; super_admin
+    /// and admin are excluded since they already see everything).
+    users_for_access: Vec<hyperion_types::WebUserSummary>,
 }
 
 #[derive(Deserialize, Default)]
@@ -138,6 +145,9 @@ pub async fn get_list(
 ) -> Result<Response, AppError> {
     let rows = list_hostings(&state).await.map_err(AppError::Rpc)?;
     let total_count = rows.len();
+    // Role-based filter: operators + viewers only see hostings they
+    // have an explicit access grant for. super_admin + admin see all.
+    let rows = filter_by_access(&state, &ctx, rows).await;
     let needle = q.q.trim().to_lowercase();
     let state_filter = q.state.trim().to_lowercase();
     let rows: Vec<HostingSummary> = rows
@@ -425,6 +435,9 @@ pub async fn post_create(
                 ftp_error: None,
                 ftp_flash: None,
                 just_created: Some(created),
+                is_super_admin: ctx.is_super_admin(),
+                access_grants: vec![],
+                users_for_access: vec![],
             };
             Ok(Html(tpl.render()?).into_response())
         }
@@ -454,6 +467,13 @@ pub async fn get_detail(
         RpcResponse::Error(e) => return Err(AppError::Rpc(e.to_string())),
         _ => return Err(AppError::Internal("unexpected response".into())),
     };
+    // RBAC guard: operator + viewer must have an access grant.
+    // super_admin + admin pass through. Unauthenticated redirects to
+    // /login earlier (require_auth middleware), so unwrap to /hostings
+    // for the no-access case.
+    if let Err(r) = require_hosting_access(&state, &ctx, detail.id.as_str(), false).await {
+        return Ok(r);
+    }
     let sel_id = HostingSelector::Id(detail.id.clone());
     let limits = fetch_limits(&state, sel_id.clone())
         .await
@@ -486,6 +506,36 @@ pub async fn get_detail(
             _ => None,
         },
         Err(_) => None,
+    };
+    // Access tab data — fetched only for super_admin since they're the
+    // only ones who see the tab. Empty vec for everyone else is cheap
+    // and keeps the template happy.
+    let (access_grants_for_detail, users_for_access_for_detail) = if ctx.is_super_admin() {
+        let grants = match hyperion_rpc_client::call(
+            &state.agent_socket,
+            Request::WebListHostingAccess {
+                hosting_id: detail.id.as_str().to_string(),
+            },
+        )
+        .await
+        {
+            Ok(RpcResponse::WebListHostingAccess(g)) => g,
+            _ => vec![],
+        };
+        let users = match hyperion_rpc_client::call(&state.agent_socket, Request::WebUserList)
+            .await
+        {
+            Ok(RpcResponse::WebUserList(u)) => u
+                .into_iter()
+                // Only operators + viewers can be granted per-web access;
+                // super_admin and admin already see everything.
+                .filter(|u| u.role == "operator" || u.role == "viewer")
+                .collect(),
+            _ => vec![],
+        };
+        (grants, users)
+    } else {
+        (vec![], vec![])
     };
     let tpl = DetailTpl {
         username: &ctx.username,
@@ -567,6 +617,9 @@ pub async fn get_detail(
             }
         }),
         just_created: None,
+        is_super_admin: ctx.is_super_admin(),
+        access_grants: access_grants_for_detail,
+        users_for_access: users_for_access_for_detail,
     };
     Ok(Html(tpl.render()?).into_response())
 }
@@ -1095,6 +1148,160 @@ pub async fn post_set_limits(
         }
         RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
         _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct AccessGrantForm {
+    pub hosting_id: String,
+    pub user_id: i64,
+    #[serde(default)]
+    pub level: String,
+}
+
+#[derive(Deserialize)]
+pub struct AccessRevokeForm {
+    pub hosting_id: String,
+    pub user_id: i64,
+}
+
+/// POST /hostings/access/grant — super_admin only. Grants a non-admin
+/// user `read` or `manage` access to one hosting.
+pub async fn post_access_grant(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<AccessGrantForm>,
+) -> Result<Response, AppError> {
+    if !ctx.is_super_admin() {
+        return Ok(Redirect::to("/").into_response());
+    }
+    let level = if form.level == "read" { "read" } else { "manage" };
+    let granted_by = ctx.session.as_ref().map(|s| s.user_id);
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::WebGrantHostingAccess {
+            user_id: form.user_id,
+            hosting_id: form.hosting_id.clone(),
+            level: level.to_string(),
+            granted_by,
+        },
+    )
+    .await
+    .map_err(AppError::from)?;
+    match resp {
+        RpcResponse::WebGrantHostingAccess => {
+            Ok(Redirect::to(&format!("/hostings/{}#access", urlencoding(&form.hosting_id)))
+                .into_response())
+        }
+        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+/// POST /hostings/access/revoke — super_admin only.
+pub async fn post_access_revoke(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<AccessRevokeForm>,
+) -> Result<Response, AppError> {
+    if !ctx.is_super_admin() {
+        return Ok(Redirect::to("/").into_response());
+    }
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::WebRevokeHostingAccess {
+            user_id: form.user_id,
+            hosting_id: form.hosting_id.clone(),
+        },
+    )
+    .await
+    .map_err(AppError::from)?;
+    match resp {
+        RpcResponse::WebRevokeHostingAccess => {
+            Ok(Redirect::to(&format!("/hostings/{}#access", urlencoding(&form.hosting_id)))
+                .into_response())
+        }
+        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+/// Drop hosting summaries the caller doesn't have access to.
+/// super_admin + admin pass through everything; operator + viewer get
+/// filtered down to the set of hostings their `web_user_hosting_access`
+/// rows mention. Unauthenticated callers see nothing.
+///
+/// Failures (RPC error, missing user_id) are conservative: we filter
+/// to empty rather than risk over-disclosure.
+async fn filter_by_access(
+    state: &SharedState,
+    ctx: &AuthCtx,
+    rows: Vec<HostingSummary>,
+) -> Vec<HostingSummary> {
+    if ctx.is_admin_or_higher() {
+        return rows;
+    }
+    let Some(sess) = ctx.session.as_ref() else {
+        return Vec::new();
+    };
+    // Fetch the access set once and filter in memory.
+    let mut allowed: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // We don't have a dedicated "list my hostings" RPC; iterate over
+    // the visible rows and ask the agent per-id. For the typical
+    // operator-with-a-few-hostings case this is cheap; for a 1000-
+    // hosting cluster it's wasteful but acceptable for v1.
+    for r in &rows {
+        let access_resp = hyperion_rpc_client::call(
+            &state.agent_socket,
+            Request::WebListHostingAccess {
+                hosting_id: r.id.as_str().to_string(),
+            },
+        )
+        .await;
+        if let Ok(RpcResponse::WebListHostingAccess(grants)) = access_resp {
+            if grants.iter().any(|g| g.user_id == sess.user_id) {
+                allowed.insert(r.id.as_str().to_string());
+            }
+        }
+    }
+    rows.into_iter()
+        .filter(|r| allowed.contains(r.id.as_str()))
+        .collect()
+}
+
+/// Block detail / write access for callers without the required level.
+/// "read" → viewer-style (any access entry suffices). "manage" →
+/// operator-style (level=manage). super_admin + admin always allowed.
+pub async fn require_hosting_access(
+    state: &SharedState,
+    ctx: &AuthCtx,
+    hosting_id: &str,
+    require_manage: bool,
+) -> Result<(), Response> {
+    if ctx.is_admin_or_higher() {
+        return Ok(());
+    }
+    let Some(sess) = ctx.session.as_ref() else {
+        return Err(Redirect::to("/login").into_response());
+    };
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::WebListHostingAccess {
+            hosting_id: hosting_id.to_string(),
+        },
+    )
+    .await;
+    let grants = match resp {
+        Ok(RpcResponse::WebListHostingAccess(g)) => g,
+        _ => return Err(Redirect::to("/hostings").into_response()),
+    };
+    let mine = grants.into_iter().find(|g| g.user_id == sess.user_id);
+    match mine {
+        None => Err(Redirect::to("/hostings").into_response()),
+        Some(g) if require_manage && g.level != "manage" => {
+            Err(Redirect::to("/hostings").into_response())
+        }
+        Some(_) => Ok(()),
     }
 }
 

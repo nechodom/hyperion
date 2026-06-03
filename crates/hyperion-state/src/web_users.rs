@@ -419,6 +419,37 @@ pub async fn list_hosting_ids_for_user(
     Ok(out)
 }
 
+/// All access grants for a given hosting — used by the per-hosting
+/// "Access" tab on the detail page. Joins to web_users so each row
+/// carries the username + email without an extra round-trip.
+pub async fn list_access_for_hosting(
+    pool: &SqlitePool,
+    hosting_id: &HostingId,
+) -> Result<Vec<(i64, String, String, AccessLevel, Option<i64>, i64)>, StateError> {
+    let rows: Vec<(i64, String, String, String, Option<i64>, i64)> = sqlx::query_as(
+        "SELECT a.user_id, u.username, u.email, a.level, a.granted_by, a.granted_at
+         FROM web_user_hosting_access a
+         JOIN web_users u ON u.id = a.user_id
+         WHERE a.hosting_id = ?
+         ORDER BY u.username",
+    )
+    .bind(hosting_id.as_str())
+    .fetch_all(pool)
+    .await?;
+    let mut out = Vec::with_capacity(rows.len());
+    for (uid, username, email, lvl, by, at) in rows {
+        out.push((
+            uid,
+            username,
+            email,
+            AccessLevel::from_str(&lvl).map_err(StateError::InvalidState)?,
+            by,
+            at,
+        ));
+    }
+    Ok(out)
+}
+
 pub async fn user_hosting_access(
     pool: &SqlitePool,
     user_id: i64,

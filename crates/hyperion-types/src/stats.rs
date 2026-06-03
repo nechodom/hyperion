@@ -280,6 +280,19 @@ pub struct Web2faEnrollment {
     pub backup_codes: Vec<String>,
 }
 
+/// One grant row on `web_user_hosting_access`. Used by the per-hosting
+/// "Access" tab and by the filter that scopes operator/viewer lists.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WebHostingAccess {
+    pub user_id: i64,
+    pub username: String,
+    pub email: String,
+    /// "read" | "manage"
+    pub level: String,
+    pub granted_by: Option<i64>,
+    pub granted_at: i64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

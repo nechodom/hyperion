@@ -314,6 +314,31 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.web_2fa_disable(user_id).await
     }
 
+    async fn web_grant_hosting_access(
+        &self,
+        user_id: i64,
+        hosting_id: String,
+        level: String,
+        granted_by: Option<i64>,
+    ) -> Result<(), RpcError> {
+        self.svc
+            .web_grant_hosting_access(user_id, hosting_id, level, granted_by)
+            .await
+    }
+    async fn web_revoke_hosting_access(
+        &self,
+        user_id: i64,
+        hosting_id: String,
+    ) -> Result<(), RpcError> {
+        self.svc.web_revoke_hosting_access(user_id, hosting_id).await
+    }
+    async fn web_list_hosting_access(
+        &self,
+        hosting_id: String,
+    ) -> Result<Vec<hyperion_types::WebHostingAccess>, RpcError> {
+        self.svc.web_list_hosting_access(hosting_id).await
+    }
+
     async fn stats_tick(&self) -> Result<i64, RpcError> {
         self.svc.stats_tick().await
     }

@@ -197,6 +197,25 @@ pub enum Request {
     Web2faDisable {
         user_id: i64,
     },
+    /// Grant a non-admin user access to one hosting at a specific
+    /// level (`"read"` for viewer-style, `"manage"` for operator-style).
+    /// super_admin / admin ignore this — they see everything.
+    WebGrantHostingAccess {
+        user_id: i64,
+        hosting_id: String,
+        level: String,
+        granted_by: Option<i64>,
+    },
+    /// Revoke a previously granted hosting access.
+    WebRevokeHostingAccess {
+        user_id: i64,
+        hosting_id: String,
+    },
+    /// List all access grants for a given hosting (used to render the
+    /// per-hosting access tab).
+    WebListHostingAccess {
+        hosting_id: String,
+    },
 
     StatsTick,
     BackupRestore {
@@ -308,6 +327,9 @@ pub enum Response {
     Web2faEnrollStart(hyperion_types::Web2faEnrollment),
     Web2faConfirmEnroll { ok: bool },
     Web2faDisable,
+    WebGrantHostingAccess,
+    WebRevokeHostingAccess,
+    WebListHostingAccess(Vec<hyperion_types::WebHostingAccess>),
     StatsTick { hostings_sampled: i64 },
     BackupRestore,
     HostingLogs(String),

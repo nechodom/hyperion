@@ -294,6 +294,27 @@ async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(()) => Response::Web2faDisable,
             Err(e) => Response::Error(e),
         },
+        Request::WebGrantHostingAccess { user_id, hosting_id, level, granted_by } => {
+            match api
+                .web_grant_hosting_access(user_id, hosting_id, level, granted_by)
+                .await
+            {
+                Ok(()) => Response::WebGrantHostingAccess,
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::WebRevokeHostingAccess { user_id, hosting_id } => {
+            match api.web_revoke_hosting_access(user_id, hosting_id).await {
+                Ok(()) => Response::WebRevokeHostingAccess,
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::WebListHostingAccess { hosting_id } => {
+            match api.web_list_hosting_access(hosting_id).await {
+                Ok(v) => Response::WebListHostingAccess(v),
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::StatsTick => match api.stats_tick().await {
             Ok(n) => Response::StatsTick {
                 hostings_sampled: n,
@@ -655,6 +676,24 @@ mod tests {
         }
         async fn web_2fa_disable(&self, _: i64) -> Result<(), RpcError> {
             Ok(())
+        }
+        async fn web_grant_hosting_access(
+            &self,
+            _: i64,
+            _: String,
+            _: String,
+            _: Option<i64>,
+        ) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn web_revoke_hosting_access(&self, _: i64, _: String) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn web_list_hosting_access(
+            &self,
+            _: String,
+        ) -> Result<Vec<hyperion_types::WebHostingAccess>, RpcError> {
+            Ok(vec![])
         }
         async fn stats_tick(&self) -> Result<i64, RpcError> {
             Ok(0)

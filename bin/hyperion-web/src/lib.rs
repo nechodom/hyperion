@@ -109,6 +109,14 @@ pub fn build_router(state: SharedState) -> Router {
             "/admin/users/password",
             post(handlers::users::post_reset_password),
         )
+        .route(
+            "/hostings/access/grant",
+            post(handlers::hostings::post_access_grant),
+        )
+        .route(
+            "/hostings/access/revoke",
+            post(handlers::hostings::post_access_revoke),
+        )
         .route("/profile", get(handlers::profile::get_profile))
         .route("/profile/2fa/start", post(handlers::profile::post_2fa_start))
         .route("/profile/2fa/confirm", post(handlers::profile::post_2fa_confirm))
