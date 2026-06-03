@@ -11,6 +11,7 @@ hyperion-validate = { path = "../hyperion-validate" }
 hyperion-rpc = { path = "../hyperion-rpc" }
 hyperion-state = { path = "../hyperion-state" }
 hyperion-adapters = { path = "../hyperion-adapters" }
+hyperion-auth = { path = "../hyperion-auth" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

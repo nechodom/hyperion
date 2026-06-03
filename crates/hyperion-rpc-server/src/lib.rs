@@ -235,6 +235,65 @@ async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(()) => Response::EmailSendTest,
             Err(e) => Response::Error(e),
         },
+        Request::WebLogin { username, password, client_ip } => {
+            match api.web_login(username, password, client_ip).await {
+                Ok(v) => Response::WebLogin(v),
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::WebVerify2fa { user_id, code } => match api.web_verify_2fa(user_id, code).await {
+            Ok(v) => Response::WebVerify2fa(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::WebUserList => match api.web_user_list().await {
+            Ok(v) => Response::WebUserList(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::WebUserGet { id } => match api.web_user_get(id).await {
+            Ok(v) => Response::WebUserGet(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::WebUserCreate { username, email, password, role } => {
+            match api.web_user_create(username, email, password, role).await {
+                Ok(id) => Response::WebUserCreate { id },
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::WebUserSetPassword { user_id, new_password } => {
+            match api.web_user_set_password(user_id, new_password).await {
+                Ok(()) => Response::WebUserSetPassword,
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::WebUserSetRole { user_id, role } => match api.web_user_set_role(user_id, role).await
+        {
+            Ok(()) => Response::WebUserSetRole,
+            Err(e) => Response::Error(e),
+        },
+        Request::WebUserSetLocked { user_id, locked, reason } => {
+            match api.web_user_set_locked(user_id, locked, reason).await {
+                Ok(()) => Response::WebUserSetLocked,
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::WebUserDelete { user_id } => match api.web_user_delete(user_id).await {
+            Ok(()) => Response::WebUserDelete,
+            Err(e) => Response::Error(e),
+        },
+        Request::Web2faEnrollStart { user_id } => match api.web_2fa_enroll_start(user_id).await {
+            Ok(v) => Response::Web2faEnrollStart(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::Web2faConfirmEnroll { user_id, code } => {
+            match api.web_2fa_confirm_enroll(user_id, code).await {
+                Ok(ok) => Response::Web2faConfirmEnroll { ok },
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::Web2faDisable { user_id } => match api.web_2fa_disable(user_id).await {
+            Ok(()) => Response::Web2faDisable,
+            Err(e) => Response::Error(e),
+        },
         Request::StatsTick => match api.stats_tick().await {
             Ok(n) => Response::StatsTick {
                 hostings_sampled: n,
@@ -529,6 +588,72 @@ mod tests {
             Ok(hyperion_types::AgentConfigView::default())
         }
         async fn email_send_test(&self, _: String) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn web_login(
+            &self,
+            _: String,
+            _: String,
+            _: Option<String>,
+        ) -> Result<hyperion_types::WebLoginResult, RpcError> {
+            Ok(hyperion_types::WebLoginResult::Invalid)
+        }
+        async fn web_verify_2fa(
+            &self,
+            _: i64,
+            _: String,
+        ) -> Result<hyperion_types::WebVerify2faResult, RpcError> {
+            Ok(hyperion_types::WebVerify2faResult::Invalid)
+        }
+        async fn web_user_list(&self) -> Result<Vec<hyperion_types::WebUserSummary>, RpcError> {
+            Ok(vec![])
+        }
+        async fn web_user_get(
+            &self,
+            _: i64,
+        ) -> Result<Option<hyperion_types::WebUserSummary>, RpcError> {
+            Ok(None)
+        }
+        async fn web_user_create(
+            &self,
+            _: String,
+            _: String,
+            _: String,
+            _: String,
+        ) -> Result<i64, RpcError> {
+            Ok(0)
+        }
+        async fn web_user_set_password(&self, _: i64, _: String) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn web_user_set_role(&self, _: i64, _: String) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn web_user_set_locked(
+            &self,
+            _: i64,
+            _: bool,
+            _: Option<String>,
+        ) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn web_user_delete(&self, _: i64) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn web_2fa_enroll_start(
+            &self,
+            _: i64,
+        ) -> Result<hyperion_types::Web2faEnrollment, RpcError> {
+            Ok(hyperion_types::Web2faEnrollment {
+                secret_base32: String::new(),
+                otpauth_url: String::new(),
+                backup_codes: vec![],
+            })
+        }
+        async fn web_2fa_confirm_enroll(&self, _: i64, _: String) -> Result<bool, RpcError> {
+            Ok(false)
+        }
+        async fn web_2fa_disable(&self, _: i64) -> Result<(), RpcError> {
             Ok(())
         }
         async fn stats_tick(&self) -> Result<i64, RpcError> {

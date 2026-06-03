@@ -10,6 +10,7 @@ pub mod services_health;
 pub mod settings;
 pub mod statics;
 pub mod stats;
+pub mod users;
 
 /// Uppercase first ASCII letter of `username`, or `?` if empty / non-ASCII.
 /// Used as the avatar glyph in the sidebar.

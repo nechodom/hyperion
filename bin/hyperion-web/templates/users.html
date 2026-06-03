@@ -1,0 +1,165 @@
+{% extends "base.html" %}
+{% block title %}Admin users · hyperion{% endblock %}
+{% block main %}
+<div class="page-header">
+  <div>
+    <h1>Admin users</h1>
+    <div class="subtitle">
+      Multi-user admin access · roles: super_admin · admin · operator · viewer
+    </div>
+  </div>
+</div>
+
+{% if let Some(e) = error %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">{{ e }}</div>
+  </div>
+{% endif %}
+
+{% if let Some(m) = flash %}
+  <div class="flash success">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+    <div class="flash-body">{{ m }}</div>
+  </div>
+{% endif %}
+
+<div class="card" style="margin-bottom:1rem">
+  <h2 style="margin:0 0 0.6rem">Add user</h2>
+  <form method="post" action="/admin/users" autocomplete="off"
+        style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr auto;gap:0.5rem;align-items:end">
+    <div class="field" style="margin:0">
+      <label for="new_username">Username</label>
+      <input id="new_username" name="username" type="text" required
+             placeholder="alice" pattern="[a-zA-Z0-9._-]{3,32}">
+    </div>
+    <div class="field" style="margin:0">
+      <label for="new_email">Email</label>
+      <input id="new_email" name="email" type="email" required placeholder="alice@example.cz">
+    </div>
+    <div class="field" style="margin:0">
+      <label for="new_password">Initial password</label>
+      <input id="new_password" name="password" type="text" required minlength="8"
+             placeholder="≥ 8 characters">
+    </div>
+    <div class="field" style="margin:0">
+      <label for="new_role">Role</label>
+      <select id="new_role" name="role">
+        <option value="viewer">viewer</option>
+        <option value="operator">operator</option>
+        <option value="admin">admin</option>
+        <option value="super_admin">super_admin</option>
+      </select>
+    </div>
+    <button class="btn primary" type="submit" style="height:fit-content">Create</button>
+  </form>
+  <p class="text-soft small" style="margin-top:0.4rem">
+    <strong>super_admin</strong> = all access incl. user management ·
+    <strong>admin</strong> = all except user management ·
+    <strong>operator</strong> = only assigned hostings (CRUD) ·
+    <strong>viewer</strong> = read-only on assigned hostings.
+  </p>
+</div>
+
+<div class="card no-pad-table">
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>User</th>
+          <th>Role</th>
+          <th>2FA</th>
+          <th>Status</th>
+          <th>Last login</th>
+          <th class="right">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for u in users %}
+        <tr>
+          <td>
+            <strong>{{ u.username }}</strong>
+            <div class="text-soft small">{{ u.email }}</div>
+          </td>
+          <td>
+            <form method="post" action="/admin/users/role" style="display:inline-flex;gap:0.4rem;align-items:center">
+              <input type="hidden" name="user_id" value="{{ u.id }}">
+              <select name="role">
+                <option value="viewer" {% if u.role == "viewer" %}selected{% endif %}>viewer</option>
+                <option value="operator" {% if u.role == "operator" %}selected{% endif %}>operator</option>
+                <option value="admin" {% if u.role == "admin" %}selected{% endif %}>admin</option>
+                <option value="super_admin" {% if u.role == "super_admin" %}selected{% endif %}>super_admin</option>
+              </select>
+              <button type="submit" class="btn small">Set</button>
+            </form>
+          </td>
+          <td>
+            {% if u.totp_enrolled %}
+              <span class="pill ok small">enrolled</span>
+            {% else if u.totp_required %}
+              <span class="pill warn small">required, not set</span>
+            {% else %}
+              <span class="text-soft">—</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if u.locked %}
+              <span class="pill err small">locked</span>
+              {% if let Some(r) = u.locked_reason %}
+                <div class="text-soft small">{{ r }}</div>
+              {% endif %}
+            {% else %}
+              <span class="pill ok small">active</span>
+            {% endif %}
+          </td>
+          <td class="text-soft small">
+            {% if let Some(t) = u.last_login_at %}
+              {{ crate::handlers::stats::fmt_ago(t) }}
+            {% else %}
+              never
+            {% endif %}
+          </td>
+          <td class="right">
+            <details>
+              <summary class="btn small ghost" style="cursor:pointer">Actions</summary>
+              <div style="display:flex;flex-direction:column;gap:0.4rem;margin-top:0.4rem;align-items:flex-end">
+                <form method="post" action="/admin/users/lock" style="display:flex;gap:0.3rem;align-items:center">
+                  <input type="hidden" name="user_id" value="{{ u.id }}">
+                  {% if u.locked %}
+                    <input type="hidden" name="locked" value="false">
+                    <button type="submit" class="btn small">Unlock</button>
+                  {% else %}
+                    <input type="hidden" name="locked" value="true">
+                    <input name="reason" placeholder="reason" style="width:8rem;margin:0">
+                    <button type="submit" class="btn small">Lock</button>
+                  {% endif %}
+                </form>
+                <form method="post" action="/admin/users/password" autocomplete="off"
+                      onsubmit="return confirm('Reset password for this user?');"
+                      style="display:flex;gap:0.3rem;align-items:center">
+                  <input type="hidden" name="user_id" value="{{ u.id }}">
+                  <input name="new_password" type="text" placeholder="new password" minlength="8" required style="width:10rem;margin:0">
+                  <button type="submit" class="btn small">Reset</button>
+                </form>
+                <form method="post" action="/admin/users/delete"
+                      onsubmit="return confirm('Delete this user? This cannot be undone.');"
+                      style="display:inline">
+                  <input type="hidden" name="user_id" value="{{ u.id }}">
+                  <button type="submit" class="btn small danger">Delete</button>
+                </form>
+              </div>
+            </details>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<p class="text-soft small" style="margin-top:1rem">
+  2FA enrollment + per-web access (operator/viewer scopes) come in
+  follow-up commits. For now operators/viewers see all hostings; the
+  role itself locks out write operations.
+</p>
+{% endblock %}

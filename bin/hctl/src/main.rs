@@ -663,6 +663,65 @@ fn print_pretty(resp: &Response) {
         Response::EmailSendTest => {
             println!("test email sent");
         }
+        Response::WebLogin(r) => match r {
+            hyperion_types::WebLoginResult::Ok { user_id, username, role, .. } => {
+                println!("login ok: id={user_id} user={username} role={role}");
+            }
+            hyperion_types::WebLoginResult::NeedsTotp { user_id, username } => {
+                println!("needs 2FA: id={user_id} user={username}");
+            }
+            hyperion_types::WebLoginResult::Invalid => {
+                println!("invalid credentials");
+            }
+            hyperion_types::WebLoginResult::Locked { reason } => {
+                println!("locked: {reason}");
+            }
+        },
+        Response::WebVerify2fa(r) => match r {
+            hyperion_types::WebVerify2faResult::Ok { user_id, username, .. } => {
+                println!("2FA ok: id={user_id} user={username}");
+            }
+            hyperion_types::WebVerify2faResult::Invalid => {
+                println!("2FA invalid");
+            }
+        },
+        Response::WebUserList(users) => {
+            println!("{} users:", users.len());
+            for u in users {
+                println!(
+                    "  id={} {} <{}> role={}{}{}",
+                    u.id, u.username, u.email, u.role,
+                    if u.totp_enrolled { " 2FA✓" } else { "" },
+                    if u.locked { " LOCKED" } else { "" }
+                );
+            }
+        }
+        Response::WebUserGet(Some(u)) => {
+            println!("user id={} {} <{}> role={}", u.id, u.username, u.email, u.role);
+        }
+        Response::WebUserGet(None) => {
+            println!("user not found");
+        }
+        Response::WebUserCreate { id } => {
+            println!("user created: id={id}");
+        }
+        Response::WebUserSetPassword => println!("password set"),
+        Response::WebUserSetRole => println!("role set"),
+        Response::WebUserSetLocked => println!("lock state changed"),
+        Response::WebUserDelete => println!("user deleted"),
+        Response::Web2faEnrollStart(e) => {
+            println!("2FA enrollment started:");
+            println!("  secret: {}", e.secret_base32);
+            println!("  url:    {}", e.otpauth_url);
+            println!("  backup codes (save NOW):");
+            for c in &e.backup_codes {
+                println!("    {}", c);
+            }
+        }
+        Response::Web2faConfirmEnroll { ok } => {
+            println!("2FA enrollment {}", if *ok { "confirmed" } else { "rejected" });
+        }
+        Response::Web2faDisable => println!("2FA disabled"),
     }
 }
 

@@ -2928,6 +2928,462 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(())
     }
 
+    // ════════════════════════════════════════════════════════════
+    //  Web users / roles / TOTP 2FA / invites
+    // ════════════════════════════════════════════════════════════
+
+    /// Username + password authentication. Doesn't mint a session
+    /// (web binary owns the cookie signer). Tracks failed attempts +
+    /// auto-locks after `WEB_LOGIN_MAX_FAILS` consecutive misses.
+    pub async fn web_login(
+        &self,
+        username: String,
+        password: String,
+        client_ip: Option<String>,
+    ) -> Result<hyperion_types::WebLoginResult, RpcError> {
+        const WEB_LOGIN_MAX_FAILS: i64 = 10;
+        let user = match hyperion_state::web_users::get_by_username(&self.pool, username.trim())
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("get user: {e}")))?
+        {
+            Some(u) => u,
+            None => {
+                // Don't reveal whether the username exists.
+                return Ok(hyperion_types::WebLoginResult::Invalid);
+            }
+        };
+        if user.locked {
+            return Ok(hyperion_types::WebLoginResult::Locked {
+                reason: user.locked_reason.unwrap_or_else(|| "account locked".into()),
+            });
+        }
+        // Verify the password (constant-time via argon2).
+        let ok = hyperion_auth::verify_password(&password, &user.password_hash)
+            .map_err(|e| RpcError::Internal_with(format!("verify: {e}")))?;
+        if !ok {
+            let n = hyperion_state::web_users::record_failed_login(&self.pool, user.id, now_secs())
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("track failed: {e}")))?;
+            if n >= WEB_LOGIN_MAX_FAILS {
+                let _ = hyperion_state::web_users::set_locked(
+                    &self.pool,
+                    user.id,
+                    true,
+                    Some("too many failed login attempts"),
+                    now_secs(),
+                )
+                .await;
+                self.append_audit(
+                    "web.user.locked",
+                    None,
+                    &serde_json::json!({"user_id": user.id, "reason": "failed_logins"})
+                        .to_string(),
+                    "ok",
+                )
+                .await;
+            }
+            self.append_audit(
+                "web.login.failed",
+                None,
+                &serde_json::json!({
+                    "username": user.username,
+                    "ip": client_ip,
+                    "failed_count": n,
+                })
+                .to_string(),
+                "failed",
+            )
+            .await;
+            return Ok(hyperion_types::WebLoginResult::Invalid);
+        }
+        // Password OK. If 2FA enrolled, ask for TOTP.
+        if user.is_2fa_enrolled() {
+            return Ok(hyperion_types::WebLoginResult::NeedsTotp {
+                user_id: user.id,
+                username: user.username,
+            });
+        }
+        // No 2FA — record the login, return Ok.
+        hyperion_state::web_users::record_login(
+            &self.pool,
+            user.id,
+            client_ip.as_deref(),
+            now_secs(),
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("record login: {e}")))?;
+        self.append_audit(
+            "web.login.ok",
+            None,
+            &serde_json::json!({"user_id": user.id, "ip": client_ip}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(hyperion_types::WebLoginResult::Ok {
+            user_id: user.id,
+            username: user.username,
+            email: user.email,
+            role: user.role.as_str().to_string(),
+        })
+    }
+
+    /// Step 2 of a 2FA-required login: verify either a 6-digit TOTP
+    /// code or a 9-char (XXXX-XXXX) backup code. On TOTP success, the
+    /// code is accepted within ±30s of clock skew (RFC 6238). On
+    /// backup-code success the code is marked used (one-shot).
+    pub async fn web_verify_2fa(
+        &self,
+        user_id: i64,
+        code: String,
+    ) -> Result<hyperion_types::WebVerify2faResult, RpcError> {
+        let user = match hyperion_state::web_users::get_by_id(&self.pool, user_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("get user: {e}")))?
+        {
+            Some(u) => u,
+            None => return Ok(hyperion_types::WebVerify2faResult::Invalid),
+        };
+        if user.locked || !user.is_2fa_enrolled() {
+            return Ok(hyperion_types::WebVerify2faResult::Invalid);
+        }
+        let trimmed = code.trim();
+        // Heuristic: 6 digits = TOTP, otherwise backup code.
+        let is_totp = trimmed.len() == 6 && trimmed.chars().all(|c| c.is_ascii_digit());
+        let accepted = if is_totp {
+            let secret = user
+                .totp_secret_base32
+                .as_deref()
+                .ok_or_else(|| RpcError::Internal_with("missing totp secret".into()))?;
+            hyperion_auth::verify_code(secret, trimmed)
+                .map_err(|e| RpcError::Internal_with(format!("totp verify: {e}")))?
+        } else {
+            // Backup code path.
+            let h = hyperion_auth::hash_backup_code(trimmed);
+            hyperion_state::web_users::consume_backup_code(&self.pool, user.id, &h, now_secs())
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("consume backup: {e}")))?
+        };
+        if !accepted {
+            self.append_audit(
+                "web.login.2fa_failed",
+                None,
+                &serde_json::json!({"user_id": user.id, "via": if is_totp {"totp"} else {"backup_code"}})
+                    .to_string(),
+                "failed",
+            )
+            .await;
+            return Ok(hyperion_types::WebVerify2faResult::Invalid);
+        }
+        hyperion_state::web_users::record_login(&self.pool, user.id, None, now_secs())
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("record login: {e}")))?;
+        self.append_audit(
+            "web.login.2fa_ok",
+            None,
+            &serde_json::json!({"user_id": user.id, "via": if is_totp {"totp"} else {"backup_code"}})
+                .to_string(),
+            "ok",
+        )
+        .await;
+        Ok(hyperion_types::WebVerify2faResult::Ok {
+            user_id: user.id,
+            username: user.username,
+            email: user.email,
+            role: user.role.as_str().to_string(),
+        })
+    }
+
+    pub async fn web_user_list(&self) -> Result<Vec<hyperion_types::WebUserSummary>, RpcError> {
+        let rows = hyperion_state::web_users::list(&self.pool)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("list: {e}")))?;
+        Ok(rows.into_iter().map(row_to_summary).collect())
+    }
+
+    pub async fn web_user_get(
+        &self,
+        id: i64,
+    ) -> Result<Option<hyperion_types::WebUserSummary>, RpcError> {
+        let row = hyperion_state::web_users::get_by_id(&self.pool, id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("get: {e}")))?;
+        Ok(row.map(row_to_summary))
+    }
+
+    pub async fn web_user_create(
+        &self,
+        username: String,
+        email: String,
+        password: String,
+        role: String,
+    ) -> Result<i64, RpcError> {
+        let username = username.trim();
+        let email = email.trim();
+        if username.is_empty() || email.is_empty() {
+            return Err(RpcError::Validation {
+                message: "username and email are required".into(),
+            });
+        }
+        if !email.contains('@') {
+            return Err(RpcError::Validation {
+                message: "email must contain '@'".into(),
+            });
+        }
+        if password.len() < 8 {
+            return Err(RpcError::Validation {
+                message: "password must be at least 8 characters".into(),
+            });
+        }
+        let role: hyperion_state::web_users::WebRole = role.parse().map_err(|e: String| {
+            RpcError::Validation { message: e }
+        })?;
+        let phc = hyperion_auth::hash_password(&password)
+            .map_err(|e| RpcError::Internal_with(format!("hash: {e}")))?;
+        let id = hyperion_state::web_users::insert(
+            &self.pool,
+            &hyperion_state::web_users::NewWebUser {
+                username,
+                email,
+                password_hash: &phc,
+                role,
+            },
+            now_secs(),
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("insert: {e}")))?;
+        self.append_audit(
+            "web.user.create",
+            None,
+            &serde_json::json!({"id": id, "username": username, "role": role.as_str()})
+                .to_string(),
+            "ok",
+        )
+        .await;
+        Ok(id)
+    }
+
+    pub async fn web_user_set_password(
+        &self,
+        user_id: i64,
+        new_password: String,
+    ) -> Result<(), RpcError> {
+        if new_password.len() < 8 {
+            return Err(RpcError::Validation {
+                message: "password must be at least 8 characters".into(),
+            });
+        }
+        let phc = hyperion_auth::hash_password(&new_password)
+            .map_err(|e| RpcError::Internal_with(format!("hash: {e}")))?;
+        hyperion_state::web_users::set_password_hash(&self.pool, user_id, &phc, now_secs())
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("set: {e}")))?;
+        self.append_audit(
+            "web.user.password_set",
+            None,
+            &serde_json::json!({"user_id": user_id}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
+    pub async fn web_user_set_role(&self, user_id: i64, role: String) -> Result<(), RpcError> {
+        let parsed: hyperion_state::web_users::WebRole = role.parse().map_err(|e: String| {
+            RpcError::Validation { message: e }
+        })?;
+        // Refuse to demote the last super_admin.
+        if !parsed.can_manage_users() {
+            self.guard_last_super_admin(user_id).await?;
+        }
+        hyperion_state::web_users::set_role(&self.pool, user_id, parsed, now_secs())
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("set role: {e}")))?;
+        self.append_audit(
+            "web.user.role_set",
+            None,
+            &serde_json::json!({"user_id": user_id, "role": parsed.as_str()}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
+    pub async fn web_user_set_locked(
+        &self,
+        user_id: i64,
+        locked: bool,
+        reason: Option<String>,
+    ) -> Result<(), RpcError> {
+        if locked {
+            // Refuse to lock the last super_admin.
+            self.guard_last_super_admin(user_id).await?;
+        }
+        hyperion_state::web_users::set_locked(
+            &self.pool,
+            user_id,
+            locked,
+            reason.as_deref(),
+            now_secs(),
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("lock: {e}")))?;
+        self.append_audit(
+            if locked { "web.user.locked" } else { "web.user.unlocked" },
+            None,
+            &serde_json::json!({"user_id": user_id, "reason": reason}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
+    pub async fn web_user_delete(&self, user_id: i64) -> Result<(), RpcError> {
+        self.guard_last_super_admin(user_id).await?;
+        let removed = hyperion_state::web_users::delete(&self.pool, user_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("delete: {e}")))?;
+        if removed == 0 {
+            return Err(RpcError::NotFound {
+                kind: "web_user".into(),
+                id: user_id.to_string(),
+            });
+        }
+        self.append_audit(
+            "web.user.delete",
+            None,
+            &serde_json::json!({"user_id": user_id}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
+    /// Refuse the operation if `user_id` is the **last** super_admin in
+    /// the cluster. Without this guard the operator could lock
+    /// themselves out — and there's no recovery without DB hand-edit.
+    async fn guard_last_super_admin(&self, user_id: i64) -> Result<(), RpcError> {
+        let target = hyperion_state::web_users::get_by_id(&self.pool, user_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("guard: {e}")))?;
+        let Some(target) = target else { return Ok(()) };
+        if !matches!(target.role, hyperion_state::web_users::WebRole::SuperAdmin) {
+            return Ok(());
+        }
+        let users = hyperion_state::web_users::list(&self.pool)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("guard list: {e}")))?;
+        let super_admins = users
+            .iter()
+            .filter(|u| matches!(u.role, hyperion_state::web_users::WebRole::SuperAdmin) && !u.locked)
+            .count();
+        if super_admins <= 1 {
+            return Err(RpcError::Validation {
+                message: "refusing — this would leave the cluster with no active super_admin"
+                    .into(),
+            });
+        }
+        Ok(())
+    }
+
+    pub async fn web_2fa_enroll_start(
+        &self,
+        user_id: i64,
+    ) -> Result<hyperion_types::Web2faEnrollment, RpcError> {
+        let user = hyperion_state::web_users::get_by_id(&self.pool, user_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("get: {e}")))?
+            .ok_or_else(|| RpcError::NotFound {
+                kind: "web_user".into(),
+                id: user_id.to_string(),
+            })?;
+        let secret = hyperion_auth::generate_secret_base32();
+        let issuer = "Hyperion";
+        let url = hyperion_auth::otpauth_url(issuer, &user.username, &secret);
+        // 10 backup codes is the industry default.
+        let (plain, hashes) = hyperion_auth::generate_backup_codes(10);
+        // Persist the (still-pending) secret + hashes. enrolled_at stays None.
+        hyperion_state::web_users::set_totp(&self.pool, user_id, Some(&secret), None, now_secs())
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("set totp: {e}")))?;
+        hyperion_state::web_users::insert_backup_codes(&self.pool, user_id, &hashes, now_secs())
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("insert codes: {e}")))?;
+        self.append_audit(
+            "web.user.2fa_enroll_start",
+            None,
+            &serde_json::json!({"user_id": user_id}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(hyperion_types::Web2faEnrollment {
+            secret_base32: secret,
+            otpauth_url: url,
+            backup_codes: plain,
+        })
+    }
+
+    pub async fn web_2fa_confirm_enroll(
+        &self,
+        user_id: i64,
+        code: String,
+    ) -> Result<bool, RpcError> {
+        let user = hyperion_state::web_users::get_by_id(&self.pool, user_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("get: {e}")))?
+            .ok_or_else(|| RpcError::NotFound {
+                kind: "web_user".into(),
+                id: user_id.to_string(),
+            })?;
+        let secret = user
+            .totp_secret_base32
+            .as_deref()
+            .ok_or_else(|| RpcError::Validation {
+                message: "no pending 2FA enrollment".into(),
+            })?;
+        let ok = hyperion_auth::verify_code(secret, code.trim())
+            .map_err(|e| RpcError::Validation {
+                message: format!("invalid code: {e}"),
+            })?;
+        if !ok {
+            return Ok(false);
+        }
+        hyperion_state::web_users::set_totp(
+            &self.pool,
+            user_id,
+            Some(secret),
+            Some(now_secs()),
+            now_secs(),
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("confirm: {e}")))?;
+        self.append_audit(
+            "web.user.2fa_enrolled",
+            None,
+            &serde_json::json!({"user_id": user_id}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(true)
+    }
+
+    pub async fn web_2fa_disable(&self, user_id: i64) -> Result<(), RpcError> {
+        hyperion_state::web_users::set_totp(&self.pool, user_id, None, None, now_secs())
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("disable: {e}")))?;
+        // Wipe backup codes too.
+        hyperion_state::web_users::insert_backup_codes(&self.pool, user_id, &[], now_secs())
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("wipe codes: {e}")))?;
+        self.append_audit(
+            "web.user.2fa_disabled",
+            None,
+            &serde_json::json!({"user_id": user_id}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
     /// Sanitised view of the agent's effective config — no secrets.
     /// Reads from the live `HostingService` state (which mirrors
     /// agent.toml as loaded at startup). For values stored on
@@ -3726,6 +4182,21 @@ async fn read_proc_metrics() -> (i64, i64, i64, i64) {
         .unwrap_or(0);
 
     (la_1m, mem_total, mem_used, uptime)
+}
+
+fn row_to_summary(u: hyperion_state::web_users::WebUserRow) -> hyperion_types::WebUserSummary {
+    hyperion_types::WebUserSummary {
+        id: u.id,
+        username: u.username,
+        email: u.email,
+        role: u.role.as_str().to_string(),
+        totp_enrolled: u.totp_enrolled_at.is_some(),
+        totp_required: u.totp_required,
+        locked: u.locked,
+        locked_reason: u.locked_reason,
+        last_login_at: u.last_login_at,
+        created_at: u.created_at,
+    }
 }
 
 fn run_to_wire(r: hyperion_state::backups::BackupRun) -> hyperion_types::BackupRunWire {

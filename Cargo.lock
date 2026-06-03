@@ -1370,6 +1370,7 @@ dependencies = [
  "chrono",
  "hex",
  "hyperion-adapters",
+ "hyperion-auth",
  "hyperion-rpc",
  "hyperion-state",
  "hyperion-types",

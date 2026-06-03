@@ -125,34 +125,142 @@ pub async fn post_login(
         )
             .into_response());
     }
+
+    // Try the agent's web_users table first via RPC. On a fresh install
+    // it's empty — in that case we fall back to the bootstrap
+    // /etc/hyperion/web-admin.json user AND seed it into the DB so
+    // subsequent logins use the multi-user path.
+    let users_list = hyperion_rpc_client::call(
+        &state.agent_socket,
+        hyperion_rpc::codec::Request::WebUserList,
+    )
+    .await;
+    let db_has_users = matches!(
+        &users_list,
+        Ok(hyperion_rpc::codec::Response::WebUserList(v)) if !v.is_empty()
+    );
+
+    if db_has_users {
+        return post_login_via_rpc(state, &ip, form).await;
+    }
+    // Bootstrap path: verify against the JSON file, then seed.
+    post_login_bootstrap(state, &ip, form).await
+}
+
+async fn post_login_via_rpc(
+    state: SharedState,
+    ip: &str,
+    form: LoginForm,
+) -> Result<Response, AppError> {
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        hyperion_rpc::codec::Request::WebLogin {
+            username: form.username.clone(),
+            password: form.password.clone(),
+            client_ip: Some(ip.to_string()),
+        },
+    )
+    .await
+    .map_err(AppError::from)?;
+    match resp {
+        hyperion_rpc::codec::Response::WebLogin(result) => match result {
+            hyperion_types::WebLoginResult::Ok { user_id, username, role, .. } => {
+                clear_throttle(ip);
+                mint_session_redirect(&state, user_id, username, role, &form.next)
+            }
+            hyperion_types::WebLoginResult::NeedsTotp { .. } => {
+                // 2FA prompt not implemented in the UI yet — surface a
+                // clear error. Operator can disable 2FA via hctl until
+                // the /login/2fa page ships.
+                Ok(Redirect::to("/login?error=2fa_required").into_response())
+            }
+            hyperion_types::WebLoginResult::Locked { reason: _ } => {
+                Ok(Redirect::to("/login?error=locked").into_response())
+            }
+            hyperion_types::WebLoginResult::Invalid => {
+                record_failure(ip);
+                Ok(login_failed(&form.next))
+            }
+        },
+        hyperion_rpc::codec::Response::Error(e) => Err(AppError::Rpc(e.to_string())),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+async fn post_login_bootstrap(
+    state: SharedState,
+    ip: &str,
+    form: LoginForm,
+) -> Result<Response, AppError> {
+    // Verify against the on-disk single-admin JSON file.
     let user = state.admin_user.clone();
     if !subtle_eq(&form.username, &user.username) {
-        record_failure(&ip);
+        record_failure(ip);
         return Ok(login_failed(&form.next));
     }
     let ok =
         admin_user::verify(&user, &form.password).map_err(|e| AppError::Internal(e.to_string()))?;
     if !ok {
-        record_failure(&ip);
+        record_failure(ip);
         return Ok(login_failed(&form.next));
     }
-    clear_throttle(&ip);
-    // Mint a session.
+    clear_throttle(ip);
+    // Seed the DB with this bootstrap user as super_admin. If the seed
+    // fails we still let them log in (so they're not locked out) — the
+    // next login attempt will try again.
+    let seed = hyperion_rpc_client::call(
+        &state.agent_socket,
+        hyperion_rpc::codec::Request::WebUserCreate {
+            username: form.username.clone(),
+            email: format!("{}@bootstrap.local", form.username),
+            password: form.password.clone(),
+            role: "super_admin".into(),
+        },
+    )
+    .await;
+    if let Ok(hyperion_rpc::codec::Response::WebUserCreate { id }) = seed {
+        return mint_session_redirect(
+            &state,
+            id,
+            form.username.clone(),
+            "super_admin".into(),
+            &form.next,
+        );
+    }
+    // Couldn't seed — issue a session under the legacy id anyway.
+    mint_session_redirect(
+        &state,
+        user.id,
+        user.username.clone(),
+        "super_admin".into(),
+        &form.next,
+    )
+}
+
+fn mint_session_redirect(
+    state: &SharedState,
+    user_id: i64,
+    username: String,
+    role: String,
+    next: &str,
+) -> Result<Response, AppError> {
     let now = hyperion_types::now_secs();
     let sid = ulid::Ulid::new().to_string();
     let session = Session {
         sid,
-        user_id: user.id,
+        user_id,
         created_at: now,
         expires_at: now + state.session_ttl(),
+        username,
+        role,
     };
     let token = state
         .session
         .sign(&session)
         .map_err(|e| AppError::Internal(e.to_string()))?;
     let mut headers = HeaderMap::new();
-    headers.insert(header::SET_COOKIE, set_cookie(&state, &token));
-    let dest = redirect_target(&form.next);
+    headers.insert(header::SET_COOKIE, set_cookie(state, &token));
+    let dest = redirect_target(next);
     let mut resp = Redirect::to(dest).into_response();
     resp.headers_mut().extend(headers);
     Ok(resp)

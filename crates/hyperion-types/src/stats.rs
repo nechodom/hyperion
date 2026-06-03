@@ -211,6 +211,75 @@ pub struct BackupRetentionConfigView {
     pub keep_latest_n: i64,
 }
 
+/// Sanitised wire shape of one row of `web_users`. NEVER includes the
+/// password hash or the TOTP secret — those stay on the agent. Booleans
+/// `totp_enrolled` and `totp_required` are enough for the UI.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WebUserSummary {
+    pub id: i64,
+    pub username: String,
+    pub email: String,
+    /// "super_admin" | "admin" | "operator" | "viewer"
+    pub role: String,
+    pub totp_enrolled: bool,
+    pub totp_required: bool,
+    pub locked: bool,
+    pub locked_reason: Option<String>,
+    pub last_login_at: Option<i64>,
+    pub created_at: i64,
+}
+
+/// Outcome of a `Request::WebLogin` call. Web binary uses this to decide
+/// whether to mint a session immediately, prompt for 2FA, or surface
+/// a clean error.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum WebLoginResult {
+    /// Password matches + user has no 2FA. Web can mint a session.
+    Ok {
+        user_id: i64,
+        username: String,
+        email: String,
+        role: String,
+    },
+    /// Password matches but user has 2FA enrolled — prompt for TOTP.
+    /// Web should stash `user_id` in a short-lived signed cookie and
+    /// require a second POST with the TOTP code.
+    NeedsTotp {
+        user_id: i64,
+        username: String,
+    },
+    /// Password doesn't match (or user doesn't exist). We do NOT
+    /// distinguish "no such user" from "wrong password" to avoid
+    /// account-enumeration.
+    Invalid,
+    /// User is locked. `reason` is shown to the user verbatim.
+    Locked {
+        reason: String,
+    },
+}
+
+/// Outcome of `Request::WebVerify2fa` — accept the TOTP code.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum WebVerify2faResult {
+    Ok {
+        user_id: i64,
+        username: String,
+        email: String,
+        role: String,
+    },
+    Invalid,
+}
+
+/// Output of `Request::Web2faEnroll` — only returned ONCE; web shows
+/// the secret + QR + backup codes to the operator and they must scan
+/// + save before confirming.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Web2faEnrollment {
+    pub secret_base32: String,
+    pub otpauth_url: String,
+    pub backup_codes: Vec<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

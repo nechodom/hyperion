@@ -246,6 +246,74 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.email_send_test(to).await
     }
 
+    // --- web users ---
+    async fn web_login(
+        &self,
+        username: String,
+        password: String,
+        client_ip: Option<String>,
+    ) -> Result<hyperion_types::WebLoginResult, RpcError> {
+        self.svc.web_login(username, password, client_ip).await
+    }
+    async fn web_verify_2fa(
+        &self,
+        user_id: i64,
+        code: String,
+    ) -> Result<hyperion_types::WebVerify2faResult, RpcError> {
+        self.svc.web_verify_2fa(user_id, code).await
+    }
+    async fn web_user_list(&self) -> Result<Vec<hyperion_types::WebUserSummary>, RpcError> {
+        self.svc.web_user_list().await
+    }
+    async fn web_user_get(
+        &self,
+        id: i64,
+    ) -> Result<Option<hyperion_types::WebUserSummary>, RpcError> {
+        self.svc.web_user_get(id).await
+    }
+    async fn web_user_create(
+        &self,
+        username: String,
+        email: String,
+        password: String,
+        role: String,
+    ) -> Result<i64, RpcError> {
+        self.svc.web_user_create(username, email, password, role).await
+    }
+    async fn web_user_set_password(
+        &self,
+        user_id: i64,
+        new_password: String,
+    ) -> Result<(), RpcError> {
+        self.svc.web_user_set_password(user_id, new_password).await
+    }
+    async fn web_user_set_role(&self, user_id: i64, role: String) -> Result<(), RpcError> {
+        self.svc.web_user_set_role(user_id, role).await
+    }
+    async fn web_user_set_locked(
+        &self,
+        user_id: i64,
+        locked: bool,
+        reason: Option<String>,
+    ) -> Result<(), RpcError> {
+        self.svc.web_user_set_locked(user_id, locked, reason).await
+    }
+    async fn web_user_delete(&self, user_id: i64) -> Result<(), RpcError> {
+        self.svc.web_user_delete(user_id).await
+    }
+    async fn web_2fa_enroll_start(
+        &self,
+        user_id: i64,
+    ) -> Result<hyperion_types::Web2faEnrollment, RpcError> {
+        self.svc.web_2fa_enroll_start(user_id).await
+    }
+    async fn web_2fa_confirm_enroll(&self, user_id: i64, code: String) -> Result<bool, RpcError> {
+        self.svc.web_2fa_confirm_enroll(user_id, code).await
+    }
+    async fn web_2fa_disable(&self, user_id: i64) -> Result<(), RpcError> {
+        self.svc.web_2fa_disable(user_id).await
+    }
+
     async fn stats_tick(&self) -> Result<i64, RpcError> {
         self.svc.stats_tick().await
     }

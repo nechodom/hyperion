@@ -100,6 +100,15 @@ pub fn build_router(state: SharedState) -> Router {
             "/settings/email-test",
             post(handlers::settings::post_email_test),
         )
+        .route("/admin/users", get(handlers::users::get_users))
+        .route("/admin/users", post(handlers::users::post_create))
+        .route("/admin/users/role", post(handlers::users::post_set_role))
+        .route("/admin/users/lock", post(handlers::users::post_lock))
+        .route("/admin/users/delete", post(handlers::users::post_delete))
+        .route(
+            "/admin/users/password",
+            post(handlers::users::post_reset_password),
+        )
         .route(
             "/hostings/dns-check-domain",
             post(handlers::hostings::post_dns_check_domain),

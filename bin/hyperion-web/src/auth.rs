@@ -21,6 +21,24 @@ impl AuthCtx {
     pub fn is_authenticated(&self) -> bool {
         self.session.is_some()
     }
+
+    /// Role string from the session, or "viewer" if unauthenticated.
+    /// Used by handlers to short-circuit write operations.
+    pub fn role(&self) -> &str {
+        self.session.as_ref().map(|s| s.role.as_str()).unwrap_or("viewer")
+    }
+
+    pub fn is_super_admin(&self) -> bool {
+        self.session.as_ref().map(|s| s.is_super_admin()).unwrap_or(false)
+    }
+
+    pub fn is_admin_or_higher(&self) -> bool {
+        self.session.as_ref().map(|s| s.is_admin_or_higher()).unwrap_or(false)
+    }
+
+    pub fn is_read_only(&self) -> bool {
+        self.session.as_ref().map(|s| s.is_read_only()).unwrap_or(true)
+    }
 }
 
 #[async_trait::async_trait]
@@ -69,24 +87,35 @@ fn extract_auth(parts: &mut Parts, state: &SharedState) -> AuthCtx {
                 None
             }
         });
-    let username = state.admin_user.username.clone();
+    let fallback_username = state.admin_user.username.clone();
     match token {
         Some(t) => {
             let now = hyperion_types::now_secs();
             match state.session.verify(&t, now) {
-                Ok(s) => AuthCtx {
-                    session: Some(s),
-                    username,
-                },
+                Ok(s) => {
+                    // Prefer the username embedded in the session
+                    // (multi-user era). Old sessions from before
+                    // multi-user have an empty string here — fall back
+                    // to the bootstrap admin user.
+                    let username = if s.username.is_empty() {
+                        fallback_username
+                    } else {
+                        s.username.clone()
+                    };
+                    AuthCtx {
+                        session: Some(s),
+                        username,
+                    }
+                }
                 Err(_) => AuthCtx {
                     session: None,
-                    username,
+                    username: fallback_username,
                 },
             }
         }
         None => AuthCtx {
             session: None,
-            username,
+            username: fallback_username,
         },
     }
 }

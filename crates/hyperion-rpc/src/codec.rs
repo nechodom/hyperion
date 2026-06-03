@@ -128,6 +128,76 @@ pub enum Request {
     EmailSendTest {
         to: String,
     },
+
+    // ─── Web users / roles / 2FA ───────────────────────────────
+    /// Verify a username + password. Does NOT mint a session — the web
+    /// binary keeps its own session signer. Returns enough info for web
+    /// to either mint a session or prompt for 2FA / show locked state.
+    WebLogin {
+        username: String,
+        password: String,
+        client_ip: Option<String>,
+    },
+    /// Second step of a 2FA-required login. `user_id` comes from a
+    /// prior `WebLogin → NeedsTotp`. `code` is either the 6-digit TOTP
+    /// or a backup code (the agent disambiguates by length).
+    WebVerify2fa {
+        user_id: i64,
+        code: String,
+    },
+    /// List all web users (super_admin only — web enforces).
+    WebUserList,
+    /// Get one user's sanitised summary by id.
+    WebUserGet {
+        id: i64,
+    },
+    /// Create a new user directly (without invite). super_admin only.
+    /// Returns the new user id.
+    WebUserCreate {
+        username: String,
+        email: String,
+        password: String,
+        role: String,
+    },
+    /// Force-set a user's password (admin reset). super_admin only.
+    WebUserSetPassword {
+        user_id: i64,
+        new_password: String,
+    },
+    /// Change role. super_admin only.
+    WebUserSetRole {
+        user_id: i64,
+        role: String,
+    },
+    /// Lock / unlock a user. super_admin only.
+    WebUserSetLocked {
+        user_id: i64,
+        locked: bool,
+        reason: Option<String>,
+    },
+    /// Delete a user. super_admin only. Refuses to delete the last
+    /// super_admin to prevent locking out the cluster.
+    WebUserDelete {
+        user_id: i64,
+    },
+    /// Start TOTP 2FA enrollment for `user_id` — returns secret + URL +
+    /// fresh backup codes. The secret is stored on the user record but
+    /// `totp_enrolled_at` stays NULL until `Web2faConfirmEnroll`.
+    Web2faEnrollStart {
+        user_id: i64,
+    },
+    /// Confirm enrollment with the first TOTP code. Flips
+    /// `totp_enrolled_at` on success.
+    Web2faConfirmEnroll {
+        user_id: i64,
+        code: String,
+    },
+    /// Disable 2FA on a user (admin override OR self-disable). Clears
+    /// the secret + enrollment marker + backup codes.
+    Web2faDisable {
+        user_id: i64,
+    },
+
     StatsTick,
     BackupRestore {
         sel: HostingSelector,
@@ -225,6 +295,19 @@ pub enum Response {
     BackupDelete,
     AgentConfigView(hyperion_types::AgentConfigView),
     EmailSendTest,
+    // Web users / roles / 2FA
+    WebLogin(hyperion_types::WebLoginResult),
+    WebVerify2fa(hyperion_types::WebVerify2faResult),
+    WebUserList(Vec<hyperion_types::WebUserSummary>),
+    WebUserGet(Option<hyperion_types::WebUserSummary>),
+    WebUserCreate { id: i64 },
+    WebUserSetPassword,
+    WebUserSetRole,
+    WebUserSetLocked,
+    WebUserDelete,
+    Web2faEnrollStart(hyperion_types::Web2faEnrollment),
+    Web2faConfirmEnroll { ok: bool },
+    Web2faDisable,
     StatsTick { hostings_sampled: i64 },
     BackupRestore,
     HostingLogs(String),

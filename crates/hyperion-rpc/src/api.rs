@@ -135,6 +135,50 @@ pub trait AgentApi: Send + Sync + 'static {
     /// Returns Ok on a successful relay handshake + DATA accept.
     async fn email_send_test(&self, to: String) -> Result<(), RpcError>;
 
+    // Web users / roles / 2FA — see codec.rs for semantics.
+    async fn web_login(
+        &self,
+        username: String,
+        password: String,
+        client_ip: Option<String>,
+    ) -> Result<hyperion_types::WebLoginResult, RpcError>;
+    async fn web_verify_2fa(
+        &self,
+        user_id: i64,
+        code: String,
+    ) -> Result<hyperion_types::WebVerify2faResult, RpcError>;
+    async fn web_user_list(&self) -> Result<Vec<hyperion_types::WebUserSummary>, RpcError>;
+    async fn web_user_get(
+        &self,
+        id: i64,
+    ) -> Result<Option<hyperion_types::WebUserSummary>, RpcError>;
+    async fn web_user_create(
+        &self,
+        username: String,
+        email: String,
+        password: String,
+        role: String,
+    ) -> Result<i64, RpcError>;
+    async fn web_user_set_password(
+        &self,
+        user_id: i64,
+        new_password: String,
+    ) -> Result<(), RpcError>;
+    async fn web_user_set_role(&self, user_id: i64, role: String) -> Result<(), RpcError>;
+    async fn web_user_set_locked(
+        &self,
+        user_id: i64,
+        locked: bool,
+        reason: Option<String>,
+    ) -> Result<(), RpcError>;
+    async fn web_user_delete(&self, user_id: i64) -> Result<(), RpcError>;
+    async fn web_2fa_enroll_start(
+        &self,
+        user_id: i64,
+    ) -> Result<hyperion_types::Web2faEnrollment, RpcError>;
+    async fn web_2fa_confirm_enroll(&self, user_id: i64, code: String) -> Result<bool, RpcError>;
+    async fn web_2fa_disable(&self, user_id: i64) -> Result<(), RpcError>;
+
     /// Install WordPress into a hosting (downloads core, writes wp-config.php
     /// against the hosting's DB credentials, runs `wp core install`, records
     /// the result in `wp_installs`).

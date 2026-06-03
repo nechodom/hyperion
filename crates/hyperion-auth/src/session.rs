@@ -32,6 +32,34 @@ pub struct Session {
     pub user_id: i64,
     pub created_at: i64,
     pub expires_at: i64,
+    /// Username for display in the UI. Optional for backward
+    /// compatibility with sessions signed before multi-user.
+    #[serde(default)]
+    pub username: String,
+    /// Role string ("super_admin" | "admin" | "operator" | "viewer").
+    /// Sessions signed before multi-user default to "super_admin" to
+    /// preserve their existing access — they were the bootstrap admin.
+    #[serde(default = "default_role")]
+    pub role: String,
+}
+
+fn default_role() -> String {
+    "super_admin".to_string()
+}
+
+impl Session {
+    pub fn role_is(&self, role: &str) -> bool {
+        self.role == role
+    }
+    pub fn is_super_admin(&self) -> bool {
+        self.role == "super_admin"
+    }
+    pub fn is_admin_or_higher(&self) -> bool {
+        matches!(self.role.as_str(), "super_admin" | "admin")
+    }
+    pub fn is_read_only(&self) -> bool {
+        self.role == "viewer"
+    }
 }
 
 pub struct SessionSigner {
@@ -116,6 +144,8 @@ mod tests {
             user_id: 1,
             created_at: 1000,
             expires_at,
+            username: "tester".into(),
+            role: "super_admin".into(),
         }
     }
 
@@ -146,6 +176,8 @@ mod tests {
             user_id: 99,
             created_at: 1000,
             expires_at: 10_000,
+            username: "evil".into(),
+            role: "super_admin".into(),
         };
         let new_payload = serde_json::to_vec(&evil).expect("json");
         let new_token = format!("{}.{}", B64.encode(&new_payload), sig);
