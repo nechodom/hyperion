@@ -168,18 +168,42 @@
       <button type="submit" class="btn small primary">Save email section</button>
     </form>
 
+    {# Explanation panel — operators often don't know whether the
+       server can actually send mail. Plain words, no jargon. #}
+    <div class="card-section" style="margin-top:1rem;padding:0.9rem 1rem;background:var(--surface-1);border-radius:8px;border-left:3px solid var(--accent)">
+      <h3 style="font-size:0.9rem;margin:0 0 0.4rem">How outbound mail works</h3>
+      <p class="text-soft small" style="margin:0 0 0.5rem;line-height:1.55">
+        Every notification (cert expiry, backup result, monitor down/up, billing reminder) is sent through the SMTP relay configured above.
+      </p>
+      <ul class="text-soft small" style="margin:0;padding-left:1.2rem;line-height:1.65">
+        <li><strong>Relay host</strong> — a real provider (Postmark, Mailgun, SendGrid, Brevo, AWS SES, Gmail SMTP) OR a local postfix on this server that you've configured to relay outbound.
+            Direct-from-VPS sends to public mailboxes almost always land in spam — operators are strongly encouraged to use a provider.</li>
+        <li><strong>SPF</strong> — the recipient's mail server checks if your relay's IP is listed as a permitted sender for the From-address domain. Set up via a DNS TXT record on your domain.
+            Hyperion shows per-hosting SPF analysis on each hosting's detail page.</li>
+        <li><strong>From-address</strong> — must be at a domain you control AND whose SPF includes your relay. Auto-detect tries to derive a sensible default from /etc/mailname.</li>
+        <li><strong>The test email below</strong> connects to the relay, sends a one-line message, and shows the SMTP code (250 = accepted, 550 = rejected, etc.). Every send is also logged at <a href="/emails">/emails</a> with full SMTP response.</li>
+        <li><strong>From another node</strong> — pick a worker from the dropdown to verify ITS outbound path works (each node uses its own [email] section in agent.toml).</li>
+      </ul>
+    </div>
+
     {% if config.email.enabled %}
       <div class="card-section" style="margin-top:1rem">
         <h3 style="font-size:0.9rem;margin:0 0 0.5rem">Send test email</h3>
         <form method="post" action="/settings/email-test" style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
           <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+          <select name="target_node" style="margin:0;min-width:14rem">
+            <option value="local" selected>From: master (this node)</option>
+            {% for n in nodes %}
+            <option value="{{ n.node_id }}">From: {{ n.label }}{% if let Some(ip) = n.public_ip.as_ref() %} — {{ ip }}{% endif %}</option>
+            {% endfor %}
+          </select>
           <input type="email" name="to" placeholder="you@example.cz" required
                  value="{% if !config.email.default_to.is_empty() %}{{ config.email.default_to }}{% endif %}"
                  style="flex:1;min-width:15rem;margin:0">
-          <button class="btn small primary" type="submit">Send</button>
+          <button class="btn small primary" type="submit">Send test</button>
         </form>
         <p class="muted" style="font-size:0.8rem;margin-top:0.6rem;margin-bottom:0">
-          Every send (test or notification) is logged at <a href="/emails">/emails</a> — including the SMTP server's response code, so you can tell "queued" from "rejected".
+          The chosen node opens a TCP socket to its configured SMTP relay and sends the message. Result + SMTP response code appear in the flash banner.
         </p>
       </div>
 

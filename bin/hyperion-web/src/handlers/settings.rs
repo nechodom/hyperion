@@ -35,6 +35,9 @@ struct SettingsTpl<'a> {
     /// inline under the Send test button so the operator sees their
     /// test send immediately without navigating to /emails.
     recent_emails: Vec<EmailLogEntry>,
+    /// Enrolled remote nodes — drives the "From: <node>" dropdown
+    /// in the Send-test-email form. Empty on single-node setups.
+    nodes: Vec<hyperion_types::NodeSummary>,
     error: Option<String>,
     flash: Option<String>,
     flash_error: Option<String>,
@@ -86,6 +89,14 @@ pub async fn get_settings(
         Ok(RpcResponse::EmailLogList(rows)) => rows,
         _ => vec![],
     };
+    // Enrolled nodes — for the "send test from <node>" dropdown.
+    // Best-effort: NodesList failure → empty Vec → dropdown shows
+    // only the master option.
+    let nodes: Vec<hyperion_types::NodeSummary> =
+        match hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await {
+            Ok(RpcResponse::NodesList(v)) => v,
+            _ => Vec::new(),
+        };
     let update_current_short = short_sha(&update_status.current_sha);
     let update_latest_short = short_sha(&update_status.latest_sha);
     let csrf_token = super::session_csrf_token(&state, &ctx);
@@ -100,6 +111,7 @@ pub async fn get_settings(
         update_current_short,
         update_latest_short,
         recent_emails,
+        nodes,
         error,
         flash: q.flash,
         flash_error: q.flash_error,
@@ -111,6 +123,12 @@ pub async fn get_settings(
 #[derive(Deserialize)]
 pub struct EmailTestForm {
     to: String,
+    /// Which node should send the test email. Empty / "local" /
+    /// "" → master. Anything else is a node_id from /install.
+    /// Lets the operator verify that each worker's local SMTP
+    /// config (or no-config-falls-back-to-master-relay) works.
+    #[serde(default)]
+    target_node: String,
 }
 
 /// POST /settings/email-test — fires a one-off SMTP send + redirects
@@ -151,8 +169,21 @@ pub async fn post_email_test(
                 .into_response(),
         );
     }
-    let resp = hyperion_rpc_client::call(
-        &state.agent_socket,
+    // Multi-node: when an operator picks a target_node, the test
+    // dispatches via the signed RPC channel so the chosen worker
+    // does the actual SMTP send. This verifies that worker's
+    // outbound SMTP path independently from the master's.
+    let target_owned = form.target_node.trim().to_string();
+    let target = if target_owned.is_empty()
+        || target_owned == crate::dispatcher::LOCAL_NODE_SENTINEL
+    {
+        None
+    } else {
+        Some(target_owned.as_str())
+    };
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target,
         Request::EmailSendTest { to: to.clone() },
     )
     .await?;
@@ -163,7 +194,12 @@ pub async fn post_email_test(
             // queue (whether it'll be delivered is between the relay
             // and the recipient's MX). Operator can tell "queued"
             // from "rejected by relay before our test even left".
-            let msg = format!("Test email sent to {to} · SMTP response: {smtp_code} · see /emails for delivery log");
+            let node_label = if target_owned.is_empty() || target_owned == "local" {
+                "master".to_string()
+            } else {
+                target_owned.clone()
+            };
+            let msg = format!("Test email sent from {node_label} to {to} · SMTP relay said {smtp_code} · check /emails for the delivery record");
             Ok(
                 Redirect::to(&format!("/settings?flash={}", urlencode(&msg)))
                     .into_response(),
