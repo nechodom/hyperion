@@ -1,29 +1,54 @@
 # 🦅 Hyperion
 
-> A Rust-based hosting control panel for Debian 12+. Build, suspend,
-> back up, schedule expiration of WordPress / PHP / static / Node.js
-> sites — one binary, one Unix socket, one web UI. Designed for
-> agencies who host their clients.
+> A Rust hosting control panel for Debian 12+. One binary on each
+> server, one web UI on the master. Provisions PHP / static / Node.js
+> sites end-to-end (nginx + FPM pool + database + TLS), runs the
+> whole cluster from one screen, and never quietly half-creates
+> anything.
 
-[![Tests](https://img.shields.io/badge/tests-233%20passing-success)](#testing)
 [![Rust](https://img.shields.io/badge/rust-stable-orange)](#)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-blue)](#license)
 
 ---
 
-## ✨ What you get out of the box
+## What you get out of the box
 
-- 🏠 **One-command hosting CRUD** — Linux user, PHP-FPM pool, MariaDB/Postgres DB, nginx vhost, TLS cert. Atomic with LIFO rollback on failure.
-- 🌐 **PHP 8.1 / 8.2 / 8.3 / 8.4** in parallel via deb.sury.org. Static-only sites supported. Node.js stack scaffolding ready.
-- 🛡 **Suspend / resume** with cascade: 503 page, FPM stop, DB lock, login lock, kill user processes. Fully reversible.
-- 📊 **Per-pool limits** — memory, exec time, max children, DB connections — clamped before storage.
-- ⏰ **Expiration + background scheduler** — pre-expiry notifications, auto-suspend, grace window, auto-delete with safety net.
-- 💾 **Local backups** — tar.gz of htdocs + mysqldump/pg_dump + JSON manifest. Restic + SFTP/S3 targets planned.
-- 🧱 **Tamper-evident audit log** — BLAKE3 hash chain, broken-chain refusal at startup.
-- 🔐 **Auth done right** — argon2id passwords (OWASP params), Ed25519 signed cookies, CSRF tokens scoped per session+form, constant-time username compare.
-- 🖥 **Modern web UI** — axum + askama + HTMX, dark + light via `prefers-color-scheme`, zero JS build, single binary.
-- 🎟 **Multi-node enrollment** — invite tokens minted in the UI, install-node.sh one-liner with the token embedded. Plaintext shown once; only hash persisted.
-- 🦀 **`#![forbid(unsafe_code)]` everywhere.** No `shell -c`, every command is `Command::new(..).arg(..)` with regex-validated arguments.
+### Hosting
+
+- **One-click create** — Linux user, PHP-FPM pool, MariaDB or Postgres DB, nginx vhost, self-signed cert, all in one transaction. If any step fails the rollback unwinds the rest — no orphan rows, no zombie users.
+- **PHP 8.1 / 8.2 / 8.3 / 8.4** side by side via deb.sury.org. Static-only sites work too, and there's a reverse-proxy mode for Node.js / Python / containers behind nginx.
+- **Suspend / resume** — 503 page, FPM stop, DB lock, killed user processes. Fully reversible — operator can resume and the site picks up where it left off.
+- **Per-hosting limits** — PHP memory, max children, exec time, DB connections, disk hard cap, monthly bandwidth quota. Profiles let you stamp the same set onto a hundred sites in one click.
+- **Expiration + grace** — schedule notifications, auto-suspend on the due date, grace window before auto-delete. Operator can opt out per hosting.
+- **Backups** — tar.gz of htdocs + mysqldump / pg_dump + JSON manifest, kept on local disk by default. Optional push to an off-site FTP / FTPS / SFTP target after every backup. Retention policy: max age + minimum N per hosting.
+
+### Multi-node cluster
+
+- **Master + worker model.** Master holds the web UI, audit log, and enrolled-nodes registry. Workers run an agent that the master drives via a signed RPC channel (Ed25519 envelope over self-signed HTTPS on port 9443). No DNS dependency between master and workers — IP-based.
+- **Per-page node switcher.** Service health, stats, install — all pages have a "View on node:" dropdown. Picking a worker shows that worker's services and metrics, not the master's.
+- **One-click hosting migrate** master → worker. Snapshot the source, target fetches via signed URL, source gets suspended (not deleted) so you can verify before pulling the trigger. Manual-export fallback for SSH-only or off-cluster targets.
+- **Remote node update** from the master UI. Pick a worker, tick "System packages" and/or "Hyperion", click Start — apt-get + update.sh run on the worker in the background, log streams live into the panel. No more ssh-and-baby-sit.
+- **Connectivity test button** on each enrolled node. Master signs an AgentInfo envelope, posts to the worker's public IP, reports back: reachable / connection refused / signature failed. Replaces the "ssh in + curl" debug ritual.
+- **Cluster-wide stats** as the default `/stats` view. Hostings, disk, bandwidth, requests summed across the whole cluster. Drop down to a single node for per-node sparklines.
+- **Master-as-control-plane toggle** (Settings → Cluster). When on, the master refuses new hosting creates and the Target-node dropdown hides it — useful when you want a dedicated control box without tenant data.
+
+### Operator UI
+
+- **axum + askama + HTMX**, no JS build step, single binary. Dark + light themes via `prefers-color-scheme`, plus an auto toggle in the sidebar.
+- **Role-aware navigation.** Operators and viewers don't see Users / Nodes / Settings in the sidebar at all — no more click-then-403. Defense in depth: server still enforces RBAC for anyone who bypasses the JS.
+- **Themed confirm modals** for destructive actions, not the browser-native confirm() prompt that looked like a phishing dialog on macOS. Each one explains in plain words what will actually happen.
+- **Live service-install progress.** Clicking "Install" on a missing service no longer freezes the page for 5 minutes — `apt-get install` runs in the background and the log tail streams into the panel. The page also drops `-qq` from apt so when something fails you see *what* failed, not just "dpkg returned an error code 1".
+- **Per-hosting actions follow the hosting.** Suspend / delete / set-limits / backup all dispatch to the node the hosting actually lives on — the listing aggregates across master + workers and tags each row with its node.
+
+### Security
+
+- **`#![forbid(unsafe_code)]`** in every crate. No `sh -c`, every command shells out via `Command::new("/usr/bin/foo").arg(...)` with regex-validated arguments.
+- **Argon2id passwords** at OWASP-recommended parameters. **Ed25519-signed session cookies**, **per-session+form CSRF tokens** with a wildcard fallback for HTMX-driven swaps. Constant-time username comparison on login.
+- **Per-IP rate limits** on `/api/enroll`, `/api/heartbeat`, `/settings/email-test`. Token bucket per (endpoint, IP), in-process, no extra deps.
+- **Tamper-evident audit log** — BLAKE3 hash chain over every state change. Broken chain refuses to start the agent.
+- **Two-factor auth** — TOTP enrolment from the user profile, scratch codes generated at enrol time.
+- **Invite tokens stored hashed**, plaintext displayed exactly once, hidden in the install command by default with a Reveal / Copy button so screenshots don't leak credentials.
+- **Constant-time secret compare** on every heartbeat — masters can't be used as a node-id oracle by timing requests.
 
 ---
 
@@ -139,27 +164,39 @@ HTTPS endpoint and reference that.
 
 ### Adding a node
 
-1. Log in to the master's web UI → **Install** in the navigation
-2. Fill the label (e.g. `node5.example.com`) and TTL, click **Generate invite**
-3. Copy the one-liner shown — it embeds the freshly-minted token. **The plaintext is displayed exactly once**; only its hash is persisted server-side.
-4. Run it on the new VPS as root:
+On the master:
+
+1. Open the web UI → **Nodes** in the sidebar.
+2. Fill the label (e.g. `node5.example.com`) + TTL → click **Generate invite**.
+3. The token is shown once, hidden behind a Reveal button. Click **Copy install command** — it bundles the token + master URL into one curl pipe.
+
+On the new Debian 12+ VPS, paste as root:
 
 ```bash
 curl -fsSL https://<master>/install/install-node.sh \
   | sudo bash -s -- --token=ABCD-EFGH-… --master=https://<master>
 ```
 
-The node bootstraps with the same apt deps, builds `hyperion-agent` +
-`hctl`, writes the token + master URL into `/etc/hyperion/agent.toml`,
-and starts the agent. Once the controller's mTLS enrollment loop ships
-(sub-project 1.5), the agent rolls into the cluster automatically.
+The script installs the apt deps, builds `hyperion-agent` + `hctl`,
+writes the token + master URL to `/etc/hyperion/agent.toml`, opens
+port 9443 in ufw (if active), and starts the agent. The agent enrolls
+with the master on first boot, the master persists the per-node
+secret (hashed), and the node shows up in the Nodes table within a
+few seconds.
+
+From that point on:
+
+- Master → worker actions go over the **signed RPC channel** (port 9443, Ed25519 envelope) — no DNS needed between them, master uses the worker's public IP.
+- Click **Test** on the worker's row to verify reachability.
+- Click **Update…** to apt-upgrade + rebuild Hyperion on the worker without ssh-ing in.
+- Provision hostings directly onto the worker from `/hostings/new` (Target node dropdown).
 
 For a **private repo**, the node script honours the same four source
-modes as the master script. Most common patterns:
+modes as the master script:
 
 ```bash
-# PAT in env (still leaves the master URL + token on argv; that's by design
-# — the master URL is non-secret and the invite token is single-use).
+# PAT in env (the master URL + token still ride on argv; that's by design —
+# the master URL is non-secret and the invite token is single-use).
 sudo HYPERION_GIT_TOKEN='ghp_xxx' \
      HYPERION_GIT_URL='https://github.com/nechodom/hyperion' \
      bash install-node.sh --token=ABCD-… --master=https://<master>
@@ -259,6 +296,60 @@ secure-install, ufw etc.) see [`docs/RUNBOOK.md`](docs/RUNBOOK.md).
 
 ---
 
+## Multi-node cookbook
+
+A handful of recipes for the common cluster operations. All of these
+are doable from the web UI on the master — `hctl` works too if you
+prefer the CLI on the node itself.
+
+### Provision a hosting on a specific worker
+
+`/hostings/new` → **Target node** dropdown at the top of the page →
+pick `stav`. The banner above shows where it'll land (changes colour
+when you pick a remote target). Submit → the master signs an envelope
+and dispatches `HostingCreate` to the worker; the worker provisions
+everything locally and returns the detail. Verify in journalctl on
+the master with `journalctl -u hyperion-web -g dispatch`.
+
+### Move an existing hosting from master to a worker
+
+`/hostings/<domain>` → **Migration** tab → **One-click migrate** card
+(only visible when source is the master AND at least one worker is
+enrolled). Pick target → confirm. Hyperion takes a full backup on
+the master, the worker fetches it over a signed URL, restores into
+a fresh hosting. The source is **suspended** (not deleted) so you can
+update DNS, verify, then delete the original from the Danger tab.
+
+### Update a worker (apt + Hyperion)
+
+`/install` → row for the worker → **Update…** button. Tick *System
+packages* and/or *Hyperion*, click **Start**. The job runs in the
+background on the worker; the log tail streams into the panel every
+3 seconds. apt-get + update.sh log lines show prefixed with
+`[apt-upgrade]` / `[hyperion-update]`. You can navigate away — when
+you come back the panel shows the latest state.
+
+### See what's actually breaking on a worker
+
+`/services?node=<id>` shows that worker's systemd units. Click
+**Install** on a missing service (e.g. `php8.4-fpm`) → a panel below
+the table polls progress every 2 s. apt now runs WITHOUT `-qq` so
+when dpkg breaks you see *which* postinst script failed, not just
+the wrapper.
+
+`/stats?node=<id>` for that worker's load average + memory + per-
+hosting bandwidth + request count sparklines. Default `/stats` view
+aggregates everything across the whole cluster.
+
+### Turn the master into a control-plane-only node
+
+Settings → **Cluster** tab → uncheck "Allow new hostings on master"
+→ Save. New hosting creates from the UI now require picking a
+worker; existing hostings on the master stay put. Persisted in
+`[cluster] master_accepts_hostings = false` in `agent.toml`.
+
+---
+
 ## 📸 Tour
 
 ### Web UI — Dashboard
@@ -310,44 +401,65 @@ $ hctl audit --limit 5
 
 ---
 
-## 🏗 Architecture
+## Architecture
+
+Two layers, on every box:
+
+- **`hyperion-agent`** runs as root, manages all system state — users, dirs, nginx vhosts, FPM pools, DBs, certs, FTP, cron, backups. Speaks JSON over a local Unix socket (`/run/hyperion.sock`, 0660, `hyperion-admin` group). On worker nodes it also listens on `0.0.0.0:9443` for signed RPC from the master.
+- **`hyperion-web`** (master only) — axum + askama + HTMX, runs unprivileged in the `hyperion-admin` group so it can talk to the local agent's socket. Holds the audit log, the web users, the enrolled-nodes registry, the master's Ed25519 signing key.
+
+`hctl` is a thin CLI that uses the same Unix socket as the web UI —
+it's the "ssh in and poke" path when something on the node is too
+broken for the web to help.
+
+For multi-node, the master signs every outbound RPC with an Ed25519
+private key (kept at `/etc/hyperion/master-rpc.key`, 0600 root). The
+public half is shipped to each worker at enrolment time and re-sent
+on every heartbeat ack. The envelope covers `(node_id, ts, nonce,
+body_hash)` so the worker can verify the request hasn't been
+tampered with or replayed.
 
 ```
-                         ┌──────────────────────────┐
-                         │    Unix socket           │
-                         │    /run/hyperion.sock    │
-                         │    (0660, hyperion-admin)│
-                         └─────┬───────────┬────────┘
-                               │           │
-            Privileged ◀───────┘           └───────▶ Unprivileged
-                               │           │
-            ┌──────────────────┴┐         ┌┴───────────────────────┐
-            │  hyperion-agent   │         │  hctl      hyperion-web│
-            │  (root daemon)    │         │  (CLI)     (web UI)    │
-            │                   │         │  in hyperion-admin grp │
-            │  ┌──────────────┐ │         └────────────────────────┘
-            │  │ hyperion-rpc │ │           Transport-agnostic
-            │  │   -server    │ │           AgentApi + JSON codec.
-            │  └──────┬───────┘ │           Future: mTLS variant
-            │  ┌──────▼───────┐ │           with same trait.
-            │  │ HostingSvc   │ │
-            │  └──────┬───────┘ │           Background loops:
-            │   ┌─────┴──────┐  │             • scheduler tick / 5 min
-            │   │ State DB   │  │             • cert renewal (planned)
-            │   │ Adapters   │  │             • backup retention
-            │   │  fs/users  │  │
-            │   │  nginx/php │  │           Audit chain verified on
-            │   │  mysql/pg  │  │           every startup; broken
-            │   │  acme/bkup │  │           chain refuses to start.
-            │   │  nodejs/wp │  │
-            │   └────────────┘  │
-            └───────────────────┘
+                                        web user
+                                            │
+                                            ▼
+                  ┌─────────────────────────────────────────────────┐
+                  │  hyperion-web (master only)                     │
+                  │  axum + askama + HTMX                           │
+                  │  └─ holds master-rpc.key (Ed25519 signer)       │
+                  └────┬───────────────────────┬────────────────────┘
+                       │ local Unix socket     │ signed RPC over HTTPS
+                       │ /run/hyperion.sock    │ (port 9443, IP-based)
+                       │ 0660 hyperion-admin   │
+                       ▼                       ▼
+            ┌──────────────────┐     ┌──────────────────┐
+            │ hyperion-agent   │     │ hyperion-agent   │
+            │ (master)         │     │ (each worker)    │
+            │  ┌─────────────┐ │     │  ┌─────────────┐ │
+            │  │ HostingSvc  │ │     │  │ HostingSvc  │ │
+            │  └──────┬──────┘ │     │  └──────┬──────┘ │
+            │  ┌──────┴──────┐ │     │  ┌──────┴──────┐ │
+            │  │ State DB    │ │     │  │ State DB    │ │
+            │  │ Adapters    │ │     │  │ Adapters    │ │
+            │  │  fs/users   │ │     │  │  fs/users   │ │
+            │  │  nginx/php  │ │     │  │  nginx/php  │ │
+            │  │  mysql/pg   │ │     │  │  mysql/pg   │ │
+            │  │  acme/bkup  │ │     │  │  acme/bkup  │ │
+            │  │  wp/ftp     │ │     │  │  wp/ftp     │ │
+            │  └─────────────┘ │     │  └─────────────┘ │
+            └──────────────────┘     └──────────────────┘
+              also runs:               background loops:
+              · web UI                  · 60s heartbeat to master
+              · audit chain             · scheduler tick / 5 min
+              · nodes registry          · cert renewal
+              · master signer           · backup retention prune
 ```
 
-Every adapter takes pre-validated typed arguments and shells out only
-via `Command::new(..).arg(..)`. Mass-mocked via the `AdapterPort`
-trait so the orchestrator's rollback paths are unit-tested in
-isolation. Wire protocol is `u32be length || JSON`, max frame 4 MiB.
+Every adapter takes pre-validated typed arguments and shells out
+only via `Command::new(..).arg(..)`. The `AdapterPort` trait is
+mocked end-to-end so the orchestrator's rollback paths are unit-
+tested in isolation. Wire protocol is `u32be length || JSON`,
+max frame 4 MiB.
 
 ---
 
@@ -385,58 +497,79 @@ hyperion/
 
 ---
 
-## ✅ Status
+## Status
 
-### Shipped today (single-node end-to-end)
+### Shipped — single node
 
 | Capability | Surface |
 |---|---|
-| Hosting CRUD (PHP + static + DB + cert) | UI · CLI · RPC |
+| Hosting CRUD (PHP + static + reverse-proxy + DB + TLS) | UI · CLI · RPC |
 | Multi-version PHP (8.1 / 8.2 / 8.3 / 8.4) | UI · CLI · RPC |
 | MariaDB / PostgreSQL provisioning | UI · CLI · RPC |
 | Suspend / resume with full cascade | UI · CLI · RPC |
-| Per-pool limits (PHP + DB) | UI · CLI · RPC |
-| Expiration with grace + scheduler | CLI · RPC |
-| Local backups (tar.gz + DB dump + manifest) | CLI · RPC |
+| Per-hosting limits (PHP + DB + disk + bandwidth) | UI · CLI · RPC |
+| Hosting profiles (apply template to many hostings) | UI · RPC |
+| Expiration with grace + scheduler | UI · CLI · RPC |
+| Local backups (tar.gz + DB dump + manifest) | UI · CLI · RPC |
+| Off-site backup push (FTP / FTPS / SFTP) | UI · RPC |
+| Real Let's Encrypt HTTP-01 issuing + renewal | UI · CLI · RPC |
+| Per-hosting cron editing | UI · RPC |
+| Per-hosting log tail (access + error) | UI · RPC |
+| Monitor probes (HTTP / TCP) with alerts | UI · RPC |
+| WordPress install + plugin manage + admin reset | UI · RPC |
+| FTP per-hosting (vsftpd, chroot to home) | UI · RPC |
 | Audit log with BLAKE3 hash chain | UI · CLI · RPC |
-| Web admin UI with auth + CSRF | — |
-| Node enrollment tokens (mint / list / revoke) | UI · CLI · RPC |
-| `install-master.sh` / `install-node.sh` | — |
+| Web admin UI with login, 2FA, CSRF, RBAC | — |
+| Per-IP rate limits on public endpoints | — |
+| Per-hosting + cluster-wide email notifications | UI · RPC |
 
-### Designed, deferred until first Debian deploy
+### Shipped — multi-node cluster
 
-These have **full design specs + integration paths documented**; they
-require real Linux system tools to test meaningfully. See
-[`docs/superpowers/DEFERRED.md`](docs/superpowers/DEFERRED.md).
+| Capability | Surface |
+|---|---|
+| Node enrollment (mint / list / revoke invite tokens) | UI · CLI · RPC |
+| Master → worker signed RPC channel (Ed25519 envelope) | — |
+| Per-page node switcher (services, stats, install) | UI |
+| One-click hosting migrate master → worker | UI · RPC |
+| Manual export / import bundle (URL + token) | UI · CLI · RPC |
+| Connectivity test button per node | UI |
+| Remote node update (apt + hyperion) with live log tail | UI · RPC |
+| Cluster-wide stats aggregation (totals + per-node) | UI |
+| Email test from any node | UI |
+| Per-hosting actions (suspend/delete/limits/…) follow the hosting | UI |
+| Master-as-control-plane-only toggle | UI · agent.toml |
+| Auto-prune of old migration bundles (>7 days) | — |
+| Self-heal: nginx start retry + apt install of missing pkgs | — |
 
-- **1.5** Controller + multi-node mTLS enrollment (rcgen CA, rustls TLS, `hyperion-controller` binary). Invite token storage already in place.
-- **5.5** Inter-agent migration (depends on 1.5)
-- **9** Security hardening: nftables management, fail2ban, ModSecurity, SSH/sysctl hardening, 30-point compliance check
-- Real ACME HTTP-01 loop (rcgen self-signed today; `instant-acme` crate already imported)
-- Remote backup targets (restic + SFTP / S3 / FTP via rclone)
+### Designed, not yet shipped
+
+- **Security hardening** — managed nftables rules, fail2ban integration, ModSecurity, SSH/sysctl baseline check, compliance dashboard.
+- **Worker-as-source migrations** — currently the one-click migrate flow needs the master to be the source (so the master can serve the bundle). Worker→X needs the master to proxy bundle bytes via signed RPC; the work is small and queued.
+- **Restic / S3 backup targets** — the off-site push path takes FTP / FTPS / SFTP today; restic + S3 are the next two.
+- **Per-node secret rotation** — operator-triggered, agent re-keys on next heartbeat. The infrastructure (hashed secret, constant-time compare) is in place.
 
 ---
 
-## 🧪 Testing
+## Testing
 
 ```bash
-cargo test --workspace           # 233 tests pass on macOS
-cargo fmt --all                  # format clean
-cargo clippy --workspace --all-targets   # warnings-only
+cargo test --workspace                    # whole suite, runs in seconds on macOS
+cargo fmt --all                           # format clean
+cargo clippy --workspace --all-targets    # warnings-only
 ```
 
-4 integration tests are gated `#[ignore]` (they require `useradd` /
-`mariadb-dump` / `pg_dump` / `systemctl reload`). To run them on
-Debian:
+A handful of integration tests are gated `#[ignore]` because they
+need a real Debian (`useradd`, `mariadb-dump`, `pg_dump`, `systemctl
+reload nginx`). To run them on a node:
 
 ```bash
 cargo test --workspace -- --ignored
 ```
 
-The web UI ships with **12 full-flow end-to-end tests** that drive
-the entire stack — login flow, CSRF token round-trip, hosting create
-via form, audit log render — against a real Unix-socket-backed agent
-fixture with mocked adapters.
+The web crate's e2e suite drives the entire stack — login flow, CSRF
+round-trip, hosting create via form, audit-log render — against a
+real Unix-socket-backed agent with mocked adapters. New flows added
+to the UI generally land with a matching e2e.
 
 ---
 
@@ -449,28 +582,34 @@ fixture with mocked adapters.
 
 ---
 
-## 🤝 Contributing
+## Contributing
 
-Spotted a bug or have a feature in mind? Open an issue or PR — the
-codebase is small (~13 000 LOC of Rust) and each crate has a single
-clear responsibility, so onboarding is fast.
+Spotted a bug or have a feature in mind? Open an issue or PR. Each
+crate has a single clear responsibility (the names are descriptive)
+so onboarding takes an afternoon.
 
-When adding a new system effect, follow the existing pattern:
+When adding a new system effect:
 
-1. Adapter function in `hyperion-adapters` (typed args, no shell interpolation)
-2. Method on `AdapterPort` trait in `hyperion-core::service`
-3. Orchestration in `HostingService` with rollback if it mutates state
-4. RPC variant in `hyperion-rpc::codec` + handler in `AgentApi`
-5. CLI subcommand in `hctl` + UI handler in `hyperion-web` if user-facing
-6. Tests at every layer; integration tests `#[ignore]` if they need root
+1. Adapter function in `hyperion-adapters` — typed args, no shell interpolation, always `Command::new("/usr/bin/foo").arg(...)`.
+2. Method on `AdapterPort` trait in `hyperion-core::service` — mockable for unit tests.
+3. Orchestration in `HostingService` with a rollback step pushed onto the LIFO stack if it mutates state.
+4. RPC variant in `hyperion-rpc::codec` + handler in `AgentApi` + dispatch in `hyperion-rpc-server`.
+5. CLI subcommand in `hctl` + UI handler + template in `hyperion-web` if user-facing.
+6. Tests at every layer. Pure-logic ones unconditional; the rare integration test that wants `useradd` or `systemctl` gets `#[ignore]`.
+
+For multi-node features specifically:
+
+- Per-hosting actions: read the hosting's `target_node` (via `find_hosting_anywhere`), pass it to `dispatcher::dispatch_to_node` — never go straight to the local socket.
+- Forms in the detail page get `target_node` injected as a hidden input by the JS shim at the bottom of `hostings_detail.html`. The matching `Form` struct on the handler just needs `target_node: String`.
+- Any RPC the UI calls should be implementable on workers too — i.e. avoid baking master-only assumptions into agent code.
 
 ---
 
-## 📜 License
+## License
 
 [AGPL-3.0-only](#license).
 
-Built as the next-generation alternative to CloudPanel / HestiaCP, but
-in Rust, with multi-node orchestration baked in from day one and a
-security model that doesn't require trust in panel-level shell
+Built as the next-generation alternative to CloudPanel / HestiaCP — Rust
+instead of templated PHP, multi-node orchestration built-in from day one,
+and a security model that doesn't require trust in panel-level shell
 templating.
