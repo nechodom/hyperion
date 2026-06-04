@@ -151,10 +151,10 @@
         <tr>
           <th style="width:1px;padding-right:0"><input type="checkbox" id="bulk-all" aria-label="Select all"></th>
           <th>Domain</th>
-          <th>PHP</th>
+          <th class="hide-on-phone">PHP</th>
           <th>State</th>
-          <th>Node</th>
-          <th>Created</th>
+          <th class="hide-on-phone">Node</th>
+          <th class="hide-on-phone">Created</th>
           <th class="right">Actions</th>
         </tr>
       </thead>
@@ -167,7 +167,7 @@
           <td>
             <a href="/hostings/{{ r.domain }}"><strong>{{ r.domain }}</strong></a>
           </td>
-          <td>
+          <td class="hide-on-phone">
             {% if let Some(v) = r.php_version %}
               <span class="tag">PHP {{ v }}</span>
             {% else %}
@@ -181,7 +181,7 @@
               {% else if r.state.as_str() == "failed" %}err
               {% else %}warn pulse{% endif %}">{{ r.state.as_str() }}</span>
           </td>
-          <td>
+          <td class="hide-on-phone">
             {% if let Some(n) = r.node_id %}
               <span class="tag node-chip" title="Provisioned on node {{ n }}">
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="margin-right:0.25rem;vertical-align:-1px"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
@@ -191,7 +191,7 @@
               <span class="text-soft">—</span>
             {% endif %}
           </td>
-          <td class="muted numeric" title="{{ r.created_at }}">{{ crate::handlers::stats::fmt_ago(r.created_at) }}</td>
+          <td class="hide-on-phone muted numeric" title="{{ r.created_at }}">{{ crate::handlers::stats::fmt_ago(r.created_at) }}</td>
           <td class="right">
             <div class="row-actions">
               <a class="btn small" href="/hostings/{{ r.domain }}">View</a>

@@ -2456,3 +2456,280 @@ hr.divider {
   60%  { box-shadow: 0 0 0 8px color-mix(in oklab, currentColor 0%, transparent); }
   100% { box-shadow: 0 0 0 0   color-mix(in oklab, currentColor 0%, transparent); }
 }
+
+/* ============================================================
+ *  MOBILE / TABLET BREAKPOINTS
+ *  ----------------------------------------------------------
+ *  The desktop layout was built around 1280–1800px monitors. Below
+ *  ~880px the sidebar already collapses to a top bar (see line ~342)
+ *  but a lot of internals (tables, cards, page-headers, tabs, forms)
+ *  needed dedicated mobile rules. This block adds them — phone-first
+ *  at 480px, then a tablet/landscape-phone tier at 760px.
+ *
+ *  Anything above 880px keeps the existing desktop layout untouched.
+ *
+ *  Test on:
+ *    - iPhone 13  (390 × 844)
+ *    - iPhone SE  (375 × 667)
+ *    - Pixel 7    (412 × 915)
+ *    - iPad mini  (768 × 1024 portrait)
+ *    - Landscape phone (~896 × 414)
+ * ============================================================ */
+
+/* ── 760px: tablet / landscape phone ──────────────────────────── */
+@media (max-width: 760px) {
+  .content { padding: 1rem 0.85rem 3rem; }
+
+  /* Smaller heading; subtitle drops to a new line. */
+  .page-header h1 { font-size: 1.3rem; }
+  .page-header .subtitle { font-size: 0.85rem; flex-basis: 100%; }
+  .page-header .actions {
+    /* Full-width action row — buttons fill the line instead of
+       hugging the right edge where the user can't reach them. */
+    flex-basis: 100%;
+    margin-top: 0.3rem;
+  }
+  .page-header .actions .btn { flex: 1 0 auto; }
+
+  /* Cards: trim padding + margin so they don't eat half the screen. */
+  .card { padding: 1rem 1rem; border-radius: var(--radius-sm); }
+  .card h2 { font-size: 1rem; }
+  .card + .card { margin-top: 0.75rem; }
+
+  /* Tables: card padding compensation needs to match the card's
+     reduced 1rem horizontal pad — otherwise table-wrap's negative
+     margin overshoots and the scroll-edge clips behind the border. */
+  .table-wrap { margin: 0 -1rem -1rem; }
+  th:first-child, td:first-child { padding-left: 1rem; }
+  th:last-child,  td:last-child  { padding-right: 1rem; }
+  th, td {
+    padding: 0.5rem 0.6rem;
+    font-size: 0.85rem;
+  }
+
+  /* Tabs: stay scrollable but tighten so more fit in one swipe. */
+  .tab {
+    padding: 0.45rem 0.65rem;
+    font-size: 0.82rem;
+    gap: 0.35rem;
+  }
+  .tabs { padding: 0.25rem; gap: 0.1rem; }
+
+  /* Field rows that were two-column on desktop become single-column
+     here too (was already 540px-only — tablet portrait benefits). */
+  .field-row { grid-template-columns: 1fr; }
+  .field-row.three { grid-template-columns: 1fr; }
+
+  /* Buttons: bigger touch target. iOS Human Interface Guidelines
+     recommend 44px minimum; we go 40px to keep visual density. */
+  .btn { min-height: 40px; padding-inline: 0.85rem; }
+
+  /* Modals / dialogs: full-bleed on phones. */
+  .modal { width: calc(100vw - 1.5rem); max-width: none; }
+
+  /* Stats cards on dashboard: 2-up instead of 4-up. */
+  .stat-grid { grid-template-columns: 1fr 1fr; }
+}
+
+/* ── 480px: phone portrait ─────────────────────────────────────── */
+@media (max-width: 480px) {
+  /* Sidebar already collapsed; drop more aggressively so the nav
+     row doesn't eat 3 lines on a small screen. */
+  .sidebar { padding: 0.5rem 0.75rem; }
+  .sidebar .brand { font-size: 0.95rem; }
+  .sidebar a.nav-link {
+    padding: 0.35rem 0.55rem;
+    font-size: 0.8rem;
+  }
+
+  /* Stats cards: single column — 2-up at 360px feels cramped. */
+  .stat-grid { grid-template-columns: 1fr; }
+
+  /* Page header: action buttons stack. */
+  .page-header { gap: 0.5rem; }
+  .page-header .actions { flex-direction: column; }
+  .page-header .actions .btn { width: 100%; }
+
+  /* Cards: tighter still. */
+  .card { padding: 0.85rem 0.85rem; }
+
+  /* Forms inside cards: pull-in the per-field padding. */
+  .field input,
+  .field select,
+  .field textarea {
+    font-size: 16px; /* prevents iOS Safari auto-zoom on focus */
+  }
+
+  /* Tables on very small screens: hide secondary columns. We use
+     a `.hide-on-phone` class that templates can opt into for the
+     less-essential columns (created_at, node, etc.). The first
+     and last columns (domain + actions) always stay visible. */
+  .hide-on-phone { display: none !important; }
+
+  /* Activity feed: simpler layout on phones. */
+  .activity-target { max-width: 100%; white-space: normal; }
+  .activity-meta { font-size: 0.72rem; }
+
+  /* Tabs: even tighter, hide icons (titles are clear enough). */
+  .tab .tab-icon { display: none; }
+  .tab { padding: 0.4rem 0.55rem; font-size: 0.78rem; }
+
+  /* Modal padding shrinks too. */
+  .modal .modal-body { padding: 0.85rem; }
+  .modal .modal-actions { flex-direction: column-reverse; gap: 0.4rem; }
+  .modal .modal-actions .btn { width: 100%; }
+}
+
+/* ── Tap-target accessibility ──────────────────────────────────── */
+@media (pointer: coarse) {
+  /* Anyone on a touch device — including iPads in desktop view —
+     gets larger hit areas on inline links inside tables. */
+  td a, td button { padding: 0.25rem 0.4rem; margin: -0.25rem -0.4rem; }
+}
+
+/* ============================================================
+ *  NOTIFICATION BELL (sidebar + dropdown portal)
+ * ============================================================ */
+.bell-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+.bell-btn {
+  position: relative;
+  background: transparent;
+  border: 0;
+  padding: 0.4rem 0.45rem;
+  margin: 0 0.15rem;
+  color: var(--text-dim);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transition: color var(--t-fast), background var(--t-fast);
+}
+.bell-btn:hover { color: var(--text); background: var(--surface-2); }
+.bell-badge {
+  position: absolute;
+  top: 0.15rem;
+  right: 0.15rem;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: var(--danger);
+  color: white;
+  font-size: 0.65rem;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  border: 2px solid var(--surface);
+  box-sizing: content-box;
+}
+
+.bell-dropdown {
+  position: fixed;
+  width: 22rem;
+  max-width: calc(100vw - 1rem);
+  max-height: 70vh;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.35);
+  z-index: 8500;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.bell-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.7rem 1rem;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-2);
+}
+.bell-mark-all {
+  background: none;
+  border: 0;
+  color: var(--primary-h);
+  font-size: 0.8rem;
+  cursor: pointer;
+  padding: 0.15rem 0.4rem;
+  border-radius: var(--radius-xs);
+}
+.bell-mark-all:hover { background: var(--surface); }
+.bell-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  flex: 1;
+}
+.bell-empty {
+  padding: 1.4rem 1rem;
+  color: var(--text-soft);
+  text-align: center;
+  font-size: 0.88rem;
+}
+.bell-item {
+  border-bottom: 1px solid var(--border);
+}
+.bell-item:last-child { border-bottom: 0; }
+.bell-link {
+  display: grid;
+  grid-template-columns: 12px 1fr;
+  gap: 0.6rem;
+  padding: 0.7rem 1rem;
+  color: var(--text);
+  text-decoration: none;
+  align-items: start;
+}
+.bell-link:hover { background: var(--surface-2); }
+.bell-item.unread .bell-link { background: color-mix(in oklab, var(--primary-soft) 35%, transparent); }
+.bell-item.unread .bell-link:hover { background: color-mix(in oklab, var(--primary-soft) 55%, transparent); }
+.bell-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  margin-top: 0.4rem;
+  background: var(--text-soft);
+}
+.bell-item.unread .bell-dot { background: var(--primary); }
+.bell-item.sev-warn .bell-dot { background: var(--warn); }
+.bell-item.sev-error .bell-dot { background: var(--danger); }
+.bell-text { font-size: 0.86rem; line-height: 1.4; min-width: 0; }
+.bell-text strong { font-weight: 600; }
+.bell-body {
+  display: block;
+  color: var(--text-dim);
+  font-size: 0.8rem;
+  margin-top: 0.15rem;
+}
+.bell-meta {
+  display: block;
+  color: var(--text-soft);
+  font-size: 0.72rem;
+  margin-top: 0.2rem;
+  font-variant-numeric: tabular-nums;
+}
+.bell-footer {
+  padding: 0.6rem 1rem;
+  border-top: 1px solid var(--border);
+  background: var(--surface-2);
+  text-align: center;
+}
+.bell-footer a { font-size: 0.83rem; color: var(--text-dim); }
+.bell-footer a:hover { color: var(--text); }
+
+@media (max-width: 480px) {
+  .bell-dropdown {
+    /* Full-width portal on phones — easier to read + tap. */
+    right: 0.5rem !important;
+    left: 0.5rem !important;
+    width: auto;
+    max-width: none;
+  }
+}
+

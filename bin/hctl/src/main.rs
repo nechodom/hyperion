@@ -441,6 +441,23 @@ fn print_pretty(resp: &Response) {
             println!("  redis_password_set  = {}", e.redis_password_set);
         }
         Response::HostingRotateWpDebugLog => println!("✓ debug.log rotated"),
+        Response::NotificationsFeed(f) => {
+            println!("unread total: {}", f.unread_total);
+            for n in &f.items {
+                let mark = if n.read_at.is_some() { " " } else { "•" };
+                println!(
+                    "  [{}] {:>5} {} {:<8} {}",
+                    mark, n.id, n.created_at, n.severity, n.title
+                );
+                if !n.body.is_empty() {
+                    println!("           {}", n.body);
+                }
+            }
+        }
+        Response::NotificationsMarkRead => println!("✓ marked read"),
+        Response::NotificationsMarkAllRead { marked } => {
+            println!("✓ marked {marked} notifications read");
+        }
         Response::HostingUsage(rows) => {
             println!(
                 "{:<14} {:>10} {:>10} {:>10} {:>10}",

@@ -648,6 +648,28 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.backup_restore(sel, archive_path).await
     }
 
+    async fn notifications_feed(
+        &self,
+        user_id: i64,
+        limit: i64,
+    ) -> Result<hyperion_types::NotificationFeed, RpcError> {
+        self.svc.notifications_feed(user_id, limit).await
+    }
+
+    async fn notifications_mark_read(
+        &self,
+        user_id: i64,
+        notification_id: i64,
+    ) -> Result<(), RpcError> {
+        self.svc
+            .notifications_mark_read(user_id, notification_id)
+            .await
+    }
+
+    async fn notifications_mark_all_read(&self, user_id: i64) -> Result<i64, RpcError> {
+        self.svc.notifications_mark_all_read(user_id).await
+    }
+
     async fn hosting_logs(
         &self,
         sel: HostingSelector,

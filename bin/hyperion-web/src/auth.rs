@@ -177,7 +177,16 @@ pub async fn check_csrf(
     // effect beyond the caller's own session. Skipping CSRF here is
     // defensible (a forced logout is annoying, not a vulnerability)
     // and avoids plumbing csrf tokens into base.html on every page.
-    if req.uri().path() == "/logout" {
+    //
+    // Bell notification endpoints are scoped to session.user_id at
+    // both the handler and the RPC/DB layer — a CSRF-forged request
+    // could only mark the user's OWN notifications as read, which
+    // is on the same "annoying, not exploitable" tier as logout.
+    let p = req.uri().path();
+    if p == "/logout"
+        || p == "/api/notifications/mark-read"
+        || p == "/api/notifications/mark-all-read"
+    {
         return next.run(req).await;
     }
 

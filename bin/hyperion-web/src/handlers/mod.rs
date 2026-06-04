@@ -9,6 +9,7 @@ pub mod emails;
 pub mod files;
 pub mod me;
 pub mod migration;
+pub mod notifications;
 pub mod profile;
 pub mod profiles;
 pub mod search;

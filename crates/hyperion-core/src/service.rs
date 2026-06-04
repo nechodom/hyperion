@@ -5505,6 +5505,19 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             )
             .await;
 
+            // Surface a bell-icon notification on failure so admins
+            // see it in the UI without grep-the-audit-log.
+            if let CertRenewOutcome::Failed { error } = &outcome {
+                self.notify_admins(
+                    "error",
+                    "Cert renewal failed",
+                    &format!("{domain_str} — {error}"),
+                    &format!("/hostings/{}", domain_str),
+                    "cert.renew_failed",
+                )
+                .await;
+            }
+
             out.push(CertRenewResult {
                 domain: domain_str,
                 outcome,
@@ -7943,6 +7956,107 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         )
         .await;
         Ok(())
+    }
+
+    // ───────────── Notification bell ─────────────
+
+    pub async fn notifications_feed(
+        &self,
+        user_id: i64,
+        limit: i64,
+    ) -> Result<hyperion_types::NotificationFeed, RpcError> {
+        let items = hyperion_state::notifications::list_recent(&self.pool, user_id, limit)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("notifications list: {e}")))?
+            .into_iter()
+            .map(|r| hyperion_types::NotificationView {
+                id: r.id,
+                severity: r.severity,
+                title: r.title,
+                body: r.body,
+                href: r.href,
+                kind: r.kind,
+                created_at: r.created_at,
+                read_at: r.read_at,
+            })
+            .collect();
+        let unread_total = hyperion_state::notifications::unread_count(&self.pool, user_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("notifications count: {e}")))?;
+        Ok(hyperion_types::NotificationFeed {
+            items,
+            unread_total,
+        })
+    }
+
+    pub async fn notifications_mark_read(
+        &self,
+        user_id: i64,
+        notification_id: i64,
+    ) -> Result<(), RpcError> {
+        hyperion_state::notifications::mark_read(
+            &self.pool,
+            user_id,
+            notification_id,
+            now_secs(),
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("notifications mark_read: {e}")))?;
+        Ok(())
+    }
+
+    pub async fn notifications_mark_all_read(&self, user_id: i64) -> Result<i64, RpcError> {
+        let n = hyperion_state::notifications::mark_all_read(&self.pool, user_id, now_secs())
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("notifications mark_all_read: {e}")))?;
+        Ok(n)
+    }
+
+    /// Fan-out helper: emit one notification to every super_admin
+    /// and admin user. Operators are skipped by default since
+    /// operator-relevant events typically have a hosting_id and a
+    /// targeted recipient list; system-wide events go to admins.
+    /// Best-effort — errors are logged, not returned (a single
+    /// failed notification mustn't break the caller's flow).
+    pub async fn notify_admins(
+        &self,
+        severity: &str,
+        title: &str,
+        body: &str,
+        href: &str,
+        kind: &str,
+    ) {
+        let users = match hyperion_state::web_users::list(&self.pool).await {
+            Ok(u) => u,
+            Err(e) => {
+                tracing::warn!(error = %e, "notify_admins: list users failed");
+                return;
+            }
+        };
+        let now = now_secs();
+        for u in users {
+            if !matches!(
+                u.role,
+                hyperion_state::web_users::WebRole::SuperAdmin
+                    | hyperion_state::web_users::WebRole::Admin
+            ) {
+                continue;
+            }
+            if let Err(e) = hyperion_state::notifications::insert(
+                &self.pool,
+                u.id,
+                severity,
+                title,
+                body,
+                href,
+                kind,
+                now,
+            )
+            .await
+            {
+                tracing::warn!(user = %u.username, error = %e, "notify_admins: insert failed");
+            }
+        }
     }
 
     pub async fn backup_restore(

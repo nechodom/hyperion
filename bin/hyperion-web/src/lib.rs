@@ -270,6 +270,20 @@ pub fn build_router(state: SharedState) -> Router {
         // Tiny role echo for the nav-hiding shim in base.html.
         // Returns "super_admin" | "admin" | "operator" | "viewer".
         .route("/api/me/role", get(handlers::me::get_role))
+        // Bell-icon notification feed. mark-read + mark-all-read are
+        // CSRF-exempt at the middleware (see check_csrf comment).
+        .route(
+            "/api/notifications/feed",
+            get(handlers::notifications::get_feed),
+        )
+        .route(
+            "/api/notifications/mark-read",
+            post(handlers::notifications::post_mark_read),
+        )
+        .route(
+            "/api/notifications/mark-all-read",
+            post(handlers::notifications::post_mark_all_read),
+        )
         .layer(from_fn_with_state(state.clone(), auth::check_csrf))
         .layer(from_fn_with_state(state.clone(), auth::require_auth));
 

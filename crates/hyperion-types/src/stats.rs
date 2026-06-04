@@ -480,6 +480,34 @@ pub struct ServiceInstallStatus {
 /// State of the most-recent (or in-progress) node update job
 /// triggered via Request::NodeUpdateRun. Returned by
 /// NodeUpdateStatus so the UI can poll progress.
+/// One notification surfaced in the bell-icon dropdown.
+/// Wire-side mirror of `hyperion_state::notifications::NotificationRow`,
+/// dropping the per-user pointer (the wire response is already
+/// scoped to the logged-in user).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NotificationView {
+    pub id: i64,
+    /// "info" | "warn" | "error" — drives the dot colour.
+    pub severity: String,
+    pub title: String,
+    pub body: String,
+    /// Internal route to navigate to when clicked.
+    pub href: String,
+    pub kind: String,
+    pub created_at: i64,
+    /// None = unread, Some(unix) = read at that time.
+    pub read_at: Option<i64>,
+}
+
+/// Bell-dropdown payload: a recent slice + an unread total. The
+/// total can be larger than `items.len()` if the user has more
+/// unread items than the dropdown's hard limit (default 10).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NotificationFeed {
+    pub items: Vec<NotificationView>,
+    pub unread_total: i64,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NodeUpdateStatus {
     /// Unix seconds when the job started. 0 → no job has ever run.

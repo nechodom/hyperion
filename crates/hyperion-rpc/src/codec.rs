@@ -443,6 +443,18 @@ pub enum Request {
         sel: HostingSelector,
         archive_path: String,
     },
+    // ── Bell-icon notification feed ──
+    NotificationsFeed {
+        user_id: i64,
+        limit: i64,
+    },
+    NotificationsMarkRead {
+        user_id: i64,
+        notification_id: i64,
+    },
+    NotificationsMarkAllRead {
+        user_id: i64,
+    },
     HostingLogs {
         sel: HostingSelector,
         log_kind: String,
@@ -619,6 +631,9 @@ pub enum Response {
     MonitorTick { sampled: i64 },
     StatsTick { hostings_sampled: i64 },
     BackupRestore,
+    NotificationsFeed(hyperion_types::NotificationFeed),
+    NotificationsMarkRead,
+    NotificationsMarkAllRead { marked: i64 },
     HostingLogs(String),
     CronList(String),
     CronReplace,

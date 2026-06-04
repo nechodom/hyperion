@@ -537,4 +537,22 @@ pub trait AgentApi: Send + Sync + 'static {
         sel: HostingSelector,
         archive_path: String,
     ) -> Result<(), RpcError>;
+
+    // ── Bell-icon notification feed (in-app) ──────────────────────
+    /// Recent N notifications + unread total for the given user.
+    /// Web caller passes the session's user_id.
+    async fn notifications_feed(
+        &self,
+        user_id: i64,
+        limit: i64,
+    ) -> Result<hyperion_types::NotificationFeed, RpcError>;
+    /// Mark one notification as read for the given user.
+    async fn notifications_mark_read(
+        &self,
+        user_id: i64,
+        notification_id: i64,
+    ) -> Result<(), RpcError>;
+    /// Mark every unread notification for the user as read.
+    /// Returns the count of rows marked.
+    async fn notifications_mark_all_read(&self, user_id: i64) -> Result<i64, RpcError>;
 }

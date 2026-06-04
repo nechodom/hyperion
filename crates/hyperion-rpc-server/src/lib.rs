@@ -538,6 +538,28 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::NotificationsFeed { user_id, limit } => {
+            match api.notifications_feed(user_id, limit).await {
+                Ok(f) => Response::NotificationsFeed(f),
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::NotificationsMarkRead {
+            user_id,
+            notification_id,
+        } => match api
+            .notifications_mark_read(user_id, notification_id)
+            .await
+        {
+            Ok(()) => Response::NotificationsMarkRead,
+            Err(e) => Response::Error(e),
+        },
+        Request::NotificationsMarkAllRead { user_id } => {
+            match api.notifications_mark_all_read(user_id).await {
+                Ok(n) => Response::NotificationsMarkAllRead { marked: n },
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::HostingLogs {
             sel,
             log_kind,
@@ -1177,6 +1199,19 @@ mod tests {
             _: String,
         ) -> Result<(), RpcError> {
             Ok(())
+        }
+        async fn notifications_feed(
+            &self,
+            _: i64,
+            _: i64,
+        ) -> Result<hyperion_types::NotificationFeed, RpcError> {
+            Ok(hyperion_types::NotificationFeed::default())
+        }
+        async fn notifications_mark_read(&self, _: i64, _: i64) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn notifications_mark_all_read(&self, _: i64) -> Result<i64, RpcError> {
+            Ok(0)
         }
         async fn hosting_logs(
             &self,
