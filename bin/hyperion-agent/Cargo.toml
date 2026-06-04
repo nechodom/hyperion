@@ -13,6 +13,7 @@ path = "src/main.rs"
 hyperion-core = { path = "../../crates/hyperion-core" }
 hyperion-rpc-server = { path = "../../crates/hyperion-rpc-server" }
 hyperion-state = { path = "../../crates/hyperion-state" }
+hyperion-types = { path = "../../crates/hyperion-types" }
 tokio = { workspace = true }
 anyhow.workspace = true
 tracing.workspace = true

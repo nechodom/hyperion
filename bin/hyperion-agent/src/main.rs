@@ -207,6 +207,59 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
+    // Cert renewal — every 24h, sweep certificates for LE certs whose
+    // `not_after` is within `renewal_window_days` (default 30) and
+    // re-issue. Without this tick every LE cert silently expires at
+    // day 90. Daily cadence is fine: LE certs are 90-day-lived and
+    // the renewal window gives 30 days of retry headroom; an
+    // operator restart never lengthens that window because the next
+    // tick lines up within 24h of boot.
+    {
+        let renew_svc = svc.clone();
+        let threshold = cfg.acme.renewal_window_days.max(1);
+        tokio::spawn(async move {
+            // 3-minute offset so we don't collide with scheduler /
+            // stats / monitor ticks at boot.
+            tokio::time::sleep(std::time::Duration::from_secs(180)).await;
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(24 * 3600));
+            interval.tick().await; // immediate-first-tick consumption
+            loop {
+                let now = hyperion_types::now_secs();
+                match renew_svc.cert_renew_tick(now, threshold).await {
+                    Ok(results) if !results.is_empty() => {
+                        let renewed = results
+                            .iter()
+                            .filter(|r| {
+                                matches!(
+                                    r.outcome,
+                                    hyperion_types::CertRenewOutcome::Renewed { .. }
+                                )
+                            })
+                            .count();
+                        let failed = results
+                            .iter()
+                            .filter(|r| {
+                                matches!(
+                                    r.outcome,
+                                    hyperion_types::CertRenewOutcome::Failed { .. }
+                                )
+                            })
+                            .count();
+                        tracing::info!(
+                            due = results.len(),
+                            renewed,
+                            failed,
+                            "cert renewal tick"
+                        );
+                    }
+                    Ok(_) => tracing::debug!("cert renewal tick: nothing due"),
+                    Err(e) => tracing::warn!(error=%e, "cert renewal tick failed"),
+                }
+                interval.tick().await;
+            }
+        });
+    }
     // Billing sweep — once per hour. Sends Slack reminders for hostings
     // with next_billing_at <= now + 3d.
     {

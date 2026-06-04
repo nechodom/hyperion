@@ -11,13 +11,14 @@ use hyperion_state::{
     certificates, databases, hostings, metrics, profiles, system_users, wordpress,
 };
 use hyperion_types::{
-    now_secs, CertInfo, CertIssueRequest, ClusterStats, DashboardAlert, DbProvision, DbSummary,
-    DnsCheckResult, HostingDetail, HostingId, HostingProfile, HostingState, HostingStats,
-    HostingSummary, NodeStats, PhpVersion, ProfileApply, ProfileInput, SecretId, WpInstallRequest,
-    WpInstallStatus,
+    now_secs, CertInfo, CertIssueRequest, CertRenewOutcome, CertRenewResult, ClusterStats,
+    DashboardAlert, DbProvision, DbSummary, DnsCheckResult, HostingDetail, HostingId,
+    HostingProfile, HostingState, HostingStats, HostingSummary, NodeStats, PhpVersion,
+    ProfileApply, ProfileInput, SecretId, WpInstallRequest, WpInstallStatus,
 };
 use hyperion_validate::{Domain, SystemUserName};
 use sqlx::SqlitePool;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 /// External-effects boundary for `HostingService`.
@@ -169,7 +170,19 @@ pub struct HostingService<A: AdapterPort + 'static> {
     /// in `bin/hyperion-agent`. Used by `update_check` to compare
     /// against the upstream rolling release.
     pub current_git_sha: String,
+    /// Per-domain mutex map used to serialize cert issuance + renewal
+    /// per domain. Two parallel "Issue Cert" clicks on the same
+    /// hosting (or a renewal racing a manual issuance) would otherwise
+    /// write cert + key from different ACME runs, leaving nginx
+    /// serving a fullchain.pem whose public key doesn't match the
+    /// privkey.pem.
+    pub cert_issue_locks: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
+
+/// Default renewal window — matches Let's Encrypt's recommended
+/// 30-day buffer before `not_after`. Operators override via
+/// `[acme] renewal_window_days` in agent.toml.
+pub const CERT_RENEWAL_WINDOW_DAYS: i64 = 30;
 
 /// Cache TTL for the GitHub release check. One hour is enough to
 /// keep the dashboard banner fresh without hammering the API or
@@ -297,6 +310,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             agent_config_path: None,
             update_cache: Arc::new(tokio::sync::RwLock::new(None)),
             current_git_sha: "dev-unknown".into(),
+            cert_issue_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -2722,7 +2736,37 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                             ),
                             hosting: Some(detail.domain.clone()),
                         });
-                    } else if days < 14 && cert.issuer != "self-signed" {
+                    } else if cert.issuer == "self-signed" {
+                        // Bootstrap cert (today RealAdapter::acme_issue
+                        // still issues self-signed at hosting create()
+                        // time). Surface from day one so operators know
+                        // to click Issue Cert once DNS resolves — without
+                        // this prompt, the only signal is the browser's
+                        // "Not Secure" badge.
+                        out.push(DashboardAlert {
+                            kind: "cert_self_signed".into(),
+                            severity: "warn".into(),
+                            message: format!(
+                                "{} is using a bootstrap self-signed cert; click Issue Cert when DNS resolves.",
+                                detail.domain
+                            ),
+                            hosting: Some(detail.domain.clone()),
+                        });
+                    } else if days < 7 {
+                        // Inside the critical band — renewal tick has
+                        // had at least 23 days of daily attempts and
+                        // still hasn't succeeded. Operator should
+                        // investigate (DNS broke, port 80 closed, …).
+                        out.push(DashboardAlert {
+                            kind: "cert_expiring".into(),
+                            severity: "error".into(),
+                            message: format!(
+                                "{} certificate expires in {} day(s) — renew now.",
+                                detail.domain, days
+                            ),
+                            hosting: Some(detail.domain.clone()),
+                        });
+                    } else if days < 30 {
                         out.push(DashboardAlert {
                             kind: "cert_expiring".into(),
                             severity: "warn".into(),
@@ -3101,6 +3145,18 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let detail = self.get(sel).await?;
         let domain = Domain::parse(&detail.domain)?;
 
+        // Serialize issuance per domain so two concurrent runs can't
+        // produce a mismatched cert+key pair on disk (cert from run A,
+        // key from run B → TLS handshake breaks). The lock outlives
+        // the full ACME flow including the vhost rewrite at the end.
+        let lock = {
+            let mut map = self.cert_issue_locks.lock().await;
+            map.entry(detail.domain.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        let _guard = lock.lock().await;
+
         if req.require_dns_match {
             let check = self.dns_check(domain.clone()).await?;
             if !check.matches {
@@ -3240,6 +3296,100 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         .await;
 
         Ok(cert)
+    }
+
+    /// Sweep `certificates` for LE certs whose `not_after - now` is
+    /// below `threshold_days*86400` and re-issue each via
+    /// `issue_real_cert` with `require_dns_match=false`. The cert is
+    /// already installed for this domain, so refusing on a transient
+    /// DNS misconfiguration would only delay the renewal further;
+    /// any persistent DNS break surfaces as a structured LE error
+    /// inside the per-domain `CertRenewResult`.
+    ///
+    /// `now` is parameterized (not just `now_secs()`) so the daily
+    /// background tick and unit tests share the same code path. The
+    /// audit log captures each attempt + outcome so an out-of-band
+    /// cron-driven renewal leaves a trace.
+    pub async fn cert_renew_tick(
+        &self,
+        now: i64,
+        threshold_days: i64,
+    ) -> Result<Vec<CertRenewResult>, RpcError> {
+        let horizon = threshold_days.max(0).saturating_mul(86400);
+        let rows = certificates::find_expiring_within(&self.pool, now, horizon)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("query expiring certs: {e}")))?;
+        // The certificates CHECK constraint already restricts issuer
+        // to {letsencrypt, self-signed}. Skip self-signed (those are
+        // bootstrap certs awaiting a first real issuance — re-issuing
+        // them would also be self-signed; the dashboard nags the
+        // operator separately). starts_with lets a future provider
+        // string like "letsencrypt-staging" still get renewed here.
+        let due: Vec<_> = rows
+            .into_iter()
+            .filter(|r| r.issuer.starts_with("letsencrypt"))
+            .collect();
+
+        let mut out = Vec::with_capacity(due.len());
+        for cert in due {
+            let domain_str = cert.domain.clone();
+            self.append_audit(
+                "cert.renew.attempt",
+                None,
+                &serde_json::json!({
+                    "domain": &domain_str,
+                    "not_after": cert.not_after,
+                    "threshold_days": threshold_days,
+                    "now": now,
+                })
+                .to_string(),
+                "ok",
+            )
+            .await;
+
+            let outcome = match Domain::parse(&domain_str) {
+                Err(e) => CertRenewOutcome::Failed {
+                    error: format!("invalid stored domain {domain_str}: {e}"),
+                },
+                Ok(d) => {
+                    let req = CertIssueRequest {
+                        staging: false,
+                        require_dns_match: false,
+                        extra_sans: vec![],
+                    };
+                    match self.issue_real_cert(HostingSelector::Domain(d), req).await {
+                        Ok(info) => CertRenewOutcome::Renewed {
+                            new_not_after: info.not_after,
+                        },
+                        Err(e) => CertRenewOutcome::Failed {
+                            error: e.to_string(),
+                        },
+                    }
+                }
+            };
+
+            let status = match &outcome {
+                CertRenewOutcome::Renewed { .. } => "ok",
+                _ => "failed",
+            };
+            self.append_audit(
+                "cert.renew",
+                None,
+                &serde_json::json!({
+                    "domain": &domain_str,
+                    "outcome": &outcome,
+                })
+                .to_string(),
+                status,
+            )
+            .await;
+
+            out.push(CertRenewResult {
+                domain: domain_str,
+                outcome,
+            });
+        }
+        Ok(out)
     }
 
     // ================================================================
@@ -6032,6 +6182,7 @@ mod tests {
             agent_config_path: None,
             update_cache: Arc::new(tokio::sync::RwLock::new(None)),
             current_git_sha: "dev-unknown".into(),
+            cert_issue_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         };
         s2.create(HostingCreateReq {
             domain: Domain::parse("b.cz").expect("parse"),
@@ -6135,6 +6286,7 @@ mod tests {
             agent_config_path: None,
             update_cache: Arc::new(tokio::sync::RwLock::new(None)),
             current_git_sha: "dev-unknown".into(),
+            cert_issue_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         };
         let r = s2.create(req("dup.cz")).await;
         match r {
@@ -6345,5 +6497,90 @@ mod tests {
         let within_30d = s.upcoming_expiries(30 * 86_400).await.expect("up");
         assert_eq!(within_30d.len(), 1);
         assert_eq!(within_30d[0].domain, "a.cz");
+    }
+
+    /// Regression test for the "every LE cert silently expires at day
+    /// 90" finding. Three certs are seeded in the DB; the renewal tick
+    /// is invoked with a `now` that pretends the clock has jumped 80
+    /// days forward. Only the Let's Encrypt cert that lands inside the
+    /// 30-day window should be picked up. The actual ACME call fails
+    /// fast in the test env (placeholder contact email triggers
+    /// `issue_real_cert`'s validation guard), so the `Failed` outcome
+    /// is the load-bearing signal that renewal was *attempted* for
+    /// that domain — and only for that domain.
+    #[tokio::test]
+    async fn cert_renew_tick_attempts_renewal_for_expiring_letsencrypt_only() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), happy_mocks());
+        // Hosting must exist for `issue_real_cert` to fetch its detail.
+        s.create(req("renewable.cz")).await.expect("create");
+
+        let now = now_secs();
+        // Pretend 80 days have passed since boot.
+        let later = now + 80 * 86_400;
+
+        // renewable.cz : LE,         expires 10d  after `later` → inside window
+        // fresh.cz     : LE,         expires 60d  after `later` → outside window
+        // bootstrap.cz : self-signed, expires 10d after `later` → wrong issuer
+        certificates::upsert(
+            &pool,
+            "renewable.cz",
+            now,
+            later + 10 * 86_400,
+            "/cert",
+            "/key",
+            "letsencrypt",
+        )
+        .await
+        .expect("upsert renewable");
+        certificates::upsert(
+            &pool,
+            "fresh.cz",
+            now,
+            later + 60 * 86_400,
+            "/cert",
+            "/key",
+            "letsencrypt",
+        )
+        .await
+        .expect("upsert fresh");
+        certificates::upsert(
+            &pool,
+            "bootstrap.cz",
+            now,
+            later + 10 * 86_400,
+            "/cert",
+            "/key",
+            "self-signed",
+        )
+        .await
+        .expect("upsert bootstrap");
+
+        let results = s
+            .cert_renew_tick(later, CERT_RENEWAL_WINDOW_DAYS)
+            .await
+            .expect("tick");
+
+        assert_eq!(
+            results.len(),
+            1,
+            "exactly one LE cert in the renewal window"
+        );
+        assert_eq!(results[0].domain, "renewable.cz");
+        assert!(
+            matches!(results[0].outcome, CertRenewOutcome::Failed { .. }),
+            "expected Failed renewal in test env (no real ACME), got {:?}",
+            results[0].outcome
+        );
+    }
+
+    /// Empty-DB sanity check: the renewal tick on a fresh agent
+    /// returns an empty result vec, doesn't panic, doesn't audit.
+    #[tokio::test]
+    async fn cert_renew_tick_with_no_certs_returns_empty() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), happy_mocks());
+        let r = s.cert_renew_tick(now_secs(), 30).await.expect("tick");
+        assert!(r.is_empty());
     }
 }

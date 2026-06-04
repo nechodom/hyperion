@@ -1331,6 +1331,7 @@ dependencies = [
  "hyperion-core",
  "hyperion-rpc-server",
  "hyperion-state",
+ "hyperion-types",
  "serde",
  "serde_json",
  "tempfile",

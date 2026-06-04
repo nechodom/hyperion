@@ -166,7 +166,15 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     }
 
     async fn cert_renew_all(&self) -> Result<Vec<CertRenewResult>, RpcError> {
-        Ok(vec![])
+        // Thin wrapper so the RPC keeps its old signature. The
+        // background tick in `hyperion-agent` is the primary driver;
+        // this lets `hctl cert renew` work on demand too.
+        self.svc
+            .cert_renew_tick(
+                hyperion_types::now_secs(),
+                crate::service::CERT_RENEWAL_WINDOW_DAYS,
+            )
+            .await
     }
 
     async fn wp_install(

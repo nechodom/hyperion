@@ -45,6 +45,10 @@ pub struct AcmeSection {
     pub directory_url: String,
     pub contact_email: String,
     pub challenge_dir: PathBuf,
+    /// Days before `not_after` at which the background renewal tick
+    /// re-issues an LE cert. 30 is the Let's Encrypt-recommended
+    /// buffer (gives a 60-day window of retries before expiry).
+    pub renewal_window_days: i64,
 }
 
 /// Optional remote-backup destination. When enabled (`enabled=true`)
@@ -180,6 +184,7 @@ impl Default for AcmeSection {
             directory_url: "https://acme-v02.api.letsencrypt.org/directory".into(),
             contact_email: "admin@example.com".into(),
             challenge_dir: PathBuf::from("/var/lib/hyperion/acme-challenges"),
+            renewal_window_days: 30,
         }
     }
 }
