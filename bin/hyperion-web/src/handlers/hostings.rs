@@ -264,6 +264,12 @@ pub struct CreateForm {
     /// "on" if the user checked the "install WordPress" checkbox.
     #[serde(default)]
     pub install_wp: String,
+    /// WP admin login (the username typed into wp-login.php).
+    /// Defaults to "admin" when blank. Operators should pick
+    /// something non-obvious — "admin" is the first username every
+    /// drive-by brute-forcer tries.
+    #[serde(default)]
+    pub wp_admin_user: String,
     /// WP admin email (also gets the install confirmation email).
     #[serde(default)]
     pub wp_admin_email: String,
@@ -380,11 +386,28 @@ pub async fn post_create(
             if wp_was_requested && created.db.is_some() && req.kind == "php" {
                 let admin_email = form.wp_admin_email.trim();
                 let admin_password = form.wp_admin_password.clone();
+                // Default "admin" preserves the previous behaviour
+                // for operators who leave the field blank, but
+                // explicit non-empty input wins.
+                let admin_user_raw = form.wp_admin_user.trim();
+                let admin_user = if admin_user_raw.is_empty() {
+                    "admin".to_string()
+                } else {
+                    admin_user_raw.to_string()
+                };
                 if admin_email.is_empty() || admin_password.len() < 6 {
                     // Don't fail the whole create — the hosting is
                     // alive. Just leave WP uninstalled.
                     tracing::warn!(
                         "WP install requested but missing/short credentials; skipping"
+                    );
+                } else if !is_valid_wp_username(&admin_user) {
+                    // Same fail-soft as above: keep the hosting,
+                    // skip WP, log so the operator sees the reason
+                    // in journalctl.
+                    tracing::warn!(
+                        admin_user = %admin_user,
+                        "WP install requested but admin username is invalid; skipping"
                     );
                 } else {
                     let title = if form.wp_title.trim().is_empty() {
@@ -401,7 +424,7 @@ pub async fn post_create(
                     let wp_req = hyperion_types::WpInstallRequest {
                         site_url: site_url.clone(),
                         title,
-                        admin_user: "admin".to_string(),
+                        admin_user: admin_user.clone(),
                         admin_email: admin_email.to_string(),
                         admin_password: admin_password.clone(),
                         locale,
@@ -421,7 +444,7 @@ pub async fn post_create(
                             // Tuck the WP creds into the response so
                             // the credential panel renders them.
                             created.wp = Some(hyperion_rpc::wire::WpCreatedInfo {
-                                admin_user: "admin".into(),
+                                admin_user: admin_user.clone(),
                                 admin_email: admin_email.to_string(),
                                 admin_password,
                                 admin_login_url: format!("{}/wp-login.php", site_url),
@@ -1669,6 +1692,79 @@ fn parse_aliases(input: &str) -> Result<Vec<Domain>, String> {
 /// Re-export of parse_selector for sibling handler modules.
 pub fn parse_selector_public(s: &str) -> Result<HostingSelector, AppError> {
     parse_selector(s)
+}
+
+/// Conservative validator for the WordPress admin username the
+/// operator types in the New Hosting form. WP itself accepts a
+/// fairly wide range (including spaces, periods, `@`), but we
+/// bound it to the safe subset to avoid:
+///   - shell quoting bugs if it gets passed to wp-cli unescaped,
+///   - URL-encoding surprises in wp-login.php links,
+///   - operator typos that yield a username they then can't type
+///     reliably (zero-width space, RTL marks, etc.).
+///
+/// Rules: 1..=60 chars, ASCII alphanumeric + `._@-`. No leading
+/// dash (looks like a CLI flag), no leading dot (hidden), no
+/// embedded whitespace.
+fn is_valid_wp_username(s: &str) -> bool {
+    if s.is_empty() || s.len() > 60 {
+        return false;
+    }
+    let bytes = s.as_bytes();
+    if bytes[0] == b'-' || bytes[0] == b'.' {
+        return false;
+    }
+    s.chars().all(|c| {
+        c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '@' || c == '-'
+    })
+}
+
+#[cfg(test)]
+mod wp_username_tests {
+    use super::is_valid_wp_username;
+
+    #[test]
+    fn accepts_typical_usernames() {
+        assert!(is_valid_wp_username("admin"));
+        assert!(is_valid_wp_username("kevin"));
+        assert!(is_valid_wp_username("kevin.nechodom"));
+        assert!(is_valid_wp_username("kevin_99"));
+        assert!(is_valid_wp_username("k@example.cz"));
+        assert!(is_valid_wp_username("a"));
+    }
+
+    #[test]
+    fn rejects_empty() {
+        assert!(!is_valid_wp_username(""));
+    }
+
+    #[test]
+    fn rejects_too_long() {
+        assert!(!is_valid_wp_username(&"a".repeat(61)));
+        assert!(is_valid_wp_username(&"a".repeat(60)));
+    }
+
+    #[test]
+    fn rejects_leading_dash_or_dot() {
+        assert!(!is_valid_wp_username("-admin"));
+        assert!(!is_valid_wp_username(".hidden"));
+    }
+
+    #[test]
+    fn rejects_whitespace_and_shell_metacharacters() {
+        assert!(!is_valid_wp_username("admin user"));
+        assert!(!is_valid_wp_username("admin\nuser"));
+        assert!(!is_valid_wp_username("admin;rm"));
+        assert!(!is_valid_wp_username("$(whoami)"));
+        assert!(!is_valid_wp_username("admin`whoami`"));
+        assert!(!is_valid_wp_username("admin/test"));
+    }
+
+    #[test]
+    fn rejects_non_ascii() {
+        assert!(!is_valid_wp_username("admín"));
+        assert!(!is_valid_wp_username("админ"));
+    }
 }
 
 fn parse_selector(s: &str) -> Result<HostingSelector, AppError> {
