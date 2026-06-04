@@ -425,6 +425,32 @@ pub struct UpdateStatus {
     pub message: String,
 }
 
+/// State of the most-recent (or in-progress) service-install job
+/// triggered via Request::ServiceInstall. Returned by
+/// ServiceInstallStatus so the UI can show live apt-get output
+/// instead of just blocking the operator's page for minutes.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServiceInstallStatus {
+    /// systemd unit name (e.g. "php8.4-fpm"). Empty when no
+    /// install has ever run on this node.
+    pub service_name: String,
+    /// apt package name (typically same as service_name).
+    pub pkg: String,
+    /// Unix seconds when the job started. 0 → no job has ever run.
+    pub started_at: i64,
+    /// Unix seconds when the job finished. 0 → still running, or
+    /// no job has ever run.
+    pub finished_at: i64,
+    /// "idle" | "running" | "succeeded" | "failed".
+    pub state: String,
+    /// Combined stdout+stderr tail of apt-get + systemctl enable,
+    /// capped at ~8 kB. Live during the run, frozen after.
+    pub log_tail: String,
+    /// Final non-zero exit code on failure (0 on success / still
+    /// running).
+    pub exit_code: i32,
+}
+
 /// State of the most-recent (or in-progress) node update job
 /// triggered via Request::NodeUpdateRun. Returned by
 /// NodeUpdateStatus so the UI can poll progress.

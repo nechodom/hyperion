@@ -192,6 +192,34 @@
   </div>
 </div>
 
+{# Live install progress — auto-polls every 2 s via HTMX while a
+   job is running. The first time the page loads the panel asks
+   the agent for current state; if no install has ever run, it
+   shows a short hint instead. #}
+{% if is_super_admin %}
+<div class="card" id="install-progress" style="margin-top:1.4rem">
+  <h2 style="display:flex;align-items:center;gap:0.5rem;margin:0 0 0.5rem">
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+    Service install progress
+    <span class="text-soft" style="font-weight:400;font-size:0.75em">· {{ current_label }}</span>
+  </h2>
+  <div id="install-progress-body"
+       hx-get="/services/install-status?node={{ current_node }}"
+       hx-trigger="load, every 2s"
+       hx-swap="innerHTML">
+    <span class="text-soft small">loading status…</span>
+  </div>
+  <p class="text-soft small" style="margin:0.6rem 0 0">
+    Click <strong>Install</strong> on any row above to start an
+    <code>apt-get install</code> + <code>systemctl enable --now</code>. Output
+    streams here live; the page does NOT block. apt is run with
+    <code>-q -o Dpkg::Options::=--force-confold</code> (non-interactive
+    but still verbose) so the real cause of a failure shows up
+    instead of just the generic dpkg-returned-1 wrapper.
+  </p>
+</div>
+{% endif %}
+
 <p class="text-soft small" style="margin-top:1rem">
   Status is live (re-evaluated on every page load via
   <code>systemctl show -p ActiveState -p SubState -p UnitFileState</code>).

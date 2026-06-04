@@ -235,6 +235,10 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(()) => Response::ServiceInstall,
             Err(e) => Response::Error(e),
         },
+        Request::ServiceInstallStatus => match api.service_install_status().await {
+            Ok(s) => Response::ServiceInstallStatus(s),
+            Err(e) => Response::Error(e),
+        },
         Request::NodeUpdateRun { do_apt, do_hyperion } => {
             match api.node_update_run(do_apt, do_hyperion).await {
                 Ok(started_at) => Response::NodeUpdateRun { started_at },
@@ -719,6 +723,11 @@ mod tests {
         }
         async fn node_update_status(&self) -> Result<hyperion_types::NodeUpdateStatus, RpcError> {
             Ok(hyperion_types::NodeUpdateStatus::default())
+        }
+        async fn service_install_status(
+            &self,
+        ) -> Result<hyperion_types::ServiceInstallStatus, RpcError> {
+            Ok(hyperion_types::ServiceInstallStatus::default())
         }
         async fn service_install(&self, _: String) -> Result<(), RpcError> {
             Ok(())

@@ -36,8 +36,9 @@ pub use stats::{
     ClusterStats, DashboardAlert, EmailConfigView, EmailLogEntry, HostingFileContent,
     HostingFileEntry, HostingStats, MonitorConfigView, MonitorHistory, MonitorSamplePoint,
     NodeMetricPoint, NodeMetricsHistory, NodeStats, NodeSummary, NodeUpdateStatus,
-    ServiceHealth, ServicesHealth, SlackConfigView, SmtpAutodetect, UpdateStatus,
-    Web2faEnrollment, WebHostingAccess, WebLoginResult, WebUserSummary, WebVerify2faResult,
+    ServiceHealth, ServiceInstallStatus, ServicesHealth, SlackConfigView, SmtpAutodetect,
+    UpdateStatus, Web2faEnrollment, WebHostingAccess, WebLoginResult, WebUserSummary,
+    WebVerify2faResult,
 };
 pub use wp::{
     WpInstallRequest, WpInstallStatus, WpPlugin, WpPluginAction, WpPluginActionResult,

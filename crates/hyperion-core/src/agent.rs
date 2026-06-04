@@ -292,6 +292,11 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     async fn service_install(&self, name: String) -> Result<(), RpcError> {
         self.svc.service_install(name).await
     }
+    async fn service_install_status(
+        &self,
+    ) -> Result<hyperion_types::ServiceInstallStatus, RpcError> {
+        self.svc.service_install_status().await
+    }
     async fn node_update_run(
         &self,
         do_apt: bool,

@@ -914,6 +914,23 @@ fn print_pretty(resp: &Response) {
             println!("  state  : {}", r.state);
             println!("  note   : {}", r.message);
         }
+        Response::ServiceInstallStatus(s) => {
+            if s.started_at == 0 {
+                println!("no service install has run on this node");
+            } else {
+                println!("service install ({}):", s.service_name);
+                println!("  state      : {}", s.state);
+                println!("  pkg        : {}", s.pkg);
+                println!("  started_at : {}", s.started_at);
+                println!("  finished_at: {}", s.finished_at);
+                println!("  exit_code  : {}", s.exit_code);
+                println!("  --- log tail ---");
+                print!("{}", s.log_tail);
+                if !s.log_tail.ends_with('\n') {
+                    println!();
+                }
+            }
+        }
         Response::NodeUpdateRun { started_at } => {
             println!("node update started: unix:{started_at}");
             println!("poll with: hctl node-update-status");

@@ -125,8 +125,13 @@ pub trait AgentApi: Send + Sync + 'static {
 
     /// Restart a whitelisted systemd unit.
     async fn service_restart(&self, name: String) -> Result<(), RpcError>;
-    /// apt-install + enable a whitelisted unit.
+    /// apt-install + enable a whitelisted unit. Returns immediately;
+    /// poll `service_install_status` for the log tail.
     async fn service_install(&self, name: String) -> Result<(), RpcError>;
+    /// State of the most-recent / in-progress service-install job.
+    async fn service_install_status(
+        &self,
+    ) -> Result<hyperion_types::ServiceInstallStatus, RpcError>;
     /// Start a background node-update job. Returns the unix
     /// timestamp the job started at. `NodeUpdateStatus` polls the
     /// log tail + state.

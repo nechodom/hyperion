@@ -200,6 +200,13 @@ pub struct HostingService<A: AdapterPort + 'static> {
     /// A single shared slot per agent — concurrent updates are
     /// refused with a "another update is already running" error.
     pub node_update: Arc<tokio::sync::Mutex<hyperion_types::NodeUpdateStatus>>,
+    /// In-memory state of the most-recent / in-progress
+    /// service-install job (apt-get install + systemctl enable
+    /// for a whitelisted unit like php8.4-fpm). Polled via
+    /// `ServiceInstallStatus`. Single slot — apt would dpkg-lock
+    /// concurrent jobs anyway.
+    pub service_install_progress:
+        Arc<tokio::sync::Mutex<hyperion_types::ServiceInstallStatus>>,
 }
 
 /// Default renewal window — matches Let's Encrypt's recommended
@@ -520,6 +527,154 @@ fn stitch_dig_txt(raw: &str) -> String {
 /// Err with a useful message otherwise. Used by the migration
 /// import-from-url path; cheap to call because curl is already a
 /// hard dependency of the installer.
+/// Drive a service-install job (apt-get install + systemctl
+/// enable --now) and stream output into the shared status slot.
+///
+/// Notable changes vs. the old synchronous service_install path:
+///   - Drops `-qq` from apt-get so we actually see the real
+///     diagnostic. The old "dpkg returned an error code (1)"
+///     bubble-up was useless — the actual cause (postinst script
+///     failure, missing dep, etc.) was suppressed.
+///   - Uses `-q -o Dpkg::Options::=--force-confold` so apt is
+///     non-interactive but still emits status lines.
+///   - Streams stdout/stderr line-by-line into log_tail (capped
+///     at ~8 kB) so the UI can show live progress instead of
+///     hanging the operator's browser for minutes.
+async fn run_service_install(
+    slot: std::sync::Arc<tokio::sync::Mutex<hyperion_types::ServiceInstallStatus>>,
+    service_name: String,
+    pkg: String,
+) {
+    use tokio::io::AsyncBufReadExt;
+    const LOG_TAIL_BYTES: usize = 8 * 1024;
+
+    async fn append_line(
+        slot: &std::sync::Arc<tokio::sync::Mutex<hyperion_types::ServiceInstallStatus>>,
+        line: &str,
+    ) {
+        let mut g = slot.lock().await;
+        g.log_tail.push_str(line);
+        g.log_tail.push('\n');
+        if g.log_tail.len() > LOG_TAIL_BYTES {
+            let drop = g.log_tail.len() - LOG_TAIL_BYTES;
+            let mut cut = drop;
+            while !g.log_tail.is_char_boundary(cut) && cut < g.log_tail.len() {
+                cut += 1;
+            }
+            g.log_tail.drain(..cut);
+        }
+    }
+
+    async fn run_one(
+        slot: &std::sync::Arc<tokio::sync::Mutex<hyperion_types::ServiceInstallStatus>>,
+        label: &str,
+        cmd: &str,
+        args: &[&str],
+    ) -> i32 {
+        append_line(slot, &format!("──── {label}: {cmd} {} ────", args.join(" "))).await;
+        let mut child = match tokio::process::Command::new(cmd)
+            .args(args)
+            .env("DEBIAN_FRONTEND", "noninteractive")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                append_line(slot, &format!("spawn {cmd} failed: {e}")).await;
+                return 127;
+            }
+        };
+        if let Some(stdout) = child.stdout.take() {
+            let s = slot.clone();
+            let label = label.to_string();
+            tokio::spawn(async move {
+                let r = tokio::io::BufReader::new(stdout);
+                let mut lines = r.lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    append_line(&s, &format!("[{label}] {line}")).await;
+                }
+            });
+        }
+        if let Some(stderr) = child.stderr.take() {
+            let s = slot.clone();
+            let label = label.to_string();
+            tokio::spawn(async move {
+                let r = tokio::io::BufReader::new(stderr);
+                let mut lines = r.lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    append_line(&s, &format!("[{label}!] {line}")).await;
+                }
+            });
+        }
+        match child.wait().await {
+            Ok(status) => status.code().unwrap_or(-1),
+            Err(e) => {
+                append_line(slot, &format!("wait {label} failed: {e}")).await;
+                -1
+            }
+        }
+    }
+
+    // Step 1: apt-get install. Hard-cap at 10 min via timeout above
+    // (tokio::spawn'd, so we wrap with timeout here).
+    let install_code = tokio::time::timeout(
+        std::time::Duration::from_secs(10 * 60),
+        run_one(
+            &slot,
+            "apt-install",
+            "/usr/bin/apt-get",
+            &[
+                "install",
+                "-y",
+                "-q",
+                "-o",
+                "Dpkg::Options::=--force-confold",
+                &pkg,
+            ],
+        ),
+    )
+    .await
+    .unwrap_or_else(|_| {
+        // The timeout fired — log it and treat as failure.
+        let s = slot.clone();
+        let _ = tokio::spawn(async move {
+            append_line(
+                &s,
+                "apt-install timed out after 10 min — check dpkg lock or mirror outage",
+            )
+            .await;
+        });
+        124 // GNU `timeout`-style exit code
+    });
+
+    let mut final_code = install_code;
+
+    // Step 2: systemctl enable --now (only if install succeeded).
+    if install_code == 0 {
+        final_code = run_one(
+            &slot,
+            "systemctl-enable",
+            "/usr/bin/systemctl",
+            &["enable", "--now", &service_name],
+        )
+        .await;
+    }
+
+    let final_state = if final_code == 0 { "succeeded" } else { "failed" };
+    let mut g = slot.lock().await;
+    g.state = final_state.to_string();
+    g.finished_at = now_secs();
+    g.exit_code = final_code;
+    tracing::info!(
+        service = %service_name,
+        pkg = %pkg,
+        exit_code = final_code,
+        state = final_state,
+        "service install job finished"
+    );
+}
+
 /// Drive a node-update job: run `apt-get upgrade -y` and/or the
 /// hyperion `update.sh` script, streaming combined stdout+stderr
 /// into the given shared status slot. Caller has already marked
@@ -1013,6 +1168,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             node_state_file: None,
             node_update: Arc::new(tokio::sync::Mutex::new(
                 hyperion_types::NodeUpdateStatus::default(),
+            )),
+            service_install_progress: Arc::new(tokio::sync::Mutex::new(
+                hyperion_types::ServiceInstallStatus::default(),
             )),
         }
     }
@@ -6204,57 +6362,76 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(status)
     }
 
+    /// Start an apt-get install + systemctl enable for a whitelisted
+    /// service. Returns immediately after spawning the background
+    /// task — operator polls `service_install_status()` for the live
+    /// log tail.
+    ///
+    /// Previously this awaited the apt-get call up to 5 min,
+    /// blocking the operator's browser. apt-get also runs with
+    /// `-qq` which suppressed the actual error reason; the operator
+    /// got "Sub-process /usr/bin/dpkg returned an error code (1)"
+    /// with no clue what went wrong. The async refactor lets us
+    /// drop `-qq` (we now stream output), capture stdout+stderr in
+    /// the slot, and surface the real failure.
     pub async fn service_install(&self, name: String) -> Result<(), RpcError> {
         let pkg = Self::service_whitelist_for(&name, false).ok_or_else(|| {
             RpcError::Validation {
                 message: format!("service `{name}` is not on the install whitelist"),
             }
         })?;
-        // 1. apt-get install. DEBIAN_FRONTEND=noninteractive so apt
-        //    doesn't try to open an interactive prompt and hang.
-        //
-        // Hard timeout of 5 min — apt-get sometimes hangs (mirror
-        // outage, dpkg lock contention, post-install scripts). The
-        // web handler awaits this RPC, so without a cap the page
-        // request hangs the operator's browser indefinitely.
-        let install = tokio::time::timeout(
-            std::time::Duration::from_secs(5 * 60),
-            tokio::process::Command::new("/usr/bin/apt-get")
-                .args(["install", "-y", "-qq", pkg])
-                .env("DEBIAN_FRONTEND", "noninteractive")
-                .output(),
-        )
-        .await
-        .map_err(|_| RpcError::Internal_with(format!(
-            "apt-get install {pkg} timed out after 5 min — check for a dpkg lock or mirror outage"
-        )))?
-        .map_err(|e| RpcError::Internal_with(format!("apt-get spawn: {e}")))?;
-        if !install.status.success() {
-            let stderr = String::from_utf8_lossy(&install.stderr).to_string();
-            return Err(RpcError::Internal_with(format!(
-                "apt-get install {pkg} failed: {stderr}"
-            )));
+        {
+            let guard = self.service_install_progress.lock().await;
+            if guard.state == "running" {
+                return Err(RpcError::Conflict {
+                    message: format!(
+                        "another service install ({} → {}) is already running on this node; \
+                         wait for it to finish — apt would dpkg-lock anyway.",
+                        guard.service_name, guard.pkg
+                    ),
+                });
+            }
         }
-        // 2. enable + start (--now). Idempotent.
-        let enable = tokio::process::Command::new("/usr/bin/systemctl")
-            .args(["enable", "--now", &name])
-            .output()
-            .await
-            .map_err(|e| RpcError::Internal_with(format!("systemctl spawn: {e}")))?;
-        if !enable.status.success() {
-            let stderr = String::from_utf8_lossy(&enable.stderr).to_string();
-            return Err(RpcError::Internal_with(format!(
-                "systemctl enable --now {name} failed: {stderr}"
-            )));
+        let now = now_secs();
+        {
+            let mut g = self.service_install_progress.lock().await;
+            *g = hyperion_types::ServiceInstallStatus {
+                service_name: name.clone(),
+                pkg: pkg.to_string(),
+                started_at: now,
+                finished_at: 0,
+                state: "running".into(),
+                log_tail: String::new(),
+                exit_code: 0,
+            };
         }
+        // Audit-log the START. The finish state is audited separately
+        // by the background task below.
         self.append_audit(
-            "service.install",
+            "service.install.start",
             None,
             &serde_json::json!({"name": name, "pkg": pkg}).to_string(),
             "ok",
         )
         .await;
+        // Spawn detached — caller returns immediately, UI polls.
+        let slot = self.service_install_progress.clone();
+        let svc_name = name.clone();
+        let pkg_owned = pkg.to_string();
+        tokio::spawn(async move {
+            run_service_install(slot, svc_name, pkg_owned).await;
+        });
         Ok(())
+    }
+
+    /// Current state of the most-recent / in-progress service-install
+    /// job. Cheap — clones the in-memory slot. Empty
+    /// ServiceInstallStatus (state="" / started_at=0) when no
+    /// install has ever run.
+    pub async fn service_install_status(
+        &self,
+    ) -> Result<hyperion_types::ServiceInstallStatus, RpcError> {
+        Ok(self.service_install_progress.lock().await.clone())
     }
 
     /// Spawn a background job that runs the requested update steps
@@ -7907,6 +8084,9 @@ mod tests {
             node_update: Arc::new(tokio::sync::Mutex::new(
                 hyperion_types::NodeUpdateStatus::default(),
             )),
+            service_install_progress: Arc::new(tokio::sync::Mutex::new(
+                hyperion_types::ServiceInstallStatus::default(),
+            )),
         };
         s2.create(req("test6.example.cz"))
             .await
@@ -7981,6 +8161,9 @@ mod tests {
             node_update: Arc::new(tokio::sync::Mutex::new(
                 hyperion_types::NodeUpdateStatus::default(),
             )),
+            service_install_progress: Arc::new(tokio::sync::Mutex::new(
+                hyperion_types::ServiceInstallStatus::default(),
+            )),
         };
         s2.create(req("retry.cz"))
             .await
@@ -8021,6 +8204,9 @@ mod tests {
             node_state_file: None,
             node_update: Arc::new(tokio::sync::Mutex::new(
                 hyperion_types::NodeUpdateStatus::default(),
+            )),
+            service_install_progress: Arc::new(tokio::sync::Mutex::new(
+                hyperion_types::ServiceInstallStatus::default(),
             )),
         };
         s2.create(HostingCreateReq {
@@ -8130,6 +8316,9 @@ mod tests {
             node_state_file: None,
             node_update: Arc::new(tokio::sync::Mutex::new(
                 hyperion_types::NodeUpdateStatus::default(),
+            )),
+            service_install_progress: Arc::new(tokio::sync::Mutex::new(
+                hyperion_types::ServiceInstallStatus::default(),
             )),
         };
         let r = s2.create(req("dup.cz")).await;

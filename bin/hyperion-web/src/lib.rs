@@ -118,6 +118,10 @@ pub fn build_router(state: SharedState) -> Router {
             "/services/install",
             post(handlers::services_health::post_service_install),
         )
+        .route(
+            "/services/install-status",
+            get(handlers::services_health::get_service_install_status),
+        )
         .route("/settings", get(handlers::settings::get_settings))
         .route(
             "/settings/email-test",

@@ -177,6 +177,11 @@ pub async fn post_service_restart(
 }
 
 /// POST /services/install — super_admin only.
+///
+/// The RPC now starts a background apt-get install + systemctl
+/// enable task and returns immediately. The page redirect lands
+/// the operator on /services where a live-progress panel (polled
+/// via HTMX) shows the rolling log tail until the job finishes.
 pub async fn post_service_install(
     State(state): State<SharedState>,
     ctx: AuthCtx,
@@ -202,7 +207,7 @@ pub async fn post_service_install(
     .await?;
     let dest = match resp {
         RpcResponse::ServiceInstall => format!(
-            "/services?{}flash=Service+{}+installed+and+started",
+            "/services?{}flash=Install+of+{}+started+%E2%80%94+see+live+progress+below#install-progress",
             query_node_prefix(target),
             urlencode(&form.name),
         ),
@@ -214,6 +219,95 @@ pub async fn post_service_install(
         _ => return Err(AppError::Internal("unexpected response".into())),
     };
     Ok(Redirect::to(&dest).into_response())
+}
+
+/// GET /services/install-status?node=… — tiny HTML fragment with
+/// the live state pill + log tail. UI polls via HTMX. No-cache.
+#[derive(Deserialize, Default)]
+pub struct InstallStatusQuery {
+    #[serde(default)]
+    pub node: Option<String>,
+}
+
+pub async fn get_service_install_status(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    axum::extract::Query(q): axum::extract::Query<InstallStatusQuery>,
+) -> Response {
+    if !ctx.is_admin_or_higher() {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            [("content-type", "text/html; charset=utf-8")],
+            "<span class=\"pill err\">admin only</span>",
+        )
+            .into_response();
+    }
+    let target = match q.node.as_deref() {
+        None | Some("") | Some("local") => None,
+        Some(s) => Some(s),
+    };
+    let resp =
+        crate::dispatcher::dispatch_to_node(&state, target, Request::ServiceInstallStatus).await;
+    let body = match resp {
+        Ok(RpcResponse::ServiceInstallStatus(s)) => render_install_status(&s),
+        Ok(RpcResponse::Error(e)) => format!(
+            "<div class=\"text-soft small\">status RPC error: {}</div>",
+            escape(&e.to_string())
+        ),
+        Ok(_) => "<div class=\"text-soft small\">unexpected response</div>".to_string(),
+        Err(e) => format!(
+            "<div class=\"text-soft small\">unreachable: {}</div>",
+            escape(&e.to_string())
+        ),
+    };
+    (
+        axum::http::StatusCode::OK,
+        [
+            ("content-type", "text/html; charset=utf-8"),
+            ("cache-control", "no-store"),
+        ],
+        body,
+    )
+        .into_response()
+}
+
+fn render_install_status(s: &hyperion_types::ServiceInstallStatus) -> String {
+    if s.started_at == 0 {
+        return "<div class=\"text-soft small\">no service install has run on this node yet — click <strong>Install</strong> on a row above</div>".to_string();
+    }
+    let pill = match s.state.as_str() {
+        "running" => "<span class=\"pill warn pulse\">installing…</span>",
+        "succeeded" => "<span class=\"pill ok\">installed</span>",
+        "failed" => "<span class=\"pill err\">failed</span>",
+        _ => "<span class=\"pill\">unknown</span>",
+    };
+    let mut out = format!(
+        "<div style=\"display:flex;gap:0.6rem;align-items:center;flex-wrap:wrap\">\
+            {pill} <strong>{}</strong> <span class=\"text-soft small\">(apt pkg <code>{}</code>)</span>",
+        escape(&s.service_name),
+        escape(&s.pkg),
+    );
+    if s.state == "failed" {
+        out.push_str(&format!(
+            " <span class=\"text-soft small\">exit {}</span>",
+            s.exit_code
+        ));
+    }
+    out.push_str("</div>");
+    if !s.log_tail.is_empty() {
+        out.push_str(&format!(
+            "<pre style=\"max-height:18rem;overflow:auto;background:var(--surface-1);padding:0.6rem 0.8rem;border-radius:6px;margin:0.6rem 0 0;font-size:0.78rem;line-height:1.45\">{}</pre>",
+            escape(&s.log_tail)
+        ));
+    }
+    out
+}
+
+fn escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 /// Render `node=<id>&` for redirects, or empty for the master so

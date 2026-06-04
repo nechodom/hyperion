@@ -177,6 +177,9 @@ async fn start_agent() -> (std::path::PathBuf, tempfile::TempDir) {
         node_update: Arc::new(tokio::sync::Mutex::new(
             hyperion_types::NodeUpdateStatus::default(),
         )),
+        service_install_progress: Arc::new(tokio::sync::Mutex::new(
+            hyperion_types::ServiceInstallStatus::default(),
+        )),
     });
     let _ = adapters; // silence unused warning
     let agent: Arc<dyn AgentApi> = Arc::new(AgentImpl::new(svc));

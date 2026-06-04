@@ -122,9 +122,16 @@ pub enum Request {
     /// `apt-get install -y <pkg>` then `systemctl enable --now <name>`.
     /// `name` must be in the same whitelist as restart. Maps service
     /// name to apt package name (typically identical).
+    ///
+    /// Returns IMMEDIATELY after spawning the install in the
+    /// background. Operator polls `ServiceInstallStatus` to follow
+    /// the live log tail.
     ServiceInstall {
         name: String,
     },
+    /// Read the state of the most-recent / in-progress
+    /// service-install job. Empty when no install has ever run.
+    ServiceInstallStatus,
     /// Run system + hyperion updates on the target node. Both jobs
     /// run in the background; the call returns immediately with a
     /// "started" marker. Operator polls `NodeUpdateStatus` (see
@@ -434,6 +441,9 @@ pub enum Response {
     EmailSendTest { smtp_code: String },
     ServiceRestart,
     ServiceInstall,
+    /// Current state of the most-recent / in-progress
+    /// service-install job + log tail.
+    ServiceInstallStatus(hyperion_types::ServiceInstallStatus),
     /// Acknowledgement that the background update task spawned.
     /// Failures during the actual update show up in the log tail,
     /// not here.
