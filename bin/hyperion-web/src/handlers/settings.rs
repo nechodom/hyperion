@@ -114,9 +114,27 @@ pub struct EmailTestForm {
 /// back to /settings with a flash message.
 pub async fn post_email_test(
     State(state): State<SharedState>,
+    ctx: AuthCtx,
     Form(form): Form<EmailTestForm>,
 ) -> Result<Response, AppError> {
+    // Without this gate any authenticated viewer can use Hyperion's
+    // SMTP relay as a free spam vector — the relay's daily quota
+    // would also get blown out, breaking real cluster notifications.
+    if !ctx.is_admin_or_higher() {
+        return Ok(
+            Redirect::to("/settings?flash_error=admin+role+required+to+send+test+emails")
+                .into_response(),
+        );
+    }
     let to = form.to.trim().to_string();
+    // Bound the address at the RFC5321 max so a 50 KB pathological
+    // 'to' field can't blow out the Location header on the redirect.
+    if to.len() > 254 {
+        return Ok(
+            Redirect::to("/settings?flash_error=address+too+long+%28max+254+chars%29")
+                .into_response(),
+        );
+    }
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
         Request::EmailSendTest { to: to.clone() },
@@ -226,8 +244,21 @@ pub async fn post_config(
 /// — viewers can run it too since it's read-only.
 pub async fn post_email_autodetect(
     State(state): State<SharedState>,
-    _ctx: AuthCtx,
+    ctx: AuthCtx,
 ) -> Result<Response, AppError> {
+    // Viewers shouldn't be able to fingerprint local SMTP via this
+    // endpoint — the probe is operator-config only.
+    if !ctx.is_admin_or_higher() {
+        return Ok(Json(SmtpAutodetect {
+            found: false,
+            smtp_host: String::new(),
+            smtp_port: 0,
+            security: String::new(),
+            suggested_from: String::new(),
+            notes: "admin role required to probe SMTP".into(),
+        })
+        .into_response());
+    }
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
         Request::EmailSmtpAutodetect,

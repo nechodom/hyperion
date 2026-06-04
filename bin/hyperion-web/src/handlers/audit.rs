@@ -75,6 +75,13 @@ pub async fn get_audit(
     ctx: AuthCtx,
     Query(q): Query<AuditQuery>,
 ) -> Result<Response, AppError> {
+    // The audit log contains every state-changing operation across
+    // every hosting + user + cluster-wide event. Subjects + JSON
+    // payloads leak cross-tenant operational data — viewer with
+    // access to one site can read everything else.
+    if !ctx.is_admin_or_higher() {
+        return Ok(axum::response::Redirect::to("/?flash_error=admin+role+required").into_response());
+    }
     let limit = q.limit.clamp(1, 1000);
     let resp = hyperion_rpc_client::call(&state.agent_socket, Request::AuditList { limit }).await?;
     let all = match resp {

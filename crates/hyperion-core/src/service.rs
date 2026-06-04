@@ -5073,19 +5073,27 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         };
 
         // Email channel.
-        if let (Some(email), Some(email_cfg)) =
-            (cfg.alert_email.as_deref(), self.email_config.as_ref())
-        {
+        //
+        // Goes through self.notify_email (not send_text directly) so
+        // every recipient lands in email_log with kind="monitor",
+        // hosting_id pre-filled, and the audit chain captures the
+        // outcome. Previously this used send_text and the /emails
+        // page + per-hosting Emails tab silently missed every alert.
+        if cfg.alert_email.is_some() && self.email_config.is_some() {
+            let email = cfg.alert_email.as_deref().unwrap_or("");
             for to in email.split(',') {
                 let to = to.trim();
                 if to.is_empty() {
                     continue;
                 }
-                if let Err(e) = hyperion_adapters::email::send_text(email_cfg, to, &subject, &body)
-                    .await
-                {
-                    tracing::warn!(error=%e, "monitor alert email failed");
-                }
+                self.notify_email(
+                    to,
+                    &subject,
+                    &body,
+                    Some(cfg.hosting_id.as_str()),
+                    "monitor",
+                )
+                .await;
             }
         }
         // Slack webhook channel.
@@ -6019,6 +6027,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let allowed_roots = [
             std::path::PathBuf::from(&self.paths.backup_root),
             std::path::PathBuf::from("/var/lib/hyperion/backups/incoming"),
+            // Migration export staging — `hosting_export` hardlinks the
+            // archive here and `hosting_import` reads it back. Without
+            // this, every cross-node `Migrate to another node` flow
+            // would 400 with "not under allowed backup root".
+            std::path::PathBuf::from("/var/lib/hyperion/migration"),
+            // Migration pull staging — `hosting_import_from_url` writes
+            // the downloaded archive here, then calls `backup_restore`
+            // on it. Same gap; without this the new one-click import
+            // workflow fails at the very last step.
+            std::path::PathBuf::from("/var/lib/hyperion/migration-incoming"),
         ];
         if !allowed_roots
             .iter()

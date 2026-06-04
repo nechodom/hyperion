@@ -34,6 +34,13 @@ pub async fn get_install(
     ctx: AuthCtx,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
+    // Minting + revoking invite tokens enrols new boxes into the
+    // cluster. Viewers shouldn't even see the page — the plaintext
+    // token + master URL on the install one-liner is enough to
+    // social-engineer a misconfigured node into a malicious cluster.
+    if !ctx.is_super_admin() {
+        return Ok(Redirect::to("/?flash_error=admin+role+required+for+node+enrollment").into_response());
+    }
     let invites = fetch_invites(&state).await.unwrap_or_default();
     let nodes = fetch_nodes(&state).await.unwrap_or_default();
     let master_url = derive_master_url(&state, &headers).await;
@@ -70,6 +77,9 @@ pub async fn post_invite(
     headers: HeaderMap,
     Form(form): Form<CreateForm>,
 ) -> Result<Response, AppError> {
+    if !ctx.is_super_admin() {
+        return Ok(Redirect::to("/?flash_error=admin+role+required+for+node+enrollment").into_response());
+    }
     let label = form.label.trim().to_string();
     if label.is_empty() {
         return Ok(render_with_error(&state, &ctx, &headers, "Label must not be empty").await);
@@ -104,7 +114,17 @@ pub async fn post_invite(
         csrf_create: csrf_token(&state, &ctx, "/install/invite"),
         csrf_revoke: csrf_token(&state, &ctx, "/install/invite/revoke"),
     };
-    Ok(Html(tpl.render()?).into_response())
+    // The rendered page carries the plaintext invite token. Make sure
+    // browser/proxy caches don't keep it around past the first view.
+    let mut response = Html(tpl.render()?).into_response();
+    let h = response.headers_mut();
+    h.insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store, no-cache, must-revalidate, private"),
+    );
+    h.insert(axum::http::header::PRAGMA, axum::http::HeaderValue::from_static("no-cache"));
+    h.insert("vary", axum::http::HeaderValue::from_static("Cookie"));
+    Ok(response)
 }
 
 #[derive(Deserialize)]
@@ -114,8 +134,12 @@ pub struct RevokeForm {
 
 pub async fn post_revoke(
     State(state): State<SharedState>,
+    ctx: AuthCtx,
     Form(form): Form<RevokeForm>,
 ) -> Result<Response, AppError> {
+    if !ctx.is_super_admin() {
+        return Ok(Redirect::to("/?flash_error=admin+role+required+for+node+enrollment").into_response());
+    }
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
         Request::InviteRevoke {
