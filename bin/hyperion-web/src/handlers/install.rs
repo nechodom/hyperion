@@ -36,7 +36,7 @@ pub async fn get_install(
 ) -> Result<Response, AppError> {
     let invites = fetch_invites(&state).await.unwrap_or_default();
     let nodes = fetch_nodes(&state).await.unwrap_or_default();
-    let master_url = derive_master_url(&state, &headers);
+    let master_url = derive_master_url(&state, &headers).await;
     let tpl = InstallTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -89,7 +89,7 @@ pub async fn post_invite(
     };
     let invites = fetch_invites(&state).await.unwrap_or_default();
     let nodes = fetch_nodes(&state).await.unwrap_or_default();
-    let master_url = derive_master_url(&state, &headers);
+    let master_url = derive_master_url(&state, &headers).await;
     let tpl = InstallTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -148,34 +148,9 @@ async fn fetch_nodes(state: &SharedState) -> Result<Vec<NodeSummary>, AppError> 
     }
 }
 
-/// Derive the master's public URL from the incoming request — the Host
-/// header is what the client actually used to reach us, so it's the only
-/// value we can hand to install-node.sh that's guaranteed to work.
-///
-/// `state.cfg.web.listen` is the *bind* address (e.g. `0.0.0.0:8443`) —
-/// useless for clients. Falls back to it only if Host is missing.
-///
-/// Honours `X-Forwarded-Proto` for installs behind a reverse proxy.
-fn derive_master_url(state: &SharedState, headers: &HeaderMap) -> String {
-    let scheme = headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_lowercase())
-        .filter(|s| s == "http" || s == "https")
-        .unwrap_or_else(|| {
-            if state.cfg.web.secure_cookies {
-                "https".to_string()
-            } else {
-                "http".to_string()
-            }
-        });
-    let host = headers
-        .get("host")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| state.cfg.web.listen.clone());
-    format!("{scheme}://{host}")
-}
+// derive_master_url lives in handlers::mod — see there for the
+// loopback-detection logic and the public-IP fallback rationale.
+use super::derive_master_url;
 
 fn csrf_token(state: &SharedState, ctx: &AuthCtx, form_id: &str) -> String {
     let sid = ctx
@@ -199,7 +174,7 @@ async fn render_with_error(
 ) -> Response {
     let invites = fetch_invites(state).await.unwrap_or_default();
     let nodes = fetch_nodes(state).await.unwrap_or_default();
-    let master_url = derive_master_url(state, headers);
+    let master_url = derive_master_url(state, headers).await;
     let tpl = InstallTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),

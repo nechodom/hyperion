@@ -2214,7 +2214,7 @@ pub async fn post_migration_export(
             // Mint the signed download URL — agent has no idea what
             // master URL the operator's browser used to reach us, so
             // the web layer is the only thing that can derive it.
-            let master_url = derive_master_url(&state, &headers);
+            let master_url = super::derive_master_url(&state, &headers).await;
             let exp = hyperion_types::now_secs()
                 + crate::handlers::migration::BUNDLE_DOWNLOAD_TTL_SECS;
             let token = hyperion_auth::bundle_sig::mint(
@@ -2250,30 +2250,9 @@ pub async fn post_migration_export(
     }
 }
 
-/// Mirror of `install::derive_master_url` — picks the externally
-/// reachable URL from the request the operator made. Duplicated
-/// here to keep the install handler's helper private; once we have
-/// more callers we can pull this into a shared module.
-fn derive_master_url(state: &SharedState, headers: &axum::http::HeaderMap) -> String {
-    let scheme = headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_lowercase())
-        .filter(|s| s == "http" || s == "https")
-        .unwrap_or_else(|| {
-            if state.cfg.web.secure_cookies {
-                "https".to_string()
-            } else {
-                "http".to_string()
-            }
-        });
-    let host = headers
-        .get("host")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| state.cfg.web.listen.clone());
-    format!("{scheme}://{host}")
-}
+// derive_master_url is the shared helper in handlers::mod — see
+// there for the loopback-detection + public-IP fallback rationale.
+// Hostings caller imports via the super:: path below.
 
 pub async fn post_wp_plugin_action(
     State(state): State<SharedState>,

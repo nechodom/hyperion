@@ -8,6 +8,21 @@
   </div>
 </div>
 
+{# Warning banner when the auto-detected master URL points at a
+   loopback / unspecified address — no node can reach it. The
+   handler tags this with "CHANGE-ME-set-master-url-below" when
+   both Host detection AND public-IP fallback failed. #}
+{% if master_url.contains("CHANGE-ME") || master_url.contains("0.0.0.0") || master_url.contains("127.0.0.1") || master_url.contains("://localhost") %}
+<div class="flash error" style="margin-bottom:1rem">
+  <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+  <div class="flash-body">
+    <strong>The auto-detected master URL (<code>{{ master_url }}</code>) is not reachable from a remote node.</strong>
+    No node can connect to <code>0.0.0.0</code> / <code>127.0.0.1</code> / <code>localhost</code> from outside this box.
+    Set the externally-reachable URL below before generating an install command — the install one-liner updates live as you type.
+  </div>
+</div>
+{% endif %}
+
 {# Editable master URL. Defaults to whatever the operator's browser
    actually used to reach us (Host header). Some setups need an
    override — e.g. operator accessed via IP but nodes should call
