@@ -3,7 +3,7 @@
 {% block main %}
 <div class="page-header">
   <div>
-    <h1>Stats</h1>
+    <h1>Stats <span class="text-soft" style="font-weight:400;font-size:0.7em">· {{ current_label }}</span></h1>
     <div class="subtitle">
       Cluster + per-node + per-hosting snapshots, sampled every 5 minutes.
       {% if samples_in_window >= 2 %}
@@ -11,6 +11,28 @@
       {% endif %}
     </div>
   </div>
+  {% if !all_nodes.is_empty() %}
+  <span class="grow"></span>
+  <div class="actions">
+    {# Switching nodes re-runs the cluster_stats + history RPCs on
+       the chosen node — so the sparklines reflect that node's /proc
+       data, not just the master's. #}
+    <form method="get" action="/stats" style="display:flex;gap:0.4rem;align-items:center">
+      <label for="node-switcher" class="text-soft small">View on node:</label>
+      <select id="node-switcher" name="node"
+              onchange="this.form.submit()"
+              style="min-width:14rem">
+        <option value="" {% if current_node.is_empty() || current_node == "local" %}selected{% endif %}>master (this node)</option>
+        {% for n in all_nodes %}
+        <option value="{{ n.node_id }}" {% if current_node == n.node_id %}selected{% endif %}>
+          {{ n.label }}{% if let Some(ip) = n.public_ip.as_ref() %} — {{ ip }}{% endif %}
+        </option>
+        {% endfor %}
+      </select>
+      <noscript><button class="btn small" type="submit">Go</button></noscript>
+    </form>
+  </div>
+  {% endif %}
 </div>
 
 {% if let Some(e) = error %}

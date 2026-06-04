@@ -3,7 +3,7 @@
 {% block main %}
 <div class="page-header">
   <div>
-    <h1>Service health</h1>
+    <h1>Service health <span class="text-soft" style="font-weight:400;font-size:0.7em">· {{ current_label }}</span></h1>
     <div class="subtitle">
       Live status of the systemd units Hyperion depends on.
       {% if health.critical_down > 0 %}
@@ -15,6 +15,28 @@
       {% endif %}
     </div>
   </div>
+  {% if !nodes.is_empty() %}
+  <span class="grow"></span>
+  <div class="actions">
+    {# Node switcher — navigate to /services?node=<id>. JS-free
+       fallback uses a tiny form; with JS the change handler fires
+       immediately so the operator doesn't have to click "Go". #}
+    <form method="get" action="/services" style="display:flex;gap:0.4rem;align-items:center">
+      <label for="node-switcher" class="text-soft small">View on node:</label>
+      <select id="node-switcher" name="node"
+              onchange="this.form.submit()"
+              style="min-width:14rem">
+        <option value="" {% if current_node.is_empty() %}selected{% endif %}>master (this node)</option>
+        {% for n in nodes %}
+        <option value="{{ n.node_id }}" {% if current_node == n.node_id %}selected{% endif %}>
+          {{ n.label }}{% if let Some(ip) = n.public_ip.as_ref() %} — {{ ip }}{% endif %}
+        </option>
+        {% endfor %}
+      </select>
+      <noscript><button class="btn small" type="submit">Go</button></noscript>
+    </form>
+  </div>
+  {% endif %}
 </div>
 
 {% if let Some(e) = error %}
@@ -133,9 +155,12 @@
                 {# Don't offer self-install for hyperion-agent / hyperion-web — they're already this binary. #}
                 {% if s.name != "hyperion-agent" && s.name != "hyperion-web" %}
                   <form method="post" action="/services/install" style="display:inline"
-                        onsubmit="return confirm('apt-install + enable {{ s.label }}? This runs apt-get on the node.');">
+                        onsubmit="return confirm('apt-install + enable {{ s.label }} on {{ current_label }}? This runs apt-get on the node.');">
                     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                     <input type="hidden" name="name" value="{{ s.name }}">
+                    {# Carry the current node so the action lands on
+                       the same node the operator is viewing. #}
+                    <input type="hidden" name="node" value="{{ current_node }}">
                     <button type="submit" class="btn small primary">Install</button>
                   </form>
                 {% endif %}
@@ -143,9 +168,10 @@
                 {# Refuse self-restart of hyperion-agent — would terminate the RPC pipe. #}
                 {% if s.name != "hyperion-agent" %}
                   <form method="post" action="/services/restart" style="display:inline"
-                        onsubmit="return confirm('Restart {{ s.label }}? Active connections may briefly drop.');">
+                        onsubmit="return confirm('Restart {{ s.label }} on {{ current_label }}? Active connections may briefly drop.');">
                     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                     <input type="hidden" name="name" value="{{ s.name }}">
+                    <input type="hidden" name="node" value="{{ current_node }}">
                     <button type="submit" class="btn small">Restart</button>
                   </form>
                 {% endif %}

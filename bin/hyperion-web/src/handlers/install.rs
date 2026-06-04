@@ -27,6 +27,10 @@ struct InstallTpl<'a> {
     error: Option<String>,
     csrf_create: String,
     csrf_revoke: String,
+    /// CSRF token for the per-row "Test connectivity" button.
+    /// Same wildcard token covers both inline HTMX POSTs and the
+    /// JS-free fallback.
+    csrf_test: String,
 }
 
 pub async fn get_install(
@@ -57,6 +61,7 @@ pub async fn get_install(
         error: None,
         csrf_create: csrf_token(&state, &ctx, "/install/invite"),
         csrf_revoke: csrf_token(&state, &ctx, "/install/invite/revoke"),
+        csrf_test: csrf_token(&state, &ctx, "/install/test-node"),
     };
     Ok(Html(tpl.render()?).into_response())
 }
@@ -113,6 +118,7 @@ pub async fn post_invite(
         error: None,
         csrf_create: csrf_token(&state, &ctx, "/install/invite"),
         csrf_revoke: csrf_token(&state, &ctx, "/install/invite/revoke"),
+        csrf_test: csrf_token(&state, &ctx, "/install/test-node"),
     };
     // The rendered page carries the plaintext invite token. Make sure
     // browser/proxy caches don't keep it around past the first view.
@@ -152,6 +158,96 @@ pub async fn post_revoke(
         RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
+}
+
+/// POST /install/test-node — super_admin only.
+///
+/// Master-side connectivity probe to a remote node. Replaces the
+/// "ssh in + curl :9443 + check ss -tlnp" debug ritual: master
+/// dispatches an `AgentInfo` over the signed-RPC channel and
+/// reports back what happened. Operator gets one of:
+///   - ✓ reachable (with agent version + hosting count for sanity)
+///   - ✗ no public_ip on record
+///   - ✗ remote-RPC signer not loaded
+///   - ✗ connection failed (curl message verbatim)
+///   - ✗ auth failed (pubkey not yet propagated; wait a heartbeat)
+///
+/// Returned as HTML fragment so the page can swap it inline via
+/// HTMX without reloading.
+#[derive(Deserialize)]
+pub struct TestNodeForm {
+    node_id: String,
+}
+
+pub async fn post_test_node(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<TestNodeForm>,
+) -> Response {
+    if !ctx.is_super_admin() {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            [("content-type", "text/html; charset=utf-8")],
+            "<span class=\"pill err\">admin role required</span>",
+        )
+            .into_response();
+    }
+    let node_id = form.node_id.trim();
+    if node_id.is_empty() {
+        return html_pill_err("missing node_id");
+    }
+    let started = std::time::Instant::now();
+    let result = crate::dispatcher::dispatch_to_node(
+        &state,
+        Some(node_id),
+        Request::AgentInfo,
+    )
+    .await;
+    let elapsed_ms = started.elapsed().as_millis();
+    match result {
+        Ok(RpcResponse::AgentInfo(info)) => html_pill_ok(&format!(
+            "reachable · v{} · {} hostings · {} ms",
+            info.version, info.hostings_count, elapsed_ms
+        )),
+        Ok(RpcResponse::Error(e)) => html_pill_err(&format!("agent error: {e}")),
+        Ok(_) => html_pill_err("unexpected response"),
+        Err(e) => html_pill_err(&e.to_string()),
+    }
+}
+
+fn html_pill_ok(msg: &str) -> Response {
+    (
+        axum::http::StatusCode::OK,
+        [("content-type", "text/html; charset=utf-8")],
+        format!(
+            "<span class=\"pill ok\" title=\"{}\">✓ {}</span>",
+            html_escape(msg),
+            html_escape(msg)
+        ),
+    )
+        .into_response()
+}
+
+fn html_pill_err(msg: &str) -> Response {
+    (
+        axum::http::StatusCode::OK,
+        [("content-type", "text/html; charset=utf-8")],
+        format!(
+            "<span class=\"pill err\" title=\"{}\">✗ {}</span>",
+            html_escape(msg),
+            html_escape(msg)
+        ),
+    )
+        .into_response()
+}
+
+/// Minimal HTML-attribute escape sufficient for the pill above.
+/// (askama would be overkill for a single-fragment response.)
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 async fn fetch_invites(state: &SharedState) -> Result<Vec<NodeInviteSummary>, AppError> {
@@ -212,6 +308,7 @@ async fn render_with_error(
         error: Some(message.to_string()),
         csrf_create: csrf_token(state, ctx, "/install/invite"),
         csrf_revoke: csrf_token(state, ctx, "/install/invite/revoke"),
+        csrf_test: csrf_token(state, ctx, "/install/test-node"),
     };
     Html(
         tpl.render()

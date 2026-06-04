@@ -197,6 +197,10 @@ pub fn build_router(state: SharedState) -> Router {
             "/install/invite/revoke",
             post(handlers::install::post_revoke),
         )
+        .route(
+            "/install/test-node",
+            post(handlers::install::post_test_node),
+        )
         .route("/hostings/:selector", get(handlers::hostings::get_detail))
         .route("/logout", post(handlers::login::post_logout))
         .layer(from_fn_with_state(state.clone(), auth::check_csrf))

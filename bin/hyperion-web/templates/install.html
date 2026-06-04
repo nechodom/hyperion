@@ -227,6 +227,8 @@
           <th>Public IP</th>
           <th>Enrolled</th>
           <th>Last seen</th>
+          <th>Remote RPC</th>
+          <th class="right">Actions</th>
         </tr>
       </thead>
       <tbody>
@@ -238,10 +240,32 @@
           <td>{% if let Some(ip) = n.public_ip %}<code>{{ ip }}</code>{% else %}<span class="text-soft">—</span>{% endif %}</td>
           <td class="muted numeric" title="{{ n.enrolled_at }}">{{ crate::handlers::stats::fmt_ago(n.enrolled_at) }}</td>
           <td class="muted numeric" title="{{ n.last_seen_at }}">{{ crate::handlers::stats::fmt_ago(n.last_seen_at) }}</td>
+          {# Connectivity probe — master signs an AgentInfo, POSTs
+             to https://<public_ip>:9443/agent-rpc, surfaces what
+             happens. Result swaps in via HTMX without a page reload. #}
+          <td id="rpc-status-{{ n.node_id }}">
+            <span class="text-soft small">click Test →</span>
+          </td>
+          <td class="right">
+            <form hx-post="/install/test-node"
+                  hx-target="#rpc-status-{{ n.node_id }}"
+                  hx-swap="innerHTML"
+                  hx-indicator="#rpc-status-{{ n.node_id }}"
+                  style="display:inline">
+              <input type="hidden" name="_csrf" value="{{ csrf_test }}">
+              <input type="hidden" name="node_id" value="{{ n.node_id }}">
+              <button type="submit" class="btn small">Test connectivity</button>
+            </form>
+          </td>
         </tr>
         {% endfor %}
       </tbody>
     </table>
+    <p class="text-soft small" style="margin:0.7rem 1.5rem 1rem">
+      <strong>Test connectivity</strong> reaches each node by its <strong>public IP</strong>
+      (port 9443, signed Ed25519 envelope). No DNS — works even when the
+      node's hostname doesn't resolve from the master.
+    </p>
   </div>
   {% endif %}
 </div>

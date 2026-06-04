@@ -60,6 +60,14 @@ struct StatsTpl<'a> {
     /// How many minutes the sparkline window covers, for the legend.
     window_minutes: i64,
     error: Option<String>,
+    /// All enrolled remote nodes — drives the "View on node:"
+    /// switcher in the page header. Empty on single-node setups.
+    all_nodes: Vec<hyperion_types::NodeSummary>,
+    /// Echoes `query.node` so the switcher highlights the
+    /// currently-displayed node.
+    current_node: String,
+    /// Human-friendly label of the displayed node ("master" / node label).
+    current_label: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -73,14 +81,29 @@ pub async fn get_stats(
     ctx: AuthCtx,
     Query(query): Query<StatsQuery>,
 ) -> Result<Response, AppError> {
+    // Decide target node up front: the `node` query param selects the
+    // node we DISPATCH to (was previously interpreted as "filter the
+    // cluster_stats response", but now that we want real per-node
+    // metrics we need to actually run cluster_stats + history ON the
+    // chosen node).
+    let target_owned = query.node.clone();
+    let target = if target_owned.is_empty()
+        || target_owned == crate::dispatcher::LOCAL_NODE_SENTINEL
+    {
+        None
+    } else {
+        Some(target_owned.as_str())
+    };
+
     // We need both: latest snapshot (ClusterStats) + history (sparklines).
     // Fetch in parallel since they're independent.
     let cluster_fut =
-        hyperion_rpc_client::call(&state.agent_socket, Request::ClusterStats);
+        crate::dispatcher::dispatch_to_node(&state, target, Request::ClusterStats);
     // ~4 hours of 5-minute samples (48 points) is a comfortable
     // sparkline width without being so dense the dots blur into noise.
-    let history_fut = hyperion_rpc_client::call(
-        &state.agent_socket,
+    let history_fut = crate::dispatcher::dispatch_to_node(
+        &state,
+        target,
         Request::NodeMetricsHistory { limit: 48 },
     );
     let (cluster_res, history_res) = tokio::join!(cluster_fut, history_fut);
@@ -89,7 +112,7 @@ pub async fn get_stats(
         Ok(RpcResponse::ClusterStats(c)) => (Some(c), None),
         Ok(RpcResponse::Error(e)) => (None, Some(e.to_string())),
         Ok(_) => (None, Some("unexpected agent response".into())),
-        Err(e) => (None, Some(format!("rpc: {e}"))),
+        Err(e) => (None, Some(e.to_string())),
     };
 
     let history: NodeMetricsHistory = match history_res {
@@ -102,6 +125,21 @@ pub async fn get_stats(
         }
         _ => NodeMetricsHistory::default(),
     };
+
+    // Always fetch the list of enrolled nodes from the master (NOT
+    // from `target`) so the switcher knows about every node even
+    // when the operator is currently viewing one of them. Failure
+    // → empty list → switcher hides itself in the template.
+    let all_nodes = match hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::NodesList,
+    )
+    .await
+    {
+        Ok(RpcResponse::NodesList(v)) => v,
+        _ => Vec::new(),
+    };
+    let current_label = label_for_node(&query.node, &all_nodes);
 
     let selected_node = cluster.as_ref().and_then(|c| {
         if !query.node.is_empty() {
@@ -163,8 +201,25 @@ pub async fn get_stats(
         samples_in_window,
         window_minutes,
         error,
+        all_nodes,
+        current_node: query.node.clone(),
+        current_label,
     };
     Ok(Html(tpl.render()?).into_response())
+}
+
+fn label_for_node(current: &str, nodes: &[hyperion_types::NodeSummary]) -> String {
+    if current.is_empty() || current == crate::dispatcher::LOCAL_NODE_SENTINEL {
+        return "master (this node)".to_string();
+    }
+    nodes
+        .iter()
+        .find(|n| n.node_id == current)
+        .map(|n| match n.public_ip.as_deref() {
+            Some(ip) if !ip.is_empty() => format!("{} ({})", n.label, ip),
+            _ => n.label.clone(),
+        })
+        .unwrap_or_else(|| current.to_string())
 }
 
 /// Generate an SVG path + per-point JSON for hover tooltips. Callers
