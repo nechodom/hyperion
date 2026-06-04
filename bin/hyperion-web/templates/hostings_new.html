@@ -9,7 +9,9 @@
 <div class="page-header">
   <div>
     <h1>Provision a new hosting</h1>
-    <div class="subtitle">nginx vhost · PHP-FPM pool · database · TLS — laid down atomically.</div>
+    <div class="subtitle">
+      nginx vhost · PHP-FPM pool · database · TLS — laid down atomically.
+    </div>
   </div>
   <span class="grow"></span>
   <div class="actions">
@@ -19,6 +21,26 @@
     </a>
   </div>
 </div>
+
+{# Loud "where is this going to land?" banner — same data the
+   inline dropdown below carries, surfaced where the operator can't
+   miss it. The chip updates live as the dropdown changes. #}
+{% if !nodes.is_empty() %}
+<div id="target-banner"
+     style="display:flex;align-items:center;gap:0.6rem;padding:0.8rem 1rem;margin-bottom:1rem;border-radius:8px;background:var(--surface-1);border-left:4px solid var(--accent)">
+  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.7">
+    <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
+    <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
+    <line x1="12" y1="22.08" x2="12" y2="12"/>
+  </svg>
+  <div style="flex:1">
+    <div class="text-soft small" style="margin-bottom:0.15rem">Will be provisioned on</div>
+    <strong id="target-banner-name" style="font-size:1.05rem">master (this node)</strong>
+    <span id="target-banner-detail" class="text-soft small" style="margin-left:0.5rem"></span>
+  </div>
+  <a href="#target-node" class="btn small ghost" onclick="document.getElementById('target_node').focus(); return false;">Change</a>
+</div>
+{% endif %}
 
 {% if let Some(e) = error %}
   <div class="flash error">
@@ -43,12 +65,18 @@
     <div class="field">
       <label for="target_node">Which node should host this site?</label>
       <select id="target_node" name="target_node">
-        <option value="local" {% if target_node_in.is_empty() || target_node_in == "local" %}selected{% endif %}>
-          this master (default)
+        <option value="local"
+                data-label="master (this node)"
+                data-detail=""
+                {% if target_node_in.is_empty() || target_node_in == "local" %}selected{% endif %}>
+          ◯  master (this node — default)
         </option>
         {% for n in nodes %}
-        <option value="{{ n.node_id }}" {% if target_node_in == n.node_id %}selected{% endif %}>
-          {{ n.label }} — {{ n.node_id }}{% if let Some(ip) = n.public_ip.as_ref() %} ({{ ip }}){% endif %}
+        <option value="{{ n.node_id }}"
+                data-label="{{ n.label }}"
+                data-detail="{% if let Some(ip) = n.public_ip.as_ref() %}{{ ip }} · {% endif %}{{ n.node_id }}"
+                {% if target_node_in == n.node_id %}selected{% endif %}>
+          ▸  {{ n.label }}{% if let Some(ip) = n.public_ip.as_ref() %} — {{ ip }}{% endif %}
         </option>
         {% endfor %}
       </select>
@@ -56,6 +84,8 @@
         Remote nodes are reached via signed HTTPS RPC (port 9443).
         The node must have <code>[remote_rpc] enabled = true</code> in
         its agent.toml and the port has to be open in its firewall.
+        <strong>Verify in journalctl after submit:</strong>
+        <code>journalctl -u hyperion-web -g 'dispatch'</code>
       </p>
     </div>
     {% else %}
@@ -210,14 +240,45 @@
     </div>
 
     <div class="btn-group" style="margin-top:1rem">
-      <button class="btn primary lg" type="submit">
+      <button class="btn primary lg" type="submit" id="provision-submit">
         <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
-        Provision
+        <span id="provision-submit-label">Provision</span>
       </button>
       <a href="/hostings" class="btn ghost">Cancel</a>
     </div>
   </form>
 </div>
+
+{# Live banner + submit-button updater for the Target node dropdown.
+   No-op when the dropdown isn't rendered (single-node setup). #}
+<script>
+(function () {
+  'use strict';
+  const sel = document.getElementById('target_node');
+  if (!sel) return;
+  const bannerName = document.getElementById('target-banner-name');
+  const bannerDetail = document.getElementById('target-banner-detail');
+  const submitLabel = document.getElementById('provision-submit-label');
+  const banner = document.getElementById('target-banner');
+
+  function refresh() {
+    const opt = sel.options[sel.selectedIndex];
+    const label = opt.dataset.label || opt.textContent.trim();
+    const detail = opt.dataset.detail || '';
+    if (bannerName) bannerName.textContent = label;
+    if (bannerDetail) bannerDetail.textContent = detail ? '· ' + detail : '';
+    if (submitLabel) submitLabel.textContent = 'Provision on ' + label;
+    // Visual cue: when targeting a remote node, switch the banner
+    // accent to indicate "this is going somewhere non-default".
+    if (banner) {
+      banner.style.borderLeftColor = (sel.value && sel.value !== 'local')
+        ? 'var(--warn)' : 'var(--accent)';
+    }
+  }
+  sel.addEventListener('change', refresh);
+  refresh();
+})();
+</script>
 
 <div class="card muted">
   <h2 style="margin-bottom:0.6rem">

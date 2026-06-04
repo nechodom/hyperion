@@ -57,9 +57,55 @@ pub async fn dispatch_to_node(
     let target = target_node_id
         .map(str::trim)
         .filter(|s| !s.is_empty() && *s != LOCAL_NODE_SENTINEL);
+    // Every dispatch leaves a journalctl breadcrumb so operators
+    // can debug "I selected stav but it ended up on master" by
+    // checking the master's logs:
+    //   journalctl -u hyperion-web -g 'dispatch' --since '1 hour ago'
+    // Verbosity is intentionally INFO (not debug) — these are rare
+    // operator actions, not hot-path requests.
+    let req_kind = request_kind_label(&req);
     match target {
-        None => Ok(call(&state.agent_socket, req).await?),
-        Some(node_id) => dispatch_remote(state, node_id, req).await,
+        None => {
+            tracing::info!(
+                target = "master (local socket)",
+                request = req_kind,
+                "dispatch"
+            );
+            Ok(call(&state.agent_socket, req).await?)
+        }
+        Some(node_id) => {
+            tracing::info!(
+                target = node_id,
+                request = req_kind,
+                "dispatch (remote signed RPC)"
+            );
+            dispatch_remote(state, node_id, req).await
+        }
+    }
+}
+
+/// Short string tag for the Request variant — purely for logs/audit
+/// (so journalctl shows "HostingCreate" instead of the full
+/// pretty-printed enum which is multi-line for nested payloads).
+fn request_kind_label(req: &Request) -> &'static str {
+    match req {
+        Request::AgentInfo => "AgentInfo",
+        Request::HostingCreate(_) => "HostingCreate",
+        Request::HostingList => "HostingList",
+        Request::HostingGet(_) => "HostingGet",
+        Request::HostingDelete { .. } => "HostingDelete",
+        Request::HostingSuspend { .. } => "HostingSuspend",
+        Request::HostingResume(_) => "HostingResume",
+        Request::HostingSetLimits { .. } => "HostingSetLimits",
+        Request::HostingGetLimits(_) => "HostingGetLimits",
+        Request::ServicesHealth => "ServicesHealth",
+        Request::ServiceRestart { .. } => "ServiceRestart",
+        Request::ServiceInstall { .. } => "ServiceInstall",
+        Request::ClusterStats => "ClusterStats",
+        Request::NodeMetricsHistory { .. } => "NodeMetricsHistory",
+        Request::NodesList => "NodesList",
+        Request::WpInstall { .. } => "WpInstall",
+        _ => "OtherRpc",
     }
 }
 

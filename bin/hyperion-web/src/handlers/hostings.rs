@@ -148,6 +148,13 @@ struct DetailTpl<'a> {
     /// dedicated csrf_* fields plumbed (access, acme-email, monitor,
     /// backup delete). Middleware accepts both.
     csrf_token: String,
+    /// Which node owns this hosting — "" (master) or the enrolled
+    /// `node_id`. Per-hosting action forms render this as a hidden
+    /// input so post_suspend / post_delete / post_set_limits / etc.
+    /// dispatch the RPC to the correct agent. Empty string is the
+    /// safe default for backwards compatibility with single-node
+    /// setups.
+    target_node: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -205,7 +212,20 @@ pub async fn get_new(State(state): State<SharedState>, ctx: AuthCtx) -> Result<R
     // Fetch enrolled remote nodes so the "Target node" dropdown can
     // offer them. Failure here just leaves the dropdown empty — the
     // form still works for the default-master case.
-    let nodes = fetch_remote_nodes(&state).await.unwrap_or_default();
+    let nodes = match fetch_remote_nodes(&state).await {
+        Ok(v) => v,
+        Err(e) => {
+            // Surface the error in tracing so an operator who sees
+            // "I expected stav in the dropdown but it's missing" can
+            // grep journalctl for the reason instead of staring at
+            // an empty form.
+            tracing::warn!(
+                error=%e,
+                "fetch_remote_nodes failed — Target node dropdown will be empty"
+            );
+            Vec::new()
+        }
+    };
     let tpl = NewTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -223,7 +243,23 @@ pub async fn get_new(State(state): State<SharedState>, ctx: AuthCtx) -> Result<R
         nodes,
         target_node_in: String::new(),
     };
-    Ok(Html(tpl.render()?).into_response())
+    // Browsers (and reverse proxies in front) can cache /hostings/new
+    // by default. After an enrollment the dropdown should refresh on
+    // the next visit, NOT show the previous stale rendering. The
+    // form also carries a one-time CSRF token, so a cached page
+    // would be useless on submit anyway.
+    let mut response = Html(tpl.render()?).into_response();
+    let h = response.headers_mut();
+    h.insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store, no-cache, must-revalidate, private"),
+    );
+    h.insert(
+        axum::http::header::PRAGMA,
+        axum::http::HeaderValue::from_static("no-cache"),
+    );
+    h.insert("vary", axum::http::HeaderValue::from_static("Cookie"));
+    Ok(response)
 }
 
 /// Look up enrolled nodes via NodesList. The master itself isn't a
@@ -370,6 +406,18 @@ pub async fn post_create(
     } else {
         Some(target_node.as_str())
     };
+    // Loud breadcrumb so the operator can verify in journalctl which
+    // node a create attempt was actually dispatched to. The dispatcher
+    // also logs, but having both lets us tell apart "form submitted
+    // local because dropdown wasn't rendered" (no log here with the
+    // real intent) from "dispatcher overrode the choice" (logs differ).
+    tracing::info!(
+        operator = %ctx.username,
+        domain = %req.domain.as_str(),
+        target_node_form_value = %target_node,
+        target_after_normalize = ?target,
+        "post_create dispatch decision"
+    );
     let resp = crate::dispatcher::dispatch_to_node(
         &state,
         target,
@@ -472,7 +520,7 @@ pub async fn post_create(
                 RpcResponse::HostingGet(d) => d,
                 _ => return Err(AppError::Internal("expected HostingGet".into())),
             };
-            let limits = fetch_limits(&state, HostingSelector::Id(created.id.clone()))
+            let limits = fetch_limits(&state, target, HostingSelector::Id(created.id.clone()))
                 .await
                 .unwrap_or_else(|_| hyperion_types::HostingLimits::defaults());
             let tpl = DetailTpl {
@@ -539,6 +587,7 @@ pub async fn post_create(
                 wp_plugins: hyperion_types::WpPluginListResponse::default(),
                 email_log: vec![],
                 csrf_token: super::session_csrf_token(&state, &ctx),
+                target_node: target.unwrap_or("").to_string(),
             };
             Ok(Html(tpl.render()?).into_response())
         }
@@ -559,15 +608,14 @@ pub async fn get_detail(
     axum::extract::Query(q): axum::extract::Query<DetailQuery>,
 ) -> Result<Response, AppError> {
     let sel = parse_selector(&selector)?;
-    let resp = hyperion_rpc_client::call(&state.agent_socket, Request::HostingGet(sel)).await?;
-    let detail = match resp {
-        RpcResponse::HostingGet(d) => d,
-        RpcResponse::Error(hyperion_rpc::RpcError::NotFound { .. }) => {
-            return Err(AppError::NotFound)
-        }
-        RpcResponse::Error(e) => return Err(AppError::Rpc(e.to_string())),
-        _ => return Err(AppError::Internal("unexpected response".into())),
-    };
+    // Multi-node detail lookup: try master first, then fan out across
+    // enrolled workers. Returns the detail PLUS the node id where it
+    // was found so every subsequent per-hosting RPC on this page
+    // (limits, stats, backups, …) goes to the SAME node. Without
+    // this, the detail page would show 404 for any hosting that
+    // lives on a worker.
+    let (detail, owner_node) = find_hosting_anywhere(&state, sel).await?;
+    let target = owner_node.as_deref();
     // RBAC guard: operator + viewer must have an access grant.
     // super_admin + admin pass through. Unauthenticated redirects to
     // /login earlier (require_auth middleware), so unwrap to /hostings
@@ -576,18 +624,19 @@ pub async fn get_detail(
         return Ok(r);
     }
     let sel_id = HostingSelector::Id(detail.id.clone());
-    let limits = fetch_limits(&state, sel_id.clone())
+    let limits = fetch_limits(&state, target, sel_id.clone())
         .await
         .unwrap_or_else(|_| hyperion_types::HostingLimits::defaults());
-    let wp_status = fetch_wp_status(&state, sel_id.clone())
+    let wp_status = fetch_wp_status(&state, target, sel_id.clone())
         .await
         .unwrap_or(None);
     // Only ask the agent for the plugin list when WP is actually
     // installed — otherwise wp-cli fails with "Error: This does not
     // seem to be a WordPress installation." and we'd render a flash.
     let wp_plugins = if wp_status.is_some() {
-        match hyperion_rpc_client::call(
-            &state.agent_socket,
+        match crate::dispatcher::dispatch_to_node(
+            &state,
+            target,
             Request::WpPluginList { hosting: sel_id.clone() },
         )
         .await
@@ -598,15 +647,15 @@ pub async fn get_detail(
     } else {
         hyperion_types::WpPluginListResponse::default()
     };
-    let expiry = fetch_expiry(&state, sel_id.clone())
+    let expiry = fetch_expiry(&state, target, sel_id.clone())
         .await
         .unwrap_or_else(|_| hyperion_types::HostingExpiry::defaults());
-    let backups = fetch_backup_list(&state, sel_id.clone(), 10)
+    let backups = fetch_backup_list(&state, target, sel_id.clone(), 10)
         .await
         .unwrap_or_default();
-    let stats = fetch_stats(&state, sel_id.clone()).await.ok();
-    let cron_body = fetch_cron(&state, sel_id.clone()).await.unwrap_or_default();
-    let profile_apply = fetch_profile_apply(&state, sel_id.clone()).await.unwrap_or(None);
+    let stats = fetch_stats(&state, target, sel_id.clone()).await.ok();
+    let cron_body = fetch_cron(&state, target, sel_id.clone()).await.unwrap_or_default();
+    let profile_apply = fetch_profile_apply(&state, target, sel_id.clone()).await.unwrap_or(None);
     let profiles = fetch_all_profiles(&state).await.unwrap_or_default();
     let applied_profile_name = profile_apply
         .as_ref()
@@ -768,16 +817,18 @@ pub async fn get_detail(
         wp_plugins,
         email_log,
         csrf_token: super::session_csrf_token(&state, &ctx),
+        target_node: owner_node.clone().unwrap_or_default(),
     };
     Ok(Html(tpl.render()?).into_response())
 }
 
 async fn fetch_profile_apply(
     state: &SharedState,
+    target: Option<&str>,
     sel: HostingSelector,
 ) -> Result<Option<ProfileApply>, AppError> {
     let resp =
-        hyperion_rpc_client::call(&state.agent_socket, Request::ProfileGetApply { sel }).await?;
+        crate::dispatcher::dispatch_to_node(state, target, Request::ProfileGetApply { sel }).await?;
     match resp {
         RpcResponse::ProfileGetApply(v) => Ok(v),
         RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
@@ -794,8 +845,13 @@ async fn fetch_all_profiles(state: &SharedState) -> Result<Vec<HostingProfile>, 
     }
 }
 
-async fn fetch_cron(state: &SharedState, sel: HostingSelector) -> Result<String, AppError> {
-    let resp = hyperion_rpc_client::call(&state.agent_socket, Request::CronList { sel }).await?;
+async fn fetch_cron(
+    state: &SharedState,
+    target: Option<&str>,
+    sel: HostingSelector,
+) -> Result<String, AppError> {
+    let resp =
+        crate::dispatcher::dispatch_to_node(state, target, Request::CronList { sel }).await?;
     match resp {
         RpcResponse::CronList(s) => Ok(s),
         RpcResponse::Error(_) => Ok(String::new()),
@@ -805,10 +861,11 @@ async fn fetch_cron(state: &SharedState, sel: HostingSelector) -> Result<String,
 
 async fn fetch_stats(
     state: &SharedState,
+    target: Option<&str>,
     sel: HostingSelector,
 ) -> Result<HostingStats, AppError> {
-    let resp =
-        hyperion_rpc_client::call(&state.agent_socket, Request::HostingStats { sel }).await?;
+    let resp = crate::dispatcher::dispatch_to_node(state, target, Request::HostingStats { sel })
+        .await?;
     match resp {
         RpcResponse::HostingStats(s) => Ok(s),
         RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
@@ -865,10 +922,11 @@ pub struct DetailQuery {
 
 async fn fetch_expiry(
     state: &SharedState,
+    target: Option<&str>,
     sel: HostingSelector,
 ) -> Result<hyperion_types::HostingExpiry, AppError> {
-    let resp =
-        hyperion_rpc_client::call(&state.agent_socket, Request::HostingGetExpiry(sel)).await?;
+    let resp = crate::dispatcher::dispatch_to_node(state, target, Request::HostingGetExpiry(sel))
+        .await?;
     match resp {
         RpcResponse::HostingGetExpiry(e) => Ok(e),
         RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
@@ -878,14 +936,13 @@ async fn fetch_expiry(
 
 async fn fetch_backup_list(
     state: &SharedState,
+    target: Option<&str>,
     sel: HostingSelector,
     limit: i64,
 ) -> Result<Vec<hyperion_types::BackupRunWire>, AppError> {
-    let resp = hyperion_rpc_client::call(
-        &state.agent_socket,
-        Request::BackupList { sel, limit },
-    )
-    .await?;
+    let resp =
+        crate::dispatcher::dispatch_to_node(state, target, Request::BackupList { sel, limit })
+            .await?;
     match resp {
         RpcResponse::BackupList(rows) => Ok(rows),
         RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
@@ -895,10 +952,11 @@ async fn fetch_backup_list(
 
 async fn fetch_wp_status(
     state: &SharedState,
+    target: Option<&str>,
     sel: HostingSelector,
 ) -> Result<Option<WpInstallStatus>, AppError> {
     let resp =
-        hyperion_rpc_client::call(&state.agent_socket, Request::WpStatus { sel }).await?;
+        crate::dispatcher::dispatch_to_node(state, target, Request::WpStatus { sel }).await?;
     match resp {
         RpcResponse::WpStatus(s) => Ok(s),
         RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
@@ -923,6 +981,8 @@ pub struct WpInstallForm {
 #[derive(Deserialize)]
 pub struct BackupNowForm {
     pub selector: String,
+    #[serde(default)]
+    pub target_node: String,
 }
 
 pub async fn post_backup_now(
@@ -934,8 +994,13 @@ pub async fn post_backup_now(
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
-    let resp =
-        hyperion_rpc_client::call(&state.agent_socket, Request::BackupNow { sel }).await?;
+    let target = node_target(&form.target_node);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target,
+        Request::BackupNow { sel },
+    )
+    .await?;
     let sel_url = urlencoding(&form.selector);
     match resp {
         RpcResponse::BackupNow(_) => {
@@ -1113,10 +1178,11 @@ pub async fn post_wp_install(
 
 async fn fetch_limits(
     state: &SharedState,
+    target: Option<&str>,
     sel: HostingSelector,
 ) -> Result<hyperion_types::HostingLimits, AppError> {
-    let resp =
-        hyperion_rpc_client::call(&state.agent_socket, Request::HostingGetLimits(sel)).await?;
+    let resp = crate::dispatcher::dispatch_to_node(state, target, Request::HostingGetLimits(sel))
+        .await?;
     match resp {
         RpcResponse::HostingGetLimits(l) => Ok(l),
         RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
@@ -1187,6 +1253,10 @@ pub struct SuspendForm {
     selector: String,
     #[serde(default)]
     reason: String,
+    /// Node where the hosting lives — populated by the detail
+    /// page's target_node injector. Empty / "local" → master.
+    #[serde(default)]
+    target_node: String,
 }
 
 pub async fn post_suspend(
@@ -1205,9 +1275,13 @@ pub async fn post_suspend(
             Some(form.reason.trim().to_string())
         },
     };
-    let resp =
-        hyperion_rpc_client::call(&state.agent_socket, Request::HostingSuspend { sel, reason })
-            .await?;
+    let target = node_target(&form.target_node);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target,
+        Request::HostingSuspend { sel, reason },
+    )
+    .await?;
     match resp {
         RpcResponse::HostingSuspend => {
             Ok(Redirect::to(&format!("/hostings/{}", urlencoding(&form.selector))).into_response())
@@ -1220,6 +1294,8 @@ pub async fn post_suspend(
 #[derive(Deserialize)]
 pub struct ResumeForm {
     selector: String,
+    #[serde(default)]
+    target_node: String,
 }
 
 pub async fn post_resume(
@@ -1231,7 +1307,13 @@ pub async fn post_resume(
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
-    let resp = hyperion_rpc_client::call(&state.agent_socket, Request::HostingResume(sel)).await?;
+    let target = node_target(&form.target_node);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target,
+        Request::HostingResume(sel),
+    )
+    .await?;
     match resp {
         RpcResponse::HostingResume => {
             Ok(Redirect::to(&format!("/hostings/{}", urlencoding(&form.selector))).into_response())
@@ -1253,6 +1335,8 @@ pub struct SetLimitsForm {
     disk_hard_mb: String,
     #[serde(default)]
     bw_monthly_mb: String,
+    #[serde(default)]
+    target_node: String,
 }
 
 #[derive(Deserialize)]
@@ -1357,8 +1441,10 @@ pub async fn post_set_limits(
             l.bw_monthly_bytes = Some(mb * 1024 * 1024);
         }
     }
-    let resp = hyperion_rpc_client::call(
-        &state.agent_socket,
+    let target = node_target(&form.target_node);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target,
         Request::HostingSetLimits { sel, limits: l },
     )
     .await?;
@@ -1850,6 +1936,61 @@ fn render_new_error<'a>(
             .unwrap_or_else(|_| "<h1>render error</h1>".into()),
     )
     .into_response()
+}
+
+/// Locate which node a hosting lives on, so per-hosting actions
+/// (suspend, resume, set-limits, backup, cert, …) dispatched from
+/// the detail page land on the right agent.
+///
+/// Strategy: try the master's local socket first (the common case).
+/// On NotFound, fan out across enrolled nodes. The first one that
+/// returns the hosting wins; its `node_id` is returned so the
+/// handler can pass it to `dispatch_to_node`.
+///
+/// Returns `(HostingDetail, node_id_or_None)`. `None` means master.
+pub async fn find_hosting_anywhere(
+    state: &SharedState,
+    sel: HostingSelector,
+) -> Result<(hyperion_types::HostingDetail, Option<String>), AppError> {
+    // 1. Master local.
+    match hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::HostingGet(sel.clone()),
+    )
+    .await
+    {
+        Ok(RpcResponse::HostingGet(d)) => return Ok((d, None)),
+        Ok(RpcResponse::Error(e)) if !is_not_found_error(&e) => {
+            return Err(AppError::Rpc(e.to_string()));
+        }
+        Ok(_) => {}
+        Err(e) => return Err(AppError::from(e)),
+    }
+    // 2. Fan out to enrolled nodes.
+    let nodes_resp =
+        hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await;
+    let nodes: Vec<hyperion_types::NodeSummary> = match nodes_resp {
+        Ok(RpcResponse::NodesList(v)) => v,
+        _ => Vec::new(),
+    };
+    for n in nodes {
+        let r = crate::dispatcher::dispatch_to_node(
+            state,
+            Some(&n.node_id),
+            Request::HostingGet(sel.clone()),
+        )
+        .await;
+        match r {
+            Ok(RpcResponse::HostingGet(d)) => return Ok((d, Some(n.node_id))),
+            Ok(RpcResponse::Error(_)) => continue, // not on this node
+            _ => continue,
+        }
+    }
+    Err(AppError::NotFound)
+}
+
+fn is_not_found_error(e: &hyperion_rpc::error::RpcError) -> bool {
+    matches!(e, hyperion_rpc::error::RpcError::NotFound { .. })
 }
 
 /// Aggregate hostings from the master + every enrolled remote node.

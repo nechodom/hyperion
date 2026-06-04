@@ -161,13 +161,25 @@
 
 <div class="page-header">
   <div>
-    <h1 style="display:flex;align-items:center;gap:0.7rem">
+    <h1 style="display:flex;align-items:center;gap:0.7rem;flex-wrap:wrap">
       {{ detail.domain }}
       <span class="pill
         {% if detail.state.as_str() == "active" %}ok
         {% else if detail.state.as_str() == "suspended" %}warn
         {% else if detail.state.as_str() == "failed" %}err
         {% else %}warn pulse{% endif %}">{{ detail.state.as_str() }}</span>
+      {# Where the hosting actually lives — must be loud so the
+         operator can verify "I clicked Provision targeting stav,
+         did it really land there?" without grepping logs. #}
+      {% if let Some(n) = detail.node_id.as_ref() %}
+        <span class="tag" title="Lives on node {{ n }}"
+              style="background:var(--surface-2);border:1px solid var(--border);font-size:0.75rem;font-weight:500;padding:0.25rem 0.55rem">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-1px;margin-right:0.3rem">
+            <rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
+          </svg>
+          on <strong>{{ n }}</strong>
+        </span>
+      {% endif %}
     </h1>
     <div class="subtitle">
       <code>{{ detail.id }}</code>
@@ -1590,6 +1602,39 @@
   }));
   const hashId = (location.hash || '').replace(/^#/, '');
   if (!activate(hashId)) activate('overview');
+})();
+</script>
+
+{# Per-hosting actions must dispatch to the node where this hosting
+   actually lives — without this, suspend/resume/set-limits/backup/
+   etc. on a worker hosting silently no-op on the master.
+
+   Each per-hosting form gets a hidden input target_node before
+   submit; the value comes from the detail handler (find_hosting_
+   anywhere). When target_node is empty (master), the input is
+   still appended with value="" which the server reads as "local"
+   — preserves the existing default.
+
+   This is a JS shim instead of editing every form's HTML so new
+   forms don't have to remember to add the field. Worst case
+   (browser without JS): forms go to master, which is correct for
+   master-hosted sites and surfaces a clear NotFound error for
+   worker-hosted ones. #}
+<script>
+(function () {
+  'use strict';
+  const TARGET_NODE = "{{ target_node|e }}";
+  document.querySelectorAll('form').forEach(f => {
+    const action = (f.getAttribute('action') || '').trim();
+    if (!action.startsWith('/hostings/')) return;
+    // Skip if form already carries target_node (manually authored).
+    if (f.querySelector('input[name="target_node"]')) return;
+    const i = document.createElement('input');
+    i.type = 'hidden';
+    i.name = 'target_node';
+    i.value = TARGET_NODE;
+    f.appendChild(i);
+  });
 })();
 </script>
 {% endblock %}
