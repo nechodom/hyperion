@@ -31,7 +31,7 @@ fn sanitize_label(s: &str) -> String {
         }
     }
     if out.is_empty() {
-        out.push_str("x");
+        out.push('x');
     }
     out
 }

@@ -297,7 +297,35 @@ pub async fn check_csrf(
             is_multipart = %is_multipart,
             "CSRF check failed",
         );
-        return (StatusCode::FORBIDDEN, "CSRF check failed").into_response();
+        // Friendly HTML page so the operator who lands on this
+        // after a stale-form submit gets a clear next step rather
+        // than a bare "CSRF check failed" plain-text wall. The
+        // back-button hint is the most common fix (browsers
+        // sometimes carry an expired session into the new
+        // submit). The journalctl breadcrumb makes operator
+        // self-service possible without source-diving.
+        let html = format!(
+            "<!doctype html><html><head><meta charset=utf-8><title>CSRF check failed · hyperion</title>\
+             <style>body{{font-family:system-ui,-apple-system,sans-serif;max-width:42rem;margin:4rem auto;padding:0 1.5rem;line-height:1.55;color:#1a1a1a}}\
+             h1{{margin:0 0 1rem;font-size:1.5rem}} code{{background:#f0f0f0;padding:0.1rem 0.3rem;border-radius:3px;font-size:0.85em}}\
+             .meta{{color:#666;font-size:0.85rem;margin-top:1.5rem;border-top:1px solid #ddd;padding-top:1rem}}</style></head>\
+             <body><h1>CSRF check failed</h1>\
+             <p>The token attached to your form submission didn't validate. This usually means one of:</p>\
+             <ul><li>You loaded the page in another tab a long time ago and your session has changed since.</li>\
+             <li>You went back via browser history and re-submitted a cached form.</li>\
+             <li>An admin restarted hyperion-web and the session keys rotated.</li></ul>\
+             <p><strong>Fix:</strong> go back, refresh the page (Cmd/Ctrl + Shift + R) and try the action again.</p>\
+             <p class=meta>Path: <code>{path}</code> · Source: <code>{source}</code> · Operator can grep journalctl with <code>journalctl -u hyperion-web -g 'CSRF check failed' --since '5 min ago'</code></p>\
+             </body></html>",
+            path = askama_escape::escape(&form_id, askama_escape::Html),
+            source = token_source(token.as_deref(), &parts),
+        );
+        return (
+            StatusCode::FORBIDDEN,
+            [("content-type", "text/html; charset=utf-8")],
+            html,
+        )
+            .into_response();
     }
     let req = Request::from_parts(parts, body);
     next.run(req).await

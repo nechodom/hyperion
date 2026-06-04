@@ -28,6 +28,7 @@ pub struct HostingProfile {
     ///   - a wordpress.org slug ("akismet", "yoast-seo")
     ///   - `@asset:<id>` to install from an uploaded ZIP in the WP
     ///     asset library
+    ///
     /// Trailing `!` on a line means "also activate after install".
     /// Lines starting with `#` and empty lines are ignored.
     #[serde(default)]

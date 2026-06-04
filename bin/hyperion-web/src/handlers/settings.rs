@@ -424,3 +424,78 @@ fn email_test_ip(headers: &HeaderMap, peer: SocketAddr) -> std::net::IpAddr {
     }
     peer.ip()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::mask_secrets_in_toml;
+
+    #[test]
+    fn mask_replaces_password_lines() {
+        let input = r#"
+[email]
+smtp_host = "smtp.postmark.com"
+smtp_password = "actual-secret-here"
+from_address = "ops@example.cz"
+"#;
+        let out = mask_secrets_in_toml(input);
+        assert!(out.contains("smtp_password = \"«set»\""));
+        assert!(!out.contains("actual-secret-here"));
+        // Non-suspect lines pass through unchanged.
+        assert!(out.contains("smtp_host = \"smtp.postmark.com\""));
+        assert!(out.contains("from_address = \"ops@example.cz\""));
+    }
+
+    #[test]
+    fn mask_distinguishes_empty_vs_set() {
+        let input = "secret = \"\"\npassword = \"x\"\n";
+        let out = mask_secrets_in_toml(input);
+        assert!(out.contains("secret = \"«empty»\""));
+        assert!(out.contains("password = \"«set»\""));
+    }
+
+    #[test]
+    fn mask_handles_indented_keys() {
+        // toml allows indented keys (common in editor-formatted files).
+        let input = "    invite_token = \"super-secret\"\n";
+        let out = mask_secrets_in_toml(input);
+        assert!(out.contains("invite_token = \"«set»\""));
+        assert!(!out.contains("super-secret"));
+    }
+
+    #[test]
+    fn mask_leaves_non_secret_keys_alone() {
+        let input = "url = \"https://example.cz\"\n";
+        let out = mask_secrets_in_toml(input);
+        assert!(out.contains("url = \"https://example.cz\""));
+    }
+
+    #[test]
+    fn mask_does_not_match_partial_key_names() {
+        // "passwordless" is NOT in the suspect list — leave it.
+        let input = "passwordless = true\nmy_password = \"x\"\n";
+        let out = mask_secrets_in_toml(input);
+        assert!(out.contains("passwordless = true"));
+        // my_password isn't in the explicit list either — leave it.
+        // (operators using non-standard key names get protection
+        // by the on-disk file mode, not by this best-effort scrub.)
+        assert!(out.contains("my_password = \"x\""));
+    }
+
+    #[test]
+    fn mask_handles_webhook_url() {
+        let input = "default_webhook = \"https://hooks.slack.com/services/T/B/abc\"\n";
+        let out = mask_secrets_in_toml(input);
+        assert!(out.contains("default_webhook = \"«set»\""));
+        assert!(!out.contains("hooks.slack.com"));
+    }
+
+    #[test]
+    fn mask_leaves_comments_alone() {
+        let input = "# password = \"never-stored-but-comment\"\nactual = \"value\"\n";
+        let out = mask_secrets_in_toml(input);
+        // Comment lines don't match because the key-detection
+        // looks for "<key> =" before the equals sign and "# password"
+        // doesn't match "password" exactly.
+        assert!(out.contains("# password = \"never-stored-but-comment\""));
+    }
+}

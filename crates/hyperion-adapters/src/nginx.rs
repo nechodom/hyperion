@@ -477,12 +477,9 @@ async fn ensure_symlink(target: &Path, link: &Path) -> Result<(), AdapterError> 
             tokio::fs::create_dir_all(parent).await?;
         }
     }
-    match tokio::fs::symlink_metadata(link).await {
-        Ok(_) => {
-            // Already exists. Re-point (best effort).
-            let _ = tokio::fs::remove_file(link).await;
-        }
-        Err(_) => {}
+    if tokio::fs::symlink_metadata(link).await.is_ok() {
+        // Already exists. Re-point (best effort).
+        let _ = tokio::fs::remove_file(link).await;
     }
     tokio::fs::symlink(target, link).await?;
     Ok(())
