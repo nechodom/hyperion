@@ -151,6 +151,17 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    // The agent's enrollment state file path. Service checks its
+    // existence at services_health() time as the "is this a worker?"
+    // signal (workers have the file → hyperion-web is a non-issue;
+    // master doesn't → hyperion-web is critical). Same path used by
+    // the heartbeat loop + AgentImpl::with_state_file below.
+    let state_file_for_svc = cfg
+        .enrollment
+        .state_file
+        .clone()
+        .unwrap_or_else(|| PathBuf::from("/etc/hyperion/node-id.json"));
+
     let mut builder = hyperion_core::HostingService::new(pool, adapter, secrets)
         .with_paths(paths)
         .with_remote_backup(remote_backup)
@@ -159,6 +170,7 @@ async fn main() -> anyhow::Result<()> {
         .with_acme_email(cfg.acme.contact_email.clone())
         .with_email(email_cfg, email_to)
         .with_agent_config_path(cli.config.clone())
+        .with_node_state_file(state_file_for_svc)
         .with_git_sha(env!("HYPERION_GIT_SHA"));
     if let Some(signer) = master_rpc_signer {
         builder = builder.with_master_rpc_signer(signer);

@@ -187,6 +187,13 @@ pub struct HostingService<A: AdapterPort + 'static> {
     /// is only ever held by the master and used to sign outbound
     /// remote-RPC requests.
     pub master_rpc_signer: Option<Arc<crate::master_rpc::MasterRpcSigner>>,
+    /// Path to the node-id state file (typically
+    /// `/etc/hyperion/node-id.json`). Used as a "is this node a
+    /// worker?" tell — workers have the file (written at enrollment),
+    /// masters don't. services_health() uses this to decide whether
+    /// hyperion-web should be flagged as a critical service.
+    /// `None` means "treat as master" (no file to check).
+    pub node_state_file: Option<std::path::PathBuf>,
 }
 
 /// Default renewal window — matches Let's Encrypt's recommended
@@ -847,6 +854,29 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             current_git_sha: "dev-unknown".into(),
             cert_issue_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             master_rpc_signer: None,
+            node_state_file: None,
+        }
+    }
+
+    /// Tell the service where node-id.json lives. Existence of the
+    /// file at services_health time → this is a worker; absence →
+    /// this is the master. Called from hyperion-agent's startup.
+    pub fn with_node_state_file(mut self, path: std::path::PathBuf) -> Self {
+        self.node_state_file = Some(path);
+        self
+    }
+
+    /// True when this Service is running on an enrolled WORKER node
+    /// (node-id.json exists), false when on the master (no file).
+    /// The check is filesystem-level on every call — cheap, and
+    /// reflects the current state if the operator removes the file
+    /// to force re-enrollment.
+    pub fn is_worker_node(&self) -> bool {
+        match &self.node_state_file {
+            Some(p) => p.exists(),
+            // Without a configured path we assume master (the
+            // historical default for single-node setups).
+            None => false,
         }
     }
 
@@ -6025,12 +6055,25 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// "Missing optional" (severity=info): php-fpm units / vsftpd
     /// that aren't installed.
     pub async fn services_health(&self) -> Result<hyperion_types::ServicesHealth, RpcError> {
-        // (unit_name, display_label, critical)
-        let critical: &[(&str, &str)] = &[
-            ("nginx", "nginx (web server)"),
-            ("hyperion-agent", "hyperion-agent (RPC daemon)"),
-            ("hyperion-web", "hyperion-web (admin UI)"),
-        ];
+        // Workers don't run hyperion-web — only the master does. On a
+        // worker node we'd otherwise flag hyperion-web as a "critical
+        // service down" on every page load, which is confusing
+        // ("CRITICAL: missing thing that's not supposed to be here").
+        // Drop the entry entirely on workers so the table reflects
+        // what the operator actually needs to care about.
+        let is_worker = self.is_worker_node();
+        let critical: Vec<(&str, &str)> = if is_worker {
+            vec![
+                ("nginx", "nginx (web server)"),
+                ("hyperion-agent", "hyperion-agent (RPC daemon)"),
+            ]
+        } else {
+            vec![
+                ("nginx", "nginx (web server)"),
+                ("hyperion-agent", "hyperion-agent (RPC daemon)"),
+                ("hyperion-web", "hyperion-web (admin UI)"),
+            ]
+        };
         let optional: &[(&str, &str)] = &[
             ("mariadb", "MariaDB (database)"),
             ("postgresql", "PostgreSQL (database)"),
@@ -7127,6 +7170,48 @@ mod tests {
     //  Migration bundle prune (pure-fs, no Service needed).
     // ============================================================
 
+    // ============================================================
+    //  is_worker_node — drives the services_health "hide hyperion-web
+    //  as critical on workers" behavior.
+    // ============================================================
+
+    async fn svc_with_state_file(
+        p: Option<std::path::PathBuf>,
+    ) -> HostingService<MockAdapterPort> {
+        let pool = open_memory().await.expect("memory db");
+        let a = MockAdapterPort::new();
+        let mut s = svc(pool, a);
+        if let Some(path) = p {
+            s = s.with_node_state_file(path);
+        }
+        s
+    }
+
+    #[tokio::test]
+    async fn is_worker_node_false_when_no_state_file_configured() {
+        let s = svc_with_state_file(None).await;
+        assert!(!s.is_worker_node(), "missing config path → assume master");
+    }
+
+    #[tokio::test]
+    async fn is_worker_node_false_when_state_file_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("node-id.json");
+        let s = svc_with_state_file(Some(p)).await;
+        assert!(!s.is_worker_node(), "path set but file absent → master");
+    }
+
+    #[tokio::test]
+    async fn is_worker_node_true_when_state_file_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("node-id.json");
+        // File present → enrolled worker. hyperion-web absence is
+        // expected, not critical.
+        tokio::fs::write(&p, b"{}").await.unwrap();
+        let s = svc_with_state_file(Some(p)).await;
+        assert!(s.is_worker_node());
+    }
+
     #[tokio::test]
     async fn prune_migration_bundle_dir_missing_root_is_ok() {
         // Root doesn't exist yet — should return 0, not error.
@@ -7448,6 +7533,7 @@ mod tests {
             current_git_sha: "dev-unknown".into(),
             cert_issue_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             master_rpc_signer: None,
+            node_state_file: None,
         };
         s2.create(HostingCreateReq {
             domain: Domain::parse("b.cz").expect("parse"),
@@ -7553,6 +7639,7 @@ mod tests {
             current_git_sha: "dev-unknown".into(),
             cert_issue_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             master_rpc_signer: None,
+            node_state_file: None,
         };
         let r = s2.create(req("dup.cz")).await;
         match r {

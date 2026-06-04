@@ -173,6 +173,7 @@ async fn start_agent() -> (std::path::PathBuf, tempfile::TempDir) {
             std::collections::HashMap::new(),
         )),
         master_rpc_signer: None,
+        node_state_file: None,
     });
     let _ = adapters; // silence unused warning
     let agent: Arc<dyn AgentApi> = Arc::new(AgentImpl::new(svc));

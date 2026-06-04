@@ -176,6 +176,7 @@ async fn start_agent() -> (PathBuf, tempfile::TempDir) {
             std::collections::HashMap::new(),
         )),
         master_rpc_signer: None,
+        node_state_file: None,
     });
     let agent: Arc<dyn AgentApi> = Arc::new(AgentImpl::new(svc));
     let path = dir.path().join("agent.sock");
