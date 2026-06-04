@@ -46,6 +46,10 @@ pub fn build_router(state: SharedState) -> Router {
             "/hostings/migration/export",
             post(handlers::hostings::post_migration_export),
         )
+        .route(
+            "/hostings/migration/move",
+            post(handlers::hostings::post_migration_move),
+        )
         .route("/hostings/import", get(handlers::migration::get_import))
         .route(
             "/hostings/migration/import-from-url",

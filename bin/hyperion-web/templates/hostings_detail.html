@@ -1546,19 +1546,52 @@
 <!-- ============== MIGRATION TAB ============== -->
 <div class="tab-panel" id="tab-migration">
 
+{# One-click migration — only offered when the source is currently
+   the master AND at least one worker is enrolled. Worker-to-X
+   migrations need the master to proxy bundle bytes, which isn't
+   wired yet — those fall back to the manual flow below. #}
+{% if target_node.is_empty() && !all_nodes.is_empty() && detail.state.as_str() == "active" %}
 <div class="card hover">
   <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+    One-click migrate
+  </h2>
+  <p class="text-soft small" style="margin:0 0 0.8rem">
+    Pick a target node — Hyperion exports {{ detail.domain }} here, hands the signed bundle URL to the target, waits for the import to finish, and suspends the source so you can verify the new copy before deleting the original.
+  </p>
+  <form method="post" action="/hostings/migration/move"
+        data-confirm-title="Migrate {{ detail.domain }}"
+        data-confirm-body="A full backup will be taken on this node, the target will fetch + restore it, and the source will be SUSPENDED (not deleted). DNS still points at the source — update it manually once you've verified the target works. This can take a few minutes for large sites."
+        data-confirm-confirm-label="Migrate now"
+        data-confirm-variant="primary"
+        style="display:flex;gap:0.5rem;align-items:flex-end;flex-wrap:wrap">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <input type="hidden" name="selector" value="{{ detail.domain }}">
+    <input type="hidden" name="source_node" value="">
+    <div class="field" style="margin:0;flex:1;min-width:15rem">
+      <label for="migrate_to">Target node</label>
+      <select id="migrate_to" name="target_node" style="margin:0" required>
+        {% for n in all_nodes %}
+        <option value="{{ n.node_id }}">{{ n.label }}{% if let Some(ip) = n.public_ip.as_ref() %} — {{ ip }}{% endif %}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <button class="btn primary" type="submit">Migrate</button>
+  </form>
+  <p class="text-soft small" style="margin:0.6rem 0 0">
+    <strong>After migration:</strong> update DNS to point at the target's IP. Once you've confirmed the new copy serves correctly, delete the suspended source from its Danger tab.
+  </p>
+</div>
+{% endif %}
+
+<div class="card hover" style="margin-top:1rem">
+  <h2>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12l18-9-3 18-7-7-8-2z"/><path d="M11 14l7-7"/></svg>
-    Migrate to another node
+    Manual export
   </h2>
   <p class="muted">
-    Click <strong>Export</strong> below — the result page shows a signed
-    URL + token (1h validity). On the target node's hyperion-web open
-    <a href="/hostings/import">Hostings → Import from another node</a> and
-    paste both fields. The target downloads the archive directly from
-    this node and provisions an identical hosting. Falls back to
-    <code>scp</code> + <code>hctl hosting import-from-url</code> for SSH-only
-    workflows.
+    Use this when you want full control over the transfer (SSH-only target, off-cluster destination, regulatory hand-over). Click <strong>Export</strong> — the result page shows a signed URL + token (1h validity) you can paste into any target's
+    <a href="/hostings/import">Hostings → Import from another node</a>.
   </p>
 
   {% if detail.state.as_str() == "active" %}

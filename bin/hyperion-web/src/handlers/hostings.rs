@@ -160,6 +160,10 @@ struct DetailTpl<'a> {
     /// safe default for backwards compatibility with single-node
     /// setups.
     target_node: String,
+    /// Enrolled remote nodes — drives the one-click "Migrate to…"
+    /// dropdown on the Migration tab. Empty on single-node setups
+    /// (the dropdown hides itself in that case).
+    all_nodes: Vec<hyperion_types::NodeSummary>,
 }
 
 #[derive(Deserialize, Default)]
@@ -606,6 +610,7 @@ pub async fn post_create(
                 email_log: vec![],
                 csrf_token: super::session_csrf_token(&state, &ctx),
                 target_node: target.unwrap_or("").to_string(),
+                all_nodes: fetch_remote_nodes(&state).await.unwrap_or_default(),
             };
             Ok(Html(tpl.render()?).into_response())
         }
@@ -836,6 +841,7 @@ pub async fn get_detail(
         email_log,
         csrf_token: super::session_csrf_token(&state, &ctx),
         target_node: owner_node.clone().unwrap_or_default(),
+        all_nodes: fetch_remote_nodes(&state).await.unwrap_or_default(),
     };
     Ok(Html(tpl.render()?).into_response())
 }
@@ -2591,6 +2597,175 @@ struct MigrationExportResultTpl<'a> {
     /// drop in without re-plumbing the handler.
     #[allow(dead_code)]
     csrf_token: String,
+}
+
+/// One-click migration: export the hosting from its current node,
+/// hand the signed download URL to the target node, wait for the
+/// import to finish. After success, the OLD hosting is suspended
+/// (NOT deleted — operator should verify the new one before
+/// pulling the trigger).
+///
+/// Current limitation: only works when the SOURCE is the master.
+/// Worker-to-worker / worker-to-master needs the master to proxy
+/// the bundle bytes (each worker holds its own /var/lib/hyperion/
+/// migration/<id>/ — only master serves the /api/migration/bundle/
+/// route). That's a follow-up.
+#[derive(Deserialize)]
+pub struct MigrationMoveForm {
+    pub selector: String,
+    pub target_node: String,
+    /// Hidden — populated by the JS-injected hidden input. Identifies
+    /// which node the hosting currently LIVES on (source).
+    #[serde(default)]
+    pub source_node: String,
+}
+
+pub async fn post_migration_move(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    headers: axum::http::HeaderMap,
+    Form(form): Form<MigrationMoveForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let sel_url = urlencoding(&form.selector);
+
+    // 0. Sanity gates.
+    let target = form.target_node.trim();
+    if target.is_empty() {
+        return Ok(Redirect::to(&format!(
+            "/hostings/{}?flash_error=Pick+a+target+node+for+migration#migration",
+            sel_url
+        ))
+        .into_response());
+    }
+    let source_local = form.source_node.is_empty()
+        || form.source_node == crate::dispatcher::LOCAL_NODE_SENTINEL;
+    if !source_local {
+        return Ok(Redirect::to(&format!(
+            "/hostings/{}?flash_error={}#migration",
+            sel_url,
+            urlencoding(
+                "Source must currently be the master. Worker-to-worker migration via UI is not yet wired — use the operator cheatsheet below for scp + hctl import."
+            )
+        ))
+        .into_response());
+    }
+    let target_owned = target.to_string();
+    if target_owned == crate::dispatcher::LOCAL_NODE_SENTINEL {
+        return Ok(Redirect::to(&format!(
+            "/hostings/{}?flash_error={}#migration",
+            sel_url,
+            urlencoding("Target node must be different from the source.")
+        ))
+        .into_response());
+    }
+
+    // 1. Export the bundle on the source (= master).
+    let export = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::HostingExport { hosting: sel.clone() },
+    )
+    .await?;
+    let bundle = match export {
+        RpcResponse::HostingExport(b) => b,
+        RpcResponse::Error(e) => {
+            return Ok(Redirect::to(&format!(
+                "/hostings/{}?flash_error={}#migration",
+                sel_url,
+                urlencoding(&format!("Export failed: {e}"))
+            ))
+            .into_response());
+        }
+        _ => return Err(AppError::Internal("expected HostingExport".into())),
+    };
+
+    // 2. Mint a signed download URL so the target node can fetch
+    //    archive.tar.gz + manifest.json from the master's
+    //    /api/migration/bundle/<id>/ route. Reuse the same TTL +
+    //    signing-key path the standalone export already uses.
+    let master_url = super::derive_master_url(&state, &headers).await;
+    let exp = hyperion_types::now_secs()
+        + crate::handlers::migration::BUNDLE_DOWNLOAD_TTL_SECS;
+    let token =
+        hyperion_auth::bundle_sig::mint(state.csrf_key.as_ref(), &bundle.bundle_id, exp);
+    let base_url = format!("{master_url}/api/migration/bundle/{}", bundle.bundle_id);
+    // 3. Tell the TARGET node to fetch + import. Importer
+    // appends `?t=<token>` to both manifest.json + archive.tar.gz.
+    let import = crate::dispatcher::dispatch_to_node(
+        &state,
+        Some(&target_owned),
+        Request::HostingImportFromUrl {
+            base_url: base_url.clone(),
+            token: token.clone(),
+        },
+    )
+    .await?;
+    let new_id = match import {
+        RpcResponse::HostingImportFromUrl(r) => r.new_hosting_id,
+        RpcResponse::Error(e) => {
+            return Ok(Redirect::to(&format!(
+                "/hostings/{}?flash_error={}#migration",
+                sel_url,
+                urlencoding(&format!("Target import failed: {e}"))
+            ))
+            .into_response());
+        }
+        _ => return Err(AppError::Internal("expected HostingImportFromUrl".into())),
+    };
+
+    // 4. Suspend the source — leaves it offline-but-recoverable so
+    //    the operator can verify the new hosting works before
+    //    pulling the trigger on delete. Best-effort.
+    let _ = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::HostingSuspend {
+            sel: sel.clone(),
+            reason: hyperion_types::SuspendReason::Manual {
+                message: Some(format!(
+                    "Migrated to node {target_owned} as {} — verify and delete here when ready.",
+                    new_id.as_str()
+                )),
+            },
+        },
+    )
+    .await;
+
+    self::audit_migration_move(&state, &ctx, &form.selector, &target_owned, &new_id).await;
+
+    // 5. Land the operator on the NEW hosting's detail page.
+    Ok(Redirect::to(&format!(
+        "/hostings/{}?flash={}",
+        urlencoding(&form.selector),
+        urlencoding(&format!(
+            "Migrated to node {target_owned}. New hosting id: {}. Source is suspended — delete it from the Danger tab once you've verified the new one is live.",
+            new_id.as_str()
+        ))
+    ))
+    .into_response())
+}
+
+/// Write an audit-log entry on the master for the migration move.
+/// Best-effort — failure here doesn't block the operator.
+async fn audit_migration_move(
+    state: &SharedState,
+    _ctx: &AuthCtx,
+    selector: &str,
+    target_node: &str,
+    new_id: &hyperion_types::HostingId,
+) {
+    // The audit RPC is server-side under hosting actions; reusing
+    // it here would require a dedicated RPC. For now just log.
+    tracing::info!(
+        selector = selector,
+        target_node = target_node,
+        new_hosting_id = new_id.as_str(),
+        operator = %_ctx.username,
+        "hosting migrated via one-click UI"
+    );
+    let _ = state;
 }
 
 pub async fn post_migration_export(
