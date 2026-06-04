@@ -558,10 +558,12 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         label: String,
         agent_version: String,
         public_ip: Option<String>,
-    ) -> Result<String, RpcError> {
-        self.svc
+    ) -> Result<(String, Option<String>), RpcError> {
+        let secret = self
+            .svc
             .enroll_consume(token, caller_ip, node_id, label, agent_version, public_ip)
-            .await
+            .await?;
+        Ok((secret, self.svc.master_rpc_pubkey_b64()))
     }
 
     async fn node_heartbeat(
@@ -569,10 +571,11 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         node_id: String,
         secret: String,
         agent_version: String,
-    ) -> Result<(), RpcError> {
+    ) -> Result<Option<String>, RpcError> {
         self.svc
             .node_heartbeat(node_id, secret, agent_version)
-            .await
+            .await?;
+        Ok(self.svc.master_rpc_pubkey_b64())
     }
 
     async fn nodes_list(&self) -> Result<Vec<NodeSummary>, RpcError> {

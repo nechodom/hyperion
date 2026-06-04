@@ -443,7 +443,10 @@ async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             .enroll_consume(token, caller_ip, node_id, label, agent_version, public_ip)
             .await
         {
-            Ok(secret) => Response::EnrollConsume { secret },
+            Ok((secret, master_rpc_pubkey)) => Response::EnrollConsume {
+                secret,
+                master_rpc_pubkey,
+            },
             Err(e) => Response::Error(e),
         },
         Request::NodeHeartbeat {
@@ -451,7 +454,7 @@ async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             secret,
             agent_version,
         } => match api.node_heartbeat(node_id, secret, agent_version).await {
-            Ok(_) => Response::NodeHeartbeat,
+            Ok(master_rpc_pubkey) => Response::NodeHeartbeat { master_rpc_pubkey },
             Err(e) => Response::Error(e),
         },
         Request::NodesList => match api.nodes_list().await {
@@ -973,16 +976,16 @@ mod tests {
             _: String,
             _: String,
             _: Option<String>,
-        ) -> Result<String, RpcError> {
-            Ok("test-secret".into())
+        ) -> Result<(String, Option<String>), RpcError> {
+            Ok(("test-secret".into(), None))
         }
         async fn node_heartbeat(
             &self,
             _: String,
             _: String,
             _: String,
-        ) -> Result<(), RpcError> {
-            Ok(())
+        ) -> Result<Option<String>, RpcError> {
+            Ok(None)
         }
         async fn nodes_list(&self) -> Result<Vec<NodeSummary>, RpcError> {
             Ok(vec![])

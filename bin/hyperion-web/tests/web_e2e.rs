@@ -175,6 +175,7 @@ async fn start_agent() -> (PathBuf, tempfile::TempDir) {
         cert_issue_locks: Arc::new(tokio::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
+        master_rpc_signer: None,
     });
     let agent: Arc<dyn AgentApi> = Arc::new(AgentImpl::new(svc));
     let path = dir.path().join("agent.sock");

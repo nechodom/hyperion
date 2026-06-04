@@ -177,6 +177,16 @@ pub struct HostingService<A: AdapterPort + 'static> {
     /// serving a fullchain.pem whose public key doesn't match the
     /// privkey.pem.
     pub cert_issue_locks: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    /// Ed25519 signing key for master→node remote RPC. `Some` on
+    /// masters where /etc/hyperion/master-rpc.key was successfully
+    /// loaded or auto-generated; `None` on workers, or on masters
+    /// where key init failed (logged, remote RPC disabled).
+    ///
+    /// The PUBLIC half is piggy-backed in enrollment and heartbeat
+    /// responses so every node ends up holding it; the PRIVATE half
+    /// is only ever held by the master and used to sign outbound
+    /// remote-RPC requests.
+    pub master_rpc_signer: Option<Arc<crate::master_rpc::MasterRpcSigner>>,
 }
 
 /// Default renewal window — matches Let's Encrypt's recommended
@@ -836,7 +846,31 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             update_cache: Arc::new(tokio::sync::RwLock::new(None)),
             current_git_sha: "dev-unknown".into(),
             cert_issue_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            master_rpc_signer: None,
         }
+    }
+
+    /// Wire a master-RPC signing key. Called from hyperion-agent's
+    /// startup on every node — workers will simply not propagate
+    /// the pubkey (they don't process inbound enrollments /
+    /// heartbeats), so leaving this on for everyone is a no-op for
+    /// non-master nodes.
+    pub fn with_master_rpc_signer(
+        mut self,
+        signer: Arc<crate::master_rpc::MasterRpcSigner>,
+    ) -> Self {
+        self.master_rpc_signer = Some(signer);
+        self
+    }
+
+    /// Convenience: returns the master's Ed25519 pubkey in base64
+    /// suitable for embedding in enrollment / heartbeat responses.
+    /// Returns `None` when remote-RPC isn't initialized on this
+    /// node (workers, or masters whose key file failed to load).
+    pub fn master_rpc_pubkey_b64(&self) -> Option<String> {
+        self.master_rpc_signer
+            .as_ref()
+            .map(|s| s.pubkey_b64().to_string())
     }
 
     /// Wire the compile-time git SHA so `update_check` knows what
@@ -7413,6 +7447,7 @@ mod tests {
             update_cache: Arc::new(tokio::sync::RwLock::new(None)),
             current_git_sha: "dev-unknown".into(),
             cert_issue_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            master_rpc_signer: None,
         };
         s2.create(HostingCreateReq {
             domain: Domain::parse("b.cz").expect("parse"),
@@ -7517,6 +7552,7 @@ mod tests {
             update_cache: Arc::new(tokio::sync::RwLock::new(None)),
             current_git_sha: "dev-unknown".into(),
             cert_issue_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            master_rpc_signer: None,
         };
         let r = s2.create(req("dup.cz")).await;
         match r {

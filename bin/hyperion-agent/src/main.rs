@@ -126,17 +126,43 @@ async fn main() -> anyhow::Result<()> {
     } else {
         Some(cfg.email.default_to.clone())
     };
-    let svc = Arc::new(
-        hyperion_core::HostingService::new(pool, adapter, secrets)
-            .with_paths(paths)
-            .with_remote_backup(remote_backup)
-            .with_retention(retention)
-            .with_slack_webhook(slack_webhook)
-            .with_acme_email(cfg.acme.contact_email.clone())
-            .with_email(email_cfg, email_to)
-            .with_agent_config_path(cli.config.clone())
-            .with_git_sha(env!("HYPERION_GIT_SHA")),
-    );
+    // Master-RPC signing key — auto-generated on first start, mode
+    // 0600. Only the master node really needs it (it's the one
+    // that ACKs enrollments and heartbeats), but on a worker the
+    // file just sits unused — harmless. Failure to load/generate
+    // is logged and `with_master_rpc_signer` is simply skipped;
+    // the node becomes a "remote RPC disabled" master.
+    let master_rpc_key_path = std::path::PathBuf::from("/etc/hyperion/master-rpc.key");
+    let master_rpc_signer = match hyperion_core::master_rpc::MasterRpcSigner::load_or_init(
+        &master_rpc_key_path,
+    ) {
+        Ok(s) => {
+            tracing::info!(path=%master_rpc_key_path.display(), "master_rpc signing key ready");
+            Some(Arc::new(s))
+        }
+        Err(e) => {
+            tracing::warn!(
+                error=%e,
+                path=%master_rpc_key_path.display(),
+                "master_rpc signing key unavailable — remote-node RPC will be disabled"
+            );
+            None
+        }
+    };
+
+    let mut builder = hyperion_core::HostingService::new(pool, adapter, secrets)
+        .with_paths(paths)
+        .with_remote_backup(remote_backup)
+        .with_retention(retention)
+        .with_slack_webhook(slack_webhook)
+        .with_acme_email(cfg.acme.contact_email.clone())
+        .with_email(email_cfg, email_to)
+        .with_agent_config_path(cli.config.clone())
+        .with_git_sha(env!("HYPERION_GIT_SHA"));
+    if let Some(signer) = master_rpc_signer {
+        builder = builder.with_master_rpc_signer(signer);
+    }
+    let svc = Arc::new(builder);
 
     // Self-heal: re-render every Active hosting's FPM pool with the
     // detected nginx user. Old pool files on disk may still encode a

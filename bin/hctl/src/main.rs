@@ -608,11 +608,23 @@ fn print_pretty(resp: &Response) {
         Response::HostingLogs(s) => print!("{s}"),
         Response::CronList(s) => print!("{s}"),
         Response::CronReplace => println!("✓ crontab updated"),
-        Response::EnrollConsume { secret } => {
+        Response::EnrollConsume {
+            secret,
+            master_rpc_pubkey,
+        } => {
             println!("✓ node enrolled");
             println!("  secret: {secret}");
+            if let Some(pk) = master_rpc_pubkey {
+                println!("  master_rpc_pubkey: {pk}");
+            }
         }
-        Response::NodeHeartbeat => println!("✓ heartbeat ok"),
+        Response::NodeHeartbeat { master_rpc_pubkey } => {
+            print!("✓ heartbeat ok");
+            if master_rpc_pubkey.is_some() {
+                print!(" (master_rpc available)");
+            }
+            println!();
+        }
         Response::NodesList(rows) => {
             for n in rows {
                 println!(

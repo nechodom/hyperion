@@ -330,9 +330,11 @@ pub trait AgentApi: Send + Sync + 'static {
     async fn cron_replace(&self, sel: HostingSelector, body: String) -> Result<(), RpcError>;
 
     /// Master-side node enrollment: consume an invite token, record the
-    /// node in the `nodes` table, mint a per-node secret. Returns the
-    /// secret (plaintext, shown only once — node persists it locally
-    /// for heartbeat auth).
+    /// node in the `nodes` table, mint a per-node secret. Returns
+    /// `(secret_plaintext, master_rpc_pubkey_b64)` — the latter is
+    /// `Some` when the master has a master-RPC signing key
+    /// configured, `None` on dev / not-yet-upgraded setups (node
+    /// treats `None` as "remote RPC unavailable from this master").
     #[allow(clippy::too_many_arguments)]
     async fn enroll_consume(
         &self,
@@ -342,16 +344,19 @@ pub trait AgentApi: Send + Sync + 'static {
         label: String,
         agent_version: String,
         public_ip: Option<String>,
-    ) -> Result<String, RpcError>;
+    ) -> Result<(String, Option<String>), RpcError>;
 
-    /// Master-side heartbeat: verifies (node_id, secret) and bumps the
-    /// node's last_seen_at + agent_version.
+    /// Master-side heartbeat: verifies (node_id, secret) and bumps
+    /// the node's last_seen_at + agent_version. Returns the master's
+    /// remote-RPC pubkey (base64, `None` when remote RPC isn't set
+    /// up on this master) so existing enrolled nodes can pick it up
+    /// without re-enrolling.
     async fn node_heartbeat(
         &self,
         node_id: String,
         secret: String,
         agent_version: String,
-    ) -> Result<(), RpcError>;
+    ) -> Result<Option<String>, RpcError>;
 
     /// List enrolled nodes (master-side `nodes` table).
     async fn nodes_list(&self) -> Result<Vec<NodeSummary>, RpcError>;

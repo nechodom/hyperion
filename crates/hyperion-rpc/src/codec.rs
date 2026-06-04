@@ -460,9 +460,25 @@ pub enum Response {
     HostingLogs(String),
     CronList(String),
     CronReplace,
-    EnrollConsume { secret: String },
+    EnrollConsume {
+        secret: String,
+        /// Base64 (no-pad) of the master's Ed25519 public key for
+        /// the master→node remote-RPC channel. `None` on masters
+        /// that haven't been upgraded past the introduction of
+        /// signed remote RPC; nodes treat that as "remote RPC not
+        /// available from this master" and continue as before.
+        #[serde(default)]
+        master_rpc_pubkey: Option<String>,
+    },
     NodesList(Vec<NodeSummary>),
-    NodeHeartbeat,
+    NodeHeartbeat {
+        /// Same as EnrollConsume — included on every heartbeat ack
+        /// so already-enrolled nodes pick up the master pubkey
+        /// within one tick after the master is upgraded, without
+        /// needing a re-enrollment.
+        #[serde(default)]
+        master_rpc_pubkey: Option<String>,
+    },
     WpResetPassword,
     DbResetPassword,
     FtpSetPassword { password: String },

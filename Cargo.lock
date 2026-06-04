@@ -1368,8 +1368,10 @@ name = "hyperion-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64",
  "blake3",
  "chrono",
+ "ed25519-dalek",
  "hex",
  "hyperion-adapters",
  "hyperion-auth",

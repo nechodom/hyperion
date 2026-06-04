@@ -59,6 +59,11 @@ pub struct EnrollResponse {
     pub master_url: String,
     /// Per-node shared secret for ongoing heartbeats. Returned once.
     pub secret: String,
+    /// Base64 of the master's Ed25519 public key for the master→
+    /// node remote-RPC channel. `None` when the master hasn't been
+    /// upgraded to support remote RPC; nodes ignore in that case.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub master_rpc_pubkey: Option<String>,
 }
 
 pub async fn post_enroll(
@@ -109,12 +114,13 @@ pub async fn post_enroll(
     )
     .await;
     match outcome {
-        Ok(secret) => {
+        Ok((secret, master_rpc_pubkey)) => {
             let master_url = derive_master_from_headers(&headers, &state);
             Ok(Json(EnrollResponse {
                 node_id,
                 master_url,
                 secret,
+                master_rpc_pubkey,
             })
             .into_response())
         }
@@ -130,7 +136,7 @@ async fn consume_and_register(
     label: &str,
     agent_version: &str,
     public_ip: Option<&str>,
-) -> Result<String, String> {
+) -> Result<(String, Option<String>), String> {
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
         Request::EnrollConsume {
@@ -145,7 +151,10 @@ async fn consume_and_register(
     .await
     .map_err(|e| format!("rpc: {e}"))?;
     match resp {
-        RpcResponse::EnrollConsume { secret } => Ok(secret),
+        RpcResponse::EnrollConsume {
+            secret,
+            master_rpc_pubkey,
+        } => Ok((secret, master_rpc_pubkey)),
         RpcResponse::Error(e) => Err(e.to_string()),
         _ => Err("unexpected response".into()),
     }
@@ -186,7 +195,17 @@ pub async fn post_heartbeat(
     )
     .await?;
     match resp {
-        RpcResponse::NodeHeartbeat => Ok(Json(serde_json::json!({"status":"ok"})).into_response()),
+        RpcResponse::NodeHeartbeat { master_rpc_pubkey } => {
+            // Echo the master's remote-RPC pubkey back to the node
+            // on every heartbeat ack. Nodes that were enrolled
+            // before remote-RPC existed will pick it up here and
+            // persist it without needing to re-enroll.
+            let mut body = serde_json::json!({"status":"ok"});
+            if let Some(pk) = master_rpc_pubkey {
+                body["master_rpc_pubkey"] = serde_json::Value::String(pk);
+            }
+            Ok(Json(body).into_response())
+        }
         RpcResponse::Error(e) => Err(AppError::BadRequest(format!("heartbeat refused: {e}"))),
         _ => Err(AppError::Internal("unexpected response".into())),
     }

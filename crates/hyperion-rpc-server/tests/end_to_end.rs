@@ -172,6 +172,7 @@ async fn start_agent() -> (std::path::PathBuf, tempfile::TempDir) {
         cert_issue_locks: Arc::new(tokio::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
+        master_rpc_signer: None,
     });
     let _ = adapters; // silence unused warning
     let agent: Arc<dyn AgentApi> = Arc::new(AgentImpl::new(svc));

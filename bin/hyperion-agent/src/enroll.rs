@@ -49,15 +49,23 @@ struct EnrollResponse {
     node_id: String,
     master_url: String,
     secret: String,
+    #[serde(default)]
+    master_rpc_pubkey: Option<String>,
 }
 
-#[derive(Deserialize, Serialize)]
+#[derive(Deserialize, Serialize, Clone)]
 pub struct PersistedNodeId {
     pub node_id: String,
     pub master_url: String,
     #[serde(default)]
     pub secret: String,
     pub enrolled_at: i64,
+    /// Base64 of the master's Ed25519 public key for the master→
+    /// node remote-RPC channel. Populated on enrollment if the
+    /// master supports remote RPC; otherwise updated lazily from
+    /// any subsequent heartbeat ack that carries it.
+    #[serde(default)]
+    pub master_rpc_pubkey: Option<String>,
 }
 
 /// Load the persisted node identity if present.
@@ -276,18 +284,9 @@ async fn finish_enrollment(cfg: &EnrollmentConfig, stdout: &[u8]) -> Result<(), 
         master_url: cfg.master_url.clone(),
         secret: resp.secret.clone(),
         enrolled_at: chrono::Utc::now().timestamp(),
+        master_rpc_pubkey: resp.master_rpc_pubkey.clone(),
     };
-    let bytes = serde_json::to_vec_pretty(&persisted)
-        .map_err(|e| format!("serialize persisted: {e}"))?;
-    let tmp = cfg.state_file.with_extension("json.tmp");
-    tokio::fs::write(&tmp, &bytes)
-        .await
-        .map_err(|e| format!("write tmp {}: {e}", tmp.display()))?;
-    use std::os::unix::fs::PermissionsExt;
-    let _ = tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).await;
-    tokio::fs::rename(&tmp, &cfg.state_file)
-        .await
-        .map_err(|e| format!("rename {} → {}: {e}", tmp.display(), cfg.state_file.display()))?;
+    atomically_persist(&cfg.state_file, &persisted).await?;
     // Best-effort: wipe the one-time invite_token from agent.toml.
     // The master invalidated it server-side already; keeping it on
     // disk just clutters the file and could mislead a future
@@ -416,6 +415,27 @@ pub async fn heartbeat_loop(state_file: std::path::PathBuf, period_secs: u64, ve
         match result {
             Ok(out) if out.status.success() => {
                 tracing::debug!(node = %p.node_id, master = %p.master_url, "heartbeat ok");
+                // Master's heartbeat ack may carry the master's
+                // remote-RPC pubkey — pick it up so already-enrolled
+                // nodes (which won't go through enroll again) end up
+                // holding it within one tick of the master being
+                // upgraded.
+                if let Some(new_pk) = parse_heartbeat_pubkey(&out.stdout) {
+                    if p.master_rpc_pubkey.as_deref() != Some(new_pk.as_str()) {
+                        let mut updated = p.clone();
+                        updated.master_rpc_pubkey = Some(new_pk);
+                        if let Err(e) = atomically_persist(&state_file, &updated).await {
+                            tracing::warn!(
+                                error=%e,
+                                "persisting master_rpc_pubkey to node-id.json failed"
+                            );
+                        } else {
+                            tracing::info!(
+                                "picked up master_rpc_pubkey from heartbeat ack"
+                            );
+                        }
+                    }
+                }
             }
             Ok(out) => {
                 tracing::warn!(
@@ -428,6 +448,45 @@ pub async fn heartbeat_loop(state_file: std::path::PathBuf, period_secs: u64, ve
             Err(e) => tracing::warn!(error=%e, "heartbeat curl failed"),
         }
     }
+}
+
+/// Extract the `master_rpc_pubkey` field from a heartbeat response
+/// body. Returns `None` if the body isn't valid JSON, doesn't
+/// contain that field, or the field isn't a non-empty string.
+fn parse_heartbeat_pubkey(stdout: &[u8]) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_slice(stdout).ok()?;
+    v.get("master_rpc_pubkey")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+}
+
+/// Atomic write of node-id.json (tmp → chmod 0600 → rename) so a
+/// crash midway can never leave the file at a wider mode than 0600.
+/// Used both by initial enrollment and by the heartbeat loop when
+/// it updates fields in-place (e.g. picking up master_rpc_pubkey).
+async fn atomically_persist(
+    state_file: &std::path::Path,
+    persisted: &PersistedNodeId,
+) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(persisted)
+        .map_err(|e| format!("serialize persisted: {e}"))?;
+    let tmp = state_file.with_extension("json.tmp");
+    tokio::fs::write(&tmp, &bytes)
+        .await
+        .map_err(|e| format!("write tmp {}: {e}", tmp.display()))?;
+    use std::os::unix::fs::PermissionsExt;
+    let _ = tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).await;
+    tokio::fs::rename(&tmp, state_file)
+        .await
+        .map_err(|e| {
+            format!(
+                "rename {} → {}: {e}",
+                tmp.display(),
+                state_file.display()
+            )
+        })?;
+    Ok(())
 }
 
 async fn fetch_public_ip() -> Option<String> {
