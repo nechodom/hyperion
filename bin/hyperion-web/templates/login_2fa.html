@@ -5,40 +5,268 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Two-factor authentication · hyperion</title>
   <link rel="stylesheet" href="/static/app.css?v={{ css_version }}">
+  <meta name="color-scheme" content="light dark">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%236366f1'/%3E%3Cpath d='M9 9 L9 23 M9 16 L17 16 M17 9 L17 23 M21 14 L24 14 L24 23 M21 11 L21 14' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E">
 </head>
-<body class="login-page">
-  <main class="login-card">
-    <div class="login-brand">
-      <svg viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg>
-      <span>hyperion</span>
-    </div>
-    <h1>Two-factor authentication</h1>
-    <p class="login-sub">Enter the 6-digit code from your authenticator app, or one of your backup codes.</p>
+<body>
+  <div class="login-shell">
+    <aside class="login-aside">
+      <div class="brand-block">
+        <div style="font-family:var(--font-mono);font-weight:800;font-size:1.4rem;letter-spacing:0.04em;margin-bottom:2.5rem;text-transform:uppercase">
+          <span style="color:#34d399;text-shadow:0 0 22px rgba(52,211,153,0.6)">HY</span><span style="opacity:0.5;font-weight:500">·</span>PERION
+        </div>
 
-    {% if let Some(e) = error %}
-      <div class="flash error">
-        <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-        <div class="flash-body">{{ e }}</div>
+        <div class="login-step-trail" aria-label="Sign-in progress">
+          <div class="login-step done">
+            <span class="login-step-dot">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+            </span>
+            <div>
+              <div class="login-step-label">Step 1</div>
+              <div class="login-step-detail">Password verified</div>
+            </div>
+          </div>
+          <div class="login-step current">
+            <span class="login-step-dot">2</span>
+            <div>
+              <div class="login-step-label">Step 2</div>
+              <div class="login-step-detail">Two-factor authentication</div>
+            </div>
+          </div>
+        </div>
+
+        <h1 style="margin-top:2rem">One more thing.</h1>
+        <p>Open your authenticator app and enter the 6-digit code — or use a backup code if you don't have the app handy.</p>
       </div>
+      <div class="footer">© hyperion · Debian 12+ · Rust + axum + askama</div>
+    </aside>
+
+    <main class="login-form">
+      <div class="login-card">
+        <div class="login-brand" style="font-family:var(--font-mono);text-transform:uppercase;letter-spacing:0.04em">
+          <span style="color:var(--brand-accent);text-shadow:0 0 18px color-mix(in oklab,var(--brand-accent) 60%,transparent)">HY</span><span style="color:var(--text-soft);font-weight:500">·</span>PERION
+        </div>
+
+        <div class="login-icon-puck" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="11" width="18" height="11" rx="2"/>
+            <path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+          </svg>
+        </div>
+
+        <h2>Two-factor authentication</h2>
+        <p class="subtitle" id="totp-subtitle">Enter the 6-digit code from your authenticator app.</p>
+        <p class="subtitle" id="backup-subtitle" hidden>Enter one of the one-shot backup codes you saved during enrollment.</p>
+
+        {% if let Some(e) = error %}
+          <div class="flash error" role="alert">
+            <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+            <div class="flash-body">
+              {% if e == "invalid" %}
+                Wrong code — double-check the digits or try a backup code.
+              {% else if e == "expired" %}
+                Your 5-minute 2FA window expired. Start over from the sign-in page.
+              {% else %}
+                {{ e }}
+              {% endif %}
+            </div>
+          </div>
+        {% endif %}
+
+        {# TOTP form — 6 individual boxes that auto-advance + accept paste. #}
+        <form method="post" action="/login/2fa" autocomplete="off" id="totp-form">
+          <input type="hidden" name="next" value="{{ next|e }}">
+          {# A hidden mirror field carries the concatenated 6-digit code
+             to the server so the existing handler doesn't change. #}
+          <input type="hidden" name="code" id="code-mirror">
+          <div class="otp-row" role="group" aria-label="6-digit code">
+            <input class="otp-box" data-otp-idx="0" type="text" inputmode="numeric" autocomplete="one-time-code"
+                   pattern="[0-9]" maxlength="1" required autofocus aria-label="Digit 1">
+            <input class="otp-box" data-otp-idx="1" type="text" inputmode="numeric"
+                   pattern="[0-9]" maxlength="1" required aria-label="Digit 2">
+            <input class="otp-box" data-otp-idx="2" type="text" inputmode="numeric"
+                   pattern="[0-9]" maxlength="1" required aria-label="Digit 3">
+            <span class="otp-sep" aria-hidden="true">·</span>
+            <input class="otp-box" data-otp-idx="3" type="text" inputmode="numeric"
+                   pattern="[0-9]" maxlength="1" required aria-label="Digit 4">
+            <input class="otp-box" data-otp-idx="4" type="text" inputmode="numeric"
+                   pattern="[0-9]" maxlength="1" required aria-label="Digit 5">
+            <input class="otp-box" data-otp-idx="5" type="text" inputmode="numeric"
+                   pattern="[0-9]" maxlength="1" required aria-label="Digit 6">
+          </div>
+          <button class="btn primary lg" type="submit" id="totp-submit" style="width:100%;margin-top:1rem">
+            Verify
+            <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+          </button>
+        </form>
+
+        {# Backup code form — single wide input, toggled on by the link. #}
+        <form method="post" action="/login/2fa" autocomplete="off" id="backup-form" hidden>
+          <input type="hidden" name="next" value="{{ next|e }}">
+          <div class="field" style="margin-bottom:0">
+            <label for="backup-code" class="login-field-label">Backup code</label>
+            <input id="backup-code" name="code" type="text"
+                   pattern="[0-9A-Za-z\-]{6,32}"
+                   maxlength="32" required
+                   placeholder="xxxx-xxxx"
+                   spellcheck="false" autocapitalize="off" autocomplete="off"
+                   style="font-family:var(--font-mono);font-size:1rem;letter-spacing:0.1em;text-align:center;text-transform:uppercase">
+          </div>
+          <button class="btn primary lg" type="submit" style="width:100%;margin-top:0.9rem">
+            Verify backup code
+          </button>
+        </form>
+
+        <div class="login-actions">
+          <button type="button" class="login-link" id="toggle-mode" aria-controls="totp-form backup-form">
+            Use a backup code instead
+          </button>
+          <a href="/login?next={{ next|e }}" class="login-link login-link-muted">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 18 9 12 15 6"/></svg>
+            Back to sign in
+          </a>
+        </div>
+
+        <p class="login-foot">
+          Lost your authenticator and out of backup codes? An administrator can
+          reset 2FA on your account from <code>/admin/users</code>.
+        </p>
+      </div>
+    </main>
+  </div>
+
+  <script>
+  (function () {
+    'use strict';
+
+    // ============================================================
+    //  6-box OTP input — auto-advance, backspace, paste, autosubmit
+    // ============================================================
+    const boxes = Array.from(document.querySelectorAll('.otp-box'));
+    const mirror = document.getElementById('code-mirror');
+    const submitBtn = document.getElementById('totp-submit');
+    const form = document.getElementById('totp-form');
+
+    function readCode() {
+      return boxes.map((b) => b.value.trim()).join('');
+    }
+    function syncMirror() {
+      mirror.value = readCode();
+      submitBtn.disabled = readCode().length !== 6;
+    }
+    function clearAll() {
+      boxes.forEach((b) => { b.value = ''; });
+      syncMirror();
+      boxes[0].focus();
+    }
+
+    // Mark wrong-code submissions visually + clear inputs so the
+    // operator can retry without manually deleting six characters.
+    {% if let Some(_) = error %}
+      boxes.forEach((b) => b.classList.add('otp-error'));
+      requestAnimationFrame(clearAll);
     {% endif %}
 
-    <form method="post" action="/login/2fa" autocomplete="off">
-      <input type="hidden" name="next" value="{{ next|e }}">
-      <div class="field">
-        <label for="code">Code</label>
-        <input id="code" name="code" type="text" inputmode="numeric" pattern="[0-9A-Za-z\-]{6,9}"
-               maxlength="9" required autofocus
-               placeholder="123456 or backup code"
-               style="font-size:1.2rem;letter-spacing:0.2em;text-align:center">
-      </div>
-      <button class="btn primary lg" type="submit" style="width:100%">Verify</button>
-    </form>
+    boxes.forEach((box, idx) => {
+      box.addEventListener('input', (ev) => {
+        // Strip anything non-digit. Some authenticator integrations
+        // (especially SMS autofill on mobile) push the full code to
+        // the first box — handle that as a paste below.
+        const v = box.value.replace(/\D/g, '');
+        if (v.length > 1) {
+          // multi-char input: distribute across boxes from idx onwards.
+          distribute(v, idx);
+          return;
+        }
+        box.value = v;
+        if (v && idx < boxes.length - 1) {
+          boxes[idx + 1].focus();
+          boxes[idx + 1].select();
+        }
+        syncMirror();
+        maybeAutosubmit();
+      });
 
-    <p class="login-foot text-soft small" style="margin-top:1rem">
-      Lost your authenticator? Use one of the backup codes you saved
-      during enrollment. Each works exactly once. After login, set up
-      a new authenticator on the profile page.
-    </p>
-  </main>
+      box.addEventListener('keydown', (ev) => {
+        if (ev.key === 'Backspace' && !box.value && idx > 0) {
+          // Move back + clear the previous box for fast correction.
+          boxes[idx - 1].focus();
+          boxes[idx - 1].value = '';
+          ev.preventDefault();
+          syncMirror();
+        } else if (ev.key === 'ArrowLeft' && idx > 0) {
+          boxes[idx - 1].focus();
+          ev.preventDefault();
+        } else if (ev.key === 'ArrowRight' && idx < boxes.length - 1) {
+          boxes[idx + 1].focus();
+          ev.preventDefault();
+        } else if ((ev.metaKey || ev.ctrlKey) && (ev.key === 'a' || ev.key === 'A')) {
+          // Select-all across all boxes — convenience for "clear all".
+          ev.preventDefault();
+          clearAll();
+        }
+      });
+
+      box.addEventListener('paste', (ev) => {
+        ev.preventDefault();
+        const text = (ev.clipboardData || window.clipboardData).getData('text');
+        distribute(text.replace(/\D/g, ''), 0);
+      });
+
+      box.addEventListener('focus', () => box.select());
+    });
+
+    function distribute(digits, startIdx) {
+      for (let i = 0; i < digits.length && startIdx + i < boxes.length; i++) {
+        boxes[startIdx + i].value = digits[i];
+      }
+      const filled = Math.min(startIdx + digits.length, boxes.length);
+      if (filled < boxes.length) {
+        boxes[filled].focus();
+      } else {
+        boxes[boxes.length - 1].focus();
+      }
+      syncMirror();
+      maybeAutosubmit();
+    }
+
+    function maybeAutosubmit() {
+      // Once all six digits are entered we submit automatically —
+      // saves a click and matches the UX of every other 2FA UI.
+      if (readCode().length === 6) {
+        // Defer so the last keystroke's `input` event finishes
+        // applying before we navigate away.
+        setTimeout(() => form.requestSubmit(), 30);
+      }
+    }
+
+    syncMirror();
+
+    // ============================================================
+    //  TOTP ↔ backup-code toggle
+    // ============================================================
+    const totpForm = document.getElementById('totp-form');
+    const backupForm = document.getElementById('backup-form');
+    const totpSub = document.getElementById('totp-subtitle');
+    const backupSub = document.getElementById('backup-subtitle');
+    const toggle = document.getElementById('toggle-mode');
+    let backupMode = false;
+    toggle.addEventListener('click', () => {
+      backupMode = !backupMode;
+      totpForm.hidden = backupMode;
+      backupForm.hidden = !backupMode;
+      totpSub.hidden = backupMode;
+      backupSub.hidden = !backupMode;
+      toggle.textContent = backupMode
+        ? 'Use authenticator code instead'
+        : 'Use a backup code instead';
+      if (backupMode) {
+        document.getElementById('backup-code').focus();
+      } else {
+        boxes[0].focus();
+      }
+    });
+  })();
+  </script>
 </body>
 </html>

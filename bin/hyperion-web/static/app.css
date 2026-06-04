@@ -1349,7 +1349,11 @@ select {
 .login-shell {
   min-height: 100dvh;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  /* Aside is roomy enough for the brand block + step trail, form
+     column is sized for comfortable reading (28rem) plus padding
+     for the icon puck. On ultrawides the form stays centered with
+     a fixed cap instead of stretching wide. */
+  grid-template-columns: minmax(0, 1.2fr) minmax(20rem, 32rem);
   background: var(--bg);
 }
 .login-aside {
@@ -1418,10 +1422,198 @@ select {
 }
 .login-card .btn.primary { width: 100%; padding: 0.7rem 1rem; }
 
+/* ---- Step trail on the aside (2FA "step 2 of 2" indicator) ---- */
+.login-step-trail {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  margin-bottom: 0.5rem;
+  position: relative;
+}
+.login-step {
+  display: grid;
+  grid-template-columns: 28px 1fr;
+  align-items: center;
+  gap: 0.85rem;
+  position: relative;
+}
+.login-step + .login-step::before {
+  content: '';
+  position: absolute;
+  left: 13px;
+  top: -0.85rem;
+  width: 2px;
+  height: 0.85rem;
+  background: rgba(255, 255, 255, 0.18);
+}
+.login-step.done + .login-step::before {
+  background: rgba(255, 255, 255, 0.55);
+}
+.login-step-dot {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-size: 0.82rem;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: white;
+}
+.login-step.done .login-step-dot {
+  background: rgba(255, 255, 255, 0.95);
+  color: var(--primary);
+  border-color: rgba(255, 255, 255, 0.95);
+}
+.login-step.current .login-step-dot {
+  background: rgba(255, 255, 255, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.45);
+  box-shadow: 0 0 0 4px rgba(255, 255, 255, 0.08);
+}
+.login-step-label {
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  opacity: 0.65;
+  font-weight: 600;
+}
+.login-step-detail {
+  font-size: 0.95rem;
+  font-weight: 500;
+  opacity: 0.95;
+}
+
+/* ---- 6-box OTP input ---- */
+.otp-row {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr) auto repeat(3, 1fr);
+  gap: 0.4rem;
+  margin: 0.4rem 0 0.2rem;
+}
+.otp-box {
+  height: 3.2rem;
+  width: 100%;
+  text-align: center;
+  font: 600 1.55rem/1 var(--font-mono);
+  background: var(--surface-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  caret-color: var(--primary);
+  outline: none;
+  padding: 0;
+  transition: border-color var(--t-fast), background var(--t-fast),
+    box-shadow var(--t-fast);
+}
+.otp-box:hover { border-color: var(--text-soft); }
+.otp-box:focus {
+  border-color: var(--primary);
+  background: var(--surface);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--primary) 28%, transparent);
+}
+.otp-box.otp-error {
+  border-color: var(--danger);
+  animation: otpShake 0.45s ease-out;
+}
+.otp-sep {
+  align-self: center;
+  color: var(--text-soft);
+  font-weight: 700;
+  font-size: 1.4rem;
+  user-select: none;
+  text-align: center;
+}
+@keyframes otpShake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-4px); }
+  40% { transform: translateX(4px); }
+  60% { transform: translateX(-3px); }
+  80% { transform: translateX(3px); }
+}
+
+/* ---- Icon puck above the page title (gives the card a focal point) ---- */
+.login-icon-puck {
+  width: 56px;
+  height: 56px;
+  border-radius: 14px;
+  background: linear-gradient(135deg,
+    color-mix(in oklab, var(--primary) 22%, transparent),
+    color-mix(in oklab, var(--primary) 8%, transparent));
+  border: 1px solid color-mix(in oklab, var(--primary) 30%, var(--border));
+  color: var(--primary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 1rem;
+}
+.login-icon-puck svg { width: 28px; height: 28px; }
+
+/* ---- Footer actions: backup-code toggle + "back to sign in" ---- */
+.login-actions {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  margin-top: 1.1rem;
+  flex-wrap: wrap;
+}
+.login-link {
+  background: transparent;
+  border: 0;
+  color: var(--primary);
+  font-size: 0.85rem;
+  font-weight: 500;
+  cursor: pointer;
+  padding: 0.3rem 0;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  font-family: inherit;
+}
+.login-link:hover { text-decoration: underline; }
+.login-link-muted { color: var(--text-dim); }
+.login-link-muted:hover { color: var(--text); }
+
+.login-field-label {
+  display: block;
+  margin-bottom: 0.4rem;
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--text-dim);
+}
+
+.login-foot {
+  margin-top: 1.6rem;
+  padding-top: 1.1rem;
+  border-top: 1px solid var(--border);
+  color: var(--text-soft);
+  font-size: 0.78rem;
+  line-height: 1.55;
+}
+.login-foot code {
+  font-family: var(--font-mono);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  padding: 0.05rem 0.35rem;
+  border-radius: var(--radius-xs);
+}
+
 @media (max-width: 880px) {
   .login-shell { grid-template-columns: 1fr; }
   .login-aside { display: none; }
   .login-card .login-brand { display: flex; }
+  .otp-box { height: 2.9rem; font-size: 1.35rem; }
+}
+@media (max-width: 420px) {
+  .otp-row {
+    grid-template-columns: repeat(6, 1fr);
+    gap: 0.3rem;
+  }
+  .otp-sep { display: none; }
+  .otp-box { height: 2.6rem; font-size: 1.2rem; }
 }
 
 /* ============================================================

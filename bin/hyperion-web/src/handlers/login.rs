@@ -302,7 +302,12 @@ pub struct Login2faForm {
 #[derive(askama::Template)]
 #[template(path = "login_2fa.html")]
 struct Login2faTpl<'a> {
-    error: Option<&'a str>,
+    /// Raw error code from `?error=…`. Template branches on the known
+    /// codes ("invalid" / "expired") and falls through to literal
+    /// rendering for anything custom — same pattern as login.html.
+    /// Owned (not &str) because askama's `==` comparison on &str vs
+    /// string literal trips the derive macro.
+    error: Option<String>,
     next: &'a str,
     css_version: &'static str,
 }
@@ -312,14 +317,8 @@ pub async fn get_login_2fa(
     Query(q): Query<Login2faQuery>,
 ) -> Result<Response, AppError> {
     let _ = state;
-    // Translate `?error=invalid` into a human message before passing
-    // to the template (askama can't compare *str to literal cleanly).
-    let err: Option<String> = q.error.map(|e| match e.as_str() {
-        "invalid" => "Invalid code. Try again.".to_string(),
-        other => other.to_string(),
-    });
     let tpl = Login2faTpl {
-        error: err.as_deref(),
+        error: q.error.clone(),
         next: &q.next,
         css_version: crate::handlers::css_version(),
     };

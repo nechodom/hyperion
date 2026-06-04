@@ -763,6 +763,66 @@ async fn api_search_requires_auth() {
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
 }
 
+/// /login/2fa renders the new split-shell layout with the 6-box OTP
+/// input. The page is reachable without a pending-2fa cookie (the
+/// server only enforces the cookie on POST); GET just shows the form.
+/// Locks in the contract that the redesigned template ships.
+#[tokio::test]
+async fn login_2fa_page_renders_otp_boxes_and_split_shell() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock, admin);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/login/2fa?next=/")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp).await;
+    // Split shell — the aside + the form column both render.
+    assert!(body.contains("login-shell"), "missing split shell");
+    assert!(body.contains("login-aside"), "missing aside");
+    assert!(body.contains("login-step-trail"), "missing step trail");
+    // 6 separate OTP boxes (data-otp-idx 0..=5).
+    for i in 0..6 {
+        let needle = format!("data-otp-idx=\"{i}\"");
+        assert!(body.contains(&needle), "missing otp box {i}: {body}");
+    }
+    // The backup-code form + toggle are both there but hidden by default.
+    assert!(body.contains("id=\"toggle-mode\""), "missing toggle");
+    assert!(body.contains("id=\"backup-form\""), "missing backup form");
+    // Back-to-sign-in link preserves next=.
+    assert!(body.contains("href=\"/login?next=/"), "missing back link");
+}
+
+/// /login/2fa?error=invalid renders the friendly error message —
+/// not the raw "invalid" string. Regression test for the audit
+/// finding that the template was dumping the raw error code.
+#[tokio::test]
+async fn login_2fa_renders_friendly_invalid_error() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock, admin);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/login/2fa?error=invalid&next=/")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    let body = body_string(resp).await;
+    assert!(
+        body.contains("Wrong code"),
+        "expected friendly 'Wrong code' message, got body: {body}"
+    );
+}
+
 /// CSRF token accepted from the `X-CSRF-Token` header. Verifies the
 /// new header-based path added so HTMX / fetch clients don't have to
 /// embed the token in the body. Uses a real authenticated session.
