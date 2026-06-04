@@ -65,6 +65,15 @@
     <div class="field">
       <label for="target_node">Which node should host this site?</label>
       <select id="target_node" name="target_node">
+        {# Auto-placement — picks the best-fit node by current load,
+           memory pressure, and hosting count. Falls back to master
+           if no workers are online + master accepts hostings. #}
+        <option value="auto"
+                data-label="auto (best-fit)"
+                data-detail="picks the node with the lowest load / memory / hosting count"
+                {% if target_node_in == "auto" %}selected{% endif %}>
+          ★  auto — pick best-fit by current load (recommended)
+        </option>
         {# Master option only when [cluster] master_accepts_hostings
            is true (default). Operator can turn it off in Settings →
            Cluster to make the master a control-plane-only node. #}
@@ -73,7 +82,7 @@
                 data-label="master (this node)"
                 data-detail=""
                 {% if target_node_in.is_empty() || target_node_in == "local" %}selected{% endif %}>
-          ◯  master (this node — default)
+          ◯  master (this node)
         </option>
         {% endif %}
         {% for n in nodes %}

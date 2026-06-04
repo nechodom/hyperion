@@ -441,7 +441,36 @@ pub async fn post_create(
     // (HostingCreate, optional WpInstall, HostingGet, fetch_limits)
     // must hit the SAME node, otherwise the WP install would land on
     // the master while the hosting itself lives on stav.
-    let target_node = form.target_node.clone();
+    //
+    // "auto" is the auto-placement sentinel — pick the best-fit
+    // worker by available capacity + load. Falls back to master if
+    // no online workers are available + master_accepts_hostings is on.
+    let mut target_node = form.target_node.clone();
+    if target_node == "auto" {
+        match pick_auto_placement_target(&state).await {
+            Some(picked) => {
+                tracing::info!(picked = %picked, "auto-placement chose node");
+                target_node = picked;
+            }
+            None => {
+                // Fall back to master if it accepts hostings;
+                // otherwise surface a clean error.
+                if fetch_master_accepts_hostings(&state).await {
+                    target_node = crate::dispatcher::LOCAL_NODE_SENTINEL.to_string();
+                    tracing::info!("auto-placement: no workers, falling back to master");
+                } else {
+                    return Ok(render_new_error(
+                        &ctx,
+                        &csrf_token,
+                        &form,
+                        "Auto-placement found no online workers and master is \
+                         in control-plane-only mode. Enrol a worker or enable \
+                         master hosting in Settings → Cluster.",
+                    ));
+                }
+            }
+        }
+    }
     let target = if target_node.is_empty()
         || target_node == crate::dispatcher::LOCAL_NODE_SENTINEL
     {
@@ -2340,6 +2369,110 @@ async fn fetch_master_accepts_hostings(state: &SharedState) -> bool {
         Ok(RpcResponse::AgentConfigView(c)) => c.cluster.master_accepts_hostings,
         _ => true,
     }
+}
+
+/// Auto-placement: pick the best-fit node for a new hosting when
+/// the operator chose the "auto" sentinel in the create form.
+///
+/// Strategy (lower is better):
+///   - Disqualify offline workers entirely.
+///   - Score = 0.45·hostings + 0.35·loadavg + 0.20·mem_pct
+///     normalised across the candidate set so a single node never
+///     dominates by virtue of having the largest absolute numbers.
+///   - Tiebreak by lexicographically smaller node_id (stable).
+///   - Master is INCLUDED as a candidate iff
+///     `cluster.master_accepts_hostings = true`.
+///
+/// Returns the chosen target string ready for the existing
+/// dispatcher contract:
+///   - `Some("worker-id")` to dispatch to a worker
+///   - `Some(LOCAL_NODE_SENTINEL)` to dispatch locally
+///   - `None` when no candidate qualifies (caller falls back to
+///     master / error).
+async fn pick_auto_placement_target(state: &SharedState) -> Option<String> {
+    use hyperion_types::NodeStats;
+
+    let nodes = fetch_remote_nodes(state).await.unwrap_or_default();
+    let master_accepts = fetch_master_accepts_hostings(state).await;
+
+    // Collect candidate NodeStats. Each entry is (target_string, NodeStats).
+    let mut candidates: Vec<(String, NodeStats)> = Vec::with_capacity(nodes.len() + 1);
+
+    if master_accepts {
+        if let Ok(RpcResponse::ClusterStats(c)) =
+            hyperion_rpc_client::call(&state.agent_socket, Request::ClusterStats).await
+        {
+            if let Some(mut n) = c.nodes.into_iter().next() {
+                if n.label.is_empty() {
+                    n.label = "master".into();
+                }
+                if n.agent_online {
+                    candidates.push((crate::dispatcher::LOCAL_NODE_SENTINEL.to_string(), n));
+                }
+            }
+        }
+    }
+
+    for ns in nodes {
+        match crate::dispatcher::dispatch_to_node(state, Some(&ns.node_id), Request::ClusterStats)
+            .await
+        {
+            Ok(RpcResponse::ClusterStats(c)) => {
+                if let Some(stat) = c.nodes.into_iter().next() {
+                    if stat.agent_online {
+                        candidates.push((ns.node_id.clone(), stat));
+                    }
+                }
+            }
+            _ => {
+                tracing::warn!(node = %ns.node_id, "auto-placement: stats unavailable; skipping");
+            }
+        }
+    }
+
+    if candidates.is_empty() {
+        return None;
+    }
+
+    // Normalise each axis to [0, 1]. Lower = better. A zero-range
+    // axis collapses to 0 contribution (every candidate is equal on
+    // that axis).
+    let max_host = candidates.iter().map(|(_, s)| s.hostings_count).max().unwrap_or(0);
+    let max_load = candidates.iter().map(|(_, s)| s.loadavg_1m_x100).max().unwrap_or(0);
+    let max_mem_pct: f64 = candidates
+        .iter()
+        .map(|(_, s)| mem_pct(s))
+        .fold(0.0_f64, f64::max);
+
+    let mut scored: Vec<(String, f64)> = candidates
+        .iter()
+        .map(|(id, s)| {
+            let h = if max_host > 0 {
+                s.hostings_count as f64 / max_host as f64
+            } else {
+                0.0
+            };
+            let l = if max_load > 0 {
+                s.loadavg_1m_x100 as f64 / max_load as f64
+            } else {
+                0.0
+            };
+            let m_pct = mem_pct(s);
+            let m = if max_mem_pct > 0.0 { m_pct / max_mem_pct } else { 0.0 };
+            let score = 0.45 * h + 0.35 * l + 0.20 * m;
+            (id.clone(), score)
+        })
+        .collect();
+    // Stable tiebreak: lexicographically smaller node_id wins.
+    scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0)));
+    scored.into_iter().next().map(|(id, _)| id)
+}
+
+fn mem_pct(s: &hyperion_types::NodeStats) -> f64 {
+    if s.mem_total_kib <= 0 {
+        return 0.0;
+    }
+    (s.mem_used_kib as f64 / s.mem_total_kib as f64).clamp(0.0, 1.0)
 }
 
 /// Locate which node a hosting lives on, so per-hosting actions
