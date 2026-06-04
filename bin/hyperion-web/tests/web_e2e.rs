@@ -1048,6 +1048,156 @@ async fn pending_2fa_token_in_session_cookie_slot_is_rejected() {
     assert!(loc.starts_with("/login"), "redirect target: {loc}");
 }
 
+/// RBAC regression: a viewer-role user must NOT be able to mutate
+/// hostings via direct POST, even with a valid session + CSRF. Before
+/// the per-hosting access guards landed, the role-gating in the
+/// templates was the ONLY barrier — anyone with `require_auth` could
+/// hand-craft `POST /hostings/delete` and the handler would run.
+#[tokio::test]
+async fn viewer_cannot_delete_hosting_via_direct_post() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+
+    // 1. Log in as bootstrap admin (creates the super_admin DB row).
+    let login_body = b"username=kevin&password=good-pw&next=/";
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/login")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(login_body.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    let admin_cookie = extract_cookie(&resp);
+
+    // 2. Create a target hosting that the viewer will try to delete.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/hostings/new")
+                .header(header::COOKIE, &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    let csrf = extract_csrf(&body_string(resp).await);
+    let body = format!(
+        "_csrf={csrf}&domain=rbac-victim.cz&aliases=&php=8.3&db=mariadb&system_user="
+    );
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/hostings")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, &admin_cookie)
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // 3. Create a viewer-role user directly via RPC.
+    let create_resp = hyperion_rpc_client::call(
+        &sock,
+        hyperion_rpc::codec::Request::WebUserCreate {
+            username: "rbac-viewer".into(),
+            email: "rbac-viewer@example.invalid".into(),
+            password: "viewer-pw-1".into(),
+            role: "viewer".into(),
+        },
+    )
+    .await
+    .expect("create viewer");
+    match create_resp {
+        hyperion_rpc::codec::Response::WebUserCreate { .. } => {}
+        other => panic!("unexpected create response: {:?}", other),
+    }
+
+    // 4. Log in as the viewer.
+    let viewer_login = b"username=rbac-viewer&password=viewer-pw-1&next=/";
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/login")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(viewer_login.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    let viewer_cookie = extract_cookie(&resp);
+
+    // 5. Grab a session-wide CSRF token bound to the viewer's session.
+    //    /hostings would render one normally, but a viewer with no
+    //    access grants sees the empty-state branch which omits the
+    //    `_csrf` input. /profile is always accessible to a logged-in
+    //    user and includes the token.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/profile")
+                .header(header::COOKIE, &viewer_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let viewer_csrf = extract_csrf(&body_string(resp).await);
+
+    // 6. Viewer attempts to delete the admin-owned hosting. Must 403.
+    let delete_body = format!("_csrf={viewer_csrf}&selector=rbac-victim.cz");
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/hostings/delete")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, &viewer_cookie)
+                .body(Body::from(delete_body))
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "viewer-role user must NOT be able to delete a hosting they have no grant for",
+    );
+
+    // 7. Confirm the hosting still exists by listing as the admin again.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/hostings")
+                .header(header::COOKIE, &admin_cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp).await;
+    assert!(
+        body.contains("rbac-victim.cz"),
+        "hosting should still exist after viewer's failed delete",
+    );
+}
+
 fn extract_cookie(resp: &axum::response::Response) -> String {
     let raw = resp
         .headers()

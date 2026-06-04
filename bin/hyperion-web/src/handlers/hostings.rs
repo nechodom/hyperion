@@ -248,6 +248,11 @@ pub async fn post_create(
     ctx: AuthCtx,
     Form(form): Form<CreateForm>,
 ) -> Result<Response, AppError> {
+    // Creating a new hosting is a cluster-scoped action — operators
+    // with per-hosting grants can't conjure new sites into existence.
+    if !ctx.is_admin_or_higher() {
+        return Err(AppError::Forbidden);
+    }
     let csrf_token = super::session_csrf_token(&state, &ctx);
     // Parse inputs; render the form with an error if anything is malformed.
     let domain = match Domain::parse(form.domain.trim()) {
@@ -830,9 +835,13 @@ pub struct BackupNowForm {
 
 pub async fn post_backup_now(
     State(state): State<SharedState>,
+    ctx: AuthCtx,
     Form(form): Form<BackupNowForm>,
 ) -> Result<Response, AppError> {
-    let sel = parse_selector(&form.selector)?;
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
     let resp =
         hyperion_rpc_client::call(&state.agent_socket, Request::BackupNow { sel }).await?;
     let sel_url = urlencoding(&form.selector);
@@ -866,9 +875,13 @@ pub struct SetExpiryForm {
 
 pub async fn post_set_expiry(
     State(state): State<SharedState>,
+    ctx: AuthCtx,
     Form(form): Form<SetExpiryForm>,
 ) -> Result<Response, AppError> {
-    let sel = parse_selector(&form.selector)?;
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
     let sel_url = urlencoding(&form.selector);
     let expires_at = match parse_yyyymmdd_to_epoch(form.expires_on.trim()) {
         Ok(t) => t,
@@ -924,9 +937,13 @@ pub struct ClearExpiryForm {
 
 pub async fn post_clear_expiry(
     State(state): State<SharedState>,
+    ctx: AuthCtx,
     Form(form): Form<ClearExpiryForm>,
 ) -> Result<Response, AppError> {
-    let sel = parse_selector(&form.selector)?;
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
     let sel_url = urlencoding(&form.selector);
     let resp =
         hyperion_rpc_client::call(&state.agent_socket, Request::HostingClearExpiry(sel)).await?;
@@ -961,9 +978,13 @@ fn parse_yyyymmdd_to_epoch(s: &str) -> Result<Option<i64>, String> {
 
 pub async fn post_wp_install(
     State(state): State<SharedState>,
+    ctx: AuthCtx,
     Form(form): Form<WpInstallForm>,
 ) -> Result<Response, AppError> {
-    let sel = parse_selector(&form.selector)?;
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
     let locale = if form.locale.trim().is_empty() {
         "en_US".to_string()
     } else {
@@ -1022,9 +1043,13 @@ pub struct DeleteForm {
 
 pub async fn post_delete(
     State(state): State<SharedState>,
+    ctx: AuthCtx,
     Form(form): Form<DeleteForm>,
 ) -> Result<Response, AppError> {
-    let sel = parse_selector(&form.selector)?;
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
     let opts = DeleteOpts {
         keep_user: form.keep_user.as_deref() == Some("on"),
         keep_database: form.keep_db.as_deref() == Some("on"),
@@ -1047,9 +1072,13 @@ pub struct SuspendForm {
 
 pub async fn post_suspend(
     State(state): State<SharedState>,
+    ctx: AuthCtx,
     Form(form): Form<SuspendForm>,
 ) -> Result<Response, AppError> {
-    let sel = parse_selector(&form.selector)?;
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
     let reason = hyperion_types::SuspendReason::Manual {
         message: if form.reason.trim().is_empty() {
             None
@@ -1076,9 +1105,13 @@ pub struct ResumeForm {
 
 pub async fn post_resume(
     State(state): State<SharedState>,
+    ctx: AuthCtx,
     Form(form): Form<ResumeForm>,
 ) -> Result<Response, AppError> {
-    let sel = parse_selector(&form.selector)?;
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
     let resp = hyperion_rpc_client::call(&state.agent_socket, Request::HostingResume(sel)).await?;
     match resp {
         RpcResponse::HostingResume => {
@@ -1113,8 +1146,17 @@ pub struct BackupDeleteForm {
 /// archive file. Refuses if the backup is still running.
 pub async fn post_backup_delete(
     State(state): State<SharedState>,
+    ctx: AuthCtx,
     Form(form): Form<BackupDeleteForm>,
 ) -> Result<Response, AppError> {
+    // form.selector controls the redirect target, not the action — the
+    // RPC operates on backup_id directly. We still gate via the
+    // selector because non-admins can only see the backup list for
+    // hostings they have access to; a viewer probing arbitrary
+    // backup_ids without a matching access grant gets 403 here.
+    if let Err(r) = require_manage_for_selector(&state, &ctx, &form.selector).await {
+        return Ok(r);
+    }
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
         Request::BackupDelete {
@@ -1144,9 +1186,13 @@ pub struct SetAcmeEmailForm {
 /// override, falling back to `[acme] contact_email` from agent.toml.
 pub async fn post_set_acme_email(
     State(state): State<SharedState>,
+    ctx: AuthCtx,
     Form(form): Form<SetAcmeEmailForm>,
 ) -> Result<Response, AppError> {
-    let sel = parse_selector(&form.selector)?;
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
     let trimmed = form.acme_email.trim();
     let email = if trimmed.is_empty() {
         None
@@ -1169,9 +1215,13 @@ pub async fn post_set_acme_email(
 
 pub async fn post_set_limits(
     State(state): State<SharedState>,
+    ctx: AuthCtx,
     Form(form): Form<SetLimitsForm>,
 ) -> Result<Response, AppError> {
-    let sel = parse_selector(&form.selector)?;
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
     let mut l = hyperion_types::HostingLimits::defaults();
     l.php_memory_mb = form.php_memory_mb;
     l.php_max_exec_secs = form.php_max_exec_secs;
@@ -1441,6 +1491,10 @@ async fn filter_by_access(
 /// Block detail / write access for callers without the required level.
 /// "read" → viewer-style (any access entry suffices). "manage" →
 /// operator-style (level=manage). super_admin + admin always allowed.
+///
+/// Returns a `403 Forbidden` response on rejection. POST handlers must
+/// propagate this with `Ok(r)` — a redirect would silently steer the
+/// caller back to /hostings and obscure the access failure.
 pub async fn require_hosting_access(
     state: &SharedState,
     ctx: &AuthCtx,
@@ -1450,8 +1504,16 @@ pub async fn require_hosting_access(
     if ctx.is_admin_or_higher() {
         return Ok(());
     }
+    let forbidden = || {
+        (
+            axum::http::StatusCode::FORBIDDEN,
+            [("content-type", "text/html; charset=utf-8")],
+            "<h1>403 Forbidden</h1>".to_string(),
+        )
+            .into_response()
+    };
     let Some(sess) = ctx.session.as_ref() else {
-        return Err(Redirect::to("/login").into_response());
+        return Err(forbidden());
     };
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
@@ -1462,16 +1524,58 @@ pub async fn require_hosting_access(
     .await;
     let grants = match resp {
         Ok(RpcResponse::WebListHostingAccess(g)) => g,
-        _ => return Err(Redirect::to("/hostings").into_response()),
+        _ => return Err(forbidden()),
     };
     let mine = grants.into_iter().find(|g| g.user_id == sess.user_id);
     match mine {
-        None => Err(Redirect::to("/hostings").into_response()),
-        Some(g) if require_manage && g.level != "manage" => {
-            Err(Redirect::to("/hostings").into_response())
-        }
+        None => Err(forbidden()),
+        Some(g) if require_manage && g.level != "manage" => Err(forbidden()),
         Some(_) => Ok(()),
     }
+}
+
+/// Convenience wrapper for mutating POST handlers: parse the selector,
+/// resolve the hosting id (looking it up by domain if needed), and
+/// require manage-level access. Returns the resolved `HostingSelector`
+/// on success so the caller can pass it straight to its RPC request.
+///
+/// Failure conditions all collapse to a 403 response — the caller
+/// propagates it via `Ok(r)`. Surfacing the precise reason (no such
+/// hosting vs. no access) would help account-enumeration; viewers
+/// shouldn't be able to probe which ids exist.
+pub async fn require_manage_for_selector(
+    state: &SharedState,
+    ctx: &AuthCtx,
+    sel_str: &str,
+) -> Result<HostingSelector, Response> {
+    let forbidden = || {
+        (
+            axum::http::StatusCode::FORBIDDEN,
+            [("content-type", "text/html; charset=utf-8")],
+            "<h1>403 Forbidden</h1>".to_string(),
+        )
+            .into_response()
+    };
+    let sel = parse_selector(sel_str).map_err(|_| forbidden())?;
+    if ctx.is_admin_or_higher() {
+        return Ok(sel);
+    }
+    let hosting_id = match &sel {
+        HostingSelector::Id(id) => id.as_str().to_string(),
+        _ => {
+            let resp = hyperion_rpc_client::call(
+                &state.agent_socket,
+                Request::HostingGet(sel.clone()),
+            )
+            .await;
+            match resp {
+                Ok(RpcResponse::HostingGet(d)) => d.id.as_str().to_string(),
+                _ => return Err(forbidden()),
+            }
+        }
+    };
+    require_hosting_access(state, ctx, &hosting_id, true).await?;
+    Ok(sel)
 }
 
 fn urlencoding(s: &str) -> String {
@@ -1583,8 +1687,14 @@ pub struct DnsCheckDomainForm {
 
 pub async fn post_dns_check_domain(
     State(state): State<SharedState>,
+    ctx: AuthCtx,
     Form(form): Form<DnsCheckDomainForm>,
 ) -> Result<Response, AppError> {
+    // Used by the new-hosting form. Match post_create's gating —
+    // operators can't be on this page anyway.
+    if !ctx.is_admin_or_higher() {
+        return Err(AppError::Forbidden);
+    }
     let trimmed = form.domain.trim();
     let parsed = match Domain::parse(trimmed) {
         Ok(d) => d,
@@ -1615,9 +1725,15 @@ pub async fn post_dns_check_domain(
 
 pub async fn post_dns_check(
     State(state): State<SharedState>,
+    ctx: AuthCtx,
     Form(form): Form<DnsCheckForm>,
 ) -> Result<Response, AppError> {
-    let detail_sel = parse_selector(&form.selector)?;
+    // DNS check is non-mutating but ties to a specific hosting; gate
+    // at manage so a viewer can't probe via this endpoint.
+    let detail_sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
     let detail_resp =
         hyperion_rpc_client::call(&state.agent_socket, Request::HostingGet(detail_sel)).await?;
     let domain = match detail_resp {
@@ -1697,9 +1813,13 @@ pub struct CertIssueForm {
 
 pub async fn post_cert_issue(
     State(state): State<SharedState>,
+    ctx: AuthCtx,
     Form(form): Form<CertIssueForm>,
 ) -> Result<Response, AppError> {
-    let sel = parse_selector(&form.selector)?;
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
     let sel_url = urlencoding(&form.selector);
     let req = CertIssueRequest {
         staging: form.staging.as_deref() == Some("on"),
@@ -1741,9 +1861,15 @@ fn default_log_lines() -> i64 {
 
 pub async fn post_logs(
     State(state): State<SharedState>,
+    ctx: AuthCtx,
     Form(form): Form<LogsForm>,
 ) -> Result<Response, AppError> {
-    let sel = parse_selector(&form.selector)?;
+    // Logs can carry sensitive request data and stack traces — gate
+    // them at manage level just like the other per-hosting writes.
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
         Request::HostingLogs {
@@ -1786,9 +1912,13 @@ pub struct CronForm {
 
 pub async fn post_cron_save(
     State(state): State<SharedState>,
+    ctx: AuthCtx,
     Form(form): Form<CronForm>,
 ) -> Result<Response, AppError> {
-    let sel = parse_selector(&form.selector)?;
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
     let sel_url = urlencoding(&form.selector);
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
@@ -1822,6 +1952,7 @@ pub struct WpResetForm {
 /// off to the existing BackupRestore RPC.
 pub async fn post_restore_upload(
     State(state): State<SharedState>,
+    ctx: AuthCtx,
     mut multipart: axum::extract::Multipart,
 ) -> Result<Response, AppError> {
     let mut selector: Option<String> = None;
@@ -1859,6 +1990,13 @@ pub async fn post_restore_upload(
         }
     }
     let selector = selector.ok_or_else(|| AppError::BadRequest("missing selector".into()))?;
+    // Authorize BEFORE touching the filesystem — a viewer must not be
+    // able to dump arbitrary tarballs into /var/lib/hyperion/backups
+    // even if they can't ultimately trigger the restore.
+    let sel = match require_manage_for_selector(&state, &ctx, &selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
     let bytes = bytes.ok_or_else(|| AppError::BadRequest("missing archive file".into()))?;
     let filename = filename
         .filter(|s| !s.is_empty())
@@ -1878,7 +2016,6 @@ pub async fn post_restore_upload(
         .await
         .map_err(|e| AppError::Internal(format!("write upload: {e}")))?;
 
-    let sel = parse_selector(&selector)?;
     let sel_url = urlencoding(&selector);
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
@@ -1916,8 +2053,15 @@ pub struct BulkForm {
 
 pub async fn post_bulk(
     State(state): State<SharedState>,
+    ctx: AuthCtx,
     Form(form): Form<BulkForm>,
 ) -> Result<Response, AppError> {
+    // Bulk ops span arbitrary hostings (admin can pick anything in the
+    // list). Operators with per-hosting grants don't get to run bulk
+    // delete across the cluster — that's an admin-level lever.
+    if !ctx.is_admin_or_higher() {
+        return Err(AppError::Forbidden);
+    }
     if form.selected.is_empty() {
         return Ok(Redirect::to("/hostings?q=&state=").into_response());
     }
@@ -2011,9 +2155,13 @@ pub struct MigrationExportForm {
 
 pub async fn post_migration_export(
     State(state): State<SharedState>,
+    ctx: AuthCtx,
     Form(form): Form<MigrationExportForm>,
 ) -> Result<Response, AppError> {
-    let sel = parse_selector(&form.selector)?;
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
     let sel_url = urlencoding(&form.selector);
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
@@ -2046,9 +2194,13 @@ pub async fn post_migration_export(
 
 pub async fn post_wp_plugin_action(
     State(state): State<SharedState>,
+    ctx: AuthCtx,
     Form(form): Form<WpPluginActionForm>,
 ) -> Result<Response, AppError> {
-    let sel = parse_selector(&form.selector)?;
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
     let sel_url = urlencoding(&form.selector);
     // Map the form's `action` string into the typed enum. Anything not
     // on the whitelist gets a 400 — the UI shouldn't be able to send it.
@@ -2124,9 +2276,13 @@ pub async fn post_wp_plugin_action(
 
 pub async fn post_wp_reset(
     State(state): State<SharedState>,
+    ctx: AuthCtx,
     Form(form): Form<WpResetForm>,
 ) -> Result<Response, AppError> {
-    let sel = parse_selector(&form.selector)?;
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
     let sel_url = urlencoding(&form.selector);
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
@@ -2157,9 +2313,13 @@ pub struct DbResetForm {
 
 pub async fn post_db_reset(
     State(state): State<SharedState>,
+    ctx: AuthCtx,
     Form(form): Form<DbResetForm>,
 ) -> Result<Response, AppError> {
-    let sel = parse_selector(&form.selector)?;
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
     let sel_url = urlencoding(&form.selector);
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
@@ -2191,9 +2351,13 @@ pub struct FtpSetForm {
 
 pub async fn post_ftp_set(
     State(state): State<SharedState>,
+    ctx: AuthCtx,
     Form(form): Form<FtpSetForm>,
 ) -> Result<Response, AppError> {
-    let sel = parse_selector(&form.selector)?;
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
     let sel_url = urlencoding(&form.selector);
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
@@ -2228,9 +2392,13 @@ pub struct FtpDisableForm {
 
 pub async fn post_ftp_disable(
     State(state): State<SharedState>,
+    ctx: AuthCtx,
     Form(form): Form<FtpDisableForm>,
 ) -> Result<Response, AppError> {
-    let sel = parse_selector(&form.selector)?;
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
     let sel_url = urlencoding(&form.selector);
     let resp =
         hyperion_rpc_client::call(&state.agent_socket, Request::FtpDisable { sel }).await?;
@@ -2249,9 +2417,13 @@ pub async fn post_ftp_disable(
 
 pub async fn post_restore(
     State(state): State<SharedState>,
+    ctx: AuthCtx,
     Form(form): Form<RestoreForm>,
 ) -> Result<Response, AppError> {
-    let sel = parse_selector(&form.selector)?;
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
     let sel_url = urlencoding(&form.selector);
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
