@@ -545,6 +545,79 @@ fn wp_asset_disk_path(id: i64, stored_filename: &str) -> String {
     format!("/var/lib/hyperion/wp-assets/{id}/{stored_filename}")
 }
 
+/// Count `@asset:<id>` references for a given asset id across all
+/// profiles' wp_plugins + wp_themes text fields. Uses substring
+/// search rather than a regex because the syntax is narrow
+/// (`@asset:<digits>` with optional trailing `!`) and the
+/// substring + boundary check is faster + dependency-free.
+fn count_profile_asset_refs(
+    profiles: &[hyperion_state::profiles::ProfileRow],
+    asset_id: i64,
+) -> i64 {
+    let needle = format!("@asset:{asset_id}");
+    let needle_len = needle.len();
+    let mut count: i64 = 0;
+    for p in profiles {
+        for text in [&p.wp_plugins, &p.wp_themes] {
+            for line in text.lines() {
+                let stripped = line.trim();
+                if let Some(pos) = stripped.find(&needle) {
+                    // Boundary check: next char (if any) must be one
+                    // of: end-of-string, '!', whitespace, or '#'.
+                    // Otherwise `@asset:7` would match @asset:70.
+                    let after = stripped[pos + needle_len..]
+                        .chars()
+                        .next();
+                    let ok = match after {
+                        None => true,
+                        Some(c) => c == '!' || c.is_whitespace() || c == '#',
+                    };
+                    if ok {
+                        count += 1;
+                    }
+                }
+            }
+        }
+    }
+    count
+}
+
+/// Count successful `wp.install_from_asset` audit entries grouped
+/// by asset_id. Returns a map you can `.get(&id)` from. The audit
+/// payload is JSON; we parse it lazily — failures (malformed JSON,
+/// missing field, wrong type) just skip the row instead of
+/// aborting the whole query.
+async fn audit_install_counts_by_asset(
+    pool: &sqlx::SqlitePool,
+) -> std::collections::HashMap<i64, i64> {
+    let mut out: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+    // Cap at 10 000 rows — install events are rare (operator
+    // clicks), so this is plenty. Larger installs eventually
+    // archive into compressed log files; the UI counter doesn't
+    // need to be 100% historically accurate.
+    let rows: Vec<(String,)> = match sqlx::query_as(
+        "SELECT payload_json FROM audit_log \
+         WHERE action = 'wp.install_from_asset' AND result = 'ok' \
+         ORDER BY id DESC LIMIT 10000",
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(r) => r,
+        Err(_) => return out,
+    };
+    for (payload,) in rows {
+        let Ok(v): Result<serde_json::Value, _> = serde_json::from_str(&payload) else {
+            continue;
+        };
+        let Some(id) = v.get("asset_id").and_then(|x| x.as_i64()) else {
+            continue;
+        };
+        *out.entry(id).or_insert(0) += 1;
+    }
+    out
+}
+
 /// Drive a service-install job (apt-get install + systemctl
 /// enable --now) and stream output into the shared status slot.
 ///
@@ -6692,16 +6765,32 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let rows = hyperion_state::wp_assets::list(&self.pool)
             .await
             .map_err(|e| RpcError::Internal_with(format!("wp_asset list: {e}")))?;
+        // Compute usage counts in two cheap passes — one over
+        // every profile's text fields (looking for @asset:<id>
+        // tokens), one over the audit log (counting successful
+        // install_from_asset entries by asset_id). Both are
+        // small queries on small tables; doing this server-side
+        // means the UI doesn't have to materialize them.
+        let profiles = hyperion_state::profiles::list(&self.pool)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("wp_asset usage profiles: {e}")))?;
+        let install_counts = audit_install_counts_by_asset(&self.pool).await;
         Ok(rows
             .into_iter()
-            .map(|r| hyperion_types::WpAssetSummary {
-                id: r.id,
-                kind: r.kind,
-                original_name: r.original_name,
-                size_bytes: r.size_bytes,
-                sha256: r.sha256,
-                uploaded_at: r.uploaded_at,
-                uploaded_by: r.uploaded_by,
+            .map(|r| {
+                let profile_refs = count_profile_asset_refs(&profiles, r.id);
+                let install_count = install_counts.get(&r.id).copied().unwrap_or(0);
+                hyperion_types::WpAssetSummary {
+                    id: r.id,
+                    kind: r.kind,
+                    original_name: r.original_name,
+                    size_bytes: r.size_bytes,
+                    sha256: r.sha256,
+                    uploaded_at: r.uploaded_at,
+                    uploaded_by: r.uploaded_by,
+                    profile_refs,
+                    install_count,
+                }
             })
             .collect())
     }
@@ -8100,6 +8189,57 @@ mod tests {
         tokio::fs::write(&p, b"{}").await.unwrap();
         let s = svc_with_state_file(Some(p)).await;
         assert!(s.is_worker_node());
+    }
+
+    // ============================================================
+    //  count_profile_asset_refs — boundary handling so @asset:7
+    //  doesn't accidentally match @asset:70 / @asset:777.
+    // ============================================================
+
+    fn mk_profile(plugins: &str, themes: &str) -> hyperion_state::profiles::ProfileRow {
+        hyperion_state::profiles::ProfileRow {
+            wp_plugins: plugins.into(),
+            wp_themes: themes.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn count_asset_refs_basic_match() {
+        let profiles = vec![mk_profile("akismet\n@asset:7\n", "")];
+        assert_eq!(count_profile_asset_refs(&profiles, 7), 1);
+    }
+
+    #[test]
+    fn count_asset_refs_trailing_activate_mark() {
+        let profiles = vec![mk_profile("@asset:7!\n", "@asset:7\n")];
+        // Two refs: one with !, one plain.
+        assert_eq!(count_profile_asset_refs(&profiles, 7), 2);
+    }
+
+    #[test]
+    fn count_asset_refs_boundary_rejects_prefix_match() {
+        // @asset:7 should NOT match @asset:70 / @asset:777.
+        let profiles = vec![mk_profile("@asset:70\n@asset:777\n@asset:7x\n", "")];
+        assert_eq!(count_profile_asset_refs(&profiles, 7), 0);
+    }
+
+    #[test]
+    fn count_asset_refs_inline_comment_after_ok() {
+        let profiles = vec![mk_profile("@asset:7    # internal client plugin\n", "")];
+        assert_eq!(count_profile_asset_refs(&profiles, 7), 1);
+    }
+
+    #[test]
+    fn count_asset_refs_across_plugins_and_themes() {
+        let profiles = vec![mk_profile("@asset:7\n", "@asset:7!\n")];
+        assert_eq!(count_profile_asset_refs(&profiles, 7), 2);
+    }
+
+    #[test]
+    fn count_asset_refs_no_match() {
+        let profiles = vec![mk_profile("akismet\nwordpress-seo\n", "")];
+        assert_eq!(count_profile_asset_refs(&profiles, 7), 0);
     }
 
     #[tokio::test]

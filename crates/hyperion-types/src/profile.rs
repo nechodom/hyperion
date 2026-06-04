@@ -94,6 +94,19 @@ pub struct WpAssetSummary {
     pub sha256: String,
     pub uploaded_at: i64,
     pub uploaded_by: String,
+    /// How many profiles' wp_plugins / wp_themes lists reference
+    /// this asset via `@asset:<id>`. 0 = orphaned, safe to delete.
+    /// `#[serde(default)]` so an older agent (pre-this-field) still
+    /// deserializes — the value just defaults to 0 in that case.
+    #[serde(default)]
+    pub profile_refs: i64,
+    /// How many successful one-off installs of this asset have
+    /// happened (counted from audit_log entries with action =
+    /// "wp.install_from_asset"). Doesn't include profile-driven
+    /// installs (those have action "profile.apply.wp" which
+    /// doesn't break down per-asset).
+    #[serde(default)]
+    pub install_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

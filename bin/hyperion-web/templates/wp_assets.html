@@ -79,9 +79,9 @@
           <th>Kind</th>
           <th>Original filename</th>
           <th class="numeric">Size</th>
-          <th>SHA-256</th>
+          <th title="Number of profiles referencing this asset via @asset:&lt;id&gt;">In profiles</th>
+          <th title="Number of one-off installs from the WordPress tab (excludes profile-driven installs)">Installs</th>
           <th>Uploaded</th>
-          <th>By</th>
           <th>Reference</th>
           <th class="right">Actions</th>
         </tr>
@@ -94,11 +94,28 @@
             {% if a.kind == "plugin" %}<span class="pill ok">plugin</span>
             {% else %}<span class="pill" style="background:var(--surface-2);color:var(--text-soft)">theme</span>{% endif %}
           </td>
-          <td>{{ a.original_name }}</td>
+          <td>
+            {{ a.original_name }}
+            <div class="text-soft" style="font-size:0.72rem;margin-top:0.15rem">
+              uploaded by <code>{{ a.uploaded_by }}</code> · sha <code title="{{ a.sha256 }}">{{ a.sha256|truncate(10) }}…</code>
+            </div>
+          </td>
           <td class="numeric">{{ a.size_bytes / 1024 }} KB</td>
-          <td><code class="text-soft" style="font-size:0.74rem" title="{{ a.sha256 }}">{{ a.sha256|truncate(16) }}…</code></td>
+          <td>
+            {% if a.profile_refs == 0 %}
+              <span class="text-soft small">— <em title="Not referenced by any profile">orphan</em></span>
+            {% else %}
+              <span class="pill ok" style="font-size:0.72rem">{{ a.profile_refs }}</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if a.install_count == 0 %}
+              <span class="text-soft">—</span>
+            {% else %}
+              <span class="pill" style="background:var(--surface-2);color:var(--text);font-size:0.72rem">{{ a.install_count }}×</span>
+            {% endif %}
+          </td>
           <td class="muted numeric" title="{{ a.uploaded_at }}">{{ crate::handlers::stats::fmt_ago(a.uploaded_at) }}</td>
-          <td><code style="font-size:0.78rem">{{ a.uploaded_by }}</code></td>
           <td>
             <code style="font-size:0.78rem;cursor:pointer"
                   title="Click to copy"
@@ -109,7 +126,7 @@
           <td class="right">
             <form method="post" action="/profiles/wp-assets/delete" style="display:inline"
                   data-confirm-title="Delete asset"
-                  data-confirm-body="The ZIP {{ a.original_name }} will be removed from disk. Profiles that still reference @asset:{{ a.id }} will fail at next apply with a clear error."
+                  data-confirm-body="The ZIP {{ a.original_name }} will be removed from disk.{% if a.profile_refs > 0 %} ⚠ {{ a.profile_refs }} profile{% if a.profile_refs != 1 %}s{% endif %} still reference{% if a.profile_refs == 1 %}s{% endif %} this asset — those references will fail at next apply.{% endif %}"
                   data-confirm-confirm-label="Delete asset"
                   data-confirm-variant="danger">
               <input type="hidden" name="_csrf" value="{{ csrf_delete }}">
