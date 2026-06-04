@@ -314,6 +314,14 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     async fn wp_asset_delete(&self, id: i64) -> Result<(), RpcError> {
         self.svc.wp_asset_delete(id).await
     }
+    async fn wp_install_from_asset(
+        &self,
+        sel: hyperion_rpc::HostingSelector,
+        asset_id: i64,
+        activate: bool,
+    ) -> Result<(String, String), RpcError> {
+        self.svc.wp_install_from_asset(sel, asset_id, activate).await
+    }
     async fn node_update_run(
         &self,
         do_apt: bool,

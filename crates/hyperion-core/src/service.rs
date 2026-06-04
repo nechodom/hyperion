@@ -6706,6 +6706,56 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .collect())
     }
 
+    /// Install one uploaded asset onto a hosting. Looks up the
+    /// asset, validates kind, derives the on-disk ZIP path, then
+    /// shells out to wp-cli via the wp_cli adapter. Returns
+    /// (kind, original_name) so the UI flash is specific.
+    pub async fn wp_install_from_asset(
+        &self,
+        sel: HostingSelector,
+        asset_id: i64,
+        activate: bool,
+    ) -> Result<(String, String), RpcError> {
+        let detail = self.get(sel).await?;
+        let row = hyperion_state::wp_assets::get_by_id(&self.pool, asset_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("wp_asset lookup: {e}")))?
+            .ok_or_else(|| RpcError::NotFound {
+                kind: "wp_asset".into(),
+                id: asset_id.to_string(),
+            })?;
+        let source = wp_asset_disk_path(asset_id, &row.stored_filename);
+        // Refuse if the ZIP went missing — better than wp-cli's
+        // generic "file not found" error.
+        if !std::path::Path::new(&source).exists() {
+            return Err(RpcError::Internal_with(format!(
+                "asset id {asset_id} ZIP not present on disk at {source} (out-of-band delete?)"
+            )));
+        }
+        let htdocs = format!("/home/{}/{}/htdocs", detail.system_user, detail.domain);
+        self.adapters
+            .wp_cli(&detail.system_user, &htdocs, &row.kind, &source, activate)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!(
+                "wp {} install {} failed: {e}",
+                row.kind, row.original_name
+            )))?;
+        self.append_audit(
+            "wp.install_from_asset",
+            Some(detail.id.as_str()),
+            &serde_json::json!({
+                "asset_id": asset_id,
+                "kind": row.kind,
+                "original_name": row.original_name,
+                "activate": activate,
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+        Ok((row.kind, row.original_name))
+    }
+
     pub async fn wp_asset_delete(&self, id: i64) -> Result<(), RpcError> {
         let row = hyperion_state::wp_assets::get_by_id(&self.pool, id)
             .await

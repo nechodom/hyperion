@@ -555,6 +555,81 @@ pub struct WpAssetDeleteForm {
     pub id: i64,
 }
 
+#[derive(Deserialize)]
+pub struct WpInstallFromAssetForm {
+    pub selector: String,
+    pub asset_id: i64,
+    #[serde(default)]
+    pub activate: Option<String>,
+    /// Carried through the JS shim on the detail page so we
+    /// dispatch to the node that owns the hosting (not always
+    /// the master).
+    #[serde(default)]
+    pub target_node: String,
+}
+
+/// POST /hostings/wp/install-from-asset — operator clicks the
+/// dropdown on a hosting's WordPress tab and picks one of the
+/// uploaded plugin/theme ZIPs.
+pub async fn post_wp_install_from_asset(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<WpInstallFromAssetForm>,
+) -> Result<Response, AppError> {
+    let sel = super::hostings::parse_selector_public(&form.selector)?;
+    let sel_url = urlencoding(&form.selector);
+    if !ctx.is_admin_or_higher() {
+        return Ok(Redirect::to(&format!(
+            "/hostings/{}?wp_error={}#wordpress",
+            sel_url,
+            urlencoding("admin role required to install WP assets")
+        ))
+        .into_response());
+    }
+    let activate = matches!(form.activate.as_deref(), Some("on" | "true" | "1"));
+    let target = if form.target_node.is_empty()
+        || form.target_node == crate::dispatcher::LOCAL_NODE_SENTINEL
+    {
+        None
+    } else {
+        Some(form.target_node.as_str())
+    };
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target,
+        Request::WpInstallFromAsset {
+            sel,
+            asset_id: form.asset_id,
+            activate,
+        },
+    )
+    .await?;
+    match resp {
+        RpcResponse::WpInstallFromAsset {
+            kind,
+            original_name,
+        } => {
+            let activated = if activate { " and activated" } else { "" };
+            let msg = format!(
+                "Installed {kind} \"{original_name}\" from library{activated}."
+            );
+            Ok(Redirect::to(&format!(
+                "/hostings/{}?wp_flash={}#wordpress",
+                sel_url,
+                urlencoding(&msg)
+            ))
+            .into_response())
+        }
+        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
+            "/hostings/{}?wp_error={}#wordpress",
+            sel_url,
+            urlencoding(&e.to_string())
+        ))
+        .into_response()),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
 pub async fn post_wp_asset_delete(
     State(state): State<SharedState>,
     ctx: AuthCtx,

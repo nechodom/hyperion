@@ -259,6 +259,17 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(()) => Response::WpAssetDelete,
             Err(e) => Response::Error(e),
         },
+        Request::WpInstallFromAsset {
+            sel,
+            asset_id,
+            activate,
+        } => match api.wp_install_from_asset(sel, asset_id, activate).await {
+            Ok((kind, original_name)) => Response::WpInstallFromAsset {
+                kind,
+                original_name,
+            },
+            Err(e) => Response::Error(e),
+        },
         Request::NodeUpdateRun { do_apt, do_hyperion } => {
             match api.node_update_run(do_apt, do_hyperion).await {
                 Ok(started_at) => Response::NodeUpdateRun { started_at },
@@ -765,6 +776,14 @@ mod tests {
         }
         async fn wp_asset_delete(&self, _: i64) -> Result<(), RpcError> {
             Ok(())
+        }
+        async fn wp_install_from_asset(
+            &self,
+            _: HostingSelector,
+            _: i64,
+            _: bool,
+        ) -> Result<(String, String), RpcError> {
+            Ok(("plugin".into(), "stub.zip".into()))
         }
         async fn service_install(&self, _: String) -> Result<(), RpcError> {
             Ok(())

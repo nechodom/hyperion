@@ -200,6 +200,10 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::profiles::post_wp_asset_delete),
         )
         .route(
+            "/hostings/wp/install-from-asset",
+            post(handlers::profiles::post_wp_install_from_asset),
+        )
+        .route(
             "/profiles/:id/edit",
             get(handlers::profiles::get_edit),
         )

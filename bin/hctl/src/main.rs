@@ -940,6 +940,12 @@ fn print_pretty(resp: &Response) {
         Response::WpAssetDelete => {
             println!("wp asset deleted");
         }
+        Response::WpInstallFromAsset {
+            kind,
+            original_name,
+        } => {
+            println!("wp {kind} installed from library: {original_name}");
+        }
         Response::ServiceInstallStatus(s) => {
             if s.started_at == 0 {
                 println!("no service install has run on this node");

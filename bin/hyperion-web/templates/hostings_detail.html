@@ -761,6 +761,53 @@
         </div>
       </form>
     </details>
+
+    {# "Install from library" — drops a select of uploaded asset
+       ZIPs. Visible whenever the library has ANYTHING in it
+       (filtered to plugins for this WP tab; themes get installed
+       via the profile-apply flow + Themes tab when that ships).
+       Empty library = no point in showing the button. #}
+    {% if !wp_assets.is_empty() %}
+    <details class="inline-action" style="position:relative">
+      <summary class="btn small" style="list-style:none;cursor:pointer">+ Install from library</summary>
+      <form method="post" action="/hostings/wp/install-from-asset" autocomplete="off"
+            style="position:absolute;z-index:10;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:0.7rem;margin-top:0.4rem;box-shadow:var(--shadow);min-width:24rem">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="selector" value="{{ detail.domain }}">
+        <div class="field" style="margin:0">
+          <label for="wp_install_asset">Uploaded ZIP
+            <a href="/profiles/wp-assets" class="text-soft" style="font-weight:400;font-size:0.78rem;margin-left:0.4rem">manage library →</a>
+          </label>
+          <select id="wp_install_asset" name="asset_id" required style="margin:0">
+            {% for a in wp_assets %}
+              {% if a.kind == "plugin" %}
+              <option value="{{ a.id }}">
+                [plugin] {{ a.original_name }} · {{ a.size_bytes / 1024 }} KB
+              </option>
+              {% endif %}
+            {% endfor %}
+            {% for a in wp_assets %}
+              {% if a.kind == "theme" %}
+              <option value="{{ a.id }}">
+                [theme] {{ a.original_name }} · {{ a.size_bytes / 1024 }} KB
+              </option>
+              {% endif %}
+            {% endfor %}
+          </select>
+        </div>
+        <label class="field-checkbox" style="margin:0.6rem 0 0;font-size:0.85rem">
+          <input type="checkbox" name="activate" value="on" checked>
+          Activate after install
+        </label>
+        <div class="row" style="gap:0.4rem;margin-top:0.6rem;justify-content:flex-end">
+          <button type="submit" class="btn small primary">Install from library</button>
+        </div>
+        <p class="text-soft small" style="margin:0.5rem 0 0;font-size:0.78rem;line-height:1.5">
+          Runs <code>wp plugin install &lt;path&gt; --force</code> (or <code>wp theme install</code>) under {{ detail.system_user }}. <code>--force</code> replaces an existing install if any.
+        </p>
+      </form>
+    </details>
+    {% endif %}
   </div>
 
   {% if wp_plugins.plugins.is_empty() %}

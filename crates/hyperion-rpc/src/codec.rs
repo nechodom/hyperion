@@ -161,6 +161,17 @@ pub enum Request {
     WpAssetDelete {
         id: i64,
     },
+    /// Install one uploaded asset (plugin or theme ZIP) onto a
+    /// WordPress hosting via wp-cli. Reuses the same `wp_cli`
+    /// adapter the profile-apply flow uses, but lets the operator
+    /// trigger a one-off install without creating a profile first.
+    WpInstallFromAsset {
+        sel: HostingSelector,
+        asset_id: i64,
+        /// Whether to also `wp plugin activate` / `wp theme activate`
+        /// after install.
+        activate: bool,
+    },
     /// Run system + hyperion updates on the target node. Both jobs
     /// run in the background; the call returns immediately with a
     /// "started" marker. Operator polls `NodeUpdateStatus` (see
@@ -480,6 +491,13 @@ pub enum Response {
     /// happened on this node.
     WpAssetList(Vec<hyperion_types::WpAssetSummary>),
     WpAssetDelete,
+    /// Plugin / theme was installed from the asset library. Carries
+    /// the resolved kind ("plugin" / "theme") + the asset's
+    /// original filename for the success flash.
+    WpInstallFromAsset {
+        kind: String,
+        original_name: String,
+    },
     /// Acknowledgement that the background update task spawned.
     /// Failures during the actual update show up in the log tail,
     /// not here.

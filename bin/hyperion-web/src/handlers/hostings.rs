@@ -164,6 +164,12 @@ struct DetailTpl<'a> {
     /// dropdown on the Migration tab. Empty on single-node setups
     /// (the dropdown hides itself in that case).
     all_nodes: Vec<hyperion_types::NodeSummary>,
+    /// Uploaded plugin/theme ZIPs from the master's library —
+    /// drives the "Install from library" dropdown on the WP tab.
+    /// Library lives on the MASTER (the master web is what
+    /// operators upload to), so we always fetch via the local
+    /// agent socket regardless of where this hosting lives.
+    wp_assets: Vec<hyperion_types::WpAssetSummary>,
 }
 
 #[derive(Deserialize, Default)]
@@ -611,6 +617,7 @@ pub async fn post_create(
                 csrf_token: super::session_csrf_token(&state, &ctx),
                 target_node: target.unwrap_or("").to_string(),
                 all_nodes: fetch_remote_nodes(&state).await.unwrap_or_default(),
+                wp_assets: fetch_wp_assets(&state).await.unwrap_or_default(),
             };
             Ok(Html(tpl.render()?).into_response())
         }
@@ -842,6 +849,7 @@ pub async fn get_detail(
         csrf_token: super::session_csrf_token(&state, &ctx),
         target_node: owner_node.clone().unwrap_or_default(),
         all_nodes: fetch_remote_nodes(&state).await.unwrap_or_default(),
+        wp_assets: fetch_wp_assets(&state).await.unwrap_or_default(),
     };
     Ok(Html(tpl.render()?).into_response())
 }
@@ -1963,6 +1971,21 @@ fn render_new_error<'a>(
             .unwrap_or_else(|_| "<h1>render error</h1>".into()),
     )
     .into_response()
+}
+
+/// Best-effort fetch of the WP asset library from the master.
+/// Used by the hosting detail page to render the "Install from
+/// library" dropdown on the WP tab. Failure → empty list (the
+/// dropdown hides itself in the template).
+async fn fetch_wp_assets(
+    state: &SharedState,
+) -> Result<Vec<hyperion_types::WpAssetSummary>, AppError> {
+    let resp = hyperion_rpc_client::call(&state.agent_socket, Request::WpAssetList).await?;
+    match resp {
+        RpcResponse::WpAssetList(v) => Ok(v),
+        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
 }
 
 /// Check the master's [cluster] section: should the master itself
