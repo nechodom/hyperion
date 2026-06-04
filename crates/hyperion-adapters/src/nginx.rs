@@ -195,9 +195,81 @@ pub async fn delete_vhost(paths: &Paths, domain: &str) -> Result<(), AdapterErro
     reload().await
 }
 
+/// Reload nginx, self-healing the common "not active, cannot reload"
+/// failure mode that bites worker nodes the first time master
+/// dispatches a HostingCreate to them.
+///
+/// Failure modes covered:
+///   - nginx is installed but not started (Debian sometimes does this
+///     when apt-get is interrupted mid-install, or when a `systemctl
+///     mask` leftover from an earlier panel survives). We try to
+///     start + retry the reload.
+///   - nginx isn't installed at all (worker provisioned without the
+///     hosting prerequisites). We surface a clear error pointing at
+///     `apt-get install nginx` so the operator doesn't have to grep
+///     journalctl to understand what's missing.
+///   - reload fails for a config error (bad vhost we just wrote).
+///     Returned verbatim — caller's nginx_test handles that path.
 pub async fn reload() -> Result<(), AdapterError> {
-    cmd::run("/usr/bin/systemctl", &["reload", "nginx"]).await?;
-    Ok(())
+    match cmd::run("/usr/bin/systemctl", &["reload", "nginx"]).await {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            let msg = e.to_string();
+            if reload_error_means_inactive(&msg) {
+                tracing::warn!(
+                    error = %msg,
+                    "nginx not running before reload — attempting start + reload"
+                );
+                // `start` is idempotent: it's a no-op if already
+                // running, brings it up otherwise. If start ALSO
+                // fails the unit either doesn't exist (not
+                // installed) or fails to come up (bad config /
+                // port conflict) — both worth surfacing verbatim.
+                if let Err(start_err) =
+                    cmd::run("/usr/bin/systemctl", &["start", "nginx"]).await
+                {
+                    let s = start_err.to_string();
+                    if s.contains("not loaded") || s.contains("not found") {
+                        return Err(AdapterError::Command {
+                            cmd: "/usr/bin/systemctl start nginx".into(),
+                            code: 1,
+                            stderr_tail: "nginx is not installed on this node. \
+                                Install it with `apt-get install -y nginx` (the hyperion \
+                                node installer should have done this — see \
+                                /opt/hyperion/packaging/install/install-node.sh, or just \
+                                re-run /opt/hyperion/packaging/install/update.sh which \
+                                self-heals missing packages)."
+                                .into(),
+                        });
+                    }
+                    return Err(start_err);
+                }
+                // Started — now try the reload again. (We could
+                // skip this since `start` already brought a fresh
+                // process up with the new vhost, but reload is the
+                // cheaper signal and matches the master's audit
+                // trail expectations.)
+                cmd::run("/usr/bin/systemctl", &["reload", "nginx"]).await?;
+                Ok(())
+            } else {
+                Err(e)
+            }
+        }
+    }
+}
+
+/// Decide whether a systemctl-reload failure looks like
+/// "nginx is just not running" (recoverable by `systemctl start`)
+/// vs. a real reload failure (bad config, etc., which we surface).
+///
+/// systemd's exact phrasing varies between releases — Debian 12
+/// emits "Job for nginx.service failed because the unit nginx.service
+/// is not active" / "Unit nginx.service is not active, cannot reload."
+/// We match the stable substring "is not active" plus the
+/// "not loaded" variant for cases where the unit was masked or
+/// removed.
+fn reload_error_means_inactive(msg: &str) -> bool {
+    msg.contains("is not active") || msg.contains("Unit nginx.service not loaded")
 }
 
 /// The Unix user that nginx worker processes run as. PHP-FPM pool sockets
@@ -477,5 +549,37 @@ mod tests {
             p.symlink_file("example.cz"),
             Path::new("/etc/nginx/sites-enabled/example.cz.conf")
         );
+    }
+
+    /// Self-heal trigger: only the "not active / not loaded" family
+    /// should switch us into start+retry mode. Anything else (config
+    /// errors, permission denied, etc.) must propagate verbatim so
+    /// the operator sees the actual failure.
+    #[test]
+    fn reload_error_means_inactive_matches_systemd_phrasings() {
+        // Debian 12 — "is not active, cannot reload"
+        assert!(reload_error_means_inactive(
+            "command /usr/bin/systemctl failed with exit 1: \
+             nginx.service is not active, cannot reload."
+        ));
+        // Masked / removed unit
+        assert!(reload_error_means_inactive(
+            "Unit nginx.service not loaded."
+        ));
+    }
+
+    #[test]
+    fn reload_error_means_inactive_ignores_real_failures() {
+        // Real reload failure (bad config) — must propagate, not retry.
+        assert!(!reload_error_means_inactive(
+            "command /usr/bin/systemctl failed with exit 1: \
+             nginx: [emerg] open() \"/etc/nginx/sites-enabled/x.conf\" failed (13: Permission denied)"
+        ));
+        // Random IO error from cmd::run
+        assert!(!reload_error_means_inactive("io: broken pipe"));
+        // nginx running, just refused to reload for some other reason
+        assert!(!reload_error_means_inactive(
+            "Job for nginx.service failed: reload-success timeout"
+        ));
     }
 }

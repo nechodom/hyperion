@@ -198,15 +198,52 @@ refresh_unit() {
 (( HAVE_AGENT )) && refresh_unit hyperion-agent
 (( HAVE_WEB   )) && refresh_unit hyperion-web
 
-# vsftpd may have been missing on this node (master install did
-# `apt install ... vsftpd` but it can fail silently or get removed).
-# Detect, log, install. Idempotent.
-if ! systemctl list-unit-files --no-pager vsftpd.service 2>/dev/null \
-     | grep -q "^vsftpd.service"; then
-  log "vsftpd.service unit missing — installing package ..."
-  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq vsftpd || \
-    warn "vsftpd install failed — FTP for hostings will not work until you fix this manually."
-fi
+# Heal missing hosting-prerequisite packages. Older install-node.sh
+# (or a node where someone apt-removed something) may be missing the
+# LAMP-ish stack. Without this, the first hosting dispatched from the
+# master to that node fails with confusing errors like
+#   "nginx.service is not active, cannot reload"
+# or
+#   "php8.3-fpm.service not loaded"
+# Re-install + enable each package only when the unit file is missing.
+declare -A NEEDED_PKGS=(
+  [nginx.service]="nginx"
+  [vsftpd.service]="vsftpd"
+  [mariadb.service]="mariadb-server"
+  [postgresql.service]="postgresql"
+  [php8.1-fpm.service]="php8.1-fpm php8.1-cli php8.1-mysql php8.1-pgsql"
+  [php8.2-fpm.service]="php8.2-fpm php8.2-cli php8.2-mysql php8.2-pgsql"
+  [php8.3-fpm.service]="php8.3-fpm php8.3-cli php8.3-mysql php8.3-pgsql"
+  [php8.4-fpm.service]="php8.4-fpm php8.4-cli php8.4-mysql php8.4-pgsql"
+)
+APT_UPDATED=0
+for unit in "${!NEEDED_PKGS[@]}"; do
+  # Skip PHP versions that aren't critical — only install if the
+  # unit is missing AND no other PHP-FPM unit is already installed
+  # (i.e. we want AT LEAST ONE php-fpm; we don't force all 4).
+  # Always install nginx + the *required* services.
+  if systemctl list-unit-files --no-pager "$unit" 2>/dev/null \
+       | grep -q "^$unit"; then
+    continue
+  fi
+  # Skip optional PHP versions when at least one is already there.
+  if [[ "$unit" == php*-fpm.service ]]; then
+    if systemctl list-unit-files --no-pager 'php*-fpm.service' 2>/dev/null \
+         | grep -q '^php.*-fpm.service'; then
+      continue
+    fi
+  fi
+  pkgs="${NEEDED_PKGS[$unit]}"
+  log "$unit missing — installing $pkgs ..."
+  if (( APT_UPDATED == 0 )); then
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq || true
+    APT_UPDATED=1
+  fi
+  if ! DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $pkgs; then
+    warn "$pkgs install failed — features that depend on $unit will not work \
+until this is fixed manually (apt-get install -y $pkgs)."
+  fi
+done
 
 # Per-version /run/php/<ver>/ subdirs for FPM sockets — without this
 # hyperion's per-user FPM pools (listen = /run/php/8.x/<user>.sock)
