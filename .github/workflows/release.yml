@@ -17,12 +17,24 @@ concurrency:
   group: release-main
   cancel-in-progress: true
 
+# Belt + suspenders alongside the per-action major-version bumps
+# below. GitHub will deprecate Node 20 on Sept 16 2026; this env
+# pre-emptively forces every JS action (including transitive ones
+# we haven't audited like Swatinem/rust-cache) to run on Node 24,
+# so we don't get warning spam in the meantime and the actual
+# cutover is a no-op.
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
 jobs:
   build:
     runs-on: ubuntu-22.04   # glibc 2.35; binaries run on Debian 12 (glibc 2.36+)
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        # v6 runs on Node 24 — see
+        # github.com/actions/checkout/releases/tag/v6.0.0. Old v4
+        # was flagged by the Sept 2025 Node-20 deprecation notice.
+        uses: actions/checkout@v6
         with:
           fetch-depth: 0    # we need the commit history for SHA-based naming
 
@@ -60,7 +72,10 @@ jobs:
           echo "build_date=$BUILD_DATE" >> "$GITHUB_OUTPUT"
 
       - name: Publish rolling release
-        uses: softprops/action-gh-release@v2
+        # v3 runs on Node 24 — see
+        # github.com/softprops/action-gh-release/releases/tag/v3.0.0
+        # ("Move the action runtime and bundle target to Node 24").
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: rolling
           name: "Rolling build (latest main)"
