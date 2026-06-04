@@ -297,6 +297,23 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     ) -> Result<hyperion_types::ServiceInstallStatus, RpcError> {
         self.svc.service_install_status().await
     }
+    async fn wp_asset_upload(
+        &self,
+        kind: String,
+        original_name: String,
+        bytes: Vec<u8>,
+        uploaded_by: String,
+    ) -> Result<(i64, bool), RpcError> {
+        self.svc
+            .wp_asset_upload(kind, original_name, bytes, uploaded_by)
+            .await
+    }
+    async fn wp_asset_list(&self) -> Result<Vec<hyperion_types::WpAssetSummary>, RpcError> {
+        self.svc.wp_asset_list().await
+    }
+    async fn wp_asset_delete(&self, id: i64) -> Result<(), RpcError> {
+        self.svc.wp_asset_delete(id).await
+    }
     async fn node_update_run(
         &self,
         do_apt: bool,

@@ -438,6 +438,22 @@ impl AdapterPort for RealAdapter {
     ) -> Result<hyperion_types::WpPluginActionResult, AdapterError> {
         hyperion_adapters::wpcli::plugin_action(system_user, htdocs, slug, action).await
     }
+
+    async fn wp_cli(
+        &self,
+        system_user: &str,
+        htdocs: &str,
+        kind: &str,
+        source: &str,
+        activate: bool,
+    ) -> Result<(), AdapterError> {
+        if kind != "plugin" && kind != "theme" {
+            return Err(AdapterError::Other(format!(
+                "wp_cli kind must be plugin|theme, got {kind:?}"
+            )));
+        }
+        hyperion_adapters::wpcli::install_item(system_user, htdocs, kind, source, activate).await
+    }
 }
 
 #[cfg(test)]

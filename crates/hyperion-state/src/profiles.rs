@@ -23,6 +23,12 @@ pub struct ProfileRow {
     pub price_currency: Option<String>,
     pub price_interval: Option<String>,
     pub slack_webhook: Option<String>,
+    /// Newline-separated WordPress plugin list. See profile.rs for
+    /// the syntax (slug, @asset:<id>, trailing ! for activate).
+    #[sqlx(default)]
+    pub wp_plugins: String,
+    #[sqlx(default)]
+    pub wp_themes: String,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -44,6 +50,9 @@ pub struct NewProfile {
     pub price_currency: Option<String>,
     pub price_interval: Option<String>,
     pub slack_webhook: Option<String>,
+    /// See ProfileRow::wp_plugins / wp_themes for the syntax.
+    pub wp_plugins: String,
+    pub wp_themes: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,8 +72,8 @@ pub async fn insert(pool: &SqlitePool, p: &NewProfile, now: i64) -> Result<i64, 
            (name, description, php_memory_mb, php_max_exec_secs, php_max_children,
             php_max_requests, db_max_connections, disk_hard_mb, bw_monthly_mb,
             expiry_grace_days, expiry_warning_offsets, price_minor, price_currency,
-            price_interval, slack_webhook, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            price_interval, slack_webhook, wp_plugins, wp_themes, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            RETURNING id"#,
     )
     .bind(&p.name)
@@ -82,6 +91,8 @@ pub async fn insert(pool: &SqlitePool, p: &NewProfile, now: i64) -> Result<i64, 
     .bind(&p.price_currency)
     .bind(&p.price_interval)
     .bind(&p.slack_webhook)
+    .bind(&p.wp_plugins)
+    .bind(&p.wp_themes)
     .bind(now)
     .bind(now)
     .fetch_one(pool)
@@ -96,7 +107,8 @@ pub async fn update(pool: &SqlitePool, id: i64, p: &NewProfile, now: i64) -> Res
             php_max_children = ?, php_max_requests = ?, db_max_connections = ?,
             disk_hard_mb = ?, bw_monthly_mb = ?, expiry_grace_days = ?,
             expiry_warning_offsets = ?, price_minor = ?, price_currency = ?,
-            price_interval = ?, slack_webhook = ?, updated_at = ?
+            price_interval = ?, slack_webhook = ?, wp_plugins = ?, wp_themes = ?,
+            updated_at = ?
            WHERE id = ?"#,
     )
     .bind(&p.name)
@@ -114,6 +126,8 @@ pub async fn update(pool: &SqlitePool, id: i64, p: &NewProfile, now: i64) -> Res
     .bind(&p.price_currency)
     .bind(&p.price_interval)
     .bind(&p.slack_webhook)
+    .bind(&p.wp_plugins)
+    .bind(&p.wp_themes)
     .bind(now)
     .bind(id)
     .execute(pool)
@@ -133,7 +147,7 @@ const SELECT_ALL: &str =
     "SELECT id, name, description, php_memory_mb, php_max_exec_secs, php_max_children,
             php_max_requests, db_max_connections, disk_hard_mb, bw_monthly_mb,
             expiry_grace_days, expiry_warning_offsets, price_minor, price_currency,
-            price_interval, slack_webhook, created_at, updated_at
+            price_interval, slack_webhook, wp_plugins, wp_themes, created_at, updated_at
      FROM hosting_profiles";
 
 pub async fn list(pool: &SqlitePool) -> Result<Vec<ProfileRow>, StateError> {
@@ -299,6 +313,8 @@ mod tests {
             price_currency: Some("CZK".into()),
             price_interval: Some("monthly".into()),
             slack_webhook: None,
+            wp_plugins: String::new(),
+            wp_themes: String::new(),
         };
         let id = insert(&pool, &p, 100).await.expect("insert");
         assert!(id > 0);

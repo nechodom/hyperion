@@ -150,6 +150,16 @@ impl hyperion_core::AdapterPort for StubAdapters {
             output_tail: String::new(),
         })
     }
+    async fn wp_cli(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: bool,
+    ) -> Result<(), AdapterError> {
+        Ok(())
+    }
 }
 
 /// Start a stub hyperion-agent on a temp Unix socket. Returns the socket path

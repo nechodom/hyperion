@@ -132,6 +132,20 @@ pub trait AgentApi: Send + Sync + 'static {
     async fn service_install_status(
         &self,
     ) -> Result<hyperion_types::ServiceInstallStatus, RpcError>;
+    /// Upload a WP plugin / theme ZIP into the master's asset
+    /// library. Returns the row id (newly-inserted or existing if
+    /// dedupe matched on SHA-256).
+    async fn wp_asset_upload(
+        &self,
+        kind: String,
+        original_name: String,
+        bytes: Vec<u8>,
+        uploaded_by: String,
+    ) -> Result<(i64, bool), RpcError>;
+    /// List every uploaded WP asset.
+    async fn wp_asset_list(&self) -> Result<Vec<hyperion_types::WpAssetSummary>, RpcError>;
+    /// Delete an uploaded asset (DB row + on-disk file).
+    async fn wp_asset_delete(&self, id: i64) -> Result<(), RpcError>;
     /// Start a background node-update job. Returns the unix
     /// timestamp the job started at. `NodeUpdateStatus` polls the
     /// log tail + state.

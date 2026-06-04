@@ -29,7 +29,7 @@ pub use limits::{
 };
 pub use migration::{HostingImportResult, HostingMigrationBundle, HostingMigrationManifest};
 pub use php::PhpVersion;
-pub use profile::{HostingProfile, ProfileApply, ProfileInput};
+pub use profile::{HostingProfile, ProfileApply, ProfileInput, WpAssetSummary};
 pub use spf::SpfCheckResult;
 pub use stats::{
     AcmeConfigView, AgentConfigView, BackupRemoteConfigView, BackupRetentionConfigView,

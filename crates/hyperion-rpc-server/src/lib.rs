@@ -239,6 +239,26 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(s) => Response::ServiceInstallStatus(s),
             Err(e) => Response::Error(e),
         },
+        Request::WpAssetUpload {
+            kind,
+            original_name,
+            bytes,
+            uploaded_by,
+        } => match api
+            .wp_asset_upload(kind, original_name, bytes, uploaded_by)
+            .await
+        {
+            Ok((id, deduped)) => Response::WpAssetUpload { id, deduped },
+            Err(e) => Response::Error(e),
+        },
+        Request::WpAssetList => match api.wp_asset_list().await {
+            Ok(v) => Response::WpAssetList(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::WpAssetDelete { id } => match api.wp_asset_delete(id).await {
+            Ok(()) => Response::WpAssetDelete,
+            Err(e) => Response::Error(e),
+        },
         Request::NodeUpdateRun { do_apt, do_hyperion } => {
             match api.node_update_run(do_apt, do_hyperion).await {
                 Ok(started_at) => Response::NodeUpdateRun { started_at },
@@ -728,6 +748,23 @@ mod tests {
             &self,
         ) -> Result<hyperion_types::ServiceInstallStatus, RpcError> {
             Ok(hyperion_types::ServiceInstallStatus::default())
+        }
+        async fn wp_asset_upload(
+            &self,
+            _: String,
+            _: String,
+            _: Vec<u8>,
+            _: String,
+        ) -> Result<(i64, bool), RpcError> {
+            Ok((0, false))
+        }
+        async fn wp_asset_list(
+            &self,
+        ) -> Result<Vec<hyperion_types::WpAssetSummary>, RpcError> {
+            Ok(vec![])
+        }
+        async fn wp_asset_delete(&self, _: i64) -> Result<(), RpcError> {
+            Ok(())
         }
         async fn service_install(&self, _: String) -> Result<(), RpcError> {
             Ok(())

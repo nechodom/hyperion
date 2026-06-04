@@ -132,6 +132,35 @@ pub enum Request {
     /// Read the state of the most-recent / in-progress
     /// service-install job. Empty when no install has ever run.
     ServiceInstallStatus,
+    /// Upload bytes for a new WordPress asset (plugin or theme ZIP).
+    /// The kind + filename + bytes already arrived on the web handler;
+    /// this RPC asks the agent to write the file under
+    /// /var/lib/hyperion/wp-assets/<id>/ + insert the DB row.
+    /// Deduplicates on SHA-256 — re-uploading the same bytes returns
+    /// the existing row id instead of inserting a second copy.
+    WpAssetUpload {
+        /// "plugin" or "theme".
+        kind: String,
+        /// Original filename the operator picked.
+        original_name: String,
+        /// Raw ZIP bytes. Serialized as a JSON byte array — verbose
+        /// on the wire (~4x base64) but the RPC is over a local
+        /// Unix socket and plugin ZIPs are <5 MB in practice. Worth
+        /// the simplicity vs. adding a serde_bytes / base64 dep.
+        bytes: Vec<u8>,
+        /// Web user who triggered the upload.
+        uploaded_by: String,
+    },
+    /// List every uploaded asset. Used by /profiles/wp-assets.
+    WpAssetList,
+    /// Delete an asset row + the on-disk file. The asset is just a
+    /// pointer-target for hosting profiles; deleting it doesn't
+    /// touch hostings that previously installed the plugin from
+    /// it. Profiles that still reference @asset:<id> will fail at
+    /// next apply with a clear error.
+    WpAssetDelete {
+        id: i64,
+    },
     /// Run system + hyperion updates on the target node. Both jobs
     /// run in the background; the call returns immediately with a
     /// "started" marker. Operator polls `NodeUpdateStatus` (see
@@ -444,6 +473,13 @@ pub enum Response {
     /// Current state of the most-recent / in-progress
     /// service-install job + log tail.
     ServiceInstallStatus(hyperion_types::ServiceInstallStatus),
+    /// Upload accepted. `id` is the newly-inserted row id (or the
+    /// existing one if dedupe matched on SHA-256).
+    WpAssetUpload { id: i64, deduped: bool },
+    /// Library snapshot — never empty unless no uploads have ever
+    /// happened on this node.
+    WpAssetList(Vec<hyperion_types::WpAssetSummary>),
+    WpAssetDelete,
     /// Acknowledgement that the background update task spawned.
     /// Failures during the actual update show up in the log tail,
     /// not here.

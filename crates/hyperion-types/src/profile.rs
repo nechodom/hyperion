@@ -22,6 +22,19 @@ pub struct HostingProfile {
     pub price_currency: Option<String>,
     pub price_interval: Option<String>,
     pub slack_webhook: Option<String>,
+    /// Newline-separated list of WordPress plugins to install when
+    /// this profile is applied to a WP-installed hosting. Each line
+    /// is either:
+    ///   - a wordpress.org slug ("akismet", "yoast-seo")
+    ///   - `@asset:<id>` to install from an uploaded ZIP in the WP
+    ///     asset library
+    /// Trailing `!` on a line means "also activate after install".
+    /// Lines starting with `#` and empty lines are ignored.
+    #[serde(default)]
+    pub wp_plugins: String,
+    /// Same syntax as `wp_plugins`, but for themes.
+    #[serde(default)]
+    pub wp_themes: String,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -62,6 +75,25 @@ pub struct ProfileInput {
     pub price_currency: Option<String>,
     pub price_interval: Option<String>,
     pub slack_webhook: Option<String>,
+    #[serde(default)]
+    pub wp_plugins: String,
+    #[serde(default)]
+    pub wp_themes: String,
+}
+
+/// One row in the WordPress asset library — operator-uploaded
+/// plugin or theme ZIP that profiles can reference via
+/// `@asset:<id>`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WpAssetSummary {
+    pub id: i64,
+    /// "plugin" | "theme".
+    pub kind: String,
+    pub original_name: String,
+    pub size_bytes: i64,
+    pub sha256: String,
+    pub uploaded_at: i64,
+    pub uploaded_by: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

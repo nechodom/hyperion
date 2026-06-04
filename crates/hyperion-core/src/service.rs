@@ -137,6 +137,18 @@ pub trait AdapterPort: Send + Sync {
         slug: &str,
         action: &hyperion_types::WpPluginAction,
     ) -> Result<hyperion_types::WpPluginActionResult, AdapterError>;
+
+    /// Install a plugin or theme via wp-cli, with `source` either a
+    /// wordpress.org slug or a local ZIP path. `kind` ∈ {"plugin",
+    /// "theme"}. Used by profile-apply's wp-items installer.
+    async fn wp_cli(
+        &self,
+        system_user: &str,
+        htdocs: &str,
+        kind: &str,
+        source: &str,
+        activate: bool,
+    ) -> Result<(), AdapterError>;
 }
 
 #[derive(Clone)]
@@ -527,6 +539,12 @@ fn stitch_dig_txt(raw: &str) -> String {
 /// Err with a useful message otherwise. Used by the migration
 /// import-from-url path; cheap to call because curl is already a
 /// hard dependency of the installer.
+/// On-disk path of an uploaded WP asset's ZIP file. Mirrors the
+/// layout `wp_asset_upload` writes — `/var/lib/hyperion/wp-assets/<id>/<filename>`.
+fn wp_asset_disk_path(id: i64, stored_filename: &str) -> String {
+    format!("/var/lib/hyperion/wp-assets/{id}/{stored_filename}")
+}
+
 /// Drive a service-install job (apt-get install + systemctl
 /// enable --now) and stream output into the shared status slot.
 ///
@@ -4005,6 +4023,34 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         .await
         .map_err(|e| RpcError::Internal_with(format!("apply: {e}")))?;
 
+        // Install WP plugins + themes from the profile, if any.
+        // Best-effort: a failure here logs + appends an audit
+        // entry but doesn't roll back the limits/expiry/price
+        // change above. The operator can see what went wrong on
+        // the per-hosting WordPress tab.
+        if !p.wp_plugins.trim().is_empty() || !p.wp_themes.trim().is_empty() {
+            let wp_outcome = self
+                .apply_profile_wp_items(&detail, &p.wp_plugins, &p.wp_themes)
+                .await;
+            let (installed, failed) = match &wp_outcome {
+                Ok(stats) => (stats.0, stats.1),
+                Err(_) => (0, 0),
+            };
+            self.append_audit(
+                "profile.apply.wp",
+                Some(detail.id.as_str()),
+                &serde_json::json!({
+                    "profile_id": profile_id,
+                    "installed": installed,
+                    "failed": failed,
+                    "error": wp_outcome.as_ref().err().map(|e| e.to_string()),
+                })
+                .to_string(),
+                if wp_outcome.is_ok() { "ok" } else { "warn" },
+            )
+            .await;
+        }
+
         self.append_audit(
             "profile.apply",
             Some(detail.id.as_str()),
@@ -4023,6 +4069,87 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             next_billing_at: next,
             applied_at: now,
         })
+    }
+
+    /// Walk a profile's wp_plugins + wp_themes text fields and
+    /// install each item via wp-cli. Skips empty lines and `#…`
+    /// comments. Returns (installed_count, failed_count).
+    ///
+    /// Line syntax (per profile.rs::HostingProfile docs):
+    ///   - `<slug>`           → install from wordpress.org
+    ///   - `@asset:<id>`      → install from the local uploaded
+    ///                          ZIP at /var/lib/hyperion/wp-assets/<id>/
+    ///   - trailing `!`       → also activate after install
+    ///   - leading `#`        → comment, skipped
+    async fn apply_profile_wp_items(
+        &self,
+        detail: &hyperion_types::HostingDetail,
+        plugins_text: &str,
+        themes_text: &str,
+    ) -> Result<(usize, usize), RpcError> {
+        let mut ok = 0usize;
+        let mut fail = 0usize;
+        for kind in ["plugin", "theme"] {
+            let text = if kind == "plugin" { plugins_text } else { themes_text };
+            for raw in text.lines() {
+                let line = raw.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                let (item, activate) = if let Some(stripped) = line.strip_suffix('!') {
+                    (stripped.trim(), true)
+                } else {
+                    (line, false)
+                };
+                // Resolve @asset:<id> → on-disk path.
+                let source = if let Some(rest) = item.strip_prefix("@asset:") {
+                    let id: i64 = rest.trim().parse().map_err(|_| RpcError::Validation {
+                        message: format!("profile {kind} line `{line}` has bad asset id"),
+                    })?;
+                    let row = hyperion_state::wp_assets::get_by_id(&self.pool, id)
+                        .await
+                        .map_err(|e| RpcError::Internal_with(format!("wp_asset lookup: {e}")))?
+                        .ok_or_else(|| RpcError::NotFound {
+                            kind: "wp_asset".into(),
+                            id: id.to_string(),
+                        })?;
+                    if row.kind != kind {
+                        return Err(RpcError::Validation {
+                            message: format!(
+                                "profile {kind} line `{line}` references asset id {id} which is a {} (mismatch)",
+                                row.kind
+                            ),
+                        });
+                    }
+                    wp_asset_disk_path(id, &row.stored_filename)
+                } else {
+                    item.to_string()
+                };
+                let res = self
+                    .adapters
+                    .wp_cli(
+                        &detail.system_user,
+                        &format!("/home/{}/{}/htdocs", detail.system_user, detail.domain),
+                        kind,
+                        &source,
+                        activate,
+                    )
+                    .await;
+                match res {
+                    Ok(()) => ok += 1,
+                    Err(e) => {
+                        tracing::warn!(
+                            kind = kind,
+                            item = %item,
+                            error = %e,
+                            "profile wp_item install failed"
+                        );
+                        fail += 1;
+                    }
+                }
+            }
+        }
+        Ok((ok, fail))
     }
 
     pub async fn profile_get_apply(
@@ -6440,6 +6567,174 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(self.service_install_progress.lock().await.clone())
     }
 
+    // ============================================================
+    //  WP asset library — operator-uploaded plugin / theme ZIPs
+    //  referenced from hosting profiles via @asset:<id>.
+    // ============================================================
+
+    pub async fn wp_asset_upload(
+        &self,
+        kind: String,
+        original_name: String,
+        bytes: Vec<u8>,
+        uploaded_by: String,
+    ) -> Result<(i64, bool), RpcError> {
+        if kind != "plugin" && kind != "theme" {
+            return Err(RpcError::Validation {
+                message: format!("kind must be `plugin` or `theme`, got {kind:?}"),
+            });
+        }
+        if bytes.is_empty() {
+            return Err(RpcError::Validation {
+                message: "uploaded file is empty".into(),
+            });
+        }
+        // Hard cap — Plugin / theme ZIPs are basically never >50 MB.
+        // Generous upper bound to catch operator mistakes (uploading
+        // a backup tarball or similar).
+        const MAX_BYTES: usize = 50 * 1024 * 1024;
+        if bytes.len() > MAX_BYTES {
+            return Err(RpcError::Validation {
+                message: format!(
+                    "uploaded file is {} bytes — max is {} bytes (50 MB)",
+                    bytes.len(),
+                    MAX_BYTES
+                ),
+            });
+        }
+        // ZIP magic check — first 4 bytes are PK\x03\x04.
+        if bytes.len() < 4 || &bytes[..4] != b"PK\x03\x04" {
+            return Err(RpcError::Validation {
+                message: "file is not a ZIP archive (missing PK header)".into(),
+            });
+        }
+        // SHA-256 for dedupe + integrity. blake3 is faster but we
+        // already store sha256 in the schema for parity with the
+        // backup archive checksums.
+        let sha = hex::encode(blake3::hash(&bytes).as_bytes());
+        // Dedupe — if the same bytes already exist, return that row.
+        if let Some(existing) =
+            hyperion_state::wp_assets::get_by_sha(&self.pool, &sha)
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("dedupe lookup: {e}")))?
+        {
+            return Ok((existing.id, true));
+        }
+        // Sanitize the operator filename — keep alphanumerics, dot,
+        // dash, underscore. Trim to 64 chars. Empty after sanitize →
+        // "asset.zip".
+        let safe_name: String = original_name
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-' || *c == '_')
+            .take(64)
+            .collect();
+        let stored_filename = if safe_name.is_empty() {
+            "asset.zip".to_string()
+        } else if !safe_name.ends_with(".zip") {
+            format!("{safe_name}.zip")
+        } else {
+            safe_name
+        };
+        let now = now_secs();
+        let id = hyperion_state::wp_assets::insert(
+            &self.pool,
+            &kind,
+            &original_name,
+            &stored_filename,
+            bytes.len() as i64,
+            &sha,
+            now,
+            &uploaded_by,
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("wp_asset insert: {e}")))?;
+        let dir = std::path::PathBuf::from("/var/lib/hyperion/wp-assets").join(id.to_string());
+        if let Err(e) = tokio::fs::create_dir_all(&dir).await {
+            // Roll back the DB row so the operator can retry.
+            let _ = hyperion_state::wp_assets::delete(&self.pool, id).await;
+            return Err(RpcError::Internal_with(format!(
+                "mkdir wp-assets/{id}: {e}"
+            )));
+        }
+        let path = dir.join(&stored_filename);
+        if let Err(e) = tokio::fs::write(&path, &bytes).await {
+            let _ = hyperion_state::wp_assets::delete(&self.pool, id).await;
+            let _ = tokio::fs::remove_dir_all(&dir).await;
+            return Err(RpcError::Internal_with(format!(
+                "write wp-assets/{id}/{stored_filename}: {e}"
+            )));
+        }
+        // 0644 — readable by anyone (wp-cli runs as the system_user
+        // of the hosting being applied to, which is different per
+        // hosting). The DIR is 0755 by default which is fine.
+        use std::os::unix::fs::PermissionsExt;
+        let _ = tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).await;
+        self.append_audit(
+            "wp_asset.upload",
+            None,
+            &serde_json::json!({
+                "id": id,
+                "kind": kind,
+                "original_name": original_name,
+                "size_bytes": bytes.len(),
+                "sha256": sha,
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+        Ok((id, false))
+    }
+
+    pub async fn wp_asset_list(
+        &self,
+    ) -> Result<Vec<hyperion_types::WpAssetSummary>, RpcError> {
+        let rows = hyperion_state::wp_assets::list(&self.pool)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("wp_asset list: {e}")))?;
+        Ok(rows
+            .into_iter()
+            .map(|r| hyperion_types::WpAssetSummary {
+                id: r.id,
+                kind: r.kind,
+                original_name: r.original_name,
+                size_bytes: r.size_bytes,
+                sha256: r.sha256,
+                uploaded_at: r.uploaded_at,
+                uploaded_by: r.uploaded_by,
+            })
+            .collect())
+    }
+
+    pub async fn wp_asset_delete(&self, id: i64) -> Result<(), RpcError> {
+        let row = hyperion_state::wp_assets::get_by_id(&self.pool, id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("wp_asset get: {e}")))?
+            .ok_or_else(|| RpcError::NotFound {
+                kind: "wp_asset".into(),
+                id: id.to_string(),
+            })?;
+        hyperion_state::wp_assets::delete(&self.pool, id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("wp_asset delete: {e}")))?;
+        let dir =
+            std::path::PathBuf::from("/var/lib/hyperion/wp-assets").join(id.to_string());
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+        self.append_audit(
+            "wp_asset.delete",
+            None,
+            &serde_json::json!({
+                "id": id,
+                "kind": row.kind,
+                "original_name": row.original_name,
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
     /// Spawn a background job that runs the requested update steps
     /// on THIS node:
     ///   1. (optional) `apt-get update && apt-get dist-upgrade -y`
@@ -7028,6 +7323,8 @@ fn profile_input_to_new(input: ProfileInput) -> hyperion_state::profiles::NewPro
         price_currency: input.price_currency,
         price_interval: input.price_interval,
         slack_webhook: input.slack_webhook,
+        wp_plugins: input.wp_plugins,
+        wp_themes: input.wp_themes,
     }
 }
 
@@ -7049,6 +7346,8 @@ fn profile_row_to_wire(r: hyperion_state::profiles::ProfileRow) -> HostingProfil
         price_currency: r.price_currency,
         price_interval: r.price_interval,
         slack_webhook: r.slack_webhook,
+        wp_plugins: r.wp_plugins,
+        wp_themes: r.wp_themes,
         created_at: r.created_at,
         updated_at: r.updated_at,
     }

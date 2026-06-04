@@ -4,7 +4,14 @@
 <div class="page-header">
   <div>
     <h1>Profiles</h1>
-    <div class="subtitle">Pre-defined templates of limits, expiry policy, pricing and notifications. Apply to any hosting in one click.</div>
+    <div class="subtitle">Pre-defined templates of limits, expiry policy, pricing, notifications, and WordPress plugins/themes. Apply to any hosting in one click.</div>
+  </div>
+  <span class="grow"></span>
+  <div class="actions">
+    <a href="/profiles/wp-assets" class="btn ghost">
+      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+      WP asset library
+    </a>
   </div>
 </div>
 
@@ -162,6 +169,29 @@
     <div class="field">
       <label for="p_slack">Slack incoming webhook URL <span class="hint">overrides the global default</span></label>
       <input id="p_slack" name="slack_webhook" type="url" placeholder="https://hooks.slack.com/services/T.../B.../...">
+    </div>
+
+    <h2 style="font-size:0.95rem;margin:1.5rem 0 0.6rem">
+      WordPress plugins + themes <span class="muted" style="font-weight:400;font-size:0.82rem">— installed when this profile is applied to a WP-enabled hosting</span>
+    </h2>
+    <p class="text-soft small" style="margin:0 0 0.7rem;line-height:1.55">
+      One item per line. WordPress.org slug (<code>akismet</code>) or
+      <code>@asset:&lt;id&gt;</code> for uploaded ZIPs (see <a href="/profiles/wp-assets">asset library</a>).
+      Trailing <code>!</code> = also activate.
+    </p>
+    <div class="field-row">
+      <div class="field" style="flex:1">
+        <label for="p_wp_plugins">Plugins</label>
+        <textarea id="p_wp_plugins" name="wp_plugins" rows="5"
+                  style="font-family:var(--font-mono);font-size:0.85rem;width:100%"
+                  placeholder="akismet!&#10;wordpress-seo"></textarea>
+      </div>
+      <div class="field" style="flex:1">
+        <label for="p_wp_themes">Themes</label>
+        <textarea id="p_wp_themes" name="wp_themes" rows="5"
+                  style="font-family:var(--font-mono);font-size:0.85rem;width:100%"
+                  placeholder="astra!"></textarea>
+      </div>
     </div>
 
     <div class="row" style="margin-top:1rem">

@@ -1,0 +1,138 @@
+{% extends "base.html" %}
+{% block title %}WP asset library · hyperion{% endblock %}
+{% block main %}
+<div class="page-header">
+  <div>
+    <h1>WordPress asset library</h1>
+    <div class="subtitle">
+      Upload custom plugin / theme ZIPs and reference them from hosting profiles via
+      <code>@asset:&lt;id&gt;</code>. Stored on this server under
+      <code>/var/lib/hyperion/wp-assets/</code>.
+    </div>
+  </div>
+  <span class="grow"></span>
+  <div class="actions">
+    <a href="/profiles" class="btn ghost">
+      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+      Back to profiles
+    </a>
+  </div>
+</div>
+
+{% if let Some(e) = error %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">{{ e }}</div>
+  </div>
+{% endif %}
+{% if let Some(m) = flash %}
+  <div class="flash success">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+    <div class="flash-body">{{ m }}</div>
+  </div>
+{% endif %}
+
+<div class="card">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+    Upload a ZIP
+  </h2>
+  <p class="text-soft small" style="margin:0 0 0.8rem">
+    Max 50 MB. ZIPs are deduped on SHA-256 — re-uploading the same bytes returns the existing entry instead of writing a second copy.
+  </p>
+  <form method="post" action="/profiles/wp-assets/upload" enctype="multipart/form-data"
+        style="display:flex;gap:0.5rem;align-items:flex-end;flex-wrap:wrap">
+    <input type="hidden" name="_csrf" value="{{ csrf_upload }}">
+    <div class="field" style="margin:0;width:8rem">
+      <label for="upload_kind">Kind</label>
+      <select id="upload_kind" name="kind" style="margin:0" required>
+        <option value="plugin" selected>Plugin</option>
+        <option value="theme">Theme</option>
+      </select>
+    </div>
+    <div class="field" style="margin:0;flex:1;min-width:18rem">
+      <label for="upload_file">ZIP file</label>
+      <input id="upload_file" type="file" name="file" accept=".zip,application/zip" required
+             style="margin:0">
+    </div>
+    <button class="btn primary" type="submit">Upload</button>
+  </form>
+</div>
+
+<div class="card no-pad-table" style="margin-top:1rem">
+  <h2 style="padding:1.4rem 1.5rem 0">
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+    Library
+    <span class="tag" style="font-weight:400;font-size:0.74em;margin-left:0.4rem">{{ assets.len() }} item{% if assets.len() != 1 %}s{% endif %}</span>
+  </h2>
+  {% if assets.is_empty() %}
+    <div class="empty">
+      <p>No assets uploaded yet. Use the form above to add a plugin or theme ZIP.</p>
+      <p class="text-soft small">Once uploaded, copy the <strong>@asset:&lt;id&gt;</strong> reference into a profile's <strong>Plugins</strong> or <strong>Themes</strong> textarea. Applying the profile to a WordPress hosting then runs <code>wp plugin install /var/lib/hyperion/wp-assets/&lt;id&gt;/&lt;file&gt; --force</code>.</p>
+    </div>
+  {% else %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>ID</th>
+          <th>Kind</th>
+          <th>Original filename</th>
+          <th class="numeric">Size</th>
+          <th>SHA-256</th>
+          <th>Uploaded</th>
+          <th>By</th>
+          <th>Reference</th>
+          <th class="right">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for a in assets %}
+        <tr>
+          <td><code>{{ a.id }}</code></td>
+          <td>
+            {% if a.kind == "plugin" %}<span class="pill ok">plugin</span>
+            {% else %}<span class="pill" style="background:var(--surface-2);color:var(--text-soft)">theme</span>{% endif %}
+          </td>
+          <td>{{ a.original_name }}</td>
+          <td class="numeric">{{ a.size_bytes / 1024 }} KB</td>
+          <td><code class="text-soft" style="font-size:0.74rem" title="{{ a.sha256 }}">{{ a.sha256|truncate(16) }}…</code></td>
+          <td class="muted numeric" title="{{ a.uploaded_at }}">{{ crate::handlers::stats::fmt_ago(a.uploaded_at) }}</td>
+          <td><code style="font-size:0.78rem">{{ a.uploaded_by }}</code></td>
+          <td>
+            <code style="font-size:0.78rem;cursor:pointer"
+                  title="Click to copy"
+                  onclick="navigator.clipboard.writeText('@asset:{{ a.id }}').then(()=>{this.style.color='var(--success)';setTimeout(()=>{this.style.color=''},800)});">
+              @asset:{{ a.id }}
+            </code>
+          </td>
+          <td class="right">
+            <form method="post" action="/profiles/wp-assets/delete" style="display:inline"
+                  data-confirm-title="Delete asset"
+                  data-confirm-body="The ZIP {{ a.original_name }} will be removed from disk. Profiles that still reference @asset:{{ a.id }} will fail at next apply with a clear error."
+                  data-confirm-confirm-label="Delete asset"
+                  data-confirm-variant="danger">
+              <input type="hidden" name="_csrf" value="{{ csrf_delete }}">
+              <input type="hidden" name="id" value="{{ a.id }}">
+              <button class="btn small danger" type="submit">Delete</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+
+<div class="card muted" style="margin-top:1rem">
+  <h2 style="font-size:0.95rem;margin:0 0 0.6rem">How this works</h2>
+  <ul class="text-soft small" style="margin:0;padding-left:1.2rem;line-height:1.65">
+    <li>Upload a plugin or theme ZIP. Hyperion validates the ZIP magic bytes, dedupes on SHA-256, and stores the file under <code>/var/lib/hyperion/wp-assets/&lt;id&gt;/&lt;sanitized-filename&gt;</code>.</li>
+    <li>Open a hosting profile's edit page (<a href="/profiles">Profiles</a> → Edit) and add lines like <code>@asset:7!</code> to the <strong>Plugins</strong> or <strong>Themes</strong> textarea.</li>
+    <li>Trailing <code>!</code> on the line means "also activate after install".</li>
+    <li>When the profile is applied to a WordPress-enabled hosting, the agent shells out to <code>wp plugin install &lt;path&gt; --force</code> (or <code>wp theme install</code>) under that hosting's system user. <code>--force</code> replaces an existing install — handy when you upload a newer ZIP under the same internal slug.</li>
+    <li>Profiles can mix uploaded assets with WordPress.org slugs (<code>akismet</code>, <code>yoast-seo</code>) in the same list.</li>
+  </ul>
+</div>
+{% endblock %}

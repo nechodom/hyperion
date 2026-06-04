@@ -188,6 +188,18 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/profiles", get(handlers::profiles::get_profiles))
         .route("/profiles/create", post(handlers::profiles::post_create))
         .route(
+            "/profiles/wp-assets",
+            get(handlers::profiles::get_wp_assets),
+        )
+        .route(
+            "/profiles/wp-assets/upload",
+            post(handlers::profiles::post_wp_asset_upload),
+        )
+        .route(
+            "/profiles/wp-assets/delete",
+            post(handlers::profiles::post_wp_asset_delete),
+        )
+        .route(
             "/profiles/:id/edit",
             get(handlers::profiles::get_edit),
         )

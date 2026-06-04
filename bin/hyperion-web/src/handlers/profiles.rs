@@ -9,7 +9,7 @@ use axum::extract::{Query, State};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Form;
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
-use hyperion_types::{HostingProfile, ProfileInput};
+use hyperion_types::{HostingProfile, ProfileInput, WpAssetSummary};
 use serde::Deserialize;
 
 #[derive(Template)]
@@ -113,6 +113,16 @@ pub struct CreateForm {
     pub price_interval: String,
     #[serde(default)]
     pub slack_webhook: String,
+    /// Newline-separated list of WordPress plugins this profile
+    /// installs when applied. Each line is a wordpress.org slug
+    /// (e.g. `akismet`) or `@asset:<id>` to install from an
+    /// uploaded ZIP. Trailing `!` = also activate after install.
+    /// Lines starting with `#` are comments.
+    #[serde(default)]
+    pub wp_plugins: String,
+    /// Same syntax as `wp_plugins`, for themes.
+    #[serde(default)]
+    pub wp_themes: String,
 }
 
 fn default_256() -> i64 {
@@ -172,6 +182,8 @@ pub async fn post_create(
         } else {
             Some(form.slack_webhook.trim().to_string())
         },
+        wp_plugins: form.wp_plugins.clone(),
+        wp_themes: form.wp_themes.clone(),
     };
     let resp =
         hyperion_rpc_client::call(&state.agent_socket, Request::ProfileCreate(input)).await?;
@@ -269,6 +281,8 @@ pub async fn post_update(
         } else {
             Some(form.slack_webhook.trim().to_string())
         },
+        wp_plugins: form.wp_plugins.clone(),
+        wp_themes: form.wp_themes.clone(),
     };
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
@@ -376,4 +390,194 @@ fn csrf_token(state: &SharedState, ctx: &AuthCtx, form_id: &str) -> String {
         form_id,
         hyperion_types::now_secs(),
     )
+}
+
+// ============================================================
+//  WordPress asset library — /profiles/wp-assets
+// ============================================================
+
+#[derive(Template)]
+#[template(path = "wp_assets.html")]
+struct WpAssetsTpl<'a> {
+    username: &'a str,
+    user_initial: char,
+    active: &'static str,
+    css_version: &'static str,
+    htmx_version: &'static str,
+    assets: Vec<WpAssetSummary>,
+    csrf_upload: String,
+    csrf_delete: String,
+    flash: Option<String>,
+    error: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+pub struct WpAssetsQuery {
+    #[serde(default)]
+    pub flash: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+}
+
+/// GET /profiles/wp-assets — admin-only library of uploaded plugin/theme ZIPs.
+pub async fn get_wp_assets(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Query(q): Query<WpAssetsQuery>,
+) -> Result<Response, AppError> {
+    if !ctx.is_admin_or_higher() {
+        return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
+    }
+    let assets = match hyperion_rpc_client::call(&state.agent_socket, Request::WpAssetList).await? {
+        RpcResponse::WpAssetList(v) => v,
+        RpcResponse::Error(e) => return Err(AppError::Rpc(e.to_string())),
+        _ => return Err(AppError::Internal("unexpected response".into())),
+    };
+    let tpl = WpAssetsTpl {
+        username: &ctx.username,
+        user_initial: super::user_initial(&ctx.username),
+        active: "profiles",
+        css_version: super::css_version(),
+        htmx_version: super::htmx_version(),
+        assets,
+        csrf_upload: super::session_csrf_token(&state, &ctx),
+        csrf_delete: super::session_csrf_token(&state, &ctx),
+        flash: q.flash,
+        error: q.error,
+    };
+    Ok(Html(tpl.render()?).into_response())
+}
+
+/// POST /profiles/wp-assets/upload — multipart form with the ZIP.
+///
+/// Uses axum's built-in Multipart extractor. Single file per
+/// upload; we read it fully into memory (capped at 50 MB on the
+/// service side) and forward to the agent via WpAssetUpload RPC.
+pub async fn post_wp_asset_upload(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    mut multipart: axum::extract::Multipart,
+) -> Result<Response, AppError> {
+    if !ctx.is_admin_or_higher() {
+        return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
+    }
+    let mut kind: Option<String> = None;
+    let mut original_name: Option<String> = None;
+    let mut bytes: Option<Vec<u8>> = None;
+    // ~60 MB hard cap on a single field read — the service then
+    // applies its 50 MB cap. Anything larger means the operator
+    // grabbed the wrong file by accident.
+    const MAX_FIELD_BYTES: usize = 60 * 1024 * 1024;
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| AppError::BadRequest(format!("multipart: {e}")))?
+    {
+        let name = field.name().unwrap_or("").to_string();
+        match name.as_str() {
+            "kind" => {
+                let v = field
+                    .text()
+                    .await
+                    .map_err(|e| AppError::BadRequest(format!("kind: {e}")))?;
+                if v != "plugin" && v != "theme" {
+                    return Err(AppError::BadRequest(format!(
+                        "kind must be plugin or theme, got {v:?}"
+                    )));
+                }
+                kind = Some(v);
+            }
+            "file" => {
+                let filename = field
+                    .file_name()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| "asset.zip".to_string());
+                let data = field
+                    .bytes()
+                    .await
+                    .map_err(|e| AppError::BadRequest(format!("file: {e}")))?;
+                if data.len() > MAX_FIELD_BYTES {
+                    return Err(AppError::BadRequest(format!(
+                        "file too large ({} bytes); max {}",
+                        data.len(),
+                        MAX_FIELD_BYTES
+                    )));
+                }
+                original_name = Some(filename);
+                bytes = Some(data.to_vec());
+            }
+            _ => {
+                // Unknown field — silently skip. Lets us add fields
+                // later without rejecting old clients.
+            }
+        }
+    }
+    let kind = kind.ok_or_else(|| AppError::BadRequest("missing `kind` field".into()))?;
+    let original_name =
+        original_name.ok_or_else(|| AppError::BadRequest("missing `file` field".into()))?;
+    let bytes = bytes.ok_or_else(|| AppError::BadRequest("missing `file` bytes".into()))?;
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::WpAssetUpload {
+            kind,
+            original_name: original_name.clone(),
+            bytes,
+            uploaded_by: ctx.username.clone(),
+        },
+    )
+    .await?;
+    match resp {
+        RpcResponse::WpAssetUpload { id, deduped } => {
+            let msg = if deduped {
+                format!(
+                    "Asset \"{original_name}\" already in library as id {id} — no duplicate stored."
+                )
+            } else {
+                format!("Uploaded \"{original_name}\" → id {id}.")
+            };
+            Ok(Redirect::to(&format!(
+                "/profiles/wp-assets?flash={}",
+                urlencoding(&msg)
+            ))
+            .into_response())
+        }
+        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
+            "/profiles/wp-assets?error={}",
+            urlencoding(&e.to_string())
+        ))
+        .into_response()),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct WpAssetDeleteForm {
+    pub id: i64,
+}
+
+pub async fn post_wp_asset_delete(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<WpAssetDeleteForm>,
+) -> Result<Response, AppError> {
+    if !ctx.is_admin_or_higher() {
+        return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
+    }
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::WpAssetDelete { id: form.id },
+    )
+    .await?;
+    match resp {
+        RpcResponse::WpAssetDelete => Ok(Redirect::to(
+            "/profiles/wp-assets?flash=Asset+deleted",
+        )
+        .into_response()),
+        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
+            "/profiles/wp-assets?error={}",
+            urlencoding(&e.to_string())
+        ))
+        .into_response()),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
 }

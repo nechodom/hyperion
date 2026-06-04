@@ -914,6 +914,32 @@ fn print_pretty(resp: &Response) {
             println!("  state  : {}", r.state);
             println!("  note   : {}", r.message);
         }
+        Response::WpAssetUpload { id, deduped } => {
+            if *deduped {
+                println!("wp asset deduped: id={id} (same SHA-256 already in library)");
+            } else {
+                println!("wp asset uploaded: id={id}");
+            }
+        }
+        Response::WpAssetList(assets) => {
+            if assets.is_empty() {
+                println!("(no wp assets uploaded yet)");
+            } else {
+                println!("{:<5} {:<7} {:<10} {}", "ID", "KIND", "SIZE", "FILENAME");
+                for a in assets {
+                    println!(
+                        "{:<5} {:<7} {:<10} {}",
+                        a.id,
+                        a.kind,
+                        format!("{} KB", a.size_bytes / 1024),
+                        a.original_name
+                    );
+                }
+            }
+        }
+        Response::WpAssetDelete => {
+            println!("wp asset deleted");
+        }
         Response::ServiceInstallStatus(s) => {
             if s.started_at == 0 {
                 println!("no service install has run on this node");

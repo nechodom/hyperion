@@ -147,6 +147,16 @@ impl hyperion_core::AdapterPort for StubAdapters {
             output_tail: String::new(),
         })
     }
+    async fn wp_cli(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: bool,
+    ) -> Result<(), AdapterError> {
+        Ok(())
+    }
 }
 
 async fn start_agent() -> (std::path::PathBuf, tempfile::TempDir) {

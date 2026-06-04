@@ -116,6 +116,32 @@
       <input id="p_slack" name="slack_webhook" type="url" value="{% if let Some(w) = profile.slack_webhook %}{{ w }}{% endif %}" placeholder="https://hooks.slack.com/services/T.../B.../...">
     </div>
 
+    <h2 style="font-size:0.95rem;margin:1.5rem 0 0.6rem">
+      WordPress plugins + themes <span class="muted" style="font-weight:400;font-size:0.82rem">— installed when this profile is applied to a WP-enabled hosting</span>
+    </h2>
+    <p class="text-soft small" style="margin:0 0 0.7rem;line-height:1.55">
+      One item per line. Each line is either:
+      a WordPress.org <strong>slug</strong> (<code>akismet</code>, <code>yoast-seo</code>),
+      or <code>@asset:&lt;id&gt;</code> to install from an uploaded ZIP
+      — see the <a href="/profiles/wp-assets">asset library</a> for IDs.
+      Trailing <code>!</code> means "also activate after install".
+      Lines starting with <code>#</code> are comments.
+    </p>
+    <div class="field-row">
+      <div class="field" style="flex:1">
+        <label for="p_wp_plugins">Plugins</label>
+        <textarea id="p_wp_plugins" name="wp_plugins" rows="6"
+                  style="font-family:var(--font-mono);font-size:0.85rem;width:100%"
+                  placeholder="akismet!&#10;wordpress-seo&#10;@asset:7    # internal client plugin">{{ profile.wp_plugins }}</textarea>
+      </div>
+      <div class="field" style="flex:1">
+        <label for="p_wp_themes">Themes</label>
+        <textarea id="p_wp_themes" name="wp_themes" rows="6"
+                  style="font-family:var(--font-mono);font-size:0.85rem;width:100%"
+                  placeholder="astra!&#10;@asset:3">{{ profile.wp_themes }}</textarea>
+      </div>
+    </div>
+
     <div class="row" style="margin-top:1rem;gap:0.5rem">
       <button class="btn primary" type="submit">
         <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>

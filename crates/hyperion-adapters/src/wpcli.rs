@@ -259,6 +259,71 @@ pub fn validate_plugin_url(s: &str) -> Result<(), AdapterError> {
     Ok(())
 }
 
+/// Install a plugin or theme by `source`. `source` is one of:
+///   - a wordpress.org slug (validated against SLUG_RX)
+///   - an https URL (validated against URL_RX)
+///   - a local absolute path to a ZIP under `/var/lib/hyperion/wp-assets/`
+///     (validated by prefix to avoid wp-cli being pointed at anything else)
+///
+/// `kind` is `"plugin"` or `"theme"` — caller has already
+/// vetted. Passes `--force` for local-path installs so re-uploads
+/// of the same asset over an existing install replace it
+/// cleanly. Optionally activates after install.
+pub async fn install_item(
+    user: &str,
+    htdocs: &str,
+    kind: &str,
+    source: &str,
+    activate: bool,
+) -> Result<(), AdapterError> {
+    ensure_wp_cli_present().await?;
+    if source.is_empty() {
+        return Err(AdapterError::Other("source must not be empty".into()));
+    }
+    // Decide what to pass to wp-cli + validate.
+    let is_local_path = source.starts_with('/');
+    let is_url = source.starts_with("http://") || source.starts_with("https://");
+    if is_local_path {
+        // Anti-traversal — only paths inside our managed asset dir.
+        if !source.starts_with("/var/lib/hyperion/wp-assets/") {
+            return Err(AdapterError::Other(format!(
+                "local ZIP path must be under /var/lib/hyperion/wp-assets/, got {source}"
+            )));
+        }
+        if !std::path::Path::new(source).exists() {
+            return Err(AdapterError::Other(format!(
+                "uploaded ZIP missing on disk: {source}"
+            )));
+        }
+    } else if is_url {
+        validate_plugin_url(source)?;
+    } else {
+        validate_plugin_slug(source)?;
+    }
+    // Build argv. `kind` is one of "plugin" / "theme" — caller has
+    // already validated, so we can use it directly as the subcommand.
+    let mut extra: Vec<String> = vec![kind.into(), "install".into(), source.into()];
+    if is_local_path {
+        // --force makes wp-cli replace an existing install — needed
+        // when an operator re-uploads a newer ZIP under the same
+        // slug.
+        extra.push("--force".into());
+    }
+    if activate {
+        extra.push("--activate".into());
+    }
+    let extra_refs: Vec<&str> = extra.iter().map(|s| s.as_str()).collect();
+    let argv = build_argv(user, htdocs, &extra_refs);
+    let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+    cmd::run("/usr/bin/sudo", &argv_refs).await.map_err(|e| {
+        AdapterError::Other(format!(
+            "wp {kind} install {source}{}: {e}",
+            if activate { " --activate" } else { "" }
+        ))
+    })?;
+    Ok(())
+}
+
 /// List installed WP plugins via `wp plugin list --format=json` and
 /// `wp core version`. Both calls run under `system_user` against
 /// `htdocs`. Returns the parsed plugin table + wp version string.
