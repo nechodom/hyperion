@@ -40,9 +40,12 @@
   <p class="text-soft small" style="margin:0 0 0.8rem">
     Max 50 MB. ZIPs are deduped on SHA-256 — re-uploading the same bytes returns the existing entry instead of writing a second copy.
   </p>
-  <form method="post" action="/profiles/wp-assets/upload" enctype="multipart/form-data"
+  {# CSRF token rides in the URL query string for multipart forms —
+     the check_csrf middleware deliberately doesn't buffer multipart
+     bodies (could be GBs) so it looks for ?_csrf=... instead. #}
+  <form method="post" action="/profiles/wp-assets/upload?_csrf={{ csrf_upload }}"
+        enctype="multipart/form-data"
         style="display:flex;gap:0.5rem;align-items:flex-end;flex-wrap:wrap">
-    <input type="hidden" name="_csrf" value="{{ csrf_upload }}">
     <div class="field" style="margin:0;width:8rem">
       <label for="upload_kind">Kind</label>
       <select id="upload_kind" name="kind" style="margin:0" required>
@@ -128,9 +131,9 @@
               {# Replace ZIP — multipart upload that keeps the same
                  asset id so profiles + tracking rows don't need
                  updating. Hidden file input behind a label/button. #}
-              <form method="post" action="/profiles/wp-assets/replace" enctype="multipart/form-data"
+              <form method="post" action="/profiles/wp-assets/replace?_csrf={{ csrf_upload }}"
+                    enctype="multipart/form-data"
                     style="display:inline" id="replace-form-{{ a.id }}">
-                <input type="hidden" name="_csrf" value="{{ csrf_upload }}">
                 <input type="hidden" name="id" value="{{ a.id }}">
                 <input type="file" name="file" accept=".zip,application/zip"
                        id="replace-input-{{ a.id }}"
