@@ -433,6 +433,16 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.hosting_export(hosting).await
     }
 
+    async fn hosting_migration_fetch_bundle_file(
+        &self,
+        bundle_id: String,
+        filename: String,
+    ) -> Result<String, RpcError> {
+        self.svc
+            .hosting_migration_fetch_bundle_file(bundle_id, filename)
+            .await
+    }
+
     async fn hosting_import(
         &self,
         manifest_path: String,

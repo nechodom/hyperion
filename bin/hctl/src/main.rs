@@ -465,6 +465,9 @@ fn print_pretty(resp: &Response) {
         Response::HostingFileDelete => println!("✓ file deleted"),
         Response::HostingFileMkdir => println!("✓ directory created"),
         Response::HostingFileRename => println!("✓ renamed"),
+        Response::HostingMigrationFetchBundleFile { bytes_b64 } => {
+            println!("✓ fetched bundle file ({} bytes b64)", bytes_b64.len());
+        }
         Response::HostingUsage(rows) => {
             println!(
                 "{:<14} {:>10} {:>10} {:>10} {:>10}",

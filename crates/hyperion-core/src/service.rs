@@ -3665,6 +3665,61 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// node. The bundle lives at `/var/lib/hyperion/migration/<id>/`
     /// — the operator transfers it out-of-band (scp/rsync/S3) and
     /// runs `hctl hosting import --bundle <file>` on the target.
+    /// Read one whitelisted file from
+    /// `/var/lib/hyperion/migration/<bundle_id>/` and return its
+    /// bytes as base64. Used by the master to pull a bundle off
+    /// a worker source during worker-to-X migration.
+    ///
+    /// Whitelist: "manifest.json" or "archive.tar.gz" only. Both
+    /// the bundle_id and the filename are validated to refuse
+    /// path traversal — ULID-shape for bundle_id, exact match for
+    /// filename.
+    pub async fn hosting_migration_fetch_bundle_file(
+        &self,
+        bundle_id: String,
+        filename: String,
+    ) -> Result<String, RpcError> {
+        use base64::Engine;
+        // bundle_id must be all-alphanumeric (ULID/timestamp shape).
+        if bundle_id.is_empty()
+            || !bundle_id
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        {
+            return Err(RpcError::Validation {
+                message: format!("bundle_id has illegal chars: {bundle_id:?}"),
+            });
+        }
+        if !matches!(filename.as_str(), "manifest.json" | "archive.tar.gz") {
+            return Err(RpcError::Validation {
+                message: format!(
+                    "filename must be `manifest.json` or `archive.tar.gz`, got {filename:?}"
+                ),
+            });
+        }
+        let path = std::path::PathBuf::from("/var/lib/hyperion/migration")
+            .join(&bundle_id)
+            .join(&filename);
+        let md = tokio::fs::metadata(&path)
+            .await
+            .map_err(|e| RpcError::NotFound {
+                kind: "migration_bundle_file".into(),
+                id: format!("{bundle_id}/{filename}: {e}"),
+            })?;
+        // Defense in depth — same 64 MiB cap as the file manager.
+        const MAX: u64 = 1024 * 1024 * 1024; // 1 GiB cap for archives
+        if md.len() > MAX {
+            return Err(RpcError::Validation {
+                message: format!("bundle file {} bytes exceeds 1 GiB cap", md.len()),
+            });
+        }
+        let bytes = tokio::fs::read(&path)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("read: {e}")))?;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        Ok(b64)
+    }
+
     pub async fn hosting_export(
         &self,
         sel: HostingSelector,

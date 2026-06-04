@@ -2371,6 +2371,50 @@ async fn fetch_master_accepts_hostings(state: &SharedState) -> bool {
     }
 }
 
+/// Pull the two bundle files (manifest.json + archive.tar.gz) off
+/// a worker source via signed RPC and write them under the master's
+/// own /var/lib/hyperion/migration/<bundle_id>/. After this the
+/// master's existing /api/migration/bundle/<id>/<filename> route
+/// serves the right bytes to the target node — the target doesn't
+/// need to know the bundle started life on a worker.
+///
+/// Returns the local bundle directory on the master on success.
+async fn pull_bundle_from_worker(
+    state: &SharedState,
+    source_node: &str,
+    bundle_id: &str,
+) -> Result<std::path::PathBuf, String> {
+    use base64::Engine;
+    let local_dir = std::path::PathBuf::from("/var/lib/hyperion/migration").join(bundle_id);
+    tokio::fs::create_dir_all(&local_dir)
+        .await
+        .map_err(|e| format!("create local bundle dir: {e}"))?;
+    for filename in ["manifest.json", "archive.tar.gz"] {
+        let resp = crate::dispatcher::dispatch_to_node(
+            state,
+            Some(source_node),
+            Request::HostingMigrationFetchBundleFile {
+                bundle_id: bundle_id.to_string(),
+                filename: filename.to_string(),
+            },
+        )
+        .await
+        .map_err(|e| format!("rpc {filename}: {e}"))?;
+        let bytes_b64 = match resp {
+            RpcResponse::HostingMigrationFetchBundleFile { bytes_b64 } => bytes_b64,
+            RpcResponse::Error(e) => return Err(format!("source rejected {filename}: {e}")),
+            _ => return Err(format!("unexpected response for {filename}")),
+        };
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(bytes_b64.as_bytes())
+            .map_err(|e| format!("b64 {filename}: {e}"))?;
+        tokio::fs::write(local_dir.join(filename), &bytes)
+            .await
+            .map_err(|e| format!("write {filename}: {e}"))?;
+    }
+    Ok(local_dir)
+}
+
 /// Auto-placement: pick the best-fit node for a new hosting when
 /// the operator chose the "auto" sentinel in the create form.
 ///
@@ -3271,18 +3315,13 @@ pub async fn post_migration_move(
     }
     let source_local = form.source_node.is_empty()
         || form.source_node == crate::dispatcher::LOCAL_NODE_SENTINEL;
-    if !source_local {
-        return Ok(Redirect::to(&format!(
-            "/hostings/{}?flash_error={}#migration",
-            sel_url,
-            urlencoding(
-                "Source must currently be the master. Worker-to-worker migration via UI is not yet wired — use the operator cheatsheet below for scp + hctl import."
-            )
-        ))
-        .into_response());
-    }
+    let source_node_str = if source_local {
+        crate::dispatcher::LOCAL_NODE_SENTINEL.to_string()
+    } else {
+        form.source_node.clone()
+    };
     let target_owned = target.to_string();
-    if target_owned == crate::dispatcher::LOCAL_NODE_SENTINEL {
+    if target_owned == source_node_str {
         return Ok(Redirect::to(&format!(
             "/hostings/{}?flash_error={}#migration",
             sel_url,
@@ -3291,9 +3330,17 @@ pub async fn post_migration_move(
         .into_response());
     }
 
-    // 1. Export the bundle on the source (= master).
-    let export = hyperion_rpc_client::call(
-        &state.agent_socket,
+    // 1. Export the bundle on the source. Dispatches to the source
+    // node (master OR worker) so the archive lands on the source's
+    // local /var/lib/hyperion/migration/<id>/.
+    let source_dispatch = if source_local {
+        None
+    } else {
+        Some(form.source_node.as_str())
+    };
+    let export = crate::dispatcher::dispatch_to_node(
+        &state,
+        source_dispatch,
         Request::HostingExport { hosting: sel.clone() },
     )
     .await?;
@@ -3309,6 +3356,26 @@ pub async fn post_migration_move(
         }
         _ => return Err(AppError::Internal("expected HostingExport".into())),
     };
+
+    // 1b. When the source was a worker the bundle files live on
+    // its disk — pull them to the master so the existing
+    // /api/migration/bundle/ download URL serves the right bytes.
+    if !source_local {
+        if let Err(e) = pull_bundle_from_worker(
+            &state,
+            &form.source_node,
+            &bundle.bundle_id,
+        )
+        .await
+        {
+            return Ok(Redirect::to(&format!(
+                "/hostings/{}?flash_error={}#migration",
+                sel_url,
+                urlencoding(&format!("Bundle proxy failed: {e}"))
+            ))
+            .into_response());
+        }
+    }
 
     // 2. Mint a signed download URL so the target node can fetch
     //    archive.tar.gz + manifest.json from the master's
@@ -3346,9 +3413,12 @@ pub async fn post_migration_move(
 
     // 4. Suspend the source — leaves it offline-but-recoverable so
     //    the operator can verify the new hosting works before
-    //    pulling the trigger on delete. Best-effort.
-    let _ = hyperion_rpc_client::call(
-        &state.agent_socket,
+    //    pulling the trigger on delete. Best-effort. Dispatched to
+    //    the SOURCE node (master OR worker) so we suspend the right
+    //    copy when the source isn't the master.
+    let _ = crate::dispatcher::dispatch_to_node(
+        &state,
+        source_dispatch,
         Request::HostingSuspend {
             sel: sel.clone(),
             reason: hyperion_types::SuspendReason::Manual {

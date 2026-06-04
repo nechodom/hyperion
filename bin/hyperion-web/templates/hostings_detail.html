@@ -2071,33 +2071,41 @@
 <!-- ============== MIGRATION TAB ============== -->
 <div class="tab-panel" id="tab-migration">
 
-{# One-click migration — only offered when the source is currently
-   the master AND at least one worker is enrolled. Worker-to-X
-   migrations need the master to proxy bundle bytes, which isn't
-   wired yet — those fall back to the manual flow below. #}
-{% if target_node.is_empty() && !all_nodes.is_empty() && detail.state.as_str() == "active" %}
+{# One-click migration — offered when there's at least one other
+   node to migrate TO. Master-to-worker and worker-to-X both work:
+   the master proxies bundle bytes from the source via signed RPC
+   when the source is a worker. #}
+{% if !all_nodes.is_empty() && detail.state.as_str() == "active" %}
 <div class="card hover">
   <h2>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
     One-click migrate
   </h2>
   <p class="text-soft small" style="margin:0 0 0.8rem">
-    Pick a target node — Hyperion exports {{ detail.domain }} here, hands the signed bundle URL to the target, waits for the import to finish, and suspends the source so you can verify the new copy before deleting the original.
+    Pick a target node — Hyperion exports {{ detail.domain }} on the source, the master proxies the bundle (when source is a worker), the target fetches + restores, and the source is suspended so you can verify the new copy before deleting the original.
   </p>
   <form method="post" action="/hostings/migration/move"
         data-confirm-title="Migrate {{ detail.domain }}"
-        data-confirm-body="A full backup will be taken on this node, the target will fetch + restore it, and the source will be SUSPENDED (not deleted). DNS still points at the source — update it manually once you've verified the target works. This can take a few minutes for large sites."
+        data-confirm-body="A full backup will be taken on the source node, the target will fetch + restore it, and the source will be SUSPENDED (not deleted). DNS still points at the source — update it manually once you've verified the target works. This can take a few minutes for large sites."
         data-confirm-confirm-label="Migrate now"
         data-confirm-variant="primary"
         style="display:flex;gap:0.5rem;align-items:flex-end;flex-wrap:wrap">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <input type="hidden" name="selector" value="{{ detail.domain }}">
-    <input type="hidden" name="source_node" value="">
+    {# source_node carries WHERE the hosting currently lives so the
+       handler dispatches Export + Suspend to the right agent. #}
+    <input type="hidden" name="source_node" value="{{ target_node }}">
     <div class="field" style="margin:0;flex:1;min-width:15rem">
       <label for="migrate_to">Target node</label>
       <select id="migrate_to" name="target_node" style="margin:0" required>
+        {# Master option only if hosting doesn't already live there. #}
+        {% if !target_node.is_empty() %}
+        <option value="local">master (this node)</option>
+        {% endif %}
         {% for n in all_nodes %}
+        {% if n.node_id != target_node %}
         <option value="{{ n.node_id }}">{{ n.label }}{% if let Some(ip) = n.public_ip.as_ref() %} — {{ ip }}{% endif %}</option>
+        {% endif %}
         {% endfor %}
       </select>
     </div>

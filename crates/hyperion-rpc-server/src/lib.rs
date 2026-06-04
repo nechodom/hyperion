@@ -367,6 +367,15 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::HostingExport(v),
             Err(e) => Response::Error(e),
         },
+        Request::HostingMigrationFetchBundleFile { bundle_id, filename } => {
+            match api
+                .hosting_migration_fetch_bundle_file(bundle_id, filename)
+                .await
+            {
+                Ok(bytes_b64) => Response::HostingMigrationFetchBundleFile { bytes_b64 },
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::HostingImport { manifest_path } => match api.hosting_import(manifest_path).await {
             Ok(v) => Response::HostingImport(v),
             Err(e) => Response::Error(e),
@@ -1018,6 +1027,13 @@ mod tests {
                 bundle_token: String::new(),
                 token_expires_at: 0,
             })
+        }
+        async fn hosting_migration_fetch_bundle_file(
+            &self,
+            _: String,
+            _: String,
+        ) -> Result<String, RpcError> {
+            Ok(String::new())
         }
         async fn hosting_import(
             &self,

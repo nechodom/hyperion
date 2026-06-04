@@ -268,6 +268,20 @@ pub enum Request {
     /// The bundle lives on the source node's disk; the operator
     /// transfers it out-of-band and imports on the target.
     HostingExport { hosting: HostingSelector },
+    /// Read one file from `/var/lib/hyperion/migration/<bundle_id>/`
+    /// and return its raw bytes (base64). Used by the master to pull
+    /// a bundle off a WORKER source during worker-to-X migration —
+    /// the master then re-serves the bytes on its existing
+    /// `/api/migration/bundle/<id>/<filename>` route so the target
+    /// node sees one canonical download URL regardless of where
+    /// the bundle was produced.
+    ///
+    /// `filename` is whitelisted: only "manifest.json" or
+    /// "archive.tar.gz" are accepted.
+    HostingMigrationFetchBundleFile {
+        bundle_id: String,
+        filename: String,
+    },
     /// Import a migration bundle by manifest path. Sibling
     /// `archive.tar.gz` is expected next to the manifest.
     HostingImport { manifest_path: String },
@@ -624,6 +638,7 @@ pub enum Response {
     AgentConfigUpdate,
     UpdateCheck(hyperion_types::UpdateStatus),
     HostingExport(hyperion_types::HostingMigrationBundle),
+    HostingMigrationFetchBundleFile { bytes_b64: String },
     HostingImport(hyperion_types::HostingImportResult),
     HostingImportFromUrl(hyperion_types::HostingImportResult),
     EmailLogList(Vec<hyperion_types::EmailLogEntry>),
