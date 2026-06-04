@@ -458,6 +458,13 @@ pub async fn post_wp_asset_upload(
     ctx: AuthCtx,
     mut multipart: axum::extract::Multipart,
 ) -> Result<Response, AppError> {
+    // Diagnostic breadcrumb — if you see "CSRF check failed" in
+    // journalctl but NOT this line, the middleware rejected the
+    // request before it reached here (token missing / mismatched).
+    tracing::info!(
+        operator = %ctx.username,
+        "post_wp_asset_upload entered"
+    );
     if !ctx.is_admin_or_higher() {
         return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
     }
@@ -638,6 +645,7 @@ pub async fn post_wp_asset_replace(
     ctx: AuthCtx,
     mut multipart: axum::extract::Multipart,
 ) -> Result<Response, AppError> {
+    tracing::info!(operator = %ctx.username, "post_wp_asset_replace entered");
     if !ctx.is_admin_or_higher() {
         return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
     }

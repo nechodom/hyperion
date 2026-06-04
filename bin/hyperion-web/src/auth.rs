@@ -273,10 +273,28 @@ pub async fn check_csrf(
         })
         .unwrap_or(false);
     if !ok {
+        // Print enough info for the operator to grep journalctl
+        // and figure out WHICH check failed (missing token vs.
+        // expired vs. wrong key). Token value itself is logged at
+        // 8-char prefix only — full value is sensitive enough that
+        // we don't want it in plaintext logs.
+        let token_prefix: String = token
+            .as_deref()
+            .map(|t| t.chars().take(8).collect())
+            .unwrap_or_else(|| "(none)".into());
+        let content_type = parts
+            .headers
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("(missing)")
+            .to_string();
         tracing::warn!(
             path = %form_id,
             had_session = %ctx.is_authenticated(),
             token_source = ?token_source(token.as_deref(), &parts),
+            token_prefix = %token_prefix,
+            content_type = %content_type,
+            is_multipart = %is_multipart,
             "CSRF check failed",
         );
         return (StatusCode::FORBIDDEN, "CSRF check failed").into_response();
