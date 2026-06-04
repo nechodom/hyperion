@@ -630,6 +630,151 @@ pub async fn post_wp_install_from_asset(
     }
 }
 
+/// POST /profiles/wp-assets/replace — multipart upload that
+/// overwrites an existing asset's on-disk ZIP. Field `id` carries
+/// the target asset, `file` is the new ZIP. Admin-only.
+pub async fn post_wp_asset_replace(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    mut multipart: axum::extract::Multipart,
+) -> Result<Response, AppError> {
+    if !ctx.is_admin_or_higher() {
+        return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
+    }
+    let mut id: Option<i64> = None;
+    let mut original_name: Option<String> = None;
+    let mut bytes: Option<Vec<u8>> = None;
+    const MAX_FIELD_BYTES: usize = 60 * 1024 * 1024;
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| AppError::BadRequest(format!("multipart: {e}")))?
+    {
+        let name = field.name().unwrap_or("").to_string();
+        match name.as_str() {
+            "id" => {
+                let v = field
+                    .text()
+                    .await
+                    .map_err(|e| AppError::BadRequest(format!("id: {e}")))?;
+                id = v.trim().parse::<i64>().ok();
+            }
+            "file" => {
+                let filename = field
+                    .file_name()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| "asset.zip".to_string());
+                let data = field
+                    .bytes()
+                    .await
+                    .map_err(|e| AppError::BadRequest(format!("file: {e}")))?;
+                if data.len() > MAX_FIELD_BYTES {
+                    return Err(AppError::BadRequest(format!(
+                        "file too large ({} bytes); max {}",
+                        data.len(),
+                        MAX_FIELD_BYTES
+                    )));
+                }
+                original_name = Some(filename);
+                bytes = Some(data.to_vec());
+            }
+            _ => {}
+        }
+    }
+    let id = id.ok_or_else(|| AppError::BadRequest("missing `id` field".into()))?;
+    let original_name =
+        original_name.ok_or_else(|| AppError::BadRequest("missing `file` field".into()))?;
+    let bytes = bytes.ok_or_else(|| AppError::BadRequest("missing `file` bytes".into()))?;
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::WpAssetReplace {
+            id,
+            original_name: original_name.clone(),
+            bytes,
+            uploaded_by: ctx.username.clone(),
+        },
+    )
+    .await?;
+    match resp {
+        RpcResponse::WpAssetReplace => Ok(Redirect::to(&format!(
+            "/profiles/wp-assets?flash={}",
+            urlencoding(&format!(
+                "Asset id {id} replaced with \"{original_name}\". Click \"Re-install on all\" to push the new version."
+            ))
+        ))
+        .into_response()),
+        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
+            "/profiles/wp-assets?error={}",
+            urlencoding(&e.to_string())
+        ))
+        .into_response()),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct WpAssetReinstallForm {
+    pub id: i64,
+    /// "" = keep original per-row activate flag; "force_on" =
+    /// activate everywhere; "force_off" = deactivate everywhere.
+    #[serde(default)]
+    pub activate_mode: String,
+}
+
+/// POST /profiles/wp-assets/reinstall-all — pushes the asset's
+/// current bytes onto every hosting tracked in wp_asset_installs.
+pub async fn post_wp_asset_reinstall_all(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<WpAssetReinstallForm>,
+) -> Result<Response, AppError> {
+    if !ctx.is_admin_or_higher() {
+        return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
+    }
+    let force_activate = match form.activate_mode.as_str() {
+        "force_on" => Some(true),
+        "force_off" => Some(false),
+        _ => None,
+    };
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::WpAssetReinstallAll {
+            asset_id: form.id,
+            force_activate,
+        },
+    )
+    .await?;
+    match resp {
+        RpcResponse::WpAssetReinstallAll {
+            installed_ok,
+            installed_failed,
+            failure_tail,
+        } => {
+            let msg = if installed_failed == 0 {
+                format!("Re-installed on {installed_ok} hosting(s).")
+            } else {
+                format!(
+                    "Re-installed on {installed_ok} hosting(s); {installed_failed} failed. First failures: {}",
+                    failure_tail.lines().take(3).collect::<Vec<_>>().join(" | ")
+                )
+            };
+            let key = if installed_failed == 0 { "flash" } else { "error" };
+            Ok(Redirect::to(&format!(
+                "/profiles/wp-assets?{}={}",
+                key,
+                urlencoding(&msg)
+            ))
+            .into_response())
+        }
+        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
+            "/profiles/wp-assets?error={}",
+            urlencoding(&e.to_string())
+        ))
+        .into_response()),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
 pub async fn post_wp_asset_delete(
     State(state): State<SharedState>,
     ctx: AuthCtx,

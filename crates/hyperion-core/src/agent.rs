@@ -322,6 +322,26 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     ) -> Result<(String, String), RpcError> {
         self.svc.wp_install_from_asset(sel, asset_id, activate).await
     }
+    async fn wp_asset_replace(
+        &self,
+        id: i64,
+        original_name: String,
+        bytes: Vec<u8>,
+        uploaded_by: String,
+    ) -> Result<(), RpcError> {
+        self.svc
+            .wp_asset_replace(id, original_name, bytes, uploaded_by)
+            .await
+    }
+    async fn wp_asset_reinstall_all(
+        &self,
+        asset_id: i64,
+        force_activate: Option<bool>,
+    ) -> Result<(i64, i64, String), RpcError> {
+        self.svc
+            .wp_asset_reinstall_all(asset_id, force_activate)
+            .await
+    }
     async fn wp_theme_list(
         &self,
         hosting: hyperion_rpc::HostingSelector,

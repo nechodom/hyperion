@@ -107,6 +107,112 @@ pub async fn delete(pool: &SqlitePool, id: i64) -> Result<(), StateError> {
     Ok(())
 }
 
+/// Replace an existing asset's on-disk file metadata. Used by
+/// `WpAssetReplace` so profiles + audit references that point at
+/// `@asset:<id>` survive a version bump.
+#[allow(clippy::too_many_arguments)]
+pub async fn replace(
+    pool: &SqlitePool,
+    id: i64,
+    original_name: &str,
+    stored_filename: &str,
+    size_bytes: i64,
+    sha256: &str,
+    uploaded_at: i64,
+    uploaded_by: &str,
+) -> Result<(), StateError> {
+    sqlx::query(
+        "UPDATE wp_assets SET \
+            original_name = ?, stored_filename = ?, size_bytes = ?, \
+            sha256 = ?, uploaded_at = ?, uploaded_by = ? \
+         WHERE id = ?",
+    )
+    .bind(original_name)
+    .bind(stored_filename)
+    .bind(size_bytes)
+    .bind(sha256)
+    .bind(uploaded_at)
+    .bind(uploaded_by)
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Record (or update) the fact that `hosting_id` (on `node_id`)
+/// got `asset_id` installed. Upsert keyed on (asset_id, hosting_id)
+/// so re-install just bumps last_at. Best-effort callers can
+/// ignore the error.
+pub async fn record_install(
+    pool: &SqlitePool,
+    asset_id: i64,
+    hosting_id: &str,
+    node_id: &str,
+    activate: bool,
+    last_at: i64,
+) -> Result<(), StateError> {
+    sqlx::query(
+        "INSERT INTO wp_asset_installs (asset_id, hosting_id, node_id, activate, last_at) \
+         VALUES (?, ?, ?, ?, ?) \
+         ON CONFLICT(asset_id, hosting_id) DO UPDATE SET \
+            node_id = excluded.node_id, \
+            activate = excluded.activate, \
+            last_at = excluded.last_at",
+    )
+    .bind(asset_id)
+    .bind(hosting_id)
+    .bind(node_id)
+    .bind(if activate { 1 } else { 0 })
+    .bind(last_at)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Count distinct hostings tracked as having `asset_id` installed.
+/// Returns 0 for unknown assets (no row constraint here).
+pub async fn install_count(pool: &SqlitePool, asset_id: i64) -> Result<i64, StateError> {
+    let row: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM wp_asset_installs WHERE asset_id = ?",
+    )
+    .bind(asset_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.0)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstallTargetRow {
+    pub hosting_id: String,
+    pub node_id: String,
+    pub activate: bool,
+    pub last_at: i64,
+}
+
+/// List all (hosting_id, node_id, activate, last_at) tuples where
+/// `asset_id` was previously installed. Used by `WpAssetReinstallAll`.
+pub async fn list_install_targets(
+    pool: &SqlitePool,
+    asset_id: i64,
+) -> Result<Vec<InstallTargetRow>, StateError> {
+    let rows: Vec<(String, String, i64, i64)> = sqlx::query_as(
+        "SELECT hosting_id, node_id, activate, last_at \
+         FROM wp_asset_installs WHERE asset_id = ?",
+    )
+    .bind(asset_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(hosting_id, node_id, activate, last_at)| InstallTargetRow {
+            hosting_id,
+            node_id,
+            activate: activate != 0,
+            last_at,
+        })
+        .collect())
+}
+
 /// Lookup the unique SHA — used to dedupe an upload (if the same
 /// bytes are already in the library, return the existing row instead
 /// of inserting a second copy).

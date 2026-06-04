@@ -270,6 +270,34 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             },
             Err(e) => Response::Error(e),
         },
+        Request::WpAssetReplace {
+            id,
+            original_name,
+            bytes,
+            uploaded_by,
+        } => match api
+            .wp_asset_replace(id, original_name, bytes, uploaded_by)
+            .await
+        {
+            Ok(()) => Response::WpAssetReplace,
+            Err(e) => Response::Error(e),
+        },
+        Request::WpAssetReinstallAll {
+            asset_id,
+            force_activate,
+        } => match api
+            .wp_asset_reinstall_all(asset_id, force_activate)
+            .await
+        {
+            Ok((installed_ok, installed_failed, failure_tail)) => {
+                Response::WpAssetReinstallAll {
+                    installed_ok,
+                    installed_failed,
+                    failure_tail,
+                }
+            }
+            Err(e) => Response::Error(e),
+        },
         Request::WpThemeList { hosting } => match api.wp_theme_list(hosting).await {
             Ok(t) => Response::WpThemeList(t),
             Err(e) => Response::Error(e),
@@ -794,6 +822,22 @@ mod tests {
             _: bool,
         ) -> Result<(String, String), RpcError> {
             Ok(("plugin".into(), "stub.zip".into()))
+        }
+        async fn wp_asset_replace(
+            &self,
+            _: i64,
+            _: String,
+            _: Vec<u8>,
+            _: String,
+        ) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn wp_asset_reinstall_all(
+            &self,
+            _: i64,
+            _: Option<bool>,
+        ) -> Result<(i64, i64, String), RpcError> {
+            Ok((0, 0, String::new()))
         }
         async fn wp_theme_list(
             &self,

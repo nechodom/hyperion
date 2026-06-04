@@ -200,6 +200,14 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::profiles::post_wp_asset_delete),
         )
         .route(
+            "/profiles/wp-assets/replace",
+            post(handlers::profiles::post_wp_asset_replace),
+        )
+        .route(
+            "/profiles/wp-assets/reinstall-all",
+            post(handlers::profiles::post_wp_asset_reinstall_all),
+        )
+        .route(
             "/hostings/wp/install-from-asset",
             post(handlers::profiles::post_wp_install_from_asset),
         )

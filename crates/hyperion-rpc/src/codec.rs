@@ -172,6 +172,30 @@ pub enum Request {
         /// after install.
         activate: bool,
     },
+    /// Replace an existing asset's on-disk ZIP. Keeps the asset's
+    /// id, so profiles + tracking rows that reference `@asset:<id>`
+    /// continue to work — they'll just install the NEW bytes next
+    /// time around. Operator's intent: "I uploaded a newer version
+    /// of this plugin, point the existing entry at it".
+    WpAssetReplace {
+        id: i64,
+        original_name: String,
+        bytes: Vec<u8>,
+        uploaded_by: String,
+    },
+    /// Push the current bytes of `asset_id` onto every hosting that
+    /// the master previously dispatched a one-off / bulk install
+    /// of this asset to (tracked in master-side `wp_asset_installs`).
+    /// Each install runs `wp <kind> install --force` so the new
+    /// version replaces the old. Returns (installed_ok,
+    /// installed_failed, error_messages_tail).
+    WpAssetReinstallAll {
+        asset_id: i64,
+        /// Force activate even if some hostings had activate=false
+        /// originally. None = use the per-row activate value
+        /// recorded at last install.
+        force_activate: Option<bool>,
+    },
     /// `wp theme list --format=json` against this hosting.
     WpThemeList {
         hosting: HostingSelector,
@@ -508,6 +532,16 @@ pub enum Response {
     WpInstallFromAsset {
         kind: String,
         original_name: String,
+    },
+    WpAssetReplace,
+    /// Result of a "re-install on all" run.
+    WpAssetReinstallAll {
+        installed_ok: i64,
+        installed_failed: i64,
+        /// Up to ~10 lines of per-hosting failure messages so the
+        /// UI flash can show something concrete instead of just a
+        /// count. Empty when everything succeeded.
+        failure_tail: String,
     },
     WpThemeList(hyperion_types::WpThemeListResponse),
     WpThemeAction(hyperion_types::WpThemeActionResult),

@@ -154,6 +154,21 @@ pub trait AgentApi: Send + Sync + 'static {
         asset_id: i64,
         activate: bool,
     ) -> Result<(String, String), RpcError>;
+    /// Replace an existing asset's on-disk file in place.
+    async fn wp_asset_replace(
+        &self,
+        id: i64,
+        original_name: String,
+        bytes: Vec<u8>,
+        uploaded_by: String,
+    ) -> Result<(), RpcError>;
+    /// Re-install an asset on every hosting tracked in
+    /// wp_asset_installs. Returns (ok_count, fail_count, failure_tail).
+    async fn wp_asset_reinstall_all(
+        &self,
+        asset_id: i64,
+        force_activate: Option<bool>,
+    ) -> Result<(i64, i64, String), RpcError>;
     /// `wp theme list` for a hosting.
     async fn wp_theme_list(
         &self,

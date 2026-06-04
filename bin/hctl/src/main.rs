@@ -946,6 +946,20 @@ fn print_pretty(resp: &Response) {
         } => {
             println!("wp {kind} installed from library: {original_name}");
         }
+        Response::WpAssetReplace => {
+            println!("wp asset replaced");
+        }
+        Response::WpAssetReinstallAll {
+            installed_ok,
+            installed_failed,
+            failure_tail,
+        } => {
+            println!("wp asset reinstall: {installed_ok} ok, {installed_failed} failed");
+            if !failure_tail.is_empty() {
+                println!("--- failures ---");
+                println!("{failure_tail}");
+            }
+        }
         Response::WpThemeList(r) => {
             println!("wp core: {}", r.wp_version);
             println!(

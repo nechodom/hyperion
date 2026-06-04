@@ -124,15 +124,49 @@
             </code>
           </td>
           <td class="right">
-            <form method="post" action="/profiles/wp-assets/delete" style="display:inline"
-                  data-confirm-title="Delete asset"
-                  data-confirm-body="The ZIP {{ a.original_name }} will be removed from disk.{% if a.profile_refs > 0 %} ⚠ {{ a.profile_refs }} profile{% if a.profile_refs != 1 %}s{% endif %} still reference{% if a.profile_refs == 1 %}s{% endif %} this asset — those references will fail at next apply.{% endif %}"
-                  data-confirm-confirm-label="Delete asset"
-                  data-confirm-variant="danger">
-              <input type="hidden" name="_csrf" value="{{ csrf_delete }}">
-              <input type="hidden" name="id" value="{{ a.id }}">
-              <button class="btn small danger" type="submit">Delete</button>
-            </form>
+            <div style="display:inline-flex;gap:0.3rem;flex-wrap:wrap;justify-content:flex-end">
+              {# Replace ZIP — multipart upload that keeps the same
+                 asset id so profiles + tracking rows don't need
+                 updating. Hidden file input behind a label/button. #}
+              <form method="post" action="/profiles/wp-assets/replace" enctype="multipart/form-data"
+                    style="display:inline" id="replace-form-{{ a.id }}">
+                <input type="hidden" name="_csrf" value="{{ csrf_upload }}">
+                <input type="hidden" name="id" value="{{ a.id }}">
+                <input type="file" name="file" accept=".zip,application/zip"
+                       id="replace-input-{{ a.id }}"
+                       style="display:none"
+                       onchange="if(this.files.length){this.form.submit()}">
+                <button type="button" class="btn small"
+                        onclick="document.getElementById('replace-input-{{ a.id }}').click()"
+                        title="Upload a new ZIP for this asset (keeps id)">
+                  Replace ZIP
+                </button>
+              </form>
+              {# Re-install on all — only shown when at least one
+                 hosting is tracked. Confirm modal warns this
+                 dispatches per-hosting installs sequentially. #}
+              {% if a.install_count > 0 %}
+              <form method="post" action="/profiles/wp-assets/reinstall-all" style="display:inline"
+                    data-confirm-title="Re-install on {{ a.install_count }} hosting(s)"
+                    data-confirm-body="The current bytes of {{ a.original_name }} will be pushed to every hosting that previously had this asset installed (via wp install --force). The original per-row activate flag is preserved. Sequential — may take a minute per hosting."
+                    data-confirm-confirm-label="Re-install everywhere"
+                    data-confirm-variant="primary">
+                <input type="hidden" name="_csrf" value="{{ csrf_upload }}">
+                <input type="hidden" name="id" value="{{ a.id }}">
+                <input type="hidden" name="activate_mode" value="">
+                <button class="btn small primary" type="submit">Re-install on {{ a.install_count }}</button>
+              </form>
+              {% endif %}
+              <form method="post" action="/profiles/wp-assets/delete" style="display:inline"
+                    data-confirm-title="Delete asset"
+                    data-confirm-body="The ZIP {{ a.original_name }} will be removed from disk. {{ a.profile_refs }} profile reference(s) will fail at next apply; {{ a.install_count }} hosting install(s) stay in place (only the library entry is removed)."
+                    data-confirm-confirm-label="Delete asset"
+                    data-confirm-variant="danger">
+                <input type="hidden" name="_csrf" value="{{ csrf_delete }}">
+                <input type="hidden" name="id" value="{{ a.id }}">
+                <button class="btn small danger" type="submit">Delete</button>
+              </form>
+            </div>
           </td>
         </tr>
         {% endfor %}

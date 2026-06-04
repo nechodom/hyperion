@@ -600,41 +600,6 @@ fn count_profile_asset_refs(
     count
 }
 
-/// Count successful `wp.install_from_asset` audit entries grouped
-/// by asset_id. Returns a map you can `.get(&id)` from. The audit
-/// payload is JSON; we parse it lazily — failures (malformed JSON,
-/// missing field, wrong type) just skip the row instead of
-/// aborting the whole query.
-async fn audit_install_counts_by_asset(
-    pool: &sqlx::SqlitePool,
-) -> std::collections::HashMap<i64, i64> {
-    let mut out: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
-    // Cap at 10 000 rows — install events are rare (operator
-    // clicks), so this is plenty. Larger installs eventually
-    // archive into compressed log files; the UI counter doesn't
-    // need to be 100% historically accurate.
-    let rows: Vec<(String,)> = match sqlx::query_as(
-        "SELECT payload_json FROM audit_log \
-         WHERE action = 'wp.install_from_asset' AND result = 'ok' \
-         ORDER BY id DESC LIMIT 10000",
-    )
-    .fetch_all(pool)
-    .await
-    {
-        Ok(r) => r,
-        Err(_) => return out,
-    };
-    for (payload,) in rows {
-        let Ok(v): Result<serde_json::Value, _> = serde_json::from_str(&payload) else {
-            continue;
-        };
-        let Some(id) = v.get("asset_id").and_then(|x| x.as_i64()) else {
-            continue;
-        };
-        *out.entry(id).or_insert(0) += 1;
-    }
-    out
-}
 
 /// Drive a service-install job (apt-get install + systemctl
 /// enable --now) and stream output into the shared status slot.
@@ -6855,34 +6820,35 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let rows = hyperion_state::wp_assets::list(&self.pool)
             .await
             .map_err(|e| RpcError::Internal_with(format!("wp_asset list: {e}")))?;
-        // Compute usage counts in two cheap passes — one over
-        // every profile's text fields (looking for @asset:<id>
-        // tokens), one over the audit log (counting successful
-        // install_from_asset entries by asset_id). Both are
-        // small queries on small tables; doing this server-side
-        // means the UI doesn't have to materialize them.
+        // Usage counts: profile_refs from a substring scan of
+        // every profile's wp_plugins+wp_themes, install_count
+        // from the master-side wp_asset_installs tracking table
+        // (more accurate than the audit-log scan we did
+        // pre-019_wp_asset_installs — that one missed installs
+        // dispatched to remote nodes).
         let profiles = hyperion_state::profiles::list(&self.pool)
             .await
             .map_err(|e| RpcError::Internal_with(format!("wp_asset usage profiles: {e}")))?;
-        let install_counts = audit_install_counts_by_asset(&self.pool).await;
-        Ok(rows
-            .into_iter()
-            .map(|r| {
-                let profile_refs = count_profile_asset_refs(&profiles, r.id);
-                let install_count = install_counts.get(&r.id).copied().unwrap_or(0);
-                hyperion_types::WpAssetSummary {
-                    id: r.id,
-                    kind: r.kind,
-                    original_name: r.original_name,
-                    size_bytes: r.size_bytes,
-                    sha256: r.sha256,
-                    uploaded_at: r.uploaded_at,
-                    uploaded_by: r.uploaded_by,
-                    profile_refs,
-                    install_count,
-                }
-            })
-            .collect())
+        let mut out: Vec<hyperion_types::WpAssetSummary> = Vec::with_capacity(rows.len());
+        for r in rows {
+            let profile_refs = count_profile_asset_refs(&profiles, r.id);
+            let install_count =
+                hyperion_state::wp_assets::install_count(&self.pool, r.id)
+                    .await
+                    .unwrap_or(0);
+            out.push(hyperion_types::WpAssetSummary {
+                id: r.id,
+                kind: r.kind,
+                original_name: r.original_name,
+                size_bytes: r.size_bytes,
+                sha256: r.sha256,
+                uploaded_at: r.uploaded_at,
+                uploaded_by: r.uploaded_by,
+                profile_refs,
+                install_count,
+            });
+        }
+        Ok(out)
     }
 
     /// Install one uploaded asset onto a hosting. Looks up the
@@ -6932,7 +6898,168 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             "ok",
         )
         .await;
+        // Record in the master-side tracking table so the
+        // "Re-install on all" button knows which hostings to push
+        // a newer version to. node_id is read from the local
+        // current_node_id — best-effort; for cross-node installs
+        // dispatched from a worker (rare), node_id will be the
+        // local one which is still a reasonable hint.
+        let node_id = self.current_node_id();
+        let _ = hyperion_state::wp_assets::record_install(
+            &self.pool,
+            asset_id,
+            detail.id.as_str(),
+            &node_id,
+            activate,
+            now_secs(),
+        )
+        .await;
         Ok((row.kind, row.original_name))
+    }
+
+    /// Replace the on-disk ZIP for an existing asset id, keeping
+    /// the id stable so profiles + tracking rows that reference
+    /// `@asset:<id>` survive a version bump.
+    pub async fn wp_asset_replace(
+        &self,
+        id: i64,
+        original_name: String,
+        bytes: Vec<u8>,
+        uploaded_by: String,
+    ) -> Result<(), RpcError> {
+        // Same validation as upload — empty + size + magic bytes.
+        if bytes.is_empty() {
+            return Err(RpcError::Validation {
+                message: "uploaded file is empty".into(),
+            });
+        }
+        const MAX_BYTES: usize = 50 * 1024 * 1024;
+        if bytes.len() > MAX_BYTES {
+            return Err(RpcError::Validation {
+                message: format!(
+                    "uploaded file is {} bytes — max is {} bytes (50 MB)",
+                    bytes.len(),
+                    MAX_BYTES
+                ),
+            });
+        }
+        if bytes.len() < 4 || &bytes[..4] != b"PK\x03\x04" {
+            return Err(RpcError::Validation {
+                message: "file is not a ZIP archive (missing PK header)".into(),
+            });
+        }
+        let row = hyperion_state::wp_assets::get_by_id(&self.pool, id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("wp_asset lookup: {e}")))?
+            .ok_or_else(|| RpcError::NotFound {
+                kind: "wp_asset".into(),
+                id: id.to_string(),
+            })?;
+        let sha = hex::encode(blake3::hash(&bytes).as_bytes());
+        // Wipe the old file (its name might differ from the new
+        // one — the dir is per-id so it's safe to clear). Then
+        // write the new file in the same dir.
+        let dir = std::path::PathBuf::from("/var/lib/hyperion/wp-assets").join(id.to_string());
+        let _ = tokio::fs::remove_file(&dir.join(&row.stored_filename)).await;
+        tokio::fs::create_dir_all(&dir).await.map_err(|e| {
+            RpcError::Internal_with(format!("mkdir wp-assets/{id}: {e}"))
+        })?;
+        let safe_name: String = original_name
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-' || *c == '_')
+            .take(64)
+            .collect();
+        let stored_filename = if safe_name.is_empty() {
+            "asset.zip".to_string()
+        } else if !safe_name.ends_with(".zip") {
+            format!("{safe_name}.zip")
+        } else {
+            safe_name
+        };
+        let path = dir.join(&stored_filename);
+        tokio::fs::write(&path, &bytes).await.map_err(|e| {
+            RpcError::Internal_with(format!("write wp-assets/{id}/{stored_filename}: {e}"))
+        })?;
+        use std::os::unix::fs::PermissionsExt;
+        let _ = tokio::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).await;
+        hyperion_state::wp_assets::replace(
+            &self.pool,
+            id,
+            &original_name,
+            &stored_filename,
+            bytes.len() as i64,
+            &sha,
+            now_secs(),
+            &uploaded_by,
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("wp_asset replace: {e}")))?;
+        self.append_audit(
+            "wp_asset.replace",
+            None,
+            &serde_json::json!({
+                "id": id,
+                "kind": row.kind,
+                "original_name": original_name,
+                "size_bytes": bytes.len(),
+                "sha256": sha,
+                "previous_sha256": row.sha256,
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
+    /// Push the current bytes of `asset_id` onto every hosting
+    /// tracked in wp_asset_installs. One install per (asset_id,
+    /// hosting_id) — re-installs run sequentially to avoid hammering
+    /// the cluster, and any single failure is appended to a
+    /// failure_tail string instead of aborting the run.
+    pub async fn wp_asset_reinstall_all(
+        &self,
+        asset_id: i64,
+        force_activate: Option<bool>,
+    ) -> Result<(i64, i64, String), RpcError> {
+        let targets = hyperion_state::wp_assets::list_install_targets(&self.pool, asset_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("install targets: {e}")))?;
+        let mut ok: i64 = 0;
+        let mut fail: i64 = 0;
+        let mut failures: Vec<String> = Vec::new();
+        for t in &targets {
+            let activate = force_activate.unwrap_or(t.activate);
+            let sel = HostingSelector::Id(hyperion_types::HostingId(t.hosting_id.clone()));
+            // Re-run the same install path. Reusing wp_install_from_asset
+            // means it also updates record_install (bumps last_at) for free.
+            match self
+                .wp_install_from_asset(sel, asset_id, activate)
+                .await
+            {
+                Ok(_) => ok += 1,
+                Err(e) => {
+                    fail += 1;
+                    failures.push(format!("{}: {}", t.hosting_id, e));
+                }
+            }
+        }
+        let failure_tail = failures.into_iter().take(10).collect::<Vec<_>>().join("\n");
+        self.append_audit(
+            "wp_asset.reinstall_all",
+            None,
+            &serde_json::json!({
+                "asset_id": asset_id,
+                "force_activate": force_activate,
+                "targets": targets.len(),
+                "ok": ok,
+                "fail": fail,
+            })
+            .to_string(),
+            if fail == 0 { "ok" } else { "warn" },
+        )
+        .await;
+        Ok((ok, fail, failure_tail))
     }
 
     pub async fn wp_asset_delete(&self, id: i64) -> Result<(), RpcError> {
