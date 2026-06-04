@@ -497,27 +497,140 @@ fn stitch_dig_txt(raw: &str) -> String {
 /// Err with a useful message otherwise. Used by the migration
 /// import-from-url path; cheap to call because curl is already a
 /// hard dependency of the installer.
+/// Remove `mig_*` sub-dirs under `root` whose mtime is older than
+/// `max_age`. Returns the count removed. Extracted as a free
+/// function so it has a fs-only signature that's easy to unit-test
+/// with `tempfile::tempdir`. Caller (`prune_old_migration_bundles`)
+/// is responsible for passing the real `/var/lib/hyperion/migration`
+/// root.
+async fn prune_migration_bundle_dir(
+    root: &std::path::Path,
+    max_age: std::time::Duration,
+) -> Result<u32, RpcError> {
+    let mut dir = match tokio::fs::read_dir(root).await {
+        Ok(d) => d,
+        // Root doesn't exist yet (no exports ever run) — nothing to
+        // do, not an error.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => {
+            return Err(RpcError::Internal_with(format!(
+                "read migration root: {e}"
+            )));
+        }
+    };
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(max_age)
+        .unwrap_or(std::time::UNIX_EPOCH);
+    let mut removed: u32 = 0;
+    while let Ok(Some(entry)) = dir.next_entry().await {
+        let path = entry.path();
+        // Only prune mig_* sub-dirs we created. Don't touch anything
+        // else an operator may have stashed there.
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !name.starts_with("mig_") {
+            continue;
+        }
+        let Ok(meta) = entry.metadata().await else { continue };
+        if !meta.is_dir() {
+            continue;
+        }
+        let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+        if mtime < cutoff {
+            match tokio::fs::remove_dir_all(&path).await {
+                Ok(()) => {
+                    tracing::info!(bundle=%name, "pruned stale migration bundle");
+                    removed = removed.saturating_add(1);
+                }
+                Err(e) => {
+                    tracing::warn!(bundle=%name, error=%e, "could not prune bundle");
+                }
+            }
+        }
+    }
+    Ok(removed)
+}
+
+/// Resolve a sensible mail-FQDN for the suggested From address.
+/// /etc/mailname is postfix's canonical source; fall back to
+/// /etc/hostname. Returns None for non-FQDN inputs (no dot, or
+/// the well-known duds "localhost" / "localhost.localdomain") so
+/// the autodetect doesn't suggest a from-address that every
+/// external relay will reject with "550 sender domain not FQDN".
+fn read_mail_fqdn() -> Option<String> {
+    for path in &["/etc/mailname", "/etc/hostname"] {
+        let v = std::fs::read_to_string(path)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+        if let Some(s) = v {
+            if !s.contains('.') {
+                continue;
+            }
+            if s == "localhost.localdomain" {
+                continue;
+            }
+            return Some(s);
+        }
+    }
+    None
+}
+
+/// Hard cap on imported migration archives. 8 GB is far past any
+/// reasonable hosting archive (real ones land at 10s–100s of MB,
+/// the largest ever seen in dev was ~3 GB on a WP site with a 2-GB
+/// uploads dir). Without a cap, a malicious or accidentally-huge
+/// upstream can fill /var/lib partition.
+const MIGRATION_MAX_DOWNLOAD_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+
 async fn curl_to_file(url: &str, dest: &std::path::Path) -> Result<(), RpcError> {
     // -f: fail with non-zero exit on 4xx/5xx (otherwise curl happily
     //     writes the error body to disk and we'd "import" garbage).
-    // -L: follow redirects (the source might 301 us to a CDN).
     // --max-time 1800: 30-minute hard cap for multi-GB archives.
-    // -o: write to dest.
+    // --max-filesize: refuse downloads larger than 8 GB. Without
+    //   this a malicious upstream could fill the disk.
+    // --max-redirs 0: do NOT follow redirects. With -L set, an
+    //   attacker who got the operator to paste their URL into the
+    //   import form could 302 us to file:// / DNS-rebind /
+    //   internal IP, opening a SSRF pivot. The legitimate source
+    //   serves the bundle on a known URL and doesn't need
+    //   redirects; if a future deployment does, the operator can
+    //   set up a proxy.
+    // --proto =https,http: refuse file:// / gopher:// / dict://
+    //   even if the URL parser somehow accepts them.
+    let mut args: Vec<String> = vec![
+        "-fsS".into(),
+        "--max-time".into(), "1800".into(),
+        "--max-filesize".into(), MIGRATION_MAX_DOWNLOAD_BYTES.to_string(),
+        "--max-redirs".into(), "0".into(),
+        "--proto".into(), "=https,http".into(),
+        "-o".into(), dest.display().to_string(),
+        url.to_string(),
+    ];
+    // Migration source uses self-signed cert by default (same chicken-
+    // egg as enrollment — no DNS at install). Trust on first use:
+    // the bundle's signed token + BLAKE3 digest are the integrity
+    // guarantees, NOT TLS.
+    args.insert(2, "-k".into());
+    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let out = tokio::process::Command::new("/usr/bin/curl")
-        .args([
-            "-fL",
-            "--max-time", "1800",
-            "-o", &dest.display().to_string(),
-            url,
-        ])
+        .args(&arg_refs)
         .output()
         .await
         .map_err(|e| RpcError::Internal_with(format!("spawn curl: {e}")))?;
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        // Curl exit 63 is "Maximum file size exceeded" — surface it
+        // with a friendlier error than the bare exit code.
+        let hint = if out.status.code() == Some(63) {
+            " (archive larger than 8 GB — refusing to download)"
+        } else {
+            ""
+        };
         return Err(RpcError::Validation {
             message: format!(
-                "download failed (exit {}): {stderr}",
+                "download failed (exit {}): {stderr}{hint}",
                 out.status.code().unwrap_or(-1),
             ),
         });
@@ -1650,7 +1763,28 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
             processed += 1;
         }
+
+        // Best-effort housekeeping: wipe migration bundle dirs older
+        // than 7 days. Operators frequently forget to clean these up
+        // after a migration completes, and they can be many GB
+        // (entire wp-content trees). Failure here is non-fatal — log
+        // and continue.
+        if let Err(e) = self.prune_old_migration_bundles().await {
+            tracing::warn!(error=%e, "migration bundle prune failed");
+        }
         Ok(processed)
+    }
+
+    /// Remove `/var/lib/hyperion/migration/<id>/` directories whose
+    /// mtime is older than 7 days. The bundle download URL also
+    /// expires after ~1h, so anything older than a week is dead
+    /// inventory the operator clearly no longer needs.
+    pub(crate) async fn prune_old_migration_bundles(&self) -> Result<u32, RpcError> {
+        prune_migration_bundle_dir(
+            &std::path::PathBuf::from("/var/lib/hyperion/migration"),
+            std::time::Duration::from_secs(7 * 86_400),
+        )
+        .await
     }
 
     async fn reconcile_scheduled_rows(&self) -> Result<(), hyperion_state::StateError> {
@@ -2535,6 +2669,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             wp_version,
             crontab,
             archive_sha256: sha.clone(),
+            proxy_upstream_url: detail.proxy_upstream_url.clone(),
         };
         let manifest_path = bundle_dir.join("manifest.json");
         let manifest_json = serde_json::to_string_pretty(&manifest)
@@ -2659,18 +2794,41 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }),
             system_user: None,
             kind: manifest.kind.clone(),
-            proxy_upstream_url: None,
+            // Carry the reverse-proxy upstream from the manifest —
+            // previously the importer silently dropped it, leaving
+            // every migrated reverse-proxy hosting pointing at no
+            // upstream. The validate_proxy_upstream_url check on
+            // create() still runs.
+            proxy_upstream_url: manifest.proxy_upstream_url.clone(),
         };
         let created = self.create(create).await?;
 
         // Restore the archive. backup_restore() looks for an archive
         // at the given path + a sibling .sql for the dump.
+        //
+        // If restore fails, we have a half-state hosting on the
+        // target: the create() succeeded but the data import didn't.
+        // Roll back by deleting the hosting (cleans up dirs, db,
+        // system_user, etc.) so the operator can retry without
+        // hitting "AlreadyExists" on the second attempt.
         let restore_path = archive_path.display().to_string();
-        self.backup_restore(
+        if let Err(restore_err) = self.backup_restore(
             HostingSelector::Id(created.id.clone()),
             restore_path,
         )
-        .await?;
+        .await
+        {
+            tracing::warn!(
+                hosting = %created.id.as_str(),
+                error = %restore_err,
+                "migration import: restore failed — rolling back half-created hosting"
+            );
+            let _ = self.delete(
+                HostingSelector::Id(created.id.clone()),
+                DeleteOpts { keep_user: false, keep_database: false },
+            ).await;
+            return Err(restore_err);
+        }
 
         // Re-apply the crontab when present.
         if !manifest.crontab.trim().is_empty() {
@@ -2971,39 +3129,74 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// auth, but it's enough for the UI to pre-fill the form with
     /// a "looks reasonable" baseline.
     pub async fn email_smtp_autodetect(&self) -> Result<hyperion_types::SmtpAutodetect, RpcError> {
+        use tokio::io::AsyncReadExt;
         let candidates: &[(&str, u16, &str)] = &[
             ("localhost", 25, "plain"),
             ("127.0.0.1", 25, "plain"),
+            ("::1", 25, "plain"),
             ("localhost", 587, "starttls"),
+            ("::1", 587, "starttls"),
         ];
         for (host, port, sec) in candidates {
-            let addr = format!("{host}:{port}");
+            // Bracket-wrap v6 hosts for the connect string.
+            let addr = if host.contains(':') {
+                format!("[{host}]:{port}")
+            } else {
+                format!("{host}:{port}")
+            };
             let connect = tokio::time::timeout(
                 std::time::Duration::from_millis(800),
                 tokio::net::TcpStream::connect(&addr),
             )
             .await;
-            if let Ok(Ok(_)) = connect {
-                // Suggest a from-address from the local hostname so
-                // the operator at least gets a working default
-                // (they're free to override).
-                let hostname = std::fs::read_to_string("/etc/hostname")
-                    .ok()
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| "hyperion".into());
-                return Ok(hyperion_types::SmtpAutodetect {
-                    found: true,
-                    smtp_host: host.to_string(),
-                    smtp_port: *port,
-                    security: sec.to_string(),
-                    suggested_from: format!("hyperion@{hostname}"),
-                    notes: format!(
-                        "TCP connect to {addr} succeeded — likely a local relay (postfix/exim). \
-                         If auth is required, fill smtp_user + smtp_password below."
-                    ),
-                });
+            let Ok(Ok(mut sock)) = connect else { continue };
+
+            // SMTP banner check — read up to 256 bytes within 600ms
+            // and require a "220" prefix. Without this, an ssh /
+            // https / random thing listening on :25 gets reported
+            // as a relay; operator clicks Save and every
+            // notification thereafter fails with TLS-handshake
+            // confusion.
+            let mut buf = [0u8; 256];
+            let n = match tokio::time::timeout(
+                std::time::Duration::from_millis(600),
+                sock.read(&mut buf),
+            )
+            .await
+            {
+                Ok(Ok(n)) => n,
+                _ => continue,
+            };
+            let banner = String::from_utf8_lossy(&buf[..n]);
+            if !banner.starts_with("220") {
+                continue;
             }
+            // Looks like SMTP. Derive a sensible from-address.
+            // /etc/mailname is postfix's canonical FQDN; fall back
+            // to /etc/hostname; refuse the result if it's
+            // "localhost"-shaped (no dot, or matches a known dud).
+            let suggested_from = read_mail_fqdn()
+                .map(|d| format!("hyperion@{d}"))
+                .unwrap_or_default();
+            let notes = if suggested_from.is_empty() {
+                format!(
+                    "SMTP banner detected at {addr} but this node's hostname isn't an FQDN; \
+                     set from_address manually (e.g. notifications@your-domain.tld)"
+                )
+            } else {
+                format!(
+                    "SMTP banner detected at {addr} — likely a local relay (postfix/exim). \
+                     If auth is required, fill smtp_user + smtp_password below."
+                )
+            };
+            return Ok(hyperion_types::SmtpAutodetect {
+                found: true,
+                smtp_host: host.to_string(),
+                smtp_port: *port,
+                security: sec.to_string(),
+                suggested_from,
+                notes,
+            });
         }
         Ok(hyperion_types::SmtpAutodetect {
             found: false,
@@ -6872,6 +7065,69 @@ mod tests {
     // ============================================================
     //  SPF parser unit tests (no DNS — pure CIDR / string logic).
     // ============================================================
+
+    // ============================================================
+    //  Migration bundle prune (pure-fs, no Service needed).
+    // ============================================================
+
+    #[tokio::test]
+    async fn prune_migration_bundle_dir_missing_root_is_ok() {
+        // Root doesn't exist yet — should return 0, not error.
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("does-not-exist");
+        let n = prune_migration_bundle_dir(&missing, std::time::Duration::from_secs(60))
+            .await
+            .expect("missing root must be Ok");
+        assert_eq!(n, 0);
+    }
+
+    #[tokio::test]
+    async fn prune_migration_bundle_dir_only_touches_mig_prefix() {
+        // With max_age=0, "older than now" == every dir → all
+        // mig_*-prefixed dirs go, everything else stays. This
+        // exercises the prefix filter without needing to forge
+        // mtimes (filetime isn't in workspace deps).
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let mig_a = root.join("mig_aaa");
+        let mig_b = root.join("mig_bbb");
+        let other = root.join("keepme");
+        let plain_file = root.join("README");
+        for d in [&mig_a, &mig_b, &other] {
+            tokio::fs::create_dir_all(d).await.unwrap();
+            tokio::fs::write(d.join("archive.tar.gz"), b"x").await.unwrap();
+        }
+        tokio::fs::write(&plain_file, b"hi").await.unwrap();
+
+        // Sleep ~10ms so created dirs' mtime < now() at the call
+        // site — without this the cutoff check (mtime < cutoff)
+        // can race and skip new dirs even with max_age=0.
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        let n = prune_migration_bundle_dir(root, std::time::Duration::from_millis(0))
+            .await
+            .unwrap();
+        assert_eq!(n, 2, "both mig_* dirs should have been removed");
+        assert!(!mig_a.exists());
+        assert!(!mig_b.exists());
+        assert!(other.exists(), "non-mig_ dirs are off-limits");
+        assert!(plain_file.exists(), "loose files are off-limits");
+    }
+
+    #[tokio::test]
+    async fn prune_migration_bundle_dir_respects_max_age() {
+        // With a generous max_age, nothing fresh should be pruned.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let mig_a = root.join("mig_fresh");
+        tokio::fs::create_dir_all(&mig_a).await.unwrap();
+
+        let n = prune_migration_bundle_dir(root, std::time::Duration::from_secs(86_400))
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
+        assert!(mig_a.exists());
+    }
 
     #[test]
     fn ip4_matches_exact() {

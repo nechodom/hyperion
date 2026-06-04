@@ -106,6 +106,11 @@ pub struct HostingMigrationManifest {
     /// recomputes and refuses on mismatch (protection against
     /// in-transit corruption / truncated scp).
     pub archive_sha256: String,
+    /// Upstream URL for `kind == "reverse_proxy"` hostings.
+    /// `None` for other kinds. Previously missing — every
+    /// reverse-proxy migration silently lost its upstream.
+    #[serde(default)]
+    pub proxy_upstream_url: Option<String>,
 }
 
 impl HostingMigrationManifest {
@@ -150,6 +155,7 @@ mod tests {
             wp_version: Some("6.5.3".into()),
             crontab: "* * * * * echo hi\n".into(),
             archive_sha256: "deadbeef".into(),
+            proxy_upstream_url: None,
         };
         let json = serde_json::to_string(&m).expect("ser");
         let back: HostingMigrationManifest = serde_json::from_str(&json).expect("de");
