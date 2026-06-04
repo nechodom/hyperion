@@ -31,6 +31,9 @@ struct ListTpl<'a> {
     csrf_bulk: String,
     error: Option<String>,
     flash: Option<String>,
+    /// WP asset library — drives the "Bulk install asset" dropdown.
+    /// Empty list = the dropdown hides itself.
+    wp_assets: Vec<hyperion_types::WpAssetSummary>,
 }
 
 #[derive(Template)]
@@ -215,6 +218,7 @@ pub async fn get_list(
         csrf_bulk,
         error: None,
         flash: q.bulk_flash,
+        wp_assets: fetch_wp_assets(&state).await.unwrap_or_default(),
     };
     Ok(Html(tpl.render()?).into_response())
 }
@@ -2497,6 +2501,14 @@ pub struct BulkForm {
     /// type expects a String — use the manual deserializer instead.
     #[serde(default)]
     pub selected: Vec<String>,
+    /// Asset id for the `install_asset` bulk action. 0 / unset for
+    /// every other action.
+    #[serde(default)]
+    pub asset_id: i64,
+    /// Whether to also activate the asset after install. Plain
+    /// HTML checkbox → "on" when ticked, missing when not.
+    #[serde(default)]
+    pub activate: Option<String>,
 }
 
 pub async fn post_bulk(
@@ -2513,6 +2525,15 @@ pub async fn post_bulk(
     if form.selected.is_empty() {
         return Ok(Redirect::to("/hostings?q=&state=").into_response());
     }
+    // Pre-flight validation for install_asset — surface a single
+    // clean error rather than echoing it per-selected hosting.
+    if form.action == "install_asset" && form.asset_id <= 0 {
+        return Ok(Redirect::to(
+            "/hostings?bulk_flash=Pick+an+asset+from+the+library+before+running+the+bulk+install",
+        )
+        .into_response());
+    }
+    let activate = matches!(form.activate.as_deref(), Some("on" | "true" | "1"));
     let mut ok = 0;
     let mut errs: Vec<String> = vec![];
     for sel_str in &form.selected {
@@ -2523,6 +2544,20 @@ pub async fn post_bulk(
                 continue;
             }
         };
+        // For multi-node correctness: actions like suspend/resume/
+        // delete/install_asset have to land on the node that
+        // actually owns the hosting. Look it up first (best-effort —
+        // single-node setups treat all hostings as local). The
+        // backup action stays master-local because backups are
+        // currently a master-side operation only.
+        let target_owned: Option<String> = match form.action.as_str() {
+            "backup" => None,
+            _ => find_hosting_anywhere(&state, sel.clone())
+                .await
+                .ok()
+                .and_then(|(_d, n)| n),
+        };
+        let target = target_owned.as_deref();
         let req = match form.action.as_str() {
             "suspend" => Request::HostingSuspend {
                 sel,
@@ -2539,13 +2574,19 @@ pub async fn post_bulk(
                     keep_database: false,
                 },
             },
+            "install_asset" => Request::WpInstallFromAsset {
+                sel,
+                asset_id: form.asset_id,
+                activate,
+            },
             other => {
                 return Err(AppError::BadRequest(format!(
                     "unknown bulk action: {other}"
                 )));
             }
         };
-        match hyperion_rpc_client::call(&state.agent_socket, req).await {
+        let result = crate::dispatcher::dispatch_to_node(&state, target, req).await;
+        match result {
             Ok(RpcResponse::Error(e)) => errs.push(format!("{sel_str}: {e}")),
             Ok(_) => ok += 1,
             Err(e) => errs.push(format!("{sel_str}: {e}")),

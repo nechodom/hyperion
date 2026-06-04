@@ -95,11 +95,51 @@
 <form method="post" action="/hostings/bulk" id="bulk-form">
 <input type="hidden" name="_csrf" value="{{ csrf_bulk }}">
 <input type="hidden" name="action" id="bulk-action" value="">
+{# Carries the asset id when the operator picks one for the
+   bulk install action. Empty / 0 for all other actions. #}
+<input type="hidden" name="asset_id" id="bulk-asset-id" value="">
+<input type="hidden" name="activate" id="bulk-activate" value="">
 
 <div class="card no-pad-table">
-  <div style="padding:0.85rem 1.5rem;display:flex;align-items:center;gap:0.5rem;border-bottom:1px solid var(--border)">
+  <div style="padding:0.85rem 1.5rem;display:flex;align-items:center;gap:0.5rem;border-bottom:1px solid var(--border);flex-wrap:wrap">
     <span id="bulk-count" class="muted" style="font-size:0.88rem">0 selected</span>
     <span class="grow"></span>
+    {% if !wp_assets.is_empty() %}
+    <details class="inline-action" style="position:relative">
+      <summary class="btn small" style="list-style:none;cursor:pointer" id="bulk-install-summary" data-bulk-summary="install_asset">+ Install WP asset</summary>
+      <div style="position:absolute;right:0;z-index:10;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:0.7rem;margin-top:0.4rem;box-shadow:var(--shadow);min-width:24rem">
+        <div class="field" style="margin:0">
+          <label for="bulk-asset-select">Asset
+            <a href="/profiles/wp-assets" class="text-soft" style="font-weight:400;font-size:0.78rem;margin-left:0.4rem">manage library →</a>
+          </label>
+          <select id="bulk-asset-select" style="margin:0">
+            {% for a in wp_assets %}
+              {% if a.kind == "plugin" %}
+              <option value="{{ a.id }}">[plugin] {{ a.original_name }} · {{ a.size_bytes / 1024 }} KB</option>
+              {% endif %}
+            {% endfor %}
+            {% for a in wp_assets %}
+              {% if a.kind == "theme" %}
+              <option value="{{ a.id }}">[theme] {{ a.original_name }} · {{ a.size_bytes / 1024 }} KB</option>
+              {% endif %}
+            {% endfor %}
+          </select>
+        </div>
+        <label class="field-checkbox" style="margin:0.6rem 0 0;font-size:0.85rem">
+          <input type="checkbox" id="bulk-activate-cb" checked>
+          Activate after install
+        </label>
+        <div class="row" style="gap:0.4rem;margin-top:0.6rem;justify-content:flex-end">
+          <button type="button" class="btn small primary" id="bulk-install-go"
+                  data-bulk="install_asset" disabled>Install on selected</button>
+        </div>
+        <p class="text-soft small" style="margin:0.5rem 0 0;font-size:0.78rem">
+          Runs <code>wp install --force</code> on every selected hosting (parallel per node).
+          Hostings without WordPress are skipped with an error in the flash.
+        </p>
+      </div>
+    </details>
+    {% endif %}
     <button type="button" class="btn small" data-bulk="suspend" disabled>Suspend</button>
     <button type="button" class="btn small" data-bulk="resume" disabled>Resume</button>
     <button type="button" class="btn small" data-bulk="backup" disabled>Backup now</button>
@@ -217,6 +257,27 @@
       form.dataset.confirmBody = 'All files, databases, system users and DNS records will be removed. This is permanent.';
       form.dataset.confirmConfirmLabel = 'Delete';
       form.dataset.confirmVariant = 'danger';
+    } else if (action === 'install_asset') {
+      // Pull the asset id + activate flag from the inline picker
+      // and copy them into the hidden form inputs so they ride
+      // along on submit.
+      const assetSel = document.getElementById('bulk-asset-select');
+      const assetIdInput = document.getElementById('bulk-asset-id');
+      const activateCb = document.getElementById('bulk-activate-cb');
+      const activateInput = document.getElementById('bulk-activate');
+      if (!assetSel || !assetIdInput || !activateInput) return;
+      const assetId = assetSel.value;
+      const assetLabel = assetSel.options[assetSel.selectedIndex]?.text || '?';
+      assetIdInput.value = assetId;
+      activateInput.value = activateCb && activateCb.checked ? 'on' : '';
+      form.dataset.confirmTitle =
+        'Install asset on ' + n + ' ' + (n === 1 ? 'hosting' : 'hostings');
+      form.dataset.confirmBody =
+        'Each selected hosting will run wp install --force for: ' + assetLabel +
+        (activateCb && activateCb.checked ? ' (and activate after)' : '') +
+        '. Hostings without WordPress will be skipped — the flash shows any failures.';
+      form.dataset.confirmConfirmLabel = 'Install';
+      form.dataset.confirmVariant = 'primary';
     } else {
       form.dataset.confirmTitle = pretty + ' ' + n + ' ' + (n === 1 ? 'hosting' : 'hostings');
       form.dataset.confirmBody = 'Selected hostings will be ' + action + 'ed.';
@@ -225,6 +286,12 @@
     }
     form.requestSubmit();
   }));
+  // The install-asset picker's "Install on selected" button has
+  // data-bulk="install_asset" so it routes through actionBtns
+  // above — but its disabled state needs to follow the same
+  // "is anything selected?" logic as the top-bar buttons. Already
+  // handled by refresh() because we query [data-bulk] which the
+  // install-go button has.
   refresh();
 })();
 </script>
