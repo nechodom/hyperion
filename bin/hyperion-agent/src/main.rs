@@ -309,18 +309,24 @@ async fn main() -> anyhow::Result<()> {
                 cfg.enrollment.node_label.clone()
             },
             state_file: state_file.clone(),
+            verify_tls: cfg.enrollment.verify_tls,
         };
         tokio::spawn(async move {
             if let Err(e) = enroll::ensure_enrolled(enr).await {
-                tracing::warn!(error=%e, "enrollment failed (will retry next boot)");
+                tracing::warn!(
+                    error = %e,
+                    "enrollment failed — retry by running `sudo hctl node enroll` on this node, \
+                     or restart hyperion-agent"
+                );
             }
         });
     }
     // Periodic heartbeat (60s interval). No-op until enrolled.
     {
         let path = state_file.clone();
+        let verify = cfg.enrollment.verify_tls;
         tokio::spawn(async move {
-            enroll::heartbeat_loop(path, 60).await;
+            enroll::heartbeat_loop(path, 60, verify).await;
         });
     }
 

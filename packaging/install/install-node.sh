@@ -206,14 +206,30 @@ base_path = "/hyperion-backups"
 [slack]
 default_webhook = ""
 
-# Enrollment with the master. The token persists here; the mTLS
-# handshake that turns this into a fully-managed cluster member is
-# sub-project 1.5 in the design docs. Until that lands the agent runs
-# single-node and listens on /run/hyperion.sock locally.
+# Enrollment with the master.
+#
+# On first boot the agent POSTs <master_url>/api/enroll with this
+# token, receives back a node_id + per-node secret, and persists
+# them to /etc/hyperion/node-id.json. From that point on the agent
+# heartbeats every 60s — visible on the master's /install page
+# under Enrolled nodes.
+#
+# verify_tls=false because install-master.sh ships a self-signed
+# cert (no DNS at install time → no LE). The bearer token + per-
+# node secret are the authentication; TLS here is encryption-in-
+# transit. Flip to true once the master serves a real cert.
+#
+# Retry on failure: if the master isn't reachable on first boot,
+# the agent retries 5× with growing backoff (~9 min total). Past
+# that, run on this node:
+#   sudo rm -f /etc/hyperion/node-id.json
+#   sudo systemctl restart hyperion-agent
+# and watch journalctl -u hyperion-agent -f | grep enroll
 [enrollment]
 master_url   = "$MASTER"
 invite_token = "$TOKEN"
 node_label   = "$LABEL"
+verify_tls   = false
 EOF
 chmod 0600 /etc/hyperion/agent.toml
 

@@ -25,6 +25,15 @@ pub struct EnrollmentSection {
     /// Path where the assigned node_id is persisted after first enrollment.
     /// Defaults to /etc/hyperion/node-id.json.
     pub state_file: Option<PathBuf>,
+    /// When `true`, the node verifies the master's TLS cert against
+    /// the system CA bundle. Defaults to `false` because install-
+    /// master.sh ships a self-signed cert (no DNS at install time
+    /// → no LE) and the node has no trust anchor to bootstrap.
+    /// The bearer token + per-node secret are the auth; TLS here
+    /// is encryption-in-transit. Set `true` once the master serves
+    /// a real LE cert.
+    #[serde(default)]
+    pub verify_tls: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
