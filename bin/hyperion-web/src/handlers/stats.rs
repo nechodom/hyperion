@@ -237,9 +237,23 @@ async fn aggregate_cluster_stats(
     use hyperion_types::NodeStats;
     let mut total = ClusterStats::default();
 
-    // Master local.
+    // Master local. We rewrite the returned NodeStats's node_id
+    // to the "local" sentinel so the template's per-node tab links
+    // (?node=<n.node_id>) route back through dispatch_to_node
+    // correctly. Without this rewrite the master's tab would link
+    // to ?node=s4 (the hostname), and the dispatcher — which only
+    // knows about ENROLLED nodes — would error out with
+    // "target node s4 is not enrolled".
     match crate::dispatcher::dispatch_to_node(state, None, Request::ClusterStats).await {
-        Ok(RpcResponse::ClusterStats(c)) => merge_cluster(&mut total, &c),
+        Ok(RpcResponse::ClusterStats(mut c)) => {
+            for n in &mut c.nodes {
+                n.node_id = crate::dispatcher::LOCAL_NODE_SENTINEL.to_string();
+                if n.label.is_empty() {
+                    n.label = "master (this node)".to_string();
+                }
+            }
+            merge_cluster(&mut total, &c);
+        }
         Ok(RpcResponse::Error(e)) => {
             tracing::warn!(error=%e, "cluster aggregate: master fetch errored");
         }
@@ -274,7 +288,16 @@ async fn aggregate_cluster_stats(
     }
     for (node_id, r) in results {
         match r {
-            Ok(RpcResponse::ClusterStats(c)) => merge_cluster(&mut total, &c),
+            Ok(RpcResponse::ClusterStats(mut c)) => {
+                // Same node_id rewrite as for master — the worker
+                // returns its OWN hostname-based node_id, but the
+                // master's dispatcher only knows the enrolled id.
+                // Rewrite so per-node tab links route correctly.
+                for n in &mut c.nodes {
+                    n.node_id = node_id.clone();
+                }
+                merge_cluster(&mut total, &c);
+            }
             Ok(RpcResponse::Error(e)) => {
                 tracing::warn!(node=%node_id, error=%e, "cluster aggregate: remote fetch errored");
                 // Surface as a placeholder NodeStats so the operator

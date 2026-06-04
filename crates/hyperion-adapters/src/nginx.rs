@@ -242,7 +242,36 @@ pub async fn reload() -> Result<(), AdapterError> {
                                 .into(),
                         });
                     }
-                    return Err(start_err);
+                    // Start failed for a reason that's NOT "not
+                    // installed". Most likely: bad nginx config
+                    // (vhost syntax error, port conflict, missing
+                    // upstream, etc.). Run `nginx -t` to capture
+                    // the precise error message + grab the
+                    // last 30 journalctl lines so the operator
+                    // sees the actual cause instead of just the
+                    // useless "Job for nginx.service failed" wrapper.
+                    let nginx_test = capture_diagnostics(
+                        "/usr/sbin/nginx",
+                        &["-t"],
+                    )
+                    .await;
+                    let journal = capture_diagnostics(
+                        "/usr/bin/journalctl",
+                        &["-u", "nginx.service", "-n", "30", "--no-pager"],
+                    )
+                    .await;
+                    return Err(AdapterError::Command {
+                        cmd: "/usr/bin/systemctl start nginx".into(),
+                        code: 1,
+                        stderr_tail: format!(
+                            "nginx failed to start. systemd said:\n{}\n\
+                             \n──── nginx -t ────\n{}\n\
+                             \n──── last 30 lines of journalctl -u nginx ────\n{}",
+                            s.trim(),
+                            nginx_test.trim(),
+                            journal.trim()
+                        ),
+                    });
                 }
                 // Started — now try the reload again. (We could
                 // skip this since `start` already brought a fresh
@@ -255,6 +284,33 @@ pub async fn reload() -> Result<(), AdapterError> {
                 Err(e)
             }
         }
+    }
+}
+
+/// Run a diagnostic command and return its combined stdout+stderr.
+/// Never errors — on spawn failure / non-zero exit the message is
+/// what the operator gets to see (which is exactly what we want
+/// for diagnostic output). Used by the start-failure path above to
+/// give the operator the REAL nginx error, not just systemd's
+/// "Job failed" wrapper.
+async fn capture_diagnostics(cmd: &str, args: &[&str]) -> String {
+    match tokio::process::Command::new(cmd).args(args).output().await {
+        Ok(out) => {
+            let mut s = String::new();
+            s.push_str(&String::from_utf8_lossy(&out.stdout));
+            if !out.stderr.is_empty() {
+                if !s.is_empty() && !s.ends_with('\n') {
+                    s.push('\n');
+                }
+                s.push_str(&String::from_utf8_lossy(&out.stderr));
+            }
+            if s.is_empty() {
+                format!("(no output from {cmd})")
+            } else {
+                s
+            }
+        }
+        Err(e) => format!("(could not run {cmd}: {e})"),
     }
 }
 
