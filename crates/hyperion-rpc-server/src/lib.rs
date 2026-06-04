@@ -546,6 +546,9 @@ mod tests {
                 version: "0".into(),
                 schema_version: 1,
                 hostings_count: 0,
+                node_id: None,
+                master_url: None,
+                enrolled_at: None,
             })
         }
         async fn hosting_create(&self, _: HostingCreateReq) -> Result<HostingCreated, RpcError> {

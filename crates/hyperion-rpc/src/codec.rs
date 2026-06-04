@@ -550,6 +550,9 @@ mod tests {
             version: "0".into(),
             schema_version: 1,
             hostings_count: 0,
+            node_id: None,
+            master_url: None,
+            enrolled_at: None,
         });
         write_frame(&mut a, &resp).await.expect("write");
         let got: Response = read_frame(&mut b).await.expect("read");

@@ -5718,12 +5718,23 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         })?;
         // 1. apt-get install. DEBIAN_FRONTEND=noninteractive so apt
         //    doesn't try to open an interactive prompt and hang.
-        let install = tokio::process::Command::new("/usr/bin/apt-get")
-            .args(["install", "-y", "-qq", pkg])
-            .env("DEBIAN_FRONTEND", "noninteractive")
-            .output()
-            .await
-            .map_err(|e| RpcError::Internal_with(format!("apt-get spawn: {e}")))?;
+        //
+        // Hard timeout of 5 min — apt-get sometimes hangs (mirror
+        // outage, dpkg lock contention, post-install scripts). The
+        // web handler awaits this RPC, so without a cap the page
+        // request hangs the operator's browser indefinitely.
+        let install = tokio::time::timeout(
+            std::time::Duration::from_secs(5 * 60),
+            tokio::process::Command::new("/usr/bin/apt-get")
+                .args(["install", "-y", "-qq", pkg])
+                .env("DEBIAN_FRONTEND", "noninteractive")
+                .output(),
+        )
+        .await
+        .map_err(|_| RpcError::Internal_with(format!(
+            "apt-get install {pkg} timed out after 5 min — check for a dpkg lock or mirror outage"
+        )))?
+        .map_err(|e| RpcError::Internal_with(format!("apt-get spawn: {e}")))?;
         if !install.status.success() {
             let stderr = String::from_utf8_lossy(&install.stderr).to_string();
             return Err(RpcError::Internal_with(format!(
@@ -5779,65 +5790,69 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             ("php8.3-fpm", "PHP 8.3 FPM"),
             ("php8.4-fpm", "PHP 8.4 FPM"),
         ];
+        // Fan ALL the probes out in parallel — was serial loop +
+        // serial(rich + present) per unit, ~10 units × ~100 ms =
+        // up to a full second of page-render latency. Now bounded
+        // by the slowest single probe.
+        let mut tasks: Vec<_> = Vec::with_capacity(critical.len() + optional.len());
+        for (unit, label) in critical.iter().copied() {
+            tasks.push(tokio::spawn(async move {
+                let (status, present) = tokio::join!(
+                    hyperion_adapters::systemctl_status_rich(unit),
+                    hyperion_adapters::systemctl_unit_present(unit),
+                );
+                (unit, label, true, status, present)
+            }));
+        }
+        for (unit, label) in optional.iter().copied() {
+            tasks.push(tokio::spawn(async move {
+                let (status, present) = tokio::join!(
+                    hyperion_adapters::systemctl_status_rich(unit),
+                    hyperion_adapters::systemctl_unit_present(unit),
+                );
+                (unit, label, false, status, present)
+            }));
+        }
         let mut services: Vec<hyperion_types::ServiceHealth> = Vec::new();
         let mut critical_down = 0usize;
         let mut warn_down = 0usize;
-
-        // ALWAYS run the active/enabled probe in parallel with the
-        // file-existence probe — a running service obviously exists
-        // even if our file-detection heuristics miss it. This catches
-        // the s4 case where `list-unit-files` returned an unexpected
-        // shape and nginx/mariadb were both flagged "not installed"
-        // despite being live.
-        for (unit, label) in critical {
-            let (status, mut present) = tokio::join!(
-                hyperion_adapters::systemctl_status_rich(unit),
-                hyperion_adapters::systemctl_unit_present(unit),
-            );
-            if status.active || status.enabled {
-                present = true;
-            }
-            let mut sub = status.sub_state.clone();
-            if !present {
-                sub = "missing".into();
-            }
-            let transient = status.transient();
-            let severity = if !present || !status.active {
-                critical_down += 1;
-                "error".to_string()
-            } else {
-                "ok".to_string()
+        for h in tasks {
+            let Ok((unit, label, is_critical, status, mut present)) = h.await else {
+                continue;
             };
-            services.push(hyperion_types::ServiceHealth {
-                name: unit.to_string(),
-                label: label.to_string(),
-                active: status.active,
-                enabled: status.enabled,
-                present,
-                sub_state: sub,
-                severity,
-                active_state: status.active_state,
-                transient,
-            });
-        }
-        for (unit, label) in optional {
-            let (status, mut present) = tokio::join!(
-                hyperion_adapters::systemctl_status_rich(unit),
-                hyperion_adapters::systemctl_unit_present(unit),
-            );
             if status.active || status.enabled {
                 present = true;
             }
             let mut sub = status.sub_state.clone();
-            if !present {
-                sub = "not installed".into();
+            // "masked" is operator-intentional — surface it
+            // distinctly so the operator doesn't see it as a
+            // failure to fix.
+            let masked = status.unit_file_state == "masked";
+            if masked {
+                sub = "masked".into();
+            } else if !present {
+                sub = if is_critical { "missing".into() } else { "not installed".into() };
             }
             let transient = status.transient();
-            let severity = if !present {
+            let severity = if masked {
+                // masked = operator decided this shouldn't run.
+                // Don't count it against health.
                 "info".to_string()
+            } else if !present {
+                if is_critical {
+                    critical_down += 1;
+                    "error".to_string()
+                } else {
+                    "info".to_string()
+                }
             } else if !status.active {
-                warn_down += 1;
-                "warn".to_string()
+                if is_critical {
+                    critical_down += 1;
+                    "error".to_string()
+                } else {
+                    warn_down += 1;
+                    "warn".to_string()
+                }
             } else {
                 "ok".to_string()
             };
@@ -5853,6 +5868,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 transient,
             });
         }
+        // Preserve operator-meaningful display order — critical first,
+        // then optional in the order they were declared. Sorted by
+        // the position in the source lists.
+        let order: std::collections::HashMap<&str, usize> = critical
+            .iter()
+            .chain(optional.iter())
+            .enumerate()
+            .map(|(i, (u, _))| (*u, i))
+            .collect();
+        services.sort_by_key(|s| *order.get(s.name.as_str()).unwrap_or(&usize::MAX));
         Ok(hyperion_types::ServicesHealth {
             services,
             critical_down,

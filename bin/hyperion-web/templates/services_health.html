@@ -38,7 +38,22 @@
   </div>
 {% endif %}
 
-{# Summary card at top. #}
+{# Summary card at top. When the agent's services_health RPC errored
+   the table is empty AND there's a flash_error / error banner above.
+   Render "Unknown" instead of falsely-green "Healthy" — the operator
+   should be able to see at a glance that the answer didn't come from
+   a successful probe. #}
+{% if error.is_some() || health.services.is_empty() %}
+<div class="kpi-grid" style="margin-bottom:1rem">
+  <div class="kpi-card" style="border-left:4px solid var(--text-soft)">
+    <div class="kpi-label">Overall</div>
+    <div class="kpi-value">Unknown</div>
+    <div class="kpi-foot" style="color:var(--text-soft)">
+      {% if let Some(e) = error %}probe failed: {{ e }}{% else %}no probes returned{% endif %}
+    </div>
+  </div>
+</div>
+{% else %}
 <div class="kpi-grid" style="margin-bottom:1rem">
   <div class="kpi-card" style="{% if health.critical_down > 0 %}border-left:4px solid var(--danger){% else if health.warn_down > 0 %}border-left:4px solid var(--warn){% else %}border-left:4px solid var(--success){% endif %}">
     <div class="kpi-label">Overall</div>
@@ -64,6 +79,7 @@
     <div class="kpi-meta">FPM, DBs, vsftpd</div>
   </div>
 </div>
+{% endif %}
 
 <div class="card no-pad-table">
   <div class="table-wrap">
@@ -161,27 +177,53 @@
 </p>
 
 <script>
-// Auto-refresh the page every 15s — but only when the tab is
-// actually visible. Avoids hammering the agent in background tabs.
-// Stops the interval on click in any form / button to avoid the
-// reload nuking a confirm dialog the operator just opened.
+// Auto-refresh every 15s. Refinements over the naive
+// `setInterval(location.reload, 15000)`:
+//
+//   1. Pause when tab is hidden — don't hammer the agent in
+//      background tabs.
+//   2. Pause when ANY form input is focused — refresh would
+//      destroy the operator's in-progress text.
+//   3. Pause on click — operator might be opening a confirm
+//      dialog; reload would nuke it.
+//   4. Save scroll position to sessionStorage before reload +
+//      restore on load — so the operator's place is kept.
 (function () {
   'use strict';
+  const SCROLL_KEY = 'hyperion.services.scroll';
+  // Restore scroll position on load if we saved one in the last
+  // 30s (anything older was a manual nav, leave alone).
+  try {
+    const saved = sessionStorage.getItem(SCROLL_KEY);
+    if (saved) {
+      const { y, ts } = JSON.parse(saved);
+      if (Date.now() - ts < 30000 && typeof y === 'number') {
+        window.scrollTo(0, y);
+      }
+    }
+    sessionStorage.removeItem(SCROLL_KEY);
+  } catch (_) {}
+
   let timer = setInterval(tick, 15000);
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden) {
-      clearInterval(timer);
-    } else {
-      timer = setInterval(tick, 15000);
-    }
+    clearInterval(timer);
+    if (!document.hidden) timer = setInterval(tick, 15000);
   });
   document.addEventListener('click', (ev) => {
-    if (ev.target.closest('button, a, form')) {
-      clearInterval(timer);
-    }
+    if (ev.target.closest('button, a, form')) clearInterval(timer);
   });
+  function isInputFocused() {
+    const a = document.activeElement;
+    if (!a) return false;
+    const tag = (a.tagName || '').toLowerCase();
+    return tag === 'input' || tag === 'textarea' || tag === 'select' || a.isContentEditable;
+  }
   function tick() {
     if (document.hidden) return;
+    if (isInputFocused()) return;
+    try {
+      sessionStorage.setItem(SCROLL_KEY, JSON.stringify({ y: window.scrollY, ts: Date.now() }));
+    } catch (_) {}
     location.reload();
   }
 })();
