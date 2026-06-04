@@ -65,21 +65,31 @@
     <div class="field">
       <label for="target_node">Which node should host this site?</label>
       <select id="target_node" name="target_node">
+        {# Master option only when [cluster] master_accepts_hostings
+           is true (default). Operator can turn it off in Settings →
+           Cluster to make the master a control-plane-only node. #}
+        {% if master_accepts_hostings %}
         <option value="local"
                 data-label="master (this node)"
                 data-detail=""
                 {% if target_node_in.is_empty() || target_node_in == "local" %}selected{% endif %}>
           ◯  master (this node — default)
         </option>
+        {% endif %}
         {% for n in nodes %}
         <option value="{{ n.node_id }}"
                 data-label="{{ n.label }}"
                 data-detail="{% if let Some(ip) = n.public_ip.as_ref() %}{{ ip }} · {% endif %}{{ n.node_id }}"
-                {% if target_node_in == n.node_id %}selected{% endif %}>
+                {% if target_node_in == n.node_id || (!master_accepts_hostings && target_node_in.is_empty() && loop.first) %}selected{% endif %}>
           ▸  {{ n.label }}{% if let Some(ip) = n.public_ip.as_ref() %} — {{ ip }}{% endif %}
         </option>
         {% endfor %}
       </select>
+      {% if !master_accepts_hostings %}
+      <p class="text-soft small" style="margin:0.3rem 0 0">
+        <strong>Master is in control-plane-only mode.</strong> Hostings are provisioned on worker nodes only. Change this in <a href="/settings#cluster">Settings → Cluster</a>.
+      </p>
+      {% endif %}
       <p class="text-soft small" style="margin:0.3rem 0 0">
         Remote nodes are reached via signed HTTPS RPC (port 9443).
         The node must have <code>[remote_rpc] enabled = true</code> in

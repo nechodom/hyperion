@@ -175,6 +175,32 @@ pub struct AgentConfigView {
     pub slack: SlackConfigView,
     pub backup_remote: BackupRemoteConfigView,
     pub backup_retention: BackupRetentionConfigView,
+    /// Multi-node cluster placement preferences. Optional in the
+    /// wire schema so older agents that pre-date the field keep
+    /// deserializing.
+    #[serde(default)]
+    pub cluster: ClusterConfigView,
+}
+
+/// Cluster-placement preferences for the master web UI.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClusterConfigView {
+    /// When `false`, /hostings/new hides the master from the
+    /// "Target node" dropdown and the agent refuses local
+    /// hosting_create calls — turning the master into a
+    /// control-plane-only node. Existing hostings on the master
+    /// stay where they are; this only affects NEW creates.
+    pub master_accepts_hostings: bool,
+}
+
+impl Default for ClusterConfigView {
+    fn default() -> Self {
+        Self {
+            // Permissive default = old behaviour. Operators
+            // opt in to "control plane only" via the toggle.
+            master_accepts_hostings: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]

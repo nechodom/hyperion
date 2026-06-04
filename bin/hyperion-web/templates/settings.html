@@ -5,8 +5,9 @@
   <div>
     <h1>Settings</h1>
     <div class="subtitle">
-      Live view of <code>/etc/hyperion/agent.toml</code> (passwords + tokens
-      hidden). Edits are made on disk; restart the agent to apply.
+      Live view of <code>/etc/hyperion/agent.toml</code> (passwords + tokens hidden).
+      Edits are written atomically and a <code>.bak</code> is kept;
+      the running agent picks them up after a restart.
     </div>
   </div>
 </div>
@@ -17,14 +18,12 @@
     <div class="flash-body">{{ e }}</div>
   </div>
 {% endif %}
-
 {% if let Some(m) = flash %}
   <div class="flash success">
     <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
     <div class="flash-body">{{ m }}</div>
   </div>
 {% endif %}
-
 {% if let Some(e) = flash_error %}
   <div class="flash error">
     <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
@@ -32,6 +31,8 @@
   </div>
 {% endif %}
 
+{# Always-visible at-a-glance cards above the tab nav. Same data
+   as before, just stays put as the operator switches tabs. #}
 <div class="kpi-grid" style="margin-bottom:1rem">
   <div class="kpi-card hostings">
     <div class="kpi-label">Node</div>
@@ -41,19 +42,13 @@
   <div class="kpi-card {% if update_status.update_available %}bw{% else %}disk{% endif %}">
     <div class="kpi-label">Version</div>
     <div class="kpi-value" style="font-size:1.05rem">
-      {% if update_status.update_available %}
-        Update available
-      {% else if update_status.current_sha == "dev-unknown" %}
-        dev build
-      {% else %}
-        Up to date
-      {% endif %}
+      {% if update_status.update_available %}Update available
+      {% else if update_status.current_sha == "dev-unknown" %}dev build
+      {% else %}Up to date{% endif %}
     </div>
     <div class="kpi-meta">
       running <code>{{ update_current_short }}</code>
-      {% if !update_status.latest_sha.is_empty() %}
-        · upstream <code>{{ update_latest_short }}</code>
-      {% endif %}
+      {% if !update_status.latest_sha.is_empty() %}· upstream <code>{{ update_latest_short }}</code>{% endif %}
     </div>
   </div>
   <div class="kpi-card disk">
@@ -66,52 +61,68 @@
   <div class="kpi-card bw">
     <div class="kpi-label">ACME contact</div>
     <div class="kpi-value" style="font-size:1.05rem">{{ config.acme.contact_email }}</div>
-    <div class="kpi-meta">expiry notices land here</div>
+    <div class="kpi-meta">where Let's Encrypt sends expiry notices</div>
   </div>
 </div>
 
-<div class="grid cols-2">
-  {# ACME — editable contact email #}
-  <div class="card">
-    <h2>
-      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-      ACME (Let's Encrypt)
-    </h2>
-    <form method="post" action="/settings/config" autocomplete="off">
-      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-      <input type="hidden" name="section" value="acme">
-      <div class="field">
-        <label for="acme_email">Contact email</label>
-        <input id="acme_email" name="contact_email" type="email" required
-               value="{{ config.acme.contact_email|e }}"
-               style="width:100%">
-      </div>
-      <p class="text-soft small" style="margin:0 0 0.6rem">
-        Challenge dir: <code>{{ config.acme.challenge_dir }}</code>
-        <span class="text-soft">(not editable here)</span>
-      </p>
-      <button type="submit" class="btn small primary">Save</button>
-    </form>
-  </div>
+{# Tabs — same pattern as the hosting detail page. Hash routing
+   so deep links like /settings#mail land directly on a section. #}
+<nav class="tabs" role="tablist">
+  <a class="tab" data-tab="mail" href="#mail" role="tab">
+    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+    Mail
+    {% if config.email.enabled %}<span class="tab-badge" style="background:var(--success);color:white">●</span>
+    {% else %}<span class="tab-badge" style="background:var(--surface-2)">off</span>{% endif %}
+  </a>
+  <a class="tab" data-tab="tls" href="#tls" role="tab">
+    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+    TLS / ACME
+  </a>
+  <a class="tab" data-tab="notifications" href="#notifications" role="tab">
+    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+    Notifications
+    {% if config.slack.default_webhook_set %}<span class="tab-badge" style="background:var(--success);color:white">●</span>
+    {% else %}<span class="tab-badge" style="background:var(--surface-2)">off</span>{% endif %}
+  </a>
+  <a class="tab" data-tab="backups" href="#backups" role="tab">
+    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+    Backups
+    {% if config.backup_remote.enabled %}<span class="tab-badge" style="background:var(--success);color:white">●</span>
+    {% else %}<span class="tab-badge" style="background:var(--surface-2)">local</span>{% endif %}
+  </a>
+  <a class="tab" data-tab="cluster" href="#cluster" role="tab">
+    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
+    Cluster
+  </a>
+  <a class="tab" data-tab="raw" href="#raw" role="tab" style="margin-left:auto">
+    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+    Raw TOML
+  </a>
+</nav>
 
-  {# Email — editable #}
+<div class="tab-panels">
+
+{# ==========================================================
+   MAIL — SMTP relay + test + how-it-works panel.
+   ========================================================== #}
+<div class="tab-panel" id="tab-mail">
   <div class="card">
-    <h2>
-      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
-      Email (SMTP relay)
-      {% if config.email.enabled %}
-        <span class="pill ok small" style="margin-left:0.5rem">enabled</span>
-      {% else %}
-        <span class="pill warn small" style="margin-left:0.5rem">disabled</span>
-      {% endif %}
-    </h2>
-    <div class="row" style="gap:0.5rem;margin-bottom:0.85rem">
+    <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:1rem">
+      <h2 style="margin:0">
+        <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+        SMTP relay
+      </h2>
+      {% if config.email.enabled %}<span class="pill ok">enabled</span>
+      {% else %}<span class="pill warn">disabled</span>{% endif %}
+      <span class="grow"></span>
       <button type="button" class="btn small" id="email-autodetect">
         <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-        Auto-detect local SMTP
+        Auto-detect local
       </button>
-      <span class="muted" style="font-size:0.82rem;align-self:center">Probes <code>localhost:25</code> + <code>localhost:587</code> and pre-fills the form.</span>
     </div>
+    <p class="text-soft small" style="margin:0 0 1rem">
+      Probes <code>localhost:25</code> and <code>localhost:587</code> for a local postfix/exim that's already accepting mail, and pre-fills the form below.
+    </p>
     <div id="email-autodetect-result"></div>
 
     <form method="post" action="/settings/config" autocomplete="off">
@@ -123,172 +134,210 @@
       </label>
       <div class="field-row" style="margin-top:0.5rem">
         <div class="field" style="flex:2">
-          <label for="smtp_host">SMTP host</label>
-          <input id="smtp_host" name="smtp_host" type="text" value="{{ config.email.smtp_host|e }}">
+          <label for="smtp_host">Relay host</label>
+          <input id="smtp_host" name="smtp_host" type="text" value="{{ config.email.smtp_host|e }}" placeholder="smtp.postmarkapp.com">
         </div>
         <div class="field" style="width:6rem">
           <label for="smtp_port">Port</label>
           <input id="smtp_port" name="smtp_port" type="number" min="1" max="65535" value="{{ config.email.smtp_port }}">
         </div>
         <div class="field" style="width:8rem">
-          <label for="security">Security</label>
+          <label for="security">Encryption</label>
           <select id="security" name="security">
-            <option value="starttls" {% if config.email.security == "starttls" %}selected{% endif %}>starttls</option>
-            <option value="tls" {% if config.email.security == "tls" %}selected{% endif %}>tls</option>
-            <option value="plain" {% if config.email.security == "plain" %}selected{% endif %}>plain</option>
+            <option value="starttls" {% if config.email.security == "starttls" %}selected{% endif %}>STARTTLS</option>
+            <option value="tls" {% if config.email.security == "tls" %}selected{% endif %}>TLS</option>
+            <option value="plain" {% if config.email.security == "plain" %}selected{% endif %}>none</option>
           </select>
         </div>
       </div>
       <div class="field-row">
         <div class="field" style="flex:1">
-          <label for="smtp_user">SMTP user</label>
+          <label for="smtp_user">Username</label>
           <input id="smtp_user" name="smtp_user" type="text" value="{{ config.email.smtp_user|e }}">
         </div>
         <div class="field" style="flex:1">
-          <label for="smtp_password">SMTP password
-            {% if config.email.smtp_password_set %}<span class="text-soft">(currently set — leave blank to keep)</span>{% endif %}
+          <label for="smtp_password">Password
+            {% if config.email.smtp_password_set %}<span class="text-soft">— stored; leave blank to keep</span>{% endif %}
           </label>
           <input id="smtp_password" name="smtp_password" type="password" autocomplete="new-password" value="">
         </div>
       </div>
       <div class="field-row">
         <div class="field" style="flex:1">
-          <label for="from_name">From name</label>
-          <input id="from_name" name="from_name" type="text" value="{{ config.email.from_name|e }}">
+          <label for="from_name">Sender name</label>
+          <input id="from_name" name="from_name" type="text" value="{{ config.email.from_name|e }}" placeholder="Hyperion">
         </div>
         <div class="field" style="flex:1">
-          <label for="from_address">From address</label>
-          <input id="from_address" name="from_address" type="email" value="{{ config.email.from_address|e }}">
+          <label for="from_address">Sender address</label>
+          <input id="from_address" name="from_address" type="email" value="{{ config.email.from_address|e }}" placeholder="notifications@your-domain.cz">
         </div>
       </div>
       <div class="field">
-        <label for="default_to">Default to (cluster-wide notifications)</label>
+        <label for="default_to">Default recipient <span class="hint">cluster-wide notifications without a hosting-specific owner</span></label>
         <input id="default_to" name="default_to" type="email" value="{{ config.email.default_to|e }}">
       </div>
-      <button type="submit" class="btn small primary">Save email section</button>
+      <button type="submit" class="btn primary">Save mail settings</button>
     </form>
-
-    {# Explanation panel — operators often don't know whether the
-       server can actually send mail. Plain words, no jargon. #}
-    <div class="card-section" style="margin-top:1rem;padding:0.9rem 1rem;background:var(--surface-1);border-radius:8px;border-left:3px solid var(--accent)">
-      <h3 style="font-size:0.9rem;margin:0 0 0.4rem">How outbound mail works</h3>
-      <p class="text-soft small" style="margin:0 0 0.5rem;line-height:1.55">
-        Every notification (cert expiry, backup result, monitor down/up, billing reminder) is sent through the SMTP relay configured above.
-      </p>
-      <ul class="text-soft small" style="margin:0;padding-left:1.2rem;line-height:1.65">
-        <li><strong>Relay host</strong> — a real provider (Postmark, Mailgun, SendGrid, Brevo, AWS SES, Gmail SMTP) OR a local postfix on this server that you've configured to relay outbound.
-            Direct-from-VPS sends to public mailboxes almost always land in spam — operators are strongly encouraged to use a provider.</li>
-        <li><strong>SPF</strong> — the recipient's mail server checks if your relay's IP is listed as a permitted sender for the From-address domain. Set up via a DNS TXT record on your domain.
-            Hyperion shows per-hosting SPF analysis on each hosting's detail page.</li>
-        <li><strong>From-address</strong> — must be at a domain you control AND whose SPF includes your relay. Auto-detect tries to derive a sensible default from /etc/mailname.</li>
-        <li><strong>The test email below</strong> connects to the relay, sends a one-line message, and shows the SMTP code (250 = accepted, 550 = rejected, etc.). Every send is also logged at <a href="/emails">/emails</a> with full SMTP response.</li>
-        <li><strong>From another node</strong> — pick a worker from the dropdown to verify ITS outbound path works (each node uses its own [email] section in agent.toml).</li>
-      </ul>
-    </div>
-
-    {% if config.email.enabled %}
-      <div class="card-section" style="margin-top:1rem">
-        <h3 style="font-size:0.9rem;margin:0 0 0.5rem">Send test email</h3>
-        <form method="post" action="/settings/email-test" style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
-          <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-          <select name="target_node" style="margin:0;min-width:14rem">
-            <option value="local" selected>From: master (this node)</option>
-            {% for n in nodes %}
-            <option value="{{ n.node_id }}">From: {{ n.label }}{% if let Some(ip) = n.public_ip.as_ref() %} — {{ ip }}{% endif %}</option>
-            {% endfor %}
-          </select>
-          <input type="email" name="to" placeholder="you@example.cz" required
-                 value="{% if !config.email.default_to.is_empty() %}{{ config.email.default_to }}{% endif %}"
-                 style="flex:1;min-width:15rem;margin:0">
-          <button class="btn small primary" type="submit">Send test</button>
-        </form>
-        <p class="muted" style="font-size:0.8rem;margin-top:0.6rem;margin-bottom:0">
-          The chosen node opens a TCP socket to its configured SMTP relay and sends the message. Result + SMTP response code appear in the flash banner.
-        </p>
-      </div>
-
-      {# Inline "last 5 emails" so the operator sees their test send
-         immediately without leaving Settings — answers "did it go?"
-         right next to the Send button. #}
-      {% if !recent_emails.is_empty() %}
-      <div class="card-section" style="margin-top:1rem">
-        <h3 style="font-size:0.9rem;margin:0 0 0.5rem;display:flex;align-items:center;gap:0.4rem">
-          Recent emails
-          <a href="/emails" class="text-soft" style="font-size:0.78rem;font-weight:400;margin-left:auto">view all →</a>
-        </h3>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Sent</th>
-                <th>State</th>
-                <th>To</th>
-                <th>Subject</th>
-                <th>SMTP / error</th>
-              </tr>
-            </thead>
-            <tbody>
-              {% for e in recent_emails %}
-              <tr>
-                <td class="muted numeric" title="{{ e.sent_at }}">{{ crate::handlers::stats::fmt_ago(e.sent_at) }}</td>
-                <td>
-                  {% if e.state == "ok" %}<span class="pill ok">sent</span>
-                  {% else %}<span class="pill err">failed</span>{% endif %}
-                </td>
-                <td><code style="font-size:0.78rem">{{ e.to_address }}</code></td>
-                <td>{{ e.subject }}</td>
-                <td>
-                  {% if let Some(err) = e.error %}<code class="muted" style="font-size:0.74rem;color:var(--danger)">{{ err|truncate(80) }}</code>
-                  {% else if let Some(c) = e.smtp_code %}<code class="muted" style="font-size:0.74rem">{{ c }}</code>
-                  {% else %}<span class="text-soft">—</span>{% endif %}
-                </td>
-              </tr>
-              {% endfor %}
-            </tbody>
-          </table>
-        </div>
-      </div>
-      {% endif %}
-    {% endif %}
   </div>
 
-  {# Slack — editable webhook #}
+  {% if config.email.enabled %}
+  <div class="card" style="margin-top:1rem">
+    <h2>
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="3 11 22 2 13 21 11 13 3 11"/></svg>
+      Send a test email
+    </h2>
+    <form method="post" action="/settings/email-test" style="display:flex;gap:0.5rem;align-items:flex-end;flex-wrap:wrap">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <div class="field" style="margin:0;min-width:14rem">
+        <label for="test_from_node">From node</label>
+        <select id="test_from_node" name="target_node" style="margin:0">
+          <option value="local" selected>master (this node)</option>
+          {% for n in nodes %}
+          <option value="{{ n.node_id }}">{{ n.label }}{% if let Some(ip) = n.public_ip.as_ref() %} — {{ ip }}{% endif %}</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field" style="margin:0;flex:1;min-width:15rem">
+        <label for="test_to">To</label>
+        <input id="test_to" type="email" name="to" placeholder="you@example.cz" required
+               value="{% if !config.email.default_to.is_empty() %}{{ config.email.default_to }}{% endif %}"
+               style="margin:0">
+      </div>
+      <button class="btn primary" type="submit">Send test</button>
+    </form>
+    <p class="text-soft small" style="margin:0.6rem 0 0">
+      The selected node opens a TCP connection to its own SMTP relay (each node has its own <code>[email]</code> section in <code>agent.toml</code>). The flash banner shows the relay's SMTP response code — 250 means queued.
+    </p>
+  </div>
+
+  {% if !recent_emails.is_empty() %}
+  <div class="card" style="margin-top:1rem">
+    <h2 style="display:flex;align-items:center;gap:0.5rem">
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+      Recent emails
+      <a href="/emails" class="text-soft" style="font-size:0.78rem;font-weight:400;margin-left:auto">view all →</a>
+    </h2>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Sent</th><th>State</th><th>To</th><th>Subject</th><th>SMTP / error</th></tr></thead>
+        <tbody>
+          {% for e in recent_emails %}
+          <tr>
+            <td class="muted numeric" title="{{ e.sent_at }}">{{ crate::handlers::stats::fmt_ago(e.sent_at) }}</td>
+            <td>{% if e.state == "ok" %}<span class="pill ok">sent</span>{% else %}<span class="pill err">failed</span>{% endif %}</td>
+            <td><code style="font-size:0.78rem">{{ e.to_address }}</code></td>
+            <td>{{ e.subject }}</td>
+            <td>
+              {% if let Some(err) = e.error %}<code class="muted" style="font-size:0.74rem;color:var(--danger)">{{ err|truncate(80) }}</code>
+              {% else if let Some(c) = e.smtp_code %}<code class="muted" style="font-size:0.74rem">{{ c }}</code>
+              {% else %}<span class="text-soft">—</span>{% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  {% endif %}
+  {% endif %}
+
+  <div class="card muted" style="margin-top:1rem">
+    <h2 style="font-size:0.95rem;margin:0 0 0.6rem">How outbound mail works</h2>
+    <ul class="text-soft small" style="margin:0;padding-left:1.2rem;line-height:1.7">
+      <li><strong>Relay host</strong> — pick a real provider (Postmark, Mailgun, SendGrid, Brevo, AWS SES, Gmail SMTP) or point at a local postfix that's been configured to relay outbound. Direct-from-VPS sends to public mailboxes almost always land in spam.</li>
+      <li><strong>SPF</strong> — the recipient's mail server checks if your relay's IP is on the From-address domain's permitted-sender list. Set up via a DNS TXT record on your domain; Hyperion shows per-hosting SPF analysis on each hosting's detail page.</li>
+      <li><strong>Sender address</strong> — must be a domain you control AND whose SPF includes your relay. Auto-detect tries to derive a sensible default from <code>/etc/mailname</code>.</li>
+      <li><strong>Per-node</strong> — each worker has its own <code>[email]</code> section in its own <code>agent.toml</code>. Pick a node in the From dropdown above to verify that node's outbound path.</li>
+      <li><strong>Every send is logged</strong> at <a href="/emails">/emails</a> with the full SMTP response — so you can tell "queued" (250) from "rejected by relay" (550) without leaving the UI.</li>
+    </ul>
+  </div>
+</div>
+
+{# ==========================================================
+   TLS / ACME — Let's Encrypt contact email
+   ========================================================== #}
+<div class="tab-panel" id="tab-tls">
   <div class="card">
     <h2>
-      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 10c-.83 0-1.5-.67-1.5-1.5v-5c0-.83.67-1.5 1.5-1.5s1.5.67 1.5 1.5v5c0 .83-.67 1.5-1.5 1.5z"/><path d="M20.5 10H19V8.5c0-.83.67-1.5 1.5-1.5s1.5.67 1.5 1.5-.67 1.5-1.5 1.5z"/></svg>
-      Slack
-      {% if config.slack.default_webhook_set %}
-        <span class="pill ok small" style="margin-left:0.5rem">webhook set</span>
-      {% else %}
-        <span class="pill warn small" style="margin-left:0.5rem">not configured</span>
-      {% endif %}
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+      Let's Encrypt contact
     </h2>
+    <form method="post" action="/settings/config" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="acme">
+      <div class="field">
+        <label for="acme_email">Contact email <span class="hint">Let's Encrypt sends expiry warnings here, per-account</span></label>
+        <input id="acme_email" name="contact_email" type="email" required
+               value="{{ config.acme.contact_email|e }}"
+               style="width:100%">
+      </div>
+      <p class="text-soft small" style="margin:0 0 0.8rem">
+        Challenge dir: <code>{{ config.acme.challenge_dir }}</code> · ACME directory: <code>{{ config.acme.directory_url }}</code>
+      </p>
+      <button type="submit" class="btn primary">Save TLS settings</button>
+    </form>
+  </div>
+
+  <div class="card muted" style="margin-top:1rem">
+    <h2 style="font-size:0.95rem;margin:0 0 0.6rem">How HTTPS issuing works</h2>
+    <ul class="text-soft small" style="margin:0;padding-left:1.2rem;line-height:1.7">
+      <li>Each hosting starts with a <strong>self-signed cert</strong> right after provisioning — enough for nginx to come up.</li>
+      <li>When <code>http://&lt;domain&gt;</code> resolves to this server, you can issue a real <strong>Let's Encrypt cert</strong> from the hosting's detail page → SSL tab.</li>
+      <li>Hyperion uses <strong>HTTP-01</strong> (file under <code>{{ config.acme.challenge_dir }}/&lt;token&gt;</code>) — no DNS API integration needed.</li>
+      <li>Certs auto-renew 30 days before expiry; failures alert via Slack / email.</li>
+      <li>Per-hosting contact email overrides this one on the hosting detail page.</li>
+    </ul>
+  </div>
+</div>
+
+{# ==========================================================
+   NOTIFICATIONS — Slack webhook (email is in its own tab)
+   ========================================================== #}
+<div class="tab-panel" id="tab-notifications">
+  <div class="card">
+    <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.5rem">
+      <h2 style="margin:0">
+        <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.79 19.79 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6 19.79 19.79 0 0 1-3.07-8.67A2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72 12.84 12.84 0 0 0 .7 2.81 2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45 12.84 12.84 0 0 0 2.81.7A2 2 0 0 1 22 16.92z"/></svg>
+        Slack webhook
+      </h2>
+      {% if config.slack.default_webhook_set %}<span class="pill ok">configured</span>
+      {% else %}<span class="pill warn">not configured</span>{% endif %}
+    </div>
     <form method="post" action="/settings/config" autocomplete="off">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <input type="hidden" name="section" value="slack">
       <div class="field">
-        <label for="default_webhook">Default Slack webhook URL
-          {% if config.slack.default_webhook_set %}<span class="text-soft">(currently set — type new URL to replace, leave blank to clear)</span>{% endif %}
+        <label for="default_webhook">Default Slack incoming webhook URL
+          {% if config.slack.default_webhook_set %}<span class="text-soft">— stored; type a new URL to replace, leave blank to clear</span>{% endif %}
         </label>
         <input id="default_webhook" name="default_webhook" type="url"
-               placeholder="https://hooks.slack.com/services/…"
+               placeholder="https://hooks.slack.com/services/T…/B…/…"
                value="">
       </div>
-      <button type="submit" class="btn small primary">Save Slack webhook</button>
+      <p class="text-soft small" style="margin:0 0 0.8rem">
+        Cluster-wide alerts (backup failures, cert renewals, monitor down/up, billing reminders) are posted here. Per-hosting webhooks override this one — set them on each hosting's detail page.
+      </p>
+      <button type="submit" class="btn primary">Save Slack webhook</button>
     </form>
   </div>
+</div>
 
-  {# Backup remote — editable #}
+{# ==========================================================
+   BACKUPS — remote target + retention policy
+   ========================================================== #}
+<div class="tab-panel" id="tab-backups">
   <div class="card">
-    <h2>
-      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
-      Remote backup target
-      {% if config.backup_remote.enabled %}
-        <span class="pill ok small" style="margin-left:0.5rem">enabled</span>
-      {% else %}
-        <span class="pill warn small" style="margin-left:0.5rem">local only</span>
-      {% endif %}
-    </h2>
+    <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.5rem">
+      <h2 style="margin:0">
+        <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+        Off-site backup target
+      </h2>
+      {% if config.backup_remote.enabled %}<span class="pill ok">pushing</span>
+      {% else %}<span class="pill warn">local only</span>{% endif %}
+    </div>
+    <p class="text-soft small" style="margin:0 0 1rem">
+      Backups always land on local disk first (under <code>/var/lib/hyperion/backups/local</code>). Optionally Hyperion can also push a copy to an off-site FTP/FTPS/SFTP server immediately after the local backup finishes.
+    </p>
     <form method="post" action="/settings/config" autocomplete="off">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <input type="hidden" name="section" value="backup_remote">
@@ -300,9 +349,9 @@
         <div class="field" style="width:8rem">
           <label for="scheme">Protocol</label>
           <select id="scheme" name="scheme">
-            <option value="ftp" {% if config.backup_remote.scheme == "ftp" %}selected{% endif %}>ftp</option>
-            <option value="ftps" {% if config.backup_remote.scheme == "ftps" %}selected{% endif %}>ftps</option>
-            <option value="sftp" {% if config.backup_remote.scheme == "sftp" %}selected{% endif %}>sftp</option>
+            <option value="ftp" {% if config.backup_remote.scheme == "ftp" %}selected{% endif %}>FTP</option>
+            <option value="ftps" {% if config.backup_remote.scheme == "ftps" %}selected{% endif %}>FTPS</option>
+            <option value="sftp" {% if config.backup_remote.scheme == "sftp" %}selected{% endif %}>SFTP</option>
           </select>
         </div>
         <div class="field" style="flex:1">
@@ -316,29 +365,28 @@
       </div>
       <div class="field-row">
         <div class="field" style="flex:1">
-          <label for="bk_user">User</label>
+          <label for="bk_user">Username</label>
           <input id="bk_user" name="user" type="text" value="{{ config.backup_remote.user|e }}">
         </div>
         <div class="field" style="flex:1">
           <label for="bk_password">Password
-            {% if config.backup_remote.password_set %}<span class="text-soft">(currently set — leave blank to keep)</span>{% endif %}
+            {% if config.backup_remote.password_set %}<span class="text-soft">— stored; leave blank to keep</span>{% endif %}
           </label>
           <input id="bk_password" name="password" type="password" autocomplete="new-password" value="">
         </div>
       </div>
       <div class="field">
-        <label for="bk_base">Base path on remote</label>
+        <label for="bk_base">Base path on remote <span class="hint">per-hosting sub-directory is appended automatically</span></label>
         <input id="bk_base" name="base_path" type="text" value="{{ config.backup_remote.base_path|e }}" placeholder="/hyperion-backups">
       </div>
-      <button type="submit" class="btn small primary">Save backup target</button>
+      <button type="submit" class="btn primary">Save backup target</button>
     </form>
   </div>
 
-  {# Retention — editable #}
-  <div class="card">
+  <div class="card" style="margin-top:1rem">
     <h2>
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-      Backup retention
+      Retention policy
     </h2>
     <form method="post" action="/settings/config" autocomplete="off">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
@@ -355,27 +403,106 @@
                  value="{{ config.backup_retention.keep_latest_n }}">
         </div>
       </div>
-      <button type="submit" class="btn small primary">Save retention policy</button>
+      <p class="text-soft small" style="margin:0.4rem 0 0.8rem">
+        Backups older than <strong>max age</strong> are pruned after every new backup completes, but at least <strong>keep latest N</strong> per hosting are always retained (so an old hosting that nobody touches for months still has the last few backups around when you need them).
+      </p>
+      <button type="submit" class="btn primary">Save retention policy</button>
     </form>
   </div>
 </div>
 
-<div class="flash warn" style="margin-top:1rem">
-  <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-  <div class="flash-body">
-    Edits are written to <code>/etc/hyperion/agent.toml</code> with comments
-    preserved (atomic write + <code>.bak</code> backup). The running agent
-    keeps its old in-memory config until you restart it:
-    <code>systemctl restart hyperion-agent</code> on the node, or use the
-    "Restart" button on the <a href="/services" style="color:inherit;text-decoration:underline">Service health</a> page.
+{# ==========================================================
+   CLUSTER — multi-node controls
+   ========================================================== #}
+<div class="tab-panel" id="tab-cluster">
+  <div class="card">
+    <h2>
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
+      Cluster placement
+    </h2>
+    <form method="post" action="/settings/config" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="cluster">
+      <label class="field-checkbox" style="font-weight:600">
+        <input type="checkbox" name="master_accepts_hostings" value="true"
+               {% if config.cluster.master_accepts_hostings %}checked{% endif %}>
+        Allow new hostings to be created on the master node
+      </label>
+      <p class="text-soft small" style="margin:0.4rem 0 0.8rem;line-height:1.55">
+        Uncheck this if the master should be a <strong>control plane only</strong> and all hostings live on workers.
+        <br>
+        With this off, the Target-node dropdown on /hostings/new hides the master option, and creating directly via <code>hctl</code> on the master will be refused. Existing hostings on the master stay where they are — the toggle only affects new creates.
+      </p>
+      <button type="submit" class="btn primary">Save cluster settings</button>
+    </form>
+  </div>
+
+  <div class="card muted" style="margin-top:1rem">
+    <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Multi-node tips</h2>
+    <ul class="text-soft small" style="margin:0;padding-left:1.2rem;line-height:1.7">
+      <li><strong><a href="/install">Nodes &amp; install</a></strong> page lists enrolled workers, lets you mint invite tokens for new ones, run a connectivity test, and trigger remote apt/hyperion updates.</li>
+      <li><strong>Updates</strong> — pick any enrolled node from <a href="/install">/install</a> → click <em>Update…</em> → tick <em>System packages</em> and/or <em>Hyperion</em> → log streams live in the row.</li>
+      <li><strong>Stats</strong> at <a href="/stats">/stats</a> default to the <em>cluster total</em>: hostings, disk and bandwidth summed across master + all workers. Switch the dropdown to a node to see per-node sparklines.</li>
+      <li><strong>Service health</strong> at <a href="/services">/services</a> shows each node's systemd units. Click <em>Install</em> to apt-install a missing service — output streams live (no more "dpkg returned an error" with no detail).</li>
+    </ul>
   </div>
 </div>
 
+{# ==========================================================
+   RAW TOML — read-only view of agent.toml with secrets masked
+   ========================================================== #}
+<div class="tab-panel" id="tab-raw">
+  <div class="card">
+    <h2>
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+      Raw agent.toml
+    </h2>
+    <p class="text-soft small" style="margin:0 0 0.8rem">
+      Read-only snapshot of what the agent has loaded into memory. Passwords and tokens are replaced with <code>«set»</code> markers. Edit on disk with <code>sudo $EDITOR /etc/hyperion/agent.toml</code> + <code>systemctl restart hyperion-agent</code> to apply.
+    </p>
+    <pre style="background:var(--surface-1);border-radius:6px;padding:0.9rem 1rem;font-size:0.78rem;line-height:1.55;overflow:auto;max-height:36rem">{{ raw_toml }}</pre>
+  </div>
+</div>
+
+</div>{# /tab-panels #}
+
+<div class="flash warn" style="margin-top:1rem">
+  <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+  <div class="flash-body">
+    Edits are written to <code>/etc/hyperion/agent.toml</code> with comments preserved (atomic write + <code>.bak</code> backup). The running agent keeps its old in-memory config until you restart it — use the <strong>Restart</strong> button on <a href="/services" style="color:inherit;text-decoration:underline">Service health</a> or run <code>systemctl restart hyperion-agent</code> on the node.
+  </div>
+</div>
+
+{# ── tab-switching JS (same pattern as hostings_detail.html) ──── #}
 <script>
-// ============================================================
-//  Email SMTP auto-detect — calls the probe RPC and pre-fills the
-//  email form. Cheap (TCP connect, sub-second).
-// ============================================================
+(function () {
+  'use strict';
+  const tabs = document.querySelectorAll('.tabs .tab');
+  const panels = document.querySelectorAll('.tab-panels .tab-panel');
+  if (!tabs.length || !panels.length) return;
+  function activate(id) {
+    let matched = false;
+    tabs.forEach(t => {
+      const isMe = t.dataset.tab === id;
+      t.classList.toggle('active', isMe);
+      if (isMe) matched = true;
+    });
+    panels.forEach(p => p.classList.toggle('active', p.id === 'tab-' + id));
+    return matched;
+  }
+  tabs.forEach(t => t.addEventListener('click', ev => {
+    ev.preventDefault();
+    const id = t.dataset.tab;
+    activate(id);
+    if (history.replaceState) history.replaceState(null, '', '#' + id);
+  }));
+  const hashId = (location.hash || '').replace(/^#/, '');
+  if (!activate(hashId)) activate('mail');
+})();
+</script>
+
+{# SMTP auto-detect — pre-fills the form from the probe RPC. #}
+<script>
 (function () {
   const btn = document.getElementById('email-autodetect');
   if (!btn) return;
@@ -397,7 +524,6 @@
         if (!document.getElementById('from_address').value) {
           document.getElementById('from_address').value = j.suggested_from;
         }
-        // Auto-enable since we have something usable.
         const en = document.querySelector('input[name="enabled"]');
         if (en) en.checked = true;
         result.innerHTML = `<div class="flash success" style="margin-bottom:0.85rem"><div class="flash-body"><strong>Detected:</strong> ${j.smtp_host}:${j.smtp_port} (${j.security}). ${escapeHtml(j.notes)} <em>Save the section below to persist.</em></div></div>`;

@@ -61,6 +61,11 @@ struct NewTpl<'a> {
     /// Pre-selected target node when re-rendering after a validation
     /// error. Empty / "local" → master.
     target_node_in: String,
+    /// Echoes the [cluster] master_accepts_hostings setting from
+    /// agent.toml. When false the template hides the master from
+    /// the Target-node dropdown — operator turned the master into
+    /// a control-plane-only node via Settings → Cluster.
+    master_accepts_hostings: bool,
 }
 
 /// Per-field append to `CreateForm` for the optional WP install
@@ -215,10 +220,6 @@ pub async fn get_new(State(state): State<SharedState>, ctx: AuthCtx) -> Result<R
     let nodes = match fetch_remote_nodes(&state).await {
         Ok(v) => v,
         Err(e) => {
-            // Surface the error in tracing so an operator who sees
-            // "I expected stav in the dropdown but it's missing" can
-            // grep journalctl for the reason instead of staring at
-            // an empty form.
             tracing::warn!(
                 error=%e,
                 "fetch_remote_nodes failed — Target node dropdown will be empty"
@@ -226,6 +227,10 @@ pub async fn get_new(State(state): State<SharedState>, ctx: AuthCtx) -> Result<R
             Vec::new()
         }
     };
+    // Check the [cluster] section from agent.toml — master might be
+    // set to control-plane-only, in which case we hide the master
+    // option from the Target-node dropdown.
+    let master_accepts_hostings = fetch_master_accepts_hostings(&state).await;
     let tpl = NewTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -242,6 +247,7 @@ pub async fn get_new(State(state): State<SharedState>, ctx: AuthCtx) -> Result<R
         proxy_upstream_url_in: String::new(),
         nodes,
         target_node_in: String::new(),
+        master_accepts_hostings,
     };
     // Browsers (and reverse proxies in front) can cache /hostings/new
     // by default. After an enrollment the dropdown should refresh on
@@ -406,6 +412,18 @@ pub async fn post_create(
     } else {
         Some(target_node.as_str())
     };
+    // Server-side enforcement of the cluster.master_accepts_hostings
+    // toggle. UI hides the master option already (defense in depth)
+    // but a hand-crafted POST with target_node=local would otherwise
+    // bypass it.
+    if target.is_none() && !fetch_master_accepts_hostings(&state).await {
+        return Ok(render_new_error(
+            &ctx,
+            &csrf_token,
+            &form,
+            "Master is in control-plane-only mode (Settings → Cluster). Pick a worker node from the dropdown.",
+        ));
+    }
     // Loud breadcrumb so the operator can verify in journalctl which
     // node a create attempt was actually dispatched to. The dispatcher
     // also logs, but having both lets us tell apart "form submitted
@@ -1930,12 +1948,27 @@ fn render_new_error<'a>(
         // the operator is fixing a field, not switching nodes.
         nodes: Vec::new(),
         target_node_in: form.target_node.clone(),
+        // Same reasoning — preserve the operator-set value on
+        // re-render. Defaulting to true keeps backward-compat.
+        master_accepts_hostings: true,
     };
     Html(
         tpl.render()
             .unwrap_or_else(|_| "<h1>render error</h1>".into()),
     )
     .into_response()
+}
+
+/// Check the master's [cluster] section: should the master itself
+/// accept new hostings, or is it a control-plane-only node? Used
+/// by /hostings/new to gate the master option in the Target-node
+/// dropdown. Defaults to true (permissive) on any RPC failure or
+/// missing config field — least-surprise.
+async fn fetch_master_accepts_hostings(state: &SharedState) -> bool {
+    match hyperion_rpc_client::call(&state.agent_socket, Request::AgentConfigView).await {
+        Ok(RpcResponse::AgentConfigView(c)) => c.cluster.master_accepts_hostings,
+        _ => true,
+    }
 }
 
 /// Locate which node a hosting lives on, so per-hosting actions

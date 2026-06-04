@@ -33,7 +33,8 @@ pub use profile::{HostingProfile, ProfileApply, ProfileInput};
 pub use spf::SpfCheckResult;
 pub use stats::{
     AcmeConfigView, AgentConfigView, BackupRemoteConfigView, BackupRetentionConfigView,
-    ClusterStats, DashboardAlert, EmailConfigView, EmailLogEntry, HostingFileContent,
+    ClusterConfigView, ClusterStats, DashboardAlert, EmailConfigView, EmailLogEntry,
+    HostingFileContent,
     HostingFileEntry, HostingStats, MonitorConfigView, MonitorHistory, MonitorSamplePoint,
     NodeMetricPoint, NodeMetricsHistory, NodeStats, NodeSummary, NodeUpdateStatus,
     ServiceHealth, ServiceInstallStatus, ServicesHealth, SlackConfigView, SmtpAutodetect,

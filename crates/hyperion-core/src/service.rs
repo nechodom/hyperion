@@ -6014,6 +6014,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             directory_url: String::new(), // not stored here
             challenge_dir: self.paths.acme_challenge_root.clone(),
         };
+        // Cluster section is read directly from agent.toml's
+        // [cluster] table (we don't keep it on Service because it's
+        // UI-only — the agent itself doesn't enforce it; the master
+        // web UI does, by hiding the master target option).
+        let cluster_view = read_cluster_section(self.agent_config_path.as_deref());
         Ok(hyperion_types::AgentConfigView {
             hostname: hostname.to_string(),
             agent_version: version.to_string(),
@@ -6023,6 +6028,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             slack: slack_view,
             backup_remote: backup_remote_view,
             backup_retention: backup_retention_view,
+            cluster: cluster_view,
         })
     }
 
@@ -7297,6 +7303,35 @@ async fn http_post_json(url: &str, json_body: &str) -> Result<(), String> {
 
 /// Per-section + field validation. Returns owned (field, FieldValue)
 /// pairs ready for the persist module.
+/// Read the `[cluster]` section out of agent.toml. The cluster
+/// section is UI-only — the agent itself doesn't enforce anything;
+/// the master web UI checks `master_accepts_hostings` when
+/// rendering the /hostings/new "Target node" dropdown. Returns the
+/// default (`master_accepts_hostings = true`) on parse failure or
+/// missing file/section so an out-of-date agent.toml never breaks
+/// the settings page.
+fn read_cluster_section(
+    cfg_path: Option<&std::path::Path>,
+) -> hyperion_types::ClusterConfigView {
+    let Some(path) = cfg_path else {
+        return hyperion_types::ClusterConfigView::default();
+    };
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return hyperion_types::ClusterConfigView::default();
+    };
+    let Ok(doc) = raw.parse::<toml_edit::DocumentMut>() else {
+        return hyperion_types::ClusterConfigView::default();
+    };
+    let accept = doc
+        .get("cluster")
+        .and_then(|s| s.get("master_accepts_hostings"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    hyperion_types::ClusterConfigView {
+        master_accepts_hostings: accept,
+    }
+}
+
 fn parse_agent_section_fields(
     section: &str,
     fields: &std::collections::BTreeMap<String, String>,
@@ -7347,6 +7382,10 @@ fn parse_agent_section_fields(
             ("backup_retention", "max_age_days")
             | ("backup_retention", "keep_latest_n") => {
                 crate::config_persist::FieldValue::Int(parse_int(v)?)
+            }
+            // [cluster] — master web UI placement preferences
+            ("cluster", "master_accepts_hostings") => {
+                crate::config_persist::FieldValue::Bool(parse_bool(v)?)
             }
             // Reject anything else.
             _ => {
