@@ -133,6 +133,18 @@ pub struct ServiceHealth {
     /// `warn` (down but optional), `info` (missing optional unit),
     /// `ok` (active + enabled). UI may colour rows accordingly.
     pub severity: String,
+    /// Raw systemd ActiveState ("active" | "activating" | "reloading"
+    /// | "deactivating" | "inactive" | "failed" | "unknown"). Drives
+    /// the "restarting…" pill in the UI so an operator doesn't see
+    /// "down + stop-sigterm" when a service is mid-restart.
+    #[serde(default)]
+    pub active_state: String,
+    /// True when ActiveState is `activating`, `reloading`, or
+    /// `deactivating`. Severity is still "ok" for these because
+    /// they resolve in seconds, but the UI shows a yellow
+    /// "restarting" badge instead of green "running".
+    #[serde(default)]
+    pub transient: bool,
 }
 
 /// Bundle of all service-health rows.

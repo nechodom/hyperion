@@ -89,15 +89,21 @@
           <td>
             {% if !s.present %}
               <span class="pill" style="background:var(--surface-2);color:var(--text-soft)">not installed</span>
-            {% else if s.active %}
+            {% else if s.transient %}
+              <span class="pill warn" title="ActiveState = {{ s.active_state }}">restarting…</span>
+            {% else if s.active_state == "active" %}
               <span class="pill ok">running</span>
+            {% else if s.active_state == "failed" %}
+              <span class="pill err">failed</span>
+            {% else if s.active %}
+              <span class="pill ok">{{ s.active_state }}</span>
             {% else %}
-              <span class="pill err">down</span>
+              <span class="pill err">{{ s.active_state }}</span>
             {% endif %}
           </td>
           <td>{% if s.active %}<span class="text-soft">yes</span>{% else %}<strong style="color:var(--danger)">no</strong>{% endif %}</td>
           <td>{% if s.enabled %}<span class="text-soft">yes</span>{% else %}<span style="color:var(--warn)">no</span>{% endif %}</td>
-          <td><code class="text-soft">{{ s.sub_state }}</code></td>
+          <td><code class="text-soft" title="SubState">{{ s.sub_state }}</code></td>
           <td>
             {% if s.severity == "error" %}<span class="pill err">CRITICAL</span>
             {% else if s.severity == "warn" %}<span class="pill warn">WARN</span>
@@ -140,7 +146,10 @@
 
 <p class="text-soft small" style="margin-top:1rem">
   Status is live (re-evaluated on every page load via
-  <code>systemctl is-active</code> / <code>is-enabled</code> / <code>show -p SubState</code>).
+  <code>systemctl show -p ActiveState -p SubState -p UnitFileState</code>).
+  The page auto-refreshes every 15 seconds so a service mid-restart
+  clears to "running" without manual reload — flip the toggle in
+  your browser if that gets in the way of debugging.
   {% if is_super_admin %}
     <strong>Install</strong> runs <code>apt-get install -y</code> + <code>systemctl enable --now</code>;
     <strong>Restart</strong> runs <code>systemctl restart &lt;name&gt;</code>.
@@ -150,4 +159,31 @@
     To restart a down service: <code>ssh root@&lt;node&gt; systemctl restart &lt;name&gt;</code>.
   {% endif %}
 </p>
+
+<script>
+// Auto-refresh the page every 15s — but only when the tab is
+// actually visible. Avoids hammering the agent in background tabs.
+// Stops the interval on click in any form / button to avoid the
+// reload nuking a confirm dialog the operator just opened.
+(function () {
+  'use strict';
+  let timer = setInterval(tick, 15000);
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) {
+      clearInterval(timer);
+    } else {
+      timer = setInterval(tick, 15000);
+    }
+  });
+  document.addEventListener('click', (ev) => {
+    if (ev.target.closest('button, a, form')) {
+      clearInterval(timer);
+    }
+  });
+  function tick() {
+    if (document.hidden) return;
+    location.reload();
+  }
+})();
+</script>
 {% endblock %}

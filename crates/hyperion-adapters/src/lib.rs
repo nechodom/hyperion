@@ -25,35 +25,134 @@ pub mod wpcli;
 
 pub mod files;
 
-/// Probe one systemd unit's status. Returns (active, enabled, sub_state).
-/// Never panics; on any error returns `(false, false, "?")`.
-/// Used by both the health-check page and the dashboard widget.
-pub async fn systemctl_status(unit: &str) -> (bool, bool, String) {
-    let active = tokio::process::Command::new("/usr/bin/systemctl")
-        .args(["is-active", "--quiet", unit])
-        .status()
-        .await
-        .map(|s| s.success())
-        .unwrap_or(false);
-    let enabled = tokio::process::Command::new("/usr/bin/systemctl")
-        .args(["is-enabled", "--quiet", unit])
-        .status()
-        .await
-        .map(|s| s.success())
-        .unwrap_or(false);
-    // SubState gives nicer detail than the boolean: "running",
-    // "failed", "dead", "exited"… empty/"?" if probe failed.
-    let sub_state = tokio::process::Command::new("/usr/bin/systemctl")
-        .args(["show", "-p", "SubState", "--value", unit])
+/// Rich systemd unit status. Returned by [`systemctl_status`] so
+/// callers can distinguish "down" from "currently restarting" — the
+/// boolean active alone collapsed both into the same state and
+/// gave operators "down + stop-sigterm" false alarms on every
+/// restart.
+#[derive(Debug, Clone)]
+pub struct UnitStatus {
+    /// True for any of: `active`, `activating`, `reloading`,
+    /// `deactivating`. False for `inactive` / `failed` / probe
+    /// error. UI consumers usually want `active && !transient`
+    /// to colour the row green.
+    pub active: bool,
+    /// True for any UnitFileState that autostarts the unit:
+    /// enabled / enabled-runtime / alias / static / indirect /
+    /// generated / transient.
+    pub enabled: bool,
+    /// Raw systemd ActiveState — "active" | "activating" |
+    /// "reloading" | "deactivating" | "inactive" | "failed".
+    /// Drives the "restarting…" badge in the UI.
+    pub active_state: String,
+    /// Raw systemd SubState — "running" | "dead" | "exited" |
+    /// "start-pre" | "stop-sigterm" | "auto-restart" | "failed" …
+    /// One-word free-form diagnostic surface.
+    pub sub_state: String,
+    /// Raw systemd UnitFileState — "enabled" | "disabled" |
+    /// "static" | "indirect" | "generated" | "masked" | … |
+    /// empty string when the unit isn't installed.
+    pub unit_file_state: String,
+}
+
+impl UnitStatus {
+    /// `true` if the unit is in a brief transition (start/stop/
+    /// reload) — UI should show "restarting" not "down".
+    pub fn transient(&self) -> bool {
+        matches!(
+            self.active_state.as_str(),
+            "activating" | "reloading" | "deactivating"
+        )
+    }
+}
+
+/// Probe one systemd unit's status via `systemctl show`.
+///
+/// The old implementation used `is-active --quiet` + `is-enabled
+/// --quiet` and reported false for any non-success exit. That gave
+/// two false negatives we kept hitting on s4:
+///
+///   - `is-active` exits 0 ONLY for `active` — `activating`,
+///     `reloading`, `deactivating` all exit non-zero, so a probe
+///     that lands mid-restart marks the unit "down" with sub_state
+///     "stop-sigterm" even though it'll be back up in 100ms.
+///
+///   - `is-enabled` exits 0 only for plain `enabled` /
+///     `enabled-runtime` / `alias`. `static` / `indirect` /
+///     `generated` (legitimate ways for a service to autostart)
+///     all exit non-zero, so the UI flagged enabled-via-WantedBy
+///     services as "enabled=no".
+///
+/// New approach: one `systemctl show -p ActiveState -p SubState
+/// -p UnitFileState --value` call. Parses the structured output
+/// and maps it correctly. Returns `UnitStatus` with both the
+/// derived booleans + the raw strings so the UI can distinguish
+/// "restarting" from "down".
+pub async fn systemctl_status_rich(unit: &str) -> UnitStatus {
+    let out = tokio::process::Command::new("/usr/bin/systemctl")
+        .args([
+            "show",
+            "-p", "ActiveState",
+            "-p", "SubState",
+            "-p", "UnitFileState",
+            "--value",
+            "--no-pager",
+            unit,
+        ])
         .output()
-        .await
-        .ok()
-        .and_then(|o| {
-            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if s.is_empty() { None } else { Some(s) }
-        })
-        .unwrap_or_else(|| "?".into());
-    (active, enabled, sub_state)
+        .await;
+    let unknown = |reason: &str| UnitStatus {
+        active: false,
+        enabled: false,
+        active_state: "unknown".into(),
+        sub_state: reason.into(),
+        unit_file_state: String::new(),
+    };
+    let Ok(out) = out else {
+        return unknown("spawn-failed");
+    };
+    if !out.status.success() {
+        // Exit 4 = "not loaded / no such unit". That maps to
+        // `inactive + dead + ""` in systemd's own data model;
+        // surface accordingly so consumers can distinguish "we
+        // don't know" from "service is genuinely missing".
+        return unknown("no-such-unit");
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut lines = stdout.lines();
+    let active_state = lines.next().unwrap_or("").trim().to_string();
+    let sub_state = lines.next().unwrap_or("").trim().to_string();
+    let unit_file_state = lines.next().unwrap_or("").trim().to_string();
+
+    let active = matches!(
+        active_state.as_str(),
+        "active" | "activating" | "reloading" | "deactivating"
+    );
+    let enabled = matches!(
+        unit_file_state.as_str(),
+        "enabled" | "enabled-runtime" | "alias" | "static"
+            | "indirect" | "generated" | "transient"
+    );
+    let sub = if sub_state.is_empty() {
+        "?".into()
+    } else {
+        sub_state
+    };
+    UnitStatus {
+        active,
+        enabled,
+        active_state,
+        sub_state: sub,
+        unit_file_state,
+    }
+}
+
+/// Backwards-compatible adapter for callers that only want the
+/// `(active, enabled, sub_state)` triple. New code should use
+/// [`systemctl_status_rich`] instead.
+pub async fn systemctl_status(unit: &str) -> (bool, bool, String) {
+    let s = systemctl_status_rich(unit).await;
+    (s.active, s.enabled, s.sub_state)
 }
 
 /// Is a unit file present at all on the system?
@@ -267,6 +366,36 @@ pub fn random_password() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// UnitStatus.transient detects the three ActiveState values
+    /// systemd uses while a unit is in motion. The bug we just
+    /// fixed: a probe that lands on `deactivating + stop-sigterm`
+    /// during a restart marked the unit "down" even though the
+    /// restart was about to complete. Now it's flagged transient
+    /// and severity stays "ok".
+    #[test]
+    fn unit_status_transient_covers_all_motion_states() {
+        for s in ["activating", "reloading", "deactivating"] {
+            let us = UnitStatus {
+                active: true,
+                enabled: true,
+                active_state: s.to_string(),
+                sub_state: "start-pre".into(),
+                unit_file_state: "enabled".into(),
+            };
+            assert!(us.transient(), "expected transient for {s}");
+        }
+        for s in ["active", "inactive", "failed", "unknown"] {
+            let us = UnitStatus {
+                active: false,
+                enabled: false,
+                active_state: s.to_string(),
+                sub_state: "?".into(),
+                unit_file_state: String::new(),
+            };
+            assert!(!us.transient(), "expected non-transient for {s}");
+        }
+    }
 
     /// strip_ansi must remove the colour codes systemctl sometimes
     /// emits without dropping legitimate content. The bug we shipped

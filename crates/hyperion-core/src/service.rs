@@ -5748,20 +5748,18 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // despite being live.
         for (unit, label) in critical {
             let (status, mut present) = tokio::join!(
-                hyperion_adapters::systemctl_status(unit),
+                hyperion_adapters::systemctl_status_rich(unit),
                 hyperion_adapters::systemctl_unit_present(unit),
             );
-            let (active, enabled, mut sub) = status;
-            if active || enabled {
+            if status.active || status.enabled {
                 present = true;
             }
+            let mut sub = status.sub_state.clone();
             if !present {
                 sub = "missing".into();
             }
-            let severity = if !present {
-                critical_down += 1;
-                "error".to_string()
-            } else if !active {
+            let transient = status.transient();
+            let severity = if !present || !status.active {
                 critical_down += 1;
                 "error".to_string()
             } else {
@@ -5770,28 +5768,31 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             services.push(hyperion_types::ServiceHealth {
                 name: unit.to_string(),
                 label: label.to_string(),
-                active,
-                enabled,
+                active: status.active,
+                enabled: status.enabled,
                 present,
                 sub_state: sub,
                 severity,
+                active_state: status.active_state,
+                transient,
             });
         }
         for (unit, label) in optional {
             let (status, mut present) = tokio::join!(
-                hyperion_adapters::systemctl_status(unit),
+                hyperion_adapters::systemctl_status_rich(unit),
                 hyperion_adapters::systemctl_unit_present(unit),
             );
-            let (active, enabled, mut sub) = status;
-            if active || enabled {
+            if status.active || status.enabled {
                 present = true;
             }
+            let mut sub = status.sub_state.clone();
             if !present {
                 sub = "not installed".into();
             }
+            let transient = status.transient();
             let severity = if !present {
                 "info".to_string()
-            } else if !active {
+            } else if !status.active {
                 warn_down += 1;
                 "warn".to_string()
             } else {
@@ -5800,11 +5801,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             services.push(hyperion_types::ServiceHealth {
                 name: unit.to_string(),
                 label: label.to_string(),
-                active,
-                enabled,
+                active: status.active,
+                enabled: status.enabled,
                 present,
                 sub_state: sub,
                 severity,
+                active_state: status.active_state,
+                transient,
             });
         }
         Ok(hyperion_types::ServicesHealth {
