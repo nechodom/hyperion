@@ -218,6 +218,10 @@ fn build_app_with_signer(
         csrf_key: Arc::new(csrf_key),
         admin_user: Arc::new(admin),
         ratelimit: Arc::new(hyperion_web::ratelimit::RateLimiter::new()),
+        // Tests don't exercise remote dispatch — leave the signer
+        // unset so any handler that wires it in later gets a clean
+        // "remote disabled" error rather than a stub signature.
+        master_rpc_signer: None,
     });
     (hyperion_web::build_router(state), signer)
 }

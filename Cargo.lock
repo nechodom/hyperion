@@ -1415,10 +1415,14 @@ dependencies = [
 name = "hyperion-rpc-client"
 version = "0.1.0"
 dependencies = [
+ "chrono",
+ "hyperion-core",
  "hyperion-rpc",
+ "serde_json",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+ "ulid",
 ]
 
 [[package]]

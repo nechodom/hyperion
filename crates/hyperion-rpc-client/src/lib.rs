@@ -1,14 +1,19 @@
-//! Unix-socket RPC client.
+//! RPC client — both Unix socket (local agent) and signed HTTPS
+//! (remote agent over the master→node channel).
 //!
-//! One call per connection. `call(path, request) -> Response` returns the
-//! decoded response, including the `Response::Error(..)` variant when the
-//! agent returned a typed RPC error.
+//! One call per connection.
+//! [`call`]: local Unix-socket round trip.
+//! [`call_remote`]: HTTPS round trip with a master-signed envelope.
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 #![forbid(unsafe_code)]
+
+pub mod remote;
 
 use hyperion_rpc::codec::{read_frame, write_frame, Request, Response};
 use std::path::Path;
 use tokio::net::UnixStream;
+
+pub use remote::{call_remote, RemoteCallOpts, RemoteClientError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {

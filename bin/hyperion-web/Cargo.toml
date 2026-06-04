@@ -15,6 +15,9 @@ hyperion-rpc-client = { path = "../../crates/hyperion-rpc-client" }
 hyperion-types = { path = "../../crates/hyperion-types" }
 hyperion-validate = { path = "../../crates/hyperion-validate" }
 hyperion-auth = { path = "../../crates/hyperion-auth" }
+# Needed for master_rpc::MasterRpcSigner (master→node RPC signing
+# key loaded at startup, used by dispatcher::dispatch_to_node).
+hyperion-core = { path = "../../crates/hyperion-core" }
 tokio = { workspace = true }
 anyhow.workspace = true
 tracing.workspace = true
@@ -49,7 +52,6 @@ tokio = { workspace = true, features = ["macros", "rt"] }
 tempfile.workspace = true
 async-trait.workspace = true
 hyperion-adapters = { path = "../../crates/hyperion-adapters" }
-hyperion-core = { path = "../../crates/hyperion-core" }
 hyperion-state = { path = "../../crates/hyperion-state" }
 hyperion-rpc-server = { path = "../../crates/hyperion-rpc-server" }
 rand.workspace = true

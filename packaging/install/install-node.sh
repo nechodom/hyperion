@@ -230,8 +230,45 @@ master_url   = "$MASTER"
 invite_token = "$TOKEN"
 node_label   = "$LABEL"
 verify_tls   = false
+
+# Master→node remote RPC.
+#
+# When enabled, the agent runs a second HTTPS listener (port 9443
+# by default) accepting signed RPC requests from the master. This
+# is what makes the master's UI "Target node" dropdown work —
+# without it, the master can still see this node in its registry
+# but can't dispatch hosting create / delete / etc. to it.
+#
+# Auth model: the master holds an Ed25519 signing key
+# (/etc/hyperion/master-rpc.key on the master); the public half is
+# delivered to this node at enrollment time and on every heartbeat
+# ack. Each remote RPC carries an Ed25519 signature over
+# (node_id, ts, nonce, body_hash) — only requests signed by the
+# legitimate master pass.
+#
+# TLS on this port is self-signed (auto-generated on first boot).
+# The signature is the actual authentication; TLS is transport
+# encryption.
+#
+# Make sure 9443 is OPEN in your firewall:
+#   ufw allow proto tcp from <master-ip> to any port 9443
+# (or scope wider if your topology needs it.)
+[remote_rpc]
+enabled       = true
+bind          = "0.0.0.0:9443"
+tls_cert_file = "/etc/hyperion/agent-rpc.crt"
+tls_key_file  = "/etc/hyperion/agent-rpc.key"
 EOF
 chmod 0600 /etc/hyperion/agent.toml
+
+#-------- 6.5 firewall opening for master→node RPC --------------------------
+# Best-effort: when ufw is installed and active, allow port 9443
+# from anywhere. Operator can tighten this later via
+# `ufw delete allow 9443/tcp && ufw allow proto tcp from <master> to any port 9443`.
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+  ufw allow 9443/tcp comment 'hyperion master->node RPC' || true
+  echo "  Opened ufw 9443/tcp for master→node RPC."
+fi
 
 #-------- 7. systemd unit + start ------------------------------------------
 if [[ -f "$INSTALL_DIR/packaging/systemd/hyperion-agent.service" ]]; then

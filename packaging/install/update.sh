@@ -243,6 +243,39 @@ done
 # into it (covered by ReadWritePaths=/etc/hyperion in the systemd unit).
 install -d -m 0700 /etc/hyperion/web-tls
 
+#-------- 4a-bis. master→node remote RPC opt-in for existing nodes --------
+# Pre-multinode agent.toml files don't have [remote_rpc]. Without
+# the section the agent's default is `enabled = false`, so the
+# master can't dispatch to this node from its UI. Patch it in via
+# a heredoc append — only when the section is missing. Operators
+# can later flip enabled to false by hand if they don't want this.
+if [[ -f /etc/hyperion/agent.toml ]] \
+   && ! grep -q '^\[remote_rpc\]' /etc/hyperion/agent.toml; then
+  log "Adding [remote_rpc] section to /etc/hyperion/agent.toml ..."
+  cat >> /etc/hyperion/agent.toml <<'EOF'
+
+# Master→node remote RPC (added by update.sh). Default ON so the
+# master UI's "Target node" dropdown works for this node. Disable
+# by setting enabled = false; the local Unix socket always works
+# regardless.
+[remote_rpc]
+enabled       = true
+bind          = "0.0.0.0:9443"
+tls_cert_file = "/etc/hyperion/agent-rpc.crt"
+tls_key_file  = "/etc/hyperion/agent-rpc.key"
+EOF
+fi
+
+# Best-effort: open port 9443 in ufw if it's installed + active.
+# Operators on iptables / nftables / cloud security groups will
+# need to open it themselves.
+if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+  if ! ufw status 2>/dev/null | grep -q '9443/tcp'; then
+    log "Opening ufw 9443/tcp for master→node RPC ..."
+    ufw allow 9443/tcp comment 'hyperion master->node RPC' || true
+  fi
+fi
+
 #-------- 4b. wp-cli (best-effort install/update) -------------------------
 # WordPress install adapter shells out to /usr/local/bin/wp. Older Hyperion
 # installs predate wp-cli being installed by install-master.sh, so make

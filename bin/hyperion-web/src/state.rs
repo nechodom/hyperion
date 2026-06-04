@@ -4,6 +4,7 @@ use crate::admin_user::AdminUser;
 use crate::config::Config;
 use crate::ratelimit::RateLimiter;
 use hyperion_auth::SessionSigner;
+use hyperion_core::master_rpc::MasterRpcSigner;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -16,6 +17,11 @@ pub struct AppState {
     /// In-process per-IP token-bucket limiter shared across handlers.
     /// See [`crate::ratelimit`] for the thread model.
     pub ratelimit: Arc<RateLimiter>,
+    /// Ed25519 signing key for master→node remote RPC. `Some` when
+    /// `/etc/hyperion/master-rpc.key` was readable at startup
+    /// (created by hyperion-agent on first boot); `None` otherwise
+    /// — the dispatcher refuses remote calls with a clean error.
+    pub master_rpc_signer: Option<Arc<MasterRpcSigner>>,
 }
 
 impl AppState {

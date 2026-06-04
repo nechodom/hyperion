@@ -32,6 +32,38 @@
   <form method="post" action="/hostings">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
 
+    {# Target node selector. Only renders when there's at least one
+       remote enrolled node; on a single-node setup the form silently
+       targets the master, which is the existing behaviour. #}
+    {% if !nodes.is_empty() %}
+    <h2>
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
+      Target node
+    </h2>
+    <div class="field">
+      <label for="target_node">Which node should host this site?</label>
+      <select id="target_node" name="target_node">
+        <option value="local" {% if target_node_in.is_empty() || target_node_in == "local" %}selected{% endif %}>
+          this master (default)
+        </option>
+        {% for n in nodes %}
+        <option value="{{ n.node_id }}" {% if target_node_in == n.node_id %}selected{% endif %}>
+          {{ n.label }} — {{ n.node_id }}{% if let Some(ip) = n.public_ip.as_ref() %} ({{ ip }}){% endif %}
+        </option>
+        {% endfor %}
+      </select>
+      <p class="text-soft small" style="margin:0.3rem 0 0">
+        Remote nodes are reached via signed HTTPS RPC (port 9443).
+        The node must have <code>[remote_rpc] enabled = true</code> in
+        its agent.toml and the port has to be open in its firewall.
+      </p>
+    </div>
+    {% else %}
+    {# Single-node setup — preserve the form contract by sending the
+       sentinel even though there's no choice to make. #}
+    <input type="hidden" name="target_node" value="local">
+    {% endif %}
+
     <h2>
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 22h20"/><path d="M2 12h20"/><path d="M2 2h20"/><path d="M6 22V2"/><path d="M18 22V2"/></svg>
       Hosting type

@@ -61,6 +61,22 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
     let tls_enabled = cfg.web.tls_enabled;
     let tls_cert = cfg.web.tls_cert_file.clone();
     let tls_key = cfg.web.tls_key_file.clone();
+    // Master remote-RPC signing key. Owned by hyperion-agent (which
+    // generates it at first boot, mode 0600); hyperion-web just
+    // reads. If the file isn't present yet (agent hasn't started
+    // once), load_or_init would CREATE it under web's uid which is
+    // fine — both processes run as root. Failure here logs and
+    // leaves the dispatcher in "remote calls disabled" mode.
+    let master_rpc_signer = match hyperion_core::master_rpc::MasterRpcSigner::load_or_init(
+        std::path::Path::new("/etc/hyperion/master-rpc.key"),
+    ) {
+        Ok(s) => Some(Arc::new(s)),
+        Err(e) => {
+            tracing::warn!(error=%e, "master-rpc.key not loaded — remote-node UI dispatch disabled");
+            None
+        }
+    };
+
     let state = Arc::new(AppState {
         cfg,
         agent_socket,
@@ -68,6 +84,7 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
         csrf_key: Arc::new(csrf_key),
         admin_user: Arc::new(admin),
         ratelimit: Arc::new(hyperion_web::ratelimit::RateLimiter::new()),
+        master_rpc_signer,
     });
     let app = hyperion_web::build_router(state);
     let bind_addr: std::net::SocketAddr = listen

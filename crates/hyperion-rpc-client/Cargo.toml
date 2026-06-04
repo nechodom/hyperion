@@ -7,8 +7,12 @@ license.workspace = true
 
 [dependencies]
 hyperion-rpc = { path = "../hyperion-rpc" }
+hyperion-core = { path = "../hyperion-core" }
 tokio = { workspace = true }
 thiserror.workspace = true
+serde_json.workspace = true
+ulid = "1"
+chrono.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }

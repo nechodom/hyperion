@@ -6,6 +6,7 @@
 pub mod admin_user;
 pub mod auth;
 pub mod config;
+pub mod dispatcher;
 pub mod error;
 pub mod handlers;
 pub mod ratelimit;

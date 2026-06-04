@@ -54,6 +54,13 @@ struct NewTpl<'a> {
     kind_in: String,
     /// Echoed-back upstream URL when create failed and kind=reverse_proxy
     proxy_upstream_url_in: String,
+    /// Enrolled remote nodes (master excluded). When empty, the
+    /// template hides the "Target node" dropdown and the hosting is
+    /// provisioned on the master itself.
+    nodes: Vec<hyperion_types::NodeSummary>,
+    /// Pre-selected target node when re-rendering after a validation
+    /// error. Empty / "local" → master.
+    target_node_in: String,
 }
 
 /// Per-field append to `CreateForm` for the optional WP install
@@ -195,6 +202,10 @@ pub async fn get_new(State(state): State<SharedState>, ctx: AuthCtx) -> Result<R
     // button (form_id /hostings/dns-check-domain) in addition to the
     // main /hostings POST.
     let csrf_token = super::session_csrf_token(&state, &ctx);
+    // Fetch enrolled remote nodes so the "Target node" dropdown can
+    // offer them. Failure here just leaves the dropdown empty — the
+    // form still works for the default-master case.
+    let nodes = fetch_remote_nodes(&state).await.unwrap_or_default();
     let tpl = NewTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -209,8 +220,24 @@ pub async fn get_new(State(state): State<SharedState>, ctx: AuthCtx) -> Result<R
         db_in: "mariadb".to_string(),
         kind_in: "php".to_string(),
         proxy_upstream_url_in: String::new(),
+        nodes,
+        target_node_in: String::new(),
     };
     Ok(Html(tpl.render()?).into_response())
+}
+
+/// Look up enrolled nodes via NodesList. The master itself isn't a
+/// row in the `nodes` table (it's the orchestrator, not an enrollee),
+/// so whatever this returns IS the set of remote targets the
+/// operator can pick from.
+async fn fetch_remote_nodes(
+    state: &SharedState,
+) -> Result<Vec<hyperion_types::NodeSummary>, AppError> {
+    let resp = hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await?;
+    match resp {
+        RpcResponse::NodesList(v) => Ok(v),
+        _ => Err(AppError::Internal("unexpected NodesList response".into())),
+    }
 }
 
 #[derive(Deserialize)]
@@ -230,6 +257,10 @@ pub struct CreateForm {
     /// Upstream URL when kind=reverse_proxy.
     #[serde(default)]
     pub proxy_upstream_url: String,
+    /// Target node for provisioning. "" / "local" → master itself;
+    /// anything else is a node_id from /install / NodesList.
+    #[serde(default)]
+    pub target_node: String,
     /// "on" if the user checked the "install WordPress" checkbox.
     #[serde(default)]
     pub install_wp: String,
@@ -321,9 +352,24 @@ pub async fn post_create(
         kind,
         proxy_upstream_url,
     };
-    let resp = hyperion_rpc_client::call(&state.agent_socket, Request::HostingCreate(req.clone()))
-        .await
-        .map_err(AppError::from)?;
+    // Cache target_node — every downstream RPC in this handler
+    // (HostingCreate, optional WpInstall, HostingGet, fetch_limits)
+    // must hit the SAME node, otherwise the WP install would land on
+    // the master while the hosting itself lives on stav.
+    let target_node = form.target_node.clone();
+    let target = if target_node.is_empty()
+        || target_node == crate::dispatcher::LOCAL_NODE_SENTINEL
+    {
+        None
+    } else {
+        Some(target_node.as_str())
+    };
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target,
+        Request::HostingCreate(req.clone()),
+    )
+    .await?;
     match resp {
         RpcResponse::HostingCreate(mut created) => {
             // Optional WordPress install — only when checkbox ticked,
@@ -361,8 +407,9 @@ pub async fn post_create(
                         locale,
                         version: "latest".to_string(),
                     };
-                    let install_resp = hyperion_rpc_client::call(
-                        &state.agent_socket,
+                    let install_resp = crate::dispatcher::dispatch_to_node(
+                        &state,
+                        target,
                         Request::WpInstall {
                             sel: HostingSelector::Id(created.id.clone()),
                             req: wp_req,
@@ -388,13 +435,16 @@ pub async fn post_create(
                 }
             }
 
-            // Re-fetch detail for nice display.
-            let detail_resp = hyperion_rpc_client::call(
-                &state.agent_socket,
+            // Re-fetch detail for nice display. Must go to the SAME
+            // node we just provisioned on — otherwise the master
+            // would return "no such hosting" because the row lives
+            // on the remote node's state DB.
+            let detail_resp = crate::dispatcher::dispatch_to_node(
+                &state,
+                target,
                 Request::HostingGet(HostingSelector::Id(created.id.clone())),
             )
-            .await
-            .map_err(AppError::from)?;
+            .await?;
             let detail = match detail_resp {
                 RpcResponse::HostingGet(d) => d,
                 _ => return Err(AppError::Internal("expected HostingGet".into())),
@@ -1665,6 +1715,12 @@ fn render_new_error<'a>(
         db_in: form.db.clone(),
         kind_in: form.kind.clone(),
         proxy_upstream_url_in: form.proxy_upstream_url.clone(),
+        // Re-rendering on validation error doesn't need a fresh
+        // NodesList — we'd repeat the agent RPC for no UX gain.
+        // The dropdown silently empties, which is acceptable since
+        // the operator is fixing a field, not switching nodes.
+        nodes: Vec::new(),
+        target_node_in: form.target_node.clone(),
     };
     Html(
         tpl.render()
