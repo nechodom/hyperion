@@ -203,7 +203,10 @@
       </form>
     {% else if detail.state.as_str() == "active" %}
       <form method="post" action="/hostings/suspend" style="display:inline"
-            onsubmit="return confirm('Suspend {{ detail.domain }}? Site will return HTTP 503 until resumed.');">
+            data-confirm-title="Suspend {{ detail.domain }}"
+            data-confirm-body="Visitors will see HTTP 503 until you resume the hosting."
+            data-confirm-confirm-label="Suspend"
+            data-confirm-variant="primary">
         <input type="hidden" name="_csrf" value="{{ csrf_suspend }}">
         <input type="hidden" name="selector" value="{{ detail.domain }}">
         <button class="btn" type="submit">
@@ -436,7 +439,10 @@
     <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Reset database password</h2>
     <p class="muted" style="margin:0 0 0.8rem;font-size:0.85rem">Generate a new strong password and update both the DB grant + the persisted secret.</p>
     <form method="post" action="/hostings/db/reset-password" autocomplete="off"
-          onsubmit="return confirm('Reset DB password for {{ db.db_user }}? Existing connections may drop.');">
+          data-confirm-title="Reset database password"
+          data-confirm-body="A new password will be generated for {{ db.db_user }}. Active connections may drop and any app config referencing the old password will stop working until updated."
+          data-confirm-confirm-label="Reset password"
+          data-confirm-variant="danger">
       <input type="hidden" name="_csrf" value="{{ csrf_db_reset }}">
       <input type="hidden" name="selector" value="{{ detail.domain }}">
       <div class="row" style="gap:0.5rem;align-items:flex-end">
@@ -559,7 +565,10 @@
     </form>
 
     <form method="post" action="/hostings/cert/issue"
-          onsubmit="return confirm('Issue a real Let\\'s Encrypt cert for {{ detail.domain }}? This contacts the LE API.');">
+          data-confirm-title="Issue real Let's Encrypt certificate"
+          data-confirm-body="Hyperion will request a production HTTPS cert for {{ detail.domain }} from Let's Encrypt. Make sure DNS A/AAAA records point at this server first or the issue will fail."
+          data-confirm-confirm-label="Issue certificate"
+          data-confirm-variant="primary">
       <input type="hidden" name="_csrf" value="{{ csrf_cert_issue }}">
       <input type="hidden" name="selector" value="{{ detail.domain }}">
       <label class="field-checkbox">
@@ -626,7 +635,10 @@
     <div class="card-section">
       <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Reset admin password</h2>
       <form method="post" action="/hostings/wp/reset-password" autocomplete="off"
-            onsubmit="return confirm('Reset WordPress admin password?');">
+            data-confirm-title="Reset WordPress admin password"
+            data-confirm-body="A new random password will be generated for the WP admin account. Existing browser sessions stay logged in."
+            data-confirm-confirm-label="Reset password"
+            data-confirm-variant="danger">
         <input type="hidden" name="_csrf" value="{{ csrf_wp_reset }}">
         <input type="hidden" name="selector" value="{{ detail.domain }}">
         <div class="field-row">
@@ -835,7 +847,10 @@
                   <button class="btn small primary" type="submit">Activate</button>
                 </form>
                 <form method="post" action="/hostings/wp/plugin-action" style="display:inline"
-                      onsubmit="return confirm('Delete plugin {{ p.slug }}? This removes the files from disk.');">
+                      data-confirm-title="Delete plugin"
+                      data-confirm-body="Plugin {{ p.slug }} will be deleted from disk and from the WordPress plugin registry. Plugin data in the DB (custom tables, options) is left intact."
+                      data-confirm-confirm-label="Delete plugin"
+                      data-confirm-variant="danger">
                   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                   <input type="hidden" name="selector" value="{{ detail.domain }}">
                   <input type="hidden" name="slug" value="{{ p.slug }}">
@@ -983,7 +998,10 @@
     <p class="muted">No profiles defined yet. <a href="/profiles">Create one</a> first.</p>
   {% else %}
     <form method="post" action="/profiles/apply"
-          onsubmit="return confirm('Apply this profile to {{ detail.domain }}? Will overwrite current limits + expiry policy + price snapshot.');">
+          data-confirm-title="Apply hosting profile"
+          data-confirm-body="Current limits, expiry policy and price snapshot for {{ detail.domain }} will be overwritten by the chosen profile."
+          data-confirm-confirm-label="Apply"
+          data-confirm-variant="primary">
       <input type="hidden" name="_csrf" value="{{ csrf_profile_apply }}">
       <input type="hidden" name="selector" value="{{ detail.domain }}">
       <div class="row" style="gap:0.5rem;align-items:flex-end">
@@ -1051,7 +1069,10 @@
       </button>
     </form>
     <form method="post" action="/hostings/ftp/disable" style="display:inline"
-          onsubmit="return confirm('Disable FTP for {{ detail.system_user }}? Current password is cleared.');">
+          data-confirm-title="Disable FTP"
+          data-confirm-body="FTP access for {{ detail.system_user }} will be revoked and the password cleared. Files on disk are not affected."
+          data-confirm-confirm-label="Disable FTP"
+          data-confirm-variant="danger">
       <input type="hidden" name="_csrf" value="{{ csrf_ftp_disable }}">
       <input type="hidden" name="selector" value="{{ detail.domain }}">
       <button class="btn" type="submit">Disable FTP</button>
@@ -1105,7 +1126,10 @@
                 {% if b.state == "ok" %}
                   {% if let Some(p) = b.archive_path %}
                   <form method="post" action="/hostings/restore" style="display:inline"
-                        onsubmit="return confirm('Restore {{ detail.domain }} from this backup? Current files + DB will be overwritten.');">
+                        data-confirm-title="Restore from backup"
+                        data-confirm-body="Files and database for {{ detail.domain }} will be overwritten with the snapshot from this backup. Current state cannot be recovered without another backup."
+                        data-confirm-confirm-label="Restore"
+                        data-confirm-variant="danger">
                     <input type="hidden" name="_csrf" value="{{ csrf_restore }}">
                     <input type="hidden" name="selector" value="{{ detail.domain }}">
                     <input type="hidden" name="archive_path" value="{{ p }}">
@@ -1115,7 +1139,10 @@
                 {% endif %}
                 {% if b.state != "running" %}
                 <form method="post" action="/hostings/backups/delete" style="display:inline"
-                      onsubmit="return confirm('Delete this backup? The archive file will be removed from disk.');">
+                      data-confirm-title="Delete backup"
+                      data-confirm-body="The archive file will be removed from disk. This cannot be undone."
+                      data-confirm-confirm-label="Delete backup"
+                      data-confirm-variant="danger">
                   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                   <input type="hidden" name="selector" value="{{ detail.domain }}">
                   <input type="hidden" name="backup_id" value="{{ b.id }}">
@@ -1142,7 +1169,10 @@
        upload just to find a hidden field). See auth::check_csrf. #}
     <form method="post" action="/hostings/restore-upload?_csrf={{ csrf_token }}"
           enctype="multipart/form-data"
-          onsubmit="return confirm('Restore {{ detail.domain }} from the uploaded archive?');">
+          data-confirm-title="Restore from uploaded archive"
+          data-confirm-body="Files and database for {{ detail.domain }} will be overwritten with the uploaded archive."
+          data-confirm-confirm-label="Restore"
+          data-confirm-variant="danger">
       <input type="hidden" name="selector" value="{{ detail.domain }}">
       <div class="row" style="gap:0.5rem;align-items:flex-end">
         <div class="field" style="flex:1;margin:0">
@@ -1160,7 +1190,10 @@
       For archives already on disk under one of the backup roots.
     </p>
     <form method="post" action="/hostings/restore"
-          onsubmit="return confirm('Restore {{ detail.domain }} from this archive?');">
+          data-confirm-title="Restore from archive"
+          data-confirm-body="Files and database for {{ detail.domain }} will be overwritten."
+          data-confirm-confirm-label="Restore"
+          data-confirm-variant="danger">
       <input type="hidden" name="_csrf" value="{{ csrf_restore }}">
       <input type="hidden" name="selector" value="{{ detail.domain }}">
       <div class="row" style="gap:0.5rem;align-items:flex-end">
@@ -1230,7 +1263,10 @@
     Crontab for system user <code>{{ detail.system_user }}</code>. Standard cron syntax. Lines with backticks are refused for safety.
   </p>
   <form method="post" action="/hostings/cron"
-        onsubmit="return confirm('Replace the crontab for {{ detail.system_user }}?');">
+        data-confirm-title="Replace crontab"
+        data-confirm-body="The crontab for {{ detail.system_user }} will be overwritten with the contents below."
+        data-confirm-confirm-label="Save crontab"
+        data-confirm-variant="primary">
     <input type="hidden" name="_csrf" value="{{ csrf_cron }}">
     <input type="hidden" name="selector" value="{{ detail.domain }}">
     <textarea name="body" rows="10" spellcheck="false" style="font-family:var(--font-mono);font-size:12.5px"
@@ -1422,7 +1458,10 @@
           <td class="muted small" title="{{ g.granted_at }}">{{ crate::handlers::stats::fmt_ago(g.granted_at) }}</td>
           <td class="right">
             <form method="post" action="/hostings/access/revoke" style="display:inline"
-                  onsubmit="return confirm('Revoke this access?');">
+                  data-confirm-title="Revoke access"
+                  data-confirm-body="This user will no longer be able to see or manage {{ detail.domain }}."
+                  data-confirm-confirm-label="Revoke"
+                  data-confirm-variant="danger">
               <input type="hidden" name="_csrf" value="{{ csrf_token }}">
               <input type="hidden" name="hosting_id" value="{{ detail.id }}">
               <input type="hidden" name="user_id" value="{{ g.user_id }}">
@@ -1524,7 +1563,10 @@
 
   {% if detail.state.as_str() == "active" %}
   <form method="post" action="/hostings/migration/export"
-        onsubmit="return confirm('Snapshot {{ detail.domain }} for migration? This runs a full backup_now (htdocs tar + DB dump) and stores the bundle on disk.');">
+        data-confirm-title="Snapshot for migration"
+        data-confirm-body="A full backup (htdocs tar + DB dump) of {{ detail.domain }} will be taken and stored as a migration bundle on disk. The bundle's download URL is shown after."
+        data-confirm-confirm-label="Create bundle"
+        data-confirm-variant="primary">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <input type="hidden" name="selector" value="{{ detail.domain }}">
     <button class="btn primary" type="submit">
@@ -1562,7 +1604,10 @@
   Suspending serves a 503 page, stops PHP-FPM, locks the DB user, kills running processes — fully reversible.</p>
   <form method="post" action="/hostings/delete" class="row gap-md"
         style="margin-top:0.5rem"
-        onsubmit="return confirm('Really delete {{ detail.domain }}?');">
+        data-confirm-title="Delete {{ detail.domain }}"
+        data-confirm-body="Files, database, system user and DNS records will be removed. This is permanent — restore is only possible from a backup."
+        data-confirm-confirm-label="Delete hosting"
+        data-confirm-variant="danger">
     <input type="hidden" name="_csrf" value="{{ csrf_delete }}">
     <input type="hidden" name="selector" value="{{ detail.domain }}">
     <label class="field-checkbox"><input type="checkbox" name="keep_user" value="on"> Keep the Linux user</label>

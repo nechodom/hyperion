@@ -92,8 +92,7 @@
   </div>
 </div>
 {% else %}
-<form method="post" action="/hostings/bulk" id="bulk-form"
-      onsubmit="return confirmBulk(this);">
+<form method="post" action="/hostings/bulk" id="bulk-form">
 <input type="hidden" name="_csrf" value="{{ csrf_bulk }}">
 <input type="hidden" name="action" id="bulk-action" value="">
 
@@ -157,7 +156,10 @@
             <div class="row-actions">
               <a class="btn small" href="/hostings/{{ r.domain }}">View</a>
               <form method="post" action="/hostings/delete" style="display:inline"
-                    onsubmit="return confirm('Delete {{ r.domain }} and all its data?');">
+                    data-confirm-title="Delete {{ r.domain }}"
+                    data-confirm-body="Files, database, system user and DNS records will be removed. This is permanent."
+                    data-confirm-confirm-label="Delete"
+                    data-confirm-variant="danger">
                 <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                 <input type="hidden" name="selector" value="{{ r.domain }}">
                 {# Carry the node this hosting lives on so post_delete
@@ -204,18 +206,25 @@
     refresh();
   });
   actionBtns.forEach(b => b.addEventListener('click', () => {
-    actionInput.value = b.dataset.bulk;
+    const n = form.querySelectorAll('.bulk-row:checked').length;
+    if (n === 0) return;
+    const action = b.dataset.bulk;
+    actionInput.value = action;
+    // Configure the modal dynamically for this bulk action.
+    const pretty = action.charAt(0).toUpperCase() + action.slice(1);
+    if (action === 'delete') {
+      form.dataset.confirmTitle = 'Delete ' + n + ' ' + (n === 1 ? 'hosting' : 'hostings');
+      form.dataset.confirmBody = 'All files, databases, system users and DNS records will be removed. This is permanent.';
+      form.dataset.confirmConfirmLabel = 'Delete';
+      form.dataset.confirmVariant = 'danger';
+    } else {
+      form.dataset.confirmTitle = pretty + ' ' + n + ' ' + (n === 1 ? 'hosting' : 'hostings');
+      form.dataset.confirmBody = 'Selected hostings will be ' + action + 'ed.';
+      form.dataset.confirmConfirmLabel = pretty;
+      form.dataset.confirmVariant = 'primary';
+    }
     form.requestSubmit();
   }));
-  window.confirmBulk = function (f) {
-    const n = f.querySelectorAll('.bulk-row:checked').length;
-    if (n === 0) return false;
-    const action = f.querySelector('#bulk-action').value;
-    if (action === 'delete') {
-      return confirm('Really DELETE ' + n + ' hosting(s) and all their data?');
-    }
-    return confirm(action.charAt(0).toUpperCase() + action.slice(1) + ' ' + n + ' hosting(s)?');
-  };
   refresh();
 })();
 </script>

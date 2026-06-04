@@ -138,7 +138,10 @@
                   {% endif %}
                 </form>
                 <form method="post" action="/admin/users/password" autocomplete="off"
-                      onsubmit="return confirm('Reset password for this user?');"
+                      data-confirm-title="Reset user password"
+                      data-confirm-body="The user's current password will be replaced with the value you typed. Existing browser sessions stay logged in until they expire."
+                      data-confirm-confirm-label="Reset password"
+                      data-confirm-variant="danger"
                       style="display:flex;gap:0.3rem;align-items:center">
                   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                   <input type="hidden" name="user_id" value="{{ u.id }}">
@@ -146,7 +149,10 @@
                   <button type="submit" class="btn small">Reset</button>
                 </form>
                 <form method="post" action="/admin/users/delete"
-                      onsubmit="return confirm('Delete this user? This cannot be undone.');"
+                      data-confirm-title="Delete user"
+                      data-confirm-body="The user will lose access immediately and all their sessions will be invalidated. Hostings they owned are unaffected."
+                      data-confirm-confirm-label="Delete user"
+                      data-confirm-variant="danger"
                       style="display:inline">
                   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                   <input type="hidden" name="user_id" value="{{ u.id }}">

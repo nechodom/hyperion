@@ -300,7 +300,10 @@
           <td><code style="font-size:0.74rem">{{ i.token_hash }}</code></td>
           <td class="right">
             <form method="post" action="/install/invite/revoke" style="display:inline"
-                  onsubmit="return confirm('Revoke invite for {{ i.label }}?');">
+                  data-confirm-title="Revoke invite"
+                  data-confirm-body="The invite for {{ i.label }} will be invalidated. If a node was about to enrol with this token, the operator will have to mint a new one."
+                  data-confirm-confirm-label="Revoke invite"
+                  data-confirm-variant="danger">
               <input type="hidden" name="_csrf" value="{{ csrf_revoke }}">
               <input type="hidden" name="token_hash" value="{{ i.token_hash }}">
               <button class="btn small danger" type="submit">Revoke</button>

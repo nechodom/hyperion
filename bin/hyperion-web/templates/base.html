@@ -579,5 +579,121 @@ function isShortcutContext(ev) {
   document.addEventListener('htmx:afterSettle', mountAll);
 })();
 </script>
+
+{# ===== Application-styled confirm modal =====
+   Replaces browser-native window.confirm() — that dialog is
+   un-themable, gets blocked by certain browser security modes,
+   and looks like a phishing prompt on macOS.
+
+   Usage on a form:
+     <form ... data-confirm-title="Delete hosting"
+                data-confirm-body="example.cz and all its data — files, DB, user — will be removed."
+                data-confirm-confirm-label="Delete"
+                data-confirm-variant="danger">
+
+   variant ∈ { "danger" (red Confirm) | "primary" (default) }.
+   Falls back to native confirm() for forms still using the old
+   onsubmit="return confirm(...)" pattern. #}
+<div id="app-modal-backdrop" style="display:none;position:fixed;inset:0;background:rgba(8,10,14,0.62);backdrop-filter:blur(2px);z-index:9000;align-items:center;justify-content:center;padding:1rem">
+  <div id="app-modal" role="dialog" aria-modal="true" aria-labelledby="app-modal-title"
+       style="max-width:32rem;width:100%;background:var(--surface);border:1px solid var(--border);border-radius:12px;box-shadow:0 24px 60px rgba(0,0,0,0.55);overflow:hidden">
+    <div style="padding:1.1rem 1.3rem 0.4rem">
+      <h2 id="app-modal-title" style="margin:0;font-size:1.05rem;font-weight:600;display:flex;align-items:center;gap:0.55rem">
+        <svg id="app-modal-icon" width="20" height="20" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"
+             style="flex:none;color:var(--warn)">
+          <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+          <line x1="12" y1="9" x2="12" y2="13"/>
+          <line x1="12" y1="17" x2="12.01" y2="17"/>
+        </svg>
+        <span id="app-modal-title-text">Confirm</span>
+      </h2>
+    </div>
+    <div id="app-modal-body" style="padding:0.6rem 1.3rem 1.2rem;color:var(--text-soft);line-height:1.55;font-size:0.93rem">
+    </div>
+    <div style="display:flex;gap:0.5rem;justify-content:flex-end;padding:0.85rem 1.3rem;background:var(--surface-1);border-top:1px solid var(--border)">
+      <button type="button" id="app-modal-cancel" class="btn ghost">Cancel</button>
+      <button type="button" id="app-modal-confirm" class="btn primary">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  const backdrop = document.getElementById('app-modal-backdrop');
+  const modal = document.getElementById('app-modal');
+  const titleEl = document.getElementById('app-modal-title-text');
+  const bodyEl = document.getElementById('app-modal-body');
+  const cancelBtn = document.getElementById('app-modal-cancel');
+  const confirmBtn = document.getElementById('app-modal-confirm');
+  if (!backdrop || !modal) return;
+
+  let pendingForm = null;
+  let lastFocused = null;
+
+  function open(form) {
+    pendingForm = form;
+    lastFocused = document.activeElement;
+    const title = form.dataset.confirmTitle || 'Are you sure?';
+    const body = form.dataset.confirmBody || '';
+    const confirmLabel = form.dataset.confirmConfirmLabel || 'Confirm';
+    const variant = (form.dataset.confirmVariant || 'primary').toLowerCase();
+    titleEl.textContent = title;
+    bodyEl.textContent = body;
+    confirmBtn.textContent = confirmLabel;
+    confirmBtn.classList.remove('danger', 'primary');
+    confirmBtn.classList.add(variant === 'danger' ? 'danger' : 'primary');
+    backdrop.style.display = 'flex';
+    // Focus the Cancel button — safer default (Enter on Confirm
+    // requires explicit intent).
+    setTimeout(() => cancelBtn.focus(), 0);
+    document.body.style.overflow = 'hidden';
+  }
+  function close() {
+    backdrop.style.display = 'none';
+    document.body.style.overflow = '';
+    pendingForm = null;
+    if (lastFocused && lastFocused.focus) lastFocused.focus();
+  }
+  cancelBtn.addEventListener('click', close);
+  backdrop.addEventListener('click', ev => {
+    // Click outside the modal panel cancels.
+    if (ev.target === backdrop) close();
+  });
+  document.addEventListener('keydown', ev => {
+    if (backdrop.style.display !== 'flex') return;
+    if (ev.key === 'Escape') { ev.preventDefault(); close(); }
+  });
+  confirmBtn.addEventListener('click', () => {
+    const f = pendingForm;
+    close();
+    if (!f) return;
+    // Mark as confirmed so our submit handler lets it through.
+    f.dataset.confirmed = '1';
+    if (f.requestSubmit) {
+      f.requestSubmit();
+    } else {
+      f.submit();
+    }
+  });
+
+  // Capture-phase submit listener so we intercept BEFORE any
+  // legacy onsubmit attribute fires. Forms that already confirmed
+  // pass through without re-prompting.
+  document.addEventListener('submit', ev => {
+    const form = ev.target;
+    if (!form || !form.dataset || !form.dataset.confirmTitle) return;
+    if (form.dataset.confirmed === '1') {
+      // Reset for next submit attempt.
+      delete form.dataset.confirmed;
+      return;
+    }
+    ev.preventDefault();
+    ev.stopPropagation();
+    open(form);
+  }, true);
+})();
+</script>
 </body>
 </html>

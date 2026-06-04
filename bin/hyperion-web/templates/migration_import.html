@@ -35,7 +35,10 @@
   </h2>
   <p class="muted">On the source node, open the hosting detail → <strong>Migration</strong> tab → click <strong>Export migration bundle</strong>. The result page prints a base URL and a token — paste both here.</p>
   <form method="post" action="/hostings/migration/import-from-url" autocomplete="off"
-        onsubmit="return confirm('Import this hosting onto THIS node? The hosting will be provisioned fresh and the bundle archive will be restored.');">
+        data-confirm-title="Import hosting"
+        data-confirm-body="A new hosting will be provisioned on this node and the archive will be restored into it. The source hosting is not affected."
+        data-confirm-confirm-label="Import"
+        data-confirm-variant="primary">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <div class="field">
       <label for="base_url">Base URL</label>

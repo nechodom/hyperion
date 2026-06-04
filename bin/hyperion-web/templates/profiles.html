@@ -53,7 +53,10 @@
             <div class="row-actions">
               <a class="btn small" href="/profiles/{{ p.id }}/edit">Edit</a>
               <form method="post" action="/profiles/delete" style="display:inline"
-                    onsubmit="return confirm('Delete profile {{ p.name }}? Hostings keep their current values.');">
+                    data-confirm-title="Delete profile {{ p.name }}"
+                    data-confirm-body="Hostings that previously had this profile applied keep their current limits, expiry policy and price — only the profile template is removed."
+                    data-confirm-confirm-label="Delete profile"
+                    data-confirm-variant="danger">
                 <input type="hidden" name="_csrf" value="{{ csrf_delete }}">
                 <input type="hidden" name="id" value="{{ p.id }}">
                 <button class="btn small danger" type="submit">Delete</button>

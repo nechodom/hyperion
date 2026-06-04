@@ -155,7 +155,10 @@
                 {# Don't offer self-install for hyperion-agent / hyperion-web — they're already this binary. #}
                 {% if s.name != "hyperion-agent" && s.name != "hyperion-web" %}
                   <form method="post" action="/services/install" style="display:inline"
-                        onsubmit="return confirm('apt-install + enable {{ s.label }} on {{ current_label }}? This runs apt-get on the node.');">
+                        data-confirm-title="Install {{ s.label }}"
+                        data-confirm-body="apt-get install -y {{ s.name }} + systemctl enable --now will run on {{ current_label }}. May take up to 5 minutes."
+                        data-confirm-confirm-label="Install"
+                        data-confirm-variant="primary">
                     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                     <input type="hidden" name="name" value="{{ s.name }}">
                     {# Carry the current node so the action lands on
@@ -168,7 +171,10 @@
                 {# Refuse self-restart of hyperion-agent — would terminate the RPC pipe. #}
                 {% if s.name != "hyperion-agent" %}
                   <form method="post" action="/services/restart" style="display:inline"
-                        onsubmit="return confirm('Restart {{ s.label }} on {{ current_label }}? Active connections may briefly drop.');">
+                        data-confirm-title="Restart {{ s.label }}"
+                        data-confirm-body="systemctl restart {{ s.name }} will run on {{ current_label }}. Active connections may briefly drop."
+                        data-confirm-confirm-label="Restart"
+                        data-confirm-variant="primary">
                     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                     <input type="hidden" name="name" value="{{ s.name }}">
                     <input type="hidden" name="node" value="{{ current_node }}">

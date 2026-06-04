@@ -102,7 +102,10 @@
     {% if u.totp_enrolled %}
       <p>You have 2FA enabled. On every login you'll be asked for a code from your authenticator app (or a one-time backup code).</p>
       <form method="post" action="/profile/2fa/disable"
-            onsubmit="return confirm('Disable 2FA on your account? Your login will only require a password again.');">
+            data-confirm-title="Disable two-factor authentication"
+            data-confirm-body="Your login will only require a password again. You can re-enable 2FA at any time."
+            data-confirm-confirm-label="Disable 2FA"
+            data-confirm-variant="danger">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
         <button class="btn danger small" type="submit">Disable 2FA</button>
       </form>
