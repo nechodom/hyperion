@@ -61,10 +61,27 @@
   <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
   <div class="flash-body">
     <strong>Invite minted for {{ m.label }}.</strong> The plaintext token is shown <strong>once below</strong> — copy it now; only its hash is persisted server-side.
-    <pre style="margin-top:0.7rem"><code id="install-cmd"
-      data-token="{{ m.token }}"
-      data-default-master="{{ master_url }}">curl -fsSL https://raw.githubusercontent.com/nechodom/hyperion/main/packaging/install/install-node.sh \
-  | sudo bash -s -- --token={{ m.token }} --master={{ master_url }}</code></pre>
+    {# The token is hidden by default. Two reasons:
+       1) "shoulder surfing" — someone behind the operator screen
+          shouldn't see the bearer credential at a glance.
+       2) The token sits in the rendered page DOM until the
+          operator navigates away; visible-by-default means
+          screenshots / screen-shares of the install page leak it.
+       The Copy + Reveal buttons keep the workflow one-click,
+       and the install one-liner can be copied without ever
+       showing the token in cleartext. #}
+    <pre style="margin-top:0.7rem;position:relative">
+      <code id="install-cmd"
+            data-token="{{ m.token }}"
+            data-default-master="{{ master_url }}"
+            data-hidden="1">curl -fsSL https://raw.githubusercontent.com/nechodom/hyperion/main/packaging/install/install-node.sh \
+  | sudo bash -s -- --token=&lt;hidden — click Reveal or Copy&gt; --master={{ master_url }}</code>
+    </pre>
+    <div style="display:flex;gap:0.5rem;flex-wrap:wrap;margin-top:0.4rem">
+      <button type="button" class="btn small" id="install-cmd-reveal" data-revealed="0">Reveal token</button>
+      <button type="button" class="btn small" id="install-cmd-copy">Copy install command</button>
+      <span id="install-cmd-copied" class="muted" style="font-size:0.78rem;align-self:center;display:none">copied to clipboard</span>
+    </div>
     <div class="muted" style="margin-top:0.5rem;font-size:0.82rem">Token hash for revoke: <code>{{ m.token_hash }}</code></div>
   </div>
 </div>
@@ -123,11 +140,14 @@
     const cmd = document.getElementById('install-cmd');
     if (!cmd) return;
     const token = cmd.dataset.token;
-    // Fetch the installer from GitHub raw — that's always reachable
-    // and we don't have to embed the script in the master binary.
-    // The --master= arg is what gets baked into the new node's
-    // agent.toml as its callback URL.
-    cmd.textContent = `curl -fsSL https://raw.githubusercontent.com/nechodom/hyperion/main/packaging/install/install-node.sh \\\n  | sudo bash -s -- --token=${token} --master=${url}`;
+    const hidden = cmd.dataset.hidden === '1';
+    // Render the visible textContent with the token masked when
+    // data-hidden=1. The Copy button copies the FULL command with
+    // the real token regardless of the visible state, so the
+    // operator can paste straight into ssh without ever flashing
+    // the token on screen.
+    const tokenDisplay = hidden ? '<hidden — click Reveal or Copy>' : token;
+    cmd.textContent = `curl -fsSL https://raw.githubusercontent.com/nechodom/hyperion/main/packaging/install/install-node.sh \\\n  | sudo bash -s -- --token=${tokenDisplay} --master=${url}`;
   }
 
   input.addEventListener('input', () => {
@@ -147,6 +167,43 @@
 
   // Initial render — picks up the localStorage value if set.
   applyToCommand();
+
+  // Reveal toggle for the install-cmd <code> block. Operator can
+  // either copy (preferred, never shows the token) or reveal (e.g.
+  // to verify the token visually before pasting it elsewhere).
+  const revealBtn = document.getElementById('install-cmd-reveal');
+  const copyBtn = document.getElementById('install-cmd-copy');
+  const copiedNote = document.getElementById('install-cmd-copied');
+  const cmd = document.getElementById('install-cmd');
+  if (revealBtn && cmd) {
+    revealBtn.addEventListener('click', () => {
+      const wasHidden = cmd.dataset.hidden === '1';
+      cmd.dataset.hidden = wasHidden ? '0' : '1';
+      revealBtn.textContent = wasHidden ? 'Hide token' : 'Reveal token';
+      applyToCommand();
+    });
+  }
+  if (copyBtn && cmd) {
+    copyBtn.addEventListener('click', async () => {
+      const url = input.value.trim().replace(/\/+$/, '') || defaultUrl;
+      const token = cmd.dataset.token;
+      // Copy the FULL command regardless of the visible state.
+      const full = `curl -fsSL https://raw.githubusercontent.com/nechodom/hyperion/main/packaging/install/install-node.sh \\\n  | sudo bash -s -- --token=${token} --master=${url}`;
+      try {
+        await navigator.clipboard.writeText(full);
+        if (copiedNote) {
+          copiedNote.style.display = 'inline';
+          setTimeout(() => { copiedNote.style.display = 'none'; }, 2000);
+        }
+      } catch (e) {
+        // Fallback: temporarily reveal so the operator can manually
+        // copy if clipboard API is blocked (insecure context, etc.).
+        cmd.dataset.hidden = '0';
+        applyToCommand();
+        alert('Clipboard API unavailable — token revealed above for manual copy.');
+      }
+    });
+  }
 })();
 </script>
 
