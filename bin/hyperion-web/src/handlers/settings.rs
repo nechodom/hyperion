@@ -243,6 +243,30 @@ pub struct ConfigEditForm {
     pub fields: std::collections::BTreeMap<String, String>,
 }
 
+/// Browsers don't submit unchecked checkboxes at all. The config
+/// handler treats a missing field as "leave alone", so without this
+/// helper, unchecking a checkbox would silently do nothing.
+///
+/// For each section that has known boolean checkboxes, we insert
+/// the explicit "false" when the field is missing. Listed by
+/// section so a future section can opt in without grep-archaeology.
+fn synthesize_unchecked_checkboxes(
+    section: &str,
+    fields: &mut std::collections::BTreeMap<String, String>,
+) {
+    let known: &[&str] = match section {
+        "email" => &["enabled"],
+        "backup_remote" => &["enabled"],
+        "cluster" => &["master_accepts_hostings"],
+        _ => return,
+    };
+    for k in known {
+        if !fields.contains_key(*k) {
+            fields.insert((*k).to_string(), "false".to_string());
+        }
+    }
+}
+
 /// POST /settings/config — super_admin only. Updates one section of
 /// agent.toml in place, preserving comments. Operator must restart the
 /// agent to apply.
@@ -274,13 +298,9 @@ pub async fn post_config(
         }
     }
     // Unchecked checkboxes don't show up in the form at all — but our
-    // service knows the field is required. Synthesise `enabled=false`
-    // when the checkbox is absent in sections that use it.
-    if matches!(form.section.as_str(), "email" | "backup_remote")
-        && !fields.contains_key("enabled")
-    {
-        fields.insert("enabled".to_string(), "false".to_string());
-    }
+    // service knows the field is required. Synthesise the missing
+    // booleans as "false" so unchecking persists.
+    synthesize_unchecked_checkboxes(&form.section, &mut fields);
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
         Request::AgentConfigUpdate {
@@ -427,7 +447,43 @@ fn email_test_ip(headers: &HeaderMap, peer: SocketAddr) -> std::net::IpAddr {
 
 #[cfg(test)]
 mod tests {
-    use super::mask_secrets_in_toml;
+    use super::{mask_secrets_in_toml, synthesize_unchecked_checkboxes};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn unchecked_cluster_checkbox_synthesizes_false() {
+        // Browser sends NO master_accepts_hostings when the box is
+        // unchecked. Synthesizer must insert false so the unchecking
+        // persists.
+        let mut fields: BTreeMap<String, String> = BTreeMap::new();
+        synthesize_unchecked_checkboxes("cluster", &mut fields);
+        assert_eq!(fields.get("master_accepts_hostings"), Some(&"false".into()));
+    }
+
+    #[test]
+    fn checked_cluster_checkbox_preserved() {
+        // When the box IS checked, browser sends "true" (or "on" — we
+        // pass through whatever the form sent). Don't clobber it.
+        let mut fields: BTreeMap<String, String> = BTreeMap::new();
+        fields.insert("master_accepts_hostings".into(), "true".into());
+        synthesize_unchecked_checkboxes("cluster", &mut fields);
+        assert_eq!(fields.get("master_accepts_hostings"), Some(&"true".into()));
+    }
+
+    #[test]
+    fn unchecked_email_enabled_synthesizes_false() {
+        // Regression: existing behaviour for [email].enabled stays.
+        let mut fields: BTreeMap<String, String> = BTreeMap::new();
+        synthesize_unchecked_checkboxes("email", &mut fields);
+        assert_eq!(fields.get("enabled"), Some(&"false".into()));
+    }
+
+    #[test]
+    fn unknown_section_does_nothing() {
+        let mut fields: BTreeMap<String, String> = BTreeMap::new();
+        synthesize_unchecked_checkboxes("acme", &mut fields);
+        assert!(fields.is_empty());
+    }
 
     #[test]
     fn mask_replaces_password_lines() {

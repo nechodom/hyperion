@@ -287,6 +287,33 @@ impl AdapterPort for RealAdapter {
             self.certs_root.display(),
             detail.domain
         );
+        // Self-heal: if the cert files have gone missing (operator
+        // manually deleted /etc/hyperion/certs/<domain>, partial
+        // failure from an earlier panel version, mid-restore state),
+        // bootstrap a self-signed cert here so the vhost we're about
+        // to write is always renderable AND nginx -t can succeed.
+        // Without this, a single missing cert dir bricks the entire
+        // nginx process: every `service nginx start` fails because
+        // ONE vhost references a non-existent cert.
+        //
+        // The bootstrap is the same self-signed cert that
+        // acme_issue() would have written; the real LE cert is
+        // re-issued on the next renewal tick (or via "Issue cert"
+        // on the SSL tab).
+        if !std::path::Path::new(&cert_path).exists()
+            || !std::path::Path::new(&key_path).exists()
+        {
+            tracing::warn!(
+                domain = %detail.domain,
+                "cert files missing — generating self-signed bootstrap (LE will replace on next renewal tick)"
+            );
+            let _ = self
+                .acme_issue(&detail.domain, &detail.aliases)
+                .await
+                .map_err(|e| {
+                    tracing::error!(domain = %detail.domain, error = %e, "self-heal bootstrap cert failed");
+                });
+        }
         let logs_dir = detail.root_dir.replace("/htdocs", "/logs");
         let acme_root = self.acme_challenge_root.display().to_string();
         // Dispatch on hosting kind. Reverse-proxy uses a completely
