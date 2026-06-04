@@ -247,24 +247,68 @@
             <span class="text-soft small">click Test →</span>
           </td>
           <td class="right">
-            <form hx-post="/install/test-node"
-                  hx-target="#rpc-status-{{ n.node_id }}"
-                  hx-swap="innerHTML"
-                  hx-indicator="#rpc-status-{{ n.node_id }}"
-                  style="display:inline">
-              <input type="hidden" name="_csrf" value="{{ csrf_test }}">
+            <div style="display:inline-flex;gap:0.3rem;flex-wrap:wrap;justify-content:flex-end">
+              <form hx-post="/install/test-node"
+                    hx-target="#rpc-status-{{ n.node_id }}"
+                    hx-swap="innerHTML"
+                    hx-indicator="#rpc-status-{{ n.node_id }}"
+                    style="display:inline">
+                <input type="hidden" name="_csrf" value="{{ csrf_test }}">
+                <input type="hidden" name="node_id" value="{{ n.node_id }}">
+                <button type="submit" class="btn small">Test</button>
+              </form>
+              <button type="button" class="btn small primary"
+                      onclick="document.getElementById('upd-{{ n.node_id }}').style.display='block';this.style.display='none'">
+                Update…
+              </button>
+            </div>
+          </td>
+        </tr>
+        {# Update controls + live status row — hidden until the
+           operator clicks "Update…". apt step needs ~minutes,
+           hyperion step needs ~minutes; HTMX polls the status
+           cell every 3 s while a job is running. #}
+        <tr id="upd-{{ n.node_id }}" style="display:none;background:var(--surface-1)">
+          <td colspan="8" style="padding:1rem 1.2rem">
+            <form method="post" action="/install/update-node"
+                  data-confirm-title="Update {{ n.label }}"
+                  data-confirm-body="apt-get dist-upgrade and/or update.sh will run on {{ n.label }} ({% if let Some(ip) = n.public_ip.as_ref() %}{{ ip }}{% else %}{{ n.node_id }}{% endif %}). The node's services may briefly restart. This can take several minutes."
+                  data-confirm-confirm-label="Start update"
+                  data-confirm-variant="primary"
+                  style="display:flex;gap:1rem;align-items:center;flex-wrap:wrap">
+              <input type="hidden" name="_csrf" value="{{ csrf_update }}">
               <input type="hidden" name="node_id" value="{{ n.node_id }}">
-              <button type="submit" class="btn small">Test connectivity</button>
+              <label style="display:flex;align-items:center;gap:0.4rem;margin:0">
+                <input type="checkbox" name="do_apt" value="on" checked>
+                <span><strong>System packages</strong> (apt dist-upgrade)</span>
+              </label>
+              <label style="display:flex;align-items:center;gap:0.4rem;margin:0">
+                <input type="checkbox" name="do_hyperion" value="on" checked>
+                <span><strong>Hyperion</strong> (rebuild + restart agent/web)</span>
+              </label>
+              <span class="grow"></span>
+              <button type="submit" class="btn small primary">Start</button>
+              <button type="button" class="btn small ghost"
+                      onclick="this.closest('tr').style.display='none';this.closest('tr').previousElementSibling.querySelector('.btn.primary').style.display=''">
+                Cancel
+              </button>
             </form>
+            {# Live status — polls every 3 s until state ≠ running. #}
+            <div id="upd-status-{{ n.node_id }}"
+                 hx-get="/install/update-node-status?node_id={{ n.node_id }}"
+                 hx-trigger="load, every 3s"
+                 hx-swap="innerHTML"
+                 style="margin-top:0.7rem">
+              <span class="text-soft small">loading status…</span>
+            </div>
           </td>
         </tr>
         {% endfor %}
       </tbody>
     </table>
     <p class="text-soft small" style="margin:0.7rem 1.5rem 1rem">
-      <strong>Test connectivity</strong> reaches each node by its <strong>public IP</strong>
-      (port 9443, signed Ed25519 envelope). No DNS — works even when the
-      node's hostname doesn't resolve from the master.
+      <strong>Test</strong> reaches the node by its public IP on port 9443 (signed Ed25519 envelope — no DNS lookup).
+      <strong>Update…</strong> starts apt + hyperion upgrades on the node in the background and streams the log tail back here.
     </p>
   </div>
   {% endif %}

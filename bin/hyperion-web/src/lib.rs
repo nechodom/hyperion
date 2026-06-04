@@ -201,6 +201,14 @@ pub fn build_router(state: SharedState) -> Router {
             "/install/test-node",
             post(handlers::install::post_test_node),
         )
+        .route(
+            "/install/update-node",
+            post(handlers::install::post_update_node),
+        )
+        .route(
+            "/install/update-node-status",
+            get(handlers::install::get_update_node_status),
+        )
         .route("/hostings/:selector", get(handlers::hostings::get_detail))
         .route("/logout", post(handlers::login::post_logout))
         // Tiny role echo for the nav-hiding shim in base.html.

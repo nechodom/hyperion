@@ -125,6 +125,22 @@ pub enum Request {
     ServiceInstall {
         name: String,
     },
+    /// Run system + hyperion updates on the target node. Both jobs
+    /// run in the background; the call returns immediately with a
+    /// "started" marker. Operator polls `NodeUpdateStatus` (see
+    /// below) to follow the log tail.
+    NodeUpdateRun {
+        /// `apt-get update && apt-get dist-upgrade -y --quiet`.
+        /// Typically 1–10 min depending on what's outdated.
+        do_apt: bool,
+        /// `/opt/hyperion/packaging/install/update.sh`. Rebuilds
+        /// hyperion-agent (+ hyperion-web on master) from
+        /// upstream main + restarts the services.
+        do_hyperion: bool,
+    },
+    /// Read the last N kB of the in-progress / most-recent update
+    /// log. Empty when no update has ever run on this node.
+    NodeUpdateStatus,
     /// Update one section of agent.toml. Validated server-side per
     /// section + field. Operator must `systemctl restart hyperion-agent`
     /// to load the new values (UI tells them).
@@ -418,6 +434,12 @@ pub enum Response {
     EmailSendTest { smtp_code: String },
     ServiceRestart,
     ServiceInstall,
+    /// Acknowledgement that the background update task spawned.
+    /// Failures during the actual update show up in the log tail,
+    /// not here.
+    NodeUpdateRun { started_at: i64 },
+    /// Current update job state + the last ~8 kB of stdout/stderr.
+    NodeUpdateStatus(hyperion_types::NodeUpdateStatus),
     AgentConfigUpdate,
     UpdateCheck(hyperion_types::UpdateStatus),
     HostingExport(hyperion_types::HostingMigrationBundle),

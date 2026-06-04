@@ -177,6 +177,9 @@ async fn start_agent() -> (PathBuf, tempfile::TempDir) {
         )),
         master_rpc_signer: None,
         node_state_file: None,
+        node_update: Arc::new(tokio::sync::Mutex::new(
+            hyperion_types::NodeUpdateStatus::default(),
+        )),
     });
     let agent: Arc<dyn AgentApi> = Arc::new(AgentImpl::new(svc));
     let path = dir.path().join("agent.sock");

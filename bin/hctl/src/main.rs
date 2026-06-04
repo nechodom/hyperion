@@ -914,6 +914,24 @@ fn print_pretty(resp: &Response) {
             println!("  state  : {}", r.state);
             println!("  note   : {}", r.message);
         }
+        Response::NodeUpdateRun { started_at } => {
+            println!("node update started: unix:{started_at}");
+            println!("poll with: hctl node-update-status");
+        }
+        Response::NodeUpdateStatus(s) => {
+            println!("node update:");
+            println!("  state      : {}", s.state);
+            println!("  started_at : {}", s.started_at);
+            println!("  finished_at: {}", s.finished_at);
+            println!("  do_apt     : {}", s.do_apt);
+            println!("  do_hyperion: {}", s.do_hyperion);
+            println!("  exit_code  : {}", s.exit_code);
+            println!("  --- log tail ---");
+            print!("{}", s.log_tail);
+            if !s.log_tail.ends_with('\n') {
+                println!();
+            }
+        }
     }
 }
 

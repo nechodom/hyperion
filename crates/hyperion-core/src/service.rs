@@ -194,6 +194,12 @@ pub struct HostingService<A: AdapterPort + 'static> {
     /// hyperion-web should be flagged as a critical service.
     /// `None` means "treat as master" (no file to check).
     pub node_state_file: Option<std::path::PathBuf>,
+    /// In-memory state of the most-recent / in-progress node
+    /// update job. Polled via `NodeUpdateStatus` so the operator
+    /// can watch apt-get / update.sh progress without ssh-ing in.
+    /// A single shared slot per agent — concurrent updates are
+    /// refused with a "another update is already running" error.
+    pub node_update: Arc<tokio::sync::Mutex<hyperion_types::NodeUpdateStatus>>,
 }
 
 /// Default renewal window — matches Let's Encrypt's recommended
@@ -514,6 +520,156 @@ fn stitch_dig_txt(raw: &str) -> String {
 /// Err with a useful message otherwise. Used by the migration
 /// import-from-url path; cheap to call because curl is already a
 /// hard dependency of the installer.
+/// Drive a node-update job: run `apt-get upgrade -y` and/or the
+/// hyperion `update.sh` script, streaming combined stdout+stderr
+/// into the given shared status slot. Caller has already marked
+/// the slot as `state="running"`. We update `log_tail` (capped at
+/// ~8 kB) as output arrives so the UI polling sees live progress.
+///
+/// Failure of either step sets `state="failed"`; both ok sets
+/// `state="succeeded"`. Exit code is the last failing step's code,
+/// or 0.
+async fn run_update_script(
+    slot: std::sync::Arc<tokio::sync::Mutex<hyperion_types::NodeUpdateStatus>>,
+    do_apt: bool,
+    do_hyperion: bool,
+) {
+    use tokio::io::AsyncBufReadExt;
+    /// Roughly 8 kB of tail — enough to see what's currently
+    /// happening without ballooning agent memory if some step
+    /// emits megabytes of output.
+    const LOG_TAIL_BYTES: usize = 8 * 1024;
+
+    async fn append_line(
+        slot: &std::sync::Arc<tokio::sync::Mutex<hyperion_types::NodeUpdateStatus>>,
+        line: &str,
+    ) {
+        let mut g = slot.lock().await;
+        g.log_tail.push_str(line);
+        g.log_tail.push('\n');
+        if g.log_tail.len() > LOG_TAIL_BYTES {
+            // Drop oldest data — find a char boundary above the
+            // overrun.
+            let drop = g.log_tail.len() - LOG_TAIL_BYTES;
+            let mut cut = drop;
+            while !g.log_tail.is_char_boundary(cut) && cut < g.log_tail.len() {
+                cut += 1;
+            }
+            g.log_tail.drain(..cut);
+        }
+    }
+
+    async fn run_one(
+        slot: &std::sync::Arc<tokio::sync::Mutex<hyperion_types::NodeUpdateStatus>>,
+        label: &str,
+        cmd: &str,
+        args: &[&str],
+    ) -> i32 {
+        append_line(slot, &format!("\n──── {label}: {cmd} {} ────", args.join(" "))).await;
+        let mut child = match tokio::process::Command::new(cmd)
+            .args(args)
+            .env("DEBIAN_FRONTEND", "noninteractive")
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                append_line(slot, &format!("spawn {cmd} failed: {e}")).await;
+                return 127;
+            }
+        };
+        if let Some(stdout) = child.stdout.take() {
+            let s = slot.clone();
+            let label = label.to_string();
+            tokio::spawn(async move {
+                let r = tokio::io::BufReader::new(stdout);
+                let mut lines = r.lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    append_line(&s, &format!("[{label}] {line}")).await;
+                }
+            });
+        }
+        if let Some(stderr) = child.stderr.take() {
+            let s = slot.clone();
+            let label = label.to_string();
+            tokio::spawn(async move {
+                let r = tokio::io::BufReader::new(stderr);
+                let mut lines = r.lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    append_line(&s, &format!("[{label}!] {line}")).await;
+                }
+            });
+        }
+        match child.wait().await {
+            Ok(status) => status.code().unwrap_or(-1),
+            Err(e) => {
+                append_line(slot, &format!("wait {label} failed: {e}")).await;
+                -1
+            }
+        }
+    }
+
+    let mut last_code: i32 = 0;
+
+    if do_apt {
+        let upd = run_one(&slot, "apt-update", "/usr/bin/apt-get", &["update", "-qq"]).await;
+        if upd == 0 {
+            last_code = run_one(
+                &slot,
+                "apt-upgrade",
+                "/usr/bin/apt-get",
+                &[
+                    "dist-upgrade",
+                    "-y",
+                    "-qq",
+                    "-o",
+                    "Dpkg::Options::=--force-confold",
+                ],
+            )
+            .await;
+        } else {
+            last_code = upd;
+        }
+    }
+
+    if do_hyperion && last_code == 0 {
+        // update.sh path is hardcoded — install-master.sh and
+        // install-node.sh both drop it here. Bail with a clear log
+        // line if it's missing rather than spawning into the void.
+        let script = std::path::PathBuf::from(
+            "/opt/hyperion/packaging/install/update.sh",
+        );
+        if !script.exists() {
+            append_line(
+                &slot,
+                &format!("update.sh missing at {} — node was not installed via install-node.sh / install-master.sh", script.display()),
+            )
+            .await;
+            last_code = 2;
+        } else {
+            last_code = run_one(
+                &slot,
+                "hyperion-update",
+                "/bin/bash",
+                &[script.to_str().unwrap_or("/opt/hyperion/packaging/install/update.sh")],
+            )
+            .await;
+        }
+    }
+
+    let final_state = if last_code == 0 { "succeeded" } else { "failed" };
+    let mut g = slot.lock().await;
+    g.state = final_state.to_string();
+    g.finished_at = now_secs();
+    g.exit_code = last_code;
+    tracing::info!(
+        exit_code = last_code,
+        state = final_state,
+        "node update job finished"
+    );
+}
+
 /// Remove `mig_*` sub-dirs under `root` whose mtime is older than
 /// `max_age`. Returns the count removed. Extracted as a free
 /// function so it has a fs-only signature that's easy to unit-test
@@ -855,6 +1011,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             cert_issue_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             master_rpc_signer: None,
             node_state_file: None,
+            node_update: Arc::new(tokio::sync::Mutex::new(
+                hyperion_types::NodeUpdateStatus::default(),
+            )),
         }
     }
 
@@ -6098,6 +6257,74 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(())
     }
 
+    /// Spawn a background job that runs the requested update steps
+    /// on THIS node:
+    ///   1. (optional) `apt-get update && apt-get dist-upgrade -y`
+    ///   2. (optional) `/opt/hyperion/packaging/install/update.sh`
+    ///
+    /// Returns the start timestamp. The job runs detached and
+    /// writes a rolling log tail into `self.node_update` so
+    /// `node_update_status()` can return progress to the UI.
+    ///
+    /// Refuses to start when an update is already running (one job
+    /// per node at a time — `apt-get` would lock dpkg anyway).
+    pub async fn node_update_run(
+        &self,
+        do_apt: bool,
+        do_hyperion: bool,
+    ) -> Result<i64, RpcError> {
+        if !do_apt && !do_hyperion {
+            return Err(RpcError::Validation {
+                message: "node_update_run: nothing to do (do_apt=false, do_hyperion=false)"
+                    .into(),
+            });
+        }
+        let started_at = now_secs();
+        {
+            let mut guard = self.node_update.lock().await;
+            if guard.state == "running" {
+                return Err(RpcError::Conflict {
+                    message: format!(
+                        "another update is already running on this node (started at unix:{}). \
+                         Wait for it to finish before starting a new one.",
+                        guard.started_at
+                    ),
+                });
+            }
+            *guard = hyperion_types::NodeUpdateStatus {
+                started_at,
+                finished_at: 0,
+                state: "running".into(),
+                do_apt,
+                do_hyperion,
+                log_tail: String::new(),
+                exit_code: 0,
+            };
+        }
+        // Spawn the work. We deliberately don't await — the caller
+        // gets the start time back and polls status.
+        let slot = self.node_update.clone();
+        tokio::spawn(async move {
+            run_update_script(slot, do_apt, do_hyperion).await;
+        });
+        self.append_audit(
+            "node.update.start",
+            None,
+            &serde_json::json!({"do_apt": do_apt, "do_hyperion": do_hyperion}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(started_at)
+    }
+
+    /// Read the current node-update job state. Cheap — just clones
+    /// the in-memory state slot.
+    pub async fn node_update_status(
+        &self,
+    ) -> Result<hyperion_types::NodeUpdateStatus, RpcError> {
+        Ok(self.node_update.lock().await.clone())
+    }
+
     /// Status of every system service Hyperion depends on. Run via
     /// `systemctl is-active/is-enabled` so the answer is always live
     /// — we don't cache because operator restarts/disables happen
@@ -7677,6 +7904,9 @@ mod tests {
             cert_issue_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             master_rpc_signer: None,
             node_state_file: None,
+            node_update: Arc::new(tokio::sync::Mutex::new(
+                hyperion_types::NodeUpdateStatus::default(),
+            )),
         };
         s2.create(req("test6.example.cz"))
             .await
@@ -7748,6 +7978,9 @@ mod tests {
             cert_issue_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             master_rpc_signer: None,
             node_state_file: None,
+            node_update: Arc::new(tokio::sync::Mutex::new(
+                hyperion_types::NodeUpdateStatus::default(),
+            )),
         };
         s2.create(req("retry.cz"))
             .await
@@ -7786,6 +8019,9 @@ mod tests {
             cert_issue_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             master_rpc_signer: None,
             node_state_file: None,
+            node_update: Arc::new(tokio::sync::Mutex::new(
+                hyperion_types::NodeUpdateStatus::default(),
+            )),
         };
         s2.create(HostingCreateReq {
             domain: Domain::parse("b.cz").expect("parse"),
@@ -7892,6 +8128,9 @@ mod tests {
             cert_issue_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             master_rpc_signer: None,
             node_state_file: None,
+            node_update: Arc::new(tokio::sync::Mutex::new(
+                hyperion_types::NodeUpdateStatus::default(),
+            )),
         };
         let r = s2.create(req("dup.cz")).await;
         match r {

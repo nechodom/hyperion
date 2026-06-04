@@ -31,6 +31,8 @@ struct InstallTpl<'a> {
     /// Same wildcard token covers both inline HTMX POSTs and the
     /// JS-free fallback.
     csrf_test: String,
+    /// CSRF for the per-row "Update node" button (apt + hyperion).
+    csrf_update: String,
 }
 
 pub async fn get_install(
@@ -62,6 +64,7 @@ pub async fn get_install(
         csrf_create: csrf_token(&state, &ctx, "/install/invite"),
         csrf_revoke: csrf_token(&state, &ctx, "/install/invite/revoke"),
         csrf_test: csrf_token(&state, &ctx, "/install/test-node"),
+        csrf_update: csrf_token(&state, &ctx, "/install/update-node"),
     };
     Ok(Html(tpl.render()?).into_response())
 }
@@ -119,6 +122,7 @@ pub async fn post_invite(
         csrf_create: csrf_token(&state, &ctx, "/install/invite"),
         csrf_revoke: csrf_token(&state, &ctx, "/install/invite/revoke"),
         csrf_test: csrf_token(&state, &ctx, "/install/test-node"),
+        csrf_update: csrf_token(&state, &ctx, "/install/update-node"),
     };
     // The rendered page carries the plaintext invite token. Make sure
     // browser/proxy caches don't keep it around past the first view.
@@ -158,6 +162,171 @@ pub async fn post_revoke(
         RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
+}
+
+/// POST /install/update-node — super_admin only.
+///
+/// Starts a background apt + hyperion update on the chosen node
+/// via the signed-RPC channel. Returns immediately; operator polls
+/// status via /install/update-node-status or sees the log on
+/// /install (auto-refresh shows the rolling tail).
+#[derive(Deserialize)]
+pub struct UpdateNodeForm {
+    node_id: String,
+    #[serde(default)]
+    do_apt: Option<String>,
+    #[serde(default)]
+    do_hyperion: Option<String>,
+}
+
+pub async fn post_update_node(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<UpdateNodeForm>,
+) -> Result<Response, AppError> {
+    if !ctx.is_super_admin() {
+        return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
+    }
+    let node_id = form.node_id.trim().to_string();
+    if node_id.is_empty() {
+        return Err(AppError::BadRequest("missing node_id".into()));
+    }
+    let do_apt = matches!(form.do_apt.as_deref(), Some("on" | "true" | "1"));
+    let do_hyperion = matches!(form.do_hyperion.as_deref(), Some("on" | "true" | "1"));
+    if !do_apt && !do_hyperion {
+        return Ok(Redirect::to(
+            "/install?flash_error=nothing+to+update+%28tick+at+least+one+option%29",
+        )
+        .into_response());
+    }
+    // Special-case: target "local" runs the update on the master itself.
+    let target = if node_id == "local" || node_id.is_empty() {
+        None
+    } else {
+        Some(node_id.as_str())
+    };
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target,
+        Request::NodeUpdateRun { do_apt, do_hyperion },
+    )
+    .await?;
+    match resp {
+        RpcResponse::NodeUpdateRun { started_at } => {
+            Ok(Redirect::to(&format!(
+                "/install?flash=update+started+%28unix%3A{}%29#node-{}",
+                started_at,
+                urlencode(&node_id)
+            ))
+            .into_response())
+        }
+        RpcResponse::Error(e) => {
+            Ok(Redirect::to(&format!(
+                "/install?flash_error={}",
+                urlencode(&format!("update failed to start: {e}"))
+            ))
+            .into_response())
+        }
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+/// GET /install/update-node-status?node_id=… — returns a tiny HTML
+/// fragment with state pill + log tail. UI polls this via HTMX.
+#[derive(Deserialize)]
+pub struct UpdateNodeStatusQuery {
+    node_id: String,
+}
+
+pub async fn get_update_node_status(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    axum::extract::Query(q): axum::extract::Query<UpdateNodeStatusQuery>,
+) -> Response {
+    if !ctx.is_super_admin() {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            [("content-type", "text/html; charset=utf-8")],
+            "<span class=\"pill err\">admin only</span>",
+        )
+            .into_response();
+    }
+    let node_id = q.node_id.trim();
+    let target = if node_id == "local" || node_id.is_empty() {
+        None
+    } else {
+        Some(node_id)
+    };
+    let resp =
+        crate::dispatcher::dispatch_to_node(&state, target, Request::NodeUpdateStatus).await;
+    let body = match resp {
+        Ok(RpcResponse::NodeUpdateStatus(s)) => render_update_status(&s),
+        Ok(RpcResponse::Error(e)) => format!(
+            "<div class=\"text-soft small\">status RPC error: {}</div>",
+            html_escape(&e.to_string())
+        ),
+        Ok(_) => "<div class=\"text-soft small\">unexpected response</div>".to_string(),
+        Err(e) => format!(
+            "<div class=\"text-soft small\">unreachable: {}</div>",
+            html_escape(&e.to_string())
+        ),
+    };
+    (
+        axum::http::StatusCode::OK,
+        [("content-type", "text/html; charset=utf-8")],
+        body,
+    )
+        .into_response()
+}
+
+/// Format a NodeUpdateStatus as a small HTML fragment for the
+/// /install per-row poll target.
+fn render_update_status(s: &hyperion_types::NodeUpdateStatus) -> String {
+    if s.started_at == 0 {
+        return "<span class=\"text-soft small\">no update has run on this node</span>"
+            .to_string();
+    }
+    let pill = match s.state.as_str() {
+        "running" => "<span class=\"pill warn pulse\">running</span>",
+        "succeeded" => "<span class=\"pill ok\">done</span>",
+        "failed" => "<span class=\"pill err\">failed</span>",
+        _ => "<span class=\"pill\">unknown</span>",
+    };
+    let scope = match (s.do_apt, s.do_hyperion) {
+        (true, true) => "apt + hyperion",
+        (true, false) => "apt only",
+        (false, true) => "hyperion only",
+        _ => "nothing",
+    };
+    let mut out = format!(
+        "<div style=\"display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap\">\
+            {pill} <span class=\"text-soft small\">{scope}</span>"
+    );
+    if s.state == "failed" {
+        out.push_str(&format!(
+            " <span class=\"text-soft small\">exit {}</span>",
+            s.exit_code
+        ));
+    }
+    out.push_str("</div>");
+    if !s.log_tail.is_empty() {
+        out.push_str(&format!(
+            "<pre style=\"max-height:14rem;overflow:auto;background:var(--surface-1);padding:0.5rem 0.7rem;border-radius:6px;margin:0.5rem 0 0;font-size:0.78rem;line-height:1.45\">{}</pre>",
+            html_escape(&s.log_tail)
+        ));
+    }
+    out
+}
+
+fn urlencode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b' ' => "+".to_string(),
+            b'-' | b'.' | b'_' | b'~' => (b as char).to_string(),
+            b if b.is_ascii_alphanumeric() => (b as char).to_string(),
+            b => format!("%{:02X}", b),
+        })
+        .collect()
 }
 
 /// POST /install/test-node — super_admin only.
@@ -309,6 +478,7 @@ async fn render_with_error(
         csrf_create: csrf_token(state, ctx, "/install/invite"),
         csrf_revoke: csrf_token(state, ctx, "/install/invite/revoke"),
         csrf_test: csrf_token(state, ctx, "/install/test-node"),
+        csrf_update: csrf_token(state, ctx, "/install/update-node"),
     };
     Html(
         tpl.render()

@@ -425,6 +425,31 @@ pub struct UpdateStatus {
     pub message: String,
 }
 
+/// State of the most-recent (or in-progress) node update job
+/// triggered via Request::NodeUpdateRun. Returned by
+/// NodeUpdateStatus so the UI can poll progress.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NodeUpdateStatus {
+    /// Unix seconds when the job started. 0 → no job has ever run.
+    pub started_at: i64,
+    /// Unix seconds when the job finished. 0 → still running, or
+    /// no job has ever run.
+    pub finished_at: i64,
+    /// "idle" | "running" | "succeeded" | "failed".
+    pub state: String,
+    /// Whether the apt step was requested for this job.
+    pub do_apt: bool,
+    /// Whether the hyperion update.sh step was requested.
+    pub do_hyperion: bool,
+    /// Combined stdout/stderr tail of the running script, capped
+    /// to roughly the last 8 kB. Live during the run, frozen
+    /// after completion.
+    pub log_tail: String,
+    /// Exit code of the script (0 = ok). Meaningful only when
+    /// state ∈ {"succeeded","failed"}.
+    pub exit_code: i32,
+}
+
 impl Default for UpdateStatus {
     fn default() -> Self {
         Self {
