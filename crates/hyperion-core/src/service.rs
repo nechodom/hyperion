@@ -1025,11 +1025,28 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                         .await
                         .ok()
                         .flatten();
-                    let orphan = match by_uid {
-                        Some(r) => match system_users::has_hostings(&self.pool, r.id).await {
-                            Ok(false) => Some(r),
-                            _ => None,
-                        },
+                    // Orphan detection: a system_users row whose
+                    // referencing hostings are either (a) absent or
+                    // (b) ALL in non-active states (failed,
+                    // provisioning, deleting) is safe to clean — no
+                    // real hosting depends on it. Only an `active`
+                    // hosting locks the row.
+                    let orphan = match &by_uid {
+                        Some(r) => {
+                            let rows: Vec<(String,)> = sqlx::query_as(
+                                "SELECT state FROM hostings WHERE system_user_id = ?",
+                            )
+                            .bind(r.id)
+                            .fetch_all(&self.pool)
+                            .await
+                            .unwrap_or_default();
+                            let any_active = rows.iter().any(|(s,)| s == "active");
+                            if any_active {
+                                None
+                            } else {
+                                Some(r.clone())
+                            }
+                        }
                         None => None,
                     };
                     if let Some(orphan) = orphan {
@@ -1039,6 +1056,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                             new_name = %system_user.as_str(),
                             "dropping orphan system_users row to free UID"
                         );
+                        // Also drop any hostings rows that
+                        // referenced the orphan — they're necessarily
+                        // stale because has_hostings already returned
+                        // false (the orphan check above gates on that).
+                        // No-op when there are none, which is the
+                        // common case.
+                        let _ = sqlx::query("DELETE FROM hostings WHERE system_user_id = ?")
+                            .bind(orphan.id)
+                            .execute(&self.pool)
+                            .await;
                         let _ = system_users::delete(&self.pool, orphan.id).await;
                         match system_users::insert(
                             &self.pool,
@@ -1059,6 +1086,25 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                             }
                         }
                     } else {
+                        // The orphan-detection branch wasn't reached
+                        // EITHER because by_uid is None (the UID
+                        // legitimately belongs to a hosting we
+                        // shouldn't nuke) OR has_hostings returned
+                        // true (a real hosting references it). In
+                        // both cases the operator has to investigate
+                        // by hand — but surface the row id so they
+                        // can grep the DB.
+                        if let Some(by_uid_row) = by_uid {
+                            tracing::error!(
+                                uid = uid,
+                                existing_name = %by_uid_row.name,
+                                "system_users UID conflict + the conflicting row IS referenced by \
+                                 a hostings record — refusing to auto-clean. Inspect with: \
+                                 sqlite3 /var/lib/hyperion/state.db \
+                                 'SELECT * FROM hostings WHERE system_user_id = {row_id};'",
+                                row_id = by_uid_row.id
+                            );
+                        }
                         let _ = stack.rollback_all().await;
                         return Err(RpcError::Internal_with(format!(
                             "system_users insert: {e}"
@@ -1067,6 +1113,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 }
             }
         };
+        // Now that the system_users row exists, push a rollback step
+        // that removes it on later failures. Without this, the
+        // DeleteUser rollback (Linux user) runs but the DB row keeps
+        // the UID, claiming it permanently. The next create's
+        // useradd reuses the freed UID and trips UNIQUE(uid).
+        stack.push(Box::new(DeleteSystemUsersRow {
+            pool: self.pool.clone(),
+            row_id: suid_row,
+        }));
         // For reverse_proxy validate upstream URL is present + parseable
         // before we touch system_users / DB / nginx. Bail clean.
         if req.kind == "reverse_proxy" {
@@ -7066,6 +7121,37 @@ impl<A: AdapterPort + 'static> Rollback for DeleteUser<A> {
     }
 }
 
+/// Drop the `system_users` row by id during create-failure rollback.
+///
+/// Pushed onto the rollback stack AFTER a successful
+/// `system_users::insert`. Without this, a later step's failure
+/// (FPM, DB, ACME, nginx, …) rolls back the Linux-side user via
+/// `userdel` but leaves the DB row, claiming the UID forever. The
+/// next create attempt's `useradd` reuses that UID (Linux freed it
+/// at userdel time) and trips `UNIQUE(system_users.uid)`:
+///
+///   useradd → UID 1000  (Linux says ok)
+///   system_users::insert(uid=1000) → UNIQUE constraint failed
+///
+/// LIFO order in the rollback stack: DeleteSystemUsersRow runs
+/// BEFORE DeleteUser, so the DB row goes away first, then the
+/// Linux user — matches the order the normal delete() path uses.
+struct DeleteSystemUsersRow {
+    pool: SqlitePool,
+    row_id: i64,
+}
+#[async_trait]
+impl Rollback for DeleteSystemUsersRow {
+    async fn run(&self) -> Result<(), String> {
+        system_users::delete(&self.pool, self.row_id)
+            .await
+            .map_err(|e| e.to_string())
+    }
+    fn label(&self) -> &str {
+        "delete_system_users_row"
+    }
+}
+
 struct RemoveTree<A: AdapterPort> {
     adapters: Arc<A>,
     root: String,
@@ -7512,6 +7598,89 @@ mod tests {
         let s = svc(pool.clone(), a);
         let r = s.create(req("example.cz")).await;
         assert!(r.is_err());
+    }
+
+    /// Regression for the field-reported bug:
+    ///   1. Create test5.example.cz on a fresh node.
+    ///   2. ensure_user succeeds (Linux UID 1000 allocated).
+    ///   3. system_users::insert succeeds (DB row with UID 1000).
+    ///   4. nginx_write_vhost fails → rollback.
+    ///   5. PRE-FIX: DeleteUser removes Linux user; system_users
+    ///      DB row stays. UID is now free at Linux level but
+    ///      claimed at DB level.
+    ///   6. Operator retries with DIFFERENT domain (different
+    ///      system_user name). useradd reuses UID 1000.
+    ///   7. PRE-FIX: system_users::insert(uid=1000) → UNIQUE
+    ///      constraint failure. Operator stuck.
+    ///   POST-FIX: DeleteSystemUsersRow rollback removes the DB
+    ///   row alongside DeleteUser, so step 6 starts from a clean
+    ///   DB state and the retry succeeds.
+    #[tokio::test]
+    async fn rollback_cleans_system_users_db_row_so_uid_can_be_reused() {
+        let pool = open_memory().await.expect("open");
+        // First attempt — succeeds through system_users::insert
+        // then fails at nginx_write_vhost so DeleteUser +
+        // DeleteSystemUsersRow rollbacks fire.
+        let mut a = MockAdapterPort::new();
+        a.expect_ensure_user().returning(|_, _| Ok(1000));
+        a.expect_ensure_dirs().returning(|_, _, _, _| Ok(()));
+        a.expect_fpm_ensure().returning(|_, _, _| Ok(()));
+        a.expect_db_create().returning(|_, _, _| Ok(db_creds()));
+        a.expect_acme_issue().returning(|d, _| Ok(cert_for(d)));
+        a.expect_nginx_write_vhost()
+            .returning(|_| Err(AdapterError::Other("nginx bad".into())));
+        a.expect_acme_delete().returning(|_| Ok(()));
+        a.expect_db_drop().returning(|_, _, _| Ok(()));
+        a.expect_fpm_delete().returning(|_, _| Ok(()));
+        a.expect_remove_hosting_tree().returning(|_| Ok(()));
+        a.expect_delete_user().returning(|_| Ok(()));
+        let s = svc(pool.clone(), a);
+        let _ = s.create(req("test5.example.cz")).await;
+        // After rollback the system_users row MUST be gone — else
+        // the next create's UNIQUE(uid) hits a phantom row.
+        let leftover = system_users::get_by_uid(&pool, 1000)
+            .await
+            .expect("query");
+        assert!(
+            leftover.is_none(),
+            "rollback must DELETE the system_users row, not just the Linux user — \
+             otherwise UNIQUE(uid) blocks every subsequent create that gets \
+             UID 1000 from useradd"
+        );
+
+        // Second attempt with a different domain — Linux freed UID
+        // 1000, useradd reuses it, system_users::insert(1000) must
+        // succeed (no phantom row).
+        let secrets_dir = tempfile::tempdir().expect("dir");
+        let secrets = Arc::new(SecretsStore::new(secrets_dir.keep()));
+        let mut a2 = MockAdapterPort::new();
+        a2.expect_ensure_user().returning(|_, _| Ok(1000));
+        a2.expect_ensure_dirs().returning(|_, _, _, _| Ok(()));
+        a2.expect_fpm_ensure().returning(|_, _, _| Ok(()));
+        a2.expect_db_create().returning(|_, _, _| Ok(db_creds()));
+        a2.expect_nginx_write_vhost().returning(|_| Ok(()));
+        a2.expect_acme_issue().returning(|d, _| Ok(cert_for(d)));
+        let s2 = HostingService {
+            pool: pool.clone(),
+            adapters: Arc::new(a2),
+            secrets,
+            paths: HostingPaths::default(),
+            remote_backup: None,
+            retention: BackupRetention::default(),
+            slack_default_webhook: None,
+            acme_contact_email: "test@example.invalid".into(),
+            email_config: None,
+            email_default_to: None,
+            agent_config_path: None,
+            update_cache: Arc::new(tokio::sync::RwLock::new(None)),
+            current_git_sha: "dev-unknown".into(),
+            cert_issue_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            master_rpc_signer: None,
+            node_state_file: None,
+        };
+        s2.create(req("test6.example.cz"))
+            .await
+            .expect("retry with different domain must succeed — DB UID 1000 is free");
     }
 
     /// Regression test for the user-visible bug:
