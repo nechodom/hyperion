@@ -129,6 +129,60 @@ pub struct WpPluginActionResult {
     pub output_tail: String,
 }
 
+/// One installed theme — parallel to `WpPlugin` but for `wp theme list`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WpTheme {
+    /// Theme directory slug (the `wp theme <action> <slug>` arg).
+    pub slug: String,
+    /// Human-readable name from the theme's style.css header.
+    pub name: String,
+    pub version: String,
+    /// "active" | "inactive" | "parent" (when it's the parent of an
+    /// active child theme).
+    pub status: String,
+    pub update_available: bool,
+    pub latest_version: String,
+}
+
+/// Response for `Request::WpThemeList`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct WpThemeListResponse {
+    pub themes: Vec<WpTheme>,
+    /// WordPress core version on disk — same field shape as
+    /// WpPluginListResponse so the UI can reuse a header.
+    pub wp_version: String,
+    pub updates_pending: i64,
+}
+
+/// Whitelisted theme actions exposed via the web UI. Mirrors
+/// `WpPluginAction` but with theme-specific subset (no
+/// auto-update-flag since wp-cli doesn't have a per-theme
+/// equivalent — theme auto-updates are managed cluster-wide).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WpThemeAction {
+    /// `wp theme install <slug> [--activate]`.
+    Install { source: String },
+    /// `wp theme activate <slug>` — exactly one theme is active at
+    /// any time; activating a new one deactivates the current.
+    Activate,
+    /// `wp theme update <slug>`.
+    Update,
+    /// `wp theme update --all`.
+    UpdateAll,
+    /// `wp theme delete <slug>`. Refuses if the theme is currently
+    /// active (matches wp-cli's safety check).
+    Delete,
+}
+
+/// Outcome of a `WpThemeAction` — same shape as the plugin variant.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WpThemeActionResult {
+    pub state: String,
+    pub message: String,
+    pub output_tail: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

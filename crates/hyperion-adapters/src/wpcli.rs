@@ -259,6 +259,119 @@ pub fn validate_plugin_url(s: &str) -> Result<(), AdapterError> {
     Ok(())
 }
 
+/// List installed WP themes — `wp theme list --format=json`.
+/// Same plumbing as plugin_list, parses into a Vec<WpTheme>.
+pub async fn theme_list(
+    user: &str,
+    htdocs: &str,
+) -> Result<(Vec<hyperion_types::WpTheme>, String), AdapterError> {
+    ensure_wp_cli_present().await?;
+    let argv = build_argv(
+        user,
+        htdocs,
+        &["theme", "list", "--format=json", "--fields=name,status,update,version,update_version"],
+    );
+    let out = cmd::run("/usr/bin/sudo", &argv_as_refs(&argv)).await?;
+    // wp-cli emits each row with `name` (= slug) and a separate
+    // human title isn't always returned; map the slug into both
+    // slug + name for the UI so a missing title isn't an empty
+    // column.
+    #[derive(serde::Deserialize)]
+    struct Row {
+        name: String,
+        #[serde(default)]
+        title: Option<String>,
+        status: String,
+        #[serde(default)]
+        update: String,
+        version: String,
+        #[serde(default)]
+        update_version: Option<String>,
+    }
+    let rows: Vec<Row> = serde_json::from_str(out.trim()).map_err(|e| {
+        AdapterError::Other(format!(
+            "wp theme list returned non-JSON / unexpected shape: {e}; head: {}",
+            out.chars().take(200).collect::<String>()
+        ))
+    })?;
+    let themes = rows
+        .into_iter()
+        .map(|r| hyperion_types::WpTheme {
+            slug: r.name.clone(),
+            name: r.title.unwrap_or(r.name),
+            version: r.version,
+            status: r.status,
+            update_available: r.update == "available",
+            latest_version: r.update_version.unwrap_or_default(),
+        })
+        .collect::<Vec<_>>();
+    // wp core version is cheap to reuse — same as plugin_list.
+    let core_argv = build_argv(user, htdocs, &["core", "version"]);
+    let core_out = cmd::run("/usr/bin/sudo", &argv_as_refs(&core_argv))
+        .await
+        .unwrap_or_default();
+    Ok((themes, core_out.trim().to_string()))
+}
+
+/// Apply one whitelisted theme action via wp-cli. Slug is empty
+/// for UpdateAll. Same shape as plugin_action.
+pub async fn theme_action(
+    user: &str,
+    htdocs: &str,
+    slug: &str,
+    action: &hyperion_types::WpThemeAction,
+) -> Result<hyperion_types::WpThemeActionResult, AdapterError> {
+    ensure_wp_cli_present().await?;
+    if !matches!(action, hyperion_types::WpThemeAction::UpdateAll) {
+        validate_plugin_slug(slug)?;
+    }
+    let args_owned: Vec<String> = match action {
+        hyperion_types::WpThemeAction::Install { source } => {
+            let is_url = source.starts_with("http://") || source.starts_with("https://");
+            if is_url {
+                validate_plugin_url(source)?;
+            } else {
+                validate_plugin_slug(source)?;
+            }
+            vec!["theme".into(), "install".into(), source.clone(), "--activate".into()]
+        }
+        hyperion_types::WpThemeAction::Activate => {
+            vec!["theme".into(), "activate".into(), slug.into()]
+        }
+        hyperion_types::WpThemeAction::Update => {
+            vec!["theme".into(), "update".into(), slug.into()]
+        }
+        hyperion_types::WpThemeAction::UpdateAll => {
+            vec!["theme".into(), "update".into(), "--all".into()]
+        }
+        hyperion_types::WpThemeAction::Delete => {
+            vec!["theme".into(), "delete".into(), slug.into()]
+        }
+    };
+    let args_refs: Vec<&str> = args_owned.iter().map(|s| s.as_str()).collect();
+    let argv = build_argv(user, htdocs, &args_refs);
+    let result = cmd::run("/usr/bin/sudo", &argv_as_refs(&argv)).await;
+    let (state, message, tail) = match result {
+        Ok(out) => {
+            let tail = tail_4k(&out);
+            let noop = out.contains("already activated")
+                || out.contains("already at the latest version")
+                || out.contains("Warning: ");
+            let state = if noop { "noop" } else { "ok" };
+            (state.to_string(), short_summary(&out), tail)
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            ("failed".into(), msg.clone(), tail_4k(&msg))
+        }
+    };
+    Ok(hyperion_types::WpThemeActionResult {
+        state,
+        message,
+        output_tail: tail,
+    })
+}
+
 /// Install a plugin or theme by `source`. `source` is one of:
 ///   - a wordpress.org slug (validated against SLUG_RX)
 ///   - an https URL (validated against URL_RX)

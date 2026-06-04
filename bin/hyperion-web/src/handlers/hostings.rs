@@ -173,6 +173,10 @@ struct DetailTpl<'a> {
     /// operators upload to), so we always fetch via the local
     /// agent socket regardless of where this hosting lives.
     wp_assets: Vec<hyperion_types::WpAssetSummary>,
+    /// Installed WP themes for the new Themes tab. Same shape as
+    /// wp_plugins above, mirrored across the wp_theme adapter.
+    /// Empty when wp_status is None (no WP install).
+    wp_themes: hyperion_types::WpThemeListResponse,
 }
 
 #[derive(Deserialize, Default)]
@@ -622,6 +626,7 @@ pub async fn post_create(
                 target_node: target.unwrap_or("").to_string(),
                 all_nodes: fetch_remote_nodes(&state).await.unwrap_or_default(),
                 wp_assets: fetch_wp_assets(&state).await.unwrap_or_default(),
+                wp_themes: hyperion_types::WpThemeListResponse::default(),
             };
             Ok(Html(tpl.render()?).into_response())
         }
@@ -680,6 +685,20 @@ pub async fn get_detail(
         }
     } else {
         hyperion_types::WpPluginListResponse::default()
+    };
+    let wp_themes = if wp_status.is_some() {
+        match crate::dispatcher::dispatch_to_node(
+            &state,
+            target,
+            Request::WpThemeList { hosting: sel_id.clone() },
+        )
+        .await
+        {
+            Ok(RpcResponse::WpThemeList(r)) => r,
+            _ => hyperion_types::WpThemeListResponse::default(),
+        }
+    } else {
+        hyperion_types::WpThemeListResponse::default()
     };
     let expiry = fetch_expiry(&state, target, sel_id.clone())
         .await
@@ -854,6 +873,7 @@ pub async fn get_detail(
         target_node: owner_node.clone().unwrap_or_default(),
         all_nodes: fetch_remote_nodes(&state).await.unwrap_or_default(),
         wp_assets: fetch_wp_assets(&state).await.unwrap_or_default(),
+        wp_themes,
     };
     Ok(Html(tpl.render()?).into_response())
 }
@@ -2629,6 +2649,99 @@ pub struct WpPluginActionForm {
     pub action: String,
     #[serde(default)]
     pub source: String,
+}
+
+#[derive(Deserialize)]
+pub struct WpThemeActionForm {
+    pub selector: String,
+    #[serde(default)]
+    pub slug: String,
+    pub action: String,
+    #[serde(default)]
+    pub source: String,
+    /// Carries the hosting's node id (injected by the detail
+    /// page's JS shim) so the dispatch lands on the right agent.
+    #[serde(default)]
+    pub target_node: String,
+}
+
+/// POST /hostings/wp/theme-action — single endpoint for every
+/// whitelisted theme verb. Mirrors post_wp_plugin_action but
+/// follows the hosting via target_node.
+pub async fn post_wp_theme_action(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<WpThemeActionForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let sel_url = urlencoding(&form.selector);
+    let action = match form.action.as_str() {
+        "install" => {
+            let source = form.source.trim().to_string();
+            if source.is_empty() {
+                return Err(AppError::BadRequest(
+                    "theme install requires a source (slug or https URL)".into(),
+                ));
+            }
+            hyperion_types::WpThemeAction::Install { source }
+        }
+        "activate" => hyperion_types::WpThemeAction::Activate,
+        "update" => hyperion_types::WpThemeAction::Update,
+        "update_all" => hyperion_types::WpThemeAction::UpdateAll,
+        "delete" => hyperion_types::WpThemeAction::Delete,
+        other => {
+            return Err(AppError::BadRequest(format!(
+                "unknown wp theme action: {}",
+                askama_escape::escape(other, askama_escape::Html)
+            )));
+        }
+    };
+    let slug = match &action {
+        hyperion_types::WpThemeAction::UpdateAll => String::new(),
+        hyperion_types::WpThemeAction::Install { source } => source.clone(),
+        _ => {
+            let s = form.slug.trim().to_string();
+            if s.is_empty() {
+                return Err(AppError::BadRequest("missing theme slug".into()));
+            }
+            s
+        }
+    };
+    let target = if form.target_node.is_empty()
+        || form.target_node == crate::dispatcher::LOCAL_NODE_SENTINEL
+    {
+        None
+    } else {
+        Some(form.target_node.as_str())
+    };
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target,
+        Request::WpThemeAction { sel, slug, action },
+    )
+    .await?;
+    match resp {
+        RpcResponse::WpThemeAction(r) => {
+            let msg = format!("Theme {}: {}", r.state, r.message);
+            Ok(Redirect::to(&format!(
+                "/hostings/{}?{}={}#themes",
+                sel_url,
+                if r.state == "failed" { "wp_error" } else { "wp_flash" },
+                urlencoding(&msg)
+            ))
+            .into_response())
+        }
+        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
+            "/hostings/{}?wp_error={}#themes",
+            sel_url,
+            urlencoding(&e.to_string())
+        ))
+        .into_response()),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
 }
 
 /// POST /hostings/migration/export

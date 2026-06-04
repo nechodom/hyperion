@@ -454,6 +454,24 @@ impl AdapterPort for RealAdapter {
         }
         hyperion_adapters::wpcli::install_item(system_user, htdocs, kind, source, activate).await
     }
+
+    async fn wp_theme_list(
+        &self,
+        system_user: &str,
+        htdocs: &str,
+    ) -> Result<(Vec<hyperion_types::WpTheme>, String), AdapterError> {
+        hyperion_adapters::wpcli::theme_list(system_user, htdocs).await
+    }
+
+    async fn wp_theme_action(
+        &self,
+        system_user: &str,
+        htdocs: &str,
+        slug: &str,
+        action: &hyperion_types::WpThemeAction,
+    ) -> Result<hyperion_types::WpThemeActionResult, AdapterError> {
+        hyperion_adapters::wpcli::theme_action(system_user, htdocs, slug, action).await
+    }
 }
 
 #[cfg(test)]

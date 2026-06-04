@@ -322,6 +322,20 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     ) -> Result<(String, String), RpcError> {
         self.svc.wp_install_from_asset(sel, asset_id, activate).await
     }
+    async fn wp_theme_list(
+        &self,
+        hosting: hyperion_rpc::HostingSelector,
+    ) -> Result<hyperion_types::WpThemeListResponse, RpcError> {
+        self.svc.wp_theme_list(hosting).await
+    }
+    async fn wp_theme_action(
+        &self,
+        sel: hyperion_rpc::HostingSelector,
+        slug: String,
+        action: hyperion_types::WpThemeAction,
+    ) -> Result<hyperion_types::WpThemeActionResult, RpcError> {
+        self.svc.wp_theme_action(sel, slug, action).await
+    }
     async fn node_update_run(
         &self,
         do_apt: bool,

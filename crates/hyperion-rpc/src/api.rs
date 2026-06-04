@@ -154,6 +154,18 @@ pub trait AgentApi: Send + Sync + 'static {
         asset_id: i64,
         activate: bool,
     ) -> Result<(String, String), RpcError>;
+    /// `wp theme list` for a hosting.
+    async fn wp_theme_list(
+        &self,
+        hosting: HostingSelector,
+    ) -> Result<hyperion_types::WpThemeListResponse, RpcError>;
+    /// Apply a whitelisted theme action via wp-cli.
+    async fn wp_theme_action(
+        &self,
+        sel: HostingSelector,
+        slug: String,
+        action: hyperion_types::WpThemeAction,
+    ) -> Result<hyperion_types::WpThemeActionResult, RpcError>;
     /// Start a background node-update job. Returns the unix
     /// timestamp the job started at. `NodeUpdateStatus` polls the
     /// log tail + state.

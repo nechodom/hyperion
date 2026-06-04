@@ -157,6 +157,26 @@ impl hyperion_core::AdapterPort for StubAdapters {
     ) -> Result<(), AdapterError> {
         Ok(())
     }
+    async fn wp_theme_list(
+        &self,
+        _: &str,
+        _: &str,
+    ) -> Result<(Vec<hyperion_types::WpTheme>, String), AdapterError> {
+        Ok((vec![], "6.5.3".into()))
+    }
+    async fn wp_theme_action(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &hyperion_types::WpThemeAction,
+    ) -> Result<hyperion_types::WpThemeActionResult, AdapterError> {
+        Ok(hyperion_types::WpThemeActionResult {
+            state: "ok".into(),
+            message: "stub".into(),
+            output_tail: String::new(),
+        })
+    }
 }
 
 async fn start_agent() -> (std::path::PathBuf, tempfile::TempDir) {

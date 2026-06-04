@@ -270,6 +270,16 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             },
             Err(e) => Response::Error(e),
         },
+        Request::WpThemeList { hosting } => match api.wp_theme_list(hosting).await {
+            Ok(t) => Response::WpThemeList(t),
+            Err(e) => Response::Error(e),
+        },
+        Request::WpThemeAction { sel, slug, action } => {
+            match api.wp_theme_action(sel, slug, action).await {
+                Ok(r) => Response::WpThemeAction(r),
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::NodeUpdateRun { do_apt, do_hyperion } => {
             match api.node_update_run(do_apt, do_hyperion).await {
                 Ok(started_at) => Response::NodeUpdateRun { started_at },
@@ -784,6 +794,24 @@ mod tests {
             _: bool,
         ) -> Result<(String, String), RpcError> {
             Ok(("plugin".into(), "stub.zip".into()))
+        }
+        async fn wp_theme_list(
+            &self,
+            _: HostingSelector,
+        ) -> Result<hyperion_types::WpThemeListResponse, RpcError> {
+            Ok(hyperion_types::WpThemeListResponse::default())
+        }
+        async fn wp_theme_action(
+            &self,
+            _: HostingSelector,
+            _: String,
+            _: hyperion_types::WpThemeAction,
+        ) -> Result<hyperion_types::WpThemeActionResult, RpcError> {
+            Ok(hyperion_types::WpThemeActionResult {
+                state: "ok".into(),
+                message: "stub".into(),
+                output_tail: String::new(),
+            })
         }
         async fn service_install(&self, _: String) -> Result<(), RpcError> {
             Ok(())

@@ -204,6 +204,10 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::profiles::post_wp_install_from_asset),
         )
         .route(
+            "/hostings/wp/theme-action",
+            post(handlers::hostings::post_wp_theme_action),
+        )
+        .route(
             "/profiles/:id/edit",
             get(handlers::profiles::get_edit),
         )

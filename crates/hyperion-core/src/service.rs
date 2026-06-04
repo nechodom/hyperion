@@ -149,6 +149,24 @@ pub trait AdapterPort: Send + Sync {
         source: &str,
         activate: bool,
     ) -> Result<(), AdapterError>;
+
+    /// `wp theme list --format=json` — parallel to wp_plugin_list.
+    /// Returns the theme table + the core version string.
+    async fn wp_theme_list(
+        &self,
+        system_user: &str,
+        htdocs: &str,
+    ) -> Result<(Vec<hyperion_types::WpTheme>, String), AdapterError>;
+
+    /// One whitelisted theme action via wp-cli. Same shape as
+    /// wp_plugin_action.
+    async fn wp_theme_action(
+        &self,
+        system_user: &str,
+        htdocs: &str,
+        slug: &str,
+        action: &hyperion_types::WpThemeAction,
+    ) -> Result<hyperion_types::WpThemeActionResult, AdapterError>;
 }
 
 #[derive(Clone)]
@@ -3100,6 +3118,78 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 "slug": slug,
                 "state": out.state,
             }).to_string(),
+            &out.state,
+        )
+        .await;
+        Ok(out)
+    }
+
+    /// `wp theme list` for a hosting. Mirrors wp_plugin_list shape.
+    pub async fn wp_theme_list(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::WpThemeListResponse, RpcError> {
+        let detail = self.get(sel).await?;
+        if detail.state != HostingState::Active {
+            return Err(RpcError::Conflict {
+                message: "hosting must be active to list themes".into(),
+            });
+        }
+        let (themes, wp_version) = self
+            .adapters
+            .wp_theme_list(&detail.system_user, &detail.root_dir)
+            .await
+            .map_err(|e| RpcError::ProvisioningFailed {
+                stage: "wp_theme_list".into(),
+                reason: e.to_string(),
+            })?;
+        let updates_pending = themes.iter().filter(|t| t.update_available).count() as i64;
+        Ok(hyperion_types::WpThemeListResponse {
+            themes,
+            wp_version,
+            updates_pending,
+        })
+    }
+
+    /// Apply one theme action (install / activate / update / delete /
+    /// update-all) via wp-cli. Audit-logged with the action label +
+    /// slug.
+    pub async fn wp_theme_action(
+        &self,
+        sel: HostingSelector,
+        slug: String,
+        action: hyperion_types::WpThemeAction,
+    ) -> Result<hyperion_types::WpThemeActionResult, RpcError> {
+        let detail = self.get(sel).await?;
+        if detail.state != HostingState::Active {
+            return Err(RpcError::Conflict {
+                message: "hosting must be active to manage themes".into(),
+            });
+        }
+        let out = self
+            .adapters
+            .wp_theme_action(&detail.system_user, &detail.root_dir, &slug, &action)
+            .await
+            .map_err(|e| RpcError::ProvisioningFailed {
+                stage: "wp_theme_action".into(),
+                reason: e.to_string(),
+            })?;
+        let action_label = match &action {
+            hyperion_types::WpThemeAction::Install { .. } => "install",
+            hyperion_types::WpThemeAction::Activate => "activate",
+            hyperion_types::WpThemeAction::Update => "update",
+            hyperion_types::WpThemeAction::UpdateAll => "update_all",
+            hyperion_types::WpThemeAction::Delete => "delete",
+        };
+        self.append_audit(
+            "wp.theme.action",
+            Some(detail.id.as_str()),
+            &serde_json::json!({
+                "action": action_label,
+                "slug": slug,
+                "state": out.state,
+            })
+            .to_string(),
             &out.state,
         )
         .await;

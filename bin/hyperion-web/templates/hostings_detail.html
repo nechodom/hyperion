@@ -322,6 +322,11 @@
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20l9-5-9-5-9 5 9 5z"/><path d="M12 12l9-5-9-5-9 5 9 5z"/></svg>
     WordPress
   </a>
+  <a class="tab" data-tab="themes" href="#themes" role="tab">
+    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r=".5"/><circle cx="17.5" cy="10.5" r=".5"/><circle cx="8.5" cy="7.5" r=".5"/><circle cx="6.5" cy="12.5" r=".5"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/></svg>
+    Themes
+    {% if wp_themes.updates_pending > 0 %}<span class="tab-badge" style="background:var(--warn);color:white">{{ wp_themes.updates_pending }}</span>{% endif %}
+  </a>
   <a class="tab" data-tab="ssl" href="#ssl" role="tab">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
     SSL
@@ -917,6 +922,167 @@
 {% endif %}
 
 </div><!-- /tab-wordpress -->
+
+<!-- ============== THEMES TAB ============== -->
+<div class="tab-panel" id="tab-themes">
+{% if wp_status.is_none() %}
+<div class="card">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r=".5"/></svg>
+    Themes
+  </h2>
+  <p class="muted">WordPress isn't installed yet. Install it from the WordPress tab first; the theme manager appears here once core is on disk.</p>
+</div>
+{% else %}
+<div class="card hover">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r=".5"/></svg>
+    Themes
+    <span class="muted" style="font-weight:400;font-size:0.82rem">· {{ wp_themes.themes.len() }} installed</span>
+    {% if wp_themes.updates_pending > 0 %}
+      <span class="tag warn" style="margin-left:0.4rem">{{ wp_themes.updates_pending }} update{% if wp_themes.updates_pending != 1 %}s{% endif %} available</span>
+    {% endif %}
+  </h2>
+
+  <div class="row" style="gap:0.5rem;margin-bottom:0.85rem;flex-wrap:wrap">
+    <form method="post" action="/hostings/wp/theme-action" style="display:inline">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="selector" value="{{ detail.domain }}">
+      <input type="hidden" name="action" value="update_all">
+      <button class="btn small" type="submit" {% if wp_themes.updates_pending == 0 %}disabled{% endif %}>
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/><path d="M20.49 15a9 9 0 0 1-14.85 3.36L1 14"/></svg>
+        Update all
+      </button>
+    </form>
+
+    <details class="inline-action" style="position:relative">
+      <summary class="btn small primary" style="list-style:none;cursor:pointer">+ Install theme</summary>
+      <form method="post" action="/hostings/wp/theme-action" autocomplete="off"
+            style="position:absolute;z-index:10;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:0.7rem;margin-top:0.4rem;box-shadow:var(--shadow);min-width:22rem">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="selector" value="{{ detail.domain }}">
+        <input type="hidden" name="action" value="install">
+        <div class="field" style="margin:0">
+          <label for="wp_theme_install_source">Source <span class="hint">wordpress.org slug or full https:// URL</span></label>
+          <input id="wp_theme_install_source" name="source" type="text" required
+                 pattern="[a-zA-Z0-9_\-./%~:?=+&amp;]+"
+                 placeholder="e.g. astra · https://example.com/theme.zip">
+        </div>
+        <div class="row" style="gap:0.4rem;margin-top:0.6rem;justify-content:flex-end">
+          <button type="submit" class="btn small primary">Install &amp; activate</button>
+        </div>
+      </form>
+    </details>
+
+    {% if !wp_assets.is_empty() %}
+    <details class="inline-action" style="position:relative">
+      <summary class="btn small" style="list-style:none;cursor:pointer">+ Install theme from library</summary>
+      <form method="post" action="/hostings/wp/install-from-asset" autocomplete="off"
+            style="position:absolute;z-index:10;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:0.7rem;margin-top:0.4rem;box-shadow:var(--shadow);min-width:24rem">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="selector" value="{{ detail.domain }}">
+        <div class="field" style="margin:0">
+          <label for="wp_theme_asset">Theme ZIP <span class="hint">from the asset library</span></label>
+          <select id="wp_theme_asset" name="asset_id" required style="margin:0">
+            {% for a in wp_assets %}
+              {% if a.kind == "theme" %}
+              <option value="{{ a.id }}">{{ a.original_name }} · {{ a.size_bytes / 1024 }} KB</option>
+              {% endif %}
+            {% endfor %}
+          </select>
+        </div>
+        <label class="field-checkbox" style="margin:0.6rem 0 0;font-size:0.85rem">
+          <input type="checkbox" name="activate" value="on" checked>
+          Activate after install
+        </label>
+        <div class="row" style="gap:0.4rem;margin-top:0.6rem;justify-content:flex-end">
+          <button type="submit" class="btn small primary">Install from library</button>
+        </div>
+      </form>
+    </details>
+    {% endif %}
+  </div>
+
+  {% if wp_themes.themes.is_empty() %}
+    <div class="empty" style="padding:1.5rem 1rem">
+      <p class="muted">No themes detected. Use <strong>Install theme</strong> above to add one from wordpress.org, a URL, or the asset library.</p>
+    </div>
+  {% else %}
+  <div class="table-wrap" style="margin:0 -1.5rem">
+    <table>
+      <thead>
+        <tr>
+          <th>Theme</th>
+          <th>Status</th>
+          <th>Version</th>
+          <th>Update</th>
+          <th class="right">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for t in wp_themes.themes %}
+        <tr>
+          <td>
+            <strong>{{ t.name }}</strong>
+            <div class="text-soft small"><code>{{ t.slug }}</code></div>
+          </td>
+          <td>
+            {% if t.status == "active" %}<span class="pill ok">active</span>
+            {% else if t.status == "parent" %}<span class="pill" style="background:var(--surface-2);color:var(--text-soft)">parent of active</span>
+            {% else %}<span class="pill" style="background:var(--surface-2);color:var(--text-soft)">{{ t.status }}</span>{% endif %}
+          </td>
+          <td><code>{{ t.version }}</code></td>
+          <td>
+            {% if t.update_available %}
+              <span class="text-soft small">→ <code>{{ t.latest_version }}</code></span>
+            {% else %}
+              <span class="text-soft small">up to date</span>
+            {% endif %}
+          </td>
+          <td class="right">
+            <div style="display:inline-flex;gap:0.3rem;flex-wrap:wrap;justify-content:flex-end">
+              {% if t.status != "active" %}
+              <form method="post" action="/hostings/wp/theme-action" style="display:inline">
+                <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                <input type="hidden" name="selector" value="{{ detail.domain }}">
+                <input type="hidden" name="action" value="activate">
+                <input type="hidden" name="slug" value="{{ t.slug }}">
+                <button class="btn small" type="submit">Activate</button>
+              </form>
+              {% endif %}
+              {% if t.update_available %}
+              <form method="post" action="/hostings/wp/theme-action" style="display:inline">
+                <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                <input type="hidden" name="selector" value="{{ detail.domain }}">
+                <input type="hidden" name="action" value="update">
+                <input type="hidden" name="slug" value="{{ t.slug }}">
+                <button class="btn small primary" type="submit">Update</button>
+              </form>
+              {% endif %}
+              {% if t.status != "active" && t.status != "parent" %}
+              <form method="post" action="/hostings/wp/theme-action" style="display:inline"
+                    data-confirm-title="Delete theme {{ t.slug }}"
+                    data-confirm-body="The theme files will be removed from disk. Database options (e.g. customizer settings) are left intact."
+                    data-confirm-confirm-label="Delete theme"
+                    data-confirm-variant="danger">
+                <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                <input type="hidden" name="selector" value="{{ detail.domain }}">
+                <input type="hidden" name="action" value="delete">
+                <input type="hidden" name="slug" value="{{ t.slug }}">
+                <button class="btn small danger" type="submit">Delete</button>
+              </form>
+              {% endif %}
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+</div><!-- /tab-themes -->
 
 <div class="tab-panel" id="tab-settings">
 

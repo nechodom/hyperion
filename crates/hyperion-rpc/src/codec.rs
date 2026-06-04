@@ -172,6 +172,17 @@ pub enum Request {
         /// after install.
         activate: bool,
     },
+    /// `wp theme list --format=json` against this hosting.
+    WpThemeList {
+        hosting: HostingSelector,
+    },
+    /// Whitelisted theme action via wp-cli (activate / delete /
+    /// install / update / update-all).
+    WpThemeAction {
+        sel: HostingSelector,
+        slug: String,
+        action: hyperion_types::WpThemeAction,
+    },
     /// Run system + hyperion updates on the target node. Both jobs
     /// run in the background; the call returns immediately with a
     /// "started" marker. Operator polls `NodeUpdateStatus` (see
@@ -498,6 +509,8 @@ pub enum Response {
         kind: String,
         original_name: String,
     },
+    WpThemeList(hyperion_types::WpThemeListResponse),
+    WpThemeAction(hyperion_types::WpThemeActionResult),
     /// Acknowledgement that the background update task spawned.
     /// Failures during the actual update show up in the log tail,
     /// not here.

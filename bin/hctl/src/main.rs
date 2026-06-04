@@ -946,6 +946,30 @@ fn print_pretty(resp: &Response) {
         } => {
             println!("wp {kind} installed from library: {original_name}");
         }
+        Response::WpThemeList(r) => {
+            println!("wp core: {}", r.wp_version);
+            println!(
+                "{:<24} {:<10} {:<10} {}",
+                "SLUG", "STATUS", "VERSION", "UPDATE"
+            );
+            for t in &r.themes {
+                println!(
+                    "{:<24} {:<10} {:<10} {}",
+                    t.slug,
+                    t.status,
+                    t.version,
+                    if t.update_available {
+                        t.latest_version.clone()
+                    } else {
+                        "-".into()
+                    }
+                );
+            }
+        }
+        Response::WpThemeAction(r) => {
+            println!("theme action: {}", r.state);
+            println!("  {}", r.message);
+        }
         Response::ServiceInstallStatus(s) => {
             if s.started_at == 0 {
                 println!("no service install has run on this node");

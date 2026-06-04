@@ -43,7 +43,7 @@ pub use stats::{
 };
 pub use wp::{
     WpInstallRequest, WpInstallStatus, WpPlugin, WpPluginAction, WpPluginActionResult,
-    WpPluginListResponse,
+    WpPluginListResponse, WpTheme, WpThemeAction, WpThemeActionResult, WpThemeListResponse,
 };
 
 /// Current Unix epoch seconds. Centralized so tests can replace it if needed.
