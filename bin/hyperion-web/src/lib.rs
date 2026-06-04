@@ -203,6 +203,9 @@ pub fn build_router(state: SharedState) -> Router {
         )
         .route("/hostings/:selector", get(handlers::hostings::get_detail))
         .route("/logout", post(handlers::login::post_logout))
+        // Tiny role echo for the nav-hiding shim in base.html.
+        // Returns "super_admin" | "admin" | "operator" | "viewer".
+        .route("/api/me/role", get(handlers::me::get_role))
         .layer(from_fn_with_state(state.clone(), auth::check_csrf))
         .layer(from_fn_with_state(state.clone(), auth::require_auth));
 

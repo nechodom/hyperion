@@ -37,7 +37,8 @@
     </nav>
     <nav class="nav-section">
       <span class="nav-label">Operations</span>
-      <a class="nav-link {% if active == "install" %}active{% endif %}" href="/install">
+      <a class="nav-link {% if active == "install" %}active{% endif %}" href="/install"
+         data-role-min="super_admin">
         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
         Nodes
       </a>
@@ -45,15 +46,18 @@
         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
         Service health
       </a>
-      <a class="nav-link {% if active == "audit" %}active{% endif %}" href="/audit">
+      <a class="nav-link {% if active == "audit" %}active{% endif %}" href="/audit"
+         data-role-min="admin">
         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="15" x2="15" y2="15"/><line x1="9" y1="11" x2="15" y2="11"/></svg>
         Audit log
       </a>
-      <a class="nav-link {% if active == "emails" %}active{% endif %}" href="/emails">
+      <a class="nav-link {% if active == "emails" %}active{% endif %}" href="/emails"
+         data-role-min="admin">
         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
         Email log
       </a>
-      <a class="nav-link {% if active == "users" %}active{% endif %}" href="/admin/users">
+      <a class="nav-link {% if active == "users" %}active{% endif %}" href="/admin/users"
+         data-role-min="super_admin">
         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
         Users
       </a>
@@ -61,7 +65,8 @@
         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
         My profile
       </a>
-      <a class="nav-link {% if active == "settings" %}active{% endif %}" href="/settings">
+      <a class="nav-link {% if active == "settings" %}active{% endif %}" href="/settings"
+         data-role-min="admin">
         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
         Settings
       </a>
@@ -71,7 +76,11 @@
         <div class="user-avatar">{{ user_initial }}</div>
         <div class="user-info">
           <div class="user-name">{{ username }}</div>
-          <div class="user-role">admin</div>
+          {# Filled by the role-aware JS shim below. Server-side
+             rendering is intentionally avoided to keep this Tpl
+             field-free (every template extends base.html — adding
+             a role field to all of them is a much bigger edit). #}
+          <div class="user-role" id="sidebar-role">loading…</div>
         </div>
         <button class="theme-toggle" id="theme-toggle" title="Toggle theme (cycles auto → light → dark)" aria-label="Toggle theme">
           <svg class="theme-dark-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
@@ -577,6 +586,53 @@ function isShortcutContext(ev) {
   mountAll();
   // Re-mount after HTMX swaps so dynamically-loaded sparklines also wire up.
   document.addEventListener('htmx:afterSettle', mountAll);
+})();
+</script>
+
+{# ===== Role-aware nav visibility shim =====
+   Fetches the current session's role from /api/me/role and:
+     1. Removes nav links the user doesn't have permission for
+        (data-role-min="super_admin" or "admin").
+     2. Adds data-role on <body> for any other UI that wants to
+        gate visibility (action buttons in detail pages, etc.).
+     3. Updates the sidebar user-role pill.
+     4. Hides any [data-role-min] element across the page —
+        action buttons can use the same attribute to self-hide.
+
+   Defense in depth: server-side handlers still enforce RBAC, so
+   even if a user disabled JS and manually navigated, they'd hit
+   a 403. This shim is UX polish, not a security boundary. #}
+<script>
+(function () {
+  'use strict';
+  // Role hierarchy lookup — higher number = more privileged.
+  const RANK = { 'viewer': 0, 'operator': 1, 'admin': 2, 'super_admin': 3 };
+  // Default to the most-restrictive while the fetch is in flight,
+  // so a slow network can't briefly flash admin-only nav to
+  // viewers (then snap them away on resolution).
+  document.body.dataset.role = 'viewer';
+  applyVisibility('viewer');
+
+  fetch('/api/me/role', { credentials: 'same-origin' })
+    .then(r => r.ok ? r.text() : 'viewer')
+    .then(role => {
+      role = (role || 'viewer').trim();
+      if (!(role in RANK)) role = 'viewer';
+      document.body.dataset.role = role;
+      // Pretty-print for the user-pill.
+      const pill = document.getElementById('sidebar-role');
+      if (pill) pill.textContent = role.replace('_', ' ');
+      applyVisibility(role);
+    })
+    .catch(() => applyVisibility('viewer'));
+
+  function applyVisibility(role) {
+    const myRank = RANK[role] ?? 0;
+    document.querySelectorAll('[data-role-min]').forEach(el => {
+      const need = RANK[el.dataset.roleMin] ?? 99;
+      el.style.display = (myRank >= need) ? '' : 'none';
+    });
+  }
 })();
 </script>
 

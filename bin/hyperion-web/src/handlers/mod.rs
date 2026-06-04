@@ -7,6 +7,7 @@ pub mod install;
 pub mod login;
 pub mod emails;
 pub mod files;
+pub mod me;
 pub mod migration;
 pub mod profile;
 pub mod profiles;
