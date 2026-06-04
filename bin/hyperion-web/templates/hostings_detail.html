@@ -342,6 +342,11 @@
     {% if access_grants.len() > 0 %}<span class="tab-badge">{{ access_grants.len() }}</span>{% endif %}
   </a>
   {% endif %}
+  <a class="tab" data-tab="emails" href="#emails" role="tab">
+    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+    Emails
+    {% if !email_log.is_empty() %}<span class="tab-badge">{{ email_log.len() }}</span>{% endif %}
+  </a>
   <a class="tab" data-tab="migration" href="#migration" role="tab">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12l18-9-3 18-7-7-8-2z"/><path d="M11 14l7-7"/></svg>
     Migration
@@ -440,23 +445,35 @@
   <h2>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
     Email DNS (SPF)
-    {% if sp.status == "matches" %}<span class="pill ok" style="margin-left:0.4rem;font-size:0.65rem">configured</span>
-    {% else if sp.status == "differs" %}<span class="pill warn" style="margin-left:0.4rem;font-size:0.65rem">differs</span>
+    {% if sp.status == "matches" %}<span class="pill ok" style="margin-left:0.4rem;font-size:0.65rem">authorized</span>
+    {% else if sp.status == "differs" %}<span class="pill warn" style="margin-left:0.4rem;font-size:0.65rem">not authorized</span>
+    {% else if sp.status == "multiple" %}<span class="pill err" style="margin-left:0.4rem;font-size:0.65rem">multiple records</span>
     {% else %}<span class="pill err" style="margin-left:0.4rem;font-size:0.65rem">missing</span>{% endif %}
   </h2>
+  {% if !sp.reason.is_empty() %}
+    <p class="muted" style="margin:-0.3rem 0 0.75rem;font-size:0.85rem">{{ sp.reason }}</p>
+  {% endif %}
   <dl class="kv">
     <dt>Existing TXT</dt>
     <dd>
       {% if sp.existing.is_empty() %}<span class="text-soft">none — emails from this hosting will be flagged as spam</span>
-      {% else %}{% for e in sp.existing %}<code style="font-size:0.78rem;display:block;margin-bottom:0.2rem">{{ e }}</code>{% endfor %}{% endif %}
+      {% else %}{% for e in sp.existing %}<code style="font-size:0.78rem;display:block;margin-bottom:0.2rem;word-break:break-all">{{ e }}</code>{% endfor %}{% endif %}
     </dd>
-    <dt>Suggested</dt>
-    <dd>
-      <code style="font-size:0.82rem;display:block;padding:0.5rem;background:var(--bg-2);border-radius:var(--radius-xs);word-break:break-all">{{ sp.suggested }}</code>
-      <div class="muted" style="font-size:0.78rem;margin-top:0.4rem">
-        Add this as a <code>TXT</code> record on the apex of <code>{{ detail.domain }}</code> in your DNS provider, then re-check.
-      </div>
-    </dd>
+    {% if sp.status != "matches" %}
+      <dt>Suggested</dt>
+      <dd>
+        <code style="font-size:0.82rem;display:block;padding:0.5rem;background:var(--bg-2);border-radius:var(--radius-xs);word-break:break-all">{{ sp.suggested }}</code>
+        <div class="muted" style="font-size:0.78rem;margin-top:0.4rem">
+          {% if sp.status == "missing" %}
+            Add this as a <code>TXT</code> record on the apex of <code>{{ detail.domain }}</code> in your DNS provider, then re-check.
+          {% else if sp.status == "multiple" %}
+            <strong>RFC 7208 §3.2 forbids more than one SPF record.</strong> Receivers fall back to <em>permerror</em> and refuse mail. Merge the existing records into one (combine their mechanisms), then re-check.
+          {% else %}
+            Your existing SPF doesn't list our IP. Either replace it with the suggested record, or add <code>{% if let Some(ip) = sp.our_public_ipv4 %}ip4:{{ ip }}{% else %}ip4:&lt;our IPv4&gt;{% endif %}</code> as an extra mechanism before the trailing <code>~all</code>.
+          {% endif %}
+        </div>
+      </dd>
+    {% endif %}
     {% if let Some(ip) = sp.our_public_ipv4 %}
     <dt>Our IPv4</dt><dd><code>{{ ip }}</code></dd>
     {% endif %}
@@ -1409,6 +1426,71 @@
 </div>
 </div><!-- /tab-access -->
 {% endif %}
+
+<!-- ============== EMAILS TAB ============== -->
+<div class="tab-panel" id="tab-emails">
+
+<div class="card hover">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+    Email log
+  </h2>
+  <p class="muted">Last 50 emails the agent sent on behalf of this hosting (alerts, cert reminders, monitor down/up, billing notifications). Cluster-wide notifications aren't shown here — see <a href="/settings#email">Settings → Email</a>.</p>
+
+  {% if email_log.is_empty() %}
+    <div class="empty" style="padding:1.5rem 1rem">
+      <p class="muted">No emails have been sent for this hosting yet. Configure SMTP in <a href="/settings#email">Settings</a> and the next monitor alert / cert renewal will appear here.</p>
+    </div>
+  {% else %}
+  <div class="table-wrap" style="margin:0 -1.5rem">
+    <table>
+      <thead>
+        <tr>
+          <th>Sent</th>
+          <th>Kind</th>
+          <th>To</th>
+          <th>Subject</th>
+          <th>State</th>
+          <th>SMTP / error</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for e in email_log %}
+        <tr>
+          <td class="muted numeric" title="{{ e.sent_at }}">{{ crate::handlers::stats::fmt_ago(e.sent_at) }}</td>
+          <td><span class="tag">{{ e.kind }}</span></td>
+          <td><code style="font-size:0.78rem">{{ e.to_address }}</code></td>
+          <td>
+            <strong>{{ e.subject }}</strong>
+            {% if !e.body_preview.is_empty() %}
+              <div class="muted" style="font-size:0.76rem;margin-top:0.15rem">{{ e.body_preview }}</div>
+            {% endif %}
+          </td>
+          <td>
+            {% if e.state == "ok" %}
+              <span class="pill ok">ok</span>
+            {% else %}
+              <span class="pill err">failed</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if let Some(err) = e.error %}
+              <code class="muted" style="font-size:0.74rem;word-break:break-word">{{ err }}</code>
+            {% else if let Some(c) = e.smtp_code %}
+              <code class="muted" style="font-size:0.74rem">{{ c }}</code>
+            {% else %}
+              <span class="text-soft">—</span>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+
+</div><!-- /tab-emails -->
 
 <!-- ============== MIGRATION TAB ============== -->
 <div class="tab-panel" id="tab-migration">

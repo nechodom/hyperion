@@ -284,6 +284,18 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.hosting_import_from_url(base_url, token).await
     }
 
+    async fn email_log_list(
+        &self,
+        hosting_id: Option<String>,
+        limit: i64,
+    ) -> Result<Vec<hyperion_types::EmailLogEntry>, RpcError> {
+        self.svc.email_log_list(hosting_id, limit).await
+    }
+
+    async fn email_smtp_autodetect(&self) -> Result<hyperion_types::SmtpAutodetect, RpcError> {
+        self.svc.email_smtp_autodetect().await
+    }
+
     async fn wp_plugin_list(
         &self,
         hosting: hyperion_rpc::HostingSelector,

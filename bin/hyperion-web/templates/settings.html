@@ -105,6 +105,15 @@
         <span class="pill warn small" style="margin-left:0.5rem">disabled</span>
       {% endif %}
     </h2>
+    <div class="row" style="gap:0.5rem;margin-bottom:0.85rem">
+      <button type="button" class="btn small" id="email-autodetect">
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        Auto-detect local SMTP
+      </button>
+      <span class="muted" style="font-size:0.82rem;align-self:center">Probes <code>localhost:25</code> + <code>localhost:587</code> and pre-fills the form.</span>
+    </div>
+    <div id="email-autodetect-result"></div>
+
     <form method="post" action="/settings/config" autocomplete="off">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <input type="hidden" name="section" value="email">
@@ -291,4 +300,50 @@
     "Restart" button on the <a href="/services" style="color:inherit;text-decoration:underline">Service health</a> page.
   </div>
 </div>
+
+<script>
+// ============================================================
+//  Email SMTP auto-detect — calls the probe RPC and pre-fills the
+//  email form. Cheap (TCP connect, sub-second).
+// ============================================================
+(function () {
+  const btn = document.getElementById('email-autodetect');
+  if (!btn) return;
+  const result = document.getElementById('email-autodetect-result');
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    const orig = btn.textContent;
+    btn.textContent = 'Probing…';
+    try {
+      const r = await fetch('/api/email-autodetect', {
+        method: 'POST',
+        headers: { 'x-csrf-token': '{{ csrf_token }}', 'accept': 'application/json' },
+      });
+      const j = await r.json();
+      if (j.found) {
+        document.getElementById('smtp_host').value = j.smtp_host;
+        document.getElementById('smtp_port').value = j.smtp_port;
+        document.getElementById('security').value = j.security;
+        if (!document.getElementById('from_address').value) {
+          document.getElementById('from_address').value = j.suggested_from;
+        }
+        // Auto-enable since we have something usable.
+        const en = document.querySelector('input[name="enabled"]');
+        if (en) en.checked = true;
+        result.innerHTML = `<div class="flash success" style="margin-bottom:0.85rem"><div class="flash-body"><strong>Detected:</strong> ${j.smtp_host}:${j.smtp_port} (${j.security}). ${escapeHtml(j.notes)} <em>Save the section below to persist.</em></div></div>`;
+      } else {
+        result.innerHTML = `<div class="flash warn" style="margin-bottom:0.85rem"><div class="flash-body">${escapeHtml(j.notes)}</div></div>`;
+      }
+    } catch (e) {
+      result.innerHTML = `<div class="flash error" style="margin-bottom:0.85rem"><div class="flash-body">Probe failed: ${escapeHtml(String(e))}</div></div>`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = orig;
+    }
+  });
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+  }
+})();
+</script>
 {% endblock %}

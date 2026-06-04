@@ -189,6 +189,310 @@ pub const CERT_RENEWAL_WINDOW_DAYS: i64 = 30;
 /// hitting their unauthenticated rate limit (60 req/hour/IP).
 pub const UPDATE_CHECK_TTL_SECS: i64 = 3600;
 
+/// Outcome of `check_spf_authorizes` — how (or whether) the SPF
+/// record authorizes our public IP.
+#[derive(Debug, Clone)]
+enum SpfMatch {
+    /// A specific mechanism matched our IP (e.g. "ip4:1.2.3.4").
+    Match { mechanism: String },
+    /// The record ends in `+all` or `?all` — pass anything.
+    CatchAll { mechanism: String },
+    /// No public IPv4 was discoverable for the agent, so we can't
+    /// decide. Surfaces as "differs" upstream with a clarifying
+    /// reason.
+    NoIp,
+    /// The record exists but doesn't authorize us.
+    None,
+}
+
+/// Decide whether an SPF record authorizes `our_ip`. Implements the
+/// `ip4` / `ip6` / `a` / `mx` / `include` / `redirect` / `+all` /
+/// `?all` mechanisms — enough to cover the common cases an operator
+/// sets up by hand. Doesn't fully implement RFC 7208 (no `exists:`,
+/// no recursion past one `include:`), but the failure mode is
+/// always conservative: we say "differs" when in doubt, never
+/// "matches" wrongly.
+async fn check_spf_authorizes(
+    record: &str,
+    domain: &str,
+    our_ip: Option<&str>,
+) -> SpfMatch {
+    let our_ip_parsed = match our_ip.and_then(|s| s.parse::<std::net::Ipv4Addr>().ok()) {
+        Some(ip) => ip,
+        None => return SpfMatch::NoIp,
+    };
+
+    // Tokenize — SPF mechanisms are whitespace-separated. Drop the
+    // leading version tag.
+    let mut tokens: Vec<&str> = record.split_whitespace().collect();
+    if tokens.first().map(|s| s.to_ascii_lowercase()) != Some("v=spf1".into()) {
+        return SpfMatch::None;
+    }
+    tokens.remove(0);
+
+    // First pass — scan for `redirect=`. If present, replace the
+    // whole evaluation with the redirect target's SPF (one level
+    // only — recursion would need a depth counter and we'd rather
+    // refuse complexity than infinite-loop).
+    for tok in &tokens {
+        if let Some(target) = tok.strip_prefix("redirect=") {
+            return check_spf_redirect(target, our_ip_parsed).await;
+        }
+    }
+
+    for tok in &tokens {
+        // Strip the qualifier prefix; we treat +/?/~/- the same for
+        // pass detection — only `-` (Fail) would actively REJECT us,
+        // but we don't model that since the operator's question is
+        // "does my IP pass" not "would a strict receiver bounce".
+        let tok_l = tok.to_ascii_lowercase();
+        let (qualifier, mech) = match tok_l.chars().next() {
+            Some('+') | Some('-') | Some('~') | Some('?') => {
+                let q = tok_l.chars().next().unwrap();
+                (q, &tok_l[1..])
+            }
+            _ => ('+', tok_l.as_str()),
+        };
+
+        // Catch-all — `+all` or `?all` count as match-everything.
+        // `~all` (softfail) and `-all` (fail) do not — those mean
+        // "anyone NOT explicitly listed above is unauthorized".
+        if mech == "all" {
+            if qualifier == '+' || qualifier == '?' {
+                return SpfMatch::CatchAll {
+                    mechanism: tok.to_string(),
+                };
+            }
+            continue;
+        }
+
+        // ip4:<addr> or ip4:<addr>/<prefix>
+        if let Some(rest) = mech.strip_prefix("ip4:") {
+            if ip4_matches(rest, our_ip_parsed) {
+                return SpfMatch::Match {
+                    mechanism: format!("ip4:{}", rest),
+                };
+            }
+            continue;
+        }
+
+        // a / a:<domain> / a/<prefix> — resolve A records and check.
+        if mech == "a" || mech.starts_with("a:") || mech.starts_with("a/") {
+            let lookup_domain = if let Some(rest) = mech.strip_prefix("a:") {
+                rest.split('/').next().unwrap_or(domain)
+            } else {
+                domain
+            };
+            for ip_str in dig_records(lookup_domain, "A").await.unwrap_or_default() {
+                if let Ok(ip) = ip_str.parse::<std::net::Ipv4Addr>() {
+                    if ip == our_ip_parsed {
+                        return SpfMatch::Match {
+                            mechanism: format!("a ({lookup_domain})"),
+                        };
+                    }
+                }
+            }
+            continue;
+        }
+
+        // mx / mx:<domain> — resolve MX targets, then their A
+        // records.
+        if mech == "mx" || mech.starts_with("mx:") || mech.starts_with("mx/") {
+            let lookup_domain = if let Some(rest) = mech.strip_prefix("mx:") {
+                rest.split('/').next().unwrap_or(domain)
+            } else {
+                domain
+            };
+            let mx_targets = dig_records(lookup_domain, "MX").await.unwrap_or_default();
+            for line in mx_targets {
+                // dig MX output: "10 mail.example.com." — strip
+                // priority + trailing dot.
+                let target = line
+                    .split_whitespace()
+                    .last()
+                    .map(|s| s.trim_end_matches('.'))
+                    .unwrap_or("");
+                if target.is_empty() {
+                    continue;
+                }
+                for ip_str in dig_records(target, "A").await.unwrap_or_default() {
+                    if let Ok(ip) = ip_str.parse::<std::net::Ipv4Addr>() {
+                        if ip == our_ip_parsed {
+                            return SpfMatch::Match {
+                                mechanism: format!("mx ({target})"),
+                            };
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+
+        // include:<domain> — fetch the included domain's SPF and
+        // evaluate it for our IP (one level of recursion only).
+        if let Some(target) = mech.strip_prefix("include:") {
+            if let SpfMatch::Match { mechanism } = check_spf_include(target, our_ip_parsed).await {
+                return SpfMatch::Match {
+                    mechanism: format!("include:{target} → {mechanism}"),
+                };
+            }
+            if let SpfMatch::CatchAll { mechanism } =
+                check_spf_include(target, our_ip_parsed).await
+            {
+                return SpfMatch::CatchAll {
+                    mechanism: format!("include:{target} → {mechanism}"),
+                };
+            }
+            continue;
+        }
+        // ip6:, ptr:, exists: — not implemented; skip silently.
+    }
+    SpfMatch::None
+}
+
+/// Resolve `target`'s SPF and evaluate it for `our_ip`. One level
+/// only — `include` of an `include` is treated as no-match to avoid
+/// pathological chains (Office365 / Google Workspace alone have
+/// 3-4 levels deep, which is exactly what burns SPF's 10-DNS-lookup
+/// budget at receive time — we surface it as "not matched" so the
+/// operator notices and adds their IP directly).
+fn check_spf_include<'a>(
+    target: &'a str,
+    our_ip: std::net::Ipv4Addr,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = SpfMatch> + Send + 'a>> {
+    Box::pin(async move {
+        let txts = dig_records(target, "TXT").await.unwrap_or_default();
+        for raw in txts {
+            let stitched = stitch_dig_txt(&raw);
+            if stitched.to_ascii_lowercase().starts_with("v=spf1") {
+                // Pass false_to_string() so the redirect path doesn't
+                // recursively await on Future<Future> — we resolve
+                // one level synchronously below.
+                return check_spf_authorizes_no_recurse(&stitched, target, our_ip).await;
+            }
+        }
+        SpfMatch::None
+    })
+}
+
+/// Same as `check_spf_redirect`, but cap recursion explicitly at the
+/// caller (we only call into this from the top-level evaluator).
+async fn check_spf_redirect(target: &str, our_ip: std::net::Ipv4Addr) -> SpfMatch {
+    let txts = dig_records(target, "TXT").await.unwrap_or_default();
+    for raw in txts {
+        let stitched = stitch_dig_txt(&raw);
+        if stitched.to_ascii_lowercase().starts_with("v=spf1") {
+            return check_spf_authorizes_no_recurse(&stitched, target, our_ip).await;
+        }
+    }
+    SpfMatch::None
+}
+
+/// Single-pass SPF eval that does NOT chase further `include:` /
+/// `redirect=` references. Used by include/redirect handlers to
+/// bound the recursion.
+async fn check_spf_authorizes_no_recurse(
+    record: &str,
+    domain: &str,
+    our_ip: std::net::Ipv4Addr,
+) -> SpfMatch {
+    let mut tokens: Vec<&str> = record.split_whitespace().collect();
+    if tokens.first().map(|s| s.to_ascii_lowercase()) != Some("v=spf1".into()) {
+        return SpfMatch::None;
+    }
+    tokens.remove(0);
+    for tok in &tokens {
+        let tok_l = tok.to_ascii_lowercase();
+        let (qualifier, mech) = match tok_l.chars().next() {
+            Some('+') | Some('-') | Some('~') | Some('?') => {
+                let q = tok_l.chars().next().unwrap();
+                (q, &tok_l[1..])
+            }
+            _ => ('+', tok_l.as_str()),
+        };
+        if mech == "all" {
+            if qualifier == '+' || qualifier == '?' {
+                return SpfMatch::CatchAll { mechanism: tok.to_string() };
+            }
+            continue;
+        }
+        if let Some(rest) = mech.strip_prefix("ip4:") {
+            if ip4_matches(rest, our_ip) {
+                return SpfMatch::Match { mechanism: format!("ip4:{rest}") };
+            }
+            continue;
+        }
+        if mech == "a" || mech.starts_with("a:") {
+            let lookup = mech.strip_prefix("a:").unwrap_or(domain);
+            for ip_str in dig_records(lookup, "A").await.unwrap_or_default() {
+                if let Ok(ip) = ip_str.parse::<std::net::Ipv4Addr>() {
+                    if ip == our_ip {
+                        return SpfMatch::Match { mechanism: format!("a ({lookup})") };
+                    }
+                }
+            }
+            continue;
+        }
+        // include: inside an include is not resolved.
+    }
+    SpfMatch::None
+}
+
+/// Check whether `spec` (an `ip4:` value — either bare IPv4 or
+/// `IPv4/prefix`) covers `ip`. Returns false on malformed input.
+fn ip4_matches(spec: &str, ip: std::net::Ipv4Addr) -> bool {
+    if let Some((addr, prefix_s)) = spec.split_once('/') {
+        let Ok(net_ip) = addr.parse::<std::net::Ipv4Addr>() else {
+            return false;
+        };
+        let Ok(prefix) = prefix_s.parse::<u8>() else {
+            return false;
+        };
+        if prefix > 32 {
+            return false;
+        }
+        if prefix == 0 {
+            return true;
+        }
+        let mask = u32::MAX << (32 - prefix);
+        let net_u = u32::from(net_ip) & mask;
+        let ip_u = u32::from(ip) & mask;
+        net_u == ip_u
+    } else {
+        spec.parse::<std::net::Ipv4Addr>()
+            .map(|a| a == ip)
+            .unwrap_or(false)
+    }
+}
+
+/// `dig +short TXT` returns each TXT record on one line, with each
+/// 255-char-or-less string segment in its own quoted block:
+///
+///   "v=spf1 ip4:1.2.3.4 " "ip4:5.6.7.8 ~all"
+///
+/// Stitch those segments back into a single string. Drops the
+/// quotes, joins consecutive segments with no separator (per RFC
+/// 7208 §3.3 — TXT continuation strings are concatenated as-is).
+fn stitch_dig_txt(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut in_quote = false;
+    for c in raw.chars() {
+        if c == '"' {
+            in_quote = !in_quote;
+            continue;
+        }
+        if in_quote {
+            out.push(c);
+        }
+    }
+    // If the raw line had no quotes at all (older dig versions),
+    // just trim it.
+    if out.is_empty() {
+        return raw.trim().to_string();
+    }
+    out
+}
+
 /// Stream-download a URL to disk via curl. Returns Ok on HTTP 2xx,
 /// Err with a useful message otherwise. Used by the migration
 /// import-from-url path; cheap to call because curl is already a
@@ -2521,9 +2825,27 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     // ================================================================
 
     /// Send a plain-text email through the configured SMTP relay.
-    /// No-op if email isn't configured. Failures are audit-logged but
-    /// never propagate.
-    pub(crate) async fn notify_email(&self, to: &str, subject: &str, body: &str) {
+    /// No-op if email isn't configured.
+    ///
+    /// Outcome lands in two places:
+    ///   1. `audit_log` — tamper-evident cluster-wide record (kept
+    ///      for security / compliance review).
+    ///   2. `email_log` — operator-facing UX surface, optionally
+    ///      tied to a specific hosting so the Emails tab on
+    ///      hostings_detail can show "what did we send for this
+    ///      site lately".
+    ///
+    /// `kind` is a free-form label with a recommended vocabulary
+    /// ("test" | "alert" | "monitor" | "backup" | "cert" | "billing"
+    /// | "other"). It drives the UI's "show only X" filters.
+    pub(crate) async fn notify_email(
+        &self,
+        to: &str,
+        subject: &str,
+        body: &str,
+        hosting_id: Option<&str>,
+        kind: &str,
+    ) {
         let Some(cfg) = self.email_config.as_ref() else {
             return;
         };
@@ -2539,62 +2861,226 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             Ok(code) => {
                 self.append_audit(
                     "notify.email",
-                    None,
-                    &serde_json::json!({"to": to, "subject": subject, "code": code}).to_string(),
+                    hosting_id,
+                    &serde_json::json!({"to": to, "subject": subject, "code": &code, "kind": kind})
+                        .to_string(),
                     "ok",
+                )
+                .await;
+                let _ = hyperion_state::email_log::append(
+                    &self.pool,
+                    hosting_id,
+                    to,
+                    subject,
+                    body,
+                    kind,
+                    "ok",
+                    None,
+                    Some(&code),
+                    now_secs(),
                 )
                 .await;
             }
             Err(e) => {
+                let err_s = e.to_string();
                 self.append_audit(
                     "notify.email",
-                    None,
+                    hosting_id,
                     &serde_json::json!({
                         "to": to,
                         "subject": subject,
-                        "error": e.to_string()
+                        "error": &err_s,
+                        "kind": kind,
                     })
                     .to_string(),
                     "failed",
                 )
                 .await;
-                tracing::warn!(to = %to, subject = %subject, error=%e, "email send failed");
+                let _ = hyperion_state::email_log::append(
+                    &self.pool,
+                    hosting_id,
+                    to,
+                    subject,
+                    body,
+                    kind,
+                    "failed",
+                    Some(&err_s),
+                    None,
+                    now_secs(),
+                )
+                .await;
+                tracing::warn!(to = %to, subject = %subject, error = %err_s, "email send failed");
             }
         }
     }
 
-    /// Read TXT records for `domain` via dig; pluck out SPF (starts with
-    /// `v=spf1`). Returns (existing_spf, suggested_record).
+    /// List recent email-log rows. `hosting_id = None` returns the
+    /// cluster-wide stream; Some filters to one hosting.
+    pub async fn email_log_list(
+        &self,
+        hosting_id: Option<String>,
+        limit: i64,
+    ) -> Result<Vec<hyperion_types::EmailLogEntry>, RpcError> {
+        let rows = hyperion_state::email_log::list(&self.pool, hosting_id.as_deref(), limit)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("email log list: {e}")))?;
+        Ok(rows
+            .into_iter()
+            .map(|r| hyperion_types::EmailLogEntry {
+                id: r.id,
+                hosting_id: r.hosting_id,
+                to_address: r.to_address,
+                subject: r.subject,
+                body_preview: r.body_preview,
+                kind: r.kind,
+                state: r.state,
+                error: r.error,
+                smtp_code: r.smtp_code,
+                sent_at: r.sent_at,
+            })
+            .collect())
+    }
+
+    /// Probe localhost for a usable SMTP relay so the operator can
+    /// click "Auto-detect" on the Settings page instead of typing
+    /// host/port/security by hand.
+    ///
+    /// Tries (in order): localhost:25 (postfix default), 127.0.0.1:25,
+    /// localhost:587. Returns the first one that completes a TCP
+    /// connect — that's not proof the relay accepts STARTTLS or
+    /// auth, but it's enough for the UI to pre-fill the form with
+    /// a "looks reasonable" baseline.
+    pub async fn email_smtp_autodetect(&self) -> Result<hyperion_types::SmtpAutodetect, RpcError> {
+        let candidates: &[(&str, u16, &str)] = &[
+            ("localhost", 25, "plain"),
+            ("127.0.0.1", 25, "plain"),
+            ("localhost", 587, "starttls"),
+        ];
+        for (host, port, sec) in candidates {
+            let addr = format!("{host}:{port}");
+            let connect = tokio::time::timeout(
+                std::time::Duration::from_millis(800),
+                tokio::net::TcpStream::connect(&addr),
+            )
+            .await;
+            if let Ok(Ok(_)) = connect {
+                // Suggest a from-address from the local hostname so
+                // the operator at least gets a working default
+                // (they're free to override).
+                let hostname = std::fs::read_to_string("/etc/hostname")
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| "hyperion".into());
+                return Ok(hyperion_types::SmtpAutodetect {
+                    found: true,
+                    smtp_host: host.to_string(),
+                    smtp_port: *port,
+                    security: sec.to_string(),
+                    suggested_from: format!("hyperion@{hostname}"),
+                    notes: format!(
+                        "TCP connect to {addr} succeeded — likely a local relay (postfix/exim). \
+                         If auth is required, fill smtp_user + smtp_password below."
+                    ),
+                });
+            }
+        }
+        Ok(hyperion_types::SmtpAutodetect {
+            found: false,
+            smtp_host: String::new(),
+            smtp_port: 0,
+            security: String::new(),
+            suggested_from: String::new(),
+            notes: "no local SMTP relay detected on :25 or :587 — point hyperion at any external \
+                    relay (gmail, postmark, mailgun, sendgrid, etc.) and fill the form below."
+                .into(),
+        })
+    }
+
+    /// Check the SPF record at `domain` against our public IPv4.
+    ///
+    /// The previous implementation did a literal string compare
+    /// between the operator's existing TXT record and the one we'd
+    /// suggest — guaranteed "differs" for any non-trivial SPF (e.g.
+    /// two `ip4:` mechanisms, an `include:`, a `redirect=`). The new
+    /// version actually *parses* the SPF mechanisms and decides
+    /// whether our IPv4 is authorized.
+    ///
+    /// Status semantics:
+    ///   - "missing"  — no `v=spf1` TXT at the apex
+    ///   - "multiple" — more than one SPF record (RFC 7208 §3.2 says
+    ///                  receivers fall back to permerror)
+    ///   - "matches"  — at least one record authorizes our IP via any
+    ///                  of: ip4 (CIDR-aware), a, mx, include (one
+    ///                  level of recursion), +all/?all catch-all
+    ///   - "differs"  — record exists and parses but does NOT
+    ///                  authorize us. Operator either has wrong IP
+    ///                  pinned, or needs to add ours alongside.
     pub async fn dns_spf_check(
         &self,
         domain: hyperion_validate::Domain,
     ) -> Result<hyperion_types::SpfCheckResult, RpcError> {
         let d = domain.as_str().to_string();
-        let txts = dig_records(&d, "TXT").await.unwrap_or_default();
-        // dig +short TXT returns quoted strings; strip quotes.
-        let existing: Vec<String> = txts
+        // dig may return one TXT split across multiple quoted segments
+        // (long TXT values use the `"...""..."` continuation syntax).
+        // Join those segments before filtering by prefix.
+        let txts_raw = dig_records(&d, "TXT").await.unwrap_or_default();
+        let existing: Vec<String> = txts_raw
             .iter()
-            .map(|s| s.trim_matches('"').to_string())
-            .filter(|s| s.starts_with("v=spf1"))
+            .map(|raw| stitch_dig_txt(raw))
+            .filter(|s| s.to_ascii_lowercase().starts_with("v=spf1"))
             .collect();
+
         let our_ipv4 = fetch_public_ip("https://api.ipify.org").await.ok();
         let suggested = match our_ipv4.as_deref() {
             Some(ip) => format!("v=spf1 ip4:{ip} a mx ~all"),
             None => "v=spf1 a mx ~all".into(),
         };
-        let status = if existing.is_empty() {
-            "missing"
-        } else if existing.iter().any(|s| s == &suggested) {
-            "matches"
+
+        let (status, reason): (String, String) = if existing.is_empty() {
+            (
+                "missing".into(),
+                "no SPF TXT record at the apex".into(),
+            )
+        } else if existing.len() > 1 {
+            (
+                "multiple".into(),
+                format!(
+                    "RFC 7208 §3.2 forbids multiple SPF records — found {}",
+                    existing.len()
+                ),
+            )
         } else {
-            "differs"
+            // One record. Try to prove it authorizes us.
+            let record = &existing[0];
+            let our_ip = our_ipv4.as_deref();
+            match check_spf_authorizes(record, &d, our_ip).await {
+                SpfMatch::Match { mechanism } => (
+                    "matches".into(),
+                    format!("{} matched our public IP", mechanism),
+                ),
+                SpfMatch::CatchAll { mechanism } => (
+                    "matches".into(),
+                    format!("{} authorizes any sender", mechanism),
+                ),
+                SpfMatch::NoIp => (
+                    "differs".into(),
+                    "couldn't determine our public IPv4 — cannot verify SPF coverage".into(),
+                ),
+                SpfMatch::None => (
+                    "differs".into(),
+                    "SPF record exists but does not authorize our public IP".into(),
+                ),
+            }
         };
+
         Ok(hyperion_types::SpfCheckResult {
             domain: d,
             existing,
             suggested,
             our_public_ipv4: our_ipv4,
-            status: status.into(),
+            status,
+            reason,
         })
     }
 
@@ -2719,7 +3205,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             let body = format!(
                 "Hosting:    {domain}\nPrice:      {price_str}\nDue in:     {due_in_days} day(s)\n\n--\nHyperion\n"
             );
-            self.notify_email(&to, &subj, &body).await;
+            self.notify_email(&to, &subj, &body, Some(row.hosting_id.as_str()), "billing").await;
             count += 1;
         }
         Ok(count)
@@ -4881,9 +5367,29 @@ impl<A: AdapterPort + 'static> HostingService<A> {
              If you can read this in your inbox, your relay is configured correctly.\n",
             cfg.from_name, cfg.from_address, cfg.smtp_host, cfg.smtp_port, cfg.security
         );
-        hyperion_adapters::email::send_text(cfg, to, subject, &body)
-            .await
-            .map_err(|e| RpcError::Internal_with(format!("email send failed: {e}")))?;
+        let send_result = hyperion_adapters::email::send_text(cfg, to, subject, &body).await;
+        // Log to email_log regardless of outcome so the operator can
+        // see the failure mode in the Emails tab. Then propagate the
+        // error to the caller so the UI shows it inline.
+        let (state, err_opt, code_opt) = match &send_result {
+            Ok(code) => ("ok", None, Some(code.as_str())),
+            Err(e) => ("failed", Some(format!("{e}")), None),
+        };
+        let err_ref: Option<&str> = err_opt.as_deref();
+        let _ = hyperion_state::email_log::append(
+            &self.pool,
+            None,
+            to,
+            subject,
+            &body,
+            "test",
+            state,
+            err_ref,
+            code_opt,
+            now_secs(),
+        )
+        .await;
+        send_result.map_err(|e| RpcError::Internal_with(format!("email send failed: {e}")))?;
         self.append_audit(
             "email.test.send",
             None,
@@ -6281,6 +6787,129 @@ mod tests {
     use hyperion_types::{CertInfo, DbProvision};
     use hyperion_validate::Domain;
     use mockall::predicate::*;
+
+    // ============================================================
+    //  SPF parser unit tests (no DNS — pure CIDR / string logic).
+    // ============================================================
+
+    #[test]
+    fn ip4_matches_exact() {
+        let ip: std::net::Ipv4Addr = "1.2.3.4".parse().unwrap();
+        assert!(ip4_matches("1.2.3.4", ip));
+        assert!(!ip4_matches("1.2.3.5", ip));
+    }
+
+    #[test]
+    fn ip4_matches_cidr_24() {
+        let ip: std::net::Ipv4Addr = "1.2.3.42".parse().unwrap();
+        assert!(ip4_matches("1.2.3.0/24", ip));
+        assert!(ip4_matches("1.2.3.255/24", ip));
+        assert!(!ip4_matches("1.2.4.0/24", ip));
+    }
+
+    #[test]
+    fn ip4_matches_cidr_edge_cases() {
+        let ip: std::net::Ipv4Addr = "10.0.0.1".parse().unwrap();
+        // /0 matches everything
+        assert!(ip4_matches("0.0.0.0/0", ip));
+        // /32 is exact
+        assert!(ip4_matches("10.0.0.1/32", ip));
+        assert!(!ip4_matches("10.0.0.2/32", ip));
+        // Malformed → false (never accidentally permissive)
+        assert!(!ip4_matches("garbage", ip));
+        assert!(!ip4_matches("1.2.3.4/33", ip));
+        assert!(!ip4_matches("1.2.3.4/abc", ip));
+    }
+
+    #[test]
+    fn stitch_dig_txt_single_segment() {
+        assert_eq!(
+            stitch_dig_txt("\"v=spf1 ip4:1.2.3.4 ~all\""),
+            "v=spf1 ip4:1.2.3.4 ~all"
+        );
+    }
+
+    #[test]
+    fn stitch_dig_txt_multi_segment() {
+        // Long TXT split into two quoted segments — dig prints them
+        // back-to-back. The RFC says receivers concatenate as-is.
+        assert_eq!(
+            stitch_dig_txt("\"v=spf1 ip4:1.2.3.4 \" \"ip4:5.6.7.8 ~all\""),
+            "v=spf1 ip4:1.2.3.4 ip4:5.6.7.8 ~all"
+        );
+    }
+
+    #[test]
+    fn stitch_dig_txt_falls_back_to_trim_when_no_quotes() {
+        assert_eq!(stitch_dig_txt("  v=spf1 ~all  "), "v=spf1 ~all");
+    }
+
+    /// SPF authorization with the previous bug's exact scenario:
+    /// the operator's record lists OUR ip alongside another ip + an
+    /// include — the literal string compare reported "differs",
+    /// the parser must now report "matches".
+    #[tokio::test]
+    async fn spf_authorize_multi_ip_with_include_matches() {
+        let our: std::net::Ipv4Addr = "178.105.99.35".parse().unwrap();
+        let record = "v=spf1 ip4:1.2.3.4 ip4:178.105.99.35 include:_spf.google.com ~all";
+        let r = check_spf_authorizes_no_recurse(record, "example.cz", our).await;
+        assert!(matches!(r, SpfMatch::Match { .. }), "got {r:?}");
+    }
+
+    #[tokio::test]
+    async fn spf_authorize_cidr_block_matches() {
+        let our: std::net::Ipv4Addr = "10.0.0.42".parse().unwrap();
+        let record = "v=spf1 ip4:10.0.0.0/24 ~all";
+        let r = check_spf_authorizes_no_recurse(record, "x.cz", our).await;
+        assert!(matches!(r, SpfMatch::Match { .. }), "got {r:?}");
+    }
+
+    #[tokio::test]
+    async fn spf_authorize_soft_all_does_not_catchall() {
+        // ~all is "softfail" — anyone NOT explicitly listed above
+        // is unauthorized but receivers should accept and tag. Our
+        // check reports "differs" since our IP isn't in the list.
+        let our: std::net::Ipv4Addr = "9.9.9.9".parse().unwrap();
+        let record = "v=spf1 ip4:1.2.3.4 ~all";
+        let r = check_spf_authorizes_no_recurse(record, "x.cz", our).await;
+        assert!(matches!(r, SpfMatch::None), "got {r:?}");
+    }
+
+    #[tokio::test]
+    async fn spf_authorize_plus_all_is_catchall() {
+        let our: std::net::Ipv4Addr = "9.9.9.9".parse().unwrap();
+        let record = "v=spf1 +all";
+        let r = check_spf_authorizes_no_recurse(record, "x.cz", our).await;
+        assert!(matches!(r, SpfMatch::CatchAll { .. }), "got {r:?}");
+    }
+
+    #[tokio::test]
+    async fn spf_authorize_question_all_is_catchall() {
+        // `?all` is "neutral" — receivers treat senders as
+        // unspecified. From the operator's "does my IP pass"
+        // perspective, this means anything ABOVE in the record
+        // could pass without an explicit IP listing.
+        let our: std::net::Ipv4Addr = "9.9.9.9".parse().unwrap();
+        let record = "v=spf1 ?all";
+        let r = check_spf_authorizes_no_recurse(record, "x.cz", our).await;
+        assert!(matches!(r, SpfMatch::CatchAll { .. }), "got {r:?}");
+    }
+
+    #[tokio::test]
+    async fn spf_authorize_minus_all_does_not_catchall() {
+        let our: std::net::Ipv4Addr = "9.9.9.9".parse().unwrap();
+        let record = "v=spf1 -all";
+        let r = check_spf_authorizes_no_recurse(record, "x.cz", our).await;
+        assert!(matches!(r, SpfMatch::None), "got {r:?}");
+    }
+
+    #[tokio::test]
+    async fn spf_authorize_missing_version_tag_rejected() {
+        let our: std::net::Ipv4Addr = "1.2.3.4".parse().unwrap();
+        // No leading "v=spf1" — not an SPF record at all.
+        let r = check_spf_authorizes_no_recurse("ip4:1.2.3.4 ~all", "x.cz", our).await;
+        assert!(matches!(r, SpfMatch::None), "got {r:?}");
+    }
 
     fn req(d: &str) -> HostingCreateReq {
         HostingCreateReq {

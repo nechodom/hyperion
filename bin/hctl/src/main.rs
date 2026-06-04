@@ -853,6 +853,25 @@ fn print_pretty(resp: &Response) {
             println!("(typical transfer: scp -r {} root@target:/var/lib/hyperion/migration/)",
                 std::path::Path::new(&b.manifest_path).parent().map(|p| p.display().to_string()).unwrap_or_default());
         }
+        Response::EmailLogList(rows) => {
+            println!("{} email log entr{}:", rows.len(), if rows.len() == 1 { "y" } else { "ies" });
+            for r in rows.iter().take(50) {
+                println!("  [{}] {} → {} · {} · {} · {}",
+                    r.sent_at, r.kind, r.to_address, r.state,
+                    r.subject,
+                    r.error.as_deref().unwrap_or(r.smtp_code.as_deref().unwrap_or("-")));
+            }
+        }
+        Response::EmailSmtpAutodetect(a) => {
+            if a.found {
+                println!("found local SMTP: {}:{} ({})", a.smtp_host, a.smtp_port, a.security);
+                println!("  suggested_from = {}", a.suggested_from);
+                println!("  note: {}", a.notes);
+            } else {
+                println!("no local SMTP relay detected");
+                println!("  note: {}", a.notes);
+            }
+        }
         Response::HostingImportFromUrl(r) => {
             println!("imported (via url) hosting {}", r.domain);
             println!("  new id : {}", r.new_hosting_id.as_str());

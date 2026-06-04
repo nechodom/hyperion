@@ -10,9 +10,10 @@ use crate::state::SharedState;
 use askama::Template;
 use axum::extract::State;
 use axum::response::{Html, IntoResponse, Redirect, Response};
+use axum::response::Json;
 use axum::Form;
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
-use hyperion_types::{AgentConfigView, UpdateStatus};
+use hyperion_types::{AgentConfigView, SmtpAutodetect, UpdateStatus};
 use serde::Deserialize;
 
 #[derive(Template)]
@@ -194,6 +195,39 @@ pub async fn post_config(
         _ => return Err(AppError::Internal("unexpected response".into())),
     };
     Ok(Redirect::to(&dest).into_response())
+}
+
+/// POST /api/email-autodetect
+///
+/// Probes the local box for a usable SMTP relay so the operator can
+/// click "Auto-detect" on the Settings page instead of guessing
+/// host/port/security. Behind require_auth (the protected router)
+/// — viewers can run it too since it's read-only.
+pub async fn post_email_autodetect(
+    State(state): State<SharedState>,
+    _ctx: AuthCtx,
+) -> Result<Response, AppError> {
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::EmailSmtpAutodetect,
+    )
+    .await?;
+    let a = match resp {
+        RpcResponse::EmailSmtpAutodetect(a) => a,
+        RpcResponse::Error(e) => {
+            return Ok(Json(SmtpAutodetect {
+                found: false,
+                smtp_host: String::new(),
+                smtp_port: 0,
+                security: String::new(),
+                suggested_from: String::new(),
+                notes: format!("agent error: {e}"),
+            })
+            .into_response());
+        }
+        _ => return Err(AppError::Internal("unexpected response".into())),
+    };
+    Ok(Json(a).into_response())
 }
 
 fn urlencode(s: &str) -> String {

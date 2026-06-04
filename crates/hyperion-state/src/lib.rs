@@ -10,6 +10,7 @@ pub mod backups;
 pub mod certificates;
 pub mod databases;
 pub mod db;
+pub mod email_log;
 pub mod hostings;
 pub mod invites;
 pub mod limits;

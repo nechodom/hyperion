@@ -33,11 +33,11 @@ pub use profile::{HostingProfile, ProfileApply, ProfileInput};
 pub use spf::SpfCheckResult;
 pub use stats::{
     AcmeConfigView, AgentConfigView, BackupRemoteConfigView, BackupRetentionConfigView,
-    ClusterStats, DashboardAlert, EmailConfigView, HostingFileContent, HostingFileEntry,
-    HostingStats, MonitorConfigView, MonitorHistory, MonitorSamplePoint, NodeMetricPoint,
-    NodeMetricsHistory, NodeStats, NodeSummary, ServiceHealth, ServicesHealth, SlackConfigView,
-    UpdateStatus, Web2faEnrollment, WebHostingAccess, WebLoginResult, WebUserSummary,
-    WebVerify2faResult,
+    ClusterStats, DashboardAlert, EmailConfigView, EmailLogEntry, HostingFileContent,
+    HostingFileEntry, HostingStats, MonitorConfigView, MonitorHistory, MonitorSamplePoint,
+    NodeMetricPoint, NodeMetricsHistory, NodeStats, NodeSummary, ServiceHealth, ServicesHealth,
+    SlackConfigView, SmtpAutodetect, UpdateStatus, Web2faEnrollment, WebHostingAccess,
+    WebLoginResult, WebUserSummary, WebVerify2faResult,
 };
 pub use wp::{
     WpInstallRequest, WpInstallStatus, WpPlugin, WpPluginAction, WpPluginActionResult,

@@ -255,6 +255,16 @@ async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::EmailLogList { hosting_id, limit } => {
+            match api.email_log_list(hosting_id, limit).await {
+                Ok(v) => Response::EmailLogList(v),
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::EmailSmtpAutodetect => match api.email_smtp_autodetect().await {
+            Ok(v) => Response::EmailSmtpAutodetect(v),
+            Err(e) => Response::Error(e),
+        },
         Request::WpPluginList { hosting } => match api.wp_plugin_list(hosting).await {
             Ok(v) => Response::WpPluginList(v),
             Err(e) => Response::Error(e),
@@ -743,6 +753,18 @@ mod tests {
                 state: "ok".into(),
                 message: "mock".into(),
             })
+        }
+        async fn email_log_list(
+            &self,
+            _: Option<String>,
+            _: i64,
+        ) -> Result<Vec<hyperion_types::EmailLogEntry>, RpcError> {
+            Ok(vec![])
+        }
+        async fn email_smtp_autodetect(
+            &self,
+        ) -> Result<hyperion_types::SmtpAutodetect, RpcError> {
+            Ok(hyperion_types::SmtpAutodetect::default())
         }
         async fn wp_plugin_list(
             &self,

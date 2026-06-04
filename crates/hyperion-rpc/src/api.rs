@@ -154,6 +154,16 @@ pub trait AgentApi: Send + Sync + 'static {
         manifest_path: String,
     ) -> Result<hyperion_types::HostingImportResult, RpcError>;
 
+    /// Per-hosting (or cluster-wide) email log.
+    async fn email_log_list(
+        &self,
+        hosting_id: Option<String>,
+        limit: i64,
+    ) -> Result<Vec<hyperion_types::EmailLogEntry>, RpcError>;
+
+    /// Probe localhost for a usable SMTP relay.
+    async fn email_smtp_autodetect(&self) -> Result<hyperion_types::SmtpAutodetect, RpcError>;
+
     /// Import a migration bundle by URL — downloads from the source
     /// node's signed `/api/migration/bundle/<id>` endpoint then runs
     /// the regular import.

@@ -355,6 +355,39 @@ pub struct MonitorHistory {
     pub samples: Vec<MonitorSamplePoint>,
 }
 
+/// One row out of the per-hosting email log. See
+/// `hyperion-state/src/email_log.rs` for the storage layout.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EmailLogEntry {
+    pub id: i64,
+    pub hosting_id: Option<String>,
+    pub to_address: String,
+    pub subject: String,
+    pub body_preview: String,
+    pub kind: String,
+    pub state: String,
+    pub error: Option<String>,
+    pub smtp_code: Option<String>,
+    pub sent_at: i64,
+}
+
+/// Outcome of `EmailSmtpAutodetect`. `found = false` means we
+/// couldn't reach any local relay; UI then offers the manual form
+/// with a hint about typical relay choices.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SmtpAutodetect {
+    pub found: bool,
+    pub smtp_host: String,
+    pub smtp_port: u16,
+    /// "starttls" | "tls" | "plain"
+    pub security: String,
+    /// e.g. "hyperion@s4.digitalka.cz" — local hostname-derived
+    /// suggestion the operator can keep or override.
+    pub suggested_from: String,
+    /// One-line operator-facing note explaining what we found.
+    pub notes: String,
+}
+
 /// What we know about whether Hyperion is up-to-date. Returned by
 /// `Request::UpdateCheck`; cached agent-side so the GitHub Releases
 /// API isn't hit on every page load.

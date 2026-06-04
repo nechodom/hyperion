@@ -133,6 +133,10 @@ struct DetailTpl<'a> {
     /// Empty otherwise; the template's WP tab shows an "install WP first"
     /// state instead of an empty table.
     wp_plugins: hyperion_types::WpPluginListResponse,
+    /// Per-hosting email log — last 50 emails the agent sent on
+    /// behalf of this hosting (alerts, cert reminders, monitor
+    /// down/up, billing). Drives the new Emails tab.
+    email_log: Vec<hyperion_types::EmailLogEntry>,
     /// Session-wide CSRF token used by the newer forms that don't have
     /// dedicated csrf_* fields plumbed (access, acme-email, monitor,
     /// backup delete). Middleware accepts both.
@@ -460,6 +464,7 @@ pub async fn post_create(
                 monitor_config: hyperion_types::MonitorConfigView::default(),
                 monitor_history: hyperion_types::MonitorHistory::default(),
                 wp_plugins: hyperion_types::WpPluginListResponse::default(),
+                email_log: vec![],
                 csrf_token: super::session_csrf_token(&state, &ctx),
             };
             Ok(Html(tpl.render()?).into_response())
@@ -558,6 +563,19 @@ pub async fn get_detail(
             hyperion_types::MonitorConfigView::default(),
             hyperion_types::MonitorHistory::default(),
         ),
+    };
+    // Per-hosting email log for the Emails tab.
+    let email_log: Vec<hyperion_types::EmailLogEntry> = match hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::EmailLogList {
+            hosting_id: Some(detail.id.as_str().to_string()),
+            limit: 50,
+        },
+    )
+    .await
+    {
+        Ok(RpcResponse::EmailLogList(r)) => r,
+        _ => vec![],
     };
     // Access tab data — fetched only for super_admin since they're the
     // only ones who see the tab. Empty vec for everyone else is cheap
@@ -675,6 +693,7 @@ pub async fn get_detail(
         monitor_config,
         monitor_history,
         wp_plugins,
+        email_log,
         csrf_token: super::session_csrf_token(&state, &ctx),
     };
     Ok(Html(tpl.render()?).into_response())

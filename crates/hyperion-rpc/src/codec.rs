@@ -149,6 +149,16 @@ pub enum Request {
     /// Import a migration bundle by manifest path. Sibling
     /// `archive.tar.gz` is expected next to the manifest.
     HostingImport { manifest_path: String },
+    /// Per-hosting (or cluster-wide) email log.
+    EmailLogList {
+        /// `None` returns the cluster-wide stream; `Some(hosting_id)`
+        /// filters to that hosting only.
+        hosting_id: Option<String>,
+        limit: i64,
+    },
+    /// Probe localhost for a usable SMTP relay so the UI can
+    /// pre-fill the email config form. Cheap — just TCP connect.
+    EmailSmtpAutodetect,
     /// Import a migration bundle from a source node's signed URL.
     /// `base_url` is e.g. `https://source-master/api/migration/bundle/<id>`
     /// — the agent appends `/manifest.json?t=<token>` and
@@ -410,6 +420,8 @@ pub enum Response {
     HostingExport(hyperion_types::HostingMigrationBundle),
     HostingImport(hyperion_types::HostingImportResult),
     HostingImportFromUrl(hyperion_types::HostingImportResult),
+    EmailLogList(Vec<hyperion_types::EmailLogEntry>),
+    EmailSmtpAutodetect(hyperion_types::SmtpAutodetect),
     WpPluginList(hyperion_types::WpPluginListResponse),
     WpPluginAction(hyperion_types::WpPluginActionResult),
     // Web users / roles / 2FA

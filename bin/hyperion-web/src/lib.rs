@@ -122,6 +122,10 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::settings::post_email_test),
         )
         .route(
+            "/api/email-autodetect",
+            post(handlers::settings::post_email_autodetect),
+        )
+        .route(
             "/settings/config",
             post(handlers::settings::post_config),
         )
