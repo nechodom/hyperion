@@ -8,6 +8,7 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 #![forbid(unsafe_code)]
 
+pub mod bundle_sig;
 pub mod csrf;
 pub mod keys;
 pub mod password;

@@ -116,6 +116,24 @@ enum HostingCmd {
         #[arg(long)]
         manifest: String,
     },
+    /// Import a migration bundle directly from a source node's
+    /// signed URL. Equivalent to `Import` but downloads the bundle
+    /// from the source's `/api/migration/bundle/<id>` instead of
+    /// requiring scp/rsync.
+    ///
+    /// Example:
+    ///   hctl hosting import-from-url \
+    ///     --base-url=https://source.example.com/api/migration/bundle/mig_abc \
+    ///     --token=AAAA.BBBB
+    ImportFromUrl {
+        /// Base URL printed by `hosting export` on the source.
+        #[arg(long = "base-url")]
+        base_url: String,
+        /// Signed token from the source's export response. Expires
+        /// 1h after the export — re-export on the source if stale.
+        #[arg(long)]
+        token: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -276,6 +294,12 @@ async fn call(cli: &Cli) -> anyhow::Result<Response> {
         Cmd::Hosting(HostingCmd::Import { manifest }) => Request::HostingImport {
             manifest_path: manifest.clone(),
         },
+        Cmd::Hosting(HostingCmd::ImportFromUrl { base_url, token }) => {
+            Request::HostingImportFromUrl {
+                base_url: base_url.clone(),
+                token: token.clone(),
+            }
+        }
         Cmd::Audit { limit } => Request::AuditList { limit: *limit },
         Cmd::Cert(CertCmd::RenewAll) => Request::CertRenewAll,
         Cmd::Cert(CertCmd::Issue { domain }) => Request::CertIssue {
@@ -828,6 +852,13 @@ fn print_pretty(resp: &Response) {
             println!("  sudo hctl hosting import --manifest {}", b.manifest_path);
             println!("(typical transfer: scp -r {} root@target:/var/lib/hyperion/migration/)",
                 std::path::Path::new(&b.manifest_path).parent().map(|p| p.display().to_string()).unwrap_or_default());
+        }
+        Response::HostingImportFromUrl(r) => {
+            println!("imported (via url) hosting {}", r.domain);
+            println!("  new id : {}", r.new_hosting_id.as_str());
+            println!("  bytes  : {}", r.restored_bytes);
+            println!("  state  : {}", r.state);
+            println!("  note   : {}", r.message);
         }
         Response::HostingImport(r) => {
             println!("imported hosting {}", r.domain);

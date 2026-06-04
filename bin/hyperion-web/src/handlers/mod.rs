@@ -6,6 +6,7 @@ pub mod hostings;
 pub mod install;
 pub mod login;
 pub mod files;
+pub mod migration;
 pub mod profile;
 pub mod profiles;
 pub mod search;

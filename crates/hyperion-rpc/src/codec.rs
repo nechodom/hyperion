@@ -149,6 +149,12 @@ pub enum Request {
     /// Import a migration bundle by manifest path. Sibling
     /// `archive.tar.gz` is expected next to the manifest.
     HostingImport { manifest_path: String },
+    /// Import a migration bundle from a source node's signed URL.
+    /// `base_url` is e.g. `https://source-master/api/migration/bundle/<id>`
+    /// — the agent appends `/manifest.json?t=<token>` and
+    /// `/archive.tar.gz?t=<token>`, downloads both, then runs the
+    /// regular import.
+    HostingImportFromUrl { base_url: String, token: String },
     /// List installed WordPress plugins for `hosting`.
     WpPluginList { hosting: HostingSelector },
     /// Apply one plugin action via wp-cli. `slug` is the plugin
@@ -403,6 +409,7 @@ pub enum Response {
     UpdateCheck(hyperion_types::UpdateStatus),
     HostingExport(hyperion_types::HostingMigrationBundle),
     HostingImport(hyperion_types::HostingImportResult),
+    HostingImportFromUrl(hyperion_types::HostingImportResult),
     WpPluginList(hyperion_types::WpPluginListResponse),
     WpPluginAction(hyperion_types::WpPluginActionResult),
     // Web users / roles / 2FA

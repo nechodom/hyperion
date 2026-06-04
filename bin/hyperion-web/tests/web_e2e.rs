@@ -1198,6 +1198,85 @@ async fn viewer_cannot_delete_hosting_via_direct_post() {
     );
 }
 
+/// Migration bundle download endpoint refuses requests without a
+/// valid signed token — even with an existing bundle on disk.
+/// Locks in the "URL is the access control" contract.
+#[tokio::test]
+async fn migration_bundle_download_refuses_unsigned() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock, admin);
+    // No cookie needed — this is a public endpoint by design.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/migration/bundle/mig_01HQABCDEFGHJKMNPQRSTVWXYZ/manifest.json?t=garbage")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn migration_bundle_download_refuses_bad_filename() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock, admin);
+    // Even with no signature, a bad filename should 404 immediately.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/migration/bundle/mig_01HQABCDEFGHJKMNPQRSTVWXYZ/../../etc/passwd?t=x")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    // axum's path routing rejects ../ in segments — should be 404
+    // (routing layer) not 200.
+    assert_ne!(resp.status(), StatusCode::OK);
+}
+
+/// /hostings/import page renders with the URL + token form.
+#[tokio::test]
+async fn migration_import_page_renders() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock, admin);
+    let login_body = b"username=kevin&password=good-pw&next=/";
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/login")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(login_body.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    let cookie = extract_cookie(&resp);
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/hostings/import")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp).await;
+    assert!(body.contains("Import hosting from another node"));
+    assert!(body.contains("name=\"base_url\""));
+    assert!(body.contains("name=\"token\""));
+}
+
 fn extract_cookie(resp: &axum::response::Response) -> String {
     let raw = resp
         .headers()

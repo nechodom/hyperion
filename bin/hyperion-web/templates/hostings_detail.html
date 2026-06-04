@@ -1419,13 +1419,13 @@
     Migrate to another node
   </h2>
   <p class="muted">
-    Produces a self-contained migration bundle on this node's disk
-    (<code>/var/lib/hyperion/migration/&lt;id&gt;/</code>). Transfer it to the
-    target node via <code>scp</code> / <code>rsync</code>, then run
-    <code>sudo hctl hosting import --manifest &lt;path&gt;</code> on the
-    target. The importer recreates the hosting with the same domain,
-    aliases, PHP version, DB engine, and crontab — and re-issues the
-    TLS cert from scratch (private keys never travel between nodes).
+    Click <strong>Export</strong> below — the result page shows a signed
+    URL + token (1h validity). On the target node's hyperion-web open
+    <a href="/hostings/import">Hostings → Import from another node</a> and
+    paste both fields. The target downloads the archive directly from
+    this node and provisions an identical hosting. Falls back to
+    <code>scp</code> + <code>hctl hosting import-from-url</code> for SSH-only
+    workflows.
   </p>
 
   {% if detail.state.as_str() == "active" %}

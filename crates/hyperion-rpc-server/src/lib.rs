@@ -249,6 +249,12 @@ async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::HostingImport(v),
             Err(e) => Response::Error(e),
         },
+        Request::HostingImportFromUrl { base_url, token } => {
+            match api.hosting_import_from_url(base_url, token).await {
+                Ok(v) => Response::HostingImportFromUrl(v),
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::WpPluginList { hosting } => match api.wp_plugin_list(hosting).await {
             Ok(v) => Response::WpPluginList(v),
             Err(e) => Response::Error(e),
@@ -708,10 +714,26 @@ mod tests {
                 source_hosting_id: hyperion_types::HostingId("01J".into()),
                 source_node_id: "mock".into(),
                 source_hyperion_version: "mock".into(),
+                download_base_url: String::new(),
+                bundle_token: String::new(),
+                token_expires_at: 0,
             })
         }
         async fn hosting_import(
             &self,
+            _: String,
+        ) -> Result<hyperion_types::HostingImportResult, RpcError> {
+            Ok(hyperion_types::HostingImportResult {
+                new_hosting_id: hyperion_types::HostingId("01J".into()),
+                domain: "mock".into(),
+                restored_bytes: 0,
+                state: "ok".into(),
+                message: "mock".into(),
+            })
+        }
+        async fn hosting_import_from_url(
+            &self,
+            _: String,
             _: String,
         ) -> Result<hyperion_types::HostingImportResult, RpcError> {
             Ok(hyperion_types::HostingImportResult {

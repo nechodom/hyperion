@@ -1,0 +1,148 @@
+{% extends "base.html" %}
+{% block title %}Migration bundle ready · hyperion{% endblock %}
+{% block main %}
+
+<nav class="breadcrumbs" aria-label="Breadcrumb">
+  <a href="/hostings">Hostings</a>
+  <span class="sep">›</span>
+  <a href="/hostings/{{ selector }}">{{ selector }}</a>
+  <span class="sep">›</span>
+  <span>Migration bundle</span>
+</nav>
+
+<div class="page-header">
+  <div>
+    <h1>Bundle ready for transfer</h1>
+    <div class="subtitle">Pin this page or copy the values now — the signed token expires in 1 hour, after which you'll need to export again.</div>
+  </div>
+</div>
+
+<div class="card hover">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+    Snapshot info
+  </h2>
+  <dl class="kv">
+    <dt>Bundle id</dt><dd><code>{{ bundle.bundle_id }}</code></dd>
+    <dt>Source node</dt><dd><span class="tag node-chip"><code style="font-size:inherit">{{ bundle.source_node_id }}</code></span></dd>
+    <dt>Size</dt><dd class="numeric">{{ bundle.archive_bytes }} bytes</dd>
+    <dt>Digest (BLAKE3)</dt><dd><code style="font-size:0.74rem;word-break:break-all">{{ bundle.archive_sha256 }}</code></dd>
+    <dt>On-disk paths</dt>
+    <dd>
+      <div><code style="font-size:0.78rem">{{ bundle.archive_path }}</code></div>
+      <div><code style="font-size:0.78rem">{{ bundle.manifest_path }}</code></div>
+    </dd>
+  </dl>
+</div>
+
+<div class="card hover">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+    Option 1 · One-click import (recommended)
+  </h2>
+  <p class="muted">On the <strong>target</strong> node's hyperion-web, open <code>/hostings/import</code> and paste:</p>
+
+  <div class="copy-row">
+    <label class="copy-label">Base URL</label>
+    <div class="copy-input">
+      <input type="text" readonly value="{{ bundle.download_base_url }}" id="copy-url">
+      <button type="button" class="btn small" data-copy-from="copy-url">Copy</button>
+    </div>
+  </div>
+
+  <div class="copy-row">
+    <label class="copy-label">Token</label>
+    <div class="copy-input">
+      <input type="text" readonly value="{{ bundle.bundle_token }}" id="copy-token">
+      <button type="button" class="btn small" data-copy-from="copy-token">Copy</button>
+    </div>
+  </div>
+
+  <p class="muted" style="font-size:0.82rem;margin-top:0.7rem">Token expires <span title="unix {{ bundle.token_expires_at }}">in 1 hour</span>. Re-export if you need more time.</p>
+</div>
+
+<div class="card hover">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+    Option 2 · hctl one-liner
+  </h2>
+  <p class="muted">SSH into the target and run:</p>
+  <div class="copy-row">
+    <div class="copy-input">
+      <input type="text" readonly id="copy-hctl"
+             value='sudo hctl hosting import-from-url --base-url="{{ bundle.download_base_url }}" --token="{{ bundle.bundle_token }}"'>
+      <button type="button" class="btn small" data-copy-from="copy-hctl">Copy</button>
+    </div>
+  </div>
+</div>
+
+<div class="card hover">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+    Option 3 · Direct download
+  </h2>
+  <p class="muted">If you need the bundle files locally (e.g. to transfer over a non-HTTP channel):</p>
+  <div class="copy-row">
+    <label class="copy-label">Manifest</label>
+    <div class="copy-input">
+      <a class="btn small" href="{{ bundle.download_base_url }}/manifest.json?t={{ bundle.bundle_token }}" download>
+        Download manifest.json
+      </a>
+    </div>
+  </div>
+  <div class="copy-row">
+    <label class="copy-label">Archive</label>
+    <div class="copy-input">
+      <a class="btn small" href="{{ bundle.download_base_url }}/archive.tar.gz?t={{ bundle.bundle_token }}" download>
+        Download archive.tar.gz ({{ bundle.archive_bytes }} bytes)
+      </a>
+    </div>
+  </div>
+</div>
+
+<div class="card muted">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+    After import
+  </h2>
+  <ol style="margin:0;padding-left:1.25rem;font-size:0.92rem;line-height:1.7">
+    <li>Target node provisions an identical hosting and restores the archive.</li>
+    <li>Update DNS to point at the target's IP.</li>
+    <li>On target: click <strong>Issue Cert</strong> when DNS resolves (private keys never travel between nodes).</li>
+    <li>Verify the imported site works.</li>
+    <li>On this (source) node: <a href="/hostings/{{ selector }}">delete the original</a> to complete the migration.</li>
+  </ol>
+</div>
+
+<script>
+(function () {
+  document.addEventListener('click', function (ev) {
+    const btn = ev.target.closest('[data-copy-from]');
+    if (!btn) return;
+    const id = btn.getAttribute('data-copy-from');
+    const input = document.getElementById(id);
+    if (!input) return;
+    input.select();
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch (_) {}
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(input.value).then(
+        () => flash(btn, 'Copied!'),
+        () => ok || flash(btn, 'Copy failed', true)
+      );
+    } else if (ok) {
+      flash(btn, 'Copied!');
+    }
+  });
+  function flash(btn, msg, isErr) {
+    const orig = btn.textContent;
+    btn.textContent = msg;
+    btn.classList.toggle('danger', !!isErr);
+    setTimeout(() => {
+      btn.textContent = orig;
+      btn.classList.toggle('danger', false);
+    }, 1400);
+  }
+})();
+</script>
+{% endblock %}

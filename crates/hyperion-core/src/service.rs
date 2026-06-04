@@ -189,6 +189,38 @@ pub const CERT_RENEWAL_WINDOW_DAYS: i64 = 30;
 /// hitting their unauthenticated rate limit (60 req/hour/IP).
 pub const UPDATE_CHECK_TTL_SECS: i64 = 3600;
 
+/// Stream-download a URL to disk via curl. Returns Ok on HTTP 2xx,
+/// Err with a useful message otherwise. Used by the migration
+/// import-from-url path; cheap to call because curl is already a
+/// hard dependency of the installer.
+async fn curl_to_file(url: &str, dest: &std::path::Path) -> Result<(), RpcError> {
+    // -f: fail with non-zero exit on 4xx/5xx (otherwise curl happily
+    //     writes the error body to disk and we'd "import" garbage).
+    // -L: follow redirects (the source might 301 us to a CDN).
+    // --max-time 1800: 30-minute hard cap for multi-GB archives.
+    // -o: write to dest.
+    let out = tokio::process::Command::new("/usr/bin/curl")
+        .args([
+            "-fL",
+            "--max-time", "1800",
+            "-o", &dest.display().to_string(),
+            url,
+        ])
+        .output()
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("spawn curl: {e}")))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(RpcError::Validation {
+            message: format!(
+                "download failed (exit {}): {stderr}",
+                out.status.code().unwrap_or(-1),
+            ),
+        });
+    }
+    Ok(())
+}
+
 /// Compute the BLAKE3 digest of a file by streaming 64 KiB chunks
 /// through the hasher. Used by the migration export/import path to
 /// detect tampering or transport corruption without ever loading
@@ -2220,6 +2252,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         )
         .await;
 
+        // download_base_url + bundle_token are filled in by the web
+        // handler (only it knows the master's externally-reachable
+        // URL + has the signing key). Service returns empty strings;
+        // the handler enriches them before responding.
         Ok(hyperion_types::HostingMigrationBundle {
             bundle_id,
             archive_path: archive_dest.display().to_string(),
@@ -2230,6 +2266,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             source_hosting_id: detail.id,
             source_node_id: self.current_node_id(),
             source_hyperion_version: self.current_git_sha.clone(),
+            download_base_url: String::new(),
+            bundle_token: String::new(),
+            token_expires_at: 0,
         })
     }
 
@@ -2376,6 +2415,85 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         hostings::backfill_node_id(&self.pool, &nid)
             .await
             .map_err(|e| RpcError::Internal_with(format!("backfill node_id: {e}")))
+    }
+
+    /// Import a migration bundle by URL. The source node's
+    /// hyperion-web serves a signed `?t=…` URL pair (manifest.json
+    /// + archive.tar.gz). The target agent downloads both into a
+    /// staging dir, then delegates to `hosting_import`.
+    ///
+    /// Why curl: same reason as `update_check` — every node has
+    /// curl already (the installer uses it) and pulling reqwest in
+    /// just for this would double-link a TLS stack.
+    pub async fn hosting_import_from_url(
+        &self,
+        base_url: String,
+        token: String,
+    ) -> Result<hyperion_types::HostingImportResult, RpcError> {
+        // Validate the URL shape before shelling out — we'd rather
+        // refuse `file://` or random garbage at the boundary than
+        // hand it to curl.
+        if !base_url.starts_with("https://") && !base_url.starts_with("http://") {
+            return Err(RpcError::Validation {
+                message: "import URL must be http(s)://".into(),
+            });
+        }
+        let base = base_url.trim_end_matches('/').to_string();
+        // Quote-stripped, but otherwise opaque to us — the source's
+        // signature is what controls access.
+        let token_q = token.trim().to_string();
+        if token_q.is_empty() {
+            return Err(RpcError::Validation {
+                message: "import URL missing ?t=<token>".into(),
+            });
+        }
+
+        // Staging area lives next to the export dir so /var/lib has
+        // a single migration namespace operators can grep / delete.
+        let staging_id = format!("inc_{}", ulid::Ulid::new());
+        let staging = std::path::PathBuf::from("/var/lib/hyperion/migration-incoming")
+            .join(&staging_id);
+        tokio::fs::create_dir_all(&staging)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("mkdir staging: {e}")))?;
+        let manifest_path = staging.join("manifest.json");
+        let archive_path = staging.join("archive.tar.gz");
+
+        let manifest_url = format!("{base}/manifest.json?t={token_q}");
+        let archive_url = format!("{base}/archive.tar.gz?t={token_q}");
+
+        // Download manifest first — small file, fail fast on bad
+        // signature / wrong URL before we burn time on the archive.
+        curl_to_file(&manifest_url, &manifest_path).await?;
+        // Then the archive — can be many GB. curl streams to disk
+        // directly so RSS stays flat.
+        curl_to_file(&archive_url, &archive_path).await?;
+
+        // Delegate to the existing path-based importer. It re-reads
+        // the SHA from disk and refuses on mismatch — that doubles
+        // as our integrity check after the HTTP transfer.
+        let outcome = self
+            .hosting_import(manifest_path.display().to_string())
+            .await;
+
+        // Always wipe staging after import (success OR failure) to
+        // avoid /var/lib/hyperion/migration-incoming growing
+        // unbounded.
+        let _ = tokio::fs::remove_dir_all(&staging).await;
+
+        let result = outcome?;
+        self.append_audit(
+            "hosting.migration.import_url",
+            Some(result.new_hosting_id.as_str()),
+            &serde_json::json!({
+                "source_url": &base,
+                "bytes": result.restored_bytes,
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+        Ok(result)
     }
 
     /// Stable node identifier for this agent. Today we use the

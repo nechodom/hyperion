@@ -48,6 +48,24 @@ pub struct HostingMigrationBundle {
     /// importer warns the operator when it differs from its own SHA
     /// since the schema may have drifted.
     pub source_hyperion_version: String,
+    /// Public download base URL for the bundle on the source node's
+    /// hyperion-web. The target node fetches `<base>/manifest.json`
+    /// and `<base>/archive.tar.gz` with the `?t=<bundle_token>`
+    /// query parameter appended. Empty when the source didn't
+    /// derive a public URL (single-node dev setups).
+    ///
+    /// Set by the handler that calls `hosting_export` — the service
+    /// layer doesn't know the master's externally-reachable URL.
+    #[serde(default)]
+    pub download_base_url: String,
+    /// Signed token covering `(bundle_id, expires_at)`. The target
+    /// appends it as `?t=<token>` to both download URLs.
+    #[serde(default)]
+    pub bundle_token: String,
+    /// Unix seconds when `bundle_token` stops verifying. Surface to
+    /// the operator so they know the deadline.
+    #[serde(default)]
+    pub token_expires_at: i64,
 }
 
 /// Declarative description of what to recreate on the target node.
@@ -150,6 +168,9 @@ mod tests {
             source_hosting_id: HostingId("01J".into()),
             source_node_id: "node-a".into(),
             source_hyperion_version: "abc1234".into(),
+            download_base_url: String::new(),
+            bundle_token: String::new(),
+            token_expires_at: 0,
         };
         let json = serde_json::to_string(&b).expect("ser");
         let back: HostingMigrationBundle = serde_json::from_str(&json).expect("de");

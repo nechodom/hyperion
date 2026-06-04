@@ -44,6 +44,11 @@ pub fn build_router(state: SharedState) -> Router {
             "/hostings/migration/export",
             post(handlers::hostings::post_migration_export),
         )
+        .route("/hostings/import", get(handlers::migration::get_import))
+        .route(
+            "/hostings/migration/import-from-url",
+            post(handlers::migration::post_import_from_url),
+        )
         .route(
             "/hostings/backup-now",
             post(handlers::hostings::post_backup_now),
@@ -204,5 +209,11 @@ pub fn build_router(state: SharedState) -> Router {
         // Probes — no auth (LB / monitoring scrapes).
         .route("/healthz", get(handlers::health::get_healthz))
         .route("/readyz", get(handlers::health::get_readyz))
+        // Migration bundle downloads — public-by-design, signature-gated.
+        // Target nodes pull the bundle without a session cookie.
+        .route(
+            "/api/migration/bundle/:bundle_id/:filename",
+            get(handlers::migration::get_bundle_file),
+        )
         .with_state(state)
 }

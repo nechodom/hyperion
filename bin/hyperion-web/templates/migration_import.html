@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %}Import hosting · hyperion{% endblock %}
+{% block main %}
+
+<nav class="breadcrumbs" aria-label="Breadcrumb">
+  <a href="/hostings">Hostings</a>
+  <span class="sep">›</span>
+  <span>Import from another node</span>
+</nav>
+
+<div class="page-header">
+  <div>
+    <h1>Import hosting from another node</h1>
+    <div class="subtitle">Paste the URL + token that <strong>Export migration bundle</strong> printed on the source node. This node will download the archive directly and provision an identical hosting here.</div>
+  </div>
+</div>
+
+{% if let Some(e) = error %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">{{ e }}</div>
+  </div>
+{% endif %}
+{% if let Some(f) = flash %}
+  <div class="flash success">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+    <div class="flash-body">{{ f }}</div>
+  </div>
+{% endif %}
+
+<div class="card hover">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+    Bundle URL
+  </h2>
+  <p class="muted">On the source node, open the hosting detail → <strong>Migration</strong> tab → click <strong>Export migration bundle</strong>. The result page prints a base URL and a token — paste both here.</p>
+  <form method="post" action="/hostings/migration/import-from-url" autocomplete="off"
+        onsubmit="return confirm('Import this hosting onto THIS node? The hosting will be provisioned fresh and the bundle archive will be restored.');">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <div class="field">
+      <label for="base_url">Base URL</label>
+      <input id="base_url" name="base_url" type="url" required
+             placeholder="https://source.example.com/api/migration/bundle/mig_…"
+             style="font-family:var(--font-mono);font-size:0.88rem">
+    </div>
+    <div class="field">
+      <label for="token">Token <span class="hint">expires 1h after the source generated it</span></label>
+      <input id="token" name="token" type="text" required
+             placeholder="AAAA.BBBB"
+             spellcheck="false" autocapitalize="off"
+             style="font-family:var(--font-mono);font-size:0.88rem">
+    </div>
+    <button class="btn primary" type="submit">
+      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
+      Import bundle
+    </button>
+  </form>
+</div>
+
+<div class="card muted">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>
+    What happens next
+  </h2>
+  <ol style="margin:0;padding-left:1.25rem;font-size:0.92rem;line-height:1.7">
+    <li>This node downloads <code>manifest.json</code> + <code>archive.tar.gz</code> from the source via the signed URL.</li>
+    <li>BLAKE3 of the archive is verified against the manifest — a corrupted transfer is refused.</li>
+    <li>A fresh hosting is provisioned with the source's domain, aliases, PHP version, DB engine.</li>
+    <li>The archive (htdocs + DB dump) is restored.</li>
+    <li>You'll be redirected to the new hosting's detail page.</li>
+    <li>Update DNS to point at this node; click <strong>Issue Cert</strong> when LE-ready (private keys never travel across nodes).</li>
+    <li>On the source: <code>hctl hosting delete &lt;domain&gt;</code> once you've verified the imported site works.</li>
+  </ol>
+</div>
+{% endblock %}

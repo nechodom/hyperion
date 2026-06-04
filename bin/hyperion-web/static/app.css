@@ -2266,6 +2266,37 @@ hr.divider {
 .node-chip svg { color: var(--primary); flex-shrink: 0; }
 
 /* ============================================================
+ *  Copy-row — readonly input + Copy button used on the migration
+ *  export result page (and any other "operator pastes this on
+ *  another machine" UI).
+ * ============================================================ */
+.copy-row + .copy-row { margin-top: 0.65rem; }
+.copy-label {
+  display: block;
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--text-soft);
+  margin-bottom: 0.3rem;
+}
+.copy-input {
+  display: flex;
+  align-items: stretch;
+  gap: 0.4rem;
+}
+.copy-input input {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  padding: 0.5rem 0.7rem;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+}
+
+/* ============================================================
  *  Search toolbar — modern integrated search input + segmented
  *  filter control (replaces the cramped row of small buttons that
  *  the hostings list used to ship). Reusable for any list page.

@@ -154,6 +154,15 @@ pub trait AgentApi: Send + Sync + 'static {
         manifest_path: String,
     ) -> Result<hyperion_types::HostingImportResult, RpcError>;
 
+    /// Import a migration bundle by URL — downloads from the source
+    /// node's signed `/api/migration/bundle/<id>` endpoint then runs
+    /// the regular import.
+    async fn hosting_import_from_url(
+        &self,
+        base_url: String,
+        token: String,
+    ) -> Result<hyperion_types::HostingImportResult, RpcError>;
+
     /// List installed WordPress plugins for a hosting.
     async fn wp_plugin_list(
         &self,

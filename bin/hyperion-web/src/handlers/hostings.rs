@@ -2153,9 +2153,31 @@ pub struct MigrationExportForm {
     pub selector: String,
 }
 
+/// Template for the one-shot "export result" page rendered inline as
+/// the POST response (NOT a redirect — the URL would otherwise carry
+/// the signed token through browser history and the Referer header).
+#[derive(Template)]
+#[template(path = "migration_export_result.html")]
+struct MigrationExportResultTpl<'a> {
+    username: &'a str,
+    user_initial: char,
+    active: &'static str,
+    css_version: &'static str,
+    htmx_version: &'static str,
+    selector: &'a str,
+    bundle: hyperion_types::HostingMigrationBundle,
+    /// Session-wide CSRF token. Currently unread by the template
+    /// itself (no forms on the result page), but populated so a
+    /// future "delete bundle now" or "regenerate token" button can
+    /// drop in without re-plumbing the handler.
+    #[allow(dead_code)]
+    csrf_token: String,
+}
+
 pub async fn post_migration_export(
     State(state): State<SharedState>,
     ctx: AuthCtx,
+    headers: axum::http::HeaderMap,
     Form(form): Form<MigrationExportForm>,
 ) -> Result<Response, AppError> {
     let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
@@ -2169,19 +2191,36 @@ pub async fn post_migration_export(
     )
     .await?;
     match resp {
-        RpcResponse::HostingExport(b) => {
-            let flash = format!(
-                "Migration bundle ready · archive={} · manifest={} · {} bytes · digest={}…",
-                b.archive_path,
-                b.manifest_path,
-                b.archive_bytes,
-                b.archive_sha256.chars().take(16).collect::<String>(),
+        RpcResponse::HostingExport(mut b) => {
+            // Mint the signed download URL — agent has no idea what
+            // master URL the operator's browser used to reach us, so
+            // the web layer is the only thing that can derive it.
+            let master_url = derive_master_url(&state, &headers);
+            let exp = hyperion_types::now_secs()
+                + crate::handlers::migration::BUNDLE_DOWNLOAD_TTL_SECS;
+            let token = hyperion_auth::bundle_sig::mint(
+                state.csrf_key.as_ref(),
+                &b.bundle_id,
+                exp,
             );
-            let q = urlencoding(&flash);
-            Ok(
-                Redirect::to(&format!("/hostings/{}?flash={}#migration", sel_url, q))
-                    .into_response(),
-            )
+            b.download_base_url = format!(
+                "{master_url}/api/migration/bundle/{}",
+                b.bundle_id
+            );
+            b.bundle_token = token;
+            b.token_expires_at = exp;
+
+            let tpl = MigrationExportResultTpl {
+                username: &ctx.username,
+                user_initial: super::user_initial(&ctx.username),
+                active: "hostings",
+                css_version: super::css_version(),
+                htmx_version: super::htmx_version(),
+                selector: &form.selector,
+                bundle: b,
+                csrf_token: super::session_csrf_token(&state, &ctx),
+            };
+            Ok(Html(tpl.render()?).into_response())
         }
         RpcResponse::Error(e) => {
             let msg = urlencoding(&format!("Migration export failed: {}", e));
@@ -2190,6 +2229,31 @@ pub async fn post_migration_export(
         }
         _ => Err(AppError::Internal("unexpected response".into())),
     }
+}
+
+/// Mirror of `install::derive_master_url` — picks the externally
+/// reachable URL from the request the operator made. Duplicated
+/// here to keep the install handler's helper private; once we have
+/// more callers we can pull this into a shared module.
+fn derive_master_url(state: &SharedState, headers: &axum::http::HeaderMap) -> String {
+    let scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_lowercase())
+        .filter(|s| s == "http" || s == "https")
+        .unwrap_or_else(|| {
+            if state.cfg.web.secure_cookies {
+                "https".to_string()
+            } else {
+                "http".to_string()
+            }
+        });
+    let host = headers
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| state.cfg.web.listen.clone());
+    format!("{scheme}://{host}")
 }
 
 pub async fn post_wp_plugin_action(

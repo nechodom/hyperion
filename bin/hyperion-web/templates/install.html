@@ -4,7 +4,33 @@
 <div class="page-header">
   <div>
     <h1>Nodes</h1>
-    <div class="subtitle">Enroll new hosts into the cluster · master URL <code>{{ master_url }}</code></div>
+    <div class="subtitle">Enroll new hosts into the cluster.</div>
+  </div>
+</div>
+
+{# Editable master URL. Defaults to whatever the operator's browser
+   actually used to reach us (Host header). Some setups need an
+   override — e.g. operator accessed via IP but nodes should call
+   back via DNS, or vice versa. Edits update the install one-liner
+   below live, and are persisted to localStorage per browser. #}
+<div class="card" style="margin-bottom:1rem">
+  <div class="copy-row" style="margin:0">
+    <label class="copy-label" for="master-url-override">Master URL that new nodes will call</label>
+    <div class="copy-input">
+      <input id="master-url-override" type="url"
+             value="{{ master_url }}"
+             placeholder="https://master.example.com"
+             style="font-family:var(--font-mono);font-size:0.88rem">
+      <button type="button" class="btn small" id="master-url-reset"
+              title="Restore the auto-detected URL">Reset</button>
+    </div>
+    <p class="muted" style="font-size:0.78rem;margin:0.4rem 0 0">
+      Auto-detected from your browser's <code>Host</code> header. If your
+      new nodes can't reach <code id="master-url-detected">{{ master_url }}</code>
+      (e.g. you're connected via the server's IP but DNS is what's reachable
+      externally) edit the URL above — the install one-liners below update
+      live. Preference is remembered in this browser.
+    </p>
   </div>
 </div>
 
@@ -20,7 +46,9 @@
   <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
   <div class="flash-body">
     <strong>Invite minted for {{ m.label }}.</strong> The plaintext token is shown <strong>once below</strong> — copy it now; only its hash is persisted server-side.
-    <pre style="margin-top:0.7rem"><code>curl -fsSL {{ master_url }}/install/install-node.sh \
+    <pre style="margin-top:0.7rem"><code id="install-cmd"
+      data-token="{{ m.token }}"
+      data-default-master="{{ master_url }}">curl -fsSL https://raw.githubusercontent.com/nechodom/hyperion/main/packaging/install/install-node.sh \
   | sudo bash -s -- --token={{ m.token }} --master={{ master_url }}</code></pre>
     <div class="muted" style="margin-top:0.5rem;font-size:0.82rem">Token hash for revoke: <code>{{ m.token_hash }}</code></div>
   </div>
@@ -62,6 +90,50 @@
   <pre><code>curl -fsSL https://raw.githubusercontent.com/nechodom/hyperion/main/packaging/install/install-master.sh \
   | sudo bash</code></pre>
 </div>
+
+<script>
+(function () {
+  'use strict';
+  const KEY = 'hyperion.master_url_override';
+  const input = document.getElementById('master-url-override');
+  const detected = document.getElementById('master-url-detected');
+  const reset = document.getElementById('master-url-reset');
+  if (!input) return;
+  const defaultUrl = input.value;
+  const saved = localStorage.getItem(KEY);
+  if (saved) input.value = saved;
+
+  function applyToCommand() {
+    const url = input.value.trim().replace(/\/+$/, '') || defaultUrl;
+    const cmd = document.getElementById('install-cmd');
+    if (!cmd) return;
+    const token = cmd.dataset.token;
+    // Fetch the installer from GitHub raw — that's always reachable
+    // and we don't have to embed the script in the master binary.
+    // The --master= arg is what gets baked into the new node's
+    // agent.toml as its callback URL.
+    cmd.textContent = `curl -fsSL https://raw.githubusercontent.com/nechodom/hyperion/main/packaging/install/install-node.sh \\\n  | sudo bash -s -- --token=${token} --master=${url}`;
+  }
+
+  input.addEventListener('input', () => {
+    const v = input.value.trim();
+    if (v && v !== defaultUrl) {
+      localStorage.setItem(KEY, v);
+    } else {
+      localStorage.removeItem(KEY);
+    }
+    applyToCommand();
+  });
+  reset.addEventListener('click', () => {
+    input.value = defaultUrl;
+    localStorage.removeItem(KEY);
+    applyToCommand();
+  });
+
+  // Initial render — picks up the localStorage value if set.
+  applyToCommand();
+})();
+</script>
 
 <div class="card no-pad-table">
   <h2 style="padding:1.4rem 1.5rem 0">
