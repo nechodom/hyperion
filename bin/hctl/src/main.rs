@@ -707,8 +707,8 @@ fn print_pretty(resp: &Response) {
             println!("backup_retention: max_age_days={} keep_latest_n={}",
                 c.backup_retention.max_age_days, c.backup_retention.keep_latest_n);
         }
-        Response::EmailSendTest => {
-            println!("test email sent");
+        Response::EmailSendTest { smtp_code } => {
+            println!("test email sent — SMTP response: {smtp_code}");
         }
         Response::WebLogin(r) => match r {
             hyperion_types::WebLoginResult::Ok { user_id, username, role, .. } => {

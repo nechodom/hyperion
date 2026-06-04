@@ -412,7 +412,10 @@ pub enum Response {
     ServicesHealth(hyperion_types::ServicesHealth),
     BackupDelete,
     AgentConfigView(hyperion_types::AgentConfigView),
-    EmailSendTest,
+    /// SMTP response code from the relay (e.g. `Code(250)`).
+    /// Surfaced in the UI flash so the operator can verify the
+    /// relay actually accepted the message.
+    EmailSendTest { smtp_code: String },
     ServiceRestart,
     ServiceInstall,
     AgentConfigUpdate,

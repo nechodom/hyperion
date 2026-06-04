@@ -284,7 +284,7 @@ async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Err(e) => Response::Error(e),
         },
         Request::EmailSendTest { to } => match api.email_send_test(to).await {
-            Ok(()) => Response::EmailSendTest,
+            Ok(code) => Response::EmailSendTest { smtp_code: code },
             Err(e) => Response::Error(e),
         },
         Request::WebLogin { username, password, client_ip } => {
@@ -790,8 +790,8 @@ mod tests {
         async fn agent_config_view(&self) -> Result<hyperion_types::AgentConfigView, RpcError> {
             Ok(hyperion_types::AgentConfigView::default())
         }
-        async fn email_send_test(&self, _: String) -> Result<(), RpcError> {
-            Ok(())
+        async fn email_send_test(&self, _: String) -> Result<String, RpcError> {
+            Ok("Code(250)".into())
         }
         async fn web_login(
             &self,

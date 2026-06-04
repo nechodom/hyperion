@@ -13,7 +13,7 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::response::Json;
 use axum::Form;
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
-use hyperion_types::{AgentConfigView, SmtpAutodetect, UpdateStatus};
+use hyperion_types::{AgentConfigView, EmailLogEntry, SmtpAutodetect, UpdateStatus};
 use serde::Deserialize;
 
 #[derive(Template)]
@@ -28,6 +28,10 @@ struct SettingsTpl<'a> {
     update_status: UpdateStatus,
     update_current_short: String,
     update_latest_short: String,
+    /// Last 5 emails the agent sent (any kind, any state). Rendered
+    /// inline under the Send test button so the operator sees their
+    /// test send immediately without navigating to /emails.
+    recent_emails: Vec<EmailLogEntry>,
     error: Option<String>,
     flash: Option<String>,
     flash_error: Option<String>,
@@ -51,11 +55,15 @@ pub async fn get_settings(
     ctx: AuthCtx,
     axum::extract::Query(q): axum::extract::Query<SettingsQuery>,
 ) -> Result<Response, AppError> {
-    let (config_res, update_res) = tokio::join!(
+    let (config_res, update_res, emails_res) = tokio::join!(
         hyperion_rpc_client::call(&state.agent_socket, Request::AgentConfigView),
         hyperion_rpc_client::call(
             &state.agent_socket,
             Request::UpdateCheck { force_refresh: false },
+        ),
+        hyperion_rpc_client::call(
+            &state.agent_socket,
+            Request::EmailLogList { hosting_id: None, limit: 5 },
         ),
     );
     let (config, error) = match config_res {
@@ -71,6 +79,10 @@ pub async fn get_settings(
         Ok(RpcResponse::UpdateCheck(u)) => u,
         _ => UpdateStatus::default(),
     };
+    let recent_emails: Vec<EmailLogEntry> = match emails_res {
+        Ok(RpcResponse::EmailLogList(rows)) => rows,
+        _ => vec![],
+    };
     let update_current_short = short_sha(&update_status.current_sha);
     let update_latest_short = short_sha(&update_status.latest_sha);
     let csrf_token = super::session_csrf_token(&state, &ctx);
@@ -84,6 +96,7 @@ pub async fn get_settings(
         update_status,
         update_current_short,
         update_latest_short,
+        recent_emails,
         error,
         flash: q.flash,
         flash_error: q.flash_error,
@@ -110,20 +123,28 @@ pub async fn post_email_test(
     )
     .await?;
     match resp {
-        RpcResponse::EmailSendTest => {
+        RpcResponse::EmailSendTest { smtp_code } => {
+            // Surface the SMTP server's response code in the flash —
+            // "250 OK" means the relay accepted the message into its
+            // queue (whether it'll be delivered is between the relay
+            // and the recipient's MX). Operator can tell "queued"
+            // from "rejected by relay before our test even left".
+            let msg = format!("Test email sent to {to} · SMTP response: {smtp_code} · see /emails for delivery log");
             Ok(
-                Redirect::to(&format!(
-                    "/settings?flash=Test+email+sent+to+{}",
-                    urlencode(&to)
-                ))
-                .into_response(),
+                Redirect::to(&format!("/settings?flash={}", urlencode(&msg)))
+                    .into_response(),
             )
         }
-        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
-            "/settings?flash_error={}",
-            urlencode(&e.to_string())
-        ))
-        .into_response()),
+        RpcResponse::Error(e) => {
+            // Include a pointer to /emails so the operator can see the
+            // failed-row in context (it's already logged there).
+            let msg = format!("{e} — see /emails for the failed row");
+            Ok(Redirect::to(&format!(
+                "/settings?flash_error={}",
+                urlencode(&msg)
+            ))
+            .into_response())
+        }
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }

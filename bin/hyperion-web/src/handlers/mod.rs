@@ -5,6 +5,7 @@ pub mod health;
 pub mod hostings;
 pub mod install;
 pub mod login;
+pub mod emails;
 pub mod files;
 pub mod migration;
 pub mod profile;

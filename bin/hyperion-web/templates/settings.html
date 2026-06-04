@@ -178,7 +178,53 @@
                  style="flex:1;min-width:15rem;margin:0">
           <button class="btn small primary" type="submit">Send</button>
         </form>
+        <p class="muted" style="font-size:0.8rem;margin-top:0.6rem;margin-bottom:0">
+          Every send (test or notification) is logged at <a href="/emails">/emails</a> — including the SMTP server's response code, so you can tell "queued" from "rejected".
+        </p>
       </div>
+
+      {# Inline "last 5 emails" so the operator sees their test send
+         immediately without leaving Settings — answers "did it go?"
+         right next to the Send button. #}
+      {% if !recent_emails.is_empty() %}
+      <div class="card-section" style="margin-top:1rem">
+        <h3 style="font-size:0.9rem;margin:0 0 0.5rem;display:flex;align-items:center;gap:0.4rem">
+          Recent emails
+          <a href="/emails" class="text-soft" style="font-size:0.78rem;font-weight:400;margin-left:auto">view all →</a>
+        </h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Sent</th>
+                <th>State</th>
+                <th>To</th>
+                <th>Subject</th>
+                <th>SMTP / error</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for e in recent_emails %}
+              <tr>
+                <td class="muted numeric" title="{{ e.sent_at }}">{{ crate::handlers::stats::fmt_ago(e.sent_at) }}</td>
+                <td>
+                  {% if e.state == "ok" %}<span class="pill ok">sent</span>
+                  {% else %}<span class="pill err">failed</span>{% endif %}
+                </td>
+                <td><code style="font-size:0.78rem">{{ e.to_address }}</code></td>
+                <td>{{ e.subject }}</td>
+                <td>
+                  {% if let Some(err) = e.error %}<code class="muted" style="font-size:0.74rem;color:var(--danger)">{{ err|truncate(80) }}</code>
+                  {% else if let Some(c) = e.smtp_code %}<code class="muted" style="font-size:0.74rem">{{ c }}</code>
+                  {% else %}<span class="text-soft">—</span>{% endif %}
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      {% endif %}
     {% endif %}
   </div>
 

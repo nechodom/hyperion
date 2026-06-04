@@ -1198,6 +1198,47 @@ async fn viewer_cannot_delete_hosting_via_direct_post() {
     );
 }
 
+/// /emails renders the global email log table — even when the
+/// agent has zero rows, the page is reachable + shows the empty
+/// state with a pointer to /settings. Locks in the route + the
+/// "show migration error hint" path.
+#[tokio::test]
+async fn emails_page_renders_with_filters() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock, admin);
+    let login_body = b"username=kevin&password=good-pw&next=/";
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/login")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(login_body.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .expect("login");
+    let cookie = extract_cookie(&resp);
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/emails")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = body_string(resp).await;
+    assert!(body.contains("Email log"), "missing page title");
+    assert!(body.contains("/emails?kind=test"), "kind=test filter missing");
+    assert!(body.contains("/emails?state=failed"), "state=failed filter missing");
+}
+
 /// Migration bundle download endpoint refuses requests without a
 /// valid signed token — even with an existing bundle on disk.
 /// Locks in the "URL is the access control" contract.

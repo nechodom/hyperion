@@ -320,7 +320,7 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.agent_config_view(&self.hostname, &self.version).await
     }
 
-    async fn email_send_test(&self, to: String) -> Result<(), RpcError> {
+    async fn email_send_test(&self, to: String) -> Result<String, RpcError> {
         self.svc.email_send_test(to).await
     }
 

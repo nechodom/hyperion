@@ -2867,7 +2867,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     "ok",
                 )
                 .await;
-                let _ = hyperion_state::email_log::append(
+                // tracing::error on append failure — usually means the
+                // migration didn't run on this node (table doesn't
+                // exist) or the SQLite file is read-only. Either way
+                // the operator needs to see this in journalctl.
+                if let Err(e) = hyperion_state::email_log::append(
                     &self.pool,
                     hosting_id,
                     to,
@@ -2879,7 +2883,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     Some(&code),
                     now_secs(),
                 )
-                .await;
+                .await
+                {
+                    tracing::error!(
+                        error = %e,
+                        to = %to,
+                        "email_log append failed — email_log table missing? \
+                         restart hyperion-agent after update.sh to apply migration 017"
+                    );
+                }
             }
             Err(e) => {
                 let err_s = e.to_string();
@@ -2896,7 +2908,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     "failed",
                 )
                 .await;
-                let _ = hyperion_state::email_log::append(
+                if let Err(le) = hyperion_state::email_log::append(
                     &self.pool,
                     hosting_id,
                     to,
@@ -2908,7 +2920,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     None,
                     now_secs(),
                 )
-                .await;
+                .await
+                {
+                    tracing::error!(
+                        log_error = %le,
+                        send_error = %err_s,
+                        to = %to,
+                        "email_log append failed AND email send failed — restart agent to apply migration 017"
+                    );
+                }
                 tracing::warn!(to = %to, subject = %subject, error = %err_s, "email send failed");
             }
         }
@@ -5347,8 +5367,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     }
 
     /// Send a one-off test email through the configured SMTP relay
-    /// to confirm the operator's config works end-to-end.
-    pub async fn email_send_test(&self, to: String) -> Result<(), RpcError> {
+    /// to confirm the operator's config works end-to-end. Returns
+    /// the SMTP server's response code so the UI can show it in
+    /// the success flash (helps the operator distinguish "queued"
+    /// from "rejected with 250 OK but actually dropped" — relays
+    /// occasionally do this).
+    pub async fn email_send_test(&self, to: String) -> Result<String, RpcError> {
         let to = to.trim();
         if to.is_empty() || !to.contains('@') {
             return Err(RpcError::Validation {
@@ -5368,36 +5392,47 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             cfg.from_name, cfg.from_address, cfg.smtp_host, cfg.smtp_port, cfg.security
         );
         let send_result = hyperion_adapters::email::send_text(cfg, to, subject, &body).await;
-        // Log to email_log regardless of outcome so the operator can
-        // see the failure mode in the Emails tab. Then propagate the
-        // error to the caller so the UI shows it inline.
-        let (state, err_opt, code_opt) = match &send_result {
+        // Log to email_log regardless of outcome — even a failed
+        // send needs to be visible on /emails so the operator can
+        // see what went wrong without scraping journalctl.
+        let (state_str, err_opt, code_opt) = match &send_result {
             Ok(code) => ("ok", None, Some(code.as_str())),
             Err(e) => ("failed", Some(format!("{e}")), None),
         };
         let err_ref: Option<&str> = err_opt.as_deref();
-        let _ = hyperion_state::email_log::append(
+        if let Err(le) = hyperion_state::email_log::append(
             &self.pool,
             None,
             to,
             subject,
             &body,
             "test",
-            state,
+            state_str,
             err_ref,
             code_opt,
             now_secs(),
         )
-        .await;
-        send_result.map_err(|e| RpcError::Internal_with(format!("email send failed: {e}")))?;
+        .await
+        {
+            // Don't swallow this — table missing is the most likely
+            // cause and operator needs to see it in the journal.
+            tracing::error!(
+                error = %le,
+                to = %to,
+                "email_log append failed during test send — \
+                 restart hyperion-agent to apply migration 017 if it hasn't yet"
+            );
+        }
+        let code = send_result
+            .map_err(|e| RpcError::Internal_with(format!("email send failed: {e}")))?;
         self.append_audit(
             "email.test.send",
             None,
-            &serde_json::json!({ "to": to }).to_string(),
+            &serde_json::json!({ "to": to, "smtp_code": &code }).to_string(),
             "ok",
         )
         .await;
-        Ok(())
+        Ok(code)
     }
 
     /// Delete a single backup run + its archive file(s) on disk.
