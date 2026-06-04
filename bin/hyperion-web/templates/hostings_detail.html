@@ -363,6 +363,18 @@
     Overview
   </h2>
   <dl class="kv">
+    <dt>Node</dt>
+    <dd>
+      {% if let Some(n) = detail.node_id %}
+        <span class="tag node-chip" title="Hyperion node this hosting was provisioned on">
+          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="margin-right:0.25rem;vertical-align:-1px"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+          <code style="font-size:inherit">{{ n }}</code>
+        </span>
+        <a href="/install" class="text-soft" style="font-size:0.78rem;margin-left:0.4rem">manage nodes →</a>
+      {% else %}
+        <span class="text-soft">— (legacy row; will fill on next agent restart)</span>
+      {% endif %}
+    </dd>
     <dt>System user</dt><dd><code>{{ detail.system_user }}</code></dd>
     <dt>Document root</dt><dd><code>{{ detail.root_dir }}</code></dd>
     <dt>PHP</dt>

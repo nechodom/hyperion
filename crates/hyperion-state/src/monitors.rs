@@ -287,7 +287,7 @@ mod tests {
         .await
         .expect("user");
         let id = HostingId::new_v7();
-        crate::hostings::insert(pool, &id, &format!("{name}.cz"), suid, None, "/x", 1)
+        crate::hostings::insert(pool, &id, &format!("{name}.cz"), suid, None, "/x", 1, None)
             .await
             .expect("hosting");
         // Move to active so list_enabled finds it.

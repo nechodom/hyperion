@@ -790,7 +790,7 @@ mod tests {
             .await
             .expect("user");
         let hid = HostingId::new_v7();
-        crate::hostings::insert(&pool, &hid, "x.cz", suid, None, "/x", 1)
+        crate::hostings::insert(&pool, &hid, "x.cz", suid, None, "/x", 1, None)
             .await
             .expect("hosting");
         let uid = fresh_user(&pool, "alice").await;

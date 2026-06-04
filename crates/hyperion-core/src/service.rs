@@ -496,6 +496,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
         }
         let hosting_id = HostingId::new_v7();
+        let node_id_str = self.current_node_id();
         if let Err(e) = hostings::insert_with_kind(
             &self.pool,
             &hosting_id,
@@ -506,6 +507,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             &req.kind,
             req.proxy_upstream_url.as_deref(),
             now_secs(),
+            Some(node_id_str.as_str()),
         )
         .await
         {
@@ -649,6 +651,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             acme_contact_email: None,
             kind: req.kind.clone(),
             proxy_upstream_url: req.proxy_upstream_url.clone(),
+            node_id: Some(node_id_str.clone()),
         };
         if let Err(e) = self.adapters.nginx_write_vhost(&detail).await {
             let _ = stack.rollback_all().await;
@@ -852,6 +855,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             acme_contact_email: row.acme_contact_email,
             kind: row.kind,
             proxy_upstream_url: row.proxy_upstream_url,
+            node_id: row.node_id,
         })
     }
 
@@ -2286,12 +2290,24 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         })
     }
 
+    /// One-shot backfill called at agent startup: every hostings row
+    /// with NULL node_id (i.e. created before migration 016) gets
+    /// tagged with the current node's id. Idempotent — running it
+    /// twice is a no-op. Returns the row count touched so the boot
+    /// log can surface non-zero backfills as a one-liner.
+    pub async fn backfill_local_node_id(&self) -> Result<u64, RpcError> {
+        let nid = self.current_node_id();
+        hostings::backfill_node_id(&self.pool, &nid)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("backfill node_id: {e}")))
+    }
+
     /// Stable node identifier for this agent. Today we use the
     /// hostname when no explicit `HYPERION_NODE_ID` env var is set
     /// — multi-node deploys configure that via systemd unit override
     /// so the cluster has a stable string regardless of hostname
     /// changes.
-    fn current_node_id(&self) -> String {
+    pub fn current_node_id(&self) -> String {
         std::env::var("HYPERION_NODE_ID")
             .ok()
             .or_else(|| {

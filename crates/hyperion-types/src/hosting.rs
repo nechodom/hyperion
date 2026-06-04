@@ -54,6 +54,11 @@ pub struct HostingSummary {
     pub state: HostingState,
     pub php_version: Option<PhpVersion>,
     pub created_at: i64,
+    /// Stable identifier of the node this hosting lives on. Surfaced
+    /// as a chip on the hosting list. `None` for rows that pre-date
+    /// migration 016 and haven't been backfilled yet.
+    #[serde(default)]
+    pub node_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -80,6 +85,11 @@ pub struct HostingDetail {
     /// Upstream URL for kind=reverse_proxy.
     #[serde(default)]
     pub proxy_upstream_url: Option<String>,
+    /// Stable identifier of the node this hosting lives on.
+    /// `None` for legacy rows (pre-migration 016) that haven't been
+    /// backfilled — surfaced as "—" in the UI.
+    #[serde(default)]
+    pub node_id: Option<String>,
 }
 
 fn default_kind() -> String {
@@ -128,6 +138,7 @@ mod tests {
             acme_contact_email: Some("ops@example.cz".into()),
             kind: "php".into(),
             proxy_upstream_url: None,
+            node_id: Some("test-node".into()),
         };
         let j = serde_json::to_string(&d).expect("serialize");
         let back: HostingDetail = serde_json::from_str(&j).expect("deserialize");
@@ -151,6 +162,7 @@ mod tests {
             state: HostingState::Provisioning,
             php_version: None,
             created_at: 0,
+            node_id: Some("n".into()),
         };
         let j = serde_json::to_string(&s).expect("serialize");
         let back: HostingSummary = serde_json::from_str(&j).expect("deserialize");

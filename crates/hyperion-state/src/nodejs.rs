@@ -186,7 +186,7 @@ mod tests {
             .await
             .expect("user");
         let id = HostingId::new_v7();
-        hostings::insert(pool, &id, "example.cz", suid, None, "/r", 1)
+        hostings::insert(pool, &id, "example.cz", suid, None, "/r", 1, None)
             .await
             .expect("hosting");
         id

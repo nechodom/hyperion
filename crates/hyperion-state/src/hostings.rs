@@ -24,6 +24,11 @@ pub struct HostingRow {
     pub kind: String,
     /// Upstream URL for kind=reverse_proxy. None for other kinds.
     pub proxy_upstream_url: Option<String>,
+    /// Stable identifier of the node this hosting was provisioned on.
+    /// Read from `HYPERION_NODE_ID` env or `/etc/hostname` at create
+    /// time (see `HostingService::current_node_id`). `None` for rows
+    /// that pre-date migration 016 and haven't been backfilled yet.
+    pub node_id: Option<String>,
 }
 
 pub async fn insert(
@@ -34,11 +39,12 @@ pub async fn insert(
     php_version: Option<PhpVersion>,
     root_dir: &str,
     now: i64,
+    node_id: Option<&str>,
 ) -> Result<(), StateError> {
     sqlx::query(
         r#"INSERT INTO hostings
-           (id, domain, state, system_user_id, php_version, root_dir, created_at, updated_at)
-           VALUES (?, ?, 'provisioning', ?, ?, ?, ?, ?)"#,
+           (id, domain, state, system_user_id, php_version, root_dir, created_at, updated_at, node_id)
+           VALUES (?, ?, 'provisioning', ?, ?, ?, ?, ?, ?)"#,
     )
     .bind(id.as_str())
     .bind(domain)
@@ -47,6 +53,7 @@ pub async fn insert(
     .bind(root_dir)
     .bind(now)
     .bind(now)
+    .bind(node_id)
     .execute(pool)
     .await?;
     Ok(())
@@ -123,13 +130,13 @@ pub async fn get_by_domain(
 }
 
 pub async fn list(pool: &SqlitePool) -> Result<Vec<HostingSummary>, StateError> {
-    let rows: Vec<(String, String, String, Option<String>, i64)> = sqlx::query_as(
-        "SELECT id, domain, state, php_version, created_at FROM hostings ORDER BY domain",
+    let rows: Vec<(String, String, String, Option<String>, i64, Option<String>)> = sqlx::query_as(
+        "SELECT id, domain, state, php_version, created_at, node_id FROM hostings ORDER BY domain",
     )
     .fetch_all(pool)
     .await?;
     let mut out = Vec::with_capacity(rows.len());
-    for (id, domain, state, php_version, created_at) in rows {
+    for (id, domain, state, php_version, created_at, node_id) in rows {
         out.push(HostingSummary {
             id: HostingId(id),
             domain,
@@ -139,6 +146,7 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<HostingSummary>, StateError> 
                 None => None,
             },
             created_at,
+            node_id,
         });
     }
     Ok(out)
@@ -158,12 +166,13 @@ type RawHostingRow = (
     Option<String>,
     String,
     Option<String>,
+    Option<String>,
 );
 
 const QUERY_BASE: &str =
-    "SELECT id, domain, state, system_user_id, php_version, root_dir, created_at, updated_at, acme_contact_email, kind, proxy_upstream_url FROM hostings WHERE id = ?";
+    "SELECT id, domain, state, system_user_id, php_version, root_dir, created_at, updated_at, acme_contact_email, kind, proxy_upstream_url, node_id FROM hostings WHERE id = ?";
 const QUERY_DOMAIN: &str =
-    "SELECT id, domain, state, system_user_id, php_version, root_dir, created_at, updated_at, acme_contact_email, kind, proxy_upstream_url FROM hostings WHERE domain = ?";
+    "SELECT id, domain, state, system_user_id, php_version, root_dir, created_at, updated_at, acme_contact_email, kind, proxy_upstream_url, node_id FROM hostings WHERE domain = ?";
 
 async fn fetch_one<'a>(
     pool: &'a SqlitePool,
@@ -183,6 +192,7 @@ async fn fetch_one<'a>(
         acme_contact_email,
         kind,
         proxy_upstream_url,
+        node_id,
     )) = row
     else {
         return Ok(None);
@@ -202,6 +212,7 @@ async fn fetch_one<'a>(
         acme_contact_email,
         kind,
         proxy_upstream_url,
+        node_id,
     }))
 }
 
@@ -239,12 +250,13 @@ pub async fn insert_with_kind(
     kind: &str,
     proxy_upstream_url: Option<&str>,
     now: i64,
+    node_id: Option<&str>,
 ) -> Result<(), StateError> {
     sqlx::query(
         r#"INSERT INTO hostings
            (id, domain, state, system_user_id, php_version, root_dir,
-            created_at, updated_at, kind, proxy_upstream_url)
-           VALUES (?, ?, 'provisioning', ?, ?, ?, ?, ?, ?, ?)"#,
+            created_at, updated_at, kind, proxy_upstream_url, node_id)
+           VALUES (?, ?, 'provisioning', ?, ?, ?, ?, ?, ?, ?, ?)"#,
     )
     .bind(id.as_str())
     .bind(domain)
@@ -255,9 +267,24 @@ pub async fn insert_with_kind(
     .bind(now)
     .bind(kind)
     .bind(proxy_upstream_url)
+    .bind(node_id)
     .execute(pool)
     .await?;
     Ok(())
+}
+
+/// One-shot backfill: every hostings row with NULL node_id gets the
+/// caller's node id. Called by the agent at startup so the list +
+/// detail UIs show a node chip even for pre-migration rows.
+pub async fn backfill_node_id(
+    pool: &SqlitePool,
+    node_id: &str,
+) -> Result<u64, StateError> {
+    let r = sqlx::query("UPDATE hostings SET node_id = ? WHERE node_id IS NULL")
+        .bind(node_id)
+        .execute(pool)
+        .await?;
+    Ok(r.rows_affected())
 }
 
 /// Update (or clear) the per-hosting ACME contact email. `None` means
@@ -305,6 +332,7 @@ mod tests {
             Some(PhpVersion::V8_3),
             "/home/ex_cz/example.cz/htdocs",
             42,
+            None,
         )
         .await
         .expect("insert");
@@ -319,11 +347,11 @@ mod tests {
         let pool = open_memory().await.expect("open");
         let suid = fresh_user(&pool, "ex_cz", 1042).await;
         let id = HostingId::new_v7();
-        insert(&pool, &id, "example.cz", suid, None, "/x", 1)
+        insert(&pool, &id, "example.cz", suid, None, "/x", 1, None)
             .await
             .expect("first ok");
         let id2 = HostingId::new_v7();
-        let r = insert(&pool, &id2, "example.cz", suid, None, "/y", 2).await;
+        let r = insert(&pool, &id2, "example.cz", suid, None, "/y", 2, None).await;
         assert!(r.is_err(), "duplicate domain must fail");
     }
 
@@ -333,7 +361,7 @@ mod tests {
         let suid = fresh_user(&pool, "ex_cz", 1042).await;
         // Insert valid, then try to set an invalid state via direct SQL.
         let id = HostingId::new_v7();
-        insert(&pool, &id, "example.cz", suid, None, "/x", 1)
+        insert(&pool, &id, "example.cz", suid, None, "/x", 1, None)
             .await
             .expect("ok");
         let bad = sqlx::query("UPDATE hostings SET state='bogus' WHERE id = ?")
@@ -351,7 +379,7 @@ mod tests {
         let pool = open_memory().await.expect("open");
         let suid = fresh_user(&pool, "ex_cz", 1042).await;
         let id = HostingId::new_v7();
-        insert(&pool, &id, "example.cz", suid, None, "/x", 1)
+        insert(&pool, &id, "example.cz", suid, None, "/x", 1, None)
             .await
             .expect("insert");
 
@@ -395,7 +423,7 @@ mod tests {
         let pool = open_memory().await.expect("open");
         let suid = fresh_user(&pool, "u", 1042).await;
         let id = HostingId::new_v7();
-        insert(&pool, &id, "example.cz", suid, None, "/x", 1)
+        insert(&pool, &id, "example.cz", suid, None, "/x", 1, None)
             .await
             .expect("ok");
         set_state(&pool, &id, HostingState::Active, 2)
@@ -411,7 +439,7 @@ mod tests {
         let pool = open_memory().await.expect("open");
         let suid = fresh_user(&pool, "u", 1042).await;
         let id = HostingId::new_v7();
-        insert(&pool, &id, "example.cz", suid, None, "/x", 1)
+        insert(&pool, &id, "example.cz", suid, None, "/x", 1, None)
             .await
             .expect("ok");
         insert_alias(&pool, &id, "www.example.cz")
@@ -446,10 +474,10 @@ mod tests {
         let suid = fresh_user(&pool, "u", 1042).await;
         let a = HostingId::new_v7();
         let b = HostingId::new_v7();
-        insert(&pool, &a, "a.cz", suid, Some(PhpVersion::V8_3), "/x", 1)
+        insert(&pool, &a, "a.cz", suid, Some(PhpVersion::V8_3), "/x", 1, None)
             .await
             .expect("ok");
-        insert(&pool, &b, "b.cz", suid, None, "/y", 2)
+        insert(&pool, &b, "b.cz", suid, None, "/y", 2, None)
             .await
             .expect("ok");
         let rows = list(&pool).await.expect("list");
@@ -465,7 +493,7 @@ mod tests {
         let pool = open_memory().await.expect("open");
         let suid = fresh_user(&pool, "u", 1042).await;
         let id = HostingId::new_v7();
-        insert(&pool, &id, "example.cz", suid, None, "/x", 1)
+        insert(&pool, &id, "example.cz", suid, None, "/x", 1, None)
             .await
             .expect("ok");
         let got = get_by_domain(&pool, "example.cz")

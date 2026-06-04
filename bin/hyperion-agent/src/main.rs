@@ -152,6 +152,21 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
+    // One-shot backfill: tag every hostings row that has NULL node_id
+    // with this node's identifier. Pre-migration-016 rows still show
+    // "—" in the UI until this completes — usually within a second of
+    // boot — and after that every list/detail render carries a real
+    // node chip.
+    {
+        let backfill_svc = svc.clone();
+        tokio::spawn(async move {
+            match backfill_svc.backfill_local_node_id().await {
+                Ok(0) => {}
+                Ok(n) => tracing::info!(rows = n, "boot: backfilled node_id on legacy rows"),
+                Err(e) => tracing::warn!(error = %e, "boot: node_id backfill failed"),
+            }
+        });
+    }
     // Background scheduler: fire scheduler_tick (expiry sweep) every 5 minutes.
     {
         let tick_svc = svc.clone();

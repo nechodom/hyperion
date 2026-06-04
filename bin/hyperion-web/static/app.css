@@ -2215,6 +2215,36 @@ hr.divider {
 }
 
 /* ============================================================
+ *  Node chip — small badge on hosting list/detail showing which
+ *  Hyperion node a site lives on. Mono font + subtle border so it
+ *  reads as a stable identifier, not a state label.
+ * ============================================================ */
+.node-chip {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  letter-spacing: 0.01em;
+  background: var(--surface-2);
+  border-color: var(--border-strong);
+  color: var(--text-dim);
+  padding: 0.18rem 0.45rem;
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
+  max-width: 22rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.node-chip code {
+  background: transparent;
+  border: 0;
+  padding: 0;
+  color: inherit;
+  font-family: inherit;
+  font-size: inherit;
+}
+.node-chip svg { color: var(--primary); flex-shrink: 0; }
+
+/* ============================================================
  *  Sidebar live status pulse dot
  * ============================================================ */
 .live-dot {

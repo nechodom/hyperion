@@ -82,6 +82,7 @@
           <th>Domain</th>
           <th>PHP</th>
           <th>State</th>
+          <th>Node</th>
           <th>Created</th>
           <th class="right">Actions</th>
         </tr>
@@ -108,6 +109,16 @@
               {% else if r.state.as_str() == "suspended" %}warn
               {% else if r.state.as_str() == "failed" %}err
               {% else %}warn pulse{% endif %}">{{ r.state.as_str() }}</span>
+          </td>
+          <td>
+            {% if let Some(n) = r.node_id %}
+              <span class="tag node-chip" title="Provisioned on node {{ n }}">
+                <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="margin-right:0.25rem;vertical-align:-1px"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+                {{ n }}
+              </span>
+            {% else %}
+              <span class="text-soft">—</span>
+            {% endif %}
           </td>
           <td class="muted numeric" title="{{ r.created_at }}">{{ crate::handlers::stats::fmt_ago(r.created_at) }}</td>
           <td class="right">
