@@ -178,22 +178,44 @@ async fn post_json(url: &str, body: &str, verify_tls: bool) -> Result<Vec<u8>, S
 }
 
 /// Decide whether to retry an http:// URL as https://. We only do
-/// this when the URL is http:// AND the error looks TLS-shaped —
-/// curl exit 35 (TLS handshake), 52 (empty reply from server, the
-/// classic "tried to speak HTTP to a TLS port"), or stderr mentioning
-/// "wrong version number" / "SSL routines".
+/// this when the URL is http:// AND the error looks TLS-shaped.
+/// Curl reports the same root cause ("server sent TLS handshake
+/// bytes when I asked HTTP") under several different exit codes
+/// depending on version and which buffer it caught first:
+///
+///   - 1   `CURLE_UNSUPPORTED_PROTOCOL` — typical for newer curl
+///         which trims "HTTP/0.9" responses as invalid (the TLS
+///         handshake bytes look like a malformed HTTP/0.9 reply).
+///         Stderr: "Received HTTP/0.9 when not allowed".
+///   - 35  `CURLE_SSL_CONNECT_ERROR` — TLS handshake failure (rare
+///         in the http→https mistake, more on https→bad-cert).
+///   - 52  `CURLE_GOT_NOTHING` — server closed after seeing
+///         garbage. Classic on older curl + nginx.
+///   - 56  `CURLE_RECV_ERROR` — connection reset during the read.
+///
+/// We also match stderr substrings as a belt-and-suspenders since
+/// curl exit codes sometimes shift between distro versions.
 fn should_try_https_fallback(base: &str, err: &str) -> bool {
     if !base.starts_with("http://") {
         return false;
     }
     let e = err.to_ascii_lowercase();
-    e.contains("exit some(35)")
+    // Exit-code matches.
+    if e.contains("exit some(1)")
+        || e.contains("exit some(35)")
         || e.contains("exit some(52)")
         || e.contains("exit some(56)")
+    {
+        return true;
+    }
+    // Substring matches — covers cases where the exit code is
+    // different but the message is unambiguous.
+    e.contains("http/0.9")
         || e.contains("empty reply from server")
         || e.contains("wrong version number")
         || e.contains("ssl routines")
         || e.contains("alert handshake")
+        || e.contains("recv failure")
 }
 
 async fn finish_enrollment(cfg: &EnrollmentConfig, stdout: &[u8]) -> Result<(), String> {
@@ -311,6 +333,14 @@ mod tests {
 
     #[test]
     fn https_fallback_triggers_on_tls_signature_errors() {
+        // Exit 1 + "HTTP/0.9" — the case the user actually hit on
+        // stav.pur.cz with newer curl. Server sent TLS handshake
+        // bytes; curl tagged them as "Received HTTP/0.9 when not
+        // allowed" and exited with CURLE_UNSUPPORTED_PROTOCOL.
+        assert!(should_try_https_fallback(
+            "http://178.105.99.35:8443",
+            "POST http://178.105.99.35:8443/api/enroll exit Some(1): curl: (1) Received HTTP/0.9 when not allowed"
+        ));
         // Exit 35 — SSL handshake failure
         assert!(should_try_https_fallback(
             "http://master.example.com:8443",
@@ -325,6 +355,11 @@ mod tests {
         assert!(should_try_https_fallback(
             "http://master:8443",
             "tlsv1 alert wrong version number"
+        ));
+        // Stderr substring HTTP/0.9 without exit code 1 — defensive
+        assert!(should_try_https_fallback(
+            "http://master:8443",
+            "POST http://master:8443 exit Some(56): Received HTTP/0.9 when not allowed"
         ));
     }
 
