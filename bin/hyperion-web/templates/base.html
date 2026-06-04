@@ -443,6 +443,17 @@ document.addEventListener('click', function (ev) {
       return;
     }
     if (ev.key === 'n' || ev.key === 'N') { location.assign('/hostings/new'); ev.preventDefault(); }
+    // GitHub/Vercel convention: bare "/" focuses the page's primary
+    // search input. Only fires when one exists on the current page,
+    // and only outside other text inputs (isShortcutContext guard).
+    if (ev.key === '/') {
+      const s = document.querySelector('input[type="search"]');
+      if (s) {
+        s.focus();
+        s.select();
+        ev.preventDefault();
+      }
+    }
   });
 })();
 
@@ -484,6 +495,17 @@ function isShortcutContext(ev) {
     tip.className = 'spark-tip';
     tip.style.display = 'none';
     host.appendChild(tip);
+
+    // Transparent hitbox covering the whole viewBox — guarantees the
+    // SVG receives mousemove anywhere in its bounds, not just over
+    // the painted area. Inserted FIRST so subsequent paints overlay
+    // it visually but it still captures events (with pointer-events:
+    // all from CSS).
+    const hit = document.createElementNS(NS, 'rect');
+    hit.setAttribute('x', '0'); hit.setAttribute('y', '0');
+    hit.setAttribute('width', '600'); hit.setAttribute('height', '60');
+    hit.setAttribute('class', 'spark-hitbox');
+    svg.insertBefore(hit, svg.firstChild);
 
     // SVG-side marker dot + vertical crosshair line.
     const vline = document.createElementNS(NS, 'line');

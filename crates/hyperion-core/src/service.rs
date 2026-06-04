@@ -217,6 +217,82 @@ async fn compute_sha256(path: &std::path::Path) -> Result<String, RpcError> {
     Ok(hex::encode(hasher.finalize().as_bytes()))
 }
 
+/// Result of `ahead_of_remote` — whether the local HEAD is at or
+/// past the remote SHA, behind it, or whether we couldn't tell
+/// because there's no local git checkout to inspect.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AheadResult {
+    /// Local HEAD == remote OR remote is reachable from HEAD via
+    /// first-parent ancestry. We're at-or-after the remote.
+    AheadOrEqual,
+    /// Local HEAD is behind the remote — a `git pull` would
+    /// fast-forward. This is the "update available" case.
+    Behind,
+    /// No usable local git checkout (typical: `cargo install`
+    /// without a clone, or a dev machine where the binary's build
+    /// SHA doesn't correspond to /opt/hyperion/.git). Caller should
+    /// fall back to the naive string compare.
+    Unknown,
+}
+
+/// Check whether `/opt/hyperion`'s git HEAD is at or past `latest`.
+///
+/// The classic false positive this fixes: `update.sh` does
+/// `git pull origin main` and rebuilds. The just-built agent's
+/// `current_git_sha` is now main HEAD, which may be ahead of the
+/// `rolling` tag because the GitHub Action that fast-forwards the
+/// tag hasn't run yet. Without this check the dashboard nags about
+/// "update available" pointing at a SHA the operator just installed
+/// past.
+///
+/// Runs as the agent (typically root), reads `/opt/hyperion/.git`
+/// directly via `git -C /opt/hyperion merge-base --is-ancestor
+/// <latest> HEAD`. Exit 0 means "yes, latest is reachable from HEAD"
+/// → we're at-or-after latest. Exit 1 means the opposite. Anything
+/// else → Unknown.
+async fn ahead_of_remote(latest: &str) -> AheadResult {
+    // If /opt/hyperion/.git doesn't exist, we can't tell — common on
+    // dev boxes where the binary was `cargo run`'d from somewhere
+    // else. Return Unknown so the caller falls back to string compare.
+    if !std::path::Path::new("/opt/hyperion/.git").exists() {
+        return AheadResult::Unknown;
+    }
+    // Trim noise the caller might have included — exact 40-char hex
+    // please.
+    let latest = latest.trim();
+    if latest.is_empty() || !latest.chars().all(|c| c.is_ascii_hexdigit()) {
+        return AheadResult::Unknown;
+    }
+    let out = tokio::process::Command::new("/usr/bin/git")
+        .args(["-C", "/opt/hyperion", "merge-base", "--is-ancestor", latest, "HEAD"])
+        .output()
+        .await;
+    match out {
+        Ok(o) if o.status.success() => AheadResult::AheadOrEqual,
+        Ok(o) if o.status.code() == Some(1) => AheadResult::Behind,
+        // Status 128 = "fatal: Not a valid commit name" — the remote
+        // SHA isn't in our local object store. That happens after a
+        // shallow clone or after a force-push. Try `git fetch` once
+        // to make the SHA reachable, then retry.
+        Ok(o) if o.status.code() == Some(128) => {
+            let _ = tokio::process::Command::new("/usr/bin/git")
+                .args(["-C", "/opt/hyperion", "fetch", "--tags", "origin"])
+                .output()
+                .await;
+            let retry = tokio::process::Command::new("/usr/bin/git")
+                .args(["-C", "/opt/hyperion", "merge-base", "--is-ancestor", latest, "HEAD"])
+                .output()
+                .await;
+            match retry {
+                Ok(o) if o.status.success() => AheadResult::AheadOrEqual,
+                Ok(o) if o.status.code() == Some(1) => AheadResult::Behind,
+                _ => AheadResult::Unknown,
+            }
+        }
+        _ => AheadResult::Unknown,
+    }
+}
+
 /// Decide whether `current` and `latest` git SHAs identify the same
 /// commit. Both sides are lowercased, then compared on the shorter
 /// length (a 7-char short SHA vs. a 40-char full SHA from the remote
@@ -4910,8 +4986,39 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     status.latest_sha = sha;
                     let (avail, msg) =
                         compare_git_shas(&status.current_sha, &status.latest_sha);
-                    status.update_available = avail;
-                    status.message = msg.to_string();
+                    if avail {
+                        // SHAs differ. Before flagging "update available",
+                        // check whether `current` is actually a descendant
+                        // of `latest` — i.e. we're *ahead* of the rolling
+                        // tag, not behind. This is the common false
+                        // positive: an operator runs `update.sh` which
+                        // `git pull`s main, then GHA hasn't yet moved the
+                        // `rolling` tag to the new HEAD. Without this
+                        // check the dashboard nags about an update that
+                        // doesn't exist.
+                        match ahead_of_remote(&status.latest_sha).await {
+                            AheadResult::AheadOrEqual => {
+                                status.update_available = false;
+                                status.message =
+                                    "up to date (ahead of rolling tag)".into();
+                            }
+                            AheadResult::Behind => {
+                                status.update_available = true;
+                                status.message = msg.to_string();
+                            }
+                            AheadResult::Unknown => {
+                                // No local git — fall back to the naive
+                                // string compare. Better to nag a dev box
+                                // occasionally than to silently miss a
+                                // real production update.
+                                status.update_available = avail;
+                                status.message = msg.to_string();
+                            }
+                        }
+                    } else {
+                        status.update_available = false;
+                        status.message = msg.to_string();
+                    }
                 }
             }
             Ok(out) => {

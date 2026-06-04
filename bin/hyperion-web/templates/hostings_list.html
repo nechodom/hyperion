@@ -21,18 +21,46 @@
   </div>
 </div>
 
-<div class="card" style="margin-bottom:1rem;padding:0.85rem 1rem">
-  <form method="get" action="/hostings" style="display:flex;gap:0.6rem;align-items:center;flex-wrap:wrap">
-    <input type="search" name="q" value="{{ q|e }}" placeholder="Search by domain…"
-           style="flex:1;min-width:14rem;max-width:24rem;margin:0">
-    <div class="btn-group" role="tablist">
-      <a class="btn small {% if state_filter.is_empty() %}primary{% endif %}" href="/hostings?q={{ q|e }}">All</a>
-      <a class="btn small {% if state_filter == "active" %}primary{% endif %}" href="/hostings?q={{ q|e }}&state=active">Active</a>
-      <a class="btn small {% if state_filter == "suspended" %}primary{% endif %}" href="/hostings?q={{ q|e }}&state=suspended">Suspended</a>
-      <a class="btn small {% if state_filter == "failed" %}primary{% endif %}" href="/hostings?q={{ q|e }}&state=failed">Failed</a>
+{# Modern toolbar — integrated search with leading icon + segmented
+   filter control underneath. No inline styles; everything lives in
+   .search-toolbar / .search-input / .search-segments in app.css. #}
+<div class="search-toolbar">
+  <form method="get" action="/hostings" class="search-form" role="search">
+    <div class="search-input">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input type="search" name="q" value="{{ q|e }}"
+             placeholder="Search hostings — domain, alias, system user…"
+             autocomplete="off" spellcheck="false">
+      {% if !q.is_empty() %}
+        <a href="/hostings{% if !state_filter.is_empty() %}?state={{ state_filter }}{% endif %}"
+           class="search-clear" title="Clear search" aria-label="Clear search">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+        </a>
+      {% endif %}
+      <kbd class="search-hint">/</kbd>
     </div>
-    <button type="submit" class="btn small">Search</button>
+    {# Preserve the active state filter through a search submission. #}
+    {% if !state_filter.is_empty() %}<input type="hidden" name="state" value="{{ state_filter }}">{% endif %}
   </form>
+
+  <nav class="search-segments" aria-label="Filter by state">
+    <a class="seg {% if state_filter.is_empty() %}active{% endif %}"
+       href="/hostings{% if !q.is_empty() %}?q={{ q|e }}{% endif %}">
+      All {% if total_count > 0 %}<span class="seg-count">{{ total_count }}</span>{% endif %}
+    </a>
+    <a class="seg {% if state_filter == "active" %}active{% endif %}"
+       href="/hostings?state=active{% if !q.is_empty() %}&q={{ q|e }}{% endif %}">
+      <span class="seg-dot ok"></span>Active
+    </a>
+    <a class="seg {% if state_filter == "suspended" %}active{% endif %}"
+       href="/hostings?state=suspended{% if !q.is_empty() %}&q={{ q|e }}{% endif %}">
+      <span class="seg-dot warn"></span>Suspended
+    </a>
+    <a class="seg {% if state_filter == "failed" %}active{% endif %}"
+       href="/hostings?state=failed{% if !q.is_empty() %}&q={{ q|e }}{% endif %}">
+      <span class="seg-dot err"></span>Failed
+    </a>
+  </nav>
 </div>
 
 {% if let Some(f) = flash %}

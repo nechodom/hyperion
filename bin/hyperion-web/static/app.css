@@ -2180,7 +2180,28 @@ hr.divider {
  *  Interactive sparkline tooltips + crosshair
  * ============================================================ */
 .spark-card { position: relative; }
-.spark-svg { cursor: crosshair; }
+.spark-svg {
+  cursor: crosshair;
+  /* Ensure the SVG element itself captures mousemove events regardless
+     of whether the cursor is over a painted path or in transparent
+     space. Without this, the gradient-with-0%-opacity at the bottom
+     of the area path swallows events in some browsers and the
+     tooltip never fires. The inner paths get pointer-events: none
+     below so the SVG root is the only hit target — simpler hit-test
+     than per-element. */
+  pointer-events: all;
+}
+.spark-svg .spark-area,
+.spark-svg .spark-line {
+  pointer-events: none;
+}
+.spark-svg .spark-hitbox {
+  /* Transparent rect covering the full viewBox — a guaranteed
+     opaque-to-the-event-loop hit target even if the area gradient
+     is fully transparent at this point along the X axis. */
+  fill: transparent;
+  pointer-events: all;
+}
 .spark-tip {
   position: absolute;
   background: var(--surface-3);
@@ -2243,6 +2264,145 @@ hr.divider {
   font-size: inherit;
 }
 .node-chip svg { color: var(--primary); flex-shrink: 0; }
+
+/* ============================================================
+ *  Search toolbar — modern integrated search input + segmented
+ *  filter control (replaces the cramped row of small buttons that
+ *  the hostings list used to ship). Reusable for any list page.
+ * ============================================================ */
+.search-toolbar {
+  display: flex;
+  align-items: stretch;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+}
+.search-form {
+  flex: 1 1 24rem;
+  min-width: 18rem;
+  margin: 0;
+}
+.search-input {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0 0.85rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  height: 40px;
+  transition: border-color var(--t-fast), box-shadow var(--t-fast);
+}
+.search-input:focus-within {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--primary) 18%, transparent);
+}
+.search-input svg { color: var(--text-soft); flex-shrink: 0; }
+.search-input input[type="search"] {
+  flex: 1;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: 500 0.92rem var(--font-ui);
+  padding: 0;
+  outline: none;
+  /* Strip the native search-input UA appearance so the field aligns
+     with our other inputs. */
+  -webkit-appearance: none;
+     -moz-appearance: none;
+          appearance: none;
+  min-width: 0;
+}
+.search-input input[type="search"]::placeholder { color: var(--text-soft); }
+.search-input input[type="search"]::-webkit-search-cancel-button { display: none; }
+.search-clear {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-2);
+  color: var(--text-soft);
+  text-decoration: none;
+  transition: background var(--t-fast), color var(--t-fast);
+  flex-shrink: 0;
+}
+.search-clear:hover { background: var(--surface-3); color: var(--text); }
+.search-hint {
+  font-family: var(--font-mono);
+  font-size: 0.7rem;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  padding: 0.05rem 0.4rem;
+  color: var(--text-soft);
+  flex-shrink: 0;
+}
+
+.search-segments {
+  display: inline-flex;
+  align-items: stretch;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 4px;
+  gap: 2px;
+  flex-shrink: 0;
+}
+.search-segments .seg {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  padding: 0 0.85rem;
+  font: 500 0.85rem var(--font-ui);
+  color: var(--text-dim);
+  text-decoration: none;
+  border-radius: calc(var(--radius) - 4px);
+  transition: background var(--t-fast), color var(--t-fast);
+  white-space: nowrap;
+}
+.search-segments .seg:hover {
+  color: var(--text);
+  background: var(--surface-2);
+}
+.search-segments .seg.active {
+  background: var(--primary);
+  color: var(--primary-fg);
+  font-weight: 600;
+}
+.search-segments .seg.active .seg-dot { box-shadow: 0 0 0 1px var(--primary-fg); }
+.search-segments .seg-count {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  padding: 0.05rem 0.4rem;
+  background: var(--surface-2);
+  border-radius: var(--radius-xs);
+  color: inherit;
+  opacity: 0.85;
+}
+.search-segments .seg.active .seg-count {
+  background: color-mix(in oklab, var(--primary-fg) 18%, transparent);
+}
+.seg-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+.seg-dot.ok   { background: var(--success); }
+.seg-dot.warn { background: var(--warn); }
+.seg-dot.err  { background: var(--danger); }
+
+@media (max-width: 720px) {
+  .search-segments {
+    width: 100%;
+    overflow-x: auto;
+  }
+  .search-segments .seg { padding: 0 0.65rem; }
+  .search-hint { display: none; }
+}
 
 /* ============================================================
  *  Sidebar live status pulse dot
