@@ -78,7 +78,7 @@ pub struct NodeSummary {
 
 /// Cluster-wide aggregate. Today single-node = node_stats[0]; later
 /// folds across enrolled nodes.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ClusterStats {
     pub nodes: Vec<NodeStats>,
     pub total_hostings: i64,

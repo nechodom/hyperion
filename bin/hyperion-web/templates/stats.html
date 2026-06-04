@@ -22,7 +22,8 @@
       <select id="node-switcher" name="node"
               onchange="this.form.submit()"
               style="min-width:14rem">
-        <option value="" {% if current_node.is_empty() || current_node == "local" %}selected{% endif %}>master (this node)</option>
+        <option value="" {% if current_node.is_empty() || current_node == "cluster" %}selected{% endif %}>Σ Cluster (all nodes)</option>
+        <option value="local" {% if current_node == "local" %}selected{% endif %}>master (this node)</option>
         {% for n in all_nodes %}
         <option value="{{ n.node_id }}" {% if current_node == n.node_id %}selected{% endif %}>
           {{ n.label }}{% if let Some(ip) = n.public_ip.as_ref() %} — {{ ip }}{% endif %}
@@ -40,6 +41,20 @@
     <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
     <div class="flash-body">{{ e }}</div>
   </div>
+{% endif %}
+
+{# Banner explaining what "cluster" means when that view is active.
+   When the operator switched to a single node, this hides itself. #}
+{% if current_node.is_empty() || current_node == "cluster" %}
+  {% if !all_nodes.is_empty() %}
+  <div style="padding:0.7rem 1rem;margin-bottom:1rem;border-radius:8px;background:var(--surface-1);border-left:4px solid var(--accent);font-size:0.88rem;line-height:1.55">
+    <strong>Σ Cluster view.</strong>
+    Totals below are summed across the master + {{ all_nodes.len() }} enrolled
+    {% if all_nodes.len() == 1 %}node{% else %}nodes{% endif %} (load + memory
+    sparklines show the master only — switch the dropdown to a node to see
+    that node's history).
+  </div>
+  {% endif %}
 {% endif %}
 
 {% if let Some(c) = cluster %}

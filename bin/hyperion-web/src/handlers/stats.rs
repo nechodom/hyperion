@@ -81,39 +81,64 @@ pub async fn get_stats(
     ctx: AuthCtx,
     Query(query): Query<StatsQuery>,
 ) -> Result<Response, AppError> {
-    // Decide target node up front: the `node` query param selects the
-    // node we DISPATCH to (was previously interpreted as "filter the
-    // cluster_stats response", but now that we want real per-node
-    // metrics we need to actually run cluster_stats + history ON the
-    // chosen node).
+    // View mode:
+    //   - empty / "cluster" → AGGREGATE across master + all enrolled nodes
+    //   - "local"           → master local only
+    //   - "<node_id>"       → single-node view via signed RPC
+    //
+    // The cluster default makes /stats with no params show the
+    // multi-node overview, which is what most operators want first.
+    // To see just the master's view they pick "master only".
+    let is_cluster_view = query.node.is_empty() || query.node == "cluster";
     let target_owned = query.node.clone();
-    let target = if target_owned.is_empty()
-        || target_owned == crate::dispatcher::LOCAL_NODE_SENTINEL
-    {
+    let target = if is_cluster_view || target_owned == crate::dispatcher::LOCAL_NODE_SENTINEL {
         None
     } else {
         Some(target_owned.as_str())
     };
 
-    // We need both: latest snapshot (ClusterStats) + history (sparklines).
-    // Fetch in parallel since they're independent.
-    let cluster_fut =
-        crate::dispatcher::dispatch_to_node(&state, target, Request::ClusterStats);
-    // ~4 hours of 5-minute samples (48 points) is a comfortable
-    // sparkline width without being so dense the dots blur into noise.
-    let history_fut = crate::dispatcher::dispatch_to_node(
-        &state,
-        target,
-        Request::NodeMetricsHistory { limit: 48 },
-    );
-    let (cluster_res, history_res) = tokio::join!(cluster_fut, history_fut);
-
-    let (cluster, mut error) = match cluster_res {
-        Ok(RpcResponse::ClusterStats(c)) => (Some(c), None),
-        Ok(RpcResponse::Error(e)) => (None, Some(e.to_string())),
-        Ok(_) => (None, Some("unexpected agent response".into())),
-        Err(e) => (None, Some(e.to_string())),
+    // Always fetch the list of enrolled nodes from the master.
+    let all_nodes = match hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::NodesList,
+    )
+    .await
+    {
+        Ok(RpcResponse::NodesList(v)) => v,
+        _ => Vec::new(),
     };
+
+    // Cluster aggregate: fetch ClusterStats from master + every
+    // enrolled node in parallel, sum the totals, concatenate the
+    // nodes arrays. Single-node mode just hits one agent.
+    let (cluster, mut error) = if is_cluster_view {
+        let agg = aggregate_cluster_stats(&state, &all_nodes).await;
+        match agg {
+            Ok(c) => (Some(c), None),
+            Err(e) => (None, Some(e)),
+        }
+    } else {
+        let cluster_res =
+            crate::dispatcher::dispatch_to_node(&state, target, Request::ClusterStats).await;
+        match cluster_res {
+            Ok(RpcResponse::ClusterStats(c)) => (Some(c), None),
+            Ok(RpcResponse::Error(e)) => (None, Some(e.to_string())),
+            Ok(_) => (None, Some("unexpected agent response".into())),
+            Err(e) => (None, Some(e.to_string())),
+        }
+    };
+
+    // History (sparklines) is per-node: in cluster mode we pull
+    // master's history as a representative — sparklines for "the
+    // cluster" don't have a single agent-level meaning. Operators
+    // who want a node-specific history switch the dropdown.
+    let history_target = if is_cluster_view { None } else { target };
+    let history_res = crate::dispatcher::dispatch_to_node(
+        &state,
+        history_target,
+        Request::NodeMetricsHistory { limit: 48 },
+    )
+    .await;
 
     let history: NodeMetricsHistory = match history_res {
         Ok(RpcResponse::NodeMetricsHistory(h)) => h,
@@ -126,20 +151,11 @@ pub async fn get_stats(
         _ => NodeMetricsHistory::default(),
     };
 
-    // Always fetch the list of enrolled nodes from the master (NOT
-    // from `target`) so the switcher knows about every node even
-    // when the operator is currently viewing one of them. Failure
-    // → empty list → switcher hides itself in the template.
-    let all_nodes = match hyperion_rpc_client::call(
-        &state.agent_socket,
-        Request::NodesList,
-    )
-    .await
-    {
-        Ok(RpcResponse::NodesList(v)) => v,
-        _ => Vec::new(),
+    let current_label = if is_cluster_view {
+        "cluster (all nodes)".to_string()
+    } else {
+        label_for_node(&query.node, &all_nodes)
     };
-    let current_label = label_for_node(&query.node, &all_nodes);
 
     let selected_node = cluster.as_ref().and_then(|c| {
         if !query.node.is_empty() {
@@ -206,6 +222,120 @@ pub async fn get_stats(
         current_label,
     };
     Ok(Html(tpl.render()?).into_response())
+}
+
+/// Build a synthetic cluster-wide ClusterStats by fan-out:
+///   - master local socket
+///   - signed RPC to every enrolled node
+/// Sums the numeric totals, concatenates per-node arrays.
+/// Failing fetches are logged + skipped — partial answers are
+/// better than no answer.
+async fn aggregate_cluster_stats(
+    state: &SharedState,
+    nodes: &[hyperion_types::NodeSummary],
+) -> Result<ClusterStats, String> {
+    use hyperion_types::NodeStats;
+    let mut total = ClusterStats::default();
+
+    // Master local.
+    match crate::dispatcher::dispatch_to_node(state, None, Request::ClusterStats).await {
+        Ok(RpcResponse::ClusterStats(c)) => merge_cluster(&mut total, &c),
+        Ok(RpcResponse::Error(e)) => {
+            tracing::warn!(error=%e, "cluster aggregate: master fetch errored");
+        }
+        Err(e) => {
+            tracing::warn!(error=%e, "cluster aggregate: master fetch unreachable");
+        }
+        _ => {}
+    }
+
+    // Every enrolled node, in parallel via tokio::spawn so we
+    // don't add a `futures` crate dep just for join_all.
+    let mut handles: Vec<tokio::task::JoinHandle<(String, Result<RpcResponse, _>)>> =
+        Vec::with_capacity(nodes.len());
+    for n in nodes {
+        let s = state.clone();
+        let id = n.node_id.clone();
+        handles.push(tokio::spawn(async move {
+            let r = crate::dispatcher::dispatch_to_node(
+                &s,
+                Some(&id),
+                Request::ClusterStats,
+            )
+            .await;
+            (id, r)
+        }));
+    }
+    let mut results: Vec<(String, _)> = Vec::with_capacity(handles.len());
+    for h in handles {
+        if let Ok(r) = h.await {
+            results.push(r);
+        }
+    }
+    for (node_id, r) in results {
+        match r {
+            Ok(RpcResponse::ClusterStats(c)) => merge_cluster(&mut total, &c),
+            Ok(RpcResponse::Error(e)) => {
+                tracing::warn!(node=%node_id, error=%e, "cluster aggregate: remote fetch errored");
+                // Surface as a placeholder NodeStats so the operator
+                // sees "this node didn't answer" instead of just
+                // missing from the table.
+                total.nodes.push(NodeStats {
+                    node_id: node_id.clone(),
+                    label: node_id.clone(),
+                    hostings_count: 0,
+                    hostings_active: 0,
+                    hostings_suspended: 0,
+                    hostings_failed: 0,
+                    total_disk_bytes: 0,
+                    total_bw_out_24h: 0,
+                    total_requests_24h: 0,
+                    loadavg_1m_x100: 0,
+                    mem_total_kib: 0,
+                    mem_used_kib: 0,
+                    uptime_secs: 0,
+                    sampled_at: 0,
+                    agent_version: String::new(),
+                    agent_online: false,
+                });
+            }
+            Err(e) => {
+                tracing::warn!(node=%node_id, error=%e, "cluster aggregate: remote unreachable");
+                total.nodes.push(NodeStats {
+                    node_id: node_id.clone(),
+                    label: node_id.clone(),
+                    hostings_count: 0,
+                    hostings_active: 0,
+                    hostings_suspended: 0,
+                    hostings_failed: 0,
+                    total_disk_bytes: 0,
+                    total_bw_out_24h: 0,
+                    total_requests_24h: 0,
+                    loadavg_1m_x100: 0,
+                    mem_total_kib: 0,
+                    mem_used_kib: 0,
+                    uptime_secs: 0,
+                    sampled_at: 0,
+                    agent_version: String::new(),
+                    agent_online: false,
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(total)
+}
+
+/// Add `src`'s totals into `dst` and append its nodes array.
+fn merge_cluster(dst: &mut ClusterStats, src: &ClusterStats) {
+    dst.total_hostings += src.total_hostings;
+    dst.total_active += src.total_active;
+    dst.total_suspended += src.total_suspended;
+    dst.total_failed += src.total_failed;
+    dst.total_disk_bytes += src.total_disk_bytes;
+    dst.total_bw_out_24h += src.total_bw_out_24h;
+    dst.total_requests_24h += src.total_requests_24h;
+    dst.nodes.extend(src.nodes.iter().cloned());
 }
 
 fn label_for_node(current: &str, nodes: &[hyperion_types::NodeSummary]) -> String {
