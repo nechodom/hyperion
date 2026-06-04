@@ -7,7 +7,7 @@ use axum::extract::{Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Form;
-use hyperion_auth::Session;
+use hyperion_auth::{Session, PURPOSE_PENDING_2FA, PURPOSE_SESSION};
 use serde::Deserialize;
 use std::sync::Mutex;
 
@@ -259,6 +259,7 @@ fn mint_pending_2fa_cookie(
         expires_at: now + 300, // 5 minutes
         username: String::new(),
         role: "pending_2fa".to_string(),
+        purpose: PURPOSE_PENDING_2FA.to_string(),
     };
     let token = state
         .session
@@ -351,7 +352,11 @@ pub async fn post_login_2fa(
     };
     let now = hyperion_types::now_secs();
     let pending = match state.session.verify(&t, now) {
-        Ok(s) if s.role == "pending_2fa" => s,
+        // Reject anything other than a pending-2FA token here — a
+        // real-session token planted in the pending cookie slot
+        // would otherwise let a stolen full session masquerade as a
+        // half-authenticated one.
+        Ok(s) if s.is_pending_2fa() => s,
         _ => return Ok(Redirect::to("/login?error=expired").into_response()),
     };
     let resp = hyperion_rpc_client::call(
@@ -416,6 +421,7 @@ fn mint_session_redirect(
         expires_at: now + state.session_ttl(),
         username,
         role,
+        purpose: PURPOSE_SESSION.to_string(),
     };
     let token = state
         .session

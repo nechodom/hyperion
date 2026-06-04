@@ -41,11 +41,29 @@ pub struct Session {
     /// preserve their existing access — they were the bootstrap admin.
     #[serde(default = "default_role")]
     pub role: String,
+    /// Cookie purpose. A real authenticated session has
+    /// `purpose == "session"`. The short-lived "you've passed password,
+    /// now enter TOTP" cookie has `purpose == "pending_2fa"`. Both are
+    /// signed by the same Ed25519 key, so without this field a
+    /// pending-2FA token replanted in the main session cookie slot
+    /// would satisfy authentication and bypass the second factor.
+    /// Sessions signed before this field existed default to "session"
+    /// — they were always real sessions.
+    #[serde(default = "default_purpose")]
+    pub purpose: String,
 }
 
 fn default_role() -> String {
     "super_admin".to_string()
 }
+
+fn default_purpose() -> String {
+    "session".to_string()
+}
+
+/// Canonical purpose strings used in [`Session::purpose`].
+pub const PURPOSE_SESSION: &str = "session";
+pub const PURPOSE_PENDING_2FA: &str = "pending_2fa";
 
 impl Session {
     pub fn role_is(&self, role: &str) -> bool {
@@ -59,6 +77,15 @@ impl Session {
     }
     pub fn is_read_only(&self) -> bool {
         self.role == "viewer"
+    }
+    /// True only for tokens issued as full sessions. Authentication
+    /// middleware MUST gate on this — see security audit
+    /// "pending-2FA cookie shares SessionSigner with real sessions".
+    pub fn is_real_session(&self) -> bool {
+        self.purpose == PURPOSE_SESSION
+    }
+    pub fn is_pending_2fa(&self) -> bool {
+        self.purpose == PURPOSE_PENDING_2FA
     }
 }
 
@@ -146,6 +173,7 @@ mod tests {
             expires_at,
             username: "tester".into(),
             role: "super_admin".into(),
+            purpose: PURPOSE_SESSION.into(),
         }
     }
 
@@ -178,6 +206,7 @@ mod tests {
             expires_at: 10_000,
             username: "evil".into(),
             role: "super_admin".into(),
+            purpose: PURPOSE_SESSION.into(),
         };
         let new_payload = serde_json::to_vec(&evil).expect("json");
         let new_token = format!("{}.{}", B64.encode(&new_payload), sig);
@@ -215,5 +244,43 @@ mod tests {
         for bad in ["", ".", "nodot", "a.b.c", "###.###"] {
             assert!(s.verify(bad, 0).is_err(), "bad: {bad:?}");
         }
+    }
+
+    #[test]
+    fn pending_2fa_purpose_distinct_from_session() {
+        let s = SessionSigner::new_random();
+        let pending = Session {
+            sid: "p2fa-xyz".into(),
+            user_id: 7,
+            created_at: 1000,
+            expires_at: 10_000,
+            username: String::new(),
+            role: "pending_2fa".into(),
+            purpose: PURPOSE_PENDING_2FA.into(),
+        };
+        let token = s.sign(&pending).expect("sign");
+        let back = s.verify(&token, 9_000).expect("verify");
+        assert!(back.is_pending_2fa());
+        assert!(!back.is_real_session());
+    }
+
+    #[test]
+    fn legacy_token_without_purpose_decodes_as_session() {
+        // A payload missing the `purpose` field — what tokens signed
+        // before the field existed look like. The default must put
+        // them into the "session" bucket so existing browsers don't
+        // get force-logged-out on deploy.
+        let payload = serde_json::json!({
+            "sid": "legacy",
+            "user_id": 1,
+            "created_at": 100,
+            "expires_at": 999_999_999_999i64,
+            "username": "kevin",
+            "role": "super_admin"
+            // no `purpose`
+        });
+        let s: Session = serde_json::from_value(payload).expect("decode");
+        assert_eq!(s.purpose, PURPOSE_SESSION);
+        assert!(s.is_real_session());
     }
 }

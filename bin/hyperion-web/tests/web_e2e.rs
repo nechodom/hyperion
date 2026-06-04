@@ -187,8 +187,18 @@ async fn start_agent() -> (PathBuf, tempfile::TempDir) {
 }
 
 fn build_app(agent_socket: PathBuf, admin: AdminUser) -> axum::Router {
+    build_app_with_signer(agent_socket, admin, Arc::new(SessionSigner::new_random())).0
+}
+
+/// Same as [`build_app`] but lets the test keep a handle on the signer
+/// so it can mint tokens that the app will accept as valid signatures.
+/// Returned tuple is `(router, signer)`.
+fn build_app_with_signer(
+    agent_socket: PathBuf,
+    admin: AdminUser,
+    signer: Arc<SessionSigner>,
+) -> (axum::Router, Arc<SessionSigner>) {
     let cfg = Config::default();
-    let signer = SessionSigner::new_random();
     let csrf_key: [u8; 32] = {
         let mut k = [0u8; 32];
         use rand::RngCore;
@@ -203,11 +213,11 @@ fn build_app(agent_socket: PathBuf, admin: AdminUser) -> axum::Router {
             },
         },
         agent_socket,
-        session: Arc::new(signer),
+        session: signer.clone(),
         csrf_key: Arc::new(csrf_key),
         admin_user: Arc::new(admin),
     });
-    hyperion_web::build_router(state)
+    (hyperion_web::build_router(state), signer)
 }
 
 async fn body_string(resp: axum::response::Response) -> String {
@@ -981,6 +991,61 @@ async fn logout_post_is_exempt_from_csrf() {
     assert_eq!(resp.status(), StatusCode::SEE_OTHER);
     let loc = resp.headers().get(header::LOCATION).expect("loc");
     assert_eq!(loc.to_str().unwrap(), "/login");
+}
+
+/// Security regression: the pending-2FA cookie and the full-session
+/// cookie share the same Ed25519 signer. If `extract_auth` does not
+/// gate on the token's `purpose` field, an attacker who knows only the
+/// password (no TOTP) can take the `hyperion_session_pending2fa` value
+/// from `Set-Cookie` and replant it as `hyperion_session`, bypassing
+/// the second factor entirely. This test mints a `pending_2fa`-purpose
+/// token, plants it in the session cookie slot, and asserts the app
+/// refuses to authenticate it.
+#[tokio::test]
+async fn pending_2fa_token_in_session_cookie_slot_is_rejected() {
+    use hyperion_auth::{Session, PURPOSE_PENDING_2FA};
+
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let signer = Arc::new(SessionSigner::new_random());
+    let (app, signer) = build_app_with_signer(sock, admin, signer);
+
+    let now = hyperion_types::now_secs();
+    let pending = Session {
+        sid: "p2fa-test".into(),
+        user_id: 1,
+        created_at: now,
+        expires_at: now + 300,
+        username: String::new(),
+        role: "pending_2fa".into(),
+        purpose: PURPOSE_PENDING_2FA.into(),
+    };
+    let token = signer.sign(&pending).expect("sign");
+    let cookie = format!("hyperion_session={token}");
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    // require_auth must redirect to /login — NOT serve the dashboard.
+    assert_eq!(
+        resp.status(),
+        StatusCode::SEE_OTHER,
+        "pending-2FA token must not authenticate as a full session",
+    );
+    let loc = resp
+        .headers()
+        .get(header::LOCATION)
+        .expect("loc")
+        .to_str()
+        .unwrap();
+    assert!(loc.starts_with("/login"), "redirect target: {loc}");
 }
 
 fn extract_cookie(resp: &axum::response::Response) -> String {

@@ -92,7 +92,11 @@ fn extract_auth(parts: &mut Parts, state: &SharedState) -> AuthCtx {
         Some(t) => {
             let now = hyperion_types::now_secs();
             match state.session.verify(&t, now) {
-                Ok(s) => {
+                // Only real-session tokens authenticate. A pending-2FA
+                // token planted in the session cookie slot must NOT
+                // authenticate — otherwise password-only knowledge
+                // bypasses the TOTP second factor.
+                Ok(s) if s.is_real_session() => {
                     // Prefer the username embedded in the session
                     // (multi-user era). Old sessions from before
                     // multi-user have an empty string here — fall back
@@ -107,7 +111,7 @@ fn extract_auth(parts: &mut Parts, state: &SharedState) -> AuthCtx {
                         username,
                     }
                 }
-                Err(_) => AuthCtx {
+                _ => AuthCtx {
                     session: None,
                     username: fallback_username,
                 },
