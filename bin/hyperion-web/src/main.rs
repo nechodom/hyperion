@@ -67,6 +67,7 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
         session: Arc::new(signer),
         csrf_key: Arc::new(csrf_key),
         admin_user: Arc::new(admin),
+        ratelimit: Arc::new(hyperion_web::ratelimit::RateLimiter::new()),
     });
     let app = hyperion_web::build_router(state);
     let bind_addr: std::net::SocketAddr = listen
@@ -91,13 +92,19 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
                     )
                 })?;
         tracing::info!(addr=%bind_addr, "hyperion-web ready (TLS)");
+        // Per-IP rate-limit handlers need ConnectInfo<SocketAddr>;
+        // wiring it here makes axum extract it for every request.
         axum_server::bind_rustls(bind_addr, rustls_config)
-            .serve(app.into_make_service())
+            .serve(app.into_make_service_with_connect_info::<std::net::SocketAddr>())
             .await?;
     } else {
         let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
         tracing::info!(addr=%bind_addr, "hyperion-web ready (PLAINTEXT)");
-        axum::serve(listener, app).await?;
+        axum::serve(
+            listener,
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .await?;
     }
     Ok(())
 }

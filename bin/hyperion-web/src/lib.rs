@@ -8,6 +8,7 @@ pub mod auth;
 pub mod config;
 pub mod error;
 pub mod handlers;
+pub mod ratelimit;
 pub mod state;
 
 use crate::state::SharedState;

@@ -216,6 +216,7 @@ fn build_app_with_signer(
         session: signer.clone(),
         csrf_key: Arc::new(csrf_key),
         admin_user: Arc::new(admin),
+        ratelimit: Arc::new(hyperion_web::ratelimit::RateLimiter::new()),
     });
     (hyperion_web::build_router(state), signer)
 }

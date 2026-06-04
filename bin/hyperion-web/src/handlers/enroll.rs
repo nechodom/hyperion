@@ -6,12 +6,40 @@
 //! operator deletes the local marker).
 
 use crate::error::AppError;
+use crate::ratelimit::Bucket;
 use crate::state::SharedState;
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Json, Response};
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
 use serde::{Deserialize, Serialize};
+use std::net::SocketAddr;
+
+/// Effective IP for rate-limit bucketing. Prefers `X-Forwarded-For`
+/// (when hyperion-web sits behind nginx / cloudflare), falls back to
+/// `X-Real-IP`, then to the connection peer.
+///
+/// Bucketing per-source-IP only matters when the deployment topology
+/// actually exposes a per-client IP. In a deployment where every
+/// request lands at hyperion-web from the same upstream proxy WITHOUT
+/// X-Forwarded-For propagation, all requests will share a bucket —
+/// which is the safer-default failure mode (over-limit) than the
+/// alternative of no limit at all.
+fn effective_ip(headers: &HeaderMap, peer: SocketAddr) -> std::net::IpAddr {
+    if let Some(v) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        if let Some(first) = v.split(',').next() {
+            if let Ok(ip) = first.trim().parse() {
+                return ip;
+            }
+        }
+    }
+    if let Some(v) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
+        if let Ok(ip) = v.trim().parse() {
+            return ip;
+        }
+    }
+    peer.ip()
+}
 
 #[derive(Deserialize)]
 pub struct EnrollRequest {
@@ -35,9 +63,19 @@ pub struct EnrollResponse {
 
 pub async fn post_enroll(
     State(state): State<SharedState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(req): Json<EnrollRequest>,
 ) -> Result<Response, AppError> {
+    // Rate-limit per source IP: enroll is a one-time event per node
+    // lifetime, so 5/min is extremely generous and still pinches off
+    // any kind of token-fuzzing flood.
+    let ip = effective_ip(&headers, peer);
+    if !state.ratelimit.check("enroll", ip, Bucket::per_minute(5)) {
+        return Err(AppError::TooManyRequests(
+            "enrollment rate limit exceeded — try again shortly".into(),
+        ));
+    }
     if req.token.trim().is_empty() {
         return Err(AppError::BadRequest("missing token".into()));
     }
@@ -124,8 +162,20 @@ pub struct HeartbeatRequest {
 
 pub async fn post_heartbeat(
     State(state): State<SharedState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Json(req): Json<HeartbeatRequest>,
 ) -> Result<Response, AppError> {
+    // 60/min per IP: nodes heartbeat every 60s so a generous cap
+    // tolerates up to ~60 distinct nodes behind a single NAT before
+    // we'd start dropping. Realistic deployments have at most a
+    // handful — anything well above that is fuzzing / enumeration.
+    let ip = effective_ip(&headers, peer);
+    if !state.ratelimit.check("heartbeat", ip, Bucket::per_minute(60)) {
+        return Err(AppError::TooManyRequests(
+            "heartbeat rate limit exceeded".into(),
+        ));
+    }
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
         Request::NodeHeartbeat {

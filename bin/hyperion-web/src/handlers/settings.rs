@@ -6,15 +6,18 @@
 
 use crate::auth::AuthCtx;
 use crate::error::AppError;
+use crate::ratelimit::Bucket;
 use crate::state::SharedState;
 use askama::Template;
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
+use axum::http::HeaderMap;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::response::Json;
 use axum::Form;
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
 use hyperion_types::{AgentConfigView, EmailLogEntry, SmtpAutodetect, UpdateStatus};
 use serde::Deserialize;
+use std::net::SocketAddr;
 
 #[derive(Template)]
 #[template(path = "settings.html")]
@@ -115,6 +118,8 @@ pub struct EmailTestForm {
 pub async fn post_email_test(
     State(state): State<SharedState>,
     ctx: AuthCtx,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Form(form): Form<EmailTestForm>,
 ) -> Result<Response, AppError> {
     // Without this gate any authenticated viewer can use Hyperion's
@@ -125,6 +130,17 @@ pub async fn post_email_test(
             Redirect::to("/settings?flash_error=admin+role+required+to+send+test+emails")
                 .into_response(),
         );
+    }
+    // Per-IP rate limit so a compromised admin cookie / leaked
+    // session can't be used as an open relay or address enumerator.
+    // 3/min is comfortable for an operator clicking Test a few times
+    // and absurdly low for automated abuse.
+    let ip = email_test_ip(&headers, peer);
+    if !state.ratelimit.check("email-test", ip, Bucket::per_minute(3)) {
+        return Ok(Redirect::to(
+            "/settings?flash_error=test+email+rate+limit+exceeded+%E2%80%94+wait+a+minute",
+        )
+        .into_response());
     }
     let to = form.to.trim().to_string();
     // Bound the address at the RFC5321 max so a 50 KB pathological
@@ -291,4 +307,23 @@ fn urlencode(s: &str) -> String {
             b => format!("%{:02X}", b),
         })
         .collect()
+}
+
+/// Resolve the effective source IP for the email-test rate limit
+/// bucket. Same precedence as the /api/enroll handler: forwarded-for
+/// → real-ip → peer socket.
+fn email_test_ip(headers: &HeaderMap, peer: SocketAddr) -> std::net::IpAddr {
+    if let Some(v) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        if let Some(first) = v.split(',').next() {
+            if let Ok(ip) = first.trim().parse() {
+                return ip;
+            }
+        }
+    }
+    if let Some(v) = headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
+        if let Ok(ip) = v.trim().parse() {
+            return ip;
+        }
+    }
+    peer.ip()
 }

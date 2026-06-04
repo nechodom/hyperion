@@ -17,6 +17,12 @@ pub enum AppError {
     Rpc(String),
     #[error("internal: {0}")]
     Internal(String),
+    /// 429 — returned by per-IP rate-limited handlers (enroll,
+    /// heartbeat, email-test). Body is the reason shown to the
+    /// caller. JSON-shaped because the limited endpoints are
+    /// JSON-API (called by curl from nodes, not via the browser).
+    #[error("too many requests: {0}")]
+    TooManyRequests(String),
 }
 
 impl IntoResponse for AppError {
@@ -43,6 +49,10 @@ impl IntoResponse for AppError {
                     "<h1>500 Internal Server Error</h1>".to_string(),
                 )
             }
+            AppError::TooManyRequests(m) => (
+                StatusCode::TOO_MANY_REQUESTS,
+                format!("<h1>429 Too Many Requests</h1><p>{m}</p>"),
+            ),
         };
         (status, [("content-type", "text/html; charset=utf-8")], body).into_response()
     }
