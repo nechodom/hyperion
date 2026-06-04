@@ -6636,6 +6636,139 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok((rel_path, entries))
     }
 
+    pub async fn hosting_file_download(
+        &self,
+        sel: HostingSelector,
+        rel_path: String,
+    ) -> Result<(String, String, String), RpcError> {
+        use base64::Engine;
+        let detail = self.get(sel).await?;
+        let jail = std::path::PathBuf::from(&detail.root_dir);
+        let (bytes, name) =
+            hyperion_adapters::files::read_raw_in_jail(&jail, &rel_path)
+                .await
+                .map_err(|e| RpcError::Validation {
+                    message: e.to_string(),
+                })?;
+        let mime = hyperion_adapters::files::guess_mime(&name).to_string();
+        let bytes_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+        Ok((rel_path, bytes_b64, mime))
+    }
+
+    pub async fn hosting_file_write(
+        &self,
+        sel: HostingSelector,
+        rel_path: String,
+        bytes_b64: String,
+    ) -> Result<(), RpcError> {
+        use base64::Engine;
+        let detail = self.get(sel).await?;
+        let jail = std::path::PathBuf::from(&detail.root_dir);
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(bytes_b64.as_bytes())
+            .map_err(|e| RpcError::Validation {
+                message: format!("base64 decode: {e}"),
+            })?;
+        hyperion_adapters::files::write_file_in_jail(&jail, &rel_path, &bytes)
+            .await
+            .map_err(|e| RpcError::Validation {
+                message: e.to_string(),
+            })?;
+        self.append_audit(
+            "hosting.file.write",
+            Some(detail.id.as_str()),
+            &serde_json::json!({
+                "domain": detail.domain,
+                "rel_path": rel_path,
+                "bytes": bytes.len(),
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
+    pub async fn hosting_file_delete(
+        &self,
+        sel: HostingSelector,
+        rel_path: String,
+    ) -> Result<(), RpcError> {
+        let detail = self.get(sel).await?;
+        let jail = std::path::PathBuf::from(&detail.root_dir);
+        hyperion_adapters::files::delete_in_jail(&jail, &rel_path)
+            .await
+            .map_err(|e| RpcError::Validation {
+                message: e.to_string(),
+            })?;
+        self.append_audit(
+            "hosting.file.delete",
+            Some(detail.id.as_str()),
+            &serde_json::json!({
+                "domain": detail.domain,
+                "rel_path": rel_path,
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
+    pub async fn hosting_file_mkdir(
+        &self,
+        sel: HostingSelector,
+        rel_path: String,
+    ) -> Result<(), RpcError> {
+        let detail = self.get(sel).await?;
+        let jail = std::path::PathBuf::from(&detail.root_dir);
+        hyperion_adapters::files::mkdir_in_jail(&jail, &rel_path)
+            .await
+            .map_err(|e| RpcError::Validation {
+                message: e.to_string(),
+            })?;
+        self.append_audit(
+            "hosting.file.mkdir",
+            Some(detail.id.as_str()),
+            &serde_json::json!({
+                "domain": detail.domain,
+                "rel_path": rel_path,
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
+    pub async fn hosting_file_rename(
+        &self,
+        sel: HostingSelector,
+        from: String,
+        to: String,
+    ) -> Result<(), RpcError> {
+        let detail = self.get(sel).await?;
+        let jail = std::path::PathBuf::from(&detail.root_dir);
+        hyperion_adapters::files::rename_in_jail(&jail, &from, &to)
+            .await
+            .map_err(|e| RpcError::Validation {
+                message: e.to_string(),
+            })?;
+        self.append_audit(
+            "hosting.file.rename",
+            Some(detail.id.as_str()),
+            &serde_json::json!({
+                "domain": detail.domain,
+                "from": from,
+                "to": to,
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
     pub async fn hosting_file_read(
         &self,
         sel: HostingSelector,

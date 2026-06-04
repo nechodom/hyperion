@@ -501,6 +501,40 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::HostingFileDownload { sel, rel_path } => {
+            match api.hosting_file_download(sel, rel_path).await {
+                Ok((rel_path, bytes_b64, mime)) => Response::HostingFileDownload {
+                    rel_path,
+                    bytes_b64,
+                    mime,
+                },
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::HostingFileWrite { sel, rel_path, bytes_b64 } => {
+            match api.hosting_file_write(sel, rel_path, bytes_b64).await {
+                Ok(()) => Response::HostingFileWrite,
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::HostingFileDelete { sel, rel_path } => {
+            match api.hosting_file_delete(sel, rel_path).await {
+                Ok(()) => Response::HostingFileDelete,
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::HostingFileMkdir { sel, rel_path } => {
+            match api.hosting_file_mkdir(sel, rel_path).await {
+                Ok(()) => Response::HostingFileMkdir,
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::HostingFileRename { sel, from, to } => {
+            match api.hosting_file_rename(sel, from, to).await {
+                Ok(()) => Response::HostingFileRename,
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::MonitorGet { sel } => match api.monitor_get(sel).await {
             Ok((config, history)) => Response::MonitorGet { config, history },
             Err(e) => Response::Error(e),
@@ -1152,6 +1186,43 @@ mod tests {
                 content: String::new(),
                 truncated: false,
             })
+        }
+        async fn hosting_file_download(
+            &self,
+            _: HostingSelector,
+            _: String,
+        ) -> Result<(String, String, String), RpcError> {
+            Ok((String::new(), String::new(), String::new()))
+        }
+        async fn hosting_file_write(
+            &self,
+            _: HostingSelector,
+            _: String,
+            _: String,
+        ) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn hosting_file_delete(
+            &self,
+            _: HostingSelector,
+            _: String,
+        ) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn hosting_file_mkdir(
+            &self,
+            _: HostingSelector,
+            _: String,
+        ) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn hosting_file_rename(
+            &self,
+            _: HostingSelector,
+            _: String,
+            _: String,
+        ) -> Result<(), RpcError> {
+            Ok(())
         }
         async fn monitor_get(
             &self,

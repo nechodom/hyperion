@@ -458,6 +458,13 @@ fn print_pretty(resp: &Response) {
         Response::NotificationsMarkAllRead { marked } => {
             println!("✓ marked {marked} notifications read");
         }
+        Response::HostingFileDownload { rel_path, bytes_b64, mime } => {
+            println!("✓ downloaded {rel_path} ({mime}, {} bytes b64)", bytes_b64.len());
+        }
+        Response::HostingFileWrite => println!("✓ file written"),
+        Response::HostingFileDelete => println!("✓ file deleted"),
+        Response::HostingFileMkdir => println!("✓ directory created"),
+        Response::HostingFileRename => println!("✓ renamed"),
         Response::HostingUsage(rows) => {
             println!(
                 "{:<14} {:>10} {:>10} {:>10} {:>10}",

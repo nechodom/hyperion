@@ -181,6 +181,17 @@ pub fn build_router(state: SharedState) -> Router {
             get(handlers::files::get_files),
         )
         .route(
+            "/hostings/:selector/files/upload",
+            post(handlers::files::post_upload),
+        )
+        .route(
+            "/hostings/:selector/files/download",
+            get(handlers::files::get_download),
+        )
+        .route("/hostings/files/delete", post(handlers::files::post_delete))
+        .route("/hostings/files/mkdir", post(handlers::files::post_mkdir))
+        .route("/hostings/files/rename", post(handlers::files::post_rename))
+        .route(
             "/hostings/monitor/set",
             post(handlers::hostings::post_monitor_set),
         )

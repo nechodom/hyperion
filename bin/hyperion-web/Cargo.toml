@@ -46,6 +46,7 @@ blake3.workspace = true
 hex.workspace = true
 askama_escape = "0.10"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+base64 = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }

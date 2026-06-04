@@ -1,15 +1,18 @@
-//! `/hostings/<sel>/files` — read-only file browser scoped to the
-//! hosting's htdocs root. Path traversal + symlinks already refused
-//! at the adapter layer; this handler just plumbs URL → RPC →
-//! template.
+//! `/hostings/<sel>/files` — file browser scoped to the hosting's
+//! htdocs root. Path traversal + symlinks already refused at the
+//! adapter layer; this handler plumbs URL → RPC → template, plus
+//! the write endpoints (upload / delete / mkdir / rename / download).
 
 use crate::auth::AuthCtx;
 use crate::error::AppError;
 use crate::handlers::hostings::{parse_selector_public, require_hosting_access};
 use crate::state::SharedState;
 use askama::Template;
-use axum::extract::{Path, State};
-use axum::response::{Html, IntoResponse, Response};
+use axum::extract::{Multipart, Path, State};
+use axum::http::{header, StatusCode};
+use axum::response::{Html, IntoResponse, Redirect, Response};
+use axum::Form;
+use base64::Engine;
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
 use hyperion_types::{HostingFileContent, HostingFileEntry};
 use serde::Deserialize;
@@ -30,6 +33,13 @@ struct FilesTpl<'a> {
     /// Set when ?file=<rel_path> — renders inline viewer.
     viewer: Option<HostingFileContent>,
     error: Option<String>,
+    /// Whether the current user can write (mkdir/upload/delete/rename).
+    /// Viewers see only the read-only UI.
+    can_write: bool,
+    /// One CSRF token used by every form on the files page.
+    csrf_token: String,
+    /// Optional flash from ?flash=...; rendered as a green banner.
+    flash: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -40,6 +50,9 @@ pub struct FilesQuery {
     /// `file` is a full rel_path (e.g. "wp-content/themes/style.css").
     #[serde(default)]
     pub file: Option<String>,
+    /// Set after a successful POST → green banner in the UI.
+    #[serde(default)]
+    pub flash: Option<String>,
 }
 
 pub async fn get_files(
@@ -94,6 +107,7 @@ pub async fn get_files(
 
     let breadcrumbs = build_breadcrumbs(&rel_path);
 
+    let can_write = !ctx.is_read_only();
     let tpl = FilesTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -107,8 +121,294 @@ pub async fn get_files(
         entries,
         viewer,
         error,
+        can_write,
+        csrf_token: super::session_csrf_token(&state, &ctx),
+        flash: q.flash.clone(),
     };
     Ok(Html(tpl.render()?).into_response())
+}
+
+// ─────────── Write handlers ───────────
+
+/// Guard: refuse non-writers up front so we don't even round-trip
+/// to the agent. The agent enforces too, but bouncing early is
+/// cheaper + gives a nicer error.
+fn require_write(ctx: &AuthCtx) -> Option<Response> {
+    if ctx.is_read_only() {
+        return Some((
+            StatusCode::FORBIDDEN,
+            "viewer role cannot modify files",
+        )
+            .into_response());
+    }
+    None
+}
+
+fn redirect_back(selector: &str, rel_path: &str, flash: &str) -> Response {
+    let q = format!(
+        "?path={}&flash={}",
+        crate::handlers::hostings::urlencoding(rel_path),
+        crate::handlers::hostings::urlencoding(flash)
+    );
+    Redirect::to(&format!(
+        "/hostings/{}/files{}",
+        crate::handlers::hostings::urlencoding(selector),
+        q
+    ))
+    .into_response()
+}
+
+#[derive(Deserialize)]
+pub struct DeleteForm {
+    pub selector: String,
+    pub rel_path: String,
+    #[serde(default)]
+    pub dir: String, // optional return path for the redirect
+}
+
+pub async fn post_delete(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<DeleteForm>,
+) -> Result<Response, AppError> {
+    if let Some(r) = require_write(&ctx) {
+        return Ok(r);
+    }
+    let sel = parse_selector_public(&form.selector)?;
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::HostingFileDelete {
+            sel,
+            rel_path: form.rel_path.clone(),
+        },
+    )
+    .await?;
+    match resp {
+        RpcResponse::HostingFileDelete => Ok(redirect_back(&form.selector, &form.dir, "Deleted")),
+        RpcResponse::Error(e) => Ok(redirect_back(&form.selector, &form.dir, &e.to_string())),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct MkdirForm {
+    pub selector: String,
+    /// Parent dir we're sitting in.
+    #[serde(default)]
+    pub dir: String,
+    /// New directory name (single component — no slashes).
+    pub name: String,
+}
+
+pub async fn post_mkdir(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<MkdirForm>,
+) -> Result<Response, AppError> {
+    if let Some(r) = require_write(&ctx) {
+        return Ok(r);
+    }
+    if form.name.contains('/') || form.name.contains('\\') || form.name.contains('\0') {
+        return Ok(redirect_back(&form.selector, &form.dir, "Invalid name"));
+    }
+    let sel = parse_selector_public(&form.selector)?;
+    let rel_path = if form.dir.is_empty() {
+        form.name.clone()
+    } else {
+        format!("{}/{}", form.dir.trim_end_matches('/'), form.name)
+    };
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::HostingFileMkdir {
+            sel,
+            rel_path: rel_path.clone(),
+        },
+    )
+    .await?;
+    match resp {
+        RpcResponse::HostingFileMkdir => Ok(redirect_back(&form.selector, &form.dir, "Created")),
+        RpcResponse::Error(e) => Ok(redirect_back(&form.selector, &form.dir, &e.to_string())),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct RenameForm {
+    pub selector: String,
+    #[serde(default)]
+    pub dir: String,
+    pub from: String,
+    /// New name (single component).
+    pub to_name: String,
+}
+
+pub async fn post_rename(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<RenameForm>,
+) -> Result<Response, AppError> {
+    if let Some(r) = require_write(&ctx) {
+        return Ok(r);
+    }
+    if form.to_name.contains('/') || form.to_name.contains('\\') || form.to_name.contains('\0') {
+        return Ok(redirect_back(&form.selector, &form.dir, "Invalid new name"));
+    }
+    // Build `to` path as siblings of `from`.
+    let parent = parent_dir(&form.from);
+    let to = if parent.is_empty() {
+        form.to_name.clone()
+    } else {
+        format!("{}/{}", parent, form.to_name)
+    };
+    let sel = parse_selector_public(&form.selector)?;
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::HostingFileRename {
+            sel,
+            from: form.from.clone(),
+            to,
+        },
+    )
+    .await?;
+    match resp {
+        RpcResponse::HostingFileRename => Ok(redirect_back(&form.selector, &form.dir, "Renamed")),
+        RpcResponse::Error(e) => Ok(redirect_back(&form.selector, &form.dir, &e.to_string())),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+/// Upload via multipart — `field "file"` is the uploaded file,
+/// `field "dir"` is the destination directory inside htdocs. CSRF
+/// rides in the `?_csrf=` query string per the multipart pattern
+/// established by the WP asset upload flow.
+pub async fn post_upload(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Path(selector): Path<String>,
+    mut mp: Multipart,
+) -> Result<Response, AppError> {
+    if let Some(r) = require_write(&ctx) {
+        return Ok(r);
+    }
+    let sel = parse_selector_public(&selector)?;
+    let mut dir = String::new();
+    let mut filename: Option<String> = None;
+    let mut bytes: Vec<u8> = Vec::new();
+    while let Some(field) = mp
+        .next_field()
+        .await
+        .map_err(|e| AppError::Internal(format!("multipart: {e}")))?
+    {
+        let name = field.name().unwrap_or("").to_string();
+        match name.as_str() {
+            "dir" => {
+                dir = field
+                    .text()
+                    .await
+                    .map_err(|e| AppError::Internal(format!("text: {e}")))?;
+            }
+            "file" => {
+                let fname = field.file_name().unwrap_or("upload.bin").to_string();
+                // Strip any path components — never trust client filenames.
+                let clean = std::path::Path::new(&fname)
+                    .file_name()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or("upload.bin")
+                    .to_string();
+                filename = Some(clean);
+                bytes = field
+                    .bytes()
+                    .await
+                    .map_err(|e| AppError::Internal(format!("bytes: {e}")))?
+                    .to_vec();
+            }
+            _ => {} // ignore unknown fields
+        }
+    }
+    let Some(fname) = filename else {
+        return Ok(redirect_back(&selector, &dir, "No file"));
+    };
+    if bytes.is_empty() {
+        return Ok(redirect_back(&selector, &dir, "Empty upload"));
+    }
+    let rel_path = if dir.is_empty() {
+        fname.clone()
+    } else {
+        format!("{}/{}", dir.trim_end_matches('/'), fname)
+    };
+    let bytes_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::HostingFileWrite {
+            sel,
+            rel_path,
+            bytes_b64,
+        },
+    )
+    .await?;
+    match resp {
+        RpcResponse::HostingFileWrite => Ok(redirect_back(&selector, &dir, "Uploaded")),
+        RpcResponse::Error(e) => Ok(redirect_back(&selector, &dir, &e.to_string())),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct DownloadQuery {
+    pub path: String,
+}
+
+pub async fn get_download(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Path(selector): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<DownloadQuery>,
+) -> Result<Response, AppError> {
+    let sel = parse_selector_public(&selector)?;
+    // Read access is enough for download — same as the inline reader.
+    let detail_resp =
+        hyperion_rpc_client::call(&state.agent_socket, Request::HostingGet(sel.clone())).await?;
+    let detail = match detail_resp {
+        RpcResponse::HostingGet(d) => d,
+        RpcResponse::Error(e) => return Err(AppError::Rpc(e.to_string())),
+        _ => return Err(AppError::Internal("unexpected response".into())),
+    };
+    if let Err(r) = require_hosting_access(&state, &ctx, detail.id.as_str(), false).await {
+        return Ok(r);
+    }
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::HostingFileDownload {
+            sel,
+            rel_path: q.path.clone(),
+        },
+    )
+    .await?;
+    match resp {
+        RpcResponse::HostingFileDownload { rel_path, bytes_b64, mime } => {
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(bytes_b64.as_bytes())
+                .map_err(|e| AppError::Internal(format!("b64: {e}")))?;
+            // Browser-safe download filename (strip path).
+            let fname = std::path::Path::new(&rel_path)
+                .file_name()
+                .and_then(|s| s.to_str())
+                .unwrap_or("download.bin");
+            Ok((
+                [
+                    (header::CONTENT_TYPE, mime),
+                    (
+                        header::CONTENT_DISPOSITION,
+                        format!("attachment; filename=\"{}\"", fname.replace('"', "")),
+                    ),
+                ],
+                bytes,
+            )
+                .into_response())
+        }
+        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
 }
 
 struct DirListing {

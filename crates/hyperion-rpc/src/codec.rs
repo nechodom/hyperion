@@ -413,6 +413,35 @@ pub enum Request {
         sel: HostingSelector,
         rel_path: String,
     },
+    /// Download any file (≤ 64 MiB) as raw bytes — used for binary
+    /// files the inline reader refuses (images, PDFs, ZIPs).
+    HostingFileDownload {
+        sel: HostingSelector,
+        rel_path: String,
+    },
+    /// Write or overwrite a file. Caller must have manage rights.
+    /// `bytes` is base64-encoded for wire safety.
+    HostingFileWrite {
+        sel: HostingSelector,
+        rel_path: String,
+        bytes_b64: String,
+    },
+    /// Delete one file OR one empty directory.
+    HostingFileDelete {
+        sel: HostingSelector,
+        rel_path: String,
+    },
+    /// Create one new empty directory.
+    HostingFileMkdir {
+        sel: HostingSelector,
+        rel_path: String,
+    },
+    /// Rename / move a path inside the jail.
+    HostingFileRename {
+        sel: HostingSelector,
+        from: String,
+        to: String,
+    },
 
     /// Read the per-hosting monitor config + sample history.
     MonitorGet {
@@ -622,6 +651,15 @@ pub enum Response {
         entries: Vec<hyperion_types::HostingFileEntry>,
     },
     HostingFileRead(hyperion_types::HostingFileContent),
+    HostingFileDownload {
+        rel_path: String,
+        bytes_b64: String,
+        mime: String,
+    },
+    HostingFileWrite,
+    HostingFileDelete,
+    HostingFileMkdir,
+    HostingFileRename,
     MonitorGet {
         config: hyperion_types::MonitorConfigView,
         history: hyperion_types::MonitorHistory,

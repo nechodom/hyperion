@@ -13,8 +13,9 @@
   <div>
     <h1>Files · {{ domain }}</h1>
     <div class="subtitle">
-      Read-only browser scoped to <code>htdocs/</code>. Path traversal +
+      Browser scoped to <code>htdocs/</code>. Path traversal +
       symlinks refused at the agent layer.
+      {% if !can_write %}<span class="text-soft">(viewer role — read only)</span>{% endif %}
     </div>
   </div>
 </div>
@@ -24,6 +25,31 @@
     <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
     <div class="flash-body">{{ e }}</div>
   </div>
+{% endif %}
+{% if let Some(m) = flash %}
+  <div class="flash ok">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+    <div class="flash-body">{{ m }}</div>
+  </div>
+{% endif %}
+
+{% if can_write %}
+<div class="card" style="margin-bottom:1rem;padding:0.9rem 1rem;display:flex;gap:0.7rem;flex-wrap:wrap;align-items:center">
+  <form method="post" action="/hostings/files/mkdir" style="display:flex;gap:0.4rem;align-items:center;margin:0">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <input type="hidden" name="selector" value="{{ selector }}">
+    <input type="hidden" name="dir" value="{{ rel_path }}">
+    <input type="text" name="name" placeholder="new directory name" pattern="[^/\\\\\0]+" required style="width:14rem;font-size:0.85rem">
+    <button class="btn small" type="submit">+ New folder</button>
+  </form>
+  <form method="post" action="/hostings/{{ selector }}/files/upload?_csrf={{ csrf_token }}"
+        enctype="multipart/form-data" style="display:flex;gap:0.4rem;align-items:center;margin:0">
+    <input type="hidden" name="dir" value="{{ rel_path }}">
+    <input type="file" name="file" required style="font-size:0.85rem">
+    <button class="btn small primary" type="submit">Upload</button>
+  </form>
+  <span class="text-soft small">Max 64 MiB. Existing file with same name will be overwritten.</span>
+</div>
 {% endif %}
 
 <div class="card" style="margin-bottom:1rem;padding:0.7rem 1rem">
@@ -100,7 +126,36 @@
                 {% if e.kind == "dir" %}—{% else %}{{ crate::handlers::files::fmt_size_u64(e.size) }}{% endif %}
               </td>
               <td class="text-soft small">{{ crate::handlers::stats::fmt_ago(e.modified_at) }}</td>
-              <td></td>
+              <td class="right">
+                <div style="display:inline-flex;gap:0.3rem;align-items:center">
+                  {% if e.kind == "file" %}
+                    <a class="btn small" href="/hostings/{{ selector }}/files/download?path={{ e.rel_path|e }}" title="Download">↓</a>
+                  {% endif %}
+                  {% if can_write %}
+                    <form method="post" action="/hostings/files/rename" style="display:inline-flex;gap:0.2rem;margin:0">
+                      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                      <input type="hidden" name="selector" value="{{ selector }}">
+                      <input type="hidden" name="dir" value="{{ rel_path }}">
+                      <input type="hidden" name="from" value="{{ e.rel_path }}">
+                      <input type="text" name="to_name" value="{{ e.name }}" pattern="[^/\\\\\0]+" required
+                             style="width:9rem;font-size:0.78rem;padding:0.2rem 0.35rem"
+                             title="Rename — edit this name and submit">
+                      <button class="btn small" type="submit" title="Rename to the value in the box">⟲</button>
+                    </form>
+                    <form method="post" action="/hostings/files/delete" style="display:inline;margin:0"
+                          data-confirm-title="Delete {{ e.name }}"
+                          data-confirm-body="This {{ e.kind }} will be removed. Directories must be empty. Permanent — no undo button."
+                          data-confirm-confirm-label="Delete"
+                          data-confirm-variant="danger">
+                      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                      <input type="hidden" name="selector" value="{{ selector }}">
+                      <input type="hidden" name="rel_path" value="{{ e.rel_path }}">
+                      <input type="hidden" name="dir" value="{{ rel_path }}">
+                      <button class="btn small danger" type="submit" title="Delete">×</button>
+                    </form>
+                  {% endif %}
+                </div>
+              </td>
             </tr>
           {% endfor %}
         </tbody>

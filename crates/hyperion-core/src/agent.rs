@@ -595,6 +595,43 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     ) -> Result<hyperion_types::HostingFileContent, RpcError> {
         self.svc.hosting_file_read(sel, rel_path).await
     }
+    async fn hosting_file_download(
+        &self,
+        sel: HostingSelector,
+        rel_path: String,
+    ) -> Result<(String, String, String), RpcError> {
+        self.svc.hosting_file_download(sel, rel_path).await
+    }
+    async fn hosting_file_write(
+        &self,
+        sel: HostingSelector,
+        rel_path: String,
+        bytes_b64: String,
+    ) -> Result<(), RpcError> {
+        self.svc.hosting_file_write(sel, rel_path, bytes_b64).await
+    }
+    async fn hosting_file_delete(
+        &self,
+        sel: HostingSelector,
+        rel_path: String,
+    ) -> Result<(), RpcError> {
+        self.svc.hosting_file_delete(sel, rel_path).await
+    }
+    async fn hosting_file_mkdir(
+        &self,
+        sel: HostingSelector,
+        rel_path: String,
+    ) -> Result<(), RpcError> {
+        self.svc.hosting_file_mkdir(sel, rel_path).await
+    }
+    async fn hosting_file_rename(
+        &self,
+        sel: HostingSelector,
+        from: String,
+        to: String,
+    ) -> Result<(), RpcError> {
+        self.svc.hosting_file_rename(sel, from, to).await
+    }
     async fn monitor_get(
         &self,
         sel: HostingSelector,

@@ -2157,7 +2157,7 @@ pub async fn require_manage_for_selector(
     Ok(sel)
 }
 
-fn urlencoding(s: &str) -> String {
+pub(crate) fn urlencoding(s: &str) -> String {
     url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
 }
 

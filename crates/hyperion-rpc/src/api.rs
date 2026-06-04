@@ -388,6 +388,40 @@ pub trait AgentApi: Send + Sync + 'static {
         sel: crate::wire::HostingSelector,
         rel_path: String,
     ) -> Result<hyperion_types::HostingFileContent, RpcError>;
+    /// Download any file (≤ 64 MiB) as raw bytes. Returns (rel_path,
+    /// base64-encoded bytes, mime). Used for binary files the inline
+    /// reader refuses (images, ZIPs, PDFs).
+    async fn hosting_file_download(
+        &self,
+        sel: crate::wire::HostingSelector,
+        rel_path: String,
+    ) -> Result<(String, String, String), RpcError>;
+    /// Write/overwrite a file. bytes_b64 is base64 (no-pad ok).
+    async fn hosting_file_write(
+        &self,
+        sel: crate::wire::HostingSelector,
+        rel_path: String,
+        bytes_b64: String,
+    ) -> Result<(), RpcError>;
+    /// Delete one file OR one empty directory.
+    async fn hosting_file_delete(
+        &self,
+        sel: crate::wire::HostingSelector,
+        rel_path: String,
+    ) -> Result<(), RpcError>;
+    /// Create one new empty directory.
+    async fn hosting_file_mkdir(
+        &self,
+        sel: crate::wire::HostingSelector,
+        rel_path: String,
+    ) -> Result<(), RpcError>;
+    /// Rename or move a path inside the jail.
+    async fn hosting_file_rename(
+        &self,
+        sel: crate::wire::HostingSelector,
+        from: String,
+        to: String,
+    ) -> Result<(), RpcError>;
 
     /// Per-hosting monitor: get config + recent samples.
     async fn monitor_get(
