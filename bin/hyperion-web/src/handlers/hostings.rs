@@ -1131,6 +1131,12 @@ pub struct DeleteForm {
     keep_user: Option<String>,
     #[serde(default)]
     keep_db: Option<String>,
+    /// Which node owns this hosting. Filled by the listing template
+    /// from the aggregated HostingSummary.node_id field. Empty /
+    /// "local" → master itself. Missing field defaults to master
+    /// for backwards compatibility with the pre-multi-node form.
+    #[serde(default)]
+    target_node: String,
 }
 
 pub async fn post_delete(
@@ -1146,12 +1152,33 @@ pub async fn post_delete(
         keep_user: form.keep_user.as_deref() == Some("on"),
         keep_database: form.keep_db.as_deref() == Some("on"),
     };
-    let resp = hyperion_rpc_client::call(&state.agent_socket, Request::HostingDelete { sel, opts })
-        .await?;
+    // Dispatch to the node that actually owns the hosting. Without
+    // this, deletes always hit the master and silently do nothing
+    // for hostings provisioned on a worker (the very bug that left
+    // orphan rows blocking the UNIQUE(domain) constraint on retry).
+    let target = node_target(&form.target_node);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target,
+        Request::HostingDelete { sel, opts },
+    )
+    .await?;
     match resp {
         RpcResponse::HostingDelete => Ok(Redirect::to("/hostings?deleted=1").into_response()),
         RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
         _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+/// Resolve a per-form `target_node` field to the Option<&str>
+/// shape that dispatch_to_node accepts. Empty / "local" / "" →
+/// master itself; anything else is a remote node_id.
+fn node_target(raw: &str) -> Option<&str> {
+    let s = raw.trim();
+    if s.is_empty() || s == crate::dispatcher::LOCAL_NODE_SENTINEL {
+        None
+    } else {
+        Some(s)
     }
 }
 
@@ -1825,15 +1852,62 @@ fn render_new_error<'a>(
     .into_response()
 }
 
+/// Aggregate hostings from the master + every enrolled remote node.
+/// Each row gets its `node_id` field REWRITTEN to the master's
+/// identifier for that node ("local" sentinel for master, the
+/// enrolled `node_id` for each worker) so the templates can show
+/// + the action forms can dispatch correctly without translating
+/// hostname↔enrolled-id (which differs because workers' hostings
+/// rows tag node_id with their hostname, while the master's view
+/// of "which node is this" uses the enrolled id).
+///
+/// Failure to reach a remote node is logged and that node's
+/// hostings are simply omitted — the local list still renders.
 async fn list_hostings(state: &SharedState) -> Result<Vec<HostingSummary>, String> {
-    let resp = hyperion_rpc_client::call(&state.agent_socket, Request::HostingList)
+    // 1. Master's own hostings (always included).
+    let local_resp = hyperion_rpc_client::call(&state.agent_socket, Request::HostingList)
         .await
         .map_err(|e| e.to_string())?;
-    match resp {
-        RpcResponse::HostingList(v) => Ok(v),
-        RpcResponse::Error(e) => Err(e.to_string()),
-        _ => Err("unexpected response".into()),
+    let mut local: Vec<HostingSummary> = match local_resp {
+        RpcResponse::HostingList(v) => v,
+        RpcResponse::Error(e) => return Err(e.to_string()),
+        _ => return Err("unexpected response".into()),
+    };
+    for r in &mut local {
+        r.node_id = Some(crate::dispatcher::LOCAL_NODE_SENTINEL.to_string());
     }
+
+    // 2. Enrolled remote nodes — best-effort fan-out.
+    let nodes_resp = hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await;
+    let nodes: Vec<hyperion_types::NodeSummary> = match nodes_resp {
+        Ok(RpcResponse::NodesList(v)) => v,
+        _ => Vec::new(), // failed lookup — fall back to master-only
+    };
+    let mut all = local;
+    for n in nodes {
+        match crate::dispatcher::dispatch_to_node(
+            state,
+            Some(&n.node_id),
+            Request::HostingList,
+        )
+        .await
+        {
+            Ok(RpcResponse::HostingList(mut remote)) => {
+                for r in &mut remote {
+                    r.node_id = Some(n.node_id.clone());
+                }
+                all.extend(remote);
+            }
+            Ok(RpcResponse::Error(e)) => {
+                tracing::warn!(node=%n.node_id, error=%e, "remote hosting list refused");
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(node=%n.node_id, error=%e, "remote hosting list unreachable");
+            }
+        }
+    }
+    Ok(all)
 }
 
 // ==================================================================

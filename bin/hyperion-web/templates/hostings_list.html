@@ -160,6 +160,12 @@
                     onsubmit="return confirm('Delete {{ r.domain }} and all its data?');">
                 <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                 <input type="hidden" name="selector" value="{{ r.domain }}">
+                {# Carry the node this hosting lives on so post_delete
+                   dispatches the RPC to the right agent. Without
+                   this, multi-node deletes silently no-op on the
+                   master while the orphan row stays on the worker. #}
+                <input type="hidden" name="target_node"
+                       value="{% if let Some(n) = r.node_id.as_ref() %}{{ n }}{% endif %}">
                 <button class="btn small danger" type="submit">Delete</button>
               </form>
             </div>

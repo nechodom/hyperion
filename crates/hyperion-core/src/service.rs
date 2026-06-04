@@ -7089,13 +7089,25 @@ struct MarkFailedOrDeleteRow {
 }
 #[async_trait]
 impl Rollback for MarkFailedOrDeleteRow {
+    /// On create-failure rollback we DELETE the half-created
+    /// hostings row instead of just marking it `failed`. Previously
+    /// the row stayed forever, and the UNIQUE constraint on
+    /// `hostings.domain` then blocked every subsequent attempt to
+    /// re-create the same domain — even after the operator "deleted"
+    /// it via the UI (the UI didn't see the failed row because the
+    /// listing is hosting-state-aware on the master side, and
+    /// HostingDelete refused to act on a state=failed row through
+    /// the normal happy-path delete).
+    ///
+    /// `hostings::delete_id` cascades into aliases / system_user
+    /// references so the row goes away cleanly.
     async fn run(&self) -> Result<(), String> {
-        hostings::set_state(&self.pool, &self.id, HostingState::Failed, now_secs())
+        hostings::delete(&self.pool, &self.id)
             .await
             .map_err(|e| e.to_string())
     }
     fn label(&self) -> &str {
-        "mark_hosting_failed"
+        "delete_hosting_row"
     }
 }
 
@@ -7500,6 +7512,77 @@ mod tests {
         let s = svc(pool.clone(), a);
         let r = s.create(req("example.cz")).await;
         assert!(r.is_err());
+    }
+
+    /// Regression test for the user-visible bug:
+    ///   1. Create example.cz — nginx_write_vhost fails partway
+    ///      through provisioning.
+    ///   2. Rollback runs; PRE-FIX it set state='failed' on the
+    ///      hostings row, POST-FIX it DELETEs the row.
+    ///   3. Create example.cz AGAIN.
+    ///   4. PRE-FIX: UNIQUE(domain) constraint blocks step 3.
+    ///      POST-FIX: succeeds.
+    #[tokio::test]
+    async fn create_after_rolled_back_failure_can_recreate_same_domain() {
+        let pool = open_memory().await.expect("open");
+        // First attempt — fails at nginx_write_vhost.
+        let mut a = MockAdapterPort::new();
+        a.expect_ensure_user().returning(|_, _| Ok(2042));
+        a.expect_ensure_dirs().returning(|_, _, _, _| Ok(()));
+        a.expect_fpm_ensure().returning(|_, _, _| Ok(()));
+        a.expect_db_create().returning(|_, _, _| Ok(db_creds()));
+        a.expect_acme_issue().returning(|d, _| Ok(cert_for(d)));
+        a.expect_nginx_write_vhost()
+            .returning(|_| Err(AdapterError::Other("nginx config bad".into())));
+        // Rollback adapter calls — all best-effort, fed Ok():
+        a.expect_acme_delete().returning(|_| Ok(()));
+        a.expect_db_drop().returning(|_, _, _| Ok(()));
+        a.expect_fpm_delete().returning(|_, _| Ok(()));
+        a.expect_remove_hosting_tree().returning(|_| Ok(()));
+        a.expect_delete_user().returning(|_| Ok(()));
+        let s = svc(pool.clone(), a);
+        let _ = s.create(req("retry.cz")).await; // expected to fail
+        // PRE-FIX: list would now contain a state='failed' row.
+        // POST-FIX: list is empty for that domain.
+        let leftover = hostings::get_by_domain(&pool, "retry.cz").await.unwrap();
+        assert!(
+            leftover.is_none(),
+            "rollback must DELETE the row, not leave it as 'failed' — \
+             otherwise UNIQUE(domain) blocks the retry"
+        );
+
+        // Second attempt — succeeds (the row is gone, no UNIQUE
+        // constraint to trip).
+        let secrets_dir = tempfile::tempdir().expect("dir");
+        let secrets = Arc::new(SecretsStore::new(secrets_dir.keep()));
+        let mut a2 = MockAdapterPort::new();
+        a2.expect_ensure_user().returning(|_, _| Ok(2043));
+        a2.expect_ensure_dirs().returning(|_, _, _, _| Ok(()));
+        a2.expect_fpm_ensure().returning(|_, _, _| Ok(()));
+        a2.expect_db_create().returning(|_, _, _| Ok(db_creds()));
+        a2.expect_nginx_write_vhost().returning(|_| Ok(()));
+        a2.expect_acme_issue().returning(|d, _| Ok(cert_for(d)));
+        let s2 = HostingService {
+            pool: pool.clone(),
+            adapters: Arc::new(a2),
+            secrets,
+            paths: HostingPaths::default(),
+            remote_backup: None,
+            retention: BackupRetention::default(),
+            slack_default_webhook: None,
+            acme_contact_email: "test@example.invalid".into(),
+            email_config: None,
+            email_default_to: None,
+            agent_config_path: None,
+            update_cache: Arc::new(tokio::sync::RwLock::new(None)),
+            current_git_sha: "dev-unknown".into(),
+            cert_issue_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            master_rpc_signer: None,
+            node_state_file: None,
+        };
+        s2.create(req("retry.cz"))
+            .await
+            .expect("second create must succeed — the orphan row should have been deleted by rollback");
     }
 
     #[tokio::test]
