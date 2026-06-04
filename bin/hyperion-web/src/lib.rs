@@ -27,6 +27,10 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/hostings/suspend", post(handlers::hostings::post_suspend))
         .route("/hostings/resume", post(handlers::hostings::post_resume))
         .route(
+            "/hostings/vhost-options",
+            post(handlers::hostings::post_vhost_options),
+        )
+        .route(
             "/hostings/set-limits",
             post(handlers::hostings::post_set_limits),
         )

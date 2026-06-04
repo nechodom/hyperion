@@ -35,6 +35,23 @@ pub trait AgentApi: Send + Sync + 'static {
         reason: SuspendReason,
     ) -> Result<(), RpcError>;
     async fn hosting_resume(&self, sel: HostingSelector) -> Result<(), RpcError>;
+    /// Apply the per-hosting vhost options (basic auth, HSTS, custom
+    /// snippet, maintenance mode, FastCGI cache, redirect target).
+    /// On the worker side this is validated with `nginx -t` before
+    /// the new vhost is committed; on failure the previous vhost is
+    /// restored and the rpc returns the verbatim nginx error.
+    ///
+    /// `basic_auth_password` is the plaintext password the operator
+    /// typed; the agent bcrypt-hashes it before writing the htpasswd
+    /// file. `None` means "leave the existing hash alone" — sent
+    /// when the operator only flipped other toggles. Empty string
+    /// also means leave alone (UI sends `""` for an untouched field).
+    async fn hosting_set_vhost_options(
+        &self,
+        sel: HostingSelector,
+        options: hyperion_types::VhostOptions,
+        basic_auth_password: Option<String>,
+    ) -> Result<hyperion_types::VhostOptions, RpcError>;
     async fn hosting_usage(
         &self,
         sel: HostingSelector,

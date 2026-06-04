@@ -21,7 +21,7 @@ pub mod wp;
 pub use cert::{CertInfo, CertRenewOutcome, CertRenewResult};
 pub use db::{DbProvision, DbSummary};
 pub use dns::{CertIssueRequest, DnsCheckResult};
-pub use hosting::{HostingDetail, HostingState, HostingSummary};
+pub use hosting::{HostingDetail, HostingState, HostingSummary, VhostOptions};
 pub use ids::{AgentId, HostingId, SecretId};
 pub use limits::{
     BackupRunWire, ExpiringHosting, HostingExpiry, HostingLimits, HostingUsageBucket,

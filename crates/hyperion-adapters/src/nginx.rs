@@ -15,6 +15,12 @@ pub struct VhostInput<'a> {
     pub cert_path: &'a str,
     pub key_path: &'a str,
     pub acme_challenge_root: &'a str,
+    /// Stable hosting id — drives per-hosting include filenames
+    /// (.htpasswd, fastcgi_cache zone name, etc.). Sanitised to
+    /// alphanumeric + dash at the call site.
+    pub hosting_id: &'a str,
+    /// Operator-controlled vhost knobs from migration 020.
+    pub options: &'a hyperion_types::VhostOptions,
 }
 
 #[derive(Template)]
@@ -30,6 +36,16 @@ struct VhostTpl<'a> {
     cert_path: &'a str,
     key_path: &'a str,
     acme_challenge_root: &'a str,
+    hosting_id: &'a str,
+    // Vhost option toggles — flattened into the template scope
+    // because askama doesn't auto-deref nested structs in
+    // `{% if %}` conditions.
+    basic_auth_enabled: bool,
+    hsts_max_age: i64,
+    custom_nginx_snippet: &'a str,
+    maintenance_mode: bool,
+    fastcgi_cache_enabled: bool,
+    fastcgi_cache_ttl: i64,
 }
 
 /// Render the vhost file's contents without writing.
@@ -48,6 +64,85 @@ pub struct SuspendedInput<'a> {
     pub cert_path: &'a str,
     pub key_path: &'a str,
     pub reason_message: &'a str,
+}
+
+/// Redirect-only hosting variant. Every request gets a 301/302 to
+/// the configured target. No FPM pool, no DB, no htdocs. The
+/// `redirect_preserve_path` flag at the input level decides whether
+/// `/foo/bar` lands at `<target>/foo/bar` or just `<target>/`.
+#[derive(Debug, Clone)]
+pub struct RedirectVhostInput<'a> {
+    pub domain: &'a str,
+    pub aliases: &'a [String],
+    pub cert_path: &'a str,
+    pub key_path: &'a str,
+    pub acme_challenge_root: &'a str,
+    /// Where to redirect. Should start with http:// or https://.
+    pub redirect_url: &'a str,
+    /// 301 or 302 (operator's choice — 301 caches in browsers
+    /// indefinitely, 302 is the safer default for "we might
+    /// reverse this later").
+    pub redirect_code: i64,
+    /// When true, the request path is appended to the target.
+    pub redirect_preserve_path: bool,
+}
+
+#[derive(askama::Template)]
+#[template(path = "nginx-vhost-redirect.conf.j2", escape = "none")]
+struct RedirectVhostTpl<'a> {
+    domain: &'a str,
+    aliases: &'a [String],
+    cert_path: &'a str,
+    key_path: &'a str,
+    acme_challenge_root: &'a str,
+    redirect_code: i64,
+    /// Rendered redirect target — `nginx_safe_target` for the HTTP
+    /// (:80) listener; if `preserve_path` is on, this is the bare
+    /// target and nginx appends $request_uri via the `return`
+    /// statement.
+    redirect_target_http: String,
+    redirect_target_https: String,
+}
+
+pub fn render_redirect(input: &RedirectVhostInput<'_>) -> Result<String, AdapterError> {
+    if !(input.redirect_url.starts_with("http://")
+        || input.redirect_url.starts_with("https://"))
+    {
+        return Err(AdapterError::Other(format!(
+            "redirect_url must start with http:// or https://, got {}",
+            input.redirect_url
+        )));
+    }
+    let target = input.redirect_url.trim_end_matches('/').to_string();
+    let (http_t, https_t) = if input.redirect_preserve_path {
+        (format!("{target}$request_uri"), format!("{target}$request_uri"))
+    } else {
+        (target.clone(), target.clone())
+    };
+    let tpl = RedirectVhostTpl {
+        domain: input.domain,
+        aliases: input.aliases,
+        cert_path: input.cert_path,
+        key_path: input.key_path,
+        acme_challenge_root: input.acme_challenge_root,
+        redirect_code: input.redirect_code,
+        redirect_target_http: http_t,
+        redirect_target_https: https_t,
+    };
+    Ok(tpl.render()?)
+}
+
+/// Write the redirect vhost file + ensure the symlink + reload.
+pub async fn write_redirect_vhost(
+    paths: &Paths,
+    input: &RedirectVhostInput<'_>,
+) -> Result<(), AdapterError> {
+    let body = render_redirect(input)?;
+    let vhost = paths.vhost_file(input.domain);
+    crate::fs::atomic_write(&vhost, body.as_bytes(), 0o644).await?;
+    let symlink = paths.symlink_file(input.domain);
+    ensure_symlink(&vhost, &symlink).await?;
+    reload().await
 }
 
 /// Reverse-proxy variant: forwards every request to a single upstream
@@ -146,6 +241,14 @@ pub fn render(input: &VhostInput<'_>) -> Result<String, AdapterError> {
         cert_path: input.cert_path,
         key_path: input.key_path,
         acme_challenge_root: input.acme_challenge_root,
+        hosting_id: input.hosting_id,
+        basic_auth_enabled: input.options.basic_auth_enabled
+            && input.options.basic_auth_set,
+        hsts_max_age: input.options.hsts_max_age,
+        custom_nginx_snippet: &input.options.custom_nginx_snippet,
+        maintenance_mode: input.options.maintenance_mode,
+        fastcgi_cache_enabled: input.options.fastcgi_cache_enabled,
+        fastcgi_cache_ttl: input.options.fastcgi_cache_ttl,
     };
     Ok(tpl.render()?)
 }
@@ -172,6 +275,12 @@ impl Paths {
 }
 
 /// Write vhost + create symlink + `nginx -t` + reload. Idempotent.
+///
+/// When the operator has flipped on the per-hosting FastCGI cache,
+/// this also writes `/etc/nginx/conf.d/hyperion-cache-<id>.conf`
+/// with the `fastcgi_cache_path` directive (must live at http{}
+/// level — can't be in a server{} block). When the operator turns
+/// the cache off, that file is removed.
 pub async fn write_vhost(paths: &Paths, input: &VhostInput<'_>) -> Result<(), AdapterError> {
     let body = render(input)?;
     let vhost = paths.vhost_file(input.domain);
@@ -179,19 +288,105 @@ pub async fn write_vhost(paths: &Paths, input: &VhostInput<'_>) -> Result<(), Ad
     atomic_write(&vhost, body.as_bytes(), 0o644).await?;
     let symlink = paths.symlink_file(input.domain);
     ensure_symlink(&vhost, &symlink).await?;
+    // Cache-zone sidecar: written/removed alongside the vhost so the
+    // two stay in sync. If the cache toggle is off, any stale sidecar
+    // from a previous "on" state is cleaned up here.
+    let cache_path = cache_zone_file(input.hosting_id);
+    if input.options.fastcgi_cache_enabled {
+        let cache_body = render_cache_zone(input.hosting_id);
+        atomic_write(&cache_path, cache_body.as_bytes(), 0o644).await?;
+    } else {
+        let _ = tokio::fs::remove_file(&cache_path).await;
+    }
     if let Err(e) = cmd::run("/usr/sbin/nginx", &["-t"]).await {
         // Restore previous state.
         restore_or_remove(&vhost, backup.as_deref()).await;
         let _ = tokio::fs::remove_file(&symlink).await;
+        // Pull the cache sidecar too — bad vhost + sidecar would
+        // half-survive an aborted apply otherwise.
+        let _ = tokio::fs::remove_file(&cache_path).await;
         return Err(e);
     }
     reload().await
 }
 
+/// `/etc/nginx/conf.d/hyperion-cache-<id>.conf` — operator-toggled
+/// sidecar containing the `fastcgi_cache_path` directive for one
+/// hosting. Lives in conf.d so nginx picks it up at the http{}
+/// level (server{}-level fastcgi_cache_path is a config error).
+fn cache_zone_file(hosting_id: &str) -> PathBuf {
+    PathBuf::from(format!("/etc/nginx/conf.d/hyperion-cache-{hosting_id}.conf"))
+}
+
+fn render_cache_zone(hosting_id: &str) -> String {
+    format!(
+        "# Auto-managed by Hyperion. Do not edit — toggle via the\n\
+         # hosting detail page (FastCGI cache section).\n\
+         fastcgi_cache_path /var/cache/nginx/hyperion-{id}\n\
+         \x20\x20\x20\x20levels=1:2\n\
+         \x20\x20\x20\x20keys_zone=hyperion_{id}:16m\n\
+         \x20\x20\x20\x20max_size=512m\n\
+         \x20\x20\x20\x20inactive=60m\n\
+         \x20\x20\x20\x20use_temp_path=off;\n",
+        id = hosting_id
+    )
+}
+
+/// `/etc/nginx/.htpasswd-<id>` — written when basic auth is on.
+/// Format is `user:bcrypt-hash\n`. nginx supports bcrypt natively
+/// (no need for `htpasswd`/apache utils to be installed).
+pub fn htpasswd_file(hosting_id: &str) -> PathBuf {
+    PathBuf::from(format!("/etc/nginx/.htpasswd-{hosting_id}"))
+}
+
+/// Write the htpasswd file. Mode 0o640 so nginx (www-data) can read it
+/// but others can't.
+pub async fn write_htpasswd(
+    hosting_id: &str,
+    user: &str,
+    bcrypt_hash: &str,
+) -> Result<(), AdapterError> {
+    if user.is_empty() {
+        return Err(AdapterError::Other("basic auth user cannot be empty".into()));
+    }
+    if user.contains(':') || user.contains('\n') {
+        return Err(AdapterError::Other(
+            "basic auth user contains illegal character".into(),
+        ));
+    }
+    if !bcrypt_hash.starts_with("$2") {
+        return Err(AdapterError::Other(
+            "basic auth hash must be bcrypt (starts with $2)".into(),
+        ));
+    }
+    let body = format!("{user}:{bcrypt_hash}\n");
+    let path = htpasswd_file(hosting_id);
+    crate::fs::atomic_write(&path, body.as_bytes(), 0o640).await
+}
+
+pub async fn delete_htpasswd(hosting_id: &str) -> Result<(), AdapterError> {
+    let _ = tokio::fs::remove_file(htpasswd_file(hosting_id)).await;
+    Ok(())
+}
+
 /// Remove vhost + symlink + reload. Safe if files already absent.
-pub async fn delete_vhost(paths: &Paths, domain: &str) -> Result<(), AdapterError> {
+///
+/// `hosting_id` is optional because legacy call sites (and the
+/// fallback "I don't have the id handy" branch in delete-cancelled
+/// flows) only know the domain. When provided, the per-hosting
+/// cache zone sidecar + htpasswd are also cleaned up so a future
+/// hosting on the same id can't inherit them.
+pub async fn delete_vhost(
+    paths: &Paths,
+    domain: &str,
+    hosting_id: Option<&str>,
+) -> Result<(), AdapterError> {
     let _ = tokio::fs::remove_file(paths.symlink_file(domain)).await;
     let _ = tokio::fs::remove_file(paths.vhost_file(domain)).await;
+    if let Some(id) = hosting_id {
+        let _ = tokio::fs::remove_file(cache_zone_file(id)).await;
+        let _ = tokio::fs::remove_file(htpasswd_file(id)).await;
+    }
     reload().await
 }
 
@@ -492,6 +687,10 @@ mod tests {
     #[test]
     fn render_static_no_php() {
         let aliases: Vec<String> = vec![];
+        let opts = hyperion_types::VhostOptions {
+            hsts_max_age: 15_768_000,
+            ..Default::default()
+        };
         let out = render(&VhostInput {
             domain: "example.cz",
             aliases: &aliases,
@@ -502,6 +701,8 @@ mod tests {
             cert_path: "/etc/lm/certs/example.cz/fullchain.pem",
             key_path: "/etc/lm/certs/example.cz/privkey.pem",
             acme_challenge_root: "/var/lib/lm/acme-challenges",
+            hosting_id: "01H0000000000000000000",
+            options: &opts,
         })
         .expect("render");
         assert!(out.contains("server_name example.cz;"));
@@ -531,6 +732,7 @@ mod tests {
     #[test]
     fn render_php_with_aliases() {
         let aliases = vec!["www.example.cz".to_string(), "example.com".to_string()];
+        let opts = hyperion_types::VhostOptions::default();
         let out = render(&VhostInput {
             domain: "example.cz",
             aliases: &aliases,
@@ -541,11 +743,164 @@ mod tests {
             cert_path: "/etc/lm/certs/example.cz/fullchain.pem",
             key_path: "/etc/lm/certs/example.cz/privkey.pem",
             acme_challenge_root: "/var/lib/lm/acme-challenges",
+            hosting_id: "01H0000000000000000000",
+            options: &opts,
         })
         .expect("render");
         assert!(out.contains("server_name example.cz www.example.cz example.com;"));
         assert!(out.contains("fastcgi_pass unix:/run/php/8.3/example_cz.sock"));
         assert!(out.contains("try_files $uri $uri/ /index.php?$args"));
+    }
+
+    #[test]
+    fn render_with_basic_auth_and_hsts() {
+        // Operator turned basic auth on + set HSTS to 1 year + dropped
+        // a custom snippet. The rendered vhost should contain all
+        // three, and the ACME challenge MUST still bypass basic auth.
+        let aliases: Vec<String> = vec![];
+        let opts = hyperion_types::VhostOptions {
+            basic_auth_enabled: true,
+            basic_auth_user: "preview".into(),
+            basic_auth_set: true,
+            hsts_max_age: 31_536_000,
+            custom_nginx_snippet: "# operator extra\nclient_max_body_size 64M;".into(),
+            ..Default::default()
+        };
+        let out = render(&VhostInput {
+            domain: "example.cz",
+            aliases: &aliases,
+            root_dir: "/home/example_cz/example.cz/htdocs",
+            logs_dir: "/home/example_cz/example.cz/logs",
+            system_user: "example_cz",
+            php_version: Some("8.3"),
+            cert_path: "/etc/lm/certs/example.cz/fullchain.pem",
+            key_path: "/etc/lm/certs/example.cz/privkey.pem",
+            acme_challenge_root: "/var/lib/lm/acme-challenges",
+            hosting_id: "01HVHOST",
+            options: &opts,
+        })
+        .expect("render");
+        assert!(out.contains("auth_basic           \"Restricted\";"));
+        assert!(out.contains("auth_basic_user_file /etc/nginx/.htpasswd-01HVHOST;"));
+        assert!(out.contains("auth_basic off;"));
+        assert!(out.contains("max-age=31536000"));
+        assert!(out.contains("client_max_body_size 64M;"));
+    }
+
+    #[test]
+    fn render_maintenance_mode() {
+        // Maintenance mode returns 503 with a generic page. ACME
+        // challenges still served so renewals don't break.
+        let aliases: Vec<String> = vec![];
+        let opts = hyperion_types::VhostOptions {
+            maintenance_mode: true,
+            ..Default::default()
+        };
+        let out = render(&VhostInput {
+            domain: "example.cz",
+            aliases: &aliases,
+            root_dir: "/home/example_cz/example.cz/htdocs",
+            logs_dir: "/home/example_cz/example.cz/logs",
+            system_user: "example_cz",
+            php_version: Some("8.3"),
+            cert_path: "/etc/lm/certs/example.cz/fullchain.pem",
+            key_path: "/etc/lm/certs/example.cz/privkey.pem",
+            acme_challenge_root: "/var/lib/lm/acme-challenges",
+            hosting_id: "01HMAINT",
+            options: &opts,
+        })
+        .expect("render");
+        assert!(out.contains("location / { return 503; }"));
+        assert!(out.contains("/var/lib/hyperion/maintenance"));
+        // ACME must still work even in maintenance mode.
+        assert!(out.contains("location /.well-known/acme-challenge/"));
+        // PHP block MUST NOT be emitted when in maintenance.
+        assert!(!out.contains("fastcgi_pass"));
+    }
+
+    #[test]
+    fn render_fastcgi_cache_per_hosting_zone() {
+        // Per-hosting cache zone name must include hosting_id so two
+        // hostings on the same node don't collide.
+        let aliases: Vec<String> = vec![];
+        let opts = hyperion_types::VhostOptions {
+            fastcgi_cache_enabled: true,
+            fastcgi_cache_ttl: 300,
+            ..Default::default()
+        };
+        let out = render(&VhostInput {
+            domain: "example.cz",
+            aliases: &aliases,
+            root_dir: "/home/example_cz/example.cz/htdocs",
+            logs_dir: "/home/example_cz/example.cz/logs",
+            system_user: "example_cz",
+            php_version: Some("8.3"),
+            cert_path: "/etc/lm/certs/example.cz/fullchain.pem",
+            key_path: "/etc/lm/certs/example.cz/privkey.pem",
+            acme_challenge_root: "/var/lib/lm/acme-challenges",
+            hosting_id: "01HCACHE",
+            options: &opts,
+        })
+        .expect("render");
+        assert!(out.contains("fastcgi_cache hyperion_01HCACHE;"));
+        assert!(out.contains("fastcgi_cache_valid 200 301 302 300s;"));
+        assert!(out.contains("fastcgi_no_cache $cookie_wordpress_logged_in"));
+    }
+
+    #[test]
+    fn render_redirect_vhost_basic() {
+        let aliases: Vec<String> = vec![];
+        let input = RedirectVhostInput {
+            domain: "old.example.cz",
+            aliases: &aliases,
+            cert_path: "/etc/lm/certs/old.example.cz/fullchain.pem",
+            key_path: "/etc/lm/certs/old.example.cz/privkey.pem",
+            acme_challenge_root: "/var/lib/lm/acme-challenges",
+            redirect_url: "https://new.example.cz",
+            redirect_code: 301,
+            redirect_preserve_path: false,
+        };
+        let out = render_redirect(&input).expect("render redirect");
+        assert!(out.contains("server_name old.example.cz;"));
+        assert!(out.contains("return 301 https://new.example.cz;"));
+        // No path appended when preserve=false.
+        assert!(!out.contains("$request_uri"));
+        // ACME location still works for cert renewals.
+        assert!(out.contains("location /.well-known/acme-challenge/"));
+    }
+
+    #[test]
+    fn render_redirect_vhost_preserve_path() {
+        let aliases: Vec<String> = vec![];
+        let input = RedirectVhostInput {
+            domain: "old.example.cz",
+            aliases: &aliases,
+            cert_path: "/etc/lm/certs/old.example.cz/fullchain.pem",
+            key_path: "/etc/lm/certs/old.example.cz/privkey.pem",
+            acme_challenge_root: "/var/lib/lm/acme-challenges",
+            redirect_url: "https://new.example.cz/",
+            redirect_code: 302,
+            redirect_preserve_path: true,
+        };
+        let out = render_redirect(&input).expect("render redirect");
+        assert!(out.contains("return 302 https://new.example.cz$request_uri;"));
+    }
+
+    #[test]
+    fn render_redirect_rejects_bad_scheme() {
+        let aliases: Vec<String> = vec![];
+        let input = RedirectVhostInput {
+            domain: "old.example.cz",
+            aliases: &aliases,
+            cert_path: "/etc/lm/certs/old.example.cz/fullchain.pem",
+            key_path: "/etc/lm/certs/old.example.cz/privkey.pem",
+            acme_challenge_root: "/var/lib/lm/acme-challenges",
+            // Missing scheme — must be rejected.
+            redirect_url: "new.example.cz",
+            redirect_code: 301,
+            redirect_preserve_path: false,
+        };
+        assert!(render_redirect(&input).is_err());
     }
 
     /// Regression test for the "502 because nginx runs as vito but the

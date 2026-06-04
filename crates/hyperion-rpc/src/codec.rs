@@ -40,6 +40,14 @@ pub enum Request {
         reason: SuspendReason,
     },
     HostingResume(HostingSelector),
+    /// Apply per-hosting vhost options. See `AgentRpc::hosting_set_vhost_options`.
+    HostingSetVhostOptions {
+        sel: HostingSelector,
+        options: hyperion_types::VhostOptions,
+        /// `None` = leave existing hash alone. `Some("")` also
+        /// treated as "leave alone" by the agent.
+        basic_auth_password: Option<String>,
+    },
     HostingUsage {
         sel: HostingSelector,
         limit: i64,
@@ -483,6 +491,7 @@ pub enum Response {
     HostingGetLimits(HostingLimits),
     HostingSuspend,
     HostingResume,
+    HostingSetVhostOptions(hyperion_types::VhostOptions),
     HostingUsage(Vec<HostingUsageBucket>),
     HostingSetExpiry(HostingExpiry),
     HostingGetExpiry(HostingExpiry),

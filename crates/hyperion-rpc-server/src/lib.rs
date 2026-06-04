@@ -117,6 +117,17 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(_) => Response::HostingResume,
             Err(e) => Response::Error(e),
         },
+        Request::HostingSetVhostOptions {
+            sel,
+            options,
+            basic_auth_password,
+        } => match api
+            .hosting_set_vhost_options(sel, options, basic_auth_password)
+            .await
+        {
+            Ok(v) => Response::HostingSetVhostOptions(v),
+            Err(e) => Response::Error(e),
+        },
         Request::HostingUsage { sel, limit } => match api.hosting_usage(sel, limit).await {
             Ok(v) => Response::HostingUsage(v),
             Err(e) => Response::Error(e),
@@ -675,6 +686,14 @@ mod tests {
         }
         async fn hosting_resume(&self, _: HostingSelector) -> Result<(), RpcError> {
             Ok(())
+        }
+        async fn hosting_set_vhost_options(
+            &self,
+            _: HostingSelector,
+            options: hyperion_types::VhostOptions,
+            _: Option<String>,
+        ) -> Result<hyperion_types::VhostOptions, RpcError> {
+            Ok(options)
         }
         async fn hosting_usage(
             &self,

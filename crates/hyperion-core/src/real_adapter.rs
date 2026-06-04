@@ -308,6 +308,35 @@ impl AdapterPort for RealAdapter {
             };
             return hyperion_adapters::nginx::write_vhost_proxy(&self.nginx_paths, &input).await;
         }
+        // Redirect-only hosting: completely separate template, no
+        // FPM/root/htdocs/PHP. The vhost_options struct holds the
+        // target URL + code + preserve-path flag the operator set.
+        if detail.kind == "redirect" {
+            // Empty redirect_url defaults to a placeholder so nginx -t
+            // still passes; operator is expected to fill it in via
+            // the vhost-options form right after creating the hosting.
+            let target = if detail.vhost_options.redirect_url.is_empty() {
+                "https://example.com/"
+            } else {
+                detail.vhost_options.redirect_url.as_str()
+            };
+            let code = if detail.vhost_options.redirect_code == 0 {
+                302
+            } else {
+                detail.vhost_options.redirect_code
+            };
+            let input = hyperion_adapters::nginx::RedirectVhostInput {
+                domain: &detail.domain,
+                aliases: &detail.aliases,
+                cert_path: &cert_path,
+                key_path: &key_path,
+                acme_challenge_root: &acme_root,
+                redirect_url: target,
+                redirect_code: code,
+                redirect_preserve_path: detail.vhost_options.redirect_preserve_path,
+            };
+            return hyperion_adapters::nginx::write_redirect_vhost(&self.nginx_paths, &input).await;
+        }
         let php = detail.php_version.map(|v| v.as_str());
         let input = hyperion_adapters::nginx::VhostInput {
             domain: &detail.domain,
@@ -319,12 +348,36 @@ impl AdapterPort for RealAdapter {
             cert_path: &cert_path,
             key_path: &key_path,
             acme_challenge_root: &acme_root,
+            hosting_id: detail.id.as_str(),
+            options: &detail.vhost_options,
         };
         hyperion_adapters::nginx::write_vhost(&self.nginx_paths, &input).await
     }
 
-    async fn nginx_delete_vhost(&self, domain: &str) -> Result<(), AdapterError> {
-        hyperion_adapters::nginx::delete_vhost(&self.nginx_paths, domain).await
+    async fn nginx_delete_vhost(
+        &self,
+        domain: &str,
+        hosting_id: Option<String>,
+    ) -> Result<(), AdapterError> {
+        hyperion_adapters::nginx::delete_vhost(
+            &self.nginx_paths,
+            domain,
+            hosting_id.as_deref(),
+        )
+        .await
+    }
+
+    async fn nginx_write_htpasswd(
+        &self,
+        hosting_id: &str,
+        user: &str,
+        bcrypt_hash: &str,
+    ) -> Result<(), AdapterError> {
+        hyperion_adapters::nginx::write_htpasswd(hosting_id, user, bcrypt_hash).await
+    }
+
+    async fn nginx_delete_htpasswd(&self, hosting_id: &str) -> Result<(), AdapterError> {
+        hyperion_adapters::nginx::delete_htpasswd(hosting_id).await
     }
 
     async fn nginx_apply_suspended(

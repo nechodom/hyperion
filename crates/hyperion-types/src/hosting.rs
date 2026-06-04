@@ -90,6 +90,75 @@ pub struct HostingDetail {
     /// backfilled — surfaced as "—" in the UI.
     #[serde(default)]
     pub node_id: Option<String>,
+    /// Per-hosting nginx vhost knobs (migration 020). Default
+    /// values match the pre-020 behaviour so existing hostings
+    /// don't change appearance.
+    #[serde(default)]
+    pub vhost_options: VhostOptions,
+}
+
+/// Per-hosting nginx vhost configuration the operator flips from
+/// the detail page. All fields default to "off" / "" so a hosting
+/// that's never touched these renders the same vhost as before.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct VhostOptions {
+    /// When true, nginx serves the vhost behind HTTP basic auth.
+    /// Useful for staging sites / client previews.
+    #[serde(default)]
+    pub basic_auth_enabled: bool,
+    /// Username shown in the browser prompt. Read-only at the wire
+    /// level — operator changes via the UI form.
+    #[serde(default)]
+    pub basic_auth_user: String,
+    /// True when a password hash is stored (we never echo the hash
+    /// itself over the RPC wire).
+    #[serde(default)]
+    pub basic_auth_set: bool,
+
+    /// Permanent 301 redirect HTTP → HTTPS in the :80 server
+    /// block. The base vhost already does this; this toggle
+    /// controls whether it stays on (sane default) or gets
+    /// disabled (rare — operator running a Tor / clearnet split).
+    #[serde(default)]
+    pub force_https: bool,
+    /// HSTS max-age in seconds. 0 = HSTS header not emitted.
+    /// Common values: 31536000 (1y), 63072000 (2y).
+    #[serde(default)]
+    pub hsts_max_age: i64,
+
+    /// Free-form nginx snippet appended inside the HTTPS server
+    /// block. Validated with `nginx -t` against a sandbox vhost
+    /// before save; refused with the verbatim nginx error on
+    /// syntax failure.
+    #[serde(default)]
+    pub custom_nginx_snippet: String,
+
+    /// When true, every request to the HTTPS vhost returns a
+    /// generic 503 "we'll be back" page. acme-challenge keeps
+    /// working so cert renewals don't break.
+    #[serde(default)]
+    pub maintenance_mode: bool,
+
+    /// FastCGI page-cache toggle for PHP hostings.
+    #[serde(default)]
+    pub fastcgi_cache_enabled: bool,
+    /// Cache TTL in seconds (5 min default).
+    #[serde(default)]
+    pub fastcgi_cache_ttl: i64,
+
+    /// Redirect-only kind: when the hosting's kind == "redirect",
+    /// every request to the vhost gets a 301/302 to this URL.
+    /// No FPM pool, no DB, no htdocs serving.
+    #[serde(default)]
+    pub redirect_url: String,
+    /// 301 (permanent) or 302 (temporary).
+    #[serde(default)]
+    pub redirect_code: i64,
+    /// When true, the request path is appended to the redirect
+    /// target (`/foo/bar` → `<target>/foo/bar`). False = flat
+    /// `/` for every request.
+    #[serde(default)]
+    pub redirect_preserve_path: bool,
 }
 
 fn default_kind() -> String {
@@ -139,6 +208,7 @@ mod tests {
             kind: "php".into(),
             proxy_upstream_url: None,
             node_id: Some("test-node".into()),
+            vhost_options: VhostOptions::default(),
         };
         let j = serde_json::to_string(&d).expect("serialize");
         let back: HostingDetail = serde_json::from_str(&j).expect("deserialize");

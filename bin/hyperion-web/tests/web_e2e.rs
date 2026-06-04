@@ -83,7 +83,22 @@ impl hyperion_core::AdapterPort for StubAdapters {
     async fn nginx_write_vhost(&self, _: &HostingDetail) -> Result<(), AdapterError> {
         Ok(())
     }
-    async fn nginx_delete_vhost(&self, _: &str) -> Result<(), AdapterError> {
+    async fn nginx_delete_vhost(
+        &self,
+        _: &str,
+        _: Option<String>,
+    ) -> Result<(), AdapterError> {
+        Ok(())
+    }
+    async fn nginx_write_htpasswd(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+    ) -> Result<(), AdapterError> {
+        Ok(())
+    }
+    async fn nginx_delete_htpasswd(&self, _: &str) -> Result<(), AdapterError> {
         Ok(())
     }
     async fn nginx_apply_suspended(&self, _: &str, _: Option<String>) -> Result<(), AdapterError> {

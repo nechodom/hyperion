@@ -408,6 +408,21 @@ fn print_pretty(resp: &Response) {
         }
         Response::HostingSuspend => println!("✓ suspended"),
         Response::HostingResume => println!("✓ resumed"),
+        Response::HostingSetVhostOptions(o) => {
+            println!("✓ vhost options applied");
+            println!("  basic_auth_enabled  = {}", o.basic_auth_enabled);
+            println!("  basic_auth_user     = {}", o.basic_auth_user);
+            println!("  basic_auth_set      = {}", o.basic_auth_set);
+            println!("  force_https         = {}", o.force_https);
+            println!("  hsts_max_age        = {}", o.hsts_max_age);
+            println!("  maintenance_mode    = {}", o.maintenance_mode);
+            println!("  fastcgi_cache       = {}", o.fastcgi_cache_enabled);
+            println!("  fastcgi_cache_ttl   = {}", o.fastcgi_cache_ttl);
+            println!("  custom_snippet_len  = {}", o.custom_nginx_snippet.len());
+            println!("  redirect_url        = {}", o.redirect_url);
+            println!("  redirect_code       = {}", o.redirect_code);
+            println!("  redirect_preserve   = {}", o.redirect_preserve_path);
+        }
         Response::HostingUsage(rows) => {
             println!(
                 "{:<14} {:>10} {:>10} {:>10} {:>10}",

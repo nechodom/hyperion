@@ -51,6 +51,10 @@ rand = "0.8"
 toml = "0.8"
 toml_edit = "0.22"
 argon2 = "0.5"
+# bcrypt is used for the htpasswd file behind per-hosting nginx
+# basic auth — nginx supports bcrypt natively (along with apr1/sha512),
+# argon2 would need an external auth_request proxy.
+bcrypt = "0.15"
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 base64 = "0.22"
 axum = { version = "0.7", features = ["macros", "multipart"] }

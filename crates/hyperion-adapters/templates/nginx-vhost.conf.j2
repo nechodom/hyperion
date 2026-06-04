@@ -1,3 +1,37 @@
+{%- if maintenance_mode %}
+# Maintenance mode toggled ON via /hostings/<domain> detail page.
+# Every request returns 503 with a generic page. ACME challenges
+# still served so LE renewals don't break.
+server {
+    listen 80;
+    listen [::]:80;
+    server_name {{ domain }}{% for a in aliases %} {{ a }}{% endfor %};
+    location /.well-known/acme-challenge/ {
+        alias {{ acme_challenge_root }}/;
+        try_files $uri =404;
+        default_type "text/plain";
+        autoindex off;
+    }
+    location / { return 503; }
+}
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name {{ domain }}{% for a in aliases %} {{ a }}{% endfor %};
+    ssl_certificate     {{ cert_path }};
+    ssl_certificate_key {{ key_path }};
+    ssl_protocols TLSv1.2 TLSv1.3;
+    error_page 503 @maintenance;
+    location @maintenance {
+        root /var/lib/hyperion/maintenance;
+        try_files /maintenance.html =503;
+        internal;
+        add_header Cache-Control "no-store" always;
+        add_header Retry-After "300" always;
+    }
+    location / { return 503; }
+}
+{%- else %}
 server {
     listen 80;
     listen [::]:80;
@@ -19,6 +53,16 @@ server {
     }
 }
 
+{%- if fastcgi_cache_enabled %}
+# Per-hosting FastCGI cache (operator-enabled, TTL {{ fastcgi_cache_ttl }}s).
+# zone name + path namespaced by hosting_id so multiple hostings on
+# the same node don't collide and a Purge button can clear ONE cache
+# at a time. The fastcgi_cache_path declaration MUST live at http{}
+# level — the agent writes it to /etc/nginx/conf.d/hyperion-cache-{{ hosting_id }}.conf
+# parallel to writing the vhost, and the include directive there
+# picks it up.
+{%- endif %}
+
 server {
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
@@ -33,7 +77,9 @@ server {
     ssl_prefer_server_ciphers on;
     ssl_session_cache shared:SSL:10m;
 
-    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+    {%- if hsts_max_age > 0 %}
+    add_header Strict-Transport-Security "max-age={{ hsts_max_age }}; includeSubDomains" always;
+    {%- endif %}
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
@@ -41,6 +87,25 @@ server {
 
     access_log {{ logs_dir }}/access.log;
     error_log  {{ logs_dir }}/error.log;
+
+    {%- if basic_auth_enabled %}
+    # Site-wide HTTP basic auth — agent writes the .htpasswd file
+    # alongside this vhost. ACME challenges below are excluded so
+    # LE renewals don't get 401'd.
+    auth_basic           "Restricted";
+    auth_basic_user_file /etc/nginx/.htpasswd-{{ hosting_id }};
+    {%- endif %}
+
+    # Always allow ACME challenges past basic-auth.
+    location /.well-known/acme-challenge/ {
+        {%- if basic_auth_enabled %}
+        auth_basic off;
+        {%- endif %}
+        alias {{ acme_challenge_root }}/;
+        try_files $uri =404;
+        default_type "text/plain";
+        autoindex off;
+    }
 
     {%- if has_php %}
     location ~ \.php$ {
@@ -51,6 +116,15 @@ server {
         include fastcgi_params;
         fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
         fastcgi_read_timeout 60s;
+        {%- if fastcgi_cache_enabled %}
+        fastcgi_cache hyperion_{{ hosting_id }};
+        fastcgi_cache_valid 200 301 302 {{ fastcgi_cache_ttl }}s;
+        fastcgi_cache_methods GET HEAD;
+        fastcgi_cache_bypass $cookie_wordpress_logged_in $cookie_PHPSESSID;
+        fastcgi_no_cache $cookie_wordpress_logged_in $cookie_PHPSESSID;
+        fastcgi_cache_key "$scheme$request_method$host$request_uri";
+        add_header X-Cache-Status $upstream_cache_status;
+        {%- endif %}
     }
     {%- endif %}
 
@@ -65,4 +139,12 @@ server {
         try_files $uri $uri/ =404;
         {%- endif %}
     }
+
+    {%- if !custom_nginx_snippet.is_empty() %}
+
+    # ─── Custom snippet from operator (Settings → Custom config) ───
+    {{ custom_nginx_snippet }}
+    # ─── end custom snippet ───
+    {%- endif %}
 }
+{%- endif %}

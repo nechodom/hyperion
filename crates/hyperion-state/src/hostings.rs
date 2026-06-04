@@ -19,8 +19,8 @@ pub struct HostingRow {
     /// agent-wide [acme] contact_email from agent.toml" — the same
     /// value that issue_real_cert defaults to when this is missing.
     pub acme_contact_email: Option<String>,
-    /// "php" | "static" | "reverse_proxy". Defaults to "php" for
-    /// pre-migration-014 rows.
+    /// "php" | "static" | "reverse_proxy" | "redirect". Defaults to
+    /// "php" for pre-migration-014 rows.
     pub kind: String,
     /// Upstream URL for kind=reverse_proxy. None for other kinds.
     pub proxy_upstream_url: Option<String>,
@@ -29,6 +29,9 @@ pub struct HostingRow {
     /// time (see `HostingService::current_node_id`). `None` for rows
     /// that pre-date migration 016 and haven't been backfilled yet.
     pub node_id: Option<String>,
+    /// Migration 020 — operator-controlled vhost knobs. Default
+    /// values match the pre-020 vhost rendering exactly.
+    pub vhost_options: hyperion_types::VhostOptions,
 }
 
 pub async fn insert(
@@ -112,7 +115,7 @@ pub async fn get_by_id(
     fetch_one(
         pool,
         "WHERE id = ?",
-        sqlx::query_as::<_, RawHostingRow>(QUERY_BASE).bind(id.as_str()),
+        sqlx::query_as::<_, RawHostingHead>(QUERY_BASE).bind(id.as_str()),
     )
     .await
 }
@@ -124,7 +127,7 @@ pub async fn get_by_domain(
     fetch_one(
         pool,
         "WHERE domain = ?",
-        sqlx::query_as::<_, RawHostingRow>(QUERY_DOMAIN).bind(domain),
+        sqlx::query_as::<_, RawHostingHead>(QUERY_DOMAIN).bind(domain),
     )
     .await
 }
@@ -154,30 +157,60 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<HostingSummary>, StateError> 
 
 // --- internals ---
 
-type RawHostingRow = (
-    String,
-    String,
-    String,
-    i64,
-    Option<String>,
-    String,
-    i64,
-    i64,
-    Option<String>,
-    String,
-    Option<String>,
-    Option<String>,
+// Split the SELECT into two halves to stay under sqlx's
+// 16-column FromRow tuple limit. Halve 1 = the "classic"
+// hosting columns. Halve 2 = the vhost knobs from migration 020.
+//
+// We do TWO sequential queries keyed by the same id/domain — the
+// second is a cheap UNIQUE-keyed lookup, so the latency hit is
+// marginal vs. one big JOIN-shaped query.
+type RawHostingHead = (
+    String,           // id
+    String,           // domain
+    String,           // state
+    i64,              // system_user_id
+    Option<String>,   // php_version
+    String,           // root_dir
+    i64,              // created_at
+    i64,              // updated_at
+    Option<String>,   // acme_contact_email
+    String,           // kind
+    Option<String>,   // proxy_upstream_url
+    Option<String>,   // node_id
+);
+type RawHostingVhost = (
+    i64,    // basic_auth_enabled
+    String, // basic_auth_user
+    String, // basic_auth_hash
+    i64,    // force_https
+    i64,    // hsts_max_age
+    String, // custom_nginx_snippet
+    i64,    // maintenance_mode
+    i64,    // fastcgi_cache_enabled
+    i64,    // fastcgi_cache_ttl
+    String, // redirect_url
+    i64,    // redirect_code
+    i64,    // redirect_preserve_path
 );
 
 const QUERY_BASE: &str =
-    "SELECT id, domain, state, system_user_id, php_version, root_dir, created_at, updated_at, acme_contact_email, kind, proxy_upstream_url, node_id FROM hostings WHERE id = ?";
+    "SELECT id, domain, state, system_user_id, php_version, root_dir, created_at, updated_at, \
+            acme_contact_email, kind, proxy_upstream_url, node_id \
+     FROM hostings WHERE id = ?";
 const QUERY_DOMAIN: &str =
-    "SELECT id, domain, state, system_user_id, php_version, root_dir, created_at, updated_at, acme_contact_email, kind, proxy_upstream_url, node_id FROM hostings WHERE domain = ?";
+    "SELECT id, domain, state, system_user_id, php_version, root_dir, created_at, updated_at, \
+            acme_contact_email, kind, proxy_upstream_url, node_id \
+     FROM hostings WHERE domain = ?";
+const QUERY_VHOST_BY_ID: &str =
+    "SELECT basic_auth_enabled, basic_auth_user, basic_auth_hash, force_https, hsts_max_age, \
+            custom_nginx_snippet, maintenance_mode, fastcgi_cache_enabled, fastcgi_cache_ttl, \
+            redirect_url, redirect_code, redirect_preserve_path \
+     FROM hostings WHERE id = ?";
 
 async fn fetch_one<'a>(
     pool: &'a SqlitePool,
     _why: &'static str,
-    q: sqlx::query::QueryAs<'a, sqlx::Sqlite, RawHostingRow, sqlx::sqlite::SqliteArguments<'a>>,
+    q: sqlx::query::QueryAs<'a, sqlx::Sqlite, RawHostingHead, sqlx::sqlite::SqliteArguments<'a>>,
 ) -> Result<Option<HostingRow>, StateError> {
     let row = q.fetch_optional(pool).await?;
     let Some((
@@ -197,6 +230,42 @@ async fn fetch_one<'a>(
     else {
         return Ok(None);
     };
+    // Second query for the vhost knob columns. We key on the same
+    // id we just read so the lookup is a single PK hit.
+    let vhost_row: Option<RawHostingVhost> = sqlx::query_as(QUERY_VHOST_BY_ID)
+        .bind(&id)
+        .fetch_optional(pool)
+        .await?;
+    let vhost_options = match vhost_row {
+        Some((
+            basic_auth_enabled,
+            basic_auth_user,
+            basic_auth_hash,
+            force_https,
+            hsts_max_age,
+            custom_nginx_snippet,
+            maintenance_mode,
+            fastcgi_cache_enabled,
+            fastcgi_cache_ttl,
+            redirect_url,
+            redirect_code,
+            redirect_preserve_path,
+        )) => hyperion_types::VhostOptions {
+            basic_auth_enabled: basic_auth_enabled != 0,
+            basic_auth_user,
+            basic_auth_set: !basic_auth_hash.is_empty(),
+            force_https: force_https != 0,
+            hsts_max_age,
+            custom_nginx_snippet,
+            maintenance_mode: maintenance_mode != 0,
+            fastcgi_cache_enabled: fastcgi_cache_enabled != 0,
+            fastcgi_cache_ttl,
+            redirect_url,
+            redirect_code,
+            redirect_preserve_path: redirect_preserve_path != 0,
+        },
+        None => hyperion_types::VhostOptions::default(),
+    };
     Ok(Some(HostingRow {
         id: HostingId(id),
         domain,
@@ -213,7 +282,90 @@ async fn fetch_one<'a>(
         kind,
         proxy_upstream_url,
         node_id,
+        vhost_options,
     }))
+}
+
+/// Read the per-hosting basic-auth password hash (NOT exposed in
+/// HostingRow.vhost_options — only the "is_set" bool is). Used by
+/// the vhost render to write the .htpasswd file. Empty string when
+/// basic auth isn't configured.
+pub async fn get_basic_auth_hash(
+    pool: &SqlitePool,
+    id: &HostingId,
+) -> Result<String, StateError> {
+    let row: Option<(String,)> = sqlx::query_as(
+        "SELECT basic_auth_hash FROM hostings WHERE id = ?",
+    )
+    .bind(id.as_str())
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|(s,)| s).unwrap_or_default())
+}
+
+/// Update the operator-controlled vhost knobs in one statement.
+/// `basic_auth_hash` should be `None` when the operator left the
+/// password field empty (preserves the existing stored hash) and
+/// `Some(new_hash)` when a new value was provided. Empty new_hash
+/// clears the credential.
+#[allow(clippy::too_many_arguments)]
+pub async fn set_vhost_options(
+    pool: &SqlitePool,
+    id: &HostingId,
+    opts: &hyperion_types::VhostOptions,
+    basic_auth_hash: Option<&str>,
+    now: i64,
+) -> Result<(), StateError> {
+    // If hash is None, don't touch the column.
+    if let Some(h) = basic_auth_hash {
+        sqlx::query(
+            "UPDATE hostings SET basic_auth_enabled=?, basic_auth_user=?, basic_auth_hash=?, \
+                force_https=?, hsts_max_age=?, custom_nginx_snippet=?, \
+                maintenance_mode=?, fastcgi_cache_enabled=?, fastcgi_cache_ttl=?, \
+                redirect_url=?, redirect_code=?, redirect_preserve_path=?, updated_at=? \
+             WHERE id = ?",
+        )
+        .bind(opts.basic_auth_enabled as i64)
+        .bind(&opts.basic_auth_user)
+        .bind(h)
+        .bind(opts.force_https as i64)
+        .bind(opts.hsts_max_age)
+        .bind(&opts.custom_nginx_snippet)
+        .bind(opts.maintenance_mode as i64)
+        .bind(opts.fastcgi_cache_enabled as i64)
+        .bind(opts.fastcgi_cache_ttl)
+        .bind(&opts.redirect_url)
+        .bind(opts.redirect_code)
+        .bind(opts.redirect_preserve_path as i64)
+        .bind(now)
+        .bind(id.as_str())
+        .execute(pool)
+        .await?;
+    } else {
+        sqlx::query(
+            "UPDATE hostings SET basic_auth_enabled=?, basic_auth_user=?, \
+                force_https=?, hsts_max_age=?, custom_nginx_snippet=?, \
+                maintenance_mode=?, fastcgi_cache_enabled=?, fastcgi_cache_ttl=?, \
+                redirect_url=?, redirect_code=?, redirect_preserve_path=?, updated_at=? \
+             WHERE id = ?",
+        )
+        .bind(opts.basic_auth_enabled as i64)
+        .bind(&opts.basic_auth_user)
+        .bind(opts.force_https as i64)
+        .bind(opts.hsts_max_age)
+        .bind(&opts.custom_nginx_snippet)
+        .bind(opts.maintenance_mode as i64)
+        .bind(opts.fastcgi_cache_enabled as i64)
+        .bind(opts.fastcgi_cache_ttl)
+        .bind(&opts.redirect_url)
+        .bind(opts.redirect_code)
+        .bind(opts.redirect_preserve_path as i64)
+        .bind(now)
+        .bind(id.as_str())
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
 }
 
 /// Set the hosting kind + upstream URL on an existing row.

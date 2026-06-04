@@ -1086,6 +1086,199 @@
 
 <div class="tab-panel" id="tab-settings">
 
+{% if vhost_saved %}
+<div class="alert alert-ok" role="status">
+  ✓ Vhost options saved. New configuration is live.
+</div>
+{% endif %}
+{% if let Some(e) = vhost_error %}
+<div class="alert alert-err" role="alert">
+  <strong>nginx refused the new config:</strong><br>
+  <code style="white-space:pre-wrap">{{ e }}</code><br>
+  No changes were applied — the previous vhost is still active.
+</div>
+{% endif %}
+
+<div class="card hover">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+    Vhost options
+  </h2>
+  <p class="muted small">
+    Toggles that map directly to the nginx vhost. Every save validates
+    with <code>nginx -t</code> before the new config is committed; on
+    failure the previous vhost stays active and the error is shown
+    above.
+  </p>
+  <form method="post" action="/hostings/vhost-options">
+    <input type="hidden" name="_csrf" value="{{ csrf_vhost_options }}">
+    <input type="hidden" name="selector" value="{{ detail.domain }}">
+    {% if !target_node.is_empty() %}
+    <input type="hidden" name="target_node" value="{{ target_node }}">
+    {% endif %}
+
+    <fieldset style="border:1px solid var(--border);border-radius:6px;padding:1rem;margin-bottom:1rem">
+      <legend><strong>HTTP basic auth</strong></legend>
+      <div class="field">
+        <label>
+          <input type="checkbox" name="basic_auth_enabled" value="on"
+                 {% if detail.vhost_options.basic_auth_enabled %}checked{% endif %}>
+          Require HTTP basic auth for every request (staging / preview)
+        </label>
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label for="basic_auth_user">Username</label>
+          <input type="text" id="basic_auth_user" name="basic_auth_user"
+                 value="{{ detail.vhost_options.basic_auth_user }}"
+                 autocomplete="off" pattern="[A-Za-z0-9_.-]{1,64}"
+                 maxlength="64">
+        </div>
+        <div class="field">
+          <label for="basic_auth_password">
+            Password
+            {% if detail.vhost_options.basic_auth_set %}
+              <span class="hint">(leave blank to keep current)</span>
+            {% else %}
+              <span class="hint">(required to enable)</span>
+            {% endif %}
+          </label>
+          <input type="password" id="basic_auth_password" name="basic_auth_password"
+                 autocomplete="new-password" minlength="0" maxlength="200">
+        </div>
+      </div>
+    </fieldset>
+
+    <fieldset style="border:1px solid var(--border);border-radius:6px;padding:1rem;margin-bottom:1rem">
+      <legend><strong>HTTPS &amp; HSTS</strong></legend>
+      <div class="field">
+        <label>
+          <input type="checkbox" name="force_https" value="on"
+                 {% if detail.vhost_options.force_https %}checked{% endif %}>
+          Force HTTP → HTTPS redirect (default: on)
+        </label>
+      </div>
+      <div class="field">
+        <label for="hsts_max_age">HSTS <code>max-age</code> <span class="hint">seconds (0 = off)</span></label>
+        <select id="hsts_max_age" name="hsts_max_age">
+          <option value="0" {% if detail.vhost_options.hsts_max_age == 0 %}selected{% endif %}>Off (0)</option>
+          <option value="3600" {% if detail.vhost_options.hsts_max_age == 3600 %}selected{% endif %}>1 hour (testing)</option>
+          <option value="86400" {% if detail.vhost_options.hsts_max_age == 86400 %}selected{% endif %}>1 day</option>
+          <option value="2592000" {% if detail.vhost_options.hsts_max_age == 2592000 %}selected{% endif %}>30 days</option>
+          <option value="15768000" {% if detail.vhost_options.hsts_max_age == 15768000 %}selected{% endif %}>6 months</option>
+          <option value="31536000" {% if detail.vhost_options.hsts_max_age == 31536000 %}selected{% endif %}>1 year (recommended)</option>
+          <option value="63072000" {% if detail.vhost_options.hsts_max_age == 63072000 %}selected{% endif %}>2 years</option>
+        </select>
+        <p class="muted small">
+          HSTS tells browsers to refuse plain HTTP for this domain.
+          Once a browser sees the header it remembers for max-age
+          seconds, so values above 1 day are essentially permanent —
+          turn it off ONLY by leaving HSTS at 0 for max-age seconds
+          (browsers won't forget any sooner).
+        </p>
+      </div>
+    </fieldset>
+
+    <fieldset style="border:1px solid var(--border);border-radius:6px;padding:1rem;margin-bottom:1rem">
+      <legend><strong>Maintenance mode</strong></legend>
+      <div class="field">
+        <label>
+          <input type="checkbox" name="maintenance_mode" value="on"
+                 {% if detail.vhost_options.maintenance_mode %}checked{% endif %}>
+          Return 503 for every request (ACME challenges still work)
+        </label>
+      </div>
+      <p class="muted small">
+        Use during deploys or DB restores. Browsers see a generic
+        "we'll be back" page; Let's Encrypt renewals continue to work
+        because the <code>/.well-known/acme-challenge/</code> path
+        bypasses the 503.
+      </p>
+    </fieldset>
+
+    <fieldset style="border:1px solid var(--border);border-radius:6px;padding:1rem;margin-bottom:1rem">
+      <legend><strong>FastCGI page cache</strong></legend>
+      <div class="field">
+        <label>
+          <input type="checkbox" name="fastcgi_cache_enabled" value="on"
+                 {% if detail.vhost_options.fastcgi_cache_enabled %}checked{% endif %}>
+          Cache rendered PHP responses for anonymous visitors
+        </label>
+      </div>
+      <div class="field">
+        <label for="fastcgi_cache_ttl">Cache TTL <span class="hint">seconds (max 86400)</span></label>
+        <input type="number" id="fastcgi_cache_ttl" name="fastcgi_cache_ttl"
+               min="0" max="86400" step="60"
+               value="{% if detail.vhost_options.fastcgi_cache_ttl > 0 %}{{ detail.vhost_options.fastcgi_cache_ttl }}{% else %}300{% endif %}">
+      </div>
+      <p class="muted small">
+        Bypassed automatically for logged-in WordPress / PHP-session
+        visitors (checks <code>wordpress_logged_in_*</code> and
+        <code>PHPSESSID</code> cookies). The cache zone is
+        per-hosting — purge one site without touching others.
+      </p>
+    </fieldset>
+
+    <fieldset style="border:1px solid var(--border);border-radius:6px;padding:1rem;margin-bottom:1rem">
+      <legend><strong>Custom nginx snippet</strong></legend>
+      <div class="field">
+        <label for="custom_nginx_snippet">
+          Appended inside the HTTPS <code>server { }</code> block
+          <span class="hint">max 32 KiB</span>
+        </label>
+        <textarea id="custom_nginx_snippet" name="custom_nginx_snippet"
+                  rows="6" maxlength="32768"
+                  style="font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px"
+                  placeholder="# e.g. raise upload size\nclient_max_body_size 64M;\n\n# e.g. extra security header\nadd_header Permissions-Policy &quot;geolocation=()&quot; always;">{{ detail.vhost_options.custom_nginx_snippet }}</textarea>
+      </div>
+      <p class="muted small">
+        Validated with <code>nginx -t</code> before save — invalid
+        config is rejected with the verbatim error.
+      </p>
+    </fieldset>
+
+    {% if detail.kind == "redirect" %}
+    <fieldset style="border:1px solid var(--border);border-radius:6px;padding:1rem;margin-bottom:1rem">
+      <legend><strong>Redirect target</strong></legend>
+      <p class="muted small">
+        This hosting is a redirect-only vhost — no PHP, no htdocs.
+        Every request is forwarded to the URL below.
+      </p>
+      <div class="field">
+        <label for="redirect_url">Target URL <span class="hint">must start with http(s)://</span></label>
+        <input type="url" id="redirect_url" name="redirect_url"
+               value="{{ detail.vhost_options.redirect_url }}"
+               placeholder="https://new.example.com" maxlength="500">
+      </div>
+      <div class="field-row">
+        <div class="field">
+          <label for="redirect_code">Redirect code</label>
+          <select id="redirect_code" name="redirect_code">
+            <option value="301" {% if detail.vhost_options.redirect_code == 301 %}selected{% endif %}>301 Moved Permanently (cached by browsers)</option>
+            <option value="302" {% if detail.vhost_options.redirect_code == 302 || detail.vhost_options.redirect_code == 0 %}selected{% endif %}>302 Found (temporary, default)</option>
+            <option value="307" {% if detail.vhost_options.redirect_code == 307 %}selected{% endif %}>307 Temporary Redirect (preserves method)</option>
+            <option value="308" {% if detail.vhost_options.redirect_code == 308 %}selected{% endif %}>308 Permanent Redirect (preserves method)</option>
+          </select>
+        </div>
+        <div class="field">
+          <label>
+            <input type="checkbox" name="redirect_preserve_path" value="on"
+                   {% if detail.vhost_options.redirect_preserve_path %}checked{% endif %}>
+            Preserve request path
+          </label>
+          <p class="hint">
+            On: <code>/foo/bar</code> → <code>&lt;target&gt;/foo/bar</code>.
+            Off: every URL collapses to <code>&lt;target&gt;/</code>.
+          </p>
+        </div>
+      </div>
+    </fieldset>
+    {% endif %}
+
+    <button class="btn btn-primary" type="submit">Save vhost options</button>
+  </form>
+</div>
+
 <div class="card hover">
   <h2>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="9" y1="9" x2="15" y2="9"/><line x1="9" y1="15" x2="15" y2="15"/></svg>

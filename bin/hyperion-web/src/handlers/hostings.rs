@@ -177,6 +177,13 @@ struct DetailTpl<'a> {
     /// wp_plugins above, mirrored across the wp_theme adapter.
     /// Empty when wp_status is None (no WP install).
     wp_themes: hyperion_types::WpThemeListResponse,
+    /// CSRF token for the vhost options form (basic auth, HSTS,
+    /// FastCGI cache, custom snippet, maintenance mode, redirect).
+    csrf_vhost_options: String,
+    /// Set by the post handler on success — banner in the UI.
+    vhost_saved: bool,
+    /// Set when set_vhost_options returned an error — banner in UI.
+    vhost_error: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -627,6 +634,9 @@ pub async fn post_create(
                 all_nodes: fetch_remote_nodes(&state).await.unwrap_or_default(),
                 wp_assets: fetch_wp_assets(&state).await.unwrap_or_default(),
                 wp_themes: hyperion_types::WpThemeListResponse::default(),
+                csrf_vhost_options: csrf_token_for(&state, &ctx, "/hostings/vhost-options"),
+                vhost_saved: false,
+                vhost_error: None,
             };
             Ok(Html(tpl.render()?).into_response())
         }
@@ -874,6 +884,9 @@ pub async fn get_detail(
         all_nodes: fetch_remote_nodes(&state).await.unwrap_or_default(),
         wp_assets: fetch_wp_assets(&state).await.unwrap_or_default(),
         wp_themes,
+        csrf_vhost_options: csrf_token_for(&state, &ctx, "/hostings/vhost-options"),
+        vhost_saved: q.vhost_saved.as_deref() == Some("1"),
+        vhost_error: q.vhost_error,
     };
     Ok(Html(tpl.render()?).into_response())
 }
@@ -974,6 +987,13 @@ pub struct DetailQuery {
     /// the operator on the page WITH the password visible.
     #[serde(default)]
     pub ftp_pw: Option<String>,
+    /// "1" after a successful vhost-options POST → green banner.
+    #[serde(default)]
+    pub vhost_saved: Option<String>,
+    /// nginx -t error / validation error from the vhost-options POST,
+    /// surfaced back through the redirect.
+    #[serde(default)]
+    pub vhost_error: Option<String>,
 }
 
 async fn fetch_expiry(
@@ -1375,6 +1395,106 @@ pub async fn post_resume(
             Ok(Redirect::to(&format!("/hostings/{}", urlencoding(&form.selector))).into_response())
         }
         RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct VhostOptionsForm {
+    selector: String,
+    #[serde(default)]
+    target_node: String,
+    // Use stringly "on" semantics — HTML checkboxes don't send
+    // false values, so #[serde(default)] + presence check.
+    #[serde(default)]
+    basic_auth_enabled: Option<String>,
+    #[serde(default)]
+    basic_auth_user: String,
+    /// Operator-typed new password. Empty string = leave hash alone.
+    #[serde(default)]
+    basic_auth_password: String,
+    #[serde(default)]
+    force_https: Option<String>,
+    #[serde(default)]
+    hsts_max_age: i64,
+    #[serde(default)]
+    custom_nginx_snippet: String,
+    #[serde(default)]
+    maintenance_mode: Option<String>,
+    #[serde(default)]
+    fastcgi_cache_enabled: Option<String>,
+    #[serde(default)]
+    fastcgi_cache_ttl: i64,
+    #[serde(default)]
+    redirect_url: String,
+    #[serde(default)]
+    redirect_code: i64,
+    #[serde(default)]
+    redirect_preserve_path: Option<String>,
+}
+
+fn checkbox_on(v: &Option<String>) -> bool {
+    v.as_deref()
+        .map(|s| matches!(s, "on" | "true" | "1" | "yes"))
+        .unwrap_or(false)
+}
+
+pub async fn post_vhost_options(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<VhostOptionsForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let options = hyperion_types::VhostOptions {
+        basic_auth_enabled: checkbox_on(&form.basic_auth_enabled),
+        basic_auth_user: form.basic_auth_user.trim().to_string(),
+        basic_auth_set: false, // service decides — based on pw + existing
+        force_https: checkbox_on(&form.force_https),
+        hsts_max_age: form.hsts_max_age,
+        custom_nginx_snippet: form.custom_nginx_snippet,
+        maintenance_mode: checkbox_on(&form.maintenance_mode),
+        fastcgi_cache_enabled: checkbox_on(&form.fastcgi_cache_enabled),
+        fastcgi_cache_ttl: form.fastcgi_cache_ttl,
+        redirect_url: form.redirect_url.trim().to_string(),
+        redirect_code: form.redirect_code,
+        redirect_preserve_path: checkbox_on(&form.redirect_preserve_path),
+    };
+    let pw_opt = if form.basic_auth_password.is_empty() {
+        None
+    } else {
+        Some(form.basic_auth_password)
+    };
+    let target = node_target(&form.target_node);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target,
+        Request::HostingSetVhostOptions {
+            sel,
+            options,
+            basic_auth_password: pw_opt,
+        },
+    )
+    .await?;
+    match resp {
+        RpcResponse::HostingSetVhostOptions(_) => Ok(Redirect::to(&format!(
+            "/hostings/{}?vhost_saved=1",
+            urlencoding(&form.selector)
+        ))
+        .into_response()),
+        RpcResponse::Error(e) => {
+            // Bounce back to the detail page with the error in the query
+            // string so the operator sees the verbatim nginx -t output
+            // (or validation error) in a banner instead of a bare 500.
+            Ok(Redirect::to(&format!(
+                "/hostings/{}?vhost_error={}",
+                urlencoding(&form.selector),
+                urlencoding(&e.to_string())
+            ))
+            .into_response())
+        }
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }

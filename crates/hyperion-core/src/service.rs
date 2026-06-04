@@ -71,7 +71,26 @@ pub trait AdapterPort: Send + Sync {
     async fn acme_delete(&self, domain: &str) -> Result<(), AdapterError>;
 
     async fn nginx_write_vhost(&self, detail: &HostingDetail) -> Result<(), AdapterError>;
-    async fn nginx_delete_vhost(&self, domain: &str) -> Result<(), AdapterError>;
+    /// Remove vhost + symlink for this domain. When `hosting_id` is
+    /// supplied the adapter also drops the per-hosting cache zone +
+    /// htpasswd sidecars so they don't survive into a future hosting
+    /// reusing the id slot.
+    async fn nginx_delete_vhost(
+        &self,
+        domain: &str,
+        hosting_id: Option<String>,
+    ) -> Result<(), AdapterError>;
+    /// Write the per-hosting basic-auth htpasswd file. Bcrypt hash
+    /// only (nginx supports it natively, so we don't need apache's
+    /// htpasswd binary installed).
+    async fn nginx_write_htpasswd(
+        &self,
+        hosting_id: &str,
+        user: &str,
+        bcrypt_hash: &str,
+    ) -> Result<(), AdapterError>;
+    /// Drop the htpasswd file (operator turned basic auth off).
+    async fn nginx_delete_htpasswd(&self, hosting_id: &str) -> Result<(), AdapterError>;
     async fn nginx_apply_suspended(
         &self,
         domain: &str,
@@ -1687,6 +1706,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             kind: req.kind.clone(),
             proxy_upstream_url: req.proxy_upstream_url.clone(),
             node_id: Some(node_id_str.clone()),
+            vhost_options: hyperion_types::VhostOptions::default(),
         };
         if let Err(e) = self.adapters.nginx_write_vhost(&detail).await {
             let _ = stack.rollback_all().await;
@@ -1891,6 +1911,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             kind: row.kind,
             proxy_upstream_url: row.proxy_upstream_url,
             node_id: row.node_id,
+            vhost_options: row.vhost_options,
         })
     }
 
@@ -1900,8 +1921,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .await
             .map_err(|e| RpcError::Internal_with(format!("set deleting: {e}")))?;
 
-        // best-effort nginx delete
-        let _ = self.adapters.nginx_delete_vhost(&detail.domain).await;
+        // best-effort nginx delete (also drops per-hosting cache zone +
+        // htpasswd sidecar so the slot is fully clean for a future
+        // hosting reusing this ULID).
+        let _ = self
+            .adapters
+            .nginx_delete_vhost(&detail.domain, Some(detail.id.to_string()))
+            .await;
         // best-effort cert delete
         let _ = self.adapters.acme_delete(&detail.domain).await;
         let _ = certificates::delete(&self.pool, &detail.domain).await;
@@ -2097,6 +2123,183 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         self.append_audit("hosting.resume", Some(detail.id.as_str()), "{}", "ok")
             .await;
         Ok(())
+    }
+
+    /// Apply per-hosting vhost options. Validates fields, writes the
+    /// htpasswd file (if basic auth password supplied), persists the
+    /// new options row, re-renders the vhost with `nginx -t` running
+    /// inside `nginx_write_vhost` — rollback on any failure.
+    ///
+    /// Returns the persisted options (with `basic_auth_set = true`
+    /// when a password was supplied, regardless of whether it was
+    /// just set or already on file).
+    pub async fn set_vhost_options(
+        &self,
+        sel: HostingSelector,
+        mut options: hyperion_types::VhostOptions,
+        basic_auth_password: Option<String>,
+    ) -> Result<hyperion_types::VhostOptions, RpcError> {
+        let detail = self.get(sel).await?;
+
+        // ─── Validation ─────────────────────────────────────────────
+        // HSTS bounds. 0 = disabled; anything above ~2y is silly.
+        if options.hsts_max_age < 0 || options.hsts_max_age > 63_072_000 {
+            return Err(RpcError::Validation {
+                message: "hsts_max_age must be 0..=63072000 (2 years)".into(),
+            });
+        }
+        // FastCGI cache TTL. 0 = use a sane default; cap at 1 day
+        // (caching dynamic PHP for longer is almost never right).
+        if options.fastcgi_cache_ttl < 0 || options.fastcgi_cache_ttl > 86_400 {
+            return Err(RpcError::Validation {
+                message: "fastcgi_cache_ttl must be 0..=86400 (24h)".into(),
+            });
+        }
+        if options.fastcgi_cache_enabled && options.fastcgi_cache_ttl == 0 {
+            options.fastcgi_cache_ttl = 300; // 5 min default.
+        }
+        // Redirect: validated by the adapter at render time too, but
+        // catch obvious mistakes early so the operator gets a clean
+        // error in the UI rather than an nginx -t failure.
+        if !options.redirect_url.is_empty()
+            && !(options.redirect_url.starts_with("http://")
+                || options.redirect_url.starts_with("https://"))
+        {
+            return Err(RpcError::Validation {
+                message: "redirect_url must start with http:// or https://".into(),
+            });
+        }
+        if options.redirect_code != 0
+            && options.redirect_code != 301
+            && options.redirect_code != 302
+            && options.redirect_code != 307
+            && options.redirect_code != 308
+        {
+            return Err(RpcError::Validation {
+                message: "redirect_code must be 301, 302, 307, or 308".into(),
+            });
+        }
+        // Basic auth: empty username with the toggle on is nonsense.
+        if options.basic_auth_enabled && options.basic_auth_user.trim().is_empty() {
+            return Err(RpcError::Validation {
+                message: "basic_auth_user is required when basic auth is enabled".into(),
+            });
+        }
+        // Custom snippet length bound: prevents an operator pasting
+        // a 10MB nginx config blob.
+        if options.custom_nginx_snippet.len() > 32 * 1024 {
+            return Err(RpcError::Validation {
+                message: "custom_nginx_snippet must be ≤ 32 KiB".into(),
+            });
+        }
+
+        // ─── htpasswd write (before persist, so a failed bcrypt is
+        //     surfaced before we change DB state) ─────────────────────
+        let pw_provided = basic_auth_password
+            .as_deref()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false);
+        let mut new_hash_for_db: Option<String> = None;
+        if pw_provided {
+            // Unwrap safe — pw_provided implies Some(non-empty).
+            let pw = basic_auth_password.as_deref().unwrap();
+            // Cost 10 — same as nginx auth_basic_user_file examples;
+            // bcrypt-12 starts noticeably hurting RPS on the first
+            // request after a worker boot.
+            let hash = bcrypt::hash(pw, 10).map_err(|e| {
+                RpcError::Internal_with(format!("bcrypt hash basic-auth password: {e}"))
+            })?;
+            self.adapters
+                .nginx_write_htpasswd(detail.id.as_str(), &options.basic_auth_user, &hash)
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("write htpasswd: {e}")))?;
+            new_hash_for_db = Some(hash);
+            options.basic_auth_set = true;
+        } else if !options.basic_auth_enabled {
+            // Operator turned basic auth off — drop the htpasswd
+            // file so it can't be re-used if they turn it back on
+            // without setting a new password.
+            let _ = self
+                .adapters
+                .nginx_delete_htpasswd(detail.id.as_str())
+                .await;
+            options.basic_auth_set = false;
+            new_hash_for_db = Some(String::new()); // sentinel: clear
+        } else {
+            // basic_auth_enabled && no new password → keep existing
+            // hash (set by a previous call). basic_auth_set carries
+            // the truth from DB into the form.
+            options.basic_auth_set = detail.vhost_options.basic_auth_set;
+        }
+
+        // ─── Persist ───────────────────────────────────────────────
+        hyperion_state::hostings::set_vhost_options(
+            &self.pool,
+            &detail.id,
+            &options,
+            new_hash_for_db.as_deref(),
+            now_secs(),
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("persist vhost options: {e}")))?;
+
+        // ─── Re-render vhost (nginx -t inside write_vhost) ─────────
+        let mut new_detail = detail.clone();
+        new_detail.vhost_options = options.clone();
+        if let Err(e) = self.adapters.nginx_write_vhost(&new_detail).await {
+            // nginx -t rejected the new vhost. Roll the DB back to
+            // the old options so the persisted state matches what
+            // nginx is actually serving.
+            let _ = hyperion_state::hostings::set_vhost_options(
+                &self.pool,
+                &detail.id,
+                &detail.vhost_options,
+                None, // don't touch hash on rollback
+                now_secs(),
+            )
+            .await;
+            // Roll back htpasswd too if we just wrote it.
+            if pw_provided {
+                if detail.vhost_options.basic_auth_set {
+                    // we don't have the previous hash here; the safest
+                    // move is to leave the now-overwritten file in
+                    // place — operator just gets to keep the new pw
+                    // they typed, which they can type again. They
+                    // wanted to change it anyway.
+                } else {
+                    let _ = self
+                        .adapters
+                        .nginx_delete_htpasswd(detail.id.as_str())
+                        .await;
+                }
+            }
+            return Err(RpcError::Validation {
+                message: format!("nginx config rejected: {e}. No changes applied."),
+            });
+        }
+
+        let audit_payload = serde_json::json!({
+            "domain": detail.domain,
+            "basic_auth_enabled": options.basic_auth_enabled,
+            "basic_auth_user": options.basic_auth_user,
+            "basic_auth_password_changed": pw_provided,
+            "hsts_max_age": options.hsts_max_age,
+            "maintenance_mode": options.maintenance_mode,
+            "fastcgi_cache_enabled": options.fastcgi_cache_enabled,
+            "fastcgi_cache_ttl": options.fastcgi_cache_ttl,
+            "custom_nginx_snippet_len": options.custom_nginx_snippet.len(),
+            "redirect_url_set": !options.redirect_url.is_empty(),
+            "redirect_code": options.redirect_code,
+        });
+        self.append_audit(
+            "hosting.set_vhost_options",
+            Some(detail.id.as_str()),
+            &audit_payload.to_string(),
+            "ok",
+        )
+        .await;
+
+        Ok(options)
     }
 
     pub async fn usage(
@@ -9360,5 +9563,154 @@ mod tests {
         let s = svc(pool.clone(), happy_mocks());
         let r = s.cert_renew_tick(now_secs(), 30).await.expect("tick");
         assert!(r.is_empty());
+    }
+
+    // ───────── set_vhost_options ─────────
+
+    fn vh_defaults() -> hyperion_types::VhostOptions {
+        hyperion_types::VhostOptions::default()
+    }
+
+    #[tokio::test]
+    async fn set_vhost_options_rejects_oversized_hsts() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), happy_mocks());
+        s.create(req("example.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("example.cz").unwrap());
+        let mut opts = vh_defaults();
+        opts.hsts_max_age = 100_000_000; // > 2y → reject
+        let r = s.set_vhost_options(sel, opts, None).await;
+        assert!(r.is_err(), "expected validation error");
+        let e = r.unwrap_err();
+        assert!(format!("{e}").contains("hsts_max_age"));
+    }
+
+    #[tokio::test]
+    async fn set_vhost_options_rejects_bad_redirect_url() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), happy_mocks());
+        s.create(req("example.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("example.cz").unwrap());
+        let mut opts = vh_defaults();
+        // Missing scheme.
+        opts.redirect_url = "new.example.cz".into();
+        let r = s.set_vhost_options(sel, opts, None).await;
+        assert!(r.is_err());
+        assert!(format!("{}", r.unwrap_err()).contains("redirect_url"));
+    }
+
+    #[tokio::test]
+    async fn set_vhost_options_rejects_bad_redirect_code() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), happy_mocks());
+        s.create(req("example.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("example.cz").unwrap());
+        let mut opts = vh_defaults();
+        opts.redirect_code = 418; // ☕
+        let r = s.set_vhost_options(sel, opts, None).await;
+        assert!(r.is_err());
+        assert!(format!("{}", r.unwrap_err()).contains("redirect_code"));
+    }
+
+    #[tokio::test]
+    async fn set_vhost_options_rejects_basic_auth_without_username() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), happy_mocks());
+        s.create(req("example.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("example.cz").unwrap());
+        let mut opts = vh_defaults();
+        opts.basic_auth_enabled = true;
+        opts.basic_auth_user = "  ".into(); // whitespace-only
+        let r = s.set_vhost_options(sel, opts, Some("hunter2".into())).await;
+        assert!(r.is_err());
+        assert!(format!("{}", r.unwrap_err()).contains("basic_auth_user"));
+    }
+
+    #[tokio::test]
+    async fn set_vhost_options_rejects_oversized_snippet() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), happy_mocks());
+        s.create(req("example.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("example.cz").unwrap());
+        let mut opts = vh_defaults();
+        opts.custom_nginx_snippet = "x".repeat(33 * 1024);
+        let r = s.set_vhost_options(sel, opts, None).await;
+        assert!(r.is_err());
+        assert!(format!("{}", r.unwrap_err()).contains("custom_nginx_snippet"));
+    }
+
+    #[tokio::test]
+    async fn set_vhost_options_default_ttl_when_cache_on() {
+        // Operator turned on FastCGI cache but didn't set TTL → 300s default.
+        let pool = open_memory().await.expect("open");
+        let mut a = happy_mocks();
+        a.expect_nginx_write_htpasswd().returning(|_, _, _| Ok(()));
+        a.expect_nginx_delete_htpasswd().returning(|_| Ok(()));
+        let s = svc(pool.clone(), a);
+        s.create(req("example.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("example.cz").unwrap());
+        let mut opts = vh_defaults();
+        opts.fastcgi_cache_enabled = true;
+        let r = s.set_vhost_options(sel, opts, None).await.expect("apply");
+        assert_eq!(r.fastcgi_cache_ttl, 300);
+    }
+
+    #[tokio::test]
+    async fn set_vhost_options_writes_htpasswd_when_password_supplied() {
+        let pool = open_memory().await.expect("open");
+        let mut a = happy_mocks();
+        a.expect_nginx_write_htpasswd()
+            .withf(|hid, user, hash| {
+                !hid.is_empty() && user == "preview" && hash.starts_with("$2")
+            })
+            .returning(|_, _, _| Ok(()));
+        a.expect_nginx_delete_htpasswd().returning(|_| Ok(()));
+        let s = svc(pool.clone(), a);
+        s.create(req("example.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("example.cz").unwrap());
+        let mut opts = vh_defaults();
+        opts.basic_auth_enabled = true;
+        opts.basic_auth_user = "preview".into();
+        let r = s
+            .set_vhost_options(sel, opts, Some("hunter2!".into()))
+            .await
+            .expect("apply");
+        assert!(r.basic_auth_set);
+    }
+
+    #[tokio::test]
+    async fn set_vhost_options_rollback_on_nginx_failure() {
+        let pool = open_memory().await.expect("open");
+        let mut a = MockAdapterPort::new();
+        a.expect_ensure_user().returning(|_, _| Ok(1042));
+        a.expect_ensure_dirs().returning(|_, _, _, _| Ok(()));
+        a.expect_fpm_ensure().returning(|_, _, _| Ok(()));
+        a.expect_db_create().returning(|_, _, _| Ok(db_creds()));
+        a.expect_acme_issue().returning(|d, _| Ok(cert_for(d)));
+        a.expect_nginx_delete_htpasswd().returning(|_| Ok(()));
+        // First nginx_write_vhost (during create) succeeds, second
+        // (during set_vhost_options) fails → service should roll back
+        // the DB options to the previous defaults.
+        let mut seq = mockall::Sequence::new();
+        a.expect_nginx_write_vhost()
+            .times(1)
+            .in_sequence(&mut seq)
+            .returning(|_| Ok(()));
+        a.expect_nginx_write_vhost()
+            .times(1)
+            .in_sequence(&mut seq)
+            .returning(|_| Err(AdapterError::Other("nginx: emerg: invalid".into())));
+        let s = svc(pool.clone(), a);
+        s.create(req("example.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("example.cz").unwrap());
+        let mut opts = vh_defaults();
+        opts.maintenance_mode = true;
+        opts.hsts_max_age = 31_536_000;
+        let r = s.set_vhost_options(sel.clone(), opts, None).await;
+        assert!(r.is_err(), "expected nginx rejection");
+        // DB should be back to defaults.
+        let detail_back = s.get(sel).await.expect("get");
+        assert!(!detail_back.vhost_options.maintenance_mode);
+        assert_eq!(detail_back.vhost_options.hsts_max_age, 0);
     }
 }

@@ -1,0 +1,33 @@
+server {
+    listen 80;
+    listen [::]:80;
+    server_name {{ domain }}{% for a in aliases %} {{ a }}{% endfor %};
+
+    # ACME challenges still served so LE renewals work even for
+    # redirect-only hostings (they have a cert too, for the HTTPS
+    # variant of the redirect).
+    location /.well-known/acme-challenge/ {
+        alias {{ acme_challenge_root }}/;
+        try_files $uri =404;
+        default_type "text/plain";
+        autoindex off;
+    }
+
+    location / {
+        return {{ redirect_code }} {{ redirect_target_http }};
+    }
+}
+
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name {{ domain }}{% for a in aliases %} {{ a }}{% endfor %};
+
+    ssl_certificate     {{ cert_path }};
+    ssl_certificate_key {{ key_path }};
+    ssl_protocols TLSv1.2 TLSv1.3;
+
+    location / {
+        return {{ redirect_code }} {{ redirect_target_https }};
+    }
+}

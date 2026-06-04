@@ -139,6 +139,17 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.resume(sel).await
     }
 
+    async fn hosting_set_vhost_options(
+        &self,
+        sel: HostingSelector,
+        options: hyperion_types::VhostOptions,
+        basic_auth_password: Option<String>,
+    ) -> Result<hyperion_types::VhostOptions, RpcError> {
+        self.svc
+            .set_vhost_options(sel, options, basic_auth_password)
+            .await
+    }
+
     async fn hosting_usage(
         &self,
         sel: HostingSelector,
