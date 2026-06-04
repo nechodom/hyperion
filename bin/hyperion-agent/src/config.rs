@@ -11,6 +11,42 @@ pub struct Config {
     pub enrollment: EnrollmentSection,
     pub slack: SlackSection,
     pub email: EmailSection,
+    pub remote_rpc: RemoteRpcSection,
+}
+
+/// Inbound master→node RPC listener. The master's hyperion-web
+/// POSTs signed RPC requests to `https://<this-node>:port/agent-rpc`
+/// and this section configures the listener.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct RemoteRpcSection {
+    /// When `true`, hyperion-agent binds `bind` and accepts signed
+    /// RPC requests. `false` is safe — the local Unix socket
+    /// always works, the operator just can't drive this node from
+    /// the master UI.
+    pub enabled: bool,
+    /// IP+port to bind to. Default `0.0.0.0:9443` exposes the
+    /// listener on every interface; operators on multi-homed
+    /// hosts can pin it (e.g. `10.0.0.5:9443`) to a single
+    /// private interface. The port also has to be opened in
+    /// whatever firewall is in front (ufw / iptables / cloud SG).
+    pub bind: String,
+    pub tls_cert_file: PathBuf,
+    pub tls_key_file: PathBuf,
+}
+
+impl Default for RemoteRpcSection {
+    fn default() -> Self {
+        Self {
+            // Default OFF on workers so an old agent.toml that
+            // doesn't even mention [remote_rpc] gets the safe
+            // behavior. install-node.sh sets this to true.
+            enabled: false,
+            bind: "0.0.0.0:9443".into(),
+            tls_cert_file: PathBuf::from("/etc/hyperion/agent-rpc.crt"),
+            tls_key_file: PathBuf::from("/etc/hyperion/agent-rpc.key"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -155,6 +191,7 @@ impl Default for Config {
             enrollment: EnrollmentSection::default(),
             slack: SlackSection::default(),
             email: EmailSection::default(),
+            remote_rpc: RemoteRpcSection::default(),
         }
     }
 }

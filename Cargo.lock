@@ -1326,12 +1326,17 @@ name = "hyperion-agent"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "axum",
+ "axum-server",
  "chrono",
  "clap",
  "hyperion-core",
+ "hyperion-rpc",
  "hyperion-rpc-server",
  "hyperion-state",
  "hyperion-types",
+ "rcgen 0.13.2",
+ "rustls",
  "serde",
  "serde_json",
  "tempfile",

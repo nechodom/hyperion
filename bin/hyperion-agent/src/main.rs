@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 mod config;
 mod enroll;
+mod inbound_rpc;
 
 fn hostname_or_unknown() -> String {
     std::process::Command::new("hostname")
@@ -382,10 +383,40 @@ async fn main() -> anyhow::Result<()> {
 
     // Pass the resolved state_file path so agent_info() can read
     // enrollment state without re-deriving it.
-    let agent = Arc::new(hyperion_core::AgentImpl::with_state_file(
-        svc,
-        state_file.clone(),
-    ));
+    let agent: Arc<dyn hyperion_rpc::AgentApi> = Arc::new(
+        hyperion_core::AgentImpl::with_state_file(svc, state_file.clone()),
+    );
+
+    // Inbound master→node remote RPC HTTPS listener. Disabled by
+    // default; opt-in via `[remote_rpc] enabled = true`. The local
+    // Unix socket always works regardless of this flag.
+    if cfg.remote_rpc.enabled {
+        match cfg.remote_rpc.bind.parse::<std::net::SocketAddr>() {
+            Ok(addr) => {
+                if let Err(e) = inbound_rpc::spawn_listener(
+                    addr,
+                    agent.clone(),
+                    state_file.clone(),
+                    cfg.remote_rpc.tls_cert_file.clone(),
+                    cfg.remote_rpc.tls_key_file.clone(),
+                )
+                .await
+                {
+                    tracing::error!(
+                        error=%e,
+                        "could not start inbound RPC listener — node will only be reachable via local socket"
+                    );
+                }
+            }
+            Err(e) => {
+                tracing::error!(
+                    bind=%cfg.remote_rpc.bind, error=%e,
+                    "remote_rpc.bind is not a valid SocketAddr — inbound RPC disabled"
+                );
+            }
+        }
+    }
+
     let server = hyperion_rpc_server::Server::bind(&cfg.agent.socket_path, agent).await?;
     tracing::info!("ready");
     server.run().await?;

@@ -171,6 +171,158 @@ pub fn verify_signature(
     pk.verify(payload, &sig).map_err(|_| "signature verify failed")
 }
 
+// ============================================================
+//  Signed envelope for master→node remote RPC
+// ============================================================
+
+/// Metadata covered by the master's signature on every outbound
+/// remote RPC. Bound to a specific node so a signed request
+/// captured by an attacker can't be replayed against a different
+/// node; bound to a body hash so it can't be reused for a
+/// different request; bound to ts+nonce so it can't be replayed
+/// after the freshness window.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct SignedEnvelope {
+    pub node_id: String,
+    pub ts: i64,
+    pub nonce: String,
+    /// BLAKE3 hex of the actual POST body bytes.
+    pub body_hash: String,
+}
+
+/// The Authorization header carries `Bearer <env_b64>.<sig_b64>` —
+/// JWT-shaped but unsigned by us; we control both ends and the
+/// payload is a fixed Rust struct, not arbitrary claims.
+#[derive(Debug, Clone)]
+pub struct SignedAuthorization {
+    pub envelope_b64: String,
+    pub signature_b64: String,
+}
+
+impl SignedAuthorization {
+    /// Render in the `<env>.<sig>` shape suitable to drop into the
+    /// HTTP Authorization header (Bearer prefix added by caller).
+    pub fn to_header_value(&self) -> String {
+        format!("{}.{}", self.envelope_b64, self.signature_b64)
+    }
+
+    /// Parse a `<env>.<sig>` Bearer value. Rejects anything that
+    /// doesn't have exactly one dot.
+    pub fn parse(s: &str) -> Result<Self, &'static str> {
+        let s = s.trim();
+        // Accept both with and without the "Bearer " prefix.
+        let body = s.strip_prefix("Bearer ").unwrap_or(s);
+        let (env_b64, sig_b64) = body.split_once('.').ok_or("missing dot separator")?;
+        if env_b64.is_empty() || sig_b64.is_empty() {
+            return Err("empty envelope or signature");
+        }
+        Ok(Self {
+            envelope_b64: env_b64.to_string(),
+            signature_b64: sig_b64.to_string(),
+        })
+    }
+}
+
+/// Sign a remote-RPC envelope. Caller supplies the node_id (target),
+/// the request body bytes, and a fresh nonce (typically a random
+/// ULID). Returns the Authorization value to put in the header.
+pub fn sign_envelope(
+    signer: &MasterRpcSigner,
+    node_id: &str,
+    body: &[u8],
+    ts: i64,
+    nonce: &str,
+) -> SignedAuthorization {
+    let env = SignedEnvelope {
+        node_id: node_id.to_string(),
+        ts,
+        nonce: nonce.to_string(),
+        body_hash: hex::encode(blake3::hash(body).as_bytes()),
+    };
+    // serde_json::to_vec on a known struct is infallible in
+    // practice (no Map iter, no Display impls that can error).
+    let env_json = serde_json::to_vec(&env).unwrap_or_else(|_| b"{}".to_vec());
+    let env_b64 = STANDARD_NO_PAD.encode(&env_json);
+    // Sign the BASE64 representation, not the raw JSON. That way
+    // the verifier doesn't have to round-trip through JSON
+    // serialization to recompute the signed bytes — they're
+    // literally the bytes of `env_b64`.
+    let sig = signer.sign(env_b64.as_bytes());
+    let sig_b64 = STANDARD_NO_PAD.encode(sig);
+    SignedAuthorization {
+        envelope_b64: env_b64,
+        signature_b64: sig_b64,
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct VerifyOpts {
+    /// Maximum allowed age of `envelope.ts` in seconds. Requests
+    /// older than this are rejected even with a valid signature
+    /// (replay protection in the time dimension).
+    pub max_age_secs: i64,
+    /// Maximum allowed *future* skew. Tolerate a small amount to
+    /// survive a few-second clock drift between master and node
+    /// without dropping legitimate requests.
+    pub max_skew_secs: i64,
+}
+
+impl Default for VerifyOpts {
+    fn default() -> Self {
+        Self {
+            max_age_secs: 60,
+            max_skew_secs: 5,
+        }
+    }
+}
+
+/// Verify a parsed `SignedAuthorization` against `pubkey_b64`,
+/// `expected_node_id` (the receiver's own node_id), and the actual
+/// request `body` bytes. Returns the parsed envelope on success
+/// so the caller can feed `envelope.nonce` to its replay cache.
+pub fn verify_envelope(
+    auth: &SignedAuthorization,
+    pubkey_b64: &str,
+    expected_node_id: &str,
+    body: &[u8],
+    now: i64,
+    opts: VerifyOpts,
+) -> Result<SignedEnvelope, &'static str> {
+    // 1. Signature first — cheapest way to reject random garbage
+    //    before we burn time on JSON parsing.
+    let sig_bytes = STANDARD_NO_PAD
+        .decode(&auth.signature_b64)
+        .map_err(|_| "signature base64")?;
+    verify_signature(pubkey_b64, auth.envelope_b64.as_bytes(), &sig_bytes)?;
+    // 2. Decode + parse the envelope.
+    let env_bytes = STANDARD_NO_PAD
+        .decode(&auth.envelope_b64)
+        .map_err(|_| "envelope base64")?;
+    let env: SignedEnvelope =
+        serde_json::from_slice(&env_bytes).map_err(|_| "envelope parse")?;
+    // 3. Bind to receiver — refuse requests addressed to a
+    //    different node, even if signed validly.
+    if env.node_id != expected_node_id {
+        return Err("envelope node mismatch");
+    }
+    // 4. Freshness — reject stale or implausibly-future ts.
+    if env.ts < now - opts.max_age_secs {
+        return Err("envelope too old");
+    }
+    if env.ts > now + opts.max_skew_secs {
+        return Err("envelope in future");
+    }
+    // 5. Body integrity — body_hash MUST match the bytes we
+    //    actually received. Otherwise an attacker with a captured
+    //    valid Authorization header could swap in a different
+    //    POST body (e.g. delete instead of list).
+    let actual_body_hash = hex::encode(blake3::hash(body).as_bytes());
+    if env.body_hash != actual_body_hash {
+        return Err("body hash mismatch");
+    }
+    Ok(env)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -241,5 +393,149 @@ mod tests {
     fn parse_pubkey_rejects_garbage() {
         assert!(parse_pubkey_b64("###not_base64###").is_err());
         assert!(parse_pubkey_b64("YWFh").is_err()); // 3 bytes, wrong length
+    }
+
+    // ============================================================
+    //  Signed envelope tests
+    // ============================================================
+
+    fn fresh_signer() -> MasterRpcSigner {
+        let tmp = tempfile::tempdir().unwrap();
+        MasterRpcSigner::load_or_init(&tmp.path().join("k")).unwrap()
+    }
+
+    #[test]
+    fn signed_authorization_header_roundtrip() {
+        let a = SignedAuthorization {
+            envelope_b64: "abc".into(),
+            signature_b64: "def".into(),
+        };
+        let h = a.to_header_value();
+        assert_eq!(h, "abc.def");
+        let parsed = SignedAuthorization::parse(&format!("Bearer {h}")).unwrap();
+        assert_eq!(parsed.envelope_b64, "abc");
+        assert_eq!(parsed.signature_b64, "def");
+        // Bare value (without Bearer prefix) also works.
+        let parsed2 = SignedAuthorization::parse(&h).unwrap();
+        assert_eq!(parsed2.envelope_b64, "abc");
+    }
+
+    #[test]
+    fn signed_authorization_rejects_bad_shape() {
+        assert!(SignedAuthorization::parse("no-dot").is_err());
+        assert!(SignedAuthorization::parse(".only-sig").is_err());
+        assert!(SignedAuthorization::parse("only-env.").is_err());
+    }
+
+    #[test]
+    fn sign_then_verify_envelope_roundtrips() {
+        let s = fresh_signer();
+        let body = br#"{"req":"HostingList"}"#;
+        let auth = sign_envelope(&s, "node_target", body, 1_700_000_000, "nonce-abc");
+        let env = verify_envelope(
+            &auth,
+            s.pubkey_b64(),
+            "node_target",
+            body,
+            1_700_000_000,
+            VerifyOpts::default(),
+        )
+        .expect("must verify");
+        assert_eq!(env.node_id, "node_target");
+        assert_eq!(env.nonce, "nonce-abc");
+        assert_eq!(env.ts, 1_700_000_000);
+    }
+
+    #[test]
+    fn verify_rejects_wrong_target_node() {
+        let s = fresh_signer();
+        let body = b"{}";
+        let auth = sign_envelope(&s, "node_a", body, 1_700_000_000, "n1");
+        let err = verify_envelope(
+            &auth,
+            s.pubkey_b64(),
+            // We're node_b — request was for node_a.
+            "node_b",
+            body,
+            1_700_000_000,
+            VerifyOpts::default(),
+        )
+        .unwrap_err();
+        assert_eq!(err, "envelope node mismatch");
+    }
+
+    #[test]
+    fn verify_rejects_stale_envelope() {
+        let s = fresh_signer();
+        let body = b"x";
+        let auth = sign_envelope(&s, "n", body, 1_700_000_000, "n1");
+        // 120s later — past the 60s default window.
+        let err = verify_envelope(
+            &auth,
+            s.pubkey_b64(),
+            "n",
+            body,
+            1_700_000_120,
+            VerifyOpts::default(),
+        )
+        .unwrap_err();
+        assert_eq!(err, "envelope too old");
+    }
+
+    #[test]
+    fn verify_rejects_future_envelope() {
+        let s = fresh_signer();
+        let body = b"x";
+        // Master timestamped 60s in the future.
+        let auth = sign_envelope(&s, "n", body, 1_700_000_060, "n1");
+        let err = verify_envelope(
+            &auth,
+            s.pubkey_b64(),
+            "n",
+            body,
+            1_700_000_000,
+            VerifyOpts::default(),
+        )
+        .unwrap_err();
+        assert_eq!(err, "envelope in future");
+    }
+
+    #[test]
+    fn verify_rejects_body_swap() {
+        let s = fresh_signer();
+        let signed_body = b"original-body";
+        let auth = sign_envelope(&s, "n", signed_body, 1_700_000_000, "n1");
+        // Attacker captured Authorization and tried to POST a
+        // different body with it.
+        let err = verify_envelope(
+            &auth,
+            s.pubkey_b64(),
+            "n",
+            b"different-body",
+            1_700_000_000,
+            VerifyOpts::default(),
+        )
+        .unwrap_err();
+        assert_eq!(err, "body hash mismatch");
+    }
+
+    #[test]
+    fn verify_rejects_signature_for_other_master() {
+        let a = fresh_signer();
+        let b = fresh_signer();
+        let body = b"x";
+        let auth = sign_envelope(&a, "n", body, 1_700_000_000, "n1");
+        // Same data but verified against a different master's
+        // pubkey — must fail.
+        let err = verify_envelope(
+            &auth,
+            b.pubkey_b64(),
+            "n",
+            body,
+            1_700_000_000,
+            VerifyOpts::default(),
+        )
+        .unwrap_err();
+        assert_eq!(err, "signature verify failed");
     }
 }

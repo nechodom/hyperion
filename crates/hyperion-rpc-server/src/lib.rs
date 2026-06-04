@@ -73,7 +73,11 @@ async fn handle_conn(mut stream: UnixStream, api: Arc<dyn AgentApi>) -> std::io:
     Ok(())
 }
 
-async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
+/// Public dispatcher. The Unix-socket handler uses it; the
+/// remote-RPC HTTPS handler on the agent reuses it so behavior is
+/// identical whether a request came in over the local socket or
+/// over the master→node signed channel.
+pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
     match req {
         Request::AgentInfo => match api.agent_info().await {
             Ok(v) => Response::AgentInfo(v),
