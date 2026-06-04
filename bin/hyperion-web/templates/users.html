@@ -5,7 +5,7 @@
   <div>
     <h1>Admin users</h1>
     <div class="subtitle">
-      Multi-user admin access · roles: super_admin · admin · operator · viewer
+      Multi-user admin access · roles: super_admin · admin · operator · customer · viewer
     </div>
   </div>
 </div>
@@ -47,6 +47,7 @@
       <label for="new_role">Role</label>
       <select id="new_role" name="role">
         <option value="viewer">viewer</option>
+        <option value="customer">customer</option>
         <option value="operator">operator</option>
         <option value="admin">admin</option>
         <option value="super_admin">super_admin</option>
@@ -57,7 +58,8 @@
   <p class="text-soft small" style="margin-top:0.4rem">
     <strong>super_admin</strong> = all access incl. user management ·
     <strong>admin</strong> = all except user management ·
-    <strong>operator</strong> = only assigned hostings (CRUD) ·
+    <strong>operator</strong> = internal staff with CRUD on assigned hostings ·
+    <strong>customer</strong> = end-user / tenant — slim nav, only their own hostings ·
     <strong>viewer</strong> = read-only on assigned hostings.
   </p>
 </div>
@@ -88,6 +90,7 @@
               <input type="hidden" name="user_id" value="{{ u.id }}">
               <select name="role">
                 <option value="viewer" {% if u.role == "viewer" %}selected{% endif %}>viewer</option>
+                <option value="customer" {% if u.role == "customer" %}selected{% endif %}>customer</option>
                 <option value="operator" {% if u.role == "operator" %}selected{% endif %}>operator</option>
                 <option value="admin" {% if u.role == "admin" %}selected{% endif %}>admin</option>
                 <option value="super_admin" {% if u.role == "super_admin" %}selected{% endif %}>super_admin</option>

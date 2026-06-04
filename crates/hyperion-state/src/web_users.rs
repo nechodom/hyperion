@@ -13,6 +13,10 @@ pub enum WebRole {
     SuperAdmin,
     Admin,
     Operator,
+    /// Customer — end-user / tenant. Same access model as Operator
+    /// (per-hosting grants in `web_user_hosting_access`) but the UI
+    /// shows a slim nav focused on their own hostings.
+    Customer,
     Viewer,
 }
 
@@ -22,6 +26,7 @@ impl WebRole {
             Self::SuperAdmin => "super_admin",
             Self::Admin => "admin",
             Self::Operator => "operator",
+            Self::Customer => "customer",
             Self::Viewer => "viewer",
         }
     }
@@ -38,6 +43,11 @@ impl WebRole {
     pub fn is_read_only(self) -> bool {
         matches!(self, Self::Viewer)
     }
+    /// Is this a tenant role (per-hosting grants)? Operator + Customer
+    /// + Viewer. Used by the nav/UI shim to slim down the chrome.
+    pub fn is_tenant_scoped(self) -> bool {
+        matches!(self, Self::Operator | Self::Customer | Self::Viewer)
+    }
 }
 
 impl FromStr for WebRole {
@@ -47,6 +57,7 @@ impl FromStr for WebRole {
             "super_admin" => Ok(Self::SuperAdmin),
             "admin" => Ok(Self::Admin),
             "operator" => Ok(Self::Operator),
+            "customer" => Ok(Self::Customer),
             "viewer" => Ok(Self::Viewer),
             other => Err(format!("unknown web role: {other}")),
         }
@@ -667,6 +678,30 @@ fn raw_to_row(r: RawUser) -> WebUserRow {
 mod tests {
     use super::*;
     use crate::db::open_memory;
+
+    #[test]
+    fn customer_role_round_trips_string_form() {
+        // FromStr accepts "customer".
+        let r = WebRole::from_str("customer").expect("parse");
+        assert_eq!(r, WebRole::Customer);
+        assert_eq!(r.as_str(), "customer");
+        // Doesn't elevate to admin/super_admin.
+        assert!(!r.sees_all_hostings());
+        assert!(!r.can_manage_users());
+        // Not read-only — can manage their own hostings.
+        assert!(!r.is_read_only());
+        assert!(r.is_tenant_scoped());
+    }
+
+    #[test]
+    fn tenant_scoped_includes_three_roles_only() {
+        assert!(WebRole::Operator.is_tenant_scoped());
+        assert!(WebRole::Customer.is_tenant_scoped());
+        assert!(WebRole::Viewer.is_tenant_scoped());
+        // Admin tier is NOT tenant-scoped — sees everything.
+        assert!(!WebRole::Admin.is_tenant_scoped());
+        assert!(!WebRole::SuperAdmin.is_tenant_scoped());
+    }
 
     async fn fresh_user(pool: &SqlitePool, name: &str) -> i64 {
         insert(

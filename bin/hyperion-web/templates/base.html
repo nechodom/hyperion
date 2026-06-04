@@ -18,7 +18,8 @@
     </a>
     <nav class="nav-section">
       <span class="nav-label">Overview</span>
-      <a class="nav-link {% if active == "dashboard" %}active{% endif %}" href="/">
+      <a class="nav-link {% if active == "dashboard" %}active{% endif %}" href="/"
+         data-hide-roles="customer">
         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/><rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/></svg>
         Dashboard
       </a>
@@ -26,16 +27,18 @@
         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
         Hostings
       </a>
-      <a class="nav-link {% if active == "stats" %}active{% endif %}" href="/stats">
+      <a class="nav-link {% if active == "stats" %}active{% endif %}" href="/stats"
+         data-hide-roles="customer">
         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
         Stats
       </a>
-      <a class="nav-link {% if active == "profiles" %}active{% endif %}" href="/profiles">
+      <a class="nav-link {% if active == "profiles" %}active{% endif %}" href="/profiles"
+         data-hide-roles="customer">
         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7h-9"/><path d="M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></svg>
         Profiles
       </a>
     </nav>
-    <nav class="nav-section">
+    <nav class="nav-section" data-hide-roles="customer">
       <span class="nav-label">Operations</span>
       <a class="nav-link {% if active == "install" %}active{% endif %}" href="/install"
          data-role-min="super_admin">
@@ -642,6 +645,21 @@ function isShortcutContext(ev) {
       const need = RANK[el.dataset.roleMin] ?? 99;
       el.style.display = (myRank >= need) ? '' : 'none';
     });
+    // data-hide-roles="customer,viewer" — comma-separated list of
+    // roles that should NOT see this element. Used for the slim
+    // tenant nav: customers see only Hostings + Profile.
+    document.querySelectorAll('[data-hide-roles]').forEach(el => {
+      const hide = (el.dataset.hideRoles || '')
+        .split(',')
+        .map(s => s.trim())
+        .filter(Boolean);
+      if (hide.includes(role)) el.style.display = 'none';
+    });
+    // Slim down the page header "New hosting" button etc. for
+    // customers. Same opt-in pattern.
+    if (role === 'customer') {
+      document.body.classList.add('role-customer');
+    }
   }
 })();
 </script>

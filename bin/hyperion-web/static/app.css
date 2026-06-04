@@ -2588,6 +2588,19 @@ hr.divider {
 }
 
 /* ============================================================
+ *  CUSTOMER ROLE — slim tenant chrome
+ *  Body gets `role-customer` class set by the nav-shim script
+ *  when the session role is "customer". CSS hides everything
+ *  marked .admin-only across the app — admins/operators still
+ *  see those controls.
+ * ============================================================ */
+body.role-customer .admin-only { display: none !important; }
+/* The /hostings/new "Add hosting" header button has class
+   .header-action-new in the list template — customers can't
+   create, so it disappears entirely. */
+body.role-customer .header-action-new { display: none !important; }
+
+/* ============================================================
  *  NOTIFICATION BELL (sidebar + dropdown portal)
  * ============================================================ */
 .bell-wrap {

@@ -78,6 +78,19 @@ impl Session {
     pub fn is_read_only(&self) -> bool {
         self.role == "viewer"
     }
+    /// True for tenant-scoped roles (operator / customer / viewer).
+    /// These users see ONLY hostings explicitly granted to them via
+    /// `web_user_hosting_access`; admins + super_admins see all.
+    pub fn is_tenant_scoped(&self) -> bool {
+        matches!(self.role.as_str(), "operator" | "customer" | "viewer")
+    }
+    /// True for customer-role specifically — drives the slim-nav
+    /// branch in base.html (Stats / Profiles / Audit / Services /
+    /// Install / Settings hidden; Hostings + My Profile + Sign-out
+    /// only).
+    pub fn is_customer(&self) -> bool {
+        self.role == "customer"
+    }
     /// True only for tokens issued as full sessions. Authentication
     /// middleware MUST gate on this — see security audit
     /// "pending-2FA cookie shares SessionSigner with real sessions".

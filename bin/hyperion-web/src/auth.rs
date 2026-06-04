@@ -39,6 +39,20 @@ impl AuthCtx {
     pub fn is_read_only(&self) -> bool {
         self.session.as_ref().map(|s| s.is_read_only()).unwrap_or(true)
     }
+
+    /// Tenant-scoped: operator/customer/viewer — sees only granted
+    /// hostings, can't touch cluster-wide endpoints.
+    pub fn is_tenant_scoped(&self) -> bool {
+        self.session
+            .as_ref()
+            .map(|s| s.is_tenant_scoped())
+            .unwrap_or(true)
+    }
+
+    /// Customer role — slim navigation in base.html.
+    pub fn is_customer(&self) -> bool {
+        self.session.as_ref().map(|s| s.is_customer()).unwrap_or(false)
+    }
 }
 
 #[async_trait::async_trait]

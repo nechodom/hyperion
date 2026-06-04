@@ -247,6 +247,14 @@ pub async fn get_list(
 }
 
 pub async fn get_new(State(state): State<SharedState>, ctx: AuthCtx) -> Result<Response, AppError> {
+    // Creating a new hosting is a cluster-scoped action. Tenant-
+    // scoped roles (operator / customer / viewer) get bounced —
+    // the post_create handler enforces this server-side anyway,
+    // bouncing on GET avoids rendering the entire form just to
+    // refuse the submit.
+    if !ctx.is_admin_or_higher() {
+        return Err(AppError::Forbidden);
+    }
     // Wildcard CSRF token so it also covers the DNS-preflight HTMX
     // button (form_id /hostings/dns-check-domain) in addition to the
     // main /hostings POST.
