@@ -184,6 +184,18 @@ struct DetailTpl<'a> {
     vhost_saved: bool,
     /// Set when set_vhost_options returned an error — banner in UI.
     vhost_error: Option<String>,
+    /// WP debug toggle form CSRF.
+    csrf_wp_debug: String,
+    /// WP debug.log rotate button CSRF.
+    csrf_wp_debug_rotate: String,
+    /// WP Redis enable/disable form CSRF.
+    csrf_wp_redis: String,
+    /// WP Redis password rotate button CSRF.
+    csrf_wp_redis_rotate: String,
+    /// Set after a successful WP debug/Redis POST — banner in UI.
+    wp_extras_flash: bool,
+    /// Set when set_wp_debug / set_redis returned an error — banner.
+    wp_extras_error: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -637,6 +649,16 @@ pub async fn post_create(
                 csrf_vhost_options: csrf_token_for(&state, &ctx, "/hostings/vhost-options"),
                 vhost_saved: false,
                 vhost_error: None,
+                csrf_wp_debug: csrf_token_for(&state, &ctx, "/hostings/wp/debug"),
+                csrf_wp_debug_rotate: csrf_token_for(
+                    &state,
+                    &ctx,
+                    "/hostings/wp/debug-log/rotate",
+                ),
+                csrf_wp_redis: csrf_token_for(&state, &ctx, "/hostings/wp/redis"),
+                csrf_wp_redis_rotate: csrf_token_for(&state, &ctx, "/hostings/wp/redis/rotate"),
+                wp_extras_flash: false,
+                wp_extras_error: None,
             };
             Ok(Html(tpl.render()?).into_response())
         }
@@ -887,6 +909,12 @@ pub async fn get_detail(
         csrf_vhost_options: csrf_token_for(&state, &ctx, "/hostings/vhost-options"),
         vhost_saved: q.vhost_saved.as_deref() == Some("1"),
         vhost_error: q.vhost_error,
+        csrf_wp_debug: csrf_token_for(&state, &ctx, "/hostings/wp/debug"),
+        csrf_wp_debug_rotate: csrf_token_for(&state, &ctx, "/hostings/wp/debug-log/rotate"),
+        csrf_wp_redis: csrf_token_for(&state, &ctx, "/hostings/wp/redis"),
+        csrf_wp_redis_rotate: csrf_token_for(&state, &ctx, "/hostings/wp/redis/rotate"),
+        wp_extras_flash: q.wp_extras_saved.as_deref() == Some("1"),
+        wp_extras_error: q.wp_extras_error,
     };
     Ok(Html(tpl.render()?).into_response())
 }
@@ -994,6 +1022,12 @@ pub struct DetailQuery {
     /// surfaced back through the redirect.
     #[serde(default)]
     pub vhost_error: Option<String>,
+    /// "1" after WP debug / Redis form was applied successfully.
+    #[serde(default)]
+    pub wp_extras_saved: Option<String>,
+    /// Error from WP debug / Redis form, surfaced via redirect.
+    #[serde(default)]
+    pub wp_extras_error: Option<String>,
 }
 
 async fn fetch_expiry(
@@ -1495,6 +1529,170 @@ pub async fn post_vhost_options(
             ))
             .into_response())
         }
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+// ──────────── WP debug + Redis handlers ────────────
+
+#[derive(Deserialize)]
+pub struct WpDebugForm {
+    selector: String,
+    #[serde(default)]
+    target_node: String,
+    #[serde(default)]
+    enabled: Option<String>,
+    #[serde(default)]
+    log: Option<String>,
+    #[serde(default)]
+    display: Option<String>,
+}
+
+fn redirect_after_wp_extras(form_selector: &str, error: Option<String>) -> Response {
+    match error {
+        Some(e) => Redirect::to(&format!(
+            "/hostings/{}?wp_extras_error={}",
+            urlencoding(form_selector),
+            urlencoding(&e)
+        ))
+        .into_response(),
+        None => Redirect::to(&format!(
+            "/hostings/{}?wp_extras_saved=1",
+            urlencoding(form_selector)
+        ))
+        .into_response(),
+    }
+}
+
+pub async fn post_wp_debug(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<WpDebugForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let target = node_target(&form.target_node);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target,
+        Request::HostingSetWpDebug {
+            sel,
+            enabled: checkbox_on(&form.enabled),
+            log: checkbox_on(&form.log),
+            display: checkbox_on(&form.display),
+        },
+    )
+    .await?;
+    match resp {
+        RpcResponse::HostingSetWpDebug(_) => Ok(redirect_after_wp_extras(&form.selector, None)),
+        RpcResponse::Error(e) => Ok(redirect_after_wp_extras(
+            &form.selector,
+            Some(e.to_string()),
+        )),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct WpRotateForm {
+    selector: String,
+    #[serde(default)]
+    target_node: String,
+}
+
+pub async fn post_wp_debug_log_rotate(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<WpRotateForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let target = node_target(&form.target_node);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target,
+        Request::HostingRotateWpDebugLog { sel },
+    )
+    .await?;
+    match resp {
+        RpcResponse::HostingRotateWpDebugLog => {
+            Ok(redirect_after_wp_extras(&form.selector, None))
+        }
+        RpcResponse::Error(e) => Ok(redirect_after_wp_extras(
+            &form.selector,
+            Some(e.to_string()),
+        )),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct WpRedisForm {
+    selector: String,
+    #[serde(default)]
+    target_node: String,
+    /// "on" = enable; anything else = disable.
+    #[serde(default)]
+    enabled: String,
+}
+
+pub async fn post_wp_redis(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<WpRedisForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let target = node_target(&form.target_node);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target,
+        Request::HostingSetRedis {
+            sel,
+            enabled: form.enabled == "on",
+        },
+    )
+    .await?;
+    match resp {
+        RpcResponse::HostingSetRedis(_) => Ok(redirect_after_wp_extras(&form.selector, None)),
+        RpcResponse::Error(e) => Ok(redirect_after_wp_extras(
+            &form.selector,
+            Some(e.to_string()),
+        )),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+pub async fn post_wp_redis_rotate(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<WpRotateForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let target = node_target(&form.target_node);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target,
+        Request::HostingRotateRedisPassword { sel },
+    )
+    .await?;
+    match resp {
+        RpcResponse::HostingRotateRedisPassword(_) => {
+            Ok(redirect_after_wp_extras(&form.selector, None))
+        }
+        RpcResponse::Error(e) => Ok(redirect_after_wp_extras(
+            &form.selector,
+            Some(e.to_string()),
+        )),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }

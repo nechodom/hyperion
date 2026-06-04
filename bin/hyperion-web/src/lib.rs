@@ -31,6 +31,22 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::hostings::post_vhost_options),
         )
         .route(
+            "/hostings/wp/debug",
+            post(handlers::hostings::post_wp_debug),
+        )
+        .route(
+            "/hostings/wp/debug-log/rotate",
+            post(handlers::hostings::post_wp_debug_log_rotate),
+        )
+        .route(
+            "/hostings/wp/redis",
+            post(handlers::hostings::post_wp_redis),
+        )
+        .route(
+            "/hostings/wp/redis/rotate",
+            post(handlers::hostings::post_wp_redis_rotate),
+        )
+        .route(
             "/hostings/set-limits",
             post(handlers::hostings::post_set_limits),
         )

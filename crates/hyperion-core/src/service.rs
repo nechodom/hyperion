@@ -186,6 +186,47 @@ pub trait AdapterPort: Send + Sync {
         slug: &str,
         action: &hyperion_types::WpThemeAction,
     ) -> Result<hyperion_types::WpThemeActionResult, AdapterError>;
+
+    /// Apply WP_DEBUG + WP_DEBUG_LOG + WP_DEBUG_DISPLAY to wp-config.php.
+    /// When `enabled` is false, the constants are deleted (not set to
+    /// false — see WpExtras docstring).
+    async fn wp_set_debug(
+        &self,
+        system_user: &str,
+        htdocs: &str,
+        enabled: bool,
+        log: bool,
+        display: bool,
+    ) -> Result<(), AdapterError>;
+
+    /// Apply WP_REDIS_* constants to wp-config.php. When `cfg` is
+    /// None, the constants are deleted.
+    async fn wp_set_redis(
+        &self,
+        system_user: &str,
+        htdocs: &str,
+        cfg: Option<hyperion_types::WpRedisConfig>,
+    ) -> Result<(), AdapterError>;
+
+    /// Read the size of wp-content/debug.log in bytes (0 if missing).
+    /// Used by the agent tick to refresh `wp_debug_log_size_bytes`.
+    async fn wp_debug_log_size(
+        &self,
+        htdocs: &str,
+    ) -> Result<i64, AdapterError>;
+
+    /// Provision a per-hosting Redis ACL user. Idempotent — re-running
+    /// with the same username + new password rotates the password.
+    /// Returns Ok on success regardless of whether the user existed.
+    async fn redis_ensure_acl(
+        &self,
+        username: &str,
+        password: &str,
+        db_number: i64,
+    ) -> Result<(), AdapterError>;
+
+    /// Delete a per-hosting Redis ACL user. Idempotent — Ok if absent.
+    async fn redis_delete_acl(&self, username: &str) -> Result<(), AdapterError>;
 }
 
 #[derive(Clone)]
@@ -1707,6 +1748,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             proxy_upstream_url: req.proxy_upstream_url.clone(),
             node_id: Some(node_id_str.clone()),
             vhost_options: hyperion_types::VhostOptions::default(),
+            wp_extras: hyperion_types::WpExtras::default(),
         };
         if let Err(e) = self.adapters.nginx_write_vhost(&detail).await {
             let _ = stack.rollback_all().await;
@@ -1912,6 +1954,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             proxy_upstream_url: row.proxy_upstream_url,
             node_id: row.node_id,
             vhost_options: row.vhost_options,
+            wp_extras: row.wp_extras,
         })
     }
 
@@ -2300,6 +2343,258 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         .await;
 
         Ok(options)
+    }
+
+    // ───────────── WP debug + Redis ─────────────
+
+    pub async fn set_wp_debug(
+        &self,
+        sel: HostingSelector,
+        enabled: bool,
+        log: bool,
+        display: bool,
+    ) -> Result<hyperion_types::WpExtras, RpcError> {
+        let detail = self.get(sel).await?;
+        // WP install required.
+        if detail.php_version.is_none() {
+            return Err(RpcError::Validation {
+                message: "WP_DEBUG toggle requires a PHP hosting".into(),
+            });
+        }
+        self.adapters
+            .wp_set_debug(&detail.system_user, &detail.root_dir, enabled, log, display)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("wp set debug: {e}")))?;
+        hyperion_state::hostings::set_wp_debug(
+            &self.pool,
+            &detail.id,
+            enabled,
+            log,
+            display,
+            now_secs(),
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("persist wp debug: {e}")))?;
+        let mut wp_extras = detail.wp_extras.clone();
+        wp_extras.wp_debug_enabled = enabled;
+        wp_extras.wp_debug_log = log;
+        wp_extras.wp_debug_display = display;
+        self.append_audit(
+            "hosting.set_wp_debug",
+            Some(detail.id.as_str()),
+            &serde_json::json!({
+                "domain": detail.domain,
+                "enabled": enabled,
+                "log": log,
+                "display": display,
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+        Ok(wp_extras)
+    }
+
+    pub async fn set_redis(
+        &self,
+        sel: HostingSelector,
+        enabled: bool,
+    ) -> Result<hyperion_types::WpExtras, RpcError> {
+        let detail = self.get(sel).await?;
+        if detail.php_version.is_none() {
+            return Err(RpcError::Validation {
+                message: "Redis cache requires a PHP hosting".into(),
+            });
+        }
+
+        if !enabled {
+            // Turn off: drop WP constants, delete ACL, clear DB row.
+            self.adapters
+                .wp_set_redis(&detail.system_user, &detail.root_dir, None)
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("wp unset redis: {e}")))?;
+            let username = redis_username_for(detail.id.as_str());
+            let _ = self.adapters.redis_delete_acl(&username).await;
+            hyperion_state::hostings::set_redis(
+                &self.pool,
+                &detail.id,
+                false,
+                None,
+                false,
+                now_secs(),
+            )
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("persist redis off: {e}")))?;
+            // Clear stored password secret.
+            let _ = self
+                .secrets
+                .delete(&hyperion_types::SecretId(format!("redis-{}", detail.id.as_str())))
+                .await;
+            self.append_audit(
+                "hosting.set_redis",
+                Some(detail.id.as_str()),
+                &serde_json::json!({"domain": detail.domain, "enabled": false}).to_string(),
+                "ok",
+            )
+            .await;
+            let mut wpe = detail.wp_extras.clone();
+            wpe.redis_enabled = false;
+            wpe.redis_db_number = None;
+            wpe.redis_password_set = false;
+            return Ok(wpe);
+        }
+
+        // Turn on. Allocate a DB slot (idempotent — reuse existing on re-enable).
+        let db_number = match detail.wp_extras.redis_db_number {
+            Some(n) => n,
+            None => {
+                let n = hyperion_state::hostings::next_free_redis_db(&self.pool, 16)
+                    .await
+                    .map_err(|e| RpcError::Internal_with(format!("alloc redis db: {e}")))?
+                    .ok_or_else(|| RpcError::Conflict {
+                        message: "no free Redis DB slot (all 16 in use). Bump `databases` in \
+                                  /etc/redis/redis.conf and reload."
+                            .into(),
+                    })?;
+                n
+            }
+        };
+        let password = generate_redis_password();
+        let username = redis_username_for(detail.id.as_str());
+
+        // Provision ACL on the local redis-server.
+        self.adapters
+            .redis_ensure_acl(&username, &password, db_number)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("redis ACL: {e}")))?;
+
+        // Persist secret BEFORE writing wp-config — so a partial
+        // failure doesn't leave wp-config pointing at a password we
+        // can't recover. (Re-enabling later regenerates anyway, but
+        // the operator might want to grep the secret out for an
+        // external tool meanwhile.)
+        let secret_id = hyperion_types::SecretId(format!("redis-{}", detail.id.as_str()));
+        self.secrets
+            .put(&secret_id, &password)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("store redis secret: {e}")))?;
+
+        // Write WP_REDIS_* into wp-config.
+        let cfg = hyperion_types::WpRedisConfig {
+            host: "127.0.0.1".into(),
+            port: 6379,
+            database: db_number,
+            username: username.clone(),
+            password,
+            key_prefix: format!("h{}_", db_number),
+        };
+        self.adapters
+            .wp_set_redis(&detail.system_user, &detail.root_dir, Some(cfg))
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("wp set redis: {e}")))?;
+
+        hyperion_state::hostings::set_redis(
+            &self.pool,
+            &detail.id,
+            true,
+            Some(db_number),
+            true,
+            now_secs(),
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("persist redis: {e}")))?;
+        self.append_audit(
+            "hosting.set_redis",
+            Some(detail.id.as_str()),
+            &serde_json::json!({
+                "domain": detail.domain,
+                "enabled": true,
+                "db_number": db_number,
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+        let mut wpe = detail.wp_extras.clone();
+        wpe.redis_enabled = true;
+        wpe.redis_db_number = Some(db_number);
+        wpe.redis_password_set = true;
+        Ok(wpe)
+    }
+
+    pub async fn rotate_redis_password(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::WpExtras, RpcError> {
+        let detail = self.get(sel).await?;
+        if !detail.wp_extras.redis_enabled {
+            return Err(RpcError::Validation {
+                message: "Redis not enabled for this hosting".into(),
+            });
+        }
+        let Some(db_number) = detail.wp_extras.redis_db_number else {
+            return Err(RpcError::Validation {
+                message: "Redis enabled but no DB number — re-enable Redis first".into(),
+            });
+        };
+        let password = generate_redis_password();
+        let username = redis_username_for(detail.id.as_str());
+        self.adapters
+            .redis_ensure_acl(&username, &password, db_number)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("redis ACL rotate: {e}")))?;
+        let secret_id = hyperion_types::SecretId(format!("redis-{}", detail.id.as_str()));
+        self.secrets
+            .put(&secret_id, &password)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("store redis secret: {e}")))?;
+        let cfg = hyperion_types::WpRedisConfig {
+            host: "127.0.0.1".into(),
+            port: 6379,
+            database: db_number,
+            username,
+            password,
+            key_prefix: format!("h{}_", db_number),
+        };
+        self.adapters
+            .wp_set_redis(&detail.system_user, &detail.root_dir, Some(cfg))
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("wp re-set redis: {e}")))?;
+        self.append_audit(
+            "hosting.rotate_redis_password",
+            Some(detail.id.as_str()),
+            &serde_json::json!({"domain": detail.domain}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(detail.wp_extras)
+    }
+
+    pub async fn rotate_wp_debug_log(&self, sel: HostingSelector) -> Result<(), RpcError> {
+        let detail = self.get(sel).await?;
+        // truncate via Linux only. Caller's responsibility to verify
+        // hosting exists (.get already does).
+        let p = std::path::Path::new(&detail.root_dir).join("wp-content/debug.log");
+        // best-effort — if file is missing, we Ok anyway.
+        match tokio::fs::File::create(&p).await {
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(RpcError::Internal_with(format!(
+                    "truncate debug.log: {e}"
+                )));
+            }
+        }
+        // Update sampled size in DB so the UI reflects the new state.
+        let _ = hyperion_state::hostings::set_wp_debug_log_size(&self.pool, &detail.id, 0).await;
+        self.append_audit(
+            "hosting.rotate_wp_debug_log",
+            Some(detail.id.as_str()),
+            &serde_json::json!({"domain": detail.domain}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
     }
 
     pub async fn usage(
@@ -8403,6 +8698,25 @@ trait RpcErrorExt {
     fn Internal_with(msg: String) -> Self;
 }
 
+/// Stable per-hosting Redis ACL username derived from the ULID.
+/// `r_` prefix + first 8 chars of the ULID lowercased — short
+/// enough to fit in `redis-cli ACL LIST` output without wrapping,
+/// long enough to avoid collisions in any realistic deployment
+/// (8 base32 chars = 40 bits = 1T combinations).
+fn redis_username_for(hosting_id: &str) -> String {
+    let suffix: String = hosting_id.chars().take(8).collect();
+    format!("r_{}", suffix.to_lowercase())
+}
+
+/// Generate a 32-char alphanumeric password for Redis. Same shape
+/// as `adapters::random_password` but inlined here to avoid pulling
+/// in the whole adapters crate from this module path (already
+/// indirectly available via Arc<A: AdapterPort>, but cleaner to
+/// reuse the same RNG without crossing the trait boundary).
+fn generate_redis_password() -> String {
+    hyperion_adapters::random_password()
+}
+
 // ===== Rollback impls =====
 
 struct DeleteUser<A: AdapterPort> {
@@ -9676,6 +9990,89 @@ mod tests {
             .await
             .expect("apply");
         assert!(r.basic_auth_set);
+    }
+
+    // ───────── WP debug + Redis ─────────
+
+    #[tokio::test]
+    async fn set_wp_debug_writes_through_to_adapter() {
+        let pool = open_memory().await.expect("open");
+        let mut a = happy_mocks();
+        a.expect_wp_set_debug()
+            .withf(|user, _htdocs, enabled, log, display| {
+                user == "example_cz" && *enabled && *log && !*display
+            })
+            .times(1)
+            .returning(|_, _, _, _, _| Ok(()));
+        let s = svc(pool.clone(), a);
+        s.create(req("example.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("example.cz").unwrap());
+        let r = s.set_wp_debug(sel, true, true, false).await.expect("set");
+        assert!(r.wp_debug_enabled);
+        assert!(r.wp_debug_log);
+        assert!(!r.wp_debug_display);
+    }
+
+    #[tokio::test]
+    async fn set_redis_provisions_acl_writes_wp_config_persists() {
+        let pool = open_memory().await.expect("open");
+        let mut a = happy_mocks();
+        // First enable: ACL + wp config write.
+        a.expect_redis_ensure_acl()
+            .withf(|user, _pw, db| user.starts_with("r_") && *db == 0)
+            .times(1)
+            .returning(|_, _, _| Ok(()));
+        a.expect_wp_set_redis()
+            .withf(|_, _, cfg| cfg.is_some())
+            .times(1)
+            .returning(|_, _, _| Ok(()));
+        let s = svc(pool.clone(), a);
+        s.create(req("example.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("example.cz").unwrap());
+        let r = s.set_redis(sel, true).await.expect("enable");
+        assert!(r.redis_enabled);
+        assert_eq!(r.redis_db_number, Some(0)); // first free slot
+        assert!(r.redis_password_set);
+    }
+
+    #[tokio::test]
+    async fn set_redis_disable_cleans_up() {
+        let pool = open_memory().await.expect("open");
+        let mut a = happy_mocks();
+        a.expect_redis_ensure_acl().returning(|_, _, _| Ok(()));
+        a.expect_wp_set_redis().returning(|_, _, _| Ok(()));
+        a.expect_redis_delete_acl()
+            .withf(|user| user.starts_with("r_"))
+            .times(1)
+            .returning(|_| Ok(()));
+        let s = svc(pool.clone(), a);
+        s.create(req("example.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("example.cz").unwrap());
+        // Enable then disable.
+        s.set_redis(sel.clone(), true).await.expect("enable");
+        let r = s.set_redis(sel, false).await.expect("disable");
+        assert!(!r.redis_enabled);
+        assert!(r.redis_db_number.is_none());
+    }
+
+    #[tokio::test]
+    async fn rotate_redis_password_rejects_when_redis_off() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), happy_mocks());
+        s.create(req("example.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("example.cz").unwrap());
+        let r = s.rotate_redis_password(sel).await;
+        assert!(r.is_err());
+        assert!(format!("{}", r.unwrap_err()).contains("not enabled"));
+    }
+
+    #[tokio::test]
+    async fn redis_username_for_is_stable_and_short() {
+        let u1 = redis_username_for("01HVXXXXXXYYY");
+        let u2 = redis_username_for("01HVXXXXXXYYY"); // same → same
+        assert_eq!(u1, u2);
+        assert_eq!(u1, "r_01hvxxxx"); // 8 chars + r_ prefix, lowercased
+        assert!(u1.len() <= 12);
     }
 
     #[tokio::test]

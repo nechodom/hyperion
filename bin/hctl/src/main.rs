@@ -423,6 +423,24 @@ fn print_pretty(resp: &Response) {
             println!("  redirect_code       = {}", o.redirect_code);
             println!("  redirect_preserve   = {}", o.redirect_preserve_path);
         }
+        Response::HostingSetWpDebug(e)
+        | Response::HostingSetRedis(e)
+        | Response::HostingRotateRedisPassword(e) => {
+            println!("✓ WP extras applied");
+            println!("  wp_debug_enabled    = {}", e.wp_debug_enabled);
+            println!("  wp_debug_log        = {}", e.wp_debug_log);
+            println!("  wp_debug_display    = {}", e.wp_debug_display);
+            println!("  debug_log_size_bytes= {}", e.wp_debug_log_size_bytes);
+            println!("  redis_enabled       = {}", e.redis_enabled);
+            println!(
+                "  redis_db_number     = {}",
+                e.redis_db_number
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "—".into())
+            );
+            println!("  redis_password_set  = {}", e.redis_password_set);
+        }
+        Response::HostingRotateWpDebugLog => println!("✓ debug.log rotated"),
         Response::HostingUsage(rows) => {
             println!(
                 "{:<14} {:>10} {:>10} {:>10} {:>10}",

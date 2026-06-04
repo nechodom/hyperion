@@ -525,6 +525,206 @@ impl AdapterPort for RealAdapter {
     ) -> Result<hyperion_types::WpThemeActionResult, AdapterError> {
         hyperion_adapters::wpcli::theme_action(system_user, htdocs, slug, action).await
     }
+
+    async fn wp_set_debug(
+        &self,
+        system_user: &str,
+        htdocs: &str,
+        enabled: bool,
+        log: bool,
+        display: bool,
+    ) -> Result<(), AdapterError> {
+        use hyperion_adapters::wpcli::{
+            delete_config_constant, set_config_constant, WpConstantValue,
+        };
+        if enabled {
+            set_config_constant(system_user, htdocs, "WP_DEBUG", WpConstantValue::Bool(true))
+                .await?;
+            if log {
+                set_config_constant(
+                    system_user,
+                    htdocs,
+                    "WP_DEBUG_LOG",
+                    WpConstantValue::Bool(true),
+                )
+                .await?;
+            } else {
+                delete_config_constant(system_user, htdocs, "WP_DEBUG_LOG").await?;
+            }
+            if display {
+                set_config_constant(
+                    system_user,
+                    htdocs,
+                    "WP_DEBUG_DISPLAY",
+                    WpConstantValue::Bool(true),
+                )
+                .await?;
+            } else {
+                // Explicit `false` here (not delete) — WP's default is
+                // true, so a missing WP_DEBUG_DISPLAY leaks errors on
+                // sites that don't override it elsewhere.
+                set_config_constant(
+                    system_user,
+                    htdocs,
+                    "WP_DEBUG_DISPLAY",
+                    WpConstantValue::Bool(false),
+                )
+                .await?;
+            }
+        } else {
+            for c in ["WP_DEBUG", "WP_DEBUG_LOG", "WP_DEBUG_DISPLAY"] {
+                delete_config_constant(system_user, htdocs, c).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn wp_set_redis(
+        &self,
+        system_user: &str,
+        htdocs: &str,
+        cfg: Option<hyperion_types::WpRedisConfig>,
+    ) -> Result<(), AdapterError> {
+        let cfg = cfg.as_ref();
+        use hyperion_adapters::wpcli::{
+            delete_config_constant, set_config_constant, WpConstantValue,
+        };
+        const KEYS: &[&str] = &[
+            "WP_REDIS_HOST",
+            "WP_REDIS_PORT",
+            "WP_REDIS_DATABASE",
+            "WP_REDIS_USERNAME",
+            "WP_REDIS_PASSWORD",
+            "WP_REDIS_PREFIX",
+        ];
+        match cfg {
+            Some(c) => {
+                set_config_constant(
+                    system_user,
+                    htdocs,
+                    "WP_REDIS_HOST",
+                    WpConstantValue::String(&c.host),
+                )
+                .await?;
+                set_config_constant(
+                    system_user,
+                    htdocs,
+                    "WP_REDIS_PORT",
+                    WpConstantValue::Int(c.port),
+                )
+                .await?;
+                set_config_constant(
+                    system_user,
+                    htdocs,
+                    "WP_REDIS_DATABASE",
+                    WpConstantValue::Int(c.database),
+                )
+                .await?;
+                set_config_constant(
+                    system_user,
+                    htdocs,
+                    "WP_REDIS_USERNAME",
+                    WpConstantValue::String(&c.username),
+                )
+                .await?;
+                set_config_constant(
+                    system_user,
+                    htdocs,
+                    "WP_REDIS_PASSWORD",
+                    WpConstantValue::String(&c.password),
+                )
+                .await?;
+                set_config_constant(
+                    system_user,
+                    htdocs,
+                    "WP_REDIS_PREFIX",
+                    WpConstantValue::String(&c.key_prefix),
+                )
+                .await?;
+            }
+            None => {
+                for k in KEYS {
+                    delete_config_constant(system_user, htdocs, k).await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn wp_debug_log_size(&self, htdocs: &str) -> Result<i64, AdapterError> {
+        let p = std::path::Path::new(htdocs).join("wp-content/debug.log");
+        match tokio::fs::metadata(&p).await {
+            Ok(m) => Ok(m.len() as i64),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            Err(e) => Err(AdapterError::Other(format!("stat debug.log: {e}"))),
+        }
+    }
+
+    async fn redis_ensure_acl(
+        &self,
+        username: &str,
+        password: &str,
+        db_number: i64,
+    ) -> Result<(), AdapterError> {
+        // Use redis-cli ACL SETUSER. The DB-restriction is done via
+        // `~h:<db>:*` keypattern; combined with ` -n <db>` on the
+        // client side this gives a clean per-tenant boundary.
+        // password is passed as `>password` literal to ACL SETUSER.
+        if username.is_empty()
+            || !username
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
+            return Err(AdapterError::Other(format!("bad redis username: {username}")));
+        }
+        if !(0..=63).contains(&db_number) {
+            return Err(AdapterError::Other(format!(
+                "redis db_number out of range: {db_number}"
+            )));
+        }
+        if password.len() < 16 {
+            return Err(AdapterError::Other("redis password too short".into()));
+        }
+        let pw_arg = format!(">{password}");
+        let keyrule = format!("~h{db_number}:*");
+        let cmd_args: Vec<&str> = vec![
+            "ACL",
+            "SETUSER",
+            username,
+            "on",
+            "resetkeys",
+            "resetchannels",
+            &keyrule,
+            "+@read",
+            "+@write",
+            "+@keyspace",
+            "+@hash",
+            "+@list",
+            "+@set",
+            "+@sortedset",
+            "+@string",
+            "+@scripting",
+            "+@pubsub",
+            "+@connection",
+            "-@dangerous",
+            "+ping",
+            "+select",
+            "+client|setname",
+            &pw_arg,
+        ];
+        hyperion_adapters::cmd::run("/usr/bin/redis-cli", &cmd_args).await?;
+        Ok(())
+    }
+
+    async fn redis_delete_acl(&self, username: &str) -> Result<(), AdapterError> {
+        if username.is_empty() {
+            return Ok(());
+        }
+        // ACL DELUSER returns 1 if deleted, 0 if didn't exist — both fine.
+        let _ = hyperion_adapters::cmd::run("/usr/bin/redis-cli", &["ACL", "DELUSER", username])
+            .await;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

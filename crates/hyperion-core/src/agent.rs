@@ -150,6 +150,38 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
             .await
     }
 
+    async fn hosting_set_wp_debug(
+        &self,
+        sel: HostingSelector,
+        enabled: bool,
+        log: bool,
+        display: bool,
+    ) -> Result<hyperion_types::WpExtras, RpcError> {
+        self.svc.set_wp_debug(sel, enabled, log, display).await
+    }
+
+    async fn hosting_set_redis(
+        &self,
+        sel: HostingSelector,
+        enabled: bool,
+    ) -> Result<hyperion_types::WpExtras, RpcError> {
+        self.svc.set_redis(sel, enabled).await
+    }
+
+    async fn hosting_rotate_redis_password(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::WpExtras, RpcError> {
+        self.svc.rotate_redis_password(sel).await
+    }
+
+    async fn hosting_rotate_wp_debug_log(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<(), RpcError> {
+        self.svc.rotate_wp_debug_log(sel).await
+    }
+
     async fn hosting_usage(
         &self,
         sel: HostingSelector,

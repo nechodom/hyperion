@@ -551,6 +551,66 @@ pub async fn plugin_action(
     })
 }
 
+/// Set or delete a constant in wp-config.php via `wp config set/delete`.
+/// `value` is wrapped as the constant's literal (numbers/booleans pass
+/// through; strings get quoted). When `value` is None, the constant is
+/// deleted. Idempotent — deleting a missing constant returns Ok.
+///
+/// Type hint maps to wp-cli `--raw` flag for non-string literals.
+/// Booleans/integers MUST be raw or they get quoted as strings, which
+/// breaks `if ( true === WP_DEBUG )` checks elsewhere.
+pub enum WpConstantValue<'a> {
+    String(&'a str),
+    Bool(bool),
+    Int(i64),
+}
+
+pub async fn set_config_constant(
+    user: &str,
+    htdocs: &str,
+    name: &str,
+    value: WpConstantValue<'_>,
+) -> Result<(), AdapterError> {
+    if !name
+        .bytes()
+        .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+    {
+        return Err(AdapterError::Other(format!(
+            "wp-config constant name must be UPPERCASE_SNAKE: {name}"
+        )));
+    }
+    let (raw_flag, literal): (&str, String) = match value {
+        WpConstantValue::String(s) => ("", s.to_string()),
+        WpConstantValue::Bool(b) => ("--raw", if b { "true".into() } else { "false".into() }),
+        WpConstantValue::Int(n) => ("--raw", n.to_string()),
+    };
+    let mut args: Vec<&str> = vec!["config", "set", name, &literal, "--type=constant"];
+    if !raw_flag.is_empty() {
+        args.push(raw_flag);
+    }
+    run(user, htdocs, &args).await?;
+    Ok(())
+}
+
+pub async fn delete_config_constant(
+    user: &str,
+    htdocs: &str,
+    name: &str,
+) -> Result<(), AdapterError> {
+    if !name
+        .bytes()
+        .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+    {
+        return Err(AdapterError::Other(format!(
+            "wp-config constant name must be UPPERCASE_SNAKE: {name}"
+        )));
+    }
+    // `wp config delete` returns nonzero if the constant is missing.
+    // We swallow that since the caller's intent is "ensure absent".
+    let _ = run(user, htdocs, &["config", "delete", name, "--type=constant"]).await;
+    Ok(())
+}
+
 /// Last ~4 KiB of a long output buffer, char-boundary safe.
 fn tail_4k(s: &str) -> String {
     const N: usize = 4096;

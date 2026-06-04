@@ -192,6 +192,33 @@ impl hyperion_core::AdapterPort for StubAdapters {
             output_tail: String::new(),
         })
     }
+    async fn wp_set_debug(
+        &self,
+        _: &str,
+        _: &str,
+        _: bool,
+        _: bool,
+        _: bool,
+    ) -> Result<(), AdapterError> {
+        Ok(())
+    }
+    async fn wp_set_redis(
+        &self,
+        _: &str,
+        _: &str,
+        _: Option<hyperion_types::WpRedisConfig>,
+    ) -> Result<(), AdapterError> {
+        Ok(())
+    }
+    async fn wp_debug_log_size(&self, _: &str) -> Result<i64, AdapterError> {
+        Ok(0)
+    }
+    async fn redis_ensure_acl(&self, _: &str, _: &str, _: i64) -> Result<(), AdapterError> {
+        Ok(())
+    }
+    async fn redis_delete_acl(&self, _: &str) -> Result<(), AdapterError> {
+        Ok(())
+    }
 }
 
 async fn start_agent() -> (std::path::PathBuf, tempfile::TempDir) {

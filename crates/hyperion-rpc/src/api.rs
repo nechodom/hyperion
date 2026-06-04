@@ -52,6 +52,37 @@ pub trait AgentApi: Send + Sync + 'static {
         options: hyperion_types::VhostOptions,
         basic_auth_password: Option<String>,
     ) -> Result<hyperion_types::VhostOptions, RpcError>;
+
+    /// Toggle WordPress debug flags (WP_DEBUG / WP_DEBUG_LOG /
+    /// WP_DEBUG_DISPLAY) for this hosting. Requires WP to be installed.
+    async fn hosting_set_wp_debug(
+        &self,
+        sel: HostingSelector,
+        enabled: bool,
+        log: bool,
+        display: bool,
+    ) -> Result<hyperion_types::WpExtras, RpcError>;
+
+    /// Enable or disable per-hosting Redis object cache. On enable,
+    /// allocates a Redis DB slot + writes WP_REDIS_* constants. On
+    /// disable, removes the constants + deletes the Redis ACL user.
+    async fn hosting_set_redis(
+        &self,
+        sel: HostingSelector,
+        enabled: bool,
+    ) -> Result<hyperion_types::WpExtras, RpcError>;
+
+    /// Rotate the Redis password for an already-enabled hosting.
+    async fn hosting_rotate_redis_password(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::WpExtras, RpcError>;
+
+    /// Truncate wp-content/debug.log to 0 bytes. Idempotent.
+    async fn hosting_rotate_wp_debug_log(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<(), RpcError>;
     async fn hosting_usage(
         &self,
         sel: HostingSelector,

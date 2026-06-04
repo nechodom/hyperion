@@ -32,6 +32,9 @@ pub struct HostingRow {
     /// Migration 020 — operator-controlled vhost knobs. Default
     /// values match the pre-020 vhost rendering exactly.
     pub vhost_options: hyperion_types::VhostOptions,
+    /// Migration 021 — WordPress + Redis app-layer toggles. Default
+    /// values match a fresh non-WP hosting.
+    pub wp_extras: hyperion_types::WpExtras,
 }
 
 pub async fn insert(
@@ -207,6 +210,23 @@ const QUERY_VHOST_BY_ID: &str =
             redirect_url, redirect_code, redirect_preserve_path \
      FROM hostings WHERE id = ?";
 
+// Third row tuple for the WP/Redis extras (migration 021). Same PK
+// lookup as the vhost half — single index hit per detail load.
+type RawHostingWp = (
+    i64, // wp_debug_enabled
+    i64, // wp_debug_log
+    i64, // wp_debug_display
+    i64, // wp_debug_log_size_bytes
+    i64, // redis_enabled
+    Option<i64>, // redis_db_number
+    i64, // redis_password_set
+);
+
+const QUERY_WP_BY_ID: &str =
+    "SELECT wp_debug_enabled, wp_debug_log, wp_debug_display, wp_debug_log_size_bytes, \
+            redis_enabled, redis_db_number, redis_password_set \
+     FROM hostings WHERE id = ?";
+
 async fn fetch_one<'a>(
     pool: &'a SqlitePool,
     _why: &'static str,
@@ -266,6 +286,31 @@ async fn fetch_one<'a>(
         },
         None => hyperion_types::VhostOptions::default(),
     };
+    // Third lookup: WP/Redis extras (migration 021). Same PK hit.
+    let wp_row: Option<RawHostingWp> = sqlx::query_as(QUERY_WP_BY_ID)
+        .bind(&id)
+        .fetch_optional(pool)
+        .await?;
+    let wp_extras = match wp_row {
+        Some((
+            wp_debug_enabled,
+            wp_debug_log,
+            wp_debug_display,
+            wp_debug_log_size_bytes,
+            redis_enabled,
+            redis_db_number,
+            redis_password_set,
+        )) => hyperion_types::WpExtras {
+            wp_debug_enabled: wp_debug_enabled != 0,
+            wp_debug_log: wp_debug_log != 0,
+            wp_debug_display: wp_debug_display != 0,
+            wp_debug_log_size_bytes,
+            redis_enabled: redis_enabled != 0,
+            redis_db_number,
+            redis_password_set: redis_password_set != 0,
+        },
+        None => hyperion_types::WpExtras::default(),
+    };
     Ok(Some(HostingRow {
         id: HostingId(id),
         domain,
@@ -283,6 +328,7 @@ async fn fetch_one<'a>(
         proxy_upstream_url,
         node_id,
         vhost_options,
+        wp_extras,
     }))
 }
 
@@ -366,6 +412,102 @@ pub async fn set_vhost_options(
         .await?;
     }
     Ok(())
+}
+
+/// Update the WP/Redis extras for one hosting.
+///
+/// Three split setters because callers want different update shapes:
+/// - the WP debug toggle (operator action) writes debug + ttl + redis
+///   flags but NOT the log-size sample
+/// - the agent's hourly tick writes ONLY the log-size sample (we don't
+///   want it to clobber the operator's other settings)
+/// - the Redis enable flow writes ONLY the redis_* columns
+///
+/// All three accept an `i64` instead of `bool` at the SQL boundary —
+/// SQLite has no native bool, and casting on the bind side keeps the
+/// migration sane.
+pub async fn set_wp_debug(
+    pool: &SqlitePool,
+    id: &HostingId,
+    enabled: bool,
+    log: bool,
+    display: bool,
+    now: i64,
+) -> Result<(), StateError> {
+    sqlx::query(
+        "UPDATE hostings SET wp_debug_enabled=?, wp_debug_log=?, wp_debug_display=?, \
+                             updated_at=? WHERE id = ?",
+    )
+    .bind(enabled as i64)
+    .bind(log as i64)
+    .bind(display as i64)
+    .bind(now)
+    .bind(id.as_str())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn set_wp_debug_log_size(
+    pool: &SqlitePool,
+    id: &HostingId,
+    size_bytes: i64,
+) -> Result<(), StateError> {
+    sqlx::query("UPDATE hostings SET wp_debug_log_size_bytes=? WHERE id = ?")
+        .bind(size_bytes)
+        .bind(id.as_str())
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn set_redis(
+    pool: &SqlitePool,
+    id: &HostingId,
+    enabled: bool,
+    db_number: Option<i64>,
+    password_set: bool,
+    now: i64,
+) -> Result<(), StateError> {
+    sqlx::query(
+        "UPDATE hostings SET redis_enabled=?, redis_db_number=?, redis_password_set=?, \
+                             updated_at=? WHERE id = ?",
+    )
+    .bind(enabled as i64)
+    .bind(db_number)
+    .bind(password_set as i64)
+    .bind(now)
+    .bind(id.as_str())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Find the lowest unused Redis DB number across all hostings on this
+/// agent. Used at provisioning time so two hostings on the same node
+/// don't share a DB and clobber each other's cache.
+///
+/// Returns `Some(n)` for the smallest free slot in [0, max), or
+/// `None` if every slot is taken (operator needs to bump
+/// `databases` in /etc/redis/redis.conf and reload first).
+pub async fn next_free_redis_db(
+    pool: &SqlitePool,
+    max: i64,
+) -> Result<Option<i64>, StateError> {
+    let taken: Vec<(i64,)> = sqlx::query_as(
+        "SELECT redis_db_number FROM hostings \
+         WHERE redis_enabled = 1 AND redis_db_number IS NOT NULL \
+         ORDER BY redis_db_number",
+    )
+    .fetch_all(pool)
+    .await?;
+    let taken: std::collections::BTreeSet<i64> = taken.into_iter().map(|(n,)| n).collect();
+    for n in 0..max {
+        if !taken.contains(&n) {
+            return Ok(Some(n));
+        }
+    }
+    Ok(None)
 }
 
 /// Set the hosting kind + upstream URL on an existing row.

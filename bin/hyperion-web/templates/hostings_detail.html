@@ -921,6 +921,125 @@
 </div>
 {% endif %}
 
+{% if let Some(_) = wp_status %}
+<div class="card hover">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    Debug
+  </h2>
+  <p class="muted small">
+    Flips <code>WP_DEBUG</code>, <code>WP_DEBUG_LOG</code> and
+    <code>WP_DEBUG_DISPLAY</code> in <code>wp-config.php</code>.
+    <strong>Turn off when finished</strong> — display=on leaks
+    paths and SQL to visitors.
+  </p>
+  {% if wp_extras_flash %}
+  <div class="alert alert-ok" role="status">✓ WP settings applied.</div>
+  {% endif %}
+  {% if let Some(e) = wp_extras_error %}
+  <div class="alert alert-err" role="alert">{{ e }}</div>
+  {% endif %}
+  <form method="post" action="/hostings/wp/debug">
+    <input type="hidden" name="_csrf" value="{{ csrf_wp_debug }}">
+    <input type="hidden" name="selector" value="{{ detail.domain }}">
+    {% if !target_node.is_empty() %}
+    <input type="hidden" name="target_node" value="{{ target_node }}">
+    {% endif %}
+    <div class="field">
+      <label>
+        <input type="checkbox" name="enabled" value="on"
+               {% if detail.wp_extras.wp_debug_enabled %}checked{% endif %}>
+        Enable WP_DEBUG
+      </label>
+    </div>
+    <div class="field">
+      <label>
+        <input type="checkbox" name="log" value="on"
+               {% if detail.wp_extras.wp_debug_log %}checked{% endif %}>
+        Log to <code>wp-content/debug.log</code> (recommended)
+      </label>
+    </div>
+    <div class="field">
+      <label>
+        <input type="checkbox" name="display" value="on"
+               {% if detail.wp_extras.wp_debug_display %}checked{% endif %}>
+        Display errors on the page (NEVER on production)
+      </label>
+    </div>
+    <button class="btn btn-primary" type="submit">Apply debug settings</button>
+  </form>
+
+  {% if detail.wp_extras.wp_debug_log_size_bytes > 0 %}
+  <p class="muted small" style="margin-top:1rem">
+    <strong>debug.log size:</strong> {{ detail.wp_extras.wp_debug_log_size_bytes }} bytes
+    (last sampled at scheduler tick)
+  </p>
+  <form method="post" action="/hostings/wp/debug-log/rotate" style="display:inline">
+    <input type="hidden" name="_csrf" value="{{ csrf_wp_debug_rotate }}">
+    <input type="hidden" name="selector" value="{{ detail.domain }}">
+    {% if !target_node.is_empty() %}
+    <input type="hidden" name="target_node" value="{{ target_node }}">
+    {% endif %}
+    <button class="btn" type="submit">Truncate debug.log</button>
+  </form>
+  {% endif %}
+</div>
+
+<div class="card hover">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+    Redis object cache
+  </h2>
+  <p class="muted small">
+    Per-hosting Redis ACL on the local <code>redis-server</code>.
+    When enabled, the agent allocates a dedicated DB slot + writes
+    <code>WP_REDIS_*</code> constants into wp-config.php. You still
+    need to install the
+    <a href="https://wordpress.org/plugins/redis-cache/" target="_blank" rel="noopener">Redis Object Cache</a>
+    plugin in WordPress and click "Enable" — we don't side-load.
+  </p>
+  {% if detail.wp_extras.redis_enabled %}
+  <p class="muted small">
+    <strong>DB slot:</strong> {{ detail.wp_extras.redis_db_number.unwrap_or(-1) }}<br>
+    <strong>Password:</strong> {% if detail.wp_extras.redis_password_set %}set (stored in wp-config){% else %}not set{% endif %}
+  </p>
+  <form method="post" action="/hostings/wp/redis" style="display:inline">
+    <input type="hidden" name="_csrf" value="{{ csrf_wp_redis }}">
+    <input type="hidden" name="selector" value="{{ detail.domain }}">
+    <input type="hidden" name="enabled" value="off">
+    {% if !target_node.is_empty() %}
+    <input type="hidden" name="target_node" value="{{ target_node }}">
+    {% endif %}
+    <button class="btn"
+            data-confirm
+            data-confirm-title="Disable Redis"
+            data-confirm-body="WP_REDIS_* constants will be removed from wp-config.php and the Redis ACL user will be deleted. The Redis Object Cache plugin will fall back to a no-op (or DB-only cache, depending on configuration). Cached items currently in Redis will be lost — but they're cached items, so that's fine."
+            data-confirm-confirm-label="Disable Redis"
+            data-confirm-variant="danger"
+            type="submit">Disable Redis</button>
+  </form>
+  <form method="post" action="/hostings/wp/redis/rotate" style="display:inline">
+    <input type="hidden" name="_csrf" value="{{ csrf_wp_redis_rotate }}">
+    <input type="hidden" name="selector" value="{{ detail.domain }}">
+    {% if !target_node.is_empty() %}
+    <input type="hidden" name="target_node" value="{{ target_node }}">
+    {% endif %}
+    <button class="btn" type="submit">Rotate password</button>
+  </form>
+  {% else %}
+  <form method="post" action="/hostings/wp/redis">
+    <input type="hidden" name="_csrf" value="{{ csrf_wp_redis }}">
+    <input type="hidden" name="selector" value="{{ detail.domain }}">
+    <input type="hidden" name="enabled" value="on">
+    {% if !target_node.is_empty() %}
+    <input type="hidden" name="target_node" value="{{ target_node }}">
+    {% endif %}
+    <button class="btn btn-primary" type="submit">Enable Redis</button>
+  </form>
+  {% endif %}
+</div>
+{% endif %}
+
 </div><!-- /tab-wordpress -->
 
 <!-- ============== THEMES TAB ============== -->

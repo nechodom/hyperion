@@ -48,6 +48,22 @@ pub enum Request {
         /// treated as "leave alone" by the agent.
         basic_auth_password: Option<String>,
     },
+    HostingSetWpDebug {
+        sel: HostingSelector,
+        enabled: bool,
+        log: bool,
+        display: bool,
+    },
+    HostingSetRedis {
+        sel: HostingSelector,
+        enabled: bool,
+    },
+    HostingRotateRedisPassword {
+        sel: HostingSelector,
+    },
+    HostingRotateWpDebugLog {
+        sel: HostingSelector,
+    },
     HostingUsage {
         sel: HostingSelector,
         limit: i64,
@@ -492,6 +508,10 @@ pub enum Response {
     HostingSuspend,
     HostingResume,
     HostingSetVhostOptions(hyperion_types::VhostOptions),
+    HostingSetWpDebug(hyperion_types::WpExtras),
+    HostingSetRedis(hyperion_types::WpExtras),
+    HostingRotateRedisPassword(hyperion_types::WpExtras),
+    HostingRotateWpDebugLog,
     HostingUsage(Vec<HostingUsageBucket>),
     HostingSetExpiry(HostingExpiry),
     HostingGetExpiry(HostingExpiry),

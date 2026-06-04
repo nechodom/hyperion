@@ -95,6 +95,10 @@ pub struct HostingDetail {
     /// don't change appearance.
     #[serde(default)]
     pub vhost_options: VhostOptions,
+    /// WordPress + Redis app-layer options (migration 021).
+    /// Empty/default for non-WP hostings.
+    #[serde(default)]
+    pub wp_extras: WpExtras,
 }
 
 /// Per-hosting nginx vhost configuration the operator flips from
@@ -165,6 +169,65 @@ fn default_kind() -> String {
     "php".to_string()
 }
 
+/// Redis connection config written into wp-config.php as the
+/// `WP_REDIS_*` constants. Generated agent-side from the local
+/// Redis listener address + the per-hosting ACL user.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WpRedisConfig {
+    pub host: String,
+    pub port: i64,
+    pub database: i64,
+    pub username: String,
+    pub password: String,
+    /// Prefix for all keys this site stores in Redis. Even with a
+    /// dedicated DB we use a prefix for grep-ability in `redis-cli`.
+    pub key_prefix: String,
+}
+
+/// WordPress + Redis app-layer toggles. Applied via wp-cli on the
+/// agent side, so only meaningful when there's a WP install in the
+/// hosting's htdocs.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct WpExtras {
+    /// Master switch: when true, agent writes WP_DEBUG=true via
+    /// `wp config set` and the two related constants below. False
+    /// = constants are deleted, not set to false (a false WP_DEBUG
+    /// still triggers some plugins' debug code paths).
+    #[serde(default)]
+    pub wp_debug_enabled: bool,
+    /// When debug is on, also enable WP_DEBUG_LOG (writes to
+    /// wp-content/debug.log). Recommended; off only for "live debug
+    /// to syslog via a custom error handler" setups.
+    #[serde(default)]
+    pub wp_debug_log: bool,
+    /// When debug is on, also enable WP_DEBUG_DISPLAY (prints errors
+    /// to the page). DEFAULT OFF — turning this on in production
+    /// leaks paths and DB queries to visitors.
+    #[serde(default)]
+    pub wp_debug_display: bool,
+    /// Size of wp-content/debug.log in bytes — sampled by the agent
+    /// on the scheduler tick. 0 = file missing.
+    #[serde(default)]
+    pub wp_debug_log_size_bytes: i64,
+
+    /// Per-hosting Redis object cache toggle. When true, the agent
+    /// ensures an ACL user + DB number on the local redis-server and
+    /// drops the WP_REDIS_* constants into wp-config.php. The customer
+    /// still has to install the "Redis Object Cache" WP plugin and
+    /// click "Enable" — we don't side-load plugins.
+    #[serde(default)]
+    pub redis_enabled: bool,
+    /// Assigned Redis DB number (0..15 by default). None = not yet
+    /// provisioned. The agent allocates on first enable.
+    #[serde(default)]
+    pub redis_db_number: Option<i64>,
+    /// True when a password is stored in the agent's secrets store.
+    /// The plaintext password is NEVER returned over the wire — it's
+    /// only written to wp-config.php on the agent side.
+    #[serde(default)]
+    pub redis_password_set: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -209,6 +272,7 @@ mod tests {
             proxy_upstream_url: None,
             node_id: Some("test-node".into()),
             vhost_options: VhostOptions::default(),
+            wp_extras: WpExtras::default(),
         };
         let j = serde_json::to_string(&d).expect("serialize");
         let back: HostingDetail = serde_json::from_str(&j).expect("deserialize");

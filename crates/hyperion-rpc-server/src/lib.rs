@@ -128,6 +128,30 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::HostingSetVhostOptions(v),
             Err(e) => Response::Error(e),
         },
+        Request::HostingSetWpDebug { sel, enabled, log, display } => {
+            match api.hosting_set_wp_debug(sel, enabled, log, display).await {
+                Ok(v) => Response::HostingSetWpDebug(v),
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::HostingSetRedis { sel, enabled } => {
+            match api.hosting_set_redis(sel, enabled).await {
+                Ok(v) => Response::HostingSetRedis(v),
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::HostingRotateRedisPassword { sel } => {
+            match api.hosting_rotate_redis_password(sel).await {
+                Ok(v) => Response::HostingRotateRedisPassword(v),
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::HostingRotateWpDebugLog { sel } => {
+            match api.hosting_rotate_wp_debug_log(sel).await {
+                Ok(()) => Response::HostingRotateWpDebugLog,
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::HostingUsage { sel, limit } => match api.hosting_usage(sel, limit).await {
             Ok(v) => Response::HostingUsage(v),
             Err(e) => Response::Error(e),
@@ -694,6 +718,34 @@ mod tests {
             _: Option<String>,
         ) -> Result<hyperion_types::VhostOptions, RpcError> {
             Ok(options)
+        }
+        async fn hosting_set_wp_debug(
+            &self,
+            _: HostingSelector,
+            _: bool,
+            _: bool,
+            _: bool,
+        ) -> Result<hyperion_types::WpExtras, RpcError> {
+            Ok(hyperion_types::WpExtras::default())
+        }
+        async fn hosting_set_redis(
+            &self,
+            _: HostingSelector,
+            _: bool,
+        ) -> Result<hyperion_types::WpExtras, RpcError> {
+            Ok(hyperion_types::WpExtras::default())
+        }
+        async fn hosting_rotate_redis_password(
+            &self,
+            _: HostingSelector,
+        ) -> Result<hyperion_types::WpExtras, RpcError> {
+            Ok(hyperion_types::WpExtras::default())
+        }
+        async fn hosting_rotate_wp_debug_log(
+            &self,
+            _: HostingSelector,
+        ) -> Result<(), RpcError> {
+            Ok(())
         }
         async fn hosting_usage(
             &self,
