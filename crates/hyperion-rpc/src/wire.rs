@@ -10,6 +10,18 @@ pub struct AgentInfo {
     pub version: String,
     pub schema_version: i64,
     pub hostings_count: i64,
+    /// Master-assigned node id from /etc/hyperion/node-id.json.
+    /// `None` when the agent isn't enrolled (single-node setup OR
+    /// enrollment failed). Surfaced on `hctl info` so the operator
+    /// can confirm enrollment without SSHing into the file.
+    #[serde(default)]
+    pub node_id: Option<String>,
+    /// Master URL the node phones home to. Same source as node_id.
+    #[serde(default)]
+    pub master_url: Option<String>,
+    /// Unix-seconds timestamp when enrollment completed.
+    #[serde(default)]
+    pub enrolled_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

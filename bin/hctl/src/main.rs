@@ -313,9 +313,25 @@ fn print_pretty(resp: &Response) {
     match resp {
         Response::AgentInfo(i) => {
             println!(
-                "agent: {} version={} hostings={}",
+                "agent:  {} version={} hostings={}",
                 i.hostname, i.version, i.hostings_count
             );
+            // Enrollment block — answers "did this node phone home to
+            // the master OK?" without SSHing in to cat node-id.json.
+            match (&i.node_id, &i.master_url) {
+                (Some(node_id), Some(master_url)) => {
+                    let when = i.enrolled_at
+                        .map(|t| format!("unix:{t}"))
+                        .unwrap_or_else(|| "?".into());
+                    println!("node:   {node_id} → {master_url} (enrolled {when})");
+                }
+                _ => {
+                    println!(
+                        "node:   NOT ENROLLED — check /etc/hyperion/agent.toml [enrollment] \
+                         and `journalctl -u hyperion-agent | grep -i enroll`"
+                    );
+                }
+            }
         }
         Response::HostingCreate(c) => {
             println!("✓ created {} (id={})", c.system_user, c.id);

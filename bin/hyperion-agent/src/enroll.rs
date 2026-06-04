@@ -151,7 +151,16 @@ pub async fn enroll_now(cfg: &EnrollmentConfig) -> Result<(), String> {
 /// Helper: POST JSON, return stdout on HTTP 2xx or a useful error
 /// string. `verify_tls=false` adds `-k` (chicken-egg: until we've
 /// enrolled we have no trust anchor for the master's cert).
+///
+/// Body is fed via curl's stdin (`--data-binary @-`), NOT via argv.
+/// The previous `--data <body>` approach put the invite token (on
+/// enrollment) and the per-node bearer secret (on every heartbeat)
+/// onto curl's command line, visible to any local user via
+/// `/proc/<pid>/cmdline` for the lifetime of the subprocess.
 async fn post_json(url: &str, body: &str, verify_tls: bool) -> Result<Vec<u8>, String> {
+    use std::process::Stdio;
+    use tokio::io::AsyncWriteExt;
+
     let mut args: Vec<&str> = vec!["-fsS", "--max-time", "15"];
     if !verify_tls {
         args.push("-k");
@@ -159,14 +168,29 @@ async fn post_json(url: &str, body: &str, verify_tls: bool) -> Result<Vec<u8>, S
     args.extend([
         "-X", "POST",
         "-H", "content-type: application/json",
-        "--data", body,
+        "--data-binary", "@-",
         url,
     ]);
-    let out = tokio::process::Command::new("/usr/bin/curl")
+    let mut child = tokio::process::Command::new("/usr/bin/curl")
         .args(&args)
-        .output()
-        .await
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("curl spawn: {e}"))?;
+
+    // Write body to stdin then close. Curl reads it as the POST body.
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(body.as_bytes())
+            .await
+            .map_err(|e| format!("curl stdin write: {e}"))?;
+        stdin.shutdown().await.ok();
+    }
+    let out = child
+        .wait_with_output()
+        .await
+        .map_err(|e| format!("curl wait: {e}"))?;
     if !out.status.success() {
         return Err(format!(
             "POST {url} exit {:?}: {}",
@@ -221,29 +245,44 @@ fn should_try_https_fallback(base: &str, err: &str) -> bool {
 async fn finish_enrollment(cfg: &EnrollmentConfig, stdout: &[u8]) -> Result<(), String> {
     let resp: EnrollResponse = serde_json::from_slice(stdout)
         .map_err(|e| format!("parse response: {e} (raw: {})", String::from_utf8_lossy(stdout)))?;
+    // Persist the OPERATOR-supplied master_url (cfg.master_url), NOT
+    // the URL returned in the enrollment response. The master is
+    // happy to tell us "I'm at https://attacker.example" if a MITM
+    // is in flight during the first enrollment; trusting that value
+    // would pin every future heartbeat to the attacker. The operator
+    // typed the master URL in install-node.sh — that's the trust
+    // anchor.
+    //
+    // If enroll_now's http→https fallback fired, cfg has already been
+    // adjusted to point at the working URL — so we still capture that
+    // upgrade without trusting the response.
+    let _server_suggested_url = resp.master_url; // discarded by design.
 
-    // Persist node_id so future boots skip enrollment.
+    // Persist node_id so future boots skip enrollment. Atomic write:
+    // tmp → chmod 0600 → rename. Without this the file briefly exists
+    // at the default umask (0o644) between `write` and
+    // `set_permissions`.
     if let Some(parent) = cfg.state_file.parent() {
         let _ = tokio::fs::create_dir_all(parent).await;
     }
     let persisted = PersistedNodeId {
         node_id: resp.node_id.clone(),
-        master_url: resp.master_url.clone(),
+        master_url: cfg.master_url.clone(),
         secret: resp.secret.clone(),
         enrolled_at: chrono::Utc::now().timestamp(),
     };
     let bytes = serde_json::to_vec_pretty(&persisted)
         .map_err(|e| format!("serialize persisted: {e}"))?;
-    tokio::fs::write(&cfg.state_file, &bytes)
+    let tmp = cfg.state_file.with_extension("json.tmp");
+    tokio::fs::write(&tmp, &bytes)
         .await
-        .map_err(|e| format!("write {}: {e}", cfg.state_file.display()))?;
+        .map_err(|e| format!("write tmp {}: {e}", tmp.display()))?;
     use std::os::unix::fs::PermissionsExt;
-    let _ = tokio::fs::set_permissions(
-        &cfg.state_file,
-        std::fs::Permissions::from_mode(0o600),
-    )
-    .await;
-    tracing::info!(node_id=%resp.node_id, master=%resp.master_url, "node enrolled");
+    let _ = tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).await;
+    tokio::fs::rename(&tmp, &cfg.state_file)
+        .await
+        .map_err(|e| format!("rename {} → {}: {e}", tmp.display(), cfg.state_file.display()))?;
+    tracing::info!(node_id=%resp.node_id, master=%cfg.master_url, "node enrolled");
     Ok(())
 }
 
@@ -279,6 +318,11 @@ pub async fn heartbeat_loop(state_file: std::path::PathBuf, period_secs: u64, ve
                 continue;
             }
         };
+        // Body via stdin, NOT argv — see post_json comment. The
+        // heartbeat carries the per-node bearer secret on every
+        // tick; argv would leak it to /proc/<pid>/cmdline.
+        use std::process::Stdio;
+        use tokio::io::AsyncWriteExt;
         let mut args: Vec<&str> = vec!["-fsS", "--max-time", "8"];
         if !verify_tls {
             args.push("-k");
@@ -286,13 +330,30 @@ pub async fn heartbeat_loop(state_file: std::path::PathBuf, period_secs: u64, ve
         args.extend([
             "-X", "POST",
             "-H", "content-type: application/json",
-            "--data", &body,
+            "--data-binary", "@-",
             &url,
         ]);
-        let result = tokio::process::Command::new("/usr/bin/curl")
+        let mut child = match tokio::process::Command::new("/usr/bin/curl")
             .args(&args)
-            .output()
-            .await;
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error=%e, "heartbeat curl spawn failed");
+                continue;
+            }
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            if let Err(e) = stdin.write_all(body.as_bytes()).await {
+                tracing::warn!(error=%e, "heartbeat stdin write");
+                continue;
+            }
+            stdin.shutdown().await.ok();
+        }
+        let result = child.wait_with_output().await;
         match result {
             Ok(out) if out.status.success() => {
                 tracing::debug!(node = %p.node_id, master = %p.master_url, "heartbeat ok");

@@ -20,15 +20,56 @@ pub struct AgentImpl<A: AdapterPort + 'static> {
     svc: Arc<HostingService<A>>,
     hostname: String,
     version: String,
+    /// Path to the persisted node-id.json. Read on every
+    /// `agent_info()` call so `hctl info` reflects enrollment
+    /// state without needing the agent to re-spawn.
+    node_state_file: std::path::PathBuf,
 }
 
 impl<A: AdapterPort + 'static> AgentImpl<A> {
     pub fn new(svc: Arc<HostingService<A>>) -> Self {
+        Self::with_state_file(svc, "/etc/hyperion/node-id.json".into())
+    }
+
+    pub fn with_state_file(svc: Arc<HostingService<A>>, node_state_file: std::path::PathBuf) -> Self {
         Self {
             svc,
             hostname: hostname_or_unknown(),
             version: env!("CARGO_PKG_VERSION").to_string(),
+            node_state_file,
         }
+    }
+}
+
+/// Minimal mirror of `bin/hyperion-agent::enroll::PersistedNodeId`
+/// just for reading from this side of the crate boundary. Adding a
+/// shared crate for this one struct isn't worth the dependency graph
+/// — the JSON shape is the contract.
+#[derive(serde::Deserialize)]
+struct PersistedNodeIdView {
+    node_id: String,
+    master_url: String,
+    #[serde(default)]
+    enrolled_at: i64,
+}
+
+/// Read node-id.json, return (node_id, master_url, enrolled_at) or
+/// triple-`None` when missing/unreadable/malformed. Fall-through is
+/// deliberately silent — `hctl info` should still print the agent's
+/// hostname + version even on an unenrolled single-node setup.
+async fn read_node_state(path: &std::path::Path) -> (Option<String>, Option<String>, Option<i64>) {
+    let bytes = match tokio::fs::read(path).await {
+        Ok(b) => b,
+        Err(_) => return (None, None, None),
+    };
+    let parsed: Result<PersistedNodeIdView, _> = serde_json::from_slice(&bytes);
+    match parsed {
+        Ok(p) => (
+            Some(p.node_id),
+            Some(p.master_url),
+            if p.enrolled_at > 0 { Some(p.enrolled_at) } else { None },
+        ),
+        Err(_) => (None, None, None),
     }
 }
 
@@ -46,11 +87,15 @@ fn hostname_or_unknown() -> String {
 impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     async fn agent_info(&self) -> Result<AgentInfo, RpcError> {
         let count = self.svc.list().await.map(|v| v.len() as i64).unwrap_or(0);
+        let (node_id, master_url, enrolled_at) = read_node_state(&self.node_state_file).await;
         Ok(AgentInfo {
             hostname: self.hostname.clone(),
             version: self.version.clone(),
             schema_version: 2,
             hostings_count: count,
+            node_id,
+            master_url,
+            enrolled_at,
         })
     }
 

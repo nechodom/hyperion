@@ -311,13 +311,36 @@ async fn main() -> anyhow::Result<()> {
             state_file: state_file.clone(),
             verify_tls: cfg.enrollment.verify_tls,
         };
+        // Outer loop — if the 5-attempt inner burst (~9 min) doesn't
+        // succeed, sleep 30 min and try the burst again, indefinitely.
+        // This is a daemon — there's no reason to ever give up. Without
+        // this, a master that's unreachable for the first 10 min after
+        // install leaves the node in a permanent zombie state until the
+        // operator restarts hyperion-agent.
+        //
+        // Loop exits cleanly once node-id.json exists (either we
+        // enrolled successfully, or `hctl enroll` ran on the side).
         tokio::spawn(async move {
-            if let Err(e) = enroll::ensure_enrolled(enr).await {
-                tracing::warn!(
-                    error = %e,
-                    "enrollment failed — retry by running `sudo hctl node enroll` on this node, \
-                     or restart hyperion-agent"
-                );
+            let mut consecutive_failures = 0u32;
+            loop {
+                if enr.state_file.exists() {
+                    if consecutive_failures > 0 {
+                        tracing::info!("enrollment succeeded out-of-band, exiting retry loop");
+                    }
+                    return;
+                }
+                match enroll::ensure_enrolled(enr.clone()).await {
+                    Ok(()) => return,
+                    Err(e) => {
+                        consecutive_failures += 1;
+                        tracing::warn!(
+                            error = %e,
+                            failure_streak = consecutive_failures,
+                            "enrollment burst exhausted — sleeping 30 min before next burst"
+                        );
+                        tokio::time::sleep(std::time::Duration::from_secs(30 * 60)).await;
+                    }
+                }
             }
         });
     }
@@ -330,7 +353,12 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    let agent = Arc::new(hyperion_core::AgentImpl::new(svc));
+    // Pass the resolved state_file path so agent_info() can read
+    // enrollment state without re-deriving it.
+    let agent = Arc::new(hyperion_core::AgentImpl::with_state_file(
+        svc,
+        state_file.clone(),
+    ));
     let server = hyperion_rpc_server::Server::bind(&cfg.agent.socket_path, agent).await?;
     tracing::info!("ready");
     server.run().await?;
