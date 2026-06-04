@@ -3843,31 +3843,54 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// Master-side: verify a node's heartbeat (constant-time secret
     /// check) and bump last_seen_at + agent_version. Returns Ok(()) if
     /// the node exists and the secret matches; otherwise Validation.
+    ///
+    /// SECURITY: always hash the supplied secret and run a
+    /// constant-time compare against *some* hash even when the node
+    /// is unknown. Returning Validation immediately on a missing
+    /// node would leak a timing oracle for node-id enumeration: an
+    /// attacker could distinguish "node doesn't exist" from "node
+    /// exists, secret wrong" by response latency.
     pub async fn node_heartbeat(
         &self,
         node_id: String,
         secret: String,
         agent_version: String,
     ) -> Result<(), RpcError> {
-        let row = hyperion_state::nodes::get_by_node_id(&self.pool, &node_id)
-            .await
-            .map_err(|e| RpcError::Internal_with(format!("node lookup: {e}")))?
-            .ok_or(RpcError::Validation {
-                message: "unknown node_id".into(),
-            })?;
-        let expected = row.secret_hash.as_bytes();
+        // Compute the candidate hash unconditionally — the same
+        // amount of crypto work happens regardless of node_id state.
         let actual = hex::encode(blake3::hash(secret.as_bytes()).as_bytes());
         let actual_bytes = actual.as_bytes();
-        if expected.len() != actual_bytes.len() {
-            return Err(RpcError::Validation {
-                message: "bad secret".into(),
-            });
-        }
-        let mut diff = 0u8;
-        for (a, b) in expected.iter().zip(actual_bytes.iter()) {
+
+        let row_opt = hyperion_state::nodes::get_by_node_id(&self.pool, &node_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("node lookup: {e}")))?;
+        // For the unknown-node case, compare against a fixed dummy
+        // string the same length as a real hex BLAKE3 digest (64
+        // bytes). The compare result is irrelevant — we'll fail
+        // afterwards — but the *time* taken is the same as the
+        // happy-path compare.
+        const DUMMY_HASH: &[u8; 64] =
+            b"0000000000000000000000000000000000000000000000000000000000000000";
+        let expected: &[u8] = match &row_opt {
+            Some(r) => r.secret_hash.as_bytes(),
+            None => DUMMY_HASH,
+        };
+        // If the stored hash is somehow a different length than a
+        // BLAKE3 hex digest, the compare must still consume the
+        // longest of the two so it doesn't short-circuit visibly.
+        // In practice secret_hash IS 64 bytes — this is belt-and-
+        // braces.
+        let n = expected.len().max(actual_bytes.len());
+        let mut diff: u8 = (expected.len() ^ actual_bytes.len()) as u8;
+        for i in 0..n {
+            let a = expected.get(i).copied().unwrap_or(0);
+            let b = actual_bytes.get(i).copied().unwrap_or(0);
             diff |= a ^ b;
         }
-        if diff != 0 {
+        // Bind the decision to BOTH "node exists" AND "compare
+        // matched" — never short-circuit on either.
+        let ok = row_opt.is_some() && diff == 0;
+        if !ok {
             return Err(RpcError::Validation {
                 message: "bad secret".into(),
             });

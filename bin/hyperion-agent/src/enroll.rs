@@ -28,6 +28,12 @@ pub struct EnrollmentConfig {
     /// and there's no trust anchor on the node yet. Flip to `true`
     /// when the master serves a real LE cert.
     pub verify_tls: bool,
+    /// Path to the agent.toml so we can blank out `invite_token`
+    /// after a successful enrollment. `None` for tests + the `hctl
+    /// enroll` one-shot path that didn't load a config. The clear
+    /// is best-effort — failures log a warning but don't abort
+    /// enrollment.
+    pub config_file: Option<PathBuf>,
 }
 
 #[derive(Serialize)]
@@ -282,7 +288,60 @@ async fn finish_enrollment(cfg: &EnrollmentConfig, stdout: &[u8]) -> Result<(), 
     tokio::fs::rename(&tmp, &cfg.state_file)
         .await
         .map_err(|e| format!("rename {} → {}: {e}", tmp.display(), cfg.state_file.display()))?;
+    // Best-effort: wipe the one-time invite_token from agent.toml.
+    // The master invalidated it server-side already; keeping it on
+    // disk just clutters the file and could mislead a future
+    // operator into thinking it's still active. A failure here is
+    // intentionally non-fatal.
+    if let Some(cfg_path) = cfg.config_file.as_ref() {
+        if let Err(e) = clear_invite_token_in_config(cfg_path).await {
+            tracing::warn!(
+                path=%cfg_path.display(), error=%e,
+                "could not blank invite_token in agent.toml — please clear it manually"
+            );
+        }
+    }
     tracing::info!(node_id=%resp.node_id, master=%cfg.master_url, "node enrolled");
+    Ok(())
+}
+
+/// Rewrite agent.toml in place setting `enrollment.invite_token = ""`.
+/// Uses toml_edit so existing comments / formatting / unrelated
+/// fields survive the rewrite. Returns Ok(()) on success OR if the
+/// file is missing (operator removed it themselves between enroll
+/// and now — not our problem). Atomic write: tmp → chmod 0600 →
+/// rename.
+async fn clear_invite_token_in_config(path: &std::path::Path) -> Result<(), String> {
+    let raw = match tokio::fs::read_to_string(path).await {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("read {}: {e}", path.display())),
+    };
+    let mut doc = raw
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|e| format!("parse {}: {e}", path.display()))?;
+    // Only mutate if the field actually exists AND has a non-empty
+    // value. Avoids touching the file on subsequent restarts.
+    let already_blank = doc
+        .get("enrollment")
+        .and_then(|s| s.get("invite_token"))
+        .and_then(|v| v.as_str())
+        .is_none_or(|s| s.is_empty());
+    if already_blank {
+        return Ok(());
+    }
+    doc["enrollment"]["invite_token"] = toml_edit::value("");
+    let updated = doc.to_string();
+    let tmp = path.with_extension("toml.tmp");
+    tokio::fs::write(&tmp, updated.as_bytes())
+        .await
+        .map_err(|e| format!("write tmp {}: {e}", tmp.display()))?;
+    use std::os::unix::fs::PermissionsExt;
+    let _ = tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).await;
+    tokio::fs::rename(&tmp, path)
+        .await
+        .map_err(|e| format!("rename {} → {}: {e}", tmp.display(), path.display()))?;
+    tracing::info!(path=%path.display(), "blanked enrollment.invite_token in agent.toml");
     Ok(())
 }
 
@@ -422,6 +481,61 @@ mod tests {
             "http://master:8443",
             "POST http://master:8443 exit Some(56): Received HTTP/0.9 when not allowed"
         ));
+    }
+
+    #[tokio::test]
+    async fn clear_invite_token_blanks_field_and_preserves_rest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("agent.toml");
+        let original = r#"
+# operator's comment
+[agent]
+socket_group = "ops"
+
+[enrollment]
+master_url = "https://master.example.cz:8443"
+invite_token = "secret-one-time-abc123"
+node_label = "stav"
+verify_tls = false
+"#;
+        tokio::fs::write(&p, original).await.unwrap();
+        clear_invite_token_in_config(&p).await.unwrap();
+        let after = tokio::fs::read_to_string(&p).await.unwrap();
+        assert!(
+            after.contains("invite_token = \"\""),
+            "token field should be blanked, got:\n{after}"
+        );
+        // Other fields survive
+        assert!(after.contains("master_url = \"https://master.example.cz:8443\""));
+        assert!(after.contains("node_label = \"stav\""));
+        assert!(after.contains("socket_group = \"ops\""));
+        // Comment survives (toml_edit preserves layout)
+        assert!(after.contains("# operator's comment"));
+        // The actual token bytes are gone
+        assert!(!after.contains("secret-one-time-abc123"));
+    }
+
+    #[tokio::test]
+    async fn clear_invite_token_noop_when_blank() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("agent.toml");
+        let original = "[enrollment]\ninvite_token = \"\"\n";
+        tokio::fs::write(&p, original).await.unwrap();
+        let mtime_before = tokio::fs::metadata(&p).await.unwrap().modified().unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+        clear_invite_token_in_config(&p).await.unwrap();
+        let mtime_after = tokio::fs::metadata(&p).await.unwrap().modified().unwrap();
+        // Already-blank → didn't touch the file at all.
+        assert_eq!(mtime_before, mtime_after);
+    }
+
+    #[tokio::test]
+    async fn clear_invite_token_noop_when_file_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("agent-does-not-exist.toml");
+        // Missing file → returns Ok(()), doesn't create it.
+        clear_invite_token_in_config(&p).await.unwrap();
+        assert!(!p.exists());
     }
 
     #[test]
