@@ -233,20 +233,32 @@ declare -A NEEDED_PKGS=(
   [php8.3-fpm.service]="php8.3-fpm php8.3-cli php8.3-mysql php8.3-pgsql"
   [php8.4-fpm.service]="php8.4-fpm php8.4-cli php8.4-mysql php8.4-pgsql"
 )
+# Canonical "is this unit installed" check. `systemctl cat <unit>`
+# succeeds iff the unit file is on disk (works regardless of whether
+# the service is running, failed, or even masked). We used to grep
+# `list-unit-files` output here, but on newer systemd (Debian 12+)
+# that output formatting drifts enough that the grep silently
+# misses live units — triggering a spurious `apt-get install nginx`
+# on every update run.
+unit_installed() {
+  systemctl cat "$1" >/dev/null 2>&1
+}
+
 APT_UPDATED=0
 for unit in "${!NEEDED_PKGS[@]}"; do
   # Skip PHP versions that aren't critical — only install if the
   # unit is missing AND no other PHP-FPM unit is already installed
   # (i.e. we want AT LEAST ONE php-fpm; we don't force all 4).
   # Always install nginx + the *required* services.
-  if systemctl list-unit-files --no-pager "$unit" 2>/dev/null \
-       | grep -q "^$unit"; then
+  if unit_installed "$unit"; then
     continue
   fi
   # Skip optional PHP versions when at least one is already there.
   if [[ "$unit" == php*-fpm.service ]]; then
-    if systemctl list-unit-files --no-pager 'php*-fpm.service' 2>/dev/null \
-         | grep -q '^php.*-fpm.service'; then
+    if unit_installed php8.1-fpm.service \
+       || unit_installed php8.2-fpm.service \
+       || unit_installed php8.3-fpm.service \
+       || unit_installed php8.4-fpm.service; then
       continue
     fi
   fi
@@ -285,8 +297,11 @@ fi
 # Bring them up here so the agent's adapter never has to self-heal.
 for svc in nginx mariadb postgresql vsftpd \
            php8.1-fpm php8.2-fpm php8.3-fpm php8.4-fpm; do
-  if systemctl list-unit-files --no-pager "$svc.service" 2>/dev/null \
-       | grep -q "^$svc.service"; then
+  if unit_installed "$svc.service"; then
+    # Clear any stale "failed" state from previous botched starts
+    # so `enable --now` doesn't trip the "Start request repeated
+    # too quickly" check. reset-failed is a no-op on healthy units.
+    systemctl reset-failed "$svc" >/dev/null 2>&1 || true
     systemctl enable --now "$svc" >/dev/null 2>&1 || true
   fi
 done

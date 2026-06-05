@@ -139,6 +139,17 @@ pub trait AdapterPort: Send + Sync {
         Ok(())
     }
 
+    /// Walk every installed php<ver>-fpm service and recover any
+    /// that's in systemd "failed" state. Runs unconditionally at
+    /// boot — when an OLD broken pool brought FPM down hard
+    /// (restart counter at 5), even after the operator fixes the
+    /// pool file systemd refuses to start without `reset-failed`.
+    /// Returns the count of services we kicked back up.
+    /// Default impl returns 0.
+    async fn fpm_recover_failed(&self) -> Result<usize, AdapterError> {
+        Ok(0)
+    }
+
     async fn nginx_write_vhost(&self, detail: &HostingDetail) -> Result<(), AdapterError>;
     /// Remove vhost + symlink for this domain. When `hosting_id` is
     /// supplied the adapter also drops the per-hosting cache zone +

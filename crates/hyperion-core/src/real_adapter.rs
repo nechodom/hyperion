@@ -280,6 +280,48 @@ impl AdapterPort for RealAdapter {
         hyperion_adapters::nginx::reload().await
     }
 
+    async fn fpm_recover_failed(&self) -> Result<usize, AdapterError> {
+        let mut recovered = 0usize;
+        for ver in PhpVersion::all() {
+            let svc = format!("{}.service", ver.service_name());
+            // Skip versions not installed on this node — checked via
+            // systemctl cat (canonical "is unit known").
+            let known = tokio::process::Command::new("/usr/bin/systemctl")
+                .args(["cat", &svc])
+                .output()
+                .await
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+            if !known {
+                continue;
+            }
+            // is-failed --quiet returns exit 0 iff state is "failed".
+            let failed = tokio::process::Command::new("/usr/bin/systemctl")
+                .args(["is-failed", "--quiet", &svc])
+                .status()
+                .await
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !failed {
+                continue;
+            }
+            tracing::warn!(
+                service = %svc,
+                "boot: FPM service in failed state — reset-failed + start"
+            );
+            if let Err(e) = self.fpm_restart(*ver).await {
+                tracing::error!(
+                    service = %svc,
+                    error = %e,
+                    "boot: FPM recovery failed (likely a pool config error — see journalctl)"
+                );
+                continue;
+            }
+            recovered += 1;
+        }
+        Ok(recovered)
+    }
+
     async fn fpm_restart(&self, version: PhpVersion) -> Result<(), AdapterError> {
         // systemctl restart php<ver>-fpm. We don't reuse phpfpm::reload
         // here because after a quarantine we want a fresh START (the

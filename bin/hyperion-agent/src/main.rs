@@ -282,6 +282,30 @@ async fn main() -> anyhow::Result<()> {
                     );
                 }
             }
+            // Belt-and-braces: regardless of what the quarantine
+            // pass did, walk every installed php<ver>-fpm service
+            // and recover any in "failed" state. This handles the
+            // exact stav scenario: an older boot wrote a broken
+            // pool, FPM died, systemd marked it failed after 5
+            // retries. A later boot fixed the pool (via rerender)
+            // but never reset the failed flag — so the service
+            // stays dead until we explicitly reset-failed + start.
+            // Idempotent for healthy services: is-failed returns
+            // false → we skip them.
+            match repair_svc.adapters.fpm_recover_failed().await {
+                Ok(0) => {
+                    tracing::debug!("boot: no FPM services in failed state");
+                }
+                Ok(n) => {
+                    tracing::warn!(recovered = n, "boot: kicked failed FPM services back up");
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "boot: FPM failed-state recovery sweep errored"
+                    );
+                }
+            }
         });
     }
     // One-shot backfill: tag every hostings row that has NULL node_id

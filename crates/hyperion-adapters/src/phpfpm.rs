@@ -264,6 +264,19 @@ pub async fn reload(php_version: PhpVersion) -> Result<(), AdapterError> {
         .map(|s| s.success())
         .unwrap_or(false);
     if !active {
+        // Belt-and-braces recovery for the "Start request repeated
+        // too quickly" trap. After 5 failed restart cycles, systemd
+        // marks the unit "failed" and refuses every subsequent
+        // start until `reset-failed` clears the counter. A bare
+        // `enable --now` on such a unit returns exit 1 with no
+        // useful clue — we'd just see "Job for X failed". So when
+        // is-failed is true (or even when it's ambiguous), clear
+        // the counter first. `reset-failed` is a no-op on healthy
+        // units, so this is always safe.
+        if is_failed(&svc).await {
+            tracing::warn!(service = %svc, "php-fpm is in failed state — resetting before start");
+            let _ = cmd::run("/usr/bin/systemctl", &["reset-failed", &svc]).await;
+        }
         tracing::warn!(service = %svc, "php-fpm not active — enabling + starting");
         // enable --now is idempotent: enable + start in one shot.
         if let Err(e) = cmd::run("/usr/bin/systemctl", &["enable", "--now", &svc]).await {
@@ -279,6 +292,20 @@ pub async fn reload(php_version: PhpVersion) -> Result<(), AdapterError> {
     }
     cmd::run("/usr/bin/systemctl", &["reload", &svc]).await?;
     Ok(())
+}
+
+/// `systemctl is-failed <svc>` — returns true if the unit is in
+/// "failed" sub-state (typical after Start request repeated too
+/// quickly). Returns false on any other state including activating,
+/// inactive, active, or when systemctl itself errors (we don't want
+/// to confuse "couldn't check" with "definitely failed").
+async fn is_failed(svc: &str) -> bool {
+    tokio::process::Command::new("/usr/bin/systemctl")
+        .args(["is-failed", "--quiet", svc])
+        .status()
+        .await
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
