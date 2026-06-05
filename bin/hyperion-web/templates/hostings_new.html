@@ -463,7 +463,20 @@
   function renderPreview() {
     const v = (nameInput.value || '').toLowerCase().trim();
     if (!v) { preview.textContent = '—'; return; }
-    const out = TEMPLATE.replace('{name}', v).replace('{node}', sel.value).toLowerCase();
+    // Substitute {node} with the node's HOSTNAME (label) instead
+    // of the long node_id — operator-friendly URL like
+    // test.blog.s4.example.cz not
+    // test.blog.node_01kt9d6hrsbaw1pyzjdmwnmrhp.example.cz.
+    // The option's data-label is the hostname; fall back to the
+    // value (node_id) if that's empty.
+    const opt = sel.options[sel.selectedIndex];
+    const hostname = (opt && opt.dataset.label || sel.value || '').trim();
+    const out = TEMPLATE
+      .replace('{name}', v)
+      .replace('{node}', hostname)
+      .replace('{node_id}', sel.value)
+      .replace('{hostname}', hostname)
+      .toLowerCase();
     preview.textContent = out;
     // Mirror into the hidden domain field so server-side validation
     // sees a non-empty value even if the operator never touched the

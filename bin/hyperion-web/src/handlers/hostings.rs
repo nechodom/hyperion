@@ -499,7 +499,18 @@ pub async fn post_create(
                 "Site name must be 1–32 chars of a–z 0–9 -, no leading/trailing dash.",
             ));
         }
-        effective_domain = cluster_cfg.render_test_domain(&name, &form.target_node);
+        // Resolve the target node's hostname (label) so `{node}`
+        // expands to "s4" not "node_01kt9d6hrsbaw1pyzjdmwnmrhp" —
+        // operator-friendly URL. Falls back to the long node_id
+        // when NodesList lookup fails (rare).
+        let node_hostname = fetch_remote_nodes(&state)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .find(|n| n.node_id == form.target_node)
+            .map(|n| n.label)
+            .unwrap_or_default();
+        effective_domain = cluster_cfg.render_test_domain(&name, &form.target_node, &node_hostname);
     } else if target_is_test && form.test_site_name.trim().is_empty() {
         // Operator picked a test node but didn't fill the short-name
         // field → enforce that the typed domain matches the template

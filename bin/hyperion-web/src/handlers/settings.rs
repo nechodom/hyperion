@@ -324,10 +324,44 @@ pub async fn post_config(
     .await
     .map_err(AppError::from)?;
     let dest = match resp {
-        RpcResponse::AgentConfigUpdate => format!(
-            "/settings?flash=Section+%5B{}%5D+saved+%E2%80%94+restart+hyperion-agent+to+apply",
-            urlencode(&form.section)
-        ),
+        RpcResponse::AgentConfigUpdate => {
+            // Spawn a delayed restart so the redirect response gets back
+            // to the browser BEFORE the agent goes down. 3s buffer is
+            // plenty for the in-flight HTTP response to land. The agent
+            // itself restarts via systemd within ~2s after the kill,
+            // so the operator's next click sees the fresh config.
+            //
+            // Why not use the existing service_restart RPC? It refuses
+            // to restart hyperion-agent through the agent itself (would
+            // kill its own RPC pipe). Doing it from hyperion-web's
+            // process side dodges that — we're not the agent.
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                let out = tokio::process::Command::new("/usr/bin/systemctl")
+                    .args(["restart", "hyperion-agent"])
+                    .output()
+                    .await;
+                match out {
+                    Ok(o) if o.status.success() => {
+                        tracing::info!("auto-restart hyperion-agent after config save: ok");
+                    }
+                    Ok(o) => {
+                        tracing::error!(
+                            stderr = %String::from_utf8_lossy(&o.stderr),
+                            exit_code = ?o.status.code(),
+                            "auto-restart hyperion-agent failed — operator must restart manually"
+                        );
+                    }
+                    Err(e) => {
+                        tracing::error!(error=%e, "auto-restart hyperion-agent: spawn failed");
+                    }
+                }
+            });
+            format!(
+                "/settings?flash=Section+%5B{}%5D+saved+%E2%80%94+hyperion-agent+restarting+%28~5s%29",
+                urlencode(&form.section)
+            )
+        }
         RpcResponse::Error(e) => format!("/settings?flash_error={}", urlencode(&e.to_string())),
         _ => return Err(AppError::Internal("unexpected response".into())),
     };

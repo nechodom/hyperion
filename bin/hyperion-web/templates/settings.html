@@ -692,13 +692,37 @@
       <input type="hidden" name="section" value="cluster">
 
       <div class="field">
-        <label for="test_node_ids">Test node IDs <span class="hint">comma-separated</span></label>
-        <input id="test_node_ids" name="test_node_ids" type="text" autocomplete="off"
-               value="{{ config.cluster.test_node_ids }}"
-               placeholder="e.g. node-staging, lab-01">
+        <label>Test nodes <span class="hint">tick which nodes should be treated as test</span></label>
+        {# Hidden input the form actually submits — built from the
+           checkboxes below by JS. Server-side stays unchanged
+           (parses CSV from agent.toml). #}
+        <input id="test_node_ids" name="test_node_ids" type="hidden"
+               value="{{ config.cluster.test_node_ids }}">
+        <div id="test-node-checkboxes" class="row" style="flex-direction:column;gap:0.4rem;padding:0.6rem;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface-1)">
+          {% if nodes.is_empty() %}
+            <p class="text-soft small" style="margin:0">
+              No remote nodes enrolled yet. Enrol nodes on
+              <a href="/install">/install</a>; they'll appear here as checkboxes.
+            </p>
+          {% else %}
+            {% for n in nodes %}
+            <label class="field-checkbox" style="margin:0;font-weight:500">
+              <input type="checkbox" class="test-node-toggle"
+                     value="{{ n.node_id }}"
+                     data-node-id="{{ n.node_id }}">
+              <strong>{{ n.label }}</strong>
+              <span class="text-soft small" style="margin-left:0.4rem">
+                <code style="font-size:0.74rem">{{ n.node_id }}</code>
+                {% if let Some(ip) = n.public_ip.as_ref() %} · {{ ip }}{% endif %}
+              </span>
+            </label>
+            {% endfor %}
+          {% endif %}
+        </div>
         <p class="text-soft small" style="margin:0.3rem 0 0">
-          The IDs from <a href="/install">/install</a> column "ID".
-          Empty = test-node feature is off (every node is treated as production).
+          The easier way: on <a href="/install">/install</a> each row has a
+          "Mark as test" button that does the same thing. No checkbox
+          ticked = test-node feature is off (every node is treated as production).
         </p>
       </div>
 
@@ -882,6 +906,35 @@
   function escapeHtml(s) {
     return String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
   }
+})();
+
+// ============================================================
+//  Test-node checkboxes ↔ hidden CSV input sync.
+//  On page load: parse the current CSV from the hidden input,
+//  tick matching checkboxes. On any checkbox change: rebuild
+//  the CSV. Form submits with `test_node_ids=<csv>` as before
+//  so the server handler is unchanged.
+// ============================================================
+(function () {
+  'use strict';
+  const hidden = document.getElementById('test_node_ids');
+  const boxes = document.querySelectorAll('.test-node-toggle');
+  if (!hidden || boxes.length === 0) return;
+  const initial = new Set(
+    (hidden.value || '').split(',').map(s => s.trim()).filter(Boolean)
+  );
+  boxes.forEach(box => {
+    box.checked = initial.has(box.value);
+    box.addEventListener('change', () => {
+      const ticked = Array.from(boxes)
+        .filter(b => b.checked)
+        .map(b => b.value);
+      // Sort so the resulting CSV in agent.toml is stable across
+      // toggles — operator-friendly diffs.
+      ticked.sort();
+      hidden.value = ticked.join(',');
+    });
+  });
 })();
 </script>
 {% endblock %}

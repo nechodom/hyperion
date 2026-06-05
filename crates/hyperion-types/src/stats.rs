@@ -269,15 +269,27 @@ impl ClusterConfigView {
             .any(|s| !s.is_empty() && s == node_id)
     }
 
-    /// Render the test domain for a given short name + node id.
+    /// Render the test domain for a given short name + node info.
+    /// `{node}` is substituted with the node's HOSTNAME when known
+    /// (operator-friendly: `s4` not `node_01kt9d…`); falls back to
+    /// `node_id` only when hostname is empty.
+    /// `{node_id}` is also supported as an explicit alternative
+    /// for operators who want the long ID for namespacing.
     /// Returns empty string when the template isn't configured.
-    pub fn render_test_domain(&self, name: &str, node_id: &str) -> String {
+    pub fn render_test_domain(&self, name: &str, node_id: &str, node_hostname: &str) -> String {
         if self.test_domain_template.is_empty() {
             return String::new();
         }
+        let node_token = if node_hostname.trim().is_empty() {
+            node_id.trim()
+        } else {
+            node_hostname.trim()
+        };
         self.test_domain_template
             .replace("{name}", name.trim())
-            .replace("{node}", node_id.trim())
+            .replace("{node}", node_token)
+            .replace("{node_id}", node_id.trim())
+            .replace("{hostname}", node_hostname.trim())
             .to_ascii_lowercase()
     }
 }
