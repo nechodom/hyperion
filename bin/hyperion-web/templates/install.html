@@ -269,6 +269,31 @@
                 <input type="hidden" name="node_id" value="{{ n.node_id }}">
                 <button type="submit" class="btn small">Test</button>
               </form>
+              {# Test/prod toggle — flips cluster.test_node_ids in
+                 agent.toml. Yellow "Mark test" when prod, ghost
+                 "Mark prod" when test. Confirmation modal warns
+                 about the cascading effects (wizard refuses prod
+                 domains on test nodes etc.) #}
+              <form method="post" action="/install/toggle-test-node" style="display:inline"
+                    data-confirm-title="{% if is_test %}Unmark{% else %}Mark{% endif %} {{ n.label }} as test node"
+                    data-confirm-body="{% if is_test %}This node will go back to production-only mode. Existing hostings stay where they are; the wizard will accept production domains on it again, and the TEST chip on /hostings will go away on the next refresh.{% else %}This node will be flagged as test-only. New hostings created here MUST use the auto-domain template (see Settings → Cluster → Test nodes), and the wizard refuses to put a production domain on it. Existing hostings are unaffected but will show a TEST chip.{% endif %}"
+                    data-confirm-confirm-label="{% if is_test %}Unmark as test{% else %}Mark as test{% endif %}"
+                    data-confirm-variant="{% if is_test %}primary{% else %}primary{% endif %}">
+                <input type="hidden" name="_csrf" value="{{ csrf_test }}">
+                <input type="hidden" name="node_id" value="{{ n.node_id }}">
+                {% if is_test %}
+                <button type="submit" class="btn small ghost"
+                        title="Currently a test node — click to mark as production">
+                  Unmark test
+                </button>
+                {% else %}
+                <button type="submit" class="btn small"
+                        title="Click to mark this node as test-only (auto-domains in the wizard)"
+                        style="border-color:var(--warn);color:var(--warn)">
+                  Mark as test
+                </button>
+                {% endif %}
+              </form>
               <button type="button" class="btn small primary"
                       onclick="document.getElementById('upd-{{ n.node_id }}').style.display='block';this.style.display='none'">
                 Update…

@@ -138,6 +138,8 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/trash", get(handlers::trash::get_trash))
         .route("/trash/restore", post(handlers::trash::post_trash_restore))
         .route("/trash/purge", post(handlers::trash::post_trash_purge))
+        .route("/api/trash-count", get(handlers::trash::get_trash_count))
+        .route("/api/check-domain", get(handlers::hostings::get_check_domain))
         .route(
             "/services",
             get(handlers::services_health::get_services_health),
@@ -319,6 +321,10 @@ pub fn build_router(state: SharedState) -> Router {
         .route(
             "/install/test-node",
             post(handlers::install::post_test_node),
+        )
+        .route(
+            "/install/toggle-test-node",
+            post(handlers::install::post_toggle_test_node),
         )
         .route(
             "/install/update-node",

@@ -208,6 +208,16 @@ pub struct ClusterConfigView {
     #[serde(default)]
     pub test_domain_template: String,
 
+    /// FQDN where the Hyperion master UI should be served via
+    /// nginx + a real TLS cert (e.g. "panel.example.com"). When
+    /// set, a one-shot `PanelProvision` RPC writes an nginx vhost
+    /// that proxies `https://<hostname>` → the master's local
+    /// hyperion-web (HTTPS on 127.0.0.1:8443) and issues a real
+    /// Let's Encrypt cert. Empty = self-signed on IP:8443 only
+    /// (the default).
+    #[serde(default)]
+    pub panel_hostname: String,
+
     /// When true, every WordPress install on a test node gets
     /// `blog_public = 0` (Discourage search engines) so test
     /// content never leaks into Google. Operator can still
@@ -240,6 +250,7 @@ impl Default for ClusterConfigView {
             test_node_ids: String::new(),
             test_domain_template: String::new(),
             test_wp_no_index: false,
+            panel_hostname: String::new(),
             trash_enabled: false,
             trash_retention_days: 30,
         }

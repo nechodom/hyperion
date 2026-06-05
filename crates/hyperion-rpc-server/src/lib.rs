@@ -466,6 +466,16 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok((cleared, output)) => Response::MtaQueueClear { cleared, output },
             Err(e) => Response::Error(e),
         },
+        Request::PanelProvision { hostname, skip_dns_check } => {
+            match api.panel_provision(hostname, skip_dns_check).await {
+                Ok((status, message, panel_url)) => Response::PanelProvision {
+                    status,
+                    message,
+                    panel_url,
+                },
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::WpPluginList { hosting } => match api.wp_plugin_list(hosting).await {
             Ok(v) => Response::WpPluginList(v),
             Err(e) => Response::Error(e),
@@ -1222,6 +1232,13 @@ mod tests {
         }
         async fn mta_queue_clear(&self) -> Result<(usize, String), RpcError> {
             Ok((0, String::new()))
+        }
+        async fn panel_provision(
+            &self,
+            _: String,
+            _: bool,
+        ) -> Result<(String, String, String), RpcError> {
+            Ok(("ok-cert-pending".into(), "test".into(), String::new()))
         }
         async fn wp_plugin_list(
             &self,

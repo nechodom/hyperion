@@ -351,6 +351,14 @@ pub trait AgentApi: Send + Sync + 'static {
     /// must gate it behind a type-to-confirm modal.
     async fn mta_queue_clear(&self) -> Result<(usize, String), RpcError>;
 
+    /// Provision the master panel on a real FQDN with auto-cert
+    /// via nginx reverse-proxy. Returns (status, message, url).
+    async fn panel_provision(
+        &self,
+        hostname: String,
+        skip_dns_check: bool,
+    ) -> Result<(String, String, String), RpcError>;
+
     /// Import a migration bundle by URL — downloads from the source
     /// node's signed `/api/migration/bundle/<id>` endpoint then runs
     /// the regular import.

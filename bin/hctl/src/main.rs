@@ -448,6 +448,13 @@ fn print_pretty(resp: &Response) {
                 println!("{output}");
             }
         }
+        Response::PanelProvision { status, message, panel_url } => {
+            println!("status: {status}");
+            if !panel_url.is_empty() {
+                println!("panel:  {panel_url}");
+            }
+            println!("{message}");
+        }
         Response::TrashList(entries) => {
             println!("{:<32} {:<14} {:<14} NODE", "DOMAIN", "TRASHED_AT", "PURGE_IN");
             for e in entries.iter() {

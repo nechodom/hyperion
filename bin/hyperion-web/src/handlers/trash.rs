@@ -196,6 +196,53 @@ fn urlencode(s: &str) -> String {
     url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
 }
 
+/// GET /api/trash-count — total number of trashed hostings across
+/// the cluster. Tiny JSON shape `{"count": N}` so the sidebar
+/// badge can poll without round-tripping the full TrashList.
+/// Best-effort: any error (rpc down, dispatcher failure) returns
+/// `{"count": 0}` so a flaky probe doesn't show false alarms.
+///
+/// Polled by the JS in base.html every 60s alongside the
+/// notification feed, so the operator always sees "there's something
+/// in trash" without visiting /trash.
+pub async fn get_trash_count(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+) -> axum::response::Response {
+    // Same role gate as the page itself — viewers/customers don't
+    // see the trash link so they don't need the count either.
+    if !ctx.is_admin_or_higher() {
+        return axum::Json(serde_json::json!({"count": 0})).into_response();
+    }
+    let mut total = 0usize;
+    if let Ok(RpcResponse::TrashList(rows)) =
+        crate::dispatcher::dispatch_to_node(&state, None, Request::TrashList).await
+    {
+        total += rows.len();
+    }
+    // Also poll every remote node (same fan-out as get_trash). Best
+    // effort — a flaky worker shouldn't make the badge go to 0.
+    if let Ok(RpcResponse::NodesList(nodes)) = hyperion_rpc_client::call(
+        &state.agent_socket,
+        hyperion_rpc::codec::Request::NodesList,
+    )
+    .await
+    {
+        for n in nodes {
+            if let Ok(RpcResponse::TrashList(rows)) = crate::dispatcher::dispatch_to_node(
+                &state,
+                Some(&n.node_id),
+                hyperion_rpc::codec::Request::TrashList,
+            )
+            .await
+            {
+                total += rows.len();
+            }
+        }
+    }
+    axum::Json(serde_json::json!({"count": total})).into_response()
+}
+
 /// Helper for templates: turn `seconds_remaining` into a friendly
 /// "5 days 3 hours" string for the table. 0 → "purging soon".
 pub fn fmt_remaining(secs: &i64) -> String {

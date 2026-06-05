@@ -145,6 +145,60 @@ pub async fn write_redirect_vhost(
     reload().await
 }
 
+/// Hyperion master panel vhost — `panel.example.com` → local
+/// hyperion-web on 127.0.0.1:8443. Specialised template (separate
+/// from `nginx-vhost-proxy.conf.j2`) because the panel always
+/// proxies to LOCALHOST self-signed and needs `proxy_ssl_verify
+/// off` — we don't want that knob bleeding into operator-defined
+/// reverse_proxy hostings.
+#[derive(Debug, Clone)]
+pub struct PanelVhostInput<'a> {
+    pub domain: &'a str,
+    pub cert_path: &'a str,
+    pub key_path: &'a str,
+    pub acme_challenge_root: &'a str,
+}
+
+#[derive(askama::Template)]
+#[template(path = "nginx-panel.conf.j2", escape = "none")]
+struct PanelVhostTpl<'a> {
+    domain: &'a str,
+    cert_path: &'a str,
+    key_path: &'a str,
+    acme_challenge_root: &'a str,
+}
+
+pub fn render_panel(input: &PanelVhostInput<'_>) -> Result<String, AdapterError> {
+    let tpl = PanelVhostTpl {
+        domain: input.domain,
+        cert_path: input.cert_path,
+        key_path: input.key_path,
+        acme_challenge_root: input.acme_challenge_root,
+    };
+    Ok(tpl.render()?)
+}
+
+/// Atomic-write + nginx-test + reload. Filename pinned to
+/// `hyperion-panel.conf` so the boot-time orphan-vhost sweep
+/// recognises it and never auto-cleans it.
+pub async fn write_panel_vhost(
+    paths: &Paths,
+    input: &PanelVhostInput<'_>,
+) -> Result<(), AdapterError> {
+    let body = render_panel(input)?;
+    let vhost = paths.sites_available.join("hyperion-panel.conf");
+    let backup = backup_existing(&vhost).await?;
+    atomic_write(&vhost, body.as_bytes(), 0o644).await?;
+    let symlink = paths.sites_enabled.join("hyperion-panel.conf");
+    ensure_symlink(&vhost, &symlink).await?;
+    if let Err(e) = cmd::run("/usr/sbin/nginx", &["-t"]).await {
+        restore_or_remove(&vhost, backup.as_deref()).await;
+        let _ = tokio::fs::remove_file(&symlink).await;
+        return Err(e);
+    }
+    reload().await
+}
+
 /// Reverse-proxy variant: forwards every request to a single upstream
 /// URL. WebSocket upgrade is on by default per MVP spec. No PHP-FPM,
 /// no static root.

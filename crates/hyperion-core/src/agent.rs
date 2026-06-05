@@ -543,6 +543,14 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.mta_queue_clear().await
     }
 
+    async fn panel_provision(
+        &self,
+        hostname: String,
+        skip_dns_check: bool,
+    ) -> Result<(String, String, String), RpcError> {
+        self.svc.panel_provision(hostname, skip_dns_check).await
+    }
+
     async fn wp_plugin_list(
         &self,
         hosting: hyperion_rpc::HostingSelector,

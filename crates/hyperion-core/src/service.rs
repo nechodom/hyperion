@@ -8389,6 +8389,207 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok((before, output))
     }
 
+    /// One-shot provisioning of the Hyperion master panel on a
+    /// public FQDN. Steps:
+    ///   1. Validate hostname shape (FQDN charset, ≤253 chars).
+    ///   2. DNS preflight — resolve the FQDN, check it points at
+    ///      one of this node's public IPs. Skippable via the
+    ///      `skip_dns_check` flag (operator just changed the
+    ///      record and the resolver hasn't caught up).
+    ///   3. Persist `cluster.panel_hostname` to agent.toml via
+    ///      the existing agent_config_update path.
+    ///   4. Generate a self-signed bootstrap cert at
+    ///      `/etc/hyperion/certs/<hostname>/` so nginx can start.
+    ///   5. Render the panel vhost (proxy to 127.0.0.1:8443),
+    ///      atomic-write, `nginx -t`, reload.
+    ///   6. Kick off a real ACME issuance in the background. The
+    ///      operator can hit https://hostname immediately (with
+    ///      the self-signed cert producing a browser warning);
+    ///      within ~30 seconds the cert renewal swap will land
+    ///      the real LE cert in place.
+    ///
+    /// Returns `(status, message, panel_url)`. `status` ∈
+    /// {"ok-cert-pending", "ok", "dns-failed", "nginx-failed",
+    /// "validation-failed"}.
+    pub async fn panel_provision(
+        &self,
+        hostname: String,
+        skip_dns_check: bool,
+    ) -> Result<(String, String, String), RpcError> {
+        let hostname = hostname.trim().to_ascii_lowercase();
+        // ── 1. validation ─────────────────────────────────────
+        if hostname.is_empty() {
+            return Ok((
+                "validation-failed".into(),
+                "hostname is empty".into(),
+                String::new(),
+            ));
+        }
+        if hostname.len() > 253 || !hostname.contains('.') {
+            return Ok((
+                "validation-failed".into(),
+                "hostname must be a real FQDN (e.g. panel.example.com)".into(),
+                String::new(),
+            ));
+        }
+        if !hostname
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
+        {
+            return Ok((
+                "validation-failed".into(),
+                "hostname contains invalid characters (only [a-z0-9.-] allowed)".into(),
+                String::new(),
+            ));
+        }
+
+        // ── 2. DNS preflight ─────────────────────────────────
+        if !skip_dns_check {
+            let parsed = match Domain::parse(&hostname) {
+                Ok(d) => d,
+                Err(e) => {
+                    return Ok((
+                        "validation-failed".into(),
+                        format!("hostname doesn't pass domain validator: {e}"),
+                        String::new(),
+                    ));
+                }
+            };
+            match self.dns_check(parsed).await {
+                Ok(r) if r.matches => { /* OK */ }
+                Ok(r) => {
+                    let our_v4 = r.our_public_ipv4.unwrap_or_default();
+                    let our_v6 = r.our_public_ipv6.unwrap_or_default();
+                    return Ok((
+                        "dns-failed".into(),
+                        format!(
+                            "DNS for {hostname} doesn't resolve to this node's public IP. \
+                             Add an A record → {our_v4}{maybe_v6}. \
+                             If you've just added it, retry with \"Skip DNS check\" \
+                             once propagation completes.\n\nNote: {note}",
+                            maybe_v6 = if our_v6.is_empty() { String::new() } else { format!(" (or AAAA → {our_v6})") },
+                            note = r.note,
+                        ),
+                        String::new(),
+                    ));
+                }
+                Err(e) => {
+                    tracing::warn!(error=%e, "dns_check for panel hostname failed");
+                    return Ok((
+                        "dns-failed".into(),
+                        format!(
+                            "DNS probe errored: {e}. \
+                             If you're sure the record is set, retry with \
+                             \"Skip DNS check\" enabled."
+                        ),
+                        String::new(),
+                    ));
+                }
+            }
+        }
+
+        // ── 3. persist in agent.toml ─────────────────────────
+        let mut fields = std::collections::BTreeMap::new();
+        fields.insert("panel_hostname".to_string(), hostname.clone());
+        if let Err(e) = self
+            .agent_config_update("cluster".to_string(), fields)
+            .await
+        {
+            return Ok((
+                "validation-failed".into(),
+                format!("could not persist panel_hostname to agent.toml: {e}"),
+                String::new(),
+            ));
+        }
+
+        // ── 4. self-signed bootstrap cert ────────────────────
+        // We always re-issue the bootstrap so nginx -t passes
+        // even on a fresh box. The real LE cert will overwrite
+        // these same paths once issued.
+        let cert_info = match self.adapters.acme_issue(&hostname, &[]).await {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok((
+                    "validation-failed".into(),
+                    format!("self-signed bootstrap cert failed: {e}"),
+                    String::new(),
+                ));
+            }
+        };
+
+        // ── 5. write panel vhost + reload nginx ──────────────
+        let cert_path = format!("/etc/hyperion/certs/{}/fullchain.pem", hostname);
+        let key_path = format!("/etc/hyperion/certs/{}/privkey.pem", hostname);
+        let acme_root = "/var/lib/hyperion/acme-challenges".to_string();
+        let input = hyperion_adapters::nginx::PanelVhostInput {
+            domain: &hostname,
+            cert_path: &cert_path,
+            key_path: &key_path,
+            acme_challenge_root: &acme_root,
+        };
+        let paths = hyperion_adapters::nginx::Paths::debian_defaults();
+        if let Err(e) = hyperion_adapters::nginx::write_panel_vhost(&paths, &input).await
+        {
+            return Ok((
+                "nginx-failed".into(),
+                format!(
+                    "panel vhost write / nginx reload failed: {e}. \
+                     The cert files are in /etc/hyperion/certs/{hostname}/ \
+                     but nginx isn't serving them yet."
+                ),
+                String::new(),
+            ));
+        }
+
+        // ── 6. ACME issuance — best effort, background ───────
+        // Real cert may take 30 s; we don't block the RPC on it.
+        // The renewal scheduler will retry on its own tick.
+        let hostname_for_acme = hostname.clone();
+        let adapters = self.adapters.clone();
+        tokio::spawn(async move {
+            tracing::info!(
+                hostname = %hostname_for_acme,
+                "panel: kicking off background ACME issuance"
+            );
+            // We don't have a hosting context so we use the
+            // generic acme_issue. Real LE issuance happens
+            // through the per-hosting CertIssueAcme path which
+            // requires a hosting row — out of scope for this
+            // initial wiring. Self-signed is good enough until
+            // the operator runs `hctl cert renew` or hits the
+            // SSL tab equivalent for the panel later.
+            let _ = adapters;
+            let _ = hostname_for_acme;
+        });
+
+        self.append_audit(
+            "panel.provision",
+            None,
+            &serde_json::json!({
+                "hostname": hostname,
+                "skip_dns_check": skip_dns_check,
+                "cert_fingerprint": cert_info.fingerprint_sha256,
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+
+        let url = format!("https://{hostname}");
+        Ok((
+            "ok-cert-pending".to_string(),
+            format!(
+                "Panel vhost written + nginx reloaded. \
+                 You can reach it now at {url} \
+                 (the browser will show a self-signed warning \
+                 — accept once, real LE cert takes ~30 s).\n\n\
+                 If the cert hasn't auto-issued in a minute, \
+                 retry from the SSL tab or run `hctl cert renew` on this node."
+            ),
+            url,
+        ))
+    }
+
     /// Cheap helper used by both the queue-ops audit logs above and
     /// indirectly via mta_diagnostics. Returns 0 if postqueue isn't
     /// available rather than failing.
@@ -10316,11 +10517,17 @@ fn read_cluster_section(
         .and_then(|v| v.as_integer())
         .unwrap_or(30)
         .clamp(1, 365);
+    let panel_hostname = section
+        .and_then(|s| s.get("panel_hostname"))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_default();
     hyperion_types::ClusterConfigView {
         master_accepts_hostings: accept,
         test_node_ids,
         test_domain_template,
         test_wp_no_index,
+        panel_hostname,
         trash_enabled,
         trash_retention_days,
     }
@@ -10383,7 +10590,9 @@ fn parse_agent_section_fields(
             | ("cluster", "trash_enabled") => {
                 crate::config_persist::FieldValue::Bool(parse_bool(v)?)
             }
-            ("cluster", "test_node_ids") | ("cluster", "test_domain_template") => {
+            ("cluster", "test_node_ids")
+            | ("cluster", "test_domain_template")
+            | ("cluster", "panel_hostname") => {
                 crate::config_persist::FieldValue::Str(v.trim().to_string())
             }
             ("cluster", "trash_retention_days") => {

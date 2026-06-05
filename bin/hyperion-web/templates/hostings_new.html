@@ -262,6 +262,12 @@
       <label for="domain">Primary domain <span class="hint">root hostname, e.g. <code>example.com</code></span></label>
       <input id="domain" name="domain" type="text" required autofocus
              value="{{ domain_in|e }}" placeholder="example.com">
+      {# Live preflight — JS at the bottom of this template debounces
+         input events and hits /api/check-domain. When the domain is
+         already claimed somewhere in the cluster, this slot fills
+         with a red "already exists on node X" hint instead of
+         waiting for the DB UNIQUE constraint to fire on submit. #}
+      <div id="domain-check-result" class="text-soft small" style="margin-top:0.3rem;min-height:1.2em"></div>
     </div>
     <div class="field">
       <label for="aliases">Aliases <span class="hint">optional, comma- or space-separated</span></label>
@@ -486,6 +492,82 @@
   sel.addEventListener('change', applyMode);
   nameInput.addEventListener('input', renderPreview);
   applyMode();
+})();
+
+// Domain availability preflight — debounced live check that hits
+// /api/check-domain and surfaces "already taken" before the operator
+// clicks submit. Without this the operator sees "UNIQUE constraint
+// failed: hostings.domain" SQL error from the agent, which is both
+// late + confusing.
+(function () {
+  'use strict';
+  const domainInput = document.getElementById('domain');
+  const resultDiv = document.getElementById('domain-check-result');
+  if (!domainInput || !resultDiv) return;
+
+  let abortCtrl = null;
+  let debounceTimer = null;
+
+  async function checkDomain(value) {
+    const needle = (value || '').trim();
+    // Heuristic: only probe when it looks vaguely like a real
+    // domain. Saves a fan-out per keystroke on partial typing.
+    if (needle.length < 4 || !needle.includes('.')) {
+      resultDiv.textContent = '';
+      resultDiv.style.color = '';
+      domainInput.classList.remove('domain-taken');
+      return;
+    }
+    if (abortCtrl) abortCtrl.abort();
+    abortCtrl = new AbortController();
+    try {
+      const r = await fetch(
+        '/api/check-domain?domain=' + encodeURIComponent(needle),
+        { signal: abortCtrl.signal, credentials: 'same-origin' }
+      );
+      if (!r.ok) return;
+      const j = await r.json();
+      if (!j.checked) {
+        resultDiv.textContent = '';
+        resultDiv.style.color = '';
+        return;
+      }
+      if (j.exists) {
+        resultDiv.style.color = 'var(--danger)';
+        const where = j.node && j.node !== 'local' ? ' on node ' + j.node : ' on master';
+        resultDiv.innerHTML =
+          '⚠ <strong>' + escape(j.domain) + '</strong> already exists' +
+          escape(where) + ' (state: ' + escape(j.state || 'unknown') + ').' +
+          ' Pick a different domain or delete the existing hosting first.';
+        domainInput.classList.add('domain-taken');
+      } else {
+        resultDiv.style.color = 'var(--success)';
+        resultDiv.textContent = '✓ available — no hosting in the cluster claims this domain';
+        domainInput.classList.remove('domain-taken');
+      }
+    } catch (_) { /* aborted or network failure — swallow */ }
+  }
+
+  function escape(s) {
+    return String(s).replace(/[&<>"']/g, c => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+    }[c]));
+  }
+
+  domainInput.addEventListener('input', () => {
+    if (debounceTimer) clearTimeout(debounceTimer);
+    resultDiv.textContent = '';   // clear stale verdict while typing
+    debounceTimer = setTimeout(() => checkDomain(domainInput.value), 450);
+  });
+  // Also probe immediately on blur in case the operator's last
+  // keystroke happened right before they Tab'd away.
+  domainInput.addEventListener('blur', () => {
+    if (debounceTimer) clearTimeout(debounceTimer);
+    checkDomain(domainInput.value);
+  });
+  // Run once on page load — useful when re-render after a
+  // validation error echoes the typed value back.
+  checkDomain(domainInput.value);
 })();
 
 // Profile picker — selecting a card stamps profile_id and (when

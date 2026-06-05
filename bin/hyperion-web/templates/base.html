@@ -58,6 +58,11 @@
          data-hide-roles="customer,viewer">
         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
         Trash
+        {# Live count badge populated by JS at the bottom of base.html
+           (polls /api/trash-count every 60s). Hidden when 0 so the
+           sidebar stays quiet on empty clusters. #}
+        <span id="nav-trash-badge" class="tab-badge" hidden
+              style="margin-left:auto;background:var(--warn);color:white">0</span>
       </a>
       <a class="nav-link {% if active == "audit" %}active{% endif %}" href="/audit"
          data-role-min="admin">
@@ -1032,6 +1037,38 @@ function isShortcutContext(ev) {
   // and matches the existing scheduler tick cadence.
   refresh(true);
   setInterval(() => refresh(true), 60_000);
+})();
+
+// ============================================================
+//  Trash sidebar badge — separate poll from the notification
+//  bell so a slow notification probe doesn't delay the trash
+//  count and vice versa. /api/trash-count returns {"count": N}.
+//  Hidden when N == 0 so the sidebar stays quiet on empty
+//  clusters.
+// ============================================================
+(function () {
+  'use strict';
+  const badge = document.getElementById('nav-trash-badge');
+  if (!badge) return;
+  async function pollTrash() {
+    try {
+      const r = await fetch('/api/trash-count', {
+        credentials: 'same-origin',
+        headers: { 'accept': 'application/json' },
+      });
+      if (!r.ok) return;
+      const j = await r.json();
+      const n = Number(j.count || 0);
+      if (n > 0) {
+        badge.hidden = false;
+        badge.textContent = n > 99 ? '99+' : String(n);
+      } else {
+        badge.hidden = true;
+      }
+    } catch (_) { /* swallow */ }
+  }
+  pollTrash();
+  setInterval(pollTrash, 60_000);
 })();
 </script>
 </body>

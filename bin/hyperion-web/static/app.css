@@ -2030,16 +2030,30 @@ hr.divider {
  *  Toast notifications (HTMX-aware)
  * ============================================================ */
 
+/* Toast container — pinned to TOP-RIGHT so important messages
+ * (config-save confirms, error banners, MTA test results) land
+ * inside the operator's natural eye path. Previously bottom-
+ * right which got hidden by short viewports / chat bubbles. */
 .toast-container {
   position: fixed;
-  bottom: 1.5rem;
-  right: 1.5rem;
-  z-index: 999;
+  top: 1rem;
+  right: 1rem;
+  z-index: 1100;          /* above the cmdk + bell dropdown */
   display: flex;
-  flex-direction: column-reverse;
+  flex-direction: column; /* newest on top */
   gap: 0.6rem;
   pointer-events: none;
-  max-width: 24rem;
+  max-width: 26rem;
+}
+/* Phones — span the top edge instead of pinning right so a long
+ * message doesn't get clipped to a narrow column. */
+@media (max-width: 520px) {
+  .toast-container {
+    top: 0.5rem;
+    left: 0.5rem;
+    right: 0.5rem;
+    max-width: none;
+  }
 }
 .toast {
   background: var(--surface);

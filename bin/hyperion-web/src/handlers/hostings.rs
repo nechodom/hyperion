@@ -3175,6 +3175,77 @@ fn is_not_found_error(e: &hyperion_rpc::error::RpcError) -> bool {
 ///
 /// Failure to reach a remote node is logged and that node's
 /// hostings are simply omitted — the local list still renders.
+/// GET /api/check-domain?domain=X — JSON preflight for the create
+/// wizard. Returns `{"exists": false}` when the domain is free, or
+/// `{"exists": true, "node": "<id>", "domain": "<canonical>"}` when
+/// it's already claimed somewhere in the cluster.
+///
+/// Uses the same fan-out as the /hostings page (`list_hostings`)
+/// rather than its own dispatch loop so the answer is consistent
+/// with what the operator sees on the list. Cheap-ish (one
+/// HostingList per node) but capped by the same dispatcher
+/// timeouts, so even a partially-down cluster returns within ~3s.
+pub async fn get_check_domain(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    axum::extract::Query(q): axum::extract::Query<CheckDomainQuery>,
+) -> axum::response::Response {
+    // Same role gate as the wizard — viewers / customers can't see
+    // /hostings/new so they shouldn't be able to probe domain
+    // availability either.
+    if !ctx.is_admin_or_higher() {
+        return axum::Json(serde_json::json!({"exists": false, "checked": false})).into_response();
+    }
+    let needle = q.domain.trim().to_ascii_lowercase();
+    if needle.is_empty() {
+        return axum::Json(serde_json::json!({"exists": false, "checked": false})).into_response();
+    }
+    // Domain format guard — refuse obvious garbage early so a
+    // pathological 50 KB field doesn't trigger a fan-out.
+    if needle.len() > 253
+        || !needle
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
+    {
+        return axum::Json(serde_json::json!({
+            "exists": false,
+            "checked": false,
+            "reason": "invalid characters"
+        }))
+        .into_response();
+    }
+    let rows = match list_hostings(&state).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error=%e, "check-domain: list_hostings failed");
+            return axum::Json(serde_json::json!({"exists": false, "checked": false})).into_response();
+        }
+    };
+    let hit = rows
+        .iter()
+        .find(|r| r.domain.eq_ignore_ascii_case(&needle));
+    match hit {
+        Some(r) => axum::Json(serde_json::json!({
+            "exists": true,
+            "checked": true,
+            "domain": r.domain,
+            "node": r.node_id.clone().unwrap_or_default(),
+            "state": r.state.as_str(),
+        }))
+        .into_response(),
+        None => axum::Json(serde_json::json!({
+            "exists": false,
+            "checked": true,
+        }))
+        .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct CheckDomainQuery {
+    pub domain: String,
+}
+
 async fn list_hostings(state: &SharedState) -> Result<Vec<HostingSummary>, String> {
     // 1. Master's own hostings (always included).
     let local_resp = hyperion_rpc_client::call(&state.agent_socket, Request::HostingList)

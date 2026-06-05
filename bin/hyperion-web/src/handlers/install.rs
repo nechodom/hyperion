@@ -372,6 +372,100 @@ pub struct TestNodeForm {
     node_id: String,
 }
 
+/// POST /install/toggle-test-node — flip a node's test-vs-prod
+/// status by editing the cluster.test_node_ids CSV in agent.toml.
+/// Calls AgentConfigUpdate which writes the file atomically (with
+/// .bak backup) and keeps comments. The running agent picks up the
+/// new value on its next periodic refresh; the wizard's
+/// `is_test_node` checks against this CSV via
+/// `fetch_cluster_test_node_ids` so the change is visible after a
+/// page reload even without an agent restart.
+pub async fn post_toggle_test_node(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<TestNodeForm>,
+) -> Result<Response, AppError> {
+    if !ctx.is_super_admin() {
+        return Ok(
+            Redirect::to("/install?flash_error=super_admin+required").into_response(),
+        );
+    }
+    let node_id = form.node_id.trim();
+    if node_id.is_empty() {
+        return Ok(
+            Redirect::to("/install?flash_error=missing+node_id").into_response(),
+        );
+    }
+    // Reject anything that isn't a sane node ID — the CSV gets
+    // written straight into agent.toml so we don't want to allow
+    // commas / quotes / shell metachars even if the agent config
+    // writer would later catch them.
+    if !node_id
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        return Ok(
+            Redirect::to(&format!(
+                "/install?flash_error={}",
+                urlencode("invalid characters in node_id")
+            ))
+            .into_response(),
+        );
+    }
+    // Read current CSV, toggle membership, persist via
+    // AgentConfigUpdate. We deliberately re-read on every request
+    // (rather than caching) so two operators flipping toggles
+    // concurrently don't clobber each other — last write wins on
+    // the agent.toml level, which is the documented contract.
+    let current_csv = fetch_cluster_test_node_ids(&state).await;
+    let mut ids: Vec<String> = current_csv
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let already_test = ids.iter().any(|s| s == node_id);
+    if already_test {
+        ids.retain(|s| s != node_id);
+    } else {
+        ids.push(node_id.to_string());
+    }
+    // Keep deterministic ordering so the CSV in agent.toml doesn't
+    // shuffle on every toggle (operator-friendly diffs).
+    ids.sort();
+    let new_csv = ids.join(",");
+    let mut fields = std::collections::BTreeMap::new();
+    fields.insert("test_node_ids".to_string(), new_csv.clone());
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::AgentConfigUpdate {
+            section: "cluster".to_string(),
+            fields,
+        },
+    )
+    .await?;
+    match resp {
+        RpcResponse::AgentConfigUpdate => {
+            let action = if already_test { "unmarked" } else { "marked" };
+            let msg = format!(
+                "{node_id} {action} as test node. Restart hyperion-agent on this master \
+                 (Service health → Restart) for the wizard's domain-validation to fully pick up \
+                 the change."
+            );
+            Ok(
+                Redirect::to(&format!("/install?flash={}", urlencode(&msg)))
+                    .into_response(),
+            )
+        }
+        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
+            "/install?flash_error={}",
+            urlencode(&format!("AgentConfigUpdate failed: {e}"))
+        ))
+        .into_response()),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+
 pub async fn post_test_node(
     State(state): State<SharedState>,
     ctx: AuthCtx,

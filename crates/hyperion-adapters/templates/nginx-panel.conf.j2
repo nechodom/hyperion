@@ -1,0 +1,84 @@
+{# Hyperion master panel — nginx vhost that proxies the
+   operator-chosen FQDN (e.g. panel.example.com) to the local
+   hyperion-web service on 127.0.0.1:8443. hyperion-web speaks
+   HTTPS with a self-signed cert, so proxy_ssl_verify is OFF for
+   the LOCAL leg only; the EXTERNAL leg uses the real LE cert
+   issued for {{ domain }}.
+
+   ACME challenge location is kept on port 80 so renewals work.
+   HTTPS redirects everything else to the panel.
+#}
+server {
+    listen 80;
+    listen [::]:80;
+    server_name {{ domain }};
+
+    location /.well-known/acme-challenge/ {
+        alias {{ acme_challenge_root }}/;
+        try_files $uri =404;
+        default_type "text/plain";
+        autoindex off;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+server {
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name {{ domain }};
+
+    ssl_certificate     {{ cert_path }};
+    ssl_certificate_key {{ key_path }};
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
+    ssl_prefer_server_ciphers on;
+    ssl_session_cache shared:SSL:10m;
+
+    add_header Strict-Transport-Security "max-age=63072000; includeSubDomains" always;
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    server_tokens off;
+
+    # Upload limit matches hyperion-web's plugin/restore upload
+    # paths (2 GiB for restore-upload, 128 MiB for plugin upload).
+    client_max_body_size 2g;
+
+    {# Allow the ACME challenge on HTTPS too — some LE flows
+       reach for it after HTTP→HTTPS redirect. #}
+    location /.well-known/acme-challenge/ {
+        alias {{ acme_challenge_root }}/;
+        try_files $uri =404;
+        default_type "text/plain";
+        autoindex off;
+    }
+
+    location / {
+        proxy_pass https://127.0.0.1:8443;
+        proxy_http_version 1.1;
+
+        # hyperion-web binds with a SELF-SIGNED cert on 8443; the
+        # external public cert is on this nginx hop. Skip cert
+        # verification for the local upstream — it's loopback only.
+        proxy_ssl_verify off;
+        proxy_ssl_session_reuse on;
+
+        # Standard headers so hyperion-web sees the real client IP.
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host  $host;
+        proxy_set_header X-Forwarded-Port  $server_port;
+
+        # HTMX uses long-lived connections for notifications poll
+        # and the SSE-like patterns. Generous timeouts.
+        proxy_read_timeout  3600s;
+        proxy_send_timeout  3600s;
+        proxy_buffering off;
+    }
+}

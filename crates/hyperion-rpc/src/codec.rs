@@ -367,6 +367,19 @@ pub enum Request {
     /// because the recipient is wrong / domain gone). Destructive
     /// — UI shows a type-to-confirm modal.
     MtaQueueClear,
+    /// Provision the master panel on a public hostname. Writes
+    /// `panel.hostname` to agent.toml, generates self-signed cert
+    /// so nginx can start, writes the panel vhost
+    /// (`/etc/nginx/sites-enabled/hyperion-panel.conf`), reloads
+    /// nginx, then triggers a real ACME issuance in the
+    /// background. Returns a status describing what landed.
+    PanelProvision {
+        hostname: String,
+        /// When true, skip the DNS preflight (operator knows the
+        /// record propagated but our resolver hasn't caught up).
+        #[serde(default)]
+        skip_dns_check: bool,
+    },
     /// Import a migration bundle from a source node's signed URL.
     /// `base_url` is e.g. `https://source-master/api/migration/bundle/<id>`
     /// — the agent appends `/manifest.json?t=<token>` and
@@ -779,6 +792,15 @@ pub enum Response {
     MtaQueueClear {
         cleared: usize,
         output: String,
+    },
+    /// Result of the panel provisioning flow. `status` is one of
+    /// "ok" / "ok-cert-pending" / "dns-failed" / "nginx-failed".
+    /// `message` is a multi-line human description. `panel_url` is
+    /// the final HTTPS URL when status starts with "ok".
+    PanelProvision {
+        status: String,
+        message: String,
+        panel_url: String,
     },
     WpPluginList(hyperion_types::WpPluginListResponse),
     WpPluginAction(hyperion_types::WpPluginActionResult),
