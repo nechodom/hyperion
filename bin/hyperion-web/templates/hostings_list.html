@@ -197,9 +197,10 @@
               <a class="btn small" href="/hostings/{{ r.domain }}">View</a>
               <form method="post" action="/hostings/delete" style="display:inline"
                     data-confirm-title="Delete {{ r.domain }}"
-                    data-confirm-body="Files, database, system user and DNS records will be removed. This is permanent."
+                    data-confirm-body="Files, database, system user and DNS records will be removed. This is permanent — type the domain to confirm."
                     data-confirm-confirm-label="Delete"
-                    data-confirm-variant="danger">
+                    data-confirm-variant="danger"
+                    data-confirm-require="{{ r.domain }}">
                 <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                 <input type="hidden" name="selector" value="{{ r.domain }}">
                 {# Carry the node this hosting lives on so post_delete

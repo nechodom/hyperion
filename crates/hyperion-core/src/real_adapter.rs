@@ -687,6 +687,15 @@ impl AdapterPort for RealAdapter {
         }
     }
 
+    async fn redis_is_available(&self) -> bool {
+        // `systemctl is-active redis-server` → "active" / anything else.
+        // Cheap (~10 ms), no fork-and-exec of redis-cli; uses systemd
+        // which is the source of truth for "is this unit running".
+        hyperion_adapters::systemctl_status_rich("redis-server")
+            .await
+            .active
+    }
+
     async fn redis_ensure_acl(
         &self,
         username: &str,

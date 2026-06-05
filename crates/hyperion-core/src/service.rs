@@ -35,6 +35,16 @@ pub trait AdapterPort: Send + Sync {
         "www-data".to_string()
     }
 
+    /// Whether `redis-server` is installed + active right now.
+    /// Default impl returns true so tests don't need to override
+    /// (mocked adapters don't have systemd). Real adapter hits
+    /// `systemctl is-active redis-server`. Used by set_redis as a
+    /// preflight so a clear error appears before we'd otherwise
+    /// fail at the ACL-write step.
+    async fn redis_is_available(&self) -> bool {
+        true
+    }
+
     async fn ensure_user(&self, name: &str, home_dir: &str) -> Result<u32, AdapterError>;
     async fn delete_user(&self, name: &str) -> Result<(), AdapterError>;
     async fn ensure_dirs(
@@ -2442,6 +2452,19 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             wpe.redis_db_number = None;
             wpe.redis_password_set = false;
             return Ok(wpe);
+        }
+
+        // Preflight: redis-server must be installed + running, else
+        // the ACL write would fail with a cryptic redis-cli error
+        // and wp-config would still point at a host that refuses
+        // connections. Detect early + surface a clear actionable
+        // message pointing the operator at /services.
+        if !self.adapters.redis_is_available().await {
+            return Err(RpcError::Conflict {
+                message: "redis-server is not installed or not active on this node. \
+                          Install + start it from /services first."
+                    .into(),
+            });
         }
 
         // Turn on. Allocate a DB slot (idempotent — reuse existing on re-enable).
@@ -6461,6 +6484,18 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             if recent > 0 && now - recent < cfg.interval_secs {
                 continue;
             }
+            // Auto-pause: if the hosting itself is suspended, probing
+            // is guaranteed to fail (nginx serves a 503 suspend page)
+            // and would spam alerts. Skip and leave the alert_state
+            // in whatever it was before the suspend happened — when
+            // the operator resumes, monitoring resumes too.
+            if let Ok(Some(row)) =
+                hyperion_state::hostings::get_by_id(&self.pool, &cfg.hosting_id).await
+            {
+                if row.state == hyperion_types::HostingState::Suspended {
+                    continue;
+                }
+            }
             let url = format!(
                 "https://{}{}",
                 cfg.domain,
@@ -7123,6 +7158,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             "nginx" => Some("nginx"),
             "mariadb" => Some("mariadb-server"),
             "postgresql" => Some("postgresql"),
+            "redis-server" => Some("redis-server"),
             "vsftpd" => Some("vsftpd"),
             "php8.1-fpm" => Some("php8.1-fpm"),
             "php8.2-fpm" => Some("php8.2-fpm"),
@@ -7892,6 +7928,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let optional: &[(&str, &str)] = &[
             ("mariadb", "MariaDB (database)"),
             ("postgresql", "PostgreSQL (database)"),
+            ("redis-server", "Redis (object cache)"),
             ("vsftpd", "vsftpd (FTP)"),
             ("php8.1-fpm", "PHP 8.1 FPM"),
             ("php8.2-fpm", "PHP 8.2 FPM"),
@@ -9495,6 +9532,11 @@ mod tests {
         a.expect_db_create().returning(|_, _, _| Ok(db_creds()));
         a.expect_acme_issue().returning(|d, _| Ok(cert_for(d)));
         a.expect_nginx_write_vhost().returning(|_| Ok(()));
+        // mockall ignores trait default impls — without an explicit
+        // `expect`, calls to `redis_is_available` panic. Default-true
+        // in tests so the Redis preflight in set_redis doesn't break
+        // tests that don't care about the systemd-level check.
+        a.expect_redis_is_available().returning(|| true);
         a
     }
 

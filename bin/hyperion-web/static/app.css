@@ -1127,7 +1127,16 @@ input:focus, select:focus, textarea:focus {
   background: var(--surface);
   box-shadow: 0 0 0 3px color-mix(in oklab, var(--primary) 25%, transparent);
 }
-input:invalid:not(:placeholder-shown) {
+/* Red border for invalid inputs — but ONLY after the user has
+   interacted (typed something) AND moved focus away. The original
+   rule was `:invalid:not(:placeholder-shown)` which fired on EMPTY
+   required fields with no placeholder set (`:placeholder-shown` is
+   false when there's no placeholder), making a fresh password
+   field look like a validation error before the user even clicked
+   into it. Now we also exempt `:focus` and `:not(.touched)` —
+   styling only kicks in after blur on a field marked touched by
+   the small shim below. */
+input:invalid:not(:focus).touched {
   border-color: color-mix(in oklab, var(--danger) 60%, var(--border));
 }
 

@@ -362,6 +362,10 @@
     {% if access_grants.len() > 0 %}<span class="tab-badge">{{ access_grants.len() }}</span>{% endif %}
   </a>
   {% endif %}
+  <a class="tab" data-tab="ftp" href="#ftp" role="tab">
+    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+    FTP
+  </a>
   <a class="tab" data-tab="emails" href="#emails" role="tab">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
     Emails
@@ -1549,6 +1553,9 @@
   {% endif %}
 </div>
 
+</div><!-- /tab-settings -->
+
+<div class="tab-panel" id="tab-ftp">
 <div class="card hover">
   <h2>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
@@ -1604,8 +1611,7 @@
     </form>
   </div>
 </div>
-
-</div><!-- /tab-settings -->
+</div><!-- /tab-ftp -->
 
 <div class="tab-panel" id="tab-backups">
 
@@ -1816,7 +1822,9 @@
       HTTP availability monitor
     </h2>
     <div>
-      {% if monitor_config.enabled %}
+      {% if detail.state.as_str() == "suspended" %}
+        <span class="pill warn">paused — hosting is suspended</span>
+      {% else if monitor_config.enabled %}
         {% if monitor_config.alert_state == "alerting" %}
           <span class="pill err">ALERTING — last {{ monitor_config.consecutive_fails }} probes failed</span>
         {% else %}
@@ -1827,6 +1835,14 @@
       {% endif %}
     </div>
   </div>
+
+  {% if detail.state.as_str() == "suspended" %}
+  <div class="flash warn" style="margin-bottom:0.8rem">
+    <div class="flash-body">
+      <strong>Monitor paused.</strong> The hosting is suspended — nginx serves a 503 page on every request, so probing would always fail and spam alerts. Probing automatically resumes when you click <a href="#overview">Resume</a>.
+    </div>
+  </div>
+  {% endif %}
 
   {# Sparkline of recent probes — green dots = ok, red = fail #}
   {% if monitor_history.samples.len() >= 2 %}
@@ -2171,9 +2187,10 @@
   <form method="post" action="/hostings/delete" class="row gap-md"
         style="margin-top:0.5rem"
         data-confirm-title="Delete {{ detail.domain }}"
-        data-confirm-body="Files, database, system user and DNS records will be removed. This is permanent — restore is only possible from a backup."
+        data-confirm-body="Files, database, system user and DNS records will be removed. This is permanent — restore is only possible from a backup. Type the domain to confirm."
         data-confirm-confirm-label="Delete hosting"
-        data-confirm-variant="danger">
+        data-confirm-variant="danger"
+        data-confirm-require="{{ detail.domain }}">
     <input type="hidden" name="_csrf" value="{{ csrf_delete }}">
     <input type="hidden" name="selector" value="{{ detail.domain }}">
     <label class="field-checkbox"><input type="checkbox" name="keep_user" value="on"> Keep the Linux user</label>
@@ -2213,6 +2230,38 @@
   }));
   const hashId = (location.hash || '').replace(/^#/, '');
   if (!activate(hashId)) activate('overview');
+
+  // Persist the current tab across POST submits. Server-issued
+  // redirects drop fragments, so we stash the tab in sessionStorage
+  // keyed by the hosting selector. The on-load block below reads
+  // the stash + activates the right tab + clears it.
+  document.addEventListener('submit', ev => {
+    const f = ev.target;
+    if (!f || f.tagName !== 'FORM') return;
+    const action = (f.getAttribute('action') || '').trim();
+    if (!action.startsWith('/hostings/')) return;
+    const active = document.querySelector('.tabs .tab.active');
+    if (!active || !active.dataset.tab) return;
+    try {
+      sessionStorage.setItem(
+        'hyperion.return_tab:' + location.pathname,
+        active.dataset.tab
+      );
+    } catch (_) { /* private mode → no-op */ }
+  }, true);
+})();
+
+// On load, if sessionStorage has a saved tab for this URL, activate
+// it + clear the stash. Used to recover the tab after a POST redirect.
+(function () {
+  let t = null;
+  try { t = sessionStorage.getItem('hyperion.return_tab:' + location.pathname); }
+  catch (_) { return; }
+  if (!t) return;
+  try { sessionStorage.removeItem('hyperion.return_tab:' + location.pathname); }
+  catch (_) {}
+  const target = document.querySelector('.tab[data-tab="' + t + '"]');
+  if (target) target.click();
 })();
 </script>
 

@@ -484,6 +484,24 @@ document.addEventListener('click', function (ev) {
   });
 })();
 
+// Mark inputs as `.touched` after first blur so the red ":invalid"
+// border only shows up AFTER the user has interacted — fresh fields
+// stay neutral on a freshly-loaded form.
+document.addEventListener('blur', (ev) => {
+  const t = ev.target;
+  if (!t) return;
+  if (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.tagName === 'SELECT') {
+    t.classList.add('touched');
+  }
+}, true);
+// Also mark every field as touched on submit attempt so the user
+// can see what failed validation if the browser refuses to submit.
+document.addEventListener('submit', (ev) => {
+  const f = ev.target;
+  if (!f || !f.querySelectorAll) return;
+  f.querySelectorAll('input, textarea, select').forEach((el) => el.classList.add('touched'));
+}, true);
+
 // Shared: only fire global shortcuts when the user isn't typing.
 function isShortcutContext(ev) {
   if (ev.metaKey || ev.ctrlKey || ev.altKey) return false;
@@ -695,6 +713,17 @@ function isShortcutContext(ev) {
     </div>
     <div id="app-modal-body" style="padding:0.6rem 1.3rem 1.2rem;color:var(--text-soft);line-height:1.55;font-size:0.93rem">
     </div>
+    {# Optional type-to-confirm row. Used by destructive actions
+       (delete hosting, drop DB) — the operator MUST type a known
+       string (e.g. the hosting domain) into this input before the
+       Confirm button enables. #}
+    <div id="app-modal-require-row" style="display:none;padding:0 1.3rem 0.8rem">
+      <label style="display:block;margin:0 0 0.35rem;font-size:0.82rem;color:var(--text-soft)">
+        Type <code id="app-modal-require-token" style="font-weight:600;color:var(--danger)"></code> to confirm
+      </label>
+      <input id="app-modal-require-input" type="text" autocomplete="off" spellcheck="false"
+             style="width:100%;font-family:ui-monospace,Menlo,Consolas,monospace">
+    </div>
     <div style="display:flex;gap:0.5rem;justify-content:flex-end;padding:0.85rem 1.3rem;background:var(--surface-1);border-top:1px solid var(--border)">
       <button type="button" id="app-modal-cancel" class="btn ghost">Cancel</button>
       <button type="button" id="app-modal-confirm" class="btn primary">Confirm</button>
@@ -711,7 +740,11 @@ function isShortcutContext(ev) {
   const bodyEl = document.getElementById('app-modal-body');
   const cancelBtn = document.getElementById('app-modal-cancel');
   const confirmBtn = document.getElementById('app-modal-confirm');
+  const requireRow = document.getElementById('app-modal-require-row');
+  const requireTokenEl = document.getElementById('app-modal-require-token');
+  const requireInput = document.getElementById('app-modal-require-input');
   if (!backdrop || !modal) return;
+  let requireToken = null;
 
   let pendingForm = null;
   let lastFocused = null;
@@ -728,12 +761,49 @@ function isShortcutContext(ev) {
     confirmBtn.textContent = confirmLabel;
     confirmBtn.classList.remove('danger', 'primary');
     confirmBtn.classList.add(variant === 'danger' ? 'danger' : 'primary');
+    // Type-to-confirm gate. data-confirm-require="<token>" forces the
+    // operator to type <token> exactly before the Confirm button
+    // unlocks. We use the hosting domain for delete (and similar
+    // destructive actions); typo or wrong domain → button stays
+    // disabled. Way harder to accidentally delete the wrong site.
+    requireToken = form.dataset.confirmRequire || null;
+    if (requireToken) {
+      requireTokenEl.textContent = requireToken;
+      requireInput.value = '';
+      requireRow.style.display = '';
+      confirmBtn.disabled = true;
+      confirmBtn.style.opacity = '0.5';
+      confirmBtn.style.cursor = 'not-allowed';
+    } else {
+      requireRow.style.display = 'none';
+      confirmBtn.disabled = false;
+      confirmBtn.style.opacity = '';
+      confirmBtn.style.cursor = '';
+    }
     backdrop.style.display = 'flex';
-    // Focus the Cancel button — safer default (Enter on Confirm
-    // requires explicit intent).
-    setTimeout(() => cancelBtn.focus(), 0);
+    // Focus: type-to-confirm input first (intent is to type), else
+    // Cancel button (safer default — Enter on Confirm requires
+    // explicit intent).
+    setTimeout(() => {
+      if (requireToken) requireInput.focus();
+      else cancelBtn.focus();
+    }, 0);
     document.body.style.overflow = 'hidden';
   }
+
+  requireInput.addEventListener('input', () => {
+    if (!requireToken) return;
+    const match = requireInput.value === requireToken;
+    confirmBtn.disabled = !match;
+    confirmBtn.style.opacity = match ? '' : '0.5';
+    confirmBtn.style.cursor = match ? '' : 'not-allowed';
+  });
+  requireInput.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter' && !confirmBtn.disabled) {
+      ev.preventDefault();
+      confirmBtn.click();
+    }
+  });
   function close() {
     backdrop.style.display = 'none';
     document.body.style.overflow = '';

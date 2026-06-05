@@ -182,7 +182,11 @@ pub fn build_router(state: SharedState) -> Router {
         )
         .route(
             "/hostings/:selector/files/upload",
-            post(handlers::files::post_upload),
+            post(handlers::files::post_upload)
+                // 100 MB cap matches the file manager's MAX_WRITE_BYTES
+                // at the adapter (64 MB) plus headroom for the multipart
+                // envelope. Default 2 MB would 400 every real upload.
+                .layer(axum::extract::DefaultBodyLimit::max(100 * 1024 * 1024)),
         )
         .route(
             "/hostings/:selector/files/download",
@@ -224,7 +228,10 @@ pub fn build_router(state: SharedState) -> Router {
         )
         .route(
             "/profiles/wp-assets/upload",
-            post(handlers::profiles::post_wp_asset_upload),
+            post(handlers::profiles::post_wp_asset_upload)
+                // 100 MB cap — plugin / theme ZIPs are often 20-50 MB.
+                // Default 2 MB silently 400'd legitimate uploads.
+                .layer(axum::extract::DefaultBodyLimit::max(100 * 1024 * 1024)),
         )
         .route(
             "/profiles/wp-assets/delete",
@@ -232,7 +239,8 @@ pub fn build_router(state: SharedState) -> Router {
         )
         .route(
             "/profiles/wp-assets/replace",
-            post(handlers::profiles::post_wp_asset_replace),
+            post(handlers::profiles::post_wp_asset_replace)
+                .layer(axum::extract::DefaultBodyLimit::max(100 * 1024 * 1024)),
         )
         .route(
             "/profiles/wp-assets/reinstall-all",
