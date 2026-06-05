@@ -468,6 +468,23 @@ fn print_pretty(resp: &Response) {
         Response::HostingMigrationFetchBundleFile { bytes_b64 } => {
             println!("✓ fetched bundle file ({} bytes b64)", bytes_b64.len());
         }
+        Response::MonitorOverview(items) => {
+            println!(
+                "{:<32} {:<10} {:>5} {:>7} {:>4} {}",
+                "DOMAIN", "STATE", "SUCC%", "AVG_MS", "SAMP", "NODE"
+            );
+            for it in items.iter() {
+                println!(
+                    "{:<32} {:<10} {:>5} {:>7} {:>4} {}",
+                    it.domain,
+                    it.alert_state,
+                    it.success_pct_24h,
+                    it.avg_response_ms_24h,
+                    it.samples_24h,
+                    it.node_id
+                );
+            }
+        }
         Response::HostingUsage(rows) => {
             println!(
                 "{:<14} {:>10} {:>10} {:>10} {:>10}",

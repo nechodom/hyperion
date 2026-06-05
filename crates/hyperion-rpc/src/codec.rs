@@ -457,6 +457,9 @@ pub enum Request {
         to: String,
     },
 
+    /// Cluster-wide monitor list — every enabled monitor on this
+    /// node with computed 24h success rate + avg latency.
+    MonitorOverview,
     /// Read the per-hosting monitor config + sample history.
     MonitorGet {
         sel: HostingSelector,
@@ -675,6 +678,7 @@ pub enum Response {
     HostingFileDelete,
     HostingFileMkdir,
     HostingFileRename,
+    MonitorOverview(Vec<hyperion_types::MonitorOverviewItem>),
     MonitorGet {
         config: hyperion_types::MonitorConfigView,
         history: hyperion_types::MonitorHistory,

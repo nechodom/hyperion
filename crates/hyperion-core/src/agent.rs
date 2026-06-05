@@ -642,6 +642,11 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     ) -> Result<(), RpcError> {
         self.svc.hosting_file_rename(sel, from, to).await
     }
+    async fn monitor_overview(
+        &self,
+    ) -> Result<Vec<hyperion_types::MonitorOverviewItem>, RpcError> {
+        self.svc.monitor_overview().await
+    }
     async fn monitor_get(
         &self,
         sel: HostingSelector,

@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% block title %}Monitoring · hyperion{% endblock %}
+{% block main %}
+
+<div class="page-header">
+  <div>
+    <h1>Monitoring</h1>
+    <div class="subtitle">
+      Every hosting across the cluster with HTTP availability monitor enabled.
+      Sorted: <strong>alerting first</strong>, then by worst success rate.
+    </div>
+  </div>
+  <div class="grow"></div>
+</div>
+
+<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:1rem;margin-bottom:1.2rem">
+  <div class="card" style="padding:1rem 1.2rem">
+    <div class="text-soft small">Alerting</div>
+    <div style="font-size:1.6rem;font-weight:700;color:var(--danger);margin-top:0.2rem">{{ alerting_count }}</div>
+  </div>
+  <div class="card" style="padding:1rem 1.2rem">
+    <div class="text-soft small">Healthy</div>
+    <div style="font-size:1.6rem;font-weight:700;color:var(--success);margin-top:0.2rem">{{ healthy_count }}</div>
+  </div>
+  <div class="card" style="padding:1rem 1.2rem">
+    <div class="text-soft small">No samples yet</div>
+    <div style="font-size:1.6rem;font-weight:700;color:var(--text-soft);margin-top:0.2rem">{{ unknown_count }}</div>
+  </div>
+</div>
+
+{% if items.is_empty() %}
+<div class="card">
+  <div class="empty">
+    <h3>No monitors configured</h3>
+    <p class="text-soft">
+      Enable HTTP monitoring on any hosting via its <em>Monitor</em> tab.
+      Probes run every 5 minutes by default; failures trigger email / Slack
+      / webhook alerts after the configured streak.
+    </p>
+  </div>
+</div>
+{% else %}
+<div class="card no-pad-table">
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Domain</th>
+          <th>State</th>
+          <th class="right">Success · 24h</th>
+          <th class="right">Avg ms</th>
+          <th class="right hide-on-phone">Samples · 24h</th>
+          <th class="hide-on-phone">Path</th>
+          <th class="hide-on-phone">Node</th>
+          <th class="hide-on-phone">Last probe</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for it in items %}
+        <tr>
+          <td>
+            <a href="/hostings/{{ it.domain }}#monitor"><strong>{{ it.domain }}</strong></a>
+          </td>
+          <td>
+            {% if it.alert_state == "alerting" %}
+              <span class="pill err">ALERTING · {{ it.consecutive_fails }} fails</span>
+            {% else if it.alert_state == "unknown" %}
+              <span class="pill" style="background:var(--surface-2);color:var(--text-soft)">no samples</span>
+            {% else %}
+              <span class="pill ok">ok</span>
+            {% endif %}
+          </td>
+          <td class="right numeric">
+            {% if it.samples_24h == 0 %}
+              <span class="text-soft">—</span>
+            {% else if it.success_pct_24h >= 99 %}
+              <span style="color:var(--success)">{{ it.success_pct_24h }}%</span>
+            {% else if it.success_pct_24h >= 95 %}
+              <span style="color:var(--warn)">{{ it.success_pct_24h }}%</span>
+            {% else %}
+              <span style="color:var(--danger)">{{ it.success_pct_24h }}%</span>
+            {% endif %}
+          </td>
+          <td class="right numeric">
+            {% if it.avg_response_ms_24h == 0 %}<span class="text-soft">—</span>
+            {% else %}{{ it.avg_response_ms_24h }} ms{% endif %}
+          </td>
+          <td class="right numeric hide-on-phone">{{ it.samples_24h }}</td>
+          <td class="hide-on-phone text-soft small"><code>{{ it.url_path }}</code></td>
+          <td class="hide-on-phone">
+            <span class="tag">{{ it.node_id }}</span>
+          </td>
+          <td class="hide-on-phone text-soft small">
+            {% if it.last_sampled_at == 0 %}—{% else %}{{ crate::handlers::stats::fmt_ago(it.last_sampled_at) }}{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+{% endblock %}

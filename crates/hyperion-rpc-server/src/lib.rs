@@ -544,6 +544,10 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::MonitorOverview => match api.monitor_overview().await {
+            Ok(items) => Response::MonitorOverview(items),
+            Err(e) => Response::Error(e),
+        },
         Request::MonitorGet { sel } => match api.monitor_get(sel).await {
             Ok((config, history)) => Response::MonitorGet { config, history },
             Err(e) => Response::Error(e),
@@ -1239,6 +1243,11 @@ mod tests {
             _: String,
         ) -> Result<(), RpcError> {
             Ok(())
+        }
+        async fn monitor_overview(
+            &self,
+        ) -> Result<Vec<hyperion_types::MonitorOverviewItem>, RpcError> {
+            Ok(vec![])
         }
         async fn monitor_get(
             &self,

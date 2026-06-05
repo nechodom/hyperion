@@ -130,6 +130,7 @@ pub fn build_router(state: SharedState) -> Router {
         )
         .route("/hostings/bulk", post(handlers::hostings::post_bulk))
         .route("/stats", get(handlers::stats::get_stats))
+        .route("/monitoring", get(handlers::monitoring::get_monitoring))
         .route(
             "/services",
             get(handlers::services_health::get_services_health),

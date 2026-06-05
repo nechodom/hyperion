@@ -508,6 +508,33 @@ pub struct NotificationFeed {
     pub unread_total: i64,
 }
 
+/// One row on the cluster-wide /monitoring overview page. Mirrors
+/// the MonitorConfig + computed success rate / avg latency over
+/// the last `MONITOR_OVERVIEW_HISTORY_LIMIT` (~24h) samples.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MonitorOverviewItem {
+    pub hosting_id: String,
+    pub domain: String,
+    pub url_path: String,
+    pub interval_secs: i64,
+    /// "ok" | "alerting" | "unknown" (no samples yet).
+    pub alert_state: String,
+    pub consecutive_fails: i64,
+    pub last_alert_at: Option<i64>,
+    /// Total samples in the window (≤ 288 = 24h × 12 per hour).
+    pub samples_24h: i64,
+    /// Successful samples / total, as a 0-100 integer percent.
+    pub success_pct_24h: i64,
+    /// Average response time over the successful samples; 0 if none.
+    pub avg_response_ms_24h: i64,
+    /// Most recent probe timestamp (0 if none).
+    pub last_sampled_at: i64,
+    /// Node this hosting lives on — surfaces in the table so an
+    /// operator can tell "which worker is the flaky site on".
+    /// Empty = master / local.
+    pub node_id: String,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NodeUpdateStatus {
     /// Unix seconds when the job started. 0 → no job has ever run.

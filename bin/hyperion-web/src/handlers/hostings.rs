@@ -321,7 +321,7 @@ pub async fn get_new(State(state): State<SharedState>, ctx: AuthCtx) -> Result<R
 /// row in the `nodes` table (it's the orchestrator, not an enrollee),
 /// so whatever this returns IS the set of remote targets the
 /// operator can pick from.
-async fn fetch_remote_nodes(
+pub(crate) async fn fetch_remote_nodes(
     state: &SharedState,
 ) -> Result<Vec<hyperion_types::NodeSummary>, AppError> {
     let resp = hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await?;

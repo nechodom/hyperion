@@ -6312,6 +6312,77 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     //  Per-hosting monitoring
     // ════════════════════════════════════════════════════════════
 
+    /// Cluster-wide monitor list — every enabled monitor on THIS
+    /// node with computed 24h success rate + avg response time.
+    /// The web layer fans this out to enrolled workers and merges
+    /// the rows for the /monitoring page.
+    pub async fn monitor_overview(
+        &self,
+    ) -> Result<Vec<hyperion_types::MonitorOverviewItem>, RpcError> {
+        let configs = hyperion_state::monitors::list_enabled(&self.pool)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("list: {e}")))?;
+        // 12 samples/hour × 24 = 288. Cap so we don't pull weeks of
+        // history just to compute one number.
+        const WINDOW: i64 = 288;
+        let mut out = Vec::with_capacity(configs.len());
+        for cfg in configs {
+            let samples = hyperion_state::monitors::history(&self.pool, &cfg.hosting_id, WINDOW)
+                .await
+                .unwrap_or_default();
+            let total = samples.len() as i64;
+            let ok = samples.iter().filter(|s| s.success).count() as i64;
+            let success_pct = if total > 0 { (ok * 100) / total } else { 0 };
+            let avg_ms = if ok > 0 {
+                samples
+                    .iter()
+                    .filter(|s| s.success)
+                    .map(|s| s.response_ms)
+                    .sum::<i64>()
+                    / ok
+            } else {
+                0
+            };
+            let last_sampled_at =
+                samples.iter().map(|s| s.sampled_at).max().unwrap_or(0);
+            let alert_state = if total == 0 {
+                "unknown".to_string()
+            } else {
+                cfg.alert_state.clone()
+            };
+            out.push(hyperion_types::MonitorOverviewItem {
+                hosting_id: cfg.hosting_id.as_str().to_string(),
+                domain: cfg.domain,
+                url_path: cfg.url_path,
+                interval_secs: cfg.interval_secs,
+                alert_state,
+                consecutive_fails: cfg.consecutive_fails,
+                last_alert_at: cfg.last_alert_at,
+                samples_24h: total,
+                success_pct_24h: success_pct,
+                avg_response_ms_24h: avg_ms,
+                last_sampled_at,
+                node_id: String::new(),
+            });
+        }
+        // Stable sort: alerting first (most urgent), then by success
+        // rate ascending (worst-performing surfaced next), then by
+        // domain alphabetical.
+        out.sort_by(|a, b| {
+            let alert_rank = |s: &str| match s {
+                "alerting" => 0,
+                "unknown" => 1,
+                _ => 2,
+            };
+            let ra = alert_rank(a.alert_state.as_str());
+            let rb = alert_rank(b.alert_state.as_str());
+            ra.cmp(&rb)
+                .then(a.success_pct_24h.cmp(&b.success_pct_24h))
+                .then(a.domain.cmp(&b.domain))
+        });
+        Ok(out)
+    }
+
     pub async fn monitor_get(
         &self,
         sel: HostingSelector,
@@ -7387,6 +7458,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     ),
                 });
             }
+        }
+        // Preflight: apt fails with a confusing "Read-only file system"
+        // error when /usr is RO (immutable VPS / snap / unprivileged
+        // LXC). Detect upfront + refuse with a clear message instead
+        // of spending 30s on apt-get only to surface dpkg noise.
+        if let Some(rw_err) = check_usr_writable().await {
+            return Err(RpcError::Conflict { message: rw_err });
         }
         let now = now_secs();
         {
@@ -9035,6 +9113,33 @@ impl RpcErrorExt for RpcError {
 trait RpcErrorExt {
     #[allow(non_snake_case)]
     fn Internal_with(msg: String) -> Self;
+}
+
+/// Sanity check: is /usr writable? Many minimal VPS images ship
+/// with /usr on a read-only / immutable filesystem (snap, snapd
+/// `usr.merge`, certain Debian "ostree"-style live images, or an
+/// operator-mounted `noexec,nodev,ro` partition). apt then fails
+/// with "Read-only file system" deep in dpkg's unpack step with
+/// 100+ lines of half-extracted noise. Detect by trying to touch
+/// a sentinel file in /usr/lib/.hyperion-rw-check.
+///
+/// Returns `None` when writable (good); `Some(message)` with a
+/// clear actionable error for the operator otherwise.
+async fn check_usr_writable() -> Option<String> {
+    let sentinel = std::path::Path::new("/usr/lib/.hyperion-rw-check");
+    match tokio::fs::write(sentinel, b"ok").await {
+        Ok(_) => {
+            let _ = tokio::fs::remove_file(sentinel).await;
+            None
+        }
+        Err(e) => Some(format!(
+            "/usr is not writable ({e}). apt-get cannot install packages — the most likely \
+             cause is the rootfs being mounted read-only (snap-managed images, immutable VPS \
+             flavours, or a noexec/ro mount in /etc/fstab). Run `mount | grep ' /usr '` and \
+             `mount | grep ' / '` to verify; if you see `ro,` you'll need to remount RW \
+             (`mount -o remount,rw /` then retry) or pick a different base image."
+        )),
+    }
 }
 
 /// Stable per-hosting Redis ACL username derived from the ULID.

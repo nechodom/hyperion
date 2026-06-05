@@ -433,6 +433,14 @@ pub trait AgentApi: Send + Sync + 'static {
         to: String,
     ) -> Result<(), RpcError>;
 
+    /// Cluster-wide monitor overview: every hosting on THIS node
+    /// with monitor enabled, plus computed 24h success rate +
+    /// avg latency. Web fan-outs this to every enrolled worker
+    /// and concatenates the rows.
+    async fn monitor_overview(
+        &self,
+    ) -> Result<Vec<hyperion_types::MonitorOverviewItem>, RpcError>;
+
     /// Per-hosting monitor: get config + recent samples.
     async fn monitor_get(
         &self,
