@@ -19,13 +19,16 @@ php_admin_value[upload_max_filesize] = 64M
 php_admin_value[post_max_size] = 64M
 php_admin_value[open_basedir] = /home/{{ system_user }}/{{ domain }}:/tmp
 
-# Capture outbound mail for the per-hosting Emails log. The
-# wrapper script writes a JSONL line per send to
-# /var/lib/hyperion/site-mail/{user}.jsonl and then execs the
-# real sendmail so delivery is unaffected. -u flag tells the
-# wrapper which hosting it's running for; the wrapper rejects
-# values it doesn't recognise so a malicious site can't smuggle
-# arguments into the real sendmail.
+; Capture outbound mail for the per-hosting Emails log. The
+; wrapper script writes a JSONL line per send to
+; /var/lib/hyperion/site-mail/{user}.jsonl and then execs the
+; real sendmail so delivery is unaffected. -u flag tells the
+; wrapper which hosting it's running for; the wrapper rejects
+; values it doesn't recognise so a malicious site can't smuggle
+; arguments into the real sendmail.
+; (Must use `;` not `#` — Zend INI parser only recognises `;`
+; as a comment character; `#` lines are parsed as bare keys and
+; trigger "value is NULL for a ZEND_INI_PARSER_ENTRY".)
 php_admin_value[sendmail_path] = /usr/local/lib/hyperion/site-mail-wrapper -u {{ system_user }}
 
 catch_workers_output = yes

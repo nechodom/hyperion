@@ -390,6 +390,68 @@ impl AdapterPort for RealAdapter {
                 }
                 quarantined += 1;
             }
+            // Round two for this PHP version: even pools that look
+            // user-valid may have syntax errors (a stray `#` comment,
+            // truncated value, etc.). Run `php-fpm<ver> -t`, parse the
+            // first pool path out of stderr, quarantine it, retry.
+            // Bounded by `MAX_FPM_T_PASSES` to avoid an infinite loop
+            // if FPM ever returns an error we can't attribute to a
+            // specific file.
+            const MAX_FPM_T_PASSES: usize = 12;
+            for _ in 0..MAX_FPM_T_PASSES {
+                match hyperion_adapters::phpfpm::test_config(*ver).await {
+                    Ok(()) => break,
+                    Err(AdapterError::Command { stderr_tail, .. }) => {
+                        let Some(bad_path) = extract_fpm_test_failed_path(&stderr_tail) else {
+                            tracing::warn!(
+                                version = %ver,
+                                stderr = %stderr_tail,
+                                "repair_orphan_fpm_pools: php-fpm -t failed but no \
+                                 attributable pool path in stderr — leaving alone"
+                            );
+                            break;
+                        };
+                        // Sanity: only quarantine inside the version's
+                        // pool dir. We don't touch php-fpm.conf or
+                        // www.conf etc. living elsewhere.
+                        if !bad_path.starts_with(&pool_dir) {
+                            tracing::warn!(
+                                version = %ver,
+                                path = %bad_path.display(),
+                                "repair_orphan_fpm_pools: php-fpm -t complained about \
+                                 a file outside the pool dir — leaving alone"
+                            );
+                            break;
+                        }
+                        let qpath = bad_path.with_extension(format!(
+                            "conf.hyperion-quarantined-{now_ts}"
+                        ));
+                        tracing::warn!(
+                            pool = %bad_path.display(),
+                            quarantined = %qpath.display(),
+                            "repair_orphan_fpm_pools: php-fpm -t rejected pool — quarantining"
+                        );
+                        if let Err(e) = tokio::fs::rename(&bad_path, &qpath).await {
+                            tracing::error!(
+                                pool = %bad_path.display(),
+                                error = %e,
+                                "repair_orphan_fpm_pools: rename to quarantine failed"
+                            );
+                            break;
+                        }
+                        quarantined += 1;
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            version = %ver,
+                            error = %e,
+                            "repair_orphan_fpm_pools: php-fpm -t errored (not a config error) \
+                             — leaving alone"
+                        );
+                        break;
+                    }
+                }
+            }
         }
         Ok((quarantined, scanned))
     }
@@ -1054,6 +1116,48 @@ fn extract_pool_user_directives(body: &str) -> Vec<(&'static str, String)> {
     out
 }
 
+/// Parse the path of the first failing pool file out of
+/// `php-fpm<ver> -t` stderr.
+///
+/// Real-world stderr from FPM looks like:
+///
+/// ```text
+/// [05-Jun-2026 09:53:09] ERROR: [/etc/php/8.3/fpm/pool.d/<name>.conf:22] value is NULL for a ZEND_INI_PARSER_ENTRY
+/// [05-Jun-2026 09:53:09] ERROR: Unable to include /etc/php/8.3/fpm/pool.d/<name>.conf from /etc/php/8.3/fpm/php-fpm.conf at line 22
+/// [05-Jun-2026 09:53:09] ERROR: failed to load configuration file '/etc/php/8.3/fpm/php-fpm.conf'
+/// [05-Jun-2026 09:53:09] ERROR: FPM initialization failed
+/// ```
+///
+/// We look for the first `[<path>:<line>]` token in the body
+/// where `<path>` starts with `/etc/php/` — that's the pool that
+/// blew up. Returns `None` if the stderr doesn't contain a
+/// recognisable pool path (in which case the caller leaves the
+/// state alone rather than guessing).
+fn extract_fpm_test_failed_path(stderr: &str) -> Option<std::path::PathBuf> {
+    for line in stderr.lines() {
+        // Find any `[/etc/php/...:<n>]` token. We don't anchor on
+        // ERROR: prefix because the timestamp format varies between
+        // distros (some have it, the systemd journal strips it).
+        let Some(open) = line.find("[/etc/php/") else {
+            continue;
+        };
+        let after = &line[open + 1..]; // skip the `[`
+        let Some(close) = after.find(']') else {
+            continue;
+        };
+        let inside = &after[..close];
+        // inside might look like `/etc/php/8.3/fpm/pool.d/x.conf:22`
+        // or just `/etc/php/8.3/fpm/pool.d/x.conf`. Strip the
+        // trailing `:<line>` if present.
+        let path_part = inside.rsplit_once(':').map(|(p, _)| p).unwrap_or(inside);
+        if path_part.is_empty() {
+            continue;
+        }
+        return Some(std::path::PathBuf::from(path_part));
+    }
+    None
+}
+
 /// Check whether a Unix user exists on the system via
 /// `getent passwd <name>`. Conservative: returns `true` on
 /// any unexpected error (binary missing, permission denied,
@@ -1465,5 +1569,59 @@ mod tests {
         assert!(unix_user_exists("$(whoami)").await);
         // Empty name is also "safe" (returns true).
         assert!(unix_user_exists("").await);
+    }
+
+    /// Real-world stderr from the stav incident — `#` comment in
+    /// pool config triggered the Zend INI parser error. Our
+    /// extractor MUST pull the file path out so the boot self-heal
+    /// can quarantine it.
+    #[test]
+    fn extract_fpm_test_failed_path_real_world_sample() {
+        let stderr = "\
+[05-Jun-2026 09:53:09] ERROR: [/etc/php/8.3/fpm/pool.d/test_four_testovaciverze_cz.conf:22] value is NULL for a ZEND_INI_PARSER_ENTRY
+[05-Jun-2026 09:53:09] ERROR: Unable to include /etc/php/8.3/fpm/pool.d/test_four_testovaciverze_cz.conf from /etc/php/8.3/fpm/php-fpm.conf at line 22
+[05-Jun-2026 09:53:09] ERROR: failed to load configuration file '/etc/php/8.3/fpm/php-fpm.conf'
+[05-Jun-2026 09:53:09] ERROR: FPM initialization failed
+";
+        let p = extract_fpm_test_failed_path(stderr).expect("must extract path");
+        assert_eq!(
+            p,
+            std::path::PathBuf::from(
+                "/etc/php/8.3/fpm/pool.d/test_four_testovaciverze_cz.conf"
+            )
+        );
+    }
+
+    /// Stderr with no `[<path>:<line>]` token returns None — caller
+    /// then leaves state alone rather than guessing.
+    #[test]
+    fn extract_fpm_test_failed_path_no_match_when_unparseable() {
+        let stderr = "some other error format without brackets";
+        assert!(extract_fpm_test_failed_path(stderr).is_none());
+    }
+
+    /// systemd-journal occasionally strips the timestamp prefix —
+    /// our parser must still find the path token.
+    #[test]
+    fn extract_fpm_test_failed_path_timestamp_optional() {
+        let stderr = "ERROR: [/etc/php/8.4/fpm/pool.d/x.conf:5] bad thing\n";
+        let p = extract_fpm_test_failed_path(stderr).expect("must extract");
+        assert_eq!(
+            p,
+            std::path::PathBuf::from("/etc/php/8.4/fpm/pool.d/x.conf")
+        );
+    }
+
+    /// Edge case: brackets without a `:line` suffix (older FPM
+    /// releases sometimes emit `[<path>]` only). We accept either
+    /// shape since the suffix is purely informational for us.
+    #[test]
+    fn extract_fpm_test_failed_path_handles_missing_line_suffix() {
+        let stderr = "ERROR: [/etc/php/8.3/fpm/pool.d/y.conf] something\n";
+        let p = extract_fpm_test_failed_path(stderr).expect("must extract");
+        assert_eq!(
+            p,
+            std::path::PathBuf::from("/etc/php/8.3/fpm/pool.d/y.conf")
+        );
     }
 }

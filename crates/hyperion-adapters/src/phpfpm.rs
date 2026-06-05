@@ -161,9 +161,82 @@ pub async fn ensure_pool(input: &PoolInput<'_>) -> Result<PathBuf, AdapterError>
 
     let body = render(input)?;
     let path = pool_path(input);
+    // Backup the existing pool (if any) so we can roll back when our
+    // new file fails `php-fpm -t`. Without this, an `ensure_pool`
+    // that ends up writing a malformed file would brick the entire
+    // php<ver>-fpm service on the next reload.
+    let backup = match tokio::fs::read(&path).await {
+        Ok(prev) => Some(prev),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(AdapterError::Io(e)),
+    };
     atomic_write(&path, body.as_bytes(), 0o644).await?;
+    // Defense in depth: `php-fpm<ver> -t` parses the WHOLE pool dir
+    // and exits non-zero on any syntax error, with the file path +
+    // line number in stderr. If our just-written file is bad, restore
+    // the previous one (or remove it on fresh creates) so the live
+    // FPM daemon keeps serving every other hosting on this version.
+    if let Err(e) = test_config(input.php_version).await {
+        match backup {
+            Some(prev) => {
+                let _ = atomic_write(&path, &prev, 0o644).await;
+            }
+            None => {
+                let _ = tokio::fs::remove_file(&path).await;
+            }
+        }
+        return Err(e);
+    }
     reload(input.php_version).await?;
     Ok(path)
+}
+
+/// Run `php-fpm<ver> -t` and return an error with the exact
+/// stderr if the configuration doesn't validate. We use this as
+/// a gate before reloading FPM — a bad pool would otherwise
+/// crash the daemon (exit 78 EX_CONFIG) and take every hosting
+/// on this PHP version with it.
+///
+/// Returns `Ok(())` for valid configs; `Err(AdapterError::Command)`
+/// with stderr verbatim otherwise. If the `php-fpm<ver>` binary
+/// itself isn't installed (rare — FPM service is present but no
+/// CLI) we return `Ok(())` so we don't block normal operation on
+/// a missing diagnostic tool.
+pub async fn test_config(php_version: PhpVersion) -> Result<(), AdapterError> {
+    let bin = format!("/usr/sbin/php-fpm{}", php_version.as_str());
+    let out = match tokio::process::Command::new(&bin)
+        .args(["-t"])
+        .output()
+        .await
+    {
+        Ok(o) => o,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            tracing::debug!(
+                bin = %bin,
+                "test_config: binary not found — skipping validation"
+            );
+            return Ok(());
+        }
+        Err(e) => return Err(AdapterError::Io(e)),
+    };
+    if out.status.success() {
+        return Ok(());
+    }
+    // FPM prints errors on stderr; some distros also dump them to
+    // stdout. Combine both so the operator sees the full picture.
+    let mut tail = String::new();
+    tail.push_str(&String::from_utf8_lossy(&out.stderr));
+    if !out.stdout.is_empty() {
+        if !tail.is_empty() && !tail.ends_with('\n') {
+            tail.push('\n');
+        }
+        tail.push_str(&String::from_utf8_lossy(&out.stdout));
+    }
+    Err(AdapterError::Command {
+        cmd: format!("{bin} -t"),
+        code: out.status.code().unwrap_or(-1),
+        stderr_tail: tail,
+    })
 }
 
 /// Remove the pool file and reload. Idempotent.
@@ -230,6 +303,33 @@ mod tests {
         // override is supplied.
         assert!(out.contains("listen.owner = www-data"));
         assert!(out.contains("listen.group = www-data"));
+    }
+
+    /// Regression test for the "exit 78 EX_CONFIG via `#` comment"
+    /// bug: PHP-FPM's Zend INI parser only treats `;` as a comment
+    /// character. Lines starting with `#` get parsed as bare keys
+    /// without values and crash the daemon at load time. The pool
+    /// template MUST NOT contain any line beginning with `#` (after
+    /// trimming whitespace) or we'll brick the whole php<ver>-fpm
+    /// service.
+    #[test]
+    fn render_uses_only_semicolon_comments() {
+        let out = render(&PoolInput::defaults(
+            "alice_cz",
+            "alice.cz",
+            PhpVersion::V8_3,
+        ))
+        .expect("render");
+        for (lineno, raw) in out.lines().enumerate() {
+            let trimmed = raw.trim_start();
+            assert!(
+                !trimmed.starts_with('#'),
+                "pool template line {} starts with `#` — \
+                 Zend INI parser would reject this as a bare key. Use `;` instead. \
+                 Offending line: {raw:?}",
+                lineno + 1
+            );
+        }
     }
 
     /// Regression test for the "502 nginx user mismatch" bug.
