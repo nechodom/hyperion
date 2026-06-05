@@ -533,6 +533,28 @@ pub struct SmtpAutodetect {
     pub notes: String,
 }
 
+/// One row in `MtaDiagnostics::outbound_smtp_probes` — TCP-connect
+/// probe to one well-known SMTP host:port. `latency_ms` is filled
+/// when reachable; `error` is filled when not. Mutually exclusive.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct MtaPortProbe {
+    pub port: u16,
+    pub host: String,
+    pub reachable: bool,
+    /// Round-trip latency in ms when reachable.
+    #[serde(default)]
+    pub latency_ms: u64,
+    /// Empty when reachable; verbatim error when not.
+    #[serde(default)]
+    pub error: String,
+    /// Human-friendly note explaining what this port is for so
+    /// the operator knows what each row means even on first read.
+    /// e.g. "MX delivery", "SMTPS submission",
+    /// "STARTTLS submission".
+    #[serde(default)]
+    pub purpose: String,
+}
+
 /// Diagnostics for the local MTA (postfix), returned by
 /// `Request::MtaDiagnostics`. Drives the "MTA" card in /settings.
 /// Every field is read live — no caching — so the operator sees
@@ -596,6 +618,18 @@ pub struct MtaDiagnostics {
     /// (latency, error message, "not probed because ...").
     #[serde(default)]
     pub outbound_port_25_msg: String,
+    /// Probes for every common outbound SMTP port. When 25 is
+    /// blocked, the operator needs to know which alternative is
+    /// open before they can set up a smart-host workaround.
+    /// Entries are `(port, target_host, reachable)`:
+    ///   * port 25  → MX delivery target (gmail's MX)
+    ///   * port 465 → implicit-TLS submission (smtp.gmail.com)
+    ///   * port 587 → STARTTLS submission (smtp.gmail.com)
+    ///   * port 2525 → alt-submission used by Mailgun/SendGrid
+    ///     when the operator is in a network with 587 blocked too
+    /// Order is preserved. Empty when probing is disabled.
+    #[serde(default)]
+    pub outbound_smtp_probes: Vec<MtaPortProbe>,
     /// Best-effort tail of `/var/log/mail.log` (last 12 lines).
     /// Empty when the log doesn't exist (fresh install) or we
     /// can't read it (rare permissions issue).

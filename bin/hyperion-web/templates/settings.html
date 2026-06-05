@@ -307,18 +307,59 @@
           {% if mta.service_active %}<span class="pill ok">active</span>{% else %}<span class="pill err">inactive</span>{% endif %}
           {% if mta.service_enabled %}<span class="pill ok" style="margin-left:0.4rem">autostart on</span>{% else %}<span class="pill warn" style="margin-left:0.4rem">autostart off</span>{% endif %}
         </dd>
-        <dt>outbound TCP/25</dt>
+        <dt>outbound SMTP ports</dt>
         <dd>
-          {% match mta.outbound_port_25_ok %}
-          {% when Some with (true) %}
-            <span class="pill ok">reachable</span>
-            <span class="text-soft small" style="margin-left:0.4rem">{{ mta.outbound_port_25_msg }}</span>
-          {% when Some with (false) %}
-            <span class="pill err">blocked</span>
-            <div class="text-soft small" style="margin-top:0.25rem">{{ mta.outbound_port_25_msg }}</div>
-          {% when None %}
+          {% if mta.outbound_smtp_probes.is_empty() %}
             <span class="text-soft">(not probed)</span>
-          {% endmatch %}
+          {% else %}
+            <div style="display:flex;flex-direction:column;gap:0.3rem">
+              {% for probe in mta.outbound_smtp_probes %}
+              <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap">
+                <code style="font-size:0.85rem;min-width:3.5rem">:{{ probe.port }}</code>
+                {% if probe.reachable %}
+                  <span class="pill ok">open · {{ probe.latency_ms }} ms</span>
+                {% else %}
+                  <span class="pill err">blocked</span>
+                {% endif %}
+                <span class="text-soft small">{{ probe.purpose }}</span>
+                {% if !probe.reachable && !probe.error.is_empty() %}
+                  <span class="text-soft small" style="opacity:0.7">— {{ probe.error }}</span>
+                {% endif %}
+              </div>
+              {% endfor %}
+            </div>
+
+            {# Workaround suggestion when 25 is blocked. Surfaces the
+               actionable next step directly under the table so the
+               operator doesn't have to puzzle out what to do. #}
+            {% match mta.outbound_port_25_ok %}
+            {% when Some with (false) %}
+              <div class="alert alert-warn" role="status" style="margin-top:0.6rem">
+                <strong>Port 25 is blocked → direct MX delivery isn't possible from this node.</strong>
+                Every receiving mail server listens on port 25 only, so postfix can't
+                connect to them.
+                <ul style="margin:0.4rem 0 0;padding-left:1.2rem;font-size:0.9rem;line-height:1.55">
+                  {% for probe in mta.outbound_smtp_probes %}
+                    {% if probe.reachable && probe.port != 25 %}
+                    <li>
+                      <strong>:{{ probe.port }} is open</strong> — set up a smart-host
+                      on port {{ probe.port }}. Fill in the SMTP relay form above with
+                      a host that accepts authenticated submission on this port
+                      (your own postfix on another VPS with port 25 outbound, or any
+                      submission-accepting host you control). Agent re-applies postfix
+                      config to smart-host mode automatically on next restart.
+                    </li>
+                    {% endif %}
+                  {% endfor %}
+                  <li>
+                    Ask your ISP / hosting provider to unblock outbound TCP/25.
+                    Most will (after a verification step) for legitimate mail use.
+                  </li>
+                </ul>
+              </div>
+            {% when _ %}
+            {% endmatch %}
+          {% endif %}
         </dd>
         <dt>mail queue</dt>
         <dd>

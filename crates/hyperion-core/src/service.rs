@@ -8268,13 +8268,33 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 _ => (String::new(), 0usize, String::new()),
             };
 
-        // Outbound TCP/25 probe. We try gmail-smtp-in.l.google.com
-        // because (a) it always exists, (b) it's a common-enough
-        // target that Hetzner/AWS/GCP egress filters affecting THEIR
-        // port-25 access affect EVERYONE's. 3-second hard timeout.
-        // We do this even when relayhost is set, because direct-MX
-        // is what the operator may want to flip to.
-        let (outbound_port_25_ok, outbound_port_25_msg) = probe_outbound_port_25().await;
+        // Outbound TCP probes for every common SMTP port. When 25
+        // is blocked (typical for Hetzner / AWS / GCP / many Czech
+        // ISPs) the operator needs to know which alternative — 465,
+        // 587, 2525 — is open so they can configure a smart-host
+        // workaround instead. Run all four in parallel; each has
+        // a 3-second hard timeout so the worst case is 3s total.
+        let probes_fut = probe_outbound_smtp_all();
+        // Keep the legacy single port_25 fields populated for
+        // older UI / external scripts that grep on them.
+        let outbound_smtp_probes: Vec<hyperion_types::MtaPortProbe> = probes_fut.await;
+        let (outbound_port_25_ok, outbound_port_25_msg) = outbound_smtp_probes
+            .iter()
+            .find(|p| p.port == 25)
+            .map(|p| {
+                let msg = if p.reachable {
+                    format!("OK · {} reachable in {} ms", format_args!("{}:25", p.host), p.latency_ms)
+                } else {
+                    format!(
+                        "BLOCKED — connect to {}:25 failed: {}. \
+                         Common on Hetzner / AWS / GCP / many ISPs — request unblock \
+                         from support, or set up a smart-host on port 587.",
+                        p.host, p.error
+                    )
+                };
+                (Some(p.reachable), msg)
+            })
+            .unwrap_or((None, String::new()));
 
         // Last 12 lines of /var/log/mail.log — cheap signal for
         // recent send activity / rejects. We don't shell out to
@@ -8303,6 +8323,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             mailq_detail,
             outbound_port_25_ok,
             outbound_port_25_msg,
+            outbound_smtp_probes,
             recent_log_tail,
         })
     }
@@ -10431,47 +10452,67 @@ fn expiry_row_to_dto(row: hyperion_state::scheduler::ExpiryRow) -> hyperion_type
     }
 }
 
-/// Quick TCP probe to a public SMTP server's port 25 to tell the
-/// operator whether their ISP / cloud-provider egress filters
-/// block outbound mail. Returns `(maybe_ok, human_msg)` so the UI
-/// can render "OK · 47 ms" / "BLOCKED — timeout after 3s" / "DNS
-/// failed".
+/// Probe every common outbound SMTP port with a 3-second timeout
+/// each. Runs all probes in parallel via `tokio::join!`. Returns a
+/// Vec preserving the well-known port order (25, 465, 587, 2525)
+/// so the UI renders a stable table.
 ///
-/// Target host is a public anycast SMTP server (Google's MX). Cheap
-/// + always-on. We don't talk SMTP; just connect + close.
-async fn probe_outbound_port_25() -> (Option<bool>, String) {
+/// Targets:
+///   * 25  — gmail-smtp-in.l.google.com (real MX, port 25 receiving)
+///   * 465 — smtp.gmail.com (implicit-TLS submission)
+///   * 587 — smtp.gmail.com (STARTTLS submission)
+///   * 2525 — smtp.mailgun.org (alt-submission accepted by many
+///            providers when 587 is blocked; some operators use
+///            it as a last-resort port)
+///
+/// Each probe is a TCP-connect, no SMTP banner read — we just
+/// want to know whether the egress firewall allows the port.
+async fn probe_outbound_smtp_all() -> Vec<hyperion_types::MtaPortProbe> {
+    let p25 = single_smtp_probe(25, "gmail-smtp-in.l.google.com", "MX delivery (recipient servers)");
+    let p465 = single_smtp_probe(465, "smtp.gmail.com", "Implicit-TLS submission");
+    let p587 = single_smtp_probe(587, "smtp.gmail.com", "STARTTLS submission (most common)");
+    let p2525 = single_smtp_probe(2525, "smtp.mailgun.org", "Alt-submission (when 587 blocked)");
+    let (r25, r465, r587, r2525) = tokio::join!(p25, p465, p587, p2525);
+    vec![r25, r465, r587, r2525]
+}
+
+async fn single_smtp_probe(
+    port: u16,
+    host: &str,
+    purpose: &str,
+) -> hyperion_types::MtaPortProbe {
     use std::time::Instant;
     use tokio::net::TcpStream;
-    const TARGET: &str = "gmail-smtp-in.l.google.com:25";
     const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+    let target = format!("{host}:{port}");
     let started = Instant::now();
-    let connect = tokio::time::timeout(TIMEOUT, TcpStream::connect(TARGET)).await;
-    let elapsed = started.elapsed().as_millis();
+    let connect = tokio::time::timeout(TIMEOUT, TcpStream::connect(&target)).await;
+    let elapsed = started.elapsed().as_millis() as u64;
     match connect {
-        Ok(Ok(_)) => (
-            Some(true),
-            format!("OK · TCP/25 to {TARGET} reachable in {elapsed} ms"),
-        ),
-        Ok(Err(e)) => {
-            // ConnectionRefused / NetworkUnreachable / etc. — usually
-            // an egress block. Surface kind() so operator knows
-            // whether to call support or check their firewall.
-            (
-                Some(false),
-                format!(
-                    "BLOCKED — connect to {TARGET} failed after {elapsed} ms: {e}. \
-                     Most cloud providers (Hetzner, AWS, GCP) block outbound TCP/25 by \
-                     default — file a support ticket to unblock."
-                ),
-            )
-        }
-        Err(_) => (
-            Some(false),
-            format!(
-                "BLOCKED — connect to {TARGET} timed out after 3 s. \
-                 Same fix as above: ISP / hosting provider egress filter."
-            ),
-        ),
+        Ok(Ok(_)) => hyperion_types::MtaPortProbe {
+            port,
+            host: host.to_string(),
+            reachable: true,
+            latency_ms: elapsed,
+            error: String::new(),
+            purpose: purpose.to_string(),
+        },
+        Ok(Err(e)) => hyperion_types::MtaPortProbe {
+            port,
+            host: host.to_string(),
+            reachable: false,
+            latency_ms: 0,
+            error: format!("{e}"),
+            purpose: purpose.to_string(),
+        },
+        Err(_) => hyperion_types::MtaPortProbe {
+            port,
+            host: host.to_string(),
+            reachable: false,
+            latency_ms: 0,
+            error: "timeout after 3 s".to_string(),
+            purpose: purpose.to_string(),
+        },
     }
 }
 
