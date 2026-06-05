@@ -33,4 +33,14 @@ pub use hyperion_adapters::fs::ensure_ancestors_traversable;
 // every fresh boot until something triggers ensure_pool.
 pub use hyperion_adapters::phpfpm::ensure_socket_dirs as ensure_phpfpm_socket_dirs;
 
+// Re-export postfix smart-host helpers so the agent's main() can
+// configure the MTA at boot from agent.toml's [email] settings
+// (PHP mail() then flows through the same authenticated relay as
+// Hyperion's own outbound).
+pub use hyperion_adapters::postfix::{
+    ensure_relay_config as postfix_ensure_relay_config,
+    is_installed as postfix_is_installed,
+    rollback_relay_config as postfix_rollback_relay_config,
+};
+
 // Re-export profile types via hyperion_types — they live there.

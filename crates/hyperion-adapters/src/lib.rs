@@ -18,6 +18,7 @@ pub mod mariadb;
 pub mod nginx;
 pub mod nodejs;
 pub mod phpfpm;
+pub mod postfix;
 pub mod postgres;
 pub mod rollback;
 pub mod users;

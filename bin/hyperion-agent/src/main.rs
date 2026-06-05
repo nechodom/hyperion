@@ -128,6 +128,57 @@ async fn main() -> anyhow::Result<()> {
     } else {
         Some(cfg.email.default_to.clone())
     };
+    // Postfix smart-host self-heal. When [email] is enabled AND
+    // postfix is installed, point postfix at the SAME SMTP relay
+    // that Hyperion uses for its own outbound (cert reminders,
+    // monitor alerts, etc.). Without this, PHP mail() from hosted
+    // sites goes through postfix's default Internet-Site mode (direct
+    // MX from the VPS IP) which fails for almost every real
+    // recipient — no SPF / DKIM / PTR, IP often blocklisted, port 25
+    // blocked on AWS/GCP. With it, site mail() and Hyperion mail
+    // share one authenticated relay.
+    //
+    // The reverse (operator flipped [email] off): leave postfix
+    // running in default mode and clear our managed config so the
+    // operator's hand-edited main.cf isn't fighting our markers.
+    {
+        let email_cfg_for_postfix = email_cfg.clone();
+        tokio::spawn(async move {
+            if !hyperion_core::postfix_is_installed().await {
+                tracing::debug!("boot: postfix not installed — skipping smart-host config");
+                return;
+            }
+            match email_cfg_for_postfix {
+                Some(cfg) if !cfg.smtp_host.trim().is_empty() => {
+                    match hyperion_core::postfix_ensure_relay_config(&cfg).await {
+                        Ok(()) => {
+                            tracing::info!(
+                                relay = %cfg.smtp_host,
+                                port = cfg.smtp_port,
+                                "boot: postfix configured as smart-host via Hyperion's [email] relay"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                error = %e,
+                                "boot: postfix smart-host config FAILED — PHP mail() will keep \
+                                 going through default direct-MX delivery (likely won't reach \
+                                 inboxes). Fix the error and restart hyperion-agent."
+                            );
+                        }
+                    }
+                }
+                _ => {
+                    if let Err(e) = hyperion_core::postfix_rollback_relay_config().await {
+                        tracing::warn!(
+                            error = %e,
+                            "boot: postfix rollback after [email] disable failed"
+                        );
+                    }
+                }
+            }
+        });
+    }
     // Master-RPC signing key — auto-generated on first start, mode
     // 0600. Only the master node really needs it (it's the one
     // that ACKs enrollments and heartbeats), but on a worker the
