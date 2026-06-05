@@ -2484,8 +2484,14 @@
   document.querySelectorAll('form').forEach(f => {
     const action = (f.getAttribute('action') || '').trim();
     if (!action.startsWith('/hostings/')) return;
-    // Skip if form already carries target_node (manually authored).
-    if (f.querySelector('input[name="target_node"]')) return;
+    // Skip if form already carries target_node. The selector
+    // intentionally matches ANY element (input/select/textarea/...)
+    // with name="target_node". Earlier this only matched
+    // `input[name="target_node"]` — which missed the migration
+    // form's `<select name="target_node">` and caused the shim to
+    // inject a duplicate hidden input. axum's Form deserializer
+    // then rejected the POST with `duplicate field "target_node"`.
+    if (f.querySelector('[name="target_node"]')) return;
     const i = document.createElement('input');
     i.type = 'hidden';
     i.name = 'target_node';
