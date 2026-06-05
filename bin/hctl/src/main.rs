@@ -1202,6 +1202,45 @@ fn print_pretty(resp: &Response) {
                 println!();
             }
         }
+        Response::FsDiagnoseAndFix(d) => {
+            println!("filesystem diagnose:");
+            println!("  final_state          : {}", d.final_state);
+            println!("  image_kind           : {}", d.image_kind);
+            println!("  /  writable now      : {}", d.usr_writable_now);
+            println!("  /  writable before   : {}", d.usr_writable_before);
+            if !d.root_mount_line.is_empty() {
+                println!("  /proc/mounts /       : {}", d.root_mount_line);
+            }
+            if !d.usr_mount_line.is_empty() {
+                println!("  /proc/mounts /usr    : {}", d.usr_mount_line);
+            }
+            if !d.fstab_root_line.is_empty() {
+                println!("  /etc/fstab /         : {}", d.fstab_root_line);
+            }
+            println!("  /usr immutable attr  : {}", d.immutable_attr_set);
+            if !d.fix_steps.is_empty() {
+                println!("  fix steps:");
+                for s in &d.fix_steps {
+                    println!(
+                        "    [{:>3}] {}  → {}",
+                        s.exit_code,
+                        if s.now_writable { "rw" } else { "ro" },
+                        s.label
+                    );
+                    if !s.message.is_empty() {
+                        for line in s.message.lines() {
+                            println!("        {line}");
+                        }
+                    }
+                }
+            }
+            if !d.recommendations.is_empty() {
+                println!("  recommendations:");
+                for r in &d.recommendations {
+                    println!("    - {r}");
+                }
+            }
+        }
     }
 }
 

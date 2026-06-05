@@ -555,6 +555,13 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.remount_usr_rw().await
     }
 
+    async fn fs_diagnose_and_fix(
+        &self,
+        dry_run: bool,
+    ) -> Result<hyperion_types::FsDiagnostics, RpcError> {
+        self.svc.fs_diagnose_and_fix(dry_run).await
+    }
+
     async fn wp_plugin_list(
         &self,
         hosting: hyperion_rpc::HostingSelector,

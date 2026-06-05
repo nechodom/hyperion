@@ -364,6 +364,13 @@ pub trait AgentApi: Send + Sync + 'static {
     /// when /usr is already writable.
     async fn remount_usr_rw(&self) -> Result<(bool, String), RpcError>;
 
+    /// Full ROFS diagnose + auto-fix sequence. See
+    /// `Request::FsDiagnoseAndFix` doc.
+    async fn fs_diagnose_and_fix(
+        &self,
+        dry_run: bool,
+    ) -> Result<hyperion_types::FsDiagnostics, RpcError>;
+
     /// Import a migration bundle by URL — downloads from the source
     /// node's signed `/api/migration/bundle/<id>` endpoint then runs
     /// the regular import.

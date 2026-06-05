@@ -340,6 +340,176 @@ pub struct RemountForm {
     pub node: String,
 }
 
+#[derive(Deserialize)]
+pub struct FsDiagnoseForm {
+    #[serde(default)]
+    pub node: String,
+    /// "1" = dry-run (gather only, no fix attempts); empty / "0"
+    /// = run the full fix sequence.
+    #[serde(default)]
+    pub dry_run: String,
+}
+
+/// POST /services/fs-diagnose — runs the full ROFS diagnose +
+/// (optionally) auto-fix sequence on the chosen node. Renders the
+/// returned `FsDiagnostics` as an HTML fragment that HTMX swaps
+/// into a results panel on the page. Used by the "Diagnose &
+/// auto-fix" card below the install-progress card.
+pub async fn post_fs_diagnose(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<FsDiagnoseForm>,
+) -> Response {
+    if !ctx.is_super_admin() {
+        return (
+            axum::http::StatusCode::FORBIDDEN,
+            [("content-type", "text/html; charset=utf-8")],
+            "<div class=\"flash error\"><div class=\"flash-body\">super_admin required</div></div>",
+        )
+            .into_response();
+    }
+    let target = if form.node.is_empty()
+        || form.node == crate::dispatcher::LOCAL_NODE_SENTINEL
+    {
+        None
+    } else {
+        Some(form.node.as_str())
+    };
+    let dry_run = matches!(form.dry_run.as_str(), "1" | "true" | "on");
+    let resp = match crate::dispatcher::dispatch_to_node(
+        &state,
+        target,
+        Request::FsDiagnoseAndFix { dry_run },
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            return html_error(&format!("RPC failed: {e}"));
+        }
+    };
+    let d = match resp {
+        RpcResponse::FsDiagnoseAndFix(d) => d,
+        RpcResponse::Error(e) => {
+            return html_error(&format!("Agent error: {e}"));
+        }
+        _ => return html_error("unexpected response"),
+    };
+    render_fs_diagnostics(&d)
+}
+
+/// Build the HTML fragment shown in the diagnose-result slot.
+/// Tiny string templating — askama would be overkill for a leaf
+/// fragment that never escapes a single handler.
+fn render_fs_diagnostics(d: &hyperion_types::FsDiagnostics) -> Response {
+    fn esc(s: &str) -> String {
+        s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    }
+    let pill_class = match d.final_state.as_str() {
+        "fixed" | "no-fix-needed" => "ok",
+        "dry-run" => "info",
+        "image-immutable" | "still-broken" => "err",
+        _ => "warn",
+    };
+    let mut html = String::with_capacity(2048);
+    html.push_str(&format!(
+        "<div style=\"margin-top:1rem\">\
+         <div class=\"row\" style=\"align-items:center;gap:0.5rem;margin-bottom:0.6rem\">\
+         <strong>Final state:</strong>\
+         <span class=\"pill {pill_class}\">{state}</span>\
+         <span class=\"text-soft small\">image: <strong>{image}</strong> · root fstype: <code>{rft}</code></span>\
+         </div>",
+        state = esc(&d.final_state),
+        image = esc(&d.image_kind),
+        rft = esc(&d.root_fstype),
+    ));
+    // Diagnostic facts in a definition list.
+    html.push_str("<dl class=\"kv\" style=\"margin:0 0 0.8rem\">");
+    html.push_str(&format!(
+        "<dt>/usr writable</dt><dd>{} → <strong>{}</strong></dd>",
+        if d.usr_writable_before { "yes" } else { "no" },
+        if d.usr_writable_now { "yes" } else { "no" }
+    ));
+    if !d.root_mount_line.is_empty() {
+        html.push_str(&format!(
+            "<dt>mount /</dt><dd><code style=\"font-size:0.8rem\">{}</code></dd>",
+            esc(&d.root_mount_line)
+        ));
+    }
+    if !d.usr_mount_line.is_empty() {
+        html.push_str(&format!(
+            "<dt>mount /usr</dt><dd><code style=\"font-size:0.8rem\">{}</code></dd>",
+            esc(&d.usr_mount_line)
+        ));
+    }
+    if !d.root_options.is_empty() {
+        html.push_str(&format!(
+            "<dt>root options</dt><dd><code>{}</code></dd>",
+            esc(&d.root_options)
+        ));
+    }
+    if !d.fstab_root_line.is_empty() {
+        html.push_str(&format!(
+            "<dt>fstab /</dt><dd><code style=\"font-size:0.8rem\">{}</code></dd>",
+            esc(&d.fstab_root_line)
+        ));
+    }
+    if d.immutable_attr_set {
+        html.push_str("<dt>chattr +i</dt><dd><span class=\"pill warn\">set on /usr</span></dd>");
+    }
+    html.push_str("</dl>");
+    // Fix steps as a small log table.
+    if !d.fix_steps.is_empty() {
+        html.push_str("<details open style=\"margin:0 0 0.8rem\">\
+            <summary style=\"cursor:pointer;font-weight:600;font-size:0.85rem;color:var(--text-dim)\">\
+            Fix steps</summary>\
+            <table class=\"table small\" style=\"margin-top:0.4rem;width:100%\">\
+            <thead><tr><th>Step</th><th>Exit</th><th>Writable after</th><th>Output</th></tr></thead><tbody>");
+        for step in &d.fix_steps {
+            let exit_pill = if step.exit_code == 0 { "ok" } else { "err" };
+            let wpill = if step.now_writable { "ok" } else { "err" };
+            html.push_str(&format!(
+                "<tr><td><code>{}</code></td>\
+                 <td><span class=\"pill {}\">{}</span></td>\
+                 <td><span class=\"pill {}\">{}</span></td>\
+                 <td><code style=\"font-size:0.74rem\">{}</code></td></tr>",
+                esc(&step.label),
+                exit_pill,
+                step.exit_code,
+                wpill,
+                if step.now_writable { "yes" } else { "no" },
+                esc(&step.message),
+            ));
+        }
+        html.push_str("</tbody></table></details>");
+    }
+    // Recommendations.
+    if !d.recommendations.is_empty() {
+        html.push_str("<div class=\"alert alert-info\" style=\"margin:0\"><strong>Next steps:</strong><ul style=\"margin:0.4rem 0 0;padding-left:1.2rem\">");
+        for r in &d.recommendations {
+            html.push_str(&format!("<li>{}</li>", esc(r)));
+        }
+        html.push_str("</ul></div>");
+    }
+    html.push_str("</div>");
+    (
+        [("content-type", "text/html; charset=utf-8")],
+        html,
+    )
+        .into_response()
+}
+
+fn html_error(msg: &str) -> Response {
+    (
+        [("content-type", "text/html; charset=utf-8")],
+        format!(
+            "<div class=\"alert alert-err\" style=\"margin-top:1rem\">{}</div>",
+            msg.replace('<', "&lt;")
+        ),
+    )
+        .into_response()
+}
+
 /// POST /services/remount-usr-rw — one-click `mount -o remount,rw /`
 /// against the chosen node. Used when the operator hit the
 /// "/usr is not writable" preflight on a service-install attempt

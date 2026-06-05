@@ -578,6 +578,74 @@ pub struct MtaPortProbe {
     pub purpose: String,
 }
 
+/// Filesystem (rootfs / `/usr`) read-only diagnostics + the
+/// outcomes of any auto-fix attempts. Returned by
+/// `Request::FsDiagnoseAndFix`. Lets the operator see at a glance
+/// *why* /usr is RO and which fixes were tried.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct FsDiagnostics {
+    /// True iff `/usr` could be written to (tested by touching a
+    /// sentinel file). The whole point of this RPC — operator
+    /// wants this true.
+    pub usr_writable_now: bool,
+    /// Was /usr writable BEFORE the fix attempts? Compared against
+    /// `usr_writable_now` so the UI can render "fixed by Hyperion"
+    /// vs "already was OK".
+    pub usr_writable_before: bool,
+    /// Verbatim `mount | grep ' / '` summary line, e.g.
+    /// `/dev/vda1 on / type ext4 (rw,relatime)`. Empty when the
+    /// probe couldn't find the rootfs.
+    pub root_mount_line: String,
+    /// Verbatim `mount | grep ' /usr '` summary line — present
+    /// only when /usr is a separate mountpoint (rare on standard
+    /// Debian, common on snap-managed boxes).
+    pub usr_mount_line: String,
+    /// Mount options on the rootfs as parsed from `/proc/mounts`
+    /// — `rw,relatime` / `ro,nodev` etc.
+    pub root_options: String,
+    /// Mount options on /usr if it's a separate mountpoint.
+    pub usr_options: String,
+    /// Filesystem type — `ext4`, `xfs`, `overlay`, `squashfs`,
+    /// `tmpfs`. Helps the operator understand immutability.
+    pub root_fstype: String,
+    pub usr_fstype: String,
+    /// Best-effort image classification: "standard" |
+    /// "snap-managed" | "ostree" | "overlay-immutable" | "unknown".
+    /// Drives the recommendation messaging.
+    pub image_kind: String,
+    /// `/etc/fstab` entry for the rootfs as a raw line — operator
+    /// can scan it for `ro,` and know whether a reboot would
+    /// undo any remount.
+    pub fstab_root_line: String,
+    /// True when `lsattr /usr` reports the immutable attr (`i`).
+    /// We attempt `chattr -i` when this is set.
+    pub immutable_attr_set: bool,
+    /// Steps the RPC actually ran, in order. Empty when `dry_run`
+    /// was passed. Each entry is a short label like
+    /// `mount -o remount,rw /` paired with its exit code and a
+    /// truncated message.
+    pub fix_steps: Vec<FsFixStep>,
+    /// "fixed" | "no-fix-needed" | "still-broken" |
+    /// "image-immutable" | "dry-run". Drives the headline pill on
+    /// the UI card.
+    pub final_state: String,
+    /// Operator-facing next-action list. Always non-empty —
+    /// includes a "you're good" message on success.
+    pub recommendations: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct FsFixStep {
+    /// Human label, e.g. "remount,rw /" / "chattr -i /usr".
+    pub label: String,
+    /// Process exit code. -1 = spawn error.
+    pub exit_code: i32,
+    /// Stderr/stdout tail (≤256 chars).
+    pub message: String,
+    /// True iff the writability re-probe after this step said yes.
+    pub now_writable: bool,
+}
+
 /// Diagnostics for the local MTA (postfix), returned by
 /// `Request::MtaDiagnostics`. Drives the "MTA" card in /settings.
 /// Every field is read live — no caching — so the operator sees

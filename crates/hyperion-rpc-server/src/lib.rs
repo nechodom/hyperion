@@ -480,6 +480,10 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok((success, message)) => Response::RemountUsrRw { success, message },
             Err(e) => Response::Error(e),
         },
+        Request::FsDiagnoseAndFix { dry_run } => match api.fs_diagnose_and_fix(dry_run).await {
+            Ok(d) => Response::FsDiagnoseAndFix(d),
+            Err(e) => Response::Error(e),
+        },
         Request::WpPluginList { hosting } => match api.wp_plugin_list(hosting).await {
             Ok(v) => Response::WpPluginList(v),
             Err(e) => Response::Error(e),
@@ -1246,6 +1250,12 @@ mod tests {
         }
         async fn remount_usr_rw(&self) -> Result<(bool, String), RpcError> {
             Ok((true, String::new()))
+        }
+        async fn fs_diagnose_and_fix(
+            &self,
+            _: bool,
+        ) -> Result<hyperion_types::FsDiagnostics, RpcError> {
+            Ok(hyperion_types::FsDiagnostics::default())
         }
         async fn wp_plugin_list(
             &self,

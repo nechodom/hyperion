@@ -219,37 +219,60 @@
   </p>
 </div>
 
-{# Rootfs read-only escape hatch. apt fails with "Read-only file
-   system" on snap-managed images / immutable VPS flavours / when
-   /etc/fstab mounts the rootfs `ro`. This card runs the same
-   `mount -o remount,rw /` the operator would type by hand, with
-   a fresh re-probe so they immediately see whether it worked. #}
+{# Rootfs read-only diagnose + auto-fix. Two HTMX-driven buttons:
+     - "Diagnose" runs the gather-only RPC and renders mount lines,
+       fstab, immutable attrs, image kind — operator can read what's
+       wrong before touching anything.
+     - "Auto-fix" runs the full sequence (remount,rw / → chattr -i
+       /usr → remount,rw /usr) and shows each step's outcome.
+   Results swap into #fs-diagnose-result; no page reload, the install
+   live-log panel above keeps streaming. #}
 <div class="card" style="margin-top:1rem">
   <h2 style="display:flex;align-items:center;gap:0.5rem;margin:0 0 0.4rem">
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-    Rootfs is read-only?
+    Rootfs is read-only? Diagnose &amp; auto-fix
   </h2>
   <p class="text-soft small" style="margin:0 0 0.7rem">
-    If an Install above failed with
-    <code>/usr is not writable</code> or
-    <code>Read-only file system (os error 30)</code>, your VPS rootfs
-    is mounted <code>ro</code>. The button below runs
-    <code>mount -o remount,rw /</code> on the chosen node. <strong>Not persistent across reboots</strong>
-    (your <code>/etc/fstab</code> still says <code>ro</code>); fixes the immediate
-    install but a reboot reverts. For a permanent fix, edit
-    <code>/etc/fstab</code> or pick a non-immutable image.
+    If an Install above failed with <code>/usr is not writable</code> or
+    <code>Read-only file system (os error 30)</code>, the buttons below
+    run a full diagnostic on <strong>{{ current_label }}</strong> and
+    optionally walk a fix sequence (<code>mount -o remount,rw /</code>,
+    <code>chattr -i /usr</code>, <code>mount -o remount,rw /usr</code>
+    when /usr is a separate mountpoint). Result lands in the panel
+    below — no page reload.
   </p>
-  <form method="post" action="/services/remount-usr-rw" style="display:inline-flex;gap:0.5rem;align-items:center"
-        data-confirm-title="Remount / read-write on {{ current_label }}"
-        data-confirm-body="Runs `mount -o remount,rw /` on {{ current_label }}. On snap-managed / ostree-style images this will FAIL (immutable by design). On normal Debian / Ubuntu images this is safe and routine."
-        data-confirm-confirm-label="Remount rw"
-        data-confirm-variant="primary">
-    <input type="hidden" name="node" value="{{ current_node }}">
-    <button class="btn" type="submit">
-      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><polyline points="21 3 21 9 15 9"/></svg>
-      Try remount /usr rw
-    </button>
-  </form>
+  <div style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center">
+    <form hx-post="/services/fs-diagnose"
+          hx-target="#fs-diagnose-result"
+          hx-swap="innerHTML"
+          hx-indicator="#fs-diagnose-spinner"
+          style="display:inline">
+      <input type="hidden" name="node" value="{{ current_node }}">
+      <input type="hidden" name="dry_run" value="1">
+      <button class="btn" type="submit">
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+        Diagnose (read-only)
+      </button>
+    </form>
+    <form hx-post="/services/fs-diagnose"
+          hx-target="#fs-diagnose-result"
+          hx-swap="innerHTML"
+          hx-indicator="#fs-diagnose-spinner"
+          data-confirm-title="Auto-fix rootfs on {{ current_label }}"
+          data-confirm-body="Runs `mount -o remount,rw /` and (when needed) `chattr -i /usr` + `mount -o remount,rw /usr`. On snap-managed / ostree images these WILL fail — the diagnose card will tell you to switch to a non-immutable image."
+          data-confirm-confirm-label="Run auto-fix"
+          data-confirm-variant="primary"
+          style="display:inline">
+      <input type="hidden" name="node" value="{{ current_node }}">
+      <input type="hidden" name="dry_run" value="0">
+      <button class="btn primary" type="submit">
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><polyline points="21 3 21 9 15 9"/></svg>
+        Diagnose &amp; auto-fix
+      </button>
+    </form>
+    <span id="fs-diagnose-spinner" class="htmx-indicator text-soft small">running…</span>
+  </div>
+  <div id="fs-diagnose-result"></div>
 </div>
 {% endif %}
 

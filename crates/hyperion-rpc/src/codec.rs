@@ -385,6 +385,19 @@ pub enum Request {
     /// service-install preflight detects /usr is read-only.
     /// Refused (validation error) if /usr is already writable.
     RemountUsrRw,
+    /// Full ROFS diagnose + auto-fix sequence. When `dry_run` is
+    /// true we only gather the diagnostic state and return without
+    /// running any fixes. When false we walk through:
+    ///   1. `mount -o remount,rw /`
+    ///   2. `chattr -i /usr` (if immutable attr was set)
+    ///   3. `mount -o remount,rw /usr` (when /usr is a separate
+    ///      mountpoint)
+    /// Each step's outcome lands in the returned `FsDiagnostics`
+    /// `fix_steps` so the UI can render a step-by-step report.
+    FsDiagnoseAndFix {
+        #[serde(default)]
+        dry_run: bool,
+    },
     /// Import a migration bundle from a source node's signed URL.
     /// `base_url` is e.g. `https://source-master/api/migration/bundle/<id>`
     /// — the agent appends `/manifest.json?t=<token>` and
@@ -813,6 +826,7 @@ pub enum Response {
     /// remount (e.g. snap-managed rootfs that genuinely cannot
     /// be made RW — operator needs a different base image).
     RemountUsrRw { success: bool, message: String },
+    FsDiagnoseAndFix(hyperion_types::FsDiagnostics),
     WpPluginList(hyperion_types::WpPluginListResponse),
     WpPluginAction(hyperion_types::WpPluginActionResult),
     // Web users / roles / 2FA

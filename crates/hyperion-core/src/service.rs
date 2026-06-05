@@ -8663,6 +8663,246 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
     }
 
+    /// Full ROFS diagnose + (optional) auto-fix sequence.
+    ///
+    /// Gather phase (always runs):
+    ///   * `/usr` writability probe (sentinel touch)
+    ///   * `mount | grep ' / '` + `' /usr '` raw lines
+    ///   * parsed mount options + fstype from `/proc/mounts`
+    ///   * `/etc/fstab` rootfs line
+    ///   * immutable-attr check via `lsattr -d /usr`
+    ///   * image-kind heuristic (overlay → "overlay-immutable",
+    ///     squashfs → "snap-managed", ostree marker → "ostree",
+    ///     standard ext4/xfs → "standard")
+    ///
+    /// Fix phase (skipped when `dry_run = true` OR /usr already
+    /// writable):
+    ///   1. `mount -o remount,rw /` — the 90% case
+    ///   2. `chattr -i /usr` when immutable_attr_set was true
+    ///   3. `mount -o remount,rw /usr` when /usr is a separate
+    ///      mountpoint that's still ro
+    /// Each step is run only when prior steps left writability
+    /// false. After each step the writability probe re-runs so
+    /// the report shows incremental progress.
+    pub async fn fs_diagnose_and_fix(
+        &self,
+        dry_run: bool,
+    ) -> Result<hyperion_types::FsDiagnostics, RpcError> {
+        let mut d = hyperion_types::FsDiagnostics::default();
+
+        // ── gather ───────────────────────────────────────────
+        d.usr_writable_before = check_usr_writable().await.is_none();
+        d.usr_writable_now = d.usr_writable_before;
+
+        // Raw mount lines for the operator to eyeball.
+        let mount_output = tokio::process::Command::new("/bin/mount")
+            .output()
+            .await
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        d.root_mount_line = mount_output
+            .lines()
+            .find(|l| l.contains(" on / type "))
+            .unwrap_or("")
+            .to_string();
+        d.usr_mount_line = mount_output
+            .lines()
+            .find(|l| l.contains(" on /usr type "))
+            .unwrap_or("")
+            .to_string();
+
+        // /proc/mounts is the source-of-truth parseable view.
+        // Format: dev mountpoint fstype opts dump pass
+        if let Ok(mounts) = tokio::fs::read_to_string("/proc/mounts").await {
+            for line in mounts.lines() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() < 4 {
+                    continue;
+                }
+                if parts[1] == "/" {
+                    d.root_fstype = parts[2].to_string();
+                    d.root_options = parts[3].to_string();
+                }
+                if parts[1] == "/usr" {
+                    d.usr_fstype = parts[2].to_string();
+                    d.usr_options = parts[3].to_string();
+                }
+            }
+        }
+
+        // /etc/fstab — single rootfs line so the operator knows
+        // whether a reboot would undo our remount.
+        if let Ok(fstab) = tokio::fs::read_to_string("/etc/fstab").await {
+            d.fstab_root_line = fstab
+                .lines()
+                .find(|l| {
+                    let t = l.trim_start();
+                    if t.is_empty() || t.starts_with('#') {
+                        return false;
+                    }
+                    // Second whitespace-separated field is the mountpoint.
+                    t.split_whitespace().nth(1) == Some("/")
+                })
+                .unwrap_or("")
+                .to_string();
+        }
+
+        // lsattr +i — check immutable attribute on /usr.
+        let lsattr = tokio::process::Command::new("/usr/bin/lsattr")
+            .args(["-d", "/usr"])
+            .output()
+            .await
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        // lsattr output: `----i---------e----- /usr` — look for 'i'
+        // anywhere in the leading flags chunk.
+        d.immutable_attr_set = lsattr
+            .split_whitespace()
+            .next()
+            .map(|flags| flags.contains('i'))
+            .unwrap_or(false);
+
+        // Image-kind heuristic.
+        d.image_kind = classify_image_kind(&d.root_fstype, &d.usr_fstype);
+
+        // ── early-out: writable + dry-run / writable in general ──
+        if d.usr_writable_now {
+            d.final_state = "no-fix-needed".to_string();
+            d.recommendations.push(
+                "/usr is already writable. apt-get install should succeed — \
+                 retry the install."
+                    .into(),
+            );
+            return Ok(d);
+        }
+        if dry_run {
+            d.final_state = "dry-run".to_string();
+            d.recommendations.push(self.recommend_for_state(&d));
+            return Ok(d);
+        }
+
+        // ── fix phase ────────────────────────────────────────
+        // Step 1: remount,rw /
+        d.fix_steps.push(self.run_fix_step("mount -o remount,rw /", "/bin/mount", &["-o", "remount,rw", "/"]).await);
+        d.usr_writable_now = check_usr_writable().await.is_none();
+        if !d.usr_writable_now {
+            // Step 2: chattr -i /usr — defensive even if lsattr
+            // didn't see the flag; harmless on a non-immutable dir.
+            if d.immutable_attr_set || matches!(d.root_fstype.as_str(), "ext4" | "xfs" | "btrfs") {
+                d.fix_steps.push(self.run_fix_step("chattr -i /usr", "/usr/bin/chattr", &["-i", "/usr"]).await);
+                d.usr_writable_now = check_usr_writable().await.is_none();
+            }
+        }
+        if !d.usr_writable_now && !d.usr_mount_line.is_empty() {
+            // Step 3: separate /usr mountpoint — remount it too.
+            d.fix_steps.push(self.run_fix_step("mount -o remount,rw /usr", "/bin/mount", &["-o", "remount,rw", "/usr"]).await);
+            d.usr_writable_now = check_usr_writable().await.is_none();
+        }
+
+        // ── final state + recommendations ───────────────────
+        if d.usr_writable_now {
+            d.final_state = "fixed".to_string();
+            d.recommendations.push(
+                "✓ /usr is now writable. Retry the install — apt-get should succeed."
+                    .into(),
+            );
+            if d.fstab_root_line.contains("ro,") || d.fstab_root_line.contains(" ro ") {
+                d.recommendations.push(
+                    "Warning: your /etc/fstab still says rootfs is `ro` — the next reboot \
+                     will revert. Edit /etc/fstab to use `rw,` or change to a non-immutable \
+                     image for a persistent fix."
+                        .into(),
+                );
+            }
+        } else if d.image_kind == "snap-managed" || d.image_kind == "overlay-immutable" {
+            d.final_state = "image-immutable".to_string();
+            d.recommendations.push(format!(
+                "Your VPS image is {kind} — the rootfs CANNOT be made writable. \
+                 You need a different image (standard Debian 12 / Ubuntu 22.04 cloud image \
+                 without snap/overlay) to use Hyperion's package install. \
+                 Reprovision the VPS with a non-immutable image and re-run install-node.sh.",
+                kind = d.image_kind,
+            ));
+        } else {
+            d.final_state = "still-broken".to_string();
+            d.recommendations.push(
+                "Every fix attempt failed. Possible causes: \
+                 (1) the FS driver doesn't support `mount -o remount,rw` for this fstype, \
+                 (2) a security module (AppArmor / SELinux) is blocking write to /usr, \
+                 (3) the device backing / is genuinely read-only (CD-ROM / squashfs loop). \
+                 SSH in and run `mount | grep ' / '` + `dmesg | tail -50` for clues."
+                    .into(),
+            );
+        }
+        for step in &d.fix_steps {
+            tracing::info!(
+                step = %step.label,
+                exit_code = step.exit_code,
+                now_writable = step.now_writable,
+                "fs_fix_step"
+            );
+        }
+        self.append_audit(
+            "system.fs_diagnose_and_fix",
+            None,
+            &serde_json::json!({
+                "dry_run": dry_run,
+                "final_state": d.final_state,
+                "writable_before": d.usr_writable_before,
+                "writable_now": d.usr_writable_now,
+                "image_kind": d.image_kind,
+                "steps": d.fix_steps.len(),
+            })
+            .to_string(),
+            if d.usr_writable_now { "ok" } else { "failed" },
+        )
+        .await;
+        Ok(d)
+    }
+
+    /// Run one fix step, capture (exit, message, writability).
+    async fn run_fix_step(&self, label: &str, cmd: &str, args: &[&str]) -> hyperion_types::FsFixStep {
+        let out = tokio::process::Command::new(cmd).args(args).output().await;
+        let (exit_code, message) = match out {
+            Ok(o) => {
+                let mut m = String::from_utf8_lossy(&o.stderr).into_owned();
+                if !o.stdout.is_empty() {
+                    if !m.is_empty() && !m.ends_with('\n') {
+                        m.push('\n');
+                    }
+                    m.push_str(&String::from_utf8_lossy(&o.stdout));
+                }
+                // Cap message length for the response payload.
+                if m.len() > 256 {
+                    m.truncate(256);
+                    m.push_str("…");
+                }
+                (o.status.code().unwrap_or(-1), m)
+            }
+            Err(e) => (-1, format!("spawn failed: {e}")),
+        };
+        let now_writable = check_usr_writable().await.is_none();
+        hyperion_types::FsFixStep {
+            label: label.to_string(),
+            exit_code,
+            message,
+            now_writable,
+        }
+    }
+
+    /// One-liner recommendation when no fixes have run yet (dry run
+    /// or pre-fix state). Tailors message to the detected image kind.
+    fn recommend_for_state(&self, d: &hyperion_types::FsDiagnostics) -> String {
+        match d.image_kind.as_str() {
+            "snap-managed" | "overlay-immutable" => format!(
+                "Image kind: {}. Rootfs is by-design immutable — \
+                 remount will fail. Switch to a standard Debian/Ubuntu cloud image.",
+                d.image_kind
+            ),
+            _ => "Click \"Diagnose & auto-fix\" to attempt remount,rw on the rootfs.".into(),
+        }
+    }
+
     /// Cheap helper used by both the queue-ops audit logs above and
     /// indirectly via mta_diagnostics. Returns 0 if postqueue isn't
     /// available rather than failing.
@@ -10977,6 +11217,30 @@ trait RpcErrorExt {
     fn Internal_with(msg: String) -> Self;
 }
 
+/// Classify the VPS image based on filesystem fingerprints — drives
+/// the auto-fix UX (snap/overlay images CAN'T be made RW). Best-
+/// effort; "unknown" is a safe default.
+fn classify_image_kind(root_fstype: &str, usr_fstype: &str) -> String {
+    // squashfs is the snap signature — snapd mounts core24/jammy
+    // images this way.
+    if usr_fstype == "squashfs" || root_fstype == "squashfs" {
+        return "snap-managed".into();
+    }
+    // overlay-based immutable images (Fedora CoreOS, ostree-style).
+    if root_fstype == "overlay" {
+        return "overlay-immutable".into();
+    }
+    // ostree marker — Atomic / CoreOS / Silverblue.
+    if std::path::Path::new("/ostree").exists() {
+        return "ostree".into();
+    }
+    // The boring 90% case.
+    if matches!(root_fstype, "ext4" | "xfs" | "btrfs" | "ext3" | "ext2") {
+        return "standard".into();
+    }
+    "unknown".into()
+}
+
 /// Sanity check: is /usr writable? Many minimal VPS images ship
 /// with /usr on a read-only / immutable filesystem (snap, snapd
 /// `usr.merge`, certain Debian "ostree"-style live images, or an
@@ -12637,5 +12901,26 @@ mod tests {
         let detail_back = s.get(sel).await.expect("get");
         assert!(!detail_back.vhost_options.maintenance_mode);
         assert_eq!(detail_back.vhost_options.hsts_max_age, 0);
+    }
+
+    /// classify_image_kind drives the auto-fix UX: snap/overlay
+    /// images can NOT be made writable, so the diagnose card must
+    /// surface "this image is immutable, switch to standard Debian"
+    /// instead of pointlessly suggesting `mount -o remount,rw`.
+    /// Guard the heuristic against silent regressions.
+    #[test]
+    fn classify_image_kind_signatures() {
+        // Real-world fingerprints from /proc/mounts.
+        assert_eq!(classify_image_kind("ext4", "squashfs"), "snap-managed");
+        assert_eq!(classify_image_kind("squashfs", "ext4"), "snap-managed");
+        assert_eq!(classify_image_kind("overlay", ""), "overlay-immutable");
+        assert_eq!(classify_image_kind("ext4", ""), "standard");
+        assert_eq!(classify_image_kind("xfs", ""), "standard");
+        assert_eq!(classify_image_kind("btrfs", ""), "standard");
+        // Genuinely unknown filesystem → "unknown" (NOT "standard");
+        // the renderer downgrades guidance so we don't tell the
+        // operator to remount something we don't understand.
+        assert_eq!(classify_image_kind("zfs", ""), "unknown");
+        assert_eq!(classify_image_kind("", ""), "unknown");
     }
 }
