@@ -460,6 +460,15 @@ pub enum Request {
     /// Cluster-wide monitor list — every enabled monitor on this
     /// node with computed 24h success rate + avg latency.
     MonitorOverview,
+    /// Look up the avatar basename for one web_user.
+    AvatarFilename {
+        user_id: i64,
+    },
+    /// Set or clear the avatar basename. `None` clears.
+    AvatarSet {
+        user_id: i64,
+        filename: Option<String>,
+    },
     /// Read the per-hosting monitor config + sample history.
     MonitorGet {
         sel: HostingSelector,
@@ -679,6 +688,8 @@ pub enum Response {
     HostingFileMkdir,
     HostingFileRename,
     MonitorOverview(Vec<hyperion_types::MonitorOverviewItem>),
+    AvatarFilename(Option<String>),
+    AvatarSet,
     MonitorGet {
         config: hyperion_types::MonitorConfigView,
         history: hyperion_types::MonitorHistory,

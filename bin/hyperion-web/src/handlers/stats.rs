@@ -636,6 +636,55 @@ pub fn fmt_short_id(s: &str) -> String {
     format!("{head}…")
 }
 
+/// Humanize a dotted audit action label for the Recent activity
+/// feed. `hosting.resume` → "Resumed", `wp.plugin.action` →
+/// "WordPress plugin", `service.install.start` → "Service install
+/// started". Falls through to the raw string for unknown codes
+/// so we don't lose information.
+pub fn fmt_action_label(s: &str) -> &str {
+    match s {
+        "hosting.create"             => "Created hosting",
+        "hosting.delete"             => "Deleted hosting",
+        "hosting.suspend"            => "Suspended",
+        "hosting.resume"             => "Resumed",
+        "hosting.set_vhost_options"  => "Vhost options",
+        "hosting.set_wp_debug"       => "WP debug toggled",
+        "hosting.set_redis"          => "Redis toggled",
+        "hosting.rotate_redis_password" => "Redis password rotated",
+        "hosting.file.write"         => "File saved",
+        "hosting.file.delete"        => "File deleted",
+        "hosting.file.mkdir"         => "Folder created",
+        "hosting.file.rename"        => "File renamed",
+        "hosting.set_limits"         => "Limits updated",
+        "hosting.acme_email.set"     => "ACME email set",
+        "wp.install"                 => "WordPress installed",
+        "wp.plugin.action"           => "WordPress plugin",
+        "wp.theme.action"            => "WordPress theme",
+        "wp.reset_password"          => "WP password reset",
+        "db.reset_password"          => "DB password reset",
+        "ftp.set_password"           => "FTP password set",
+        "ftp.disable"                => "FTP disabled",
+        "cert.issue"                 => "Cert issued",
+        "cert.renew"                 => "Cert renewed",
+        "cert.renew.attempt"         => "Cert renew attempted",
+        "backup.now"                 => "Backup taken",
+        "backup.restore"             => "Backup restored",
+        "service.install.start"      => "Service install started",
+        "service.install.finish"     => "Service install finished",
+        "service.restart"            => "Service restarted",
+        "agent.config.update"        => "Agent config updated",
+        "web.user.create"            => "User created",
+        "web.user.set_role"          => "User role changed",
+        "web.user.2fa_disabled"      => "2FA disabled",
+        "node.enroll"                => "Node enrolled",
+        "node.revoke"                => "Node revoked",
+        "hosting.migration.move"     => "Hosting migrated",
+        "hosting.rotate_wp_debug_log" => "debug.log rotated",
+        // Unknown / new — strip the prefix for a less technical look.
+        other => other,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

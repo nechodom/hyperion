@@ -286,6 +286,17 @@ pre code {
   font-weight: 700;
   font-size: 0.85rem;
   flex-shrink: 0;
+  position: relative;
+  overflow: hidden;
+}
+/* Avatar image overlays the initial when loaded. On 404 the img
+   removes itself (onerror in HTML), revealing the initial below. */
+.sidebar .user-avatar .user-avatar-img {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
 }
 .sidebar .user-info {
   flex: 1;
@@ -553,6 +564,12 @@ pre code {
 .kpi-card.reqs::before     { background: var(--warn); }
 .kpi-card.load::before     { background: #a78bfa; }
 .kpi-card.mem::before      { background: #fb7185; }
+/* State-driven accent: green when healthy, orange when warned,
+   red when critical. Used by widgets whose colour signals state
+   (Services, Cert health, etc.) instead of a fixed metric. */
+.kpi-card.kpi-ok::before   { background: var(--success); }
+.kpi-card.kpi-warn::before { background: var(--warn); }
+.kpi-card.kpi-bad::before  { background: var(--danger); }
 .kpi-label {
   font-size: 0.72rem;
   text-transform: uppercase;
@@ -1810,6 +1827,14 @@ hr.divider {
   padding: 0.05rem 0.4rem;
   font-size: 0.76rem;
   white-space: nowrap;
+  color: var(--text);
+}
+/* Humanized action label — no chip, just a clean weight-600 word.
+   The chip-style .activity-action above was visually noisy when
+   every row is a chip-id-meta sandwich. */
+.activity-action-name {
+  font-weight: 600;
+  font-size: 0.92rem;
   color: var(--text);
 }
 .activity-target {

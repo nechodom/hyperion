@@ -441,6 +441,15 @@ pub trait AgentApi: Send + Sync + 'static {
         &self,
     ) -> Result<Vec<hyperion_types::MonitorOverviewItem>, RpcError>;
 
+    /// Read the avatar filename column for one user.
+    async fn avatar_filename(&self, user_id: i64) -> Result<Option<String>, RpcError>;
+    /// Set / clear the avatar filename column.
+    async fn avatar_set(
+        &self,
+        user_id: i64,
+        filename: Option<String>,
+    ) -> Result<(), RpcError>;
+
     /// Per-hosting monitor: get config + recent samples.
     async fn monitor_get(
         &self,

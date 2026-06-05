@@ -647,6 +647,16 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     ) -> Result<Vec<hyperion_types::MonitorOverviewItem>, RpcError> {
         self.svc.monitor_overview().await
     }
+    async fn avatar_filename(&self, user_id: i64) -> Result<Option<String>, RpcError> {
+        self.svc.avatar_filename(user_id).await
+    }
+    async fn avatar_set(
+        &self,
+        user_id: i64,
+        filename: Option<String>,
+    ) -> Result<(), RpcError> {
+        self.svc.avatar_set(user_id, filename).await
+    }
     async fn monitor_get(
         &self,
         sel: HostingSelector,

@@ -82,6 +82,9 @@ pub struct WebUserRow {
     pub failed_locked_at: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Avatar basename under `/var/lib/hyperion/avatars/`. None →
+    /// fall back to initial-letter pill.
+    pub avatar_filename: Option<String>,
 }
 
 impl WebUserRow {
@@ -183,6 +186,38 @@ pub async fn set_email(
         .execute(pool)
         .await?;
     Ok(())
+}
+
+/// Set the avatar filename for a user. `None` clears the avatar
+/// (UI then falls back to the initial-letter pill).
+pub async fn set_avatar_filename(
+    pool: &SqlitePool,
+    user_id: i64,
+    filename: Option<&str>,
+    now: i64,
+) -> Result<(), StateError> {
+    sqlx::query("UPDATE web_users SET avatar_filename = ?, updated_at = ? WHERE id = ?")
+        .bind(filename)
+        .bind(now)
+        .bind(user_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Look up just the avatar filename for one user — cheap query
+/// used by the /avatar/<user_id> serve endpoint.
+pub async fn get_avatar_filename(
+    pool: &SqlitePool,
+    user_id: i64,
+) -> Result<Option<String>, StateError> {
+    let row: Option<(Option<String>,)> = sqlx::query_as(
+        "SELECT avatar_filename FROM web_users WHERE id = ?",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.and_then(|(f,)| f))
 }
 
 pub async fn set_locked(
@@ -671,6 +706,11 @@ fn raw_to_row(r: RawUser) -> WebUserRow {
         failed_locked_at: r.13,
         created_at: r.14,
         updated_at: r.15,
+        // avatar_filename isn't in the SELECT (would push the tuple
+        // past sqlx's 16-element FromRow cap). Look it up via the
+        // dedicated `get_avatar_filename` when needed; common code
+        // paths (login, role check, 2FA) don't care about avatars.
+        avatar_filename: None,
     }
 }
 

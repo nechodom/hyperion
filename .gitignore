@@ -3,3 +3,8 @@
 .DS_Store
 .claude/
 Cargo.lock.*
+# Ad-hoc status / scratch notes — never commit. Use git log / tags
+# for the real timeline.
+STATUS-*.md
+SCRATCH-*.md
+NOTES-*.md

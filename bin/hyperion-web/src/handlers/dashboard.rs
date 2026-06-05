@@ -32,6 +32,10 @@ struct DashboardTpl<'a> {
     recent: Vec<HostingSummary>,
     cluster: Option<ClusterStats>,
     activity: Vec<AuditEntryWire>,
+    /// hosting_id → domain lookup so the activity feed can render
+    /// a friendly site name instead of the opaque ULID. Filled by
+    /// the handler from the `recent` + `cluster` lists.
+    hosting_domains: std::collections::HashMap<String, String>,
     alerts: Vec<DashboardAlert>,
     services_health: ServicesHealth,
     spark_load: Sparkline,
@@ -101,6 +105,20 @@ pub async fn get_dashboard(
         "bw",
         |v| crate::handlers::stats::fmt_bytes(&(v as i64)),
     );
+    // Build hosting_id → domain map from the full list so the
+    // activity feed renders friendly site names instead of raw
+    // ULIDs. Fetched once via HostingList (also feeds `recent`
+    // above), so this is a free pass through the same data.
+    let mut hosting_domains: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    if let Ok(RpcResponse::HostingList(all)) =
+        hyperion_rpc_client::call(&state.agent_socket, Request::HostingList).await
+    {
+        for h in all {
+            hosting_domains.insert(h.id.as_str().to_string(), h.domain);
+        }
+    }
+
     let tpl = DashboardTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -120,6 +138,7 @@ pub async fn get_dashboard(
         update_current_short,
         update_latest_short,
         error,
+        hosting_domains,
     };
     Ok(Html(tpl.render()?).into_response())
 }

@@ -93,7 +93,7 @@
     <div class="kpi-meta">{% if let Some(c) = cluster %}{{ c.total_requests_24h }} requests · 24h{% else %}—{% endif %}</div>
   </div>
 
-  <div class="kpi-card reqs">
+  <div class="kpi-card {% if services_health.critical_down > 0 %}kpi-bad{% else if services_health.warn_down > 0 %}kpi-warn{% else %}kpi-ok{% endif %}">
     <div class="kpi-label">Services</div>
     <div class="kpi-value" style="{% if services_health.critical_down > 0 %}color:var(--danger){% else if services_health.warn_down > 0 %}color:var(--warn){% else %}color:var(--success){% endif %}">
       {% if services_health.critical_down > 0 %}
@@ -227,13 +227,19 @@
           <span class="activity-dot" aria-hidden="true"></span>
           <div class="activity-body">
             <div class="activity-title">
-              <code class="activity-action">{{ a.action }}</code>
+              <span class="activity-action-name">{{ crate::handlers::stats::fmt_action_label(a.action) }}</span>
               {% if let Some(t) = a.target %}
-                <a class="activity-target" href="/hostings/{{ t }}" title="{{ t }}">{{ crate::handlers::stats::fmt_short_id(t) }}</a>
+                {% if let Some(domain) = hosting_domains.get(t.as_str()) %}
+                  <a class="activity-target" href="/hostings/{{ domain }}" title="{{ domain }}">{{ domain }}</a>
+                {% else %}
+                  <a class="activity-target" href="/hostings/{{ t }}" title="{{ t }}">{{ crate::handlers::stats::fmt_short_id(t) }}</a>
+                {% endif %}
               {% endif %}
             </div>
             <div class="activity-meta">
-              {{ a.actor_label }} · <span title="{{ a.ts }}">{{ crate::handlers::stats::fmt_ago(a.ts) }}</span>
+              {# Drop the "agent · " prefix when the actor is the
+                 agent itself — adds no signal and bloats every line. #}
+              {% if a.actor_label != "agent" %}{{ a.actor_label }} · {% endif %}<span title="{{ a.ts }}">{{ crate::handlers::stats::fmt_ago(a.ts) }}</span>
             </div>
           </div>
         </li>

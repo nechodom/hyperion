@@ -468,6 +468,11 @@ fn print_pretty(resp: &Response) {
         Response::HostingMigrationFetchBundleFile { bytes_b64 } => {
             println!("✓ fetched bundle file ({} bytes b64)", bytes_b64.len());
         }
+        Response::AvatarFilename(f) => match f {
+            Some(name) => println!("avatar: {name}"),
+            None => println!("avatar: (none)"),
+        },
+        Response::AvatarSet => println!("✓ avatar updated"),
         Response::MonitorOverview(items) => {
             println!(
                 "{:<32} {:<10} {:>5} {:>7} {:>4} {}",

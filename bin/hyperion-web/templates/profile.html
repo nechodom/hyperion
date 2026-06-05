@@ -50,6 +50,45 @@
 </div>
 {% endif %}
 
+<div class="card hover" style="margin-bottom:1rem">
+  <h2 style="margin:0 0 0.6rem">
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><circle cx="12" cy="12" r="10"/></svg>
+    Profile picture
+  </h2>
+  <div style="display:flex;gap:1.2rem;align-items:center;flex-wrap:wrap">
+    <div style="width:96px;height:96px;border-radius:50%;overflow:hidden;background:linear-gradient(135deg,var(--primary),var(--info));position:relative;display:grid;place-items:center;color:white;font-weight:700;font-size:2.2rem;flex-shrink:0">
+      {% if let Some(u) = user %}{{ crate::handlers::user_initial(u.username) }}{% else %}?{% endif %}
+      {# Cache-bust on every page load so a fresh upload shows
+         immediately. Tradeoff: extra bytes per page render, but
+         the avatar is small + the request is no-store anyway. #}
+      <img src="/avatar/me?t={{ css_version }}" alt="" onerror="this.remove()"
+           style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover">
+    </div>
+    <div style="flex:1;min-width:14rem">
+      <p class="muted" style="font-size:0.85rem;margin:0 0 0.6rem">
+        PNG / JPG / WEBP, max 1 MB. Recommend square ≥ 256 px.
+      </p>
+      {# Multipart upload: _csrf rides in URL query (middleware
+         skips multipart body parsing). #}
+      <form method="post" action="/profile/avatar/upload?_csrf={{ csrf_token }}"
+            enctype="multipart/form-data"
+            style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;margin:0">
+        <input type="file" name="file" accept="image/png,image/jpeg,image/webp" required
+               style="font-size:0.85rem">
+        <button class="btn primary" type="submit">Upload</button>
+      </form>
+      <form method="post" action="/profile/avatar/clear" style="margin:0.5rem 0 0"
+            data-confirm-title="Remove avatar"
+            data-confirm-body="Your profile picture will be removed."
+            data-confirm-confirm-label="Remove"
+            data-confirm-variant="danger">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <button class="btn small ghost" type="submit">Remove current avatar</button>
+      </form>
+    </div>
+  </div>
+</div>
+
 {# 2FA SECTION — three states: enrollment-in-progress | enrolled | disabled. #}
 <div class="grid cols-2">
 

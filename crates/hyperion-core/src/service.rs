@@ -6316,6 +6316,57 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// node with computed 24h success rate + avg response time.
     /// The web layer fans this out to enrolled workers and merges
     /// the rows for the /monitoring page.
+    pub async fn avatar_filename(&self, user_id: i64) -> Result<Option<String>, RpcError> {
+        hyperion_state::web_users::get_avatar_filename(&self.pool, user_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("avatar_filename: {e}")))
+    }
+
+    pub async fn avatar_set(
+        &self,
+        user_id: i64,
+        filename: Option<String>,
+    ) -> Result<(), RpcError> {
+        // Whitelist the filename shape (defense in depth — the web
+        // handler already validates, but RPC consumers can call us
+        // directly too).
+        if let Some(f) = &filename {
+            if !f
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_')
+            {
+                return Err(RpcError::Validation {
+                    message: format!("avatar filename has illegal chars: {f:?}"),
+                });
+            }
+            if f.starts_with('.') {
+                return Err(RpcError::Validation {
+                    message: "avatar filename cannot start with `.`".into(),
+                });
+            }
+        }
+        hyperion_state::web_users::set_avatar_filename(
+            &self.pool,
+            user_id,
+            filename.as_deref(),
+            now_secs(),
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("avatar_set: {e}")))?;
+        self.append_audit(
+            "web.user.avatar_set",
+            None,
+            &serde_json::json!({
+                "user_id": user_id,
+                "set": filename.is_some(),
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
     pub async fn monitor_overview(
         &self,
     ) -> Result<Vec<hyperion_types::MonitorOverviewItem>, RpcError> {

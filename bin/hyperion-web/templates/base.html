@@ -81,7 +81,10 @@
     </nav>
     <div class="sidebar-footer">
       <div class="user-pill">
-        <div class="user-avatar">{{ user_initial }}</div>
+        <div class="user-avatar">
+          {{ user_initial }}
+          <img class="user-avatar-img" src="/avatar/me" alt="" onerror="this.remove()">
+        </div>
         <div class="user-info">
           <div class="user-name">{{ username }}</div>
           {# Filled by the role-aware JS shim below. Server-side
@@ -100,11 +103,6 @@
             <span class="bell-badge" id="bell-badge" hidden>0</span>
           </button>
         </div>
-        <button class="theme-toggle" id="theme-toggle" title="Toggle theme (cycles auto → light → dark)" aria-label="Toggle theme">
-          <svg class="theme-dark-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
-          <svg class="theme-light-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:none"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>
-          <svg class="theme-auto-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 0 0 18z" fill="currentColor"/></svg>
-        </button>
         <form method="post" action="/logout" style="margin:0">
           <button class="signout" type="submit" title="Sign out" aria-label="Sign out">
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
@@ -148,7 +146,6 @@
       <kbd>g</kbd> <kbd>u</kbd><span class="desc">Go to Users</span>
       <kbd>g</kbd> <kbd>a</kbd><span class="desc">Go to Audit log</span>
       <kbd>n</kbd><span class="desc">New hosting</span>
-      <kbd>t</kbd><span class="desc">Toggle theme</span>
       <kbd>?</kbd><span class="desc">Show this overlay</span>
       <kbd>esc</kbd><span class="desc">Close modals / palette</span>
     </div>
@@ -300,7 +297,6 @@ document.addEventListener('click', function (ev) {
     { group: 'Pages', label: 'My profile',      href: '/profile',    keys: ['profile', 'me', 'account', '2fa'] },
     { group: 'Pages', label: 'Settings',        href: '/settings',   keys: ['settings', 'config', 'agent', 'smtp', 'slack'] },
     { group: 'Pages', label: 'Nodes / install', href: '/install',    keys: ['nodes', 'install', 'invite', 'enroll'] },
-    { group: 'Actions', label: 'Toggle theme',  action: 'theme',     keys: ['theme', 'dark', 'light', 'mode'] },
     { group: 'Actions', label: 'Show keyboard shortcuts', action: 'shortcuts', keys: ['shortcuts', 'keys', 'help'] },
     { group: 'Actions', label: 'Sign out',      action: 'logout',    keys: ['logout', 'signout', 'exit'] },
   ];
@@ -884,9 +880,23 @@ function isShortcutContext(ev) {
 
   function position() {
     // Anchor below the bell, right-aligned to the viewport edge.
+    // On narrow viewports we ignore the bell position and pin the
+    // dropdown to both edges with margin — otherwise on phones
+    // (where the sidebar is collapsed to a top bar and the bell
+    // sits near right edge), the dropdown would render off-screen.
     const r = btn.getBoundingClientRect();
     dropdown.style.top = (r.bottom + 8) + 'px';
-    dropdown.style.right = Math.max(8, window.innerWidth - r.right) + 'px';
+    if (window.innerWidth <= 520) {
+      // Full-width-ish on phones — overrides CSS that already
+      // does the same at 480px, but covers the 481–520 range.
+      dropdown.style.left = '8px';
+      dropdown.style.right = '8px';
+      dropdown.style.width = 'auto';
+    } else {
+      dropdown.style.left = '';
+      dropdown.style.width = '';
+      dropdown.style.right = Math.max(8, window.innerWidth - r.right) + 'px';
+    }
   }
 
   function csrfToken() {

@@ -548,6 +548,16 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(items) => Response::MonitorOverview(items),
             Err(e) => Response::Error(e),
         },
+        Request::AvatarFilename { user_id } => match api.avatar_filename(user_id).await {
+            Ok(f) => Response::AvatarFilename(f),
+            Err(e) => Response::Error(e),
+        },
+        Request::AvatarSet { user_id, filename } => {
+            match api.avatar_set(user_id, filename).await {
+                Ok(()) => Response::AvatarSet,
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::MonitorGet { sel } => match api.monitor_get(sel).await {
             Ok((config, history)) => Response::MonitorGet { config, history },
             Err(e) => Response::Error(e),
@@ -1248,6 +1258,12 @@ mod tests {
             &self,
         ) -> Result<Vec<hyperion_types::MonitorOverviewItem>, RpcError> {
             Ok(vec![])
+        }
+        async fn avatar_filename(&self, _: i64) -> Result<Option<String>, RpcError> {
+            Ok(None)
+        }
+        async fn avatar_set(&self, _: i64, _: Option<String>) -> Result<(), RpcError> {
+            Ok(())
         }
         async fn monitor_get(
             &self,

@@ -298,6 +298,20 @@ pub fn build_router(state: SharedState) -> Router {
         // Tiny role echo for the nav-hiding shim in base.html.
         // Returns "super_admin" | "admin" | "operator" | "viewer".
         .route("/api/me/role", get(handlers::me::get_role))
+        // Avatar serve + upload. Upload uses a 2 MB body cap —
+        // double the 1 MB asset cap to leave room for multipart
+        // envelope overhead.
+        .route("/avatar/me", get(handlers::avatar::get_my_avatar))
+        .route("/avatar/:user_id", get(handlers::avatar::get_user_avatar))
+        .route(
+            "/profile/avatar/upload",
+            post(handlers::avatar::post_avatar_upload)
+                .layer(axum::extract::DefaultBodyLimit::max(2 * 1024 * 1024)),
+        )
+        .route(
+            "/profile/avatar/clear",
+            post(handlers::avatar::post_avatar_clear),
+        )
         // Bell-icon notification feed. mark-read + mark-all-read are
         // CSRF-exempt at the middleware (see check_csrf comment).
         .route(
