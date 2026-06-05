@@ -276,6 +276,87 @@ impl AdapterPort for RealAdapter {
         hyperion_adapters::fs::remove_dir_all(&domain_dir).await
     }
 
+    async fn nginx_reload(&self) -> Result<(), AdapterError> {
+        hyperion_adapters::nginx::reload().await
+    }
+
+    async fn repair_orphan_certs(&self) -> Result<(usize, usize), AdapterError> {
+        let sites_dir = &self.nginx_paths.sites_enabled;
+        let mut entries = match tokio::fs::read_dir(sites_dir).await {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((0, 0)),
+            Err(e) => return Err(AdapterError::Io(e)),
+        };
+
+        let mut scanned = 0usize;
+        let mut repaired = 0usize;
+
+        while let Some(entry) = entries.next_entry().await.map_err(AdapterError::Io)? {
+            let path = entry.path();
+            // Only inspect .conf files. nginx's sites-enabled also
+            // legitimately contains "default" (no extension) on Debian
+            // out-of-the-box — skip those.
+            if path.extension().and_then(|s| s.to_str()) != Some("conf") {
+                continue;
+            }
+            scanned += 1;
+            let body = match tokio::fs::read_to_string(&path).await {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %e,
+                        "repair_orphan_certs: skip (read failed)"
+                    );
+                    continue;
+                }
+            };
+            for cert_path in extract_ssl_certificate_paths(&body) {
+                // Only repair certs we own (under our certs_root).
+                // We never touch certs at /etc/letsencrypt/... or
+                // other operator-managed paths.
+                let pb = std::path::Path::new(&cert_path);
+                if !pb.starts_with(&self.certs_root) {
+                    continue;
+                }
+                if pb.exists() {
+                    continue;
+                }
+                // Derive the domain: <certs_root>/<DOMAIN>/fullchain.pem
+                let Some(domain) = pb
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|s| s.to_str())
+                else {
+                    tracing::warn!(
+                        cert = %cert_path,
+                        "repair_orphan_certs: cannot derive domain from path"
+                    );
+                    continue;
+                };
+                tracing::warn!(
+                    domain = %domain,
+                    vhost = %path.display(),
+                    "repair_orphan_certs: cert missing → generating self-signed bootstrap"
+                );
+                // No SANs at hand (we don't re-parse the vhost for
+                // server_name aliases); LE will fix the SANs on the
+                // next real renewal. Self-signed-with-domain-only is
+                // enough to unbrick nginx -t today.
+                if let Err(e) = self.acme_issue(domain, &[]).await {
+                    tracing::error!(
+                        domain = %domain,
+                        error = %e,
+                        "repair_orphan_certs: acme_issue (self-signed) failed"
+                    );
+                    continue;
+                }
+                repaired += 1;
+            }
+        }
+        Ok((repaired, scanned))
+    }
+
     async fn nginx_write_vhost(&self, detail: &HostingDetail) -> Result<(), AdapterError> {
         let cert_path = format!(
             "{}/{}/fullchain.pem",
@@ -307,12 +388,24 @@ impl AdapterPort for RealAdapter {
                 domain = %detail.domain,
                 "cert files missing — generating self-signed bootstrap (LE will replace on next renewal tick)"
             );
-            let _ = self
-                .acme_issue(&detail.domain, &detail.aliases)
+            // Propagate failure rather than swallow. Without a cert
+            // file we'd be writing a vhost that nginx -t will reject,
+            // and `write_vhost` would then roll back to whatever was
+            // there before — leaving the operator with a confusing
+            // "create succeeded but my domain doesn't serve" state.
+            // Better to fail fast: the audit log will record the real
+            // cause (rcgen problem, disk full, EROFS on the certs
+            // dir, etc.) instead of an opaque nginx -t error.
+            self.acme_issue(&detail.domain, &detail.aliases)
                 .await
                 .map_err(|e| {
-                    tracing::error!(domain = %detail.domain, error = %e, "self-heal bootstrap cert failed");
-                });
+                    tracing::error!(
+                        domain = %detail.domain,
+                        error = %e,
+                        "self-heal bootstrap cert failed"
+                    );
+                    e
+                })?;
         }
         let logs_dir = detail.root_dir.replace("/htdocs", "/logs");
         let acme_root = self.acme_challenge_root.display().to_string();
@@ -763,6 +856,31 @@ impl AdapterPort for RealAdapter {
     }
 }
 
+/// Extract every `ssl_certificate <path>;` value from an nginx
+/// config body. Skips `ssl_certificate_key`, which has the same
+/// prefix — we match on a trailing space so only the cert lines
+/// (not the key lines) are returned. Trims leading whitespace + a
+/// trailing semicolon. Comments (`# ssl_certificate ...`) are
+/// skipped because we only consider lines whose first non-ws token
+/// is the directive itself.
+fn extract_ssl_certificate_paths(body: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for raw in body.lines() {
+        let line = raw.trim_start();
+        // Use the `_key` discriminator trick: `ssl_certificate ` (with
+        // a trailing space) matches the cert directive but not
+        // `ssl_certificate_key` which has `_` after the prefix.
+        let Some(rest) = line.strip_prefix("ssl_certificate ") else {
+            continue;
+        };
+        let value = rest.trim().trim_end_matches(';').trim();
+        if !value.is_empty() {
+            out.push(value.to_string());
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -905,5 +1023,158 @@ mod tests {
         assert!(cert.contains("BEGIN CERTIFICATE"));
         let key = std::fs::read_to_string(&key_path).expect("read");
         assert!(key.contains("BEGIN PRIVATE KEY"));
+    }
+
+    /// `extract_ssl_certificate_paths` must pull only the cert path,
+    /// not the key path (they share the `ssl_certificate` prefix —
+    /// classic gotcha).
+    #[test]
+    fn extract_ssl_cert_paths_distinguishes_cert_from_key() {
+        let body = r#"
+            server {
+                listen 443 ssl;
+                ssl_certificate     /etc/hyperion/certs/a.cz/fullchain.pem;
+                ssl_certificate_key /etc/hyperion/certs/a.cz/privkey.pem;
+            }
+            server {
+                listen 443 ssl;
+                ssl_certificate /etc/hyperion/certs/b.cz/fullchain.pem;
+                ssl_certificate_key /etc/hyperion/certs/b.cz/privkey.pem;
+            }
+        "#;
+        let paths = extract_ssl_certificate_paths(body);
+        assert_eq!(
+            paths,
+            vec![
+                "/etc/hyperion/certs/a.cz/fullchain.pem".to_string(),
+                "/etc/hyperion/certs/b.cz/fullchain.pem".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn extract_ssl_cert_paths_skips_comments_and_blank() {
+        let body = "# ssl_certificate /commented/out.pem;\n\
+                    \n\
+                    ssl_certificate /real/path.pem;\n";
+        let paths = extract_ssl_certificate_paths(body);
+        assert_eq!(paths, vec!["/real/path.pem".to_string()]);
+    }
+
+    /// End-to-end: build a fake sites-enabled with two vhosts —
+    /// one whose cert exists, one whose cert is missing. The repair
+    /// pass must regenerate exactly one cert + leave the existing
+    /// one untouched.
+    #[tokio::test]
+    async fn repair_orphan_certs_regenerates_missing_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let certs_root = tmp.path().join("certs");
+        let sites_avail = tmp.path().join("sites-available");
+        let sites_enab = tmp.path().join("sites-enabled");
+        std::fs::create_dir_all(&certs_root).unwrap();
+        std::fs::create_dir_all(&sites_avail).unwrap();
+        std::fs::create_dir_all(&sites_enab).unwrap();
+
+        // Cert that exists on disk.
+        let alive_cert_dir = certs_root.join("alive.cz");
+        std::fs::create_dir_all(&alive_cert_dir).unwrap();
+        std::fs::write(alive_cert_dir.join("fullchain.pem"), b"existing").unwrap();
+        std::fs::write(alive_cert_dir.join("privkey.pem"), b"existing").unwrap();
+
+        // Vhost A — cert present.
+        std::fs::write(
+            sites_enab.join("alive.cz.conf"),
+            format!(
+                "server {{\n  listen 443 ssl;\n  \
+                 ssl_certificate     {}/alive.cz/fullchain.pem;\n  \
+                 ssl_certificate_key {}/alive.cz/privkey.pem;\n}}\n",
+                certs_root.display(),
+                certs_root.display()
+            ),
+        )
+        .unwrap();
+        // Vhost B — cert MISSING. This is the bug scenario.
+        std::fs::write(
+            sites_enab.join("orphan.cz.conf"),
+            format!(
+                "server {{\n  listen 443 ssl;\n  \
+                 ssl_certificate     {}/orphan.cz/fullchain.pem;\n  \
+                 ssl_certificate_key {}/orphan.cz/privkey.pem;\n}}\n",
+                certs_root.display(),
+                certs_root.display()
+            ),
+        )
+        .unwrap();
+        // Debian's default vhost — no extension, must be skipped.
+        std::fs::write(sites_enab.join("default"), b"# default server").unwrap();
+
+        let a = RealAdapter {
+            nginx_paths: hyperion_adapters::nginx::Paths {
+                sites_available: sites_avail.clone(),
+                sites_enabled: sites_enab.clone(),
+            },
+            certs_root: certs_root.clone(),
+            ..Default::default()
+        };
+
+        let (repaired, scanned) = a.repair_orphan_certs().await.expect("repair");
+        assert_eq!(scanned, 2, "should have scanned 2 .conf files (default skipped)");
+        assert_eq!(repaired, 1, "should have repaired the one orphan");
+
+        // Orphan now has a real PEM cert.
+        let orphan_cert = certs_root.join("orphan.cz/fullchain.pem");
+        let body = std::fs::read_to_string(&orphan_cert).expect("read");
+        assert!(body.contains("BEGIN CERTIFICATE"));
+
+        // Existing cert was NOT clobbered.
+        let alive_body = std::fs::read_to_string(alive_cert_dir.join("fullchain.pem"))
+            .expect("read");
+        assert_eq!(alive_body, "existing");
+    }
+
+    /// If sites-enabled doesn't exist (fresh node, never installed
+    /// nginx) we return (0, 0), not an error.
+    #[tokio::test]
+    async fn repair_orphan_certs_handles_missing_sites_enabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let a = RealAdapter {
+            nginx_paths: hyperion_adapters::nginx::Paths {
+                sites_available: tmp.path().join("no-such-dir-a"),
+                sites_enabled: tmp.path().join("no-such-dir-b"),
+            },
+            certs_root: tmp.path().join("certs"),
+            ..Default::default()
+        };
+        let (repaired, scanned) = a.repair_orphan_certs().await.expect("repair");
+        assert_eq!(repaired, 0);
+        assert_eq!(scanned, 0);
+    }
+
+    /// Certs OUTSIDE our certs_root (e.g. operator-managed
+    /// /etc/letsencrypt/...) must never be touched, even if missing.
+    #[tokio::test]
+    async fn repair_orphan_certs_ignores_paths_outside_certs_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let certs_root = tmp.path().join("certs");
+        let sites_enab = tmp.path().join("sites-enabled");
+        std::fs::create_dir_all(&certs_root).unwrap();
+        std::fs::create_dir_all(&sites_enab).unwrap();
+        // Vhost referencing an operator-managed path.
+        std::fs::write(
+            sites_enab.join("external.cz.conf"),
+            "server { ssl_certificate /etc/letsencrypt/live/external.cz/fullchain.pem; }\n",
+        )
+        .unwrap();
+        let a = RealAdapter {
+            nginx_paths: hyperion_adapters::nginx::Paths {
+                sites_available: tmp.path().join("sites-available"),
+                sites_enabled: sites_enab,
+            },
+            certs_root,
+            ..Default::default()
+        };
+        let (repaired, scanned) = a.repair_orphan_certs().await.expect("repair");
+        assert_eq!(scanned, 1);
+        assert_eq!(repaired, 0, "must not touch certs outside our root");
     }
 }

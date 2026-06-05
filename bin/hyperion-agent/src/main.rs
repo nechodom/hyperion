@@ -1,6 +1,7 @@
 //! `hyperion-agent` — the privileged daemon.
 
 use clap::Parser;
+use hyperion_core::AdapterPort;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -188,6 +189,48 @@ async fn main() -> anyhow::Result<()> {
             let n = rerender_svc.rerender_fpm_pools().await;
             if n > 0 {
                 tracing::info!(count = n, "boot: re-rendered FPM pools with current nginx user");
+            }
+        });
+    }
+    // Self-heal: scan every enabled nginx vhost for `ssl_certificate`
+    // paths that no longer exist on disk. For each missing cert we
+    // generate a self-signed bootstrap so `nginx -t` passes — without
+    // this a single deleted cert dir bricks the WHOLE nginx process
+    // and every hosting create/update/delete fails with `nginx -t`
+    // exit 1. (Real LE cert gets reissued on the next renewal tick.)
+    {
+        let repair_svc = svc.clone();
+        tokio::spawn(async move {
+            match repair_svc.adapters.repair_orphan_certs().await {
+                Ok((0, _scanned)) => {
+                    tracing::debug!("boot: orphan cert sweep clean");
+                }
+                Ok((repaired, scanned)) => {
+                    tracing::warn!(
+                        repaired,
+                        scanned,
+                        "boot: regenerated self-signed certs for orphan vhosts — \
+                         reloading nginx to recover"
+                    );
+                    // Best-effort reload. If nginx was already down
+                    // because of this exact issue, `reload` will
+                    // auto-promote to `start` (see nginx::reload
+                    // self-heal). On reload failure the operator will
+                    // see the error in journalctl and can investigate.
+                    if let Err(e) = repair_svc.adapters.nginx_reload().await {
+                        tracing::error!(
+                            error = %e,
+                            "boot: nginx reload after cert repair failed — \
+                             manual `systemctl restart nginx` may be needed"
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "boot: orphan cert sweep failed"
+                    );
+                }
             }
         });
     }

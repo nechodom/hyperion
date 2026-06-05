@@ -684,6 +684,39 @@ async fn ensure_symlink(target: &Path, link: &Path) -> Result<(), AdapterError> 
 mod tests {
     use super::*;
 
+    /// Regression: nginx ≥ 1.25 deprecated `listen 443 ssl http2;`
+    /// in favour of separate `http2 on;` directive. Every rendered
+    /// vhost variant must use the new form so `nginx -t` doesn't
+    /// emit a stderr warning on every reload (operators read those
+    /// warnings as errors).
+    #[test]
+    fn rendered_vhosts_use_modern_http2_directive() {
+        let aliases: Vec<String> = vec![];
+        let opts = hyperion_types::VhostOptions::default();
+        let out = render(&VhostInput {
+            domain: "example.cz",
+            aliases: &aliases,
+            root_dir: "/srv/x/htdocs",
+            logs_dir: "/srv/x/logs",
+            system_user: "x",
+            php_version: None,
+            cert_path: "/etc/lm/certs/example.cz/fullchain.pem",
+            key_path: "/etc/lm/certs/example.cz/privkey.pem",
+            acme_challenge_root: "/var/lib/lm/acme-challenges",
+            hosting_id: "01HMOD",
+            options: &opts,
+        })
+        .expect("render");
+        assert!(
+            !out.contains("ssl http2;"),
+            "vhost still uses the deprecated `listen ... ssl http2;` directive: \n{out}"
+        );
+        assert!(
+            out.contains("http2 on;"),
+            "vhost is missing the modern `http2 on;` directive: \n{out}"
+        );
+    }
+
     #[test]
     fn render_static_no_php() {
         let aliases: Vec<String> = vec![];

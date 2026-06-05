@@ -15,8 +15,9 @@ server {
     location / { return 503; }
 }
 server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
     server_name {{ domain }}{% for a in aliases %} {{ a }}{% endfor %};
     ssl_certificate     {{ cert_path }};
     ssl_certificate_key {{ key_path }};
@@ -64,8 +65,9 @@ server {
 {%- endif %}
 
 server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
     server_name {{ domain }}{% for a in aliases %} {{ a }}{% endfor %};
     root {{ root_dir }};
     index index.php index.html index.htm;

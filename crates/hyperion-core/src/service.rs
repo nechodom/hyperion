@@ -80,6 +80,36 @@ pub trait AdapterPort: Send + Sync {
     async fn acme_issue(&self, domain: &str, sans: &[String]) -> Result<CertInfo, AdapterError>;
     async fn acme_delete(&self, domain: &str) -> Result<(), AdapterError>;
 
+    /// Walk every enabled nginx vhost on this node, parse out the
+    /// `ssl_certificate` paths, and for each path that doesn't exist
+    /// on disk generate a self-signed bootstrap so `nginx -t` passes.
+    ///
+    /// Why this exists: a single vhost referencing a missing cert
+    /// bricks the ENTIRE nginx process — `nginx -t` rejects the whole
+    /// config, every reload fails, no other hosting can be touched
+    /// until the cert is restored. Possible causes: operator manually
+    /// rm'd /etc/hyperion/certs/<domain>, partial failure from an
+    /// older agent build without the per-vhost self-heal, restore
+    /// from a backup that excluded /etc/hyperion. This sweep is the
+    /// belt-and-braces fix that runs at agent boot.
+    ///
+    /// Returns (repaired, scanned) so the caller can log a useful
+    /// number — `(0, N)` means "checked N vhosts, all fine".
+    ///
+    /// Default impl returns (0, 0) so MockAdapterPort tests don't
+    /// have to override.
+    async fn repair_orphan_certs(&self) -> Result<(usize, usize), AdapterError> {
+        Ok((0, 0))
+    }
+
+    /// `systemctl reload nginx` with self-heal (auto-promotes to
+    /// `start` if nginx is not running). Used by the boot-time
+    /// orphan-cert sweep to recover the live process after a repair.
+    /// Default impl is a no-op (mocks don't manage systemd).
+    async fn nginx_reload(&self) -> Result<(), AdapterError> {
+        Ok(())
+    }
+
     async fn nginx_write_vhost(&self, detail: &HostingDetail) -> Result<(), AdapterError>;
     /// Remove vhost + symlink for this domain. When `hosting_id` is
     /// supplied the adapter also drops the per-hosting cache zone +
