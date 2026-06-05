@@ -3816,6 +3816,26 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 ),
             });
         }
+        // Belt-and-braces: even if the DB row is missing, an
+        // existing wp-config.php on disk means WP IS installed
+        // (Hyperion-managed install that lost its row, SSH
+        // install, migration). Refuse the install rather than
+        // wipe the DB + clobber the directory with `wp core
+        // download`. wp_status() would have already adopted it
+        // into the row on the previous page load, but a stale
+        // tab whose form was authored before adoption could
+        // still land here.
+        if let Some(ver) = detect_wp_install_on_disk(&detail.root_dir).await {
+            return Err(RpcError::Conflict {
+                message: format!(
+                    "WordPress is already on disk at {} (version {ver}). \
+                     Refresh the hosting detail page — the install was \
+                     adopted into the panel and the install form should \
+                     no longer be shown.",
+                    detail.root_dir
+                ),
+            });
+        }
 
         let installed_version = self
             .adapters
@@ -4062,20 +4082,98 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     }
 
     /// Return the recorded WordPress install for a hosting, if any.
+    ///
+    /// Self-healing: when the `wp_installs` row is missing but
+    /// `<root_dir>/wp-config.php` + `<root_dir>/wp-includes/
+    /// version.php` are both present on disk, WordPress IS installed
+    /// (most likely Hyperion's record_install lost the write to a
+    /// network glitch / DB lock; or the operator installed via SSH /
+    /// migrated from another panel). We:
+    ///   1. Parse `$wp_version` out of `wp-includes/version.php`
+    ///      with a regex (no shell-out — fast, no wp-cli dep).
+    ///   2. Insert the recovered row into `wp_installs` so the
+    ///      next call hits the fast DB path.
+    ///   3. Append an audit entry so the operator can trace the
+    ///      adoption back to a specific moment.
+    /// This means a fresh-create that "lost" the install record
+    /// recovers transparently on the very next page load — the
+    /// operator never sees a spurious "Install WordPress" form
+    /// for an already-installed site.
     pub async fn wp_status(
         &self,
         sel: HostingSelector,
     ) -> Result<Option<WpInstallStatus>, RpcError> {
         let detail = self.get(sel).await?;
-        let row = wordpress::get_install(&self.pool, &detail.id)
+        if let Some(row) = wordpress::get_install(&self.pool, &detail.id)
             .await
-            .map_err(|e| RpcError::Internal_with(format!("wp lookup: {e}")))?;
-        Ok(row.map(|r| WpInstallStatus {
-            hosting_id: r.hosting_id,
-            site_url: r.site_url,
-            wp_version: r.wp_version,
-            installed_at: r.installed_at,
-            last_pack_hash: r.last_pack_hash,
+            .map_err(|e| RpcError::Internal_with(format!("wp lookup: {e}")))?
+        {
+            return Ok(Some(WpInstallStatus {
+                hosting_id: row.hosting_id,
+                site_url: row.site_url,
+                wp_version: row.wp_version,
+                installed_at: row.installed_at,
+                last_pack_hash: row.last_pack_hash,
+            }));
+        }
+        // Filesystem fallback. Skip for non-php hostings (no WP
+        // possible) and for empty root_dir (provisioning state).
+        if detail.root_dir.is_empty() {
+            return Ok(None);
+        }
+        let Some(detected_version) = detect_wp_install_on_disk(&detail.root_dir).await
+        else {
+            return Ok(None);
+        };
+        // Self-heal: record the detected install so subsequent
+        // page loads don't re-probe the filesystem.
+        let site_url = format!("https://{}", detail.domain);
+        let pack_hash = wordpress::pack_hash(&format!(
+            "detected-{}-{}",
+            detected_version.trim(),
+            detail.id.as_str()
+        ));
+        let now = now_secs();
+        if let Err(e) = wordpress::record_install(
+            &self.pool,
+            &detail.id,
+            &site_url,
+            &detected_version,
+            &pack_hash,
+            now,
+        )
+        .await
+        {
+            tracing::warn!(
+                hosting_id = %detail.id.as_str(),
+                error = %e,
+                "wp_status: detected WP on disk but record_install failed (will retry next call)"
+            );
+        } else {
+            self.append_audit(
+                "wordpress.detected",
+                Some(detail.id.as_str()),
+                &serde_json::json!({
+                    "site_url": site_url,
+                    "version": detected_version.trim(),
+                    "reason": "filesystem fallback in wp_status",
+                })
+                .to_string(),
+                "ok",
+            )
+            .await;
+            tracing::info!(
+                hosting_id = %detail.id.as_str(),
+                version = %detected_version,
+                "wp_status: adopted on-disk WP install into wp_installs"
+            );
+        }
+        Ok(Some(WpInstallStatus {
+            hosting_id: detail.id.clone(),
+            site_url,
+            wp_version: detected_version,
+            installed_at: now,
+            last_pack_hash: pack_hash,
         }))
     }
 
@@ -9969,6 +10067,84 @@ fn expiry_row_to_dto(row: hyperion_state::scheduler::ExpiryRow) -> hyperion_type
     }
 }
 
+/// Detect a WordPress install at `<root_dir>` by checking for the
+/// two files that any WP install (Hyperion-managed, SSH-installed,
+/// migrated, restored from backup) MUST have: `wp-config.php` and
+/// `wp-includes/version.php`. Returns the version string parsed
+/// out of version.php's `$wp_version = '<x.y.z>'` line, or
+/// `"unknown"` when both files are present but the version line
+/// can't be parsed (corrupt install, custom fork, etc.).
+///
+/// Returns `None` when either file is missing or unreadable —
+/// strict "no WP here" answer. Never panics. Never errors out
+/// (the caller treats `None` as "no install" the same way it
+/// treats an empty DB row).
+pub(crate) async fn detect_wp_install_on_disk(root_dir: &str) -> Option<String> {
+    use std::path::Path;
+    let root = Path::new(root_dir);
+    // wp-config.php — proof that WP setup has run at all.
+    let wp_config = root.join("wp-config.php");
+    if tokio::fs::metadata(&wp_config).await.is_err() {
+        return None;
+    }
+    // wp-includes/version.php — has the version string.
+    let version_php = root.join("wp-includes").join("version.php");
+    let Ok(body) = tokio::fs::read_to_string(&version_php).await else {
+        // wp-config exists but core is missing — this is a partial
+        // install. Treat as "no WP" rather than fake a version,
+        // so the operator's install button stays available to
+        // recover it.
+        return None;
+    };
+    // Parse `$wp_version = '<x.y.z>'` (single or double quotes,
+    // any amount of whitespace around the `=`). Defensive: only
+    // accept versions of the shape [digit.][...] so we never
+    // surface garbage from a corrupt file.
+    for raw in body.lines() {
+        let line = raw.trim_start();
+        // Skip comments — both `//` and `#` and `/*` styles can
+        // legally appear above the version line.
+        if line.starts_with("//") || line.starts_with('#') || line.starts_with("/*") {
+            continue;
+        }
+        let Some(rest) = line.strip_prefix("$wp_version") else {
+            continue;
+        };
+        // Allow optional whitespace, then `=`, then any whitespace,
+        // then a quote.
+        let after_eq = match rest.split_once('=') {
+            Some((_, r)) => r.trim_start(),
+            None => continue,
+        };
+        let quote_char = after_eq.chars().next();
+        let inside = match quote_char {
+            Some('\'') | Some('"') => {
+                let q = quote_char.unwrap();
+                let s = &after_eq[1..];
+                match s.find(q) {
+                    Some(end) => &s[..end],
+                    None => continue,
+                }
+            }
+            _ => continue,
+        };
+        if inside.is_empty() {
+            continue;
+        }
+        if !inside
+            .chars()
+            .all(|c| c.is_ascii_digit() || c == '.' || c == '-' || c.is_ascii_alphanumeric())
+        {
+            continue;
+        }
+        return Some(inside.to_string());
+    }
+    // version.php existed but didn't match the expected shape —
+    // still WP, just unknown version. The detail UI shows "unknown"
+    // as the version which is honest about what we observed.
+    Some("unknown".to_string())
+}
+
 fn clamp_limits(mut l: hyperion_types::HostingLimits) -> hyperion_types::HostingLimits {
     // Hard sanity ranges. Refusing to store nonsense is more useful than
     // silently mis-applying it later.
@@ -11192,6 +11368,128 @@ mod tests {
         assert_eq!(v, PhpVersion::V8_3);
         let after = s.get(sel).await.expect("get");
         assert_eq!(after.php_version, Some(PhpVersion::V8_3));
+    }
+
+    /// Filesystem WP-detection happy path: both wp-config.php and
+    /// wp-includes/version.php present with a parseable
+    /// `$wp_version` line → returns Some(<version>).
+    #[tokio::test]
+    async fn detect_wp_install_on_disk_finds_version() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::write(root.join("wp-config.php"), b"<?php /* fake */ ?>").unwrap();
+        std::fs::create_dir_all(root.join("wp-includes")).unwrap();
+        std::fs::write(
+            root.join("wp-includes/version.php"),
+            b"<?php\n\
+              // The WordPress version string.\n\
+              $wp_version = '6.4.2';\n\
+              $wp_db_version = 56657;\n",
+        )
+        .unwrap();
+        let got = super::detect_wp_install_on_disk(root.to_str().unwrap()).await;
+        assert_eq!(got, Some("6.4.2".to_string()));
+    }
+
+    /// Missing wp-config.php → no WP, no fake.
+    #[tokio::test]
+    async fn detect_wp_install_on_disk_returns_none_when_missing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let got = super::detect_wp_install_on_disk(tmp.path().to_str().unwrap()).await;
+        assert_eq!(got, None);
+    }
+
+    /// wp-config.php present but wp-includes/version.php missing —
+    /// partial install state. Don't fake a version; let the
+    /// operator's install button stay available to recover it.
+    #[tokio::test]
+    async fn detect_wp_install_on_disk_returns_none_on_partial_install() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join("wp-config.php"), b"<?php ?>").unwrap();
+        let got = super::detect_wp_install_on_disk(tmp.path().to_str().unwrap()).await;
+        assert_eq!(got, None);
+    }
+
+    /// version.php exists but $wp_version line is missing /
+    /// malformed → return Some("unknown") to honestly reflect
+    /// "WP is here but we can't tell which version".
+    #[tokio::test]
+    async fn detect_wp_install_on_disk_handles_unknown_version() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::write(root.join("wp-config.php"), b"<?php ?>").unwrap();
+        std::fs::create_dir_all(root.join("wp-includes")).unwrap();
+        std::fs::write(
+            root.join("wp-includes/version.php"),
+            b"<?php\n// no $wp_version line here\n",
+        )
+        .unwrap();
+        let got = super::detect_wp_install_on_disk(root.to_str().unwrap()).await;
+        assert_eq!(got, Some("unknown".to_string()));
+    }
+
+    /// Comment that mentions `$wp_version` but isn't the actual
+    /// directive must NOT be parsed as the version.
+    #[tokio::test]
+    async fn detect_wp_install_on_disk_skips_commented_version() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::write(root.join("wp-config.php"), b"<?php ?>").unwrap();
+        std::fs::create_dir_all(root.join("wp-includes")).unwrap();
+        std::fs::write(
+            root.join("wp-includes/version.php"),
+            b"<?php\n\
+              // $wp_version = '5.0.0'; // old comment\n\
+              $wp_version = '6.5';\n",
+        )
+        .unwrap();
+        let got = super::detect_wp_install_on_disk(root.to_str().unwrap()).await;
+        assert_eq!(got, Some("6.5".to_string()));
+    }
+
+    /// End-to-end: a hosting WITHOUT a wp_installs row but WITH
+    /// wp-config + version.php on disk must surface as Some(status)
+    /// via `wp_status()`, and a second call must hit the DB
+    /// directly (self-heal upsert succeeded).
+    #[tokio::test]
+    async fn wp_status_filesystem_fallback_self_heals() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), happy_mocks());
+        s.create(req("wpfs.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("wpfs.cz").unwrap());
+        let detail = s.get(sel.clone()).await.expect("get");
+
+        // Materialise WP files in a writable tempdir and re-point
+        // the hostings row at it. The mock's default root_dir is
+        // `/home/<user>/...` which isn't writable in CI.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        std::fs::write(root.join("wp-config.php"), b"<?php ?>").unwrap();
+        std::fs::create_dir_all(root.join("wp-includes")).unwrap();
+        std::fs::write(
+            root.join("wp-includes/version.php"),
+            b"<?php\n$wp_version = '6.4.2';\n",
+        )
+        .unwrap();
+        sqlx::query("UPDATE hostings SET root_dir = ? WHERE id = ?")
+            .bind(root.to_str().unwrap())
+            .bind(detail.id.as_str())
+            .execute(&pool)
+            .await
+            .expect("repoint root_dir");
+
+        // First call should detect + self-heal.
+        let first = s.wp_status(sel.clone()).await.expect("first wp_status");
+        let first = first.expect("must detect WP");
+        assert_eq!(first.wp_version, "6.4.2");
+
+        // Second call must come from the DB row that was just
+        // written. We assert by removing the on-disk files and
+        // expecting the status to still come back.
+        std::fs::remove_dir_all(root).ok();
+        let second = s.wp_status(sel.clone()).await.expect("second wp_status");
+        let second = second.expect("DB row must survive disk removal");
+        assert_eq!(second.wp_version, "6.4.2");
     }
 
     /// Static / proxy / redirect hostings have no PHP — the change
