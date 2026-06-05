@@ -23,7 +23,11 @@ struct ListTpl<'a> {
     active: &'static str,
     css_version: &'static str,
     htmx_version: &'static str,
-    rows: Vec<HostingSummary>,
+    /// Each entry is `(hosting, is_on_test_node)`. Pre-tagged on
+    /// the server so the askama template doesn't need to do a
+    /// closure-based set-lookup inside the loop (askama can't
+    /// parse Rust closures).
+    rows: Vec<(HostingSummary, bool)>,
     total_count: usize,
     q: String,
     state_filter: String,
@@ -263,6 +267,27 @@ pub async fn get_list(
         .into_iter()
         .filter(|r| needle.is_empty() || r.domain.to_lowercase().contains(&needle))
         .filter(|r| state_filter.is_empty() || r.state.as_str() == state_filter)
+        .collect();
+    // Pre-tag each row with `is_on_test_node` so the template can
+    // render the TEST chip without doing closure-based set lookups
+    // (askama can't parse Rust closures).
+    let test_set: std::collections::HashSet<String> = fetch_cluster_config(&state)
+        .await
+        .test_node_ids
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let rows: Vec<(HostingSummary, bool)> = rows
+        .into_iter()
+        .map(|r| {
+            let is_test = r
+                .node_id
+                .as_ref()
+                .map(|n| test_set.contains(n))
+                .unwrap_or(false);
+            (r, is_test)
+        })
         .collect();
     let csrf_token = csrf_token_for(&state, &ctx, "/hostings/delete");
     let csrf_bulk = csrf_token_for(&state, &ctx, "/hostings/bulk");

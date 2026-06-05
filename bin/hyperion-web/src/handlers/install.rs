@@ -22,7 +22,11 @@ struct InstallTpl<'a> {
     htmx_version: &'static str,
     master_url: &'a str,
     invites: Vec<NodeInviteSummary>,
-    nodes: Vec<NodeSummary>,
+    /// Each entry is `(node, is_test)` so the template can render a
+    /// TEST chip without doing string-search inside the loop —
+    /// askama doesn't parse Rust closures so we pre-resolve this
+    /// on the server side.
+    nodes: Vec<(NodeSummary, bool)>,
     just_minted: Option<NodeInviteMint>,
     error: Option<String>,
     csrf_create: String,
@@ -33,6 +37,26 @@ struct InstallTpl<'a> {
     csrf_test: String,
     /// CSRF for the per-row "Update node" button (apt + hyperion).
     csrf_update: String,
+}
+
+/// Wrap `fetch_nodes` + the cluster test-node CSV into a single
+/// `Vec<(NodeSummary, is_test)>` so the template renders chips
+/// without string-searching in the loop.
+async fn fetch_nodes_with_test_flag(state: &SharedState) -> Vec<(NodeSummary, bool)> {
+    let nodes = fetch_nodes(state).await.unwrap_or_default();
+    let test_csv = fetch_cluster_test_node_ids(state).await;
+    let test_set: std::collections::HashSet<String> = test_csv
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    nodes
+        .into_iter()
+        .map(|n| {
+            let is_test = test_set.contains(&n.node_id);
+            (n, is_test)
+        })
+        .collect()
 }
 
 pub async fn get_install(
@@ -48,7 +72,7 @@ pub async fn get_install(
         return Ok(Redirect::to("/?flash_error=admin+role+required+for+node+enrollment").into_response());
     }
     let invites = fetch_invites(&state).await.unwrap_or_default();
-    let nodes = fetch_nodes(&state).await.unwrap_or_default();
+    let nodes = fetch_nodes_with_test_flag(&state).await;
     let master_url = derive_master_url(&state, &headers).await;
     let tpl = InstallTpl {
         username: &ctx.username,
@@ -106,7 +130,7 @@ pub async fn post_invite(
         _ => return Err(AppError::Internal("unexpected response".into())),
     };
     let invites = fetch_invites(&state).await.unwrap_or_default();
-    let nodes = fetch_nodes(&state).await.unwrap_or_default();
+    let nodes = fetch_nodes_with_test_flag(&state).await;
     let master_url = derive_master_url(&state, &headers).await;
     let tpl = InstallTpl {
         username: &ctx.username,
@@ -462,7 +486,7 @@ async fn render_with_error(
     message: &str,
 ) -> Response {
     let invites = fetch_invites(state).await.unwrap_or_default();
-    let nodes = fetch_nodes(state).await.unwrap_or_default();
+    let nodes = fetch_nodes_with_test_flag(state).await;
     let master_url = derive_master_url(state, headers).await;
     let tpl = InstallTpl {
         username: &ctx.username,
@@ -485,4 +509,15 @@ async fn render_with_error(
             .unwrap_or_else(|_| "<h1>render error</h1>".into()),
     )
     .into_response()
+}
+
+/// Read `cluster.test_node_ids` from the agent's view of agent.toml.
+/// Returns the raw CSV string ("stav,worker2") or empty on RPC
+/// failure / config absence. Templates use a JS .includes() check
+/// to decide which rows render the TEST chip.
+async fn fetch_cluster_test_node_ids(state: &SharedState) -> String {
+    match hyperion_rpc_client::call(&state.agent_socket, Request::AgentConfigView).await {
+        Ok(RpcResponse::AgentConfigView(c)) => c.cluster.test_node_ids,
+        _ => String::new(),
+    }
 }

@@ -29,6 +29,15 @@ pub struct ProfileRow {
     pub wp_plugins: String,
     #[sqlx(default)]
     pub wp_themes: String,
+    /// Migration 027 — optional wizard pre-fill for PHP version
+    /// ("8.1".."8.4"). `#[sqlx(default)]` so older agents
+    /// pre-migration-027 still deserialise the row when read.
+    #[sqlx(default)]
+    pub default_php_version: Option<String>,
+    /// Migration 027 — optional wizard pre-fill for DB engine
+    /// ("mariadb" | "postgres" | "none").
+    #[sqlx(default)]
+    pub default_db_engine: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -53,6 +62,10 @@ pub struct NewProfile {
     /// See ProfileRow::wp_plugins / wp_themes for the syntax.
     pub wp_plugins: String,
     pub wp_themes: String,
+    /// See ProfileRow::default_php_version.
+    pub default_php_version: Option<String>,
+    /// See ProfileRow::default_db_engine.
+    pub default_db_engine: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,8 +85,10 @@ pub async fn insert(pool: &SqlitePool, p: &NewProfile, now: i64) -> Result<i64, 
            (name, description, php_memory_mb, php_max_exec_secs, php_max_children,
             php_max_requests, db_max_connections, disk_hard_mb, bw_monthly_mb,
             expiry_grace_days, expiry_warning_offsets, price_minor, price_currency,
-            price_interval, slack_webhook, wp_plugins, wp_themes, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            price_interval, slack_webhook, wp_plugins, wp_themes,
+            default_php_version, default_db_engine,
+            created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            RETURNING id"#,
     )
     .bind(&p.name)
@@ -93,6 +108,8 @@ pub async fn insert(pool: &SqlitePool, p: &NewProfile, now: i64) -> Result<i64, 
     .bind(&p.slack_webhook)
     .bind(&p.wp_plugins)
     .bind(&p.wp_themes)
+    .bind(&p.default_php_version)
+    .bind(&p.default_db_engine)
     .bind(now)
     .bind(now)
     .fetch_one(pool)
@@ -108,6 +125,7 @@ pub async fn update(pool: &SqlitePool, id: i64, p: &NewProfile, now: i64) -> Res
             disk_hard_mb = ?, bw_monthly_mb = ?, expiry_grace_days = ?,
             expiry_warning_offsets = ?, price_minor = ?, price_currency = ?,
             price_interval = ?, slack_webhook = ?, wp_plugins = ?, wp_themes = ?,
+            default_php_version = ?, default_db_engine = ?,
             updated_at = ?
            WHERE id = ?"#,
     )
@@ -128,6 +146,8 @@ pub async fn update(pool: &SqlitePool, id: i64, p: &NewProfile, now: i64) -> Res
     .bind(&p.slack_webhook)
     .bind(&p.wp_plugins)
     .bind(&p.wp_themes)
+    .bind(&p.default_php_version)
+    .bind(&p.default_db_engine)
     .bind(now)
     .bind(id)
     .execute(pool)
@@ -147,7 +167,9 @@ const SELECT_ALL: &str =
     "SELECT id, name, description, php_memory_mb, php_max_exec_secs, php_max_children,
             php_max_requests, db_max_connections, disk_hard_mb, bw_monthly_mb,
             expiry_grace_days, expiry_warning_offsets, price_minor, price_currency,
-            price_interval, slack_webhook, wp_plugins, wp_themes, created_at, updated_at
+            price_interval, slack_webhook, wp_plugins, wp_themes,
+            default_php_version, default_db_engine,
+            created_at, updated_at
      FROM hosting_profiles";
 
 pub async fn list(pool: &SqlitePool) -> Result<Vec<ProfileRow>, StateError> {
@@ -315,6 +337,8 @@ mod tests {
             slack_webhook: None,
             wp_plugins: String::new(),
             wp_themes: String::new(),
+            default_php_version: None,
+            default_db_engine: None,
         };
         let id = insert(&pool, &p, 100).await.expect("insert");
         assert!(id > 0);

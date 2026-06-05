@@ -159,7 +159,9 @@
          fine. #}
       <label class="profile-card" data-pid="{{ p.id }}"
              data-wp-plugins="{{ p.wp_plugins }}"
-             data-wp-themes="{{ p.wp_themes }}">
+             data-wp-themes="{{ p.wp_themes }}"
+             data-default-php-version="{% if let Some(v) = p.default_php_version.as_ref() %}{{ v }}{% endif %}"
+             data-default-db-engine="{% if let Some(e) = p.default_db_engine.as_ref() %}{{ e }}{% endif %}">
         <input type="radio" name="profile_radio" value="{{ p.id }}">
         <div class="profile-card-body">
           <div class="profile-name">{{ p.name }}</div>
@@ -519,6 +521,35 @@
     const plugins = card.dataset.wpPlugins || '';
     const themes = card.dataset.wpThemes || '';
     const profileForcesWp = hasMeaningfulLines(plugins) || hasMeaningfulLines(themes);
+
+    // ─── Pre-fill PHP version + DB engine from the profile ──
+    // Each profile carries optional defaults on its data attrs.
+    // When set, we move the wizard's step-3 dropdowns to match
+    // BEFORE the operator gets there — they can still override,
+    // but the common case ("WordPress Pro" needs PHP 8.4 +
+    // MariaDB) is one click instead of three.
+    const defaultPhp = (card.dataset.defaultPhpVersion || '').trim();
+    const defaultDb = (card.dataset.defaultDbEngine || '').trim();
+    const phpSelect = document.getElementById('php');
+    const dbSelect = document.getElementById('db');
+    if (phpSelect && defaultPhp) {
+      // map "8.4" -> the option whose value matches
+      phpSelect.value = defaultPhp;
+    }
+    if (dbSelect && defaultDb) {
+      dbSelect.value = defaultDb;
+    }
+    // When WP is required, ensure PHP isn't set to "none" (would
+    // make the agent refuse the WP install). Only override when
+    // the profile didn't already specify a PHP version.
+    if (profileForcesWp && phpSelect && phpSelect.value === 'none' && !defaultPhp) {
+      phpSelect.value = '8.3';
+    }
+    // Similarly for DB — WP needs MariaDB.
+    if (profileForcesWp && dbSelect && dbSelect.value === 'none' && !defaultDb) {
+      dbSelect.value = 'mariadb';
+    }
+
     if (!wpToggle) return;
     if (profileForcesWp) {
       // Force checked + locked. Operator can't uncheck without

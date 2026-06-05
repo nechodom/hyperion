@@ -123,6 +123,15 @@ pub struct CreateForm {
     /// Same syntax as `wp_plugins`, for themes.
     #[serde(default)]
     pub wp_themes: String,
+    /// Optional wizard pre-fill — when set the new-hosting wizard's
+    /// PHP-version dropdown auto-selects this value. Empty / "" =
+    /// no preference (wizard keeps its global default).
+    #[serde(default)]
+    pub default_php_version: String,
+    /// Optional wizard pre-fill — "mariadb" / "postgres" / "none"
+    /// / "" (empty = no preference).
+    #[serde(default)]
+    pub default_db_engine: String,
 }
 
 fn default_256() -> i64 {
@@ -184,6 +193,16 @@ pub async fn post_create(
         },
         wp_plugins: form.wp_plugins.clone(),
         wp_themes: form.wp_themes.clone(),
+        default_php_version: if form.default_php_version.trim().is_empty() {
+            None
+        } else {
+            Some(form.default_php_version.trim().to_string())
+        },
+        default_db_engine: if form.default_db_engine.trim().is_empty() {
+            None
+        } else {
+            Some(form.default_db_engine.trim().to_string())
+        },
     };
     let resp =
         hyperion_rpc_client::call(&state.agent_socket, Request::ProfileCreate(input)).await?;
@@ -283,6 +302,16 @@ pub async fn post_update(
         },
         wp_plugins: form.wp_plugins.clone(),
         wp_themes: form.wp_themes.clone(),
+        default_php_version: if form.default_php_version.trim().is_empty() {
+            None
+        } else {
+            Some(form.default_php_version.trim().to_string())
+        },
+        default_db_engine: if form.default_db_engine.trim().is_empty() {
+            None
+        } else {
+            Some(form.default_db_engine.trim().to_string())
+        },
     };
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,

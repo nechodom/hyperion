@@ -9982,6 +9982,14 @@ fn profile_input_to_new(input: ProfileInput) -> hyperion_state::profiles::NewPro
         slack_webhook: input.slack_webhook,
         wp_plugins: input.wp_plugins,
         wp_themes: input.wp_themes,
+        // Normalise empty strings to None so the DB stores NULL and
+        // the wizard's "no preference" path stays clean.
+        default_php_version: input
+            .default_php_version
+            .filter(|s| !s.trim().is_empty()),
+        default_db_engine: input
+            .default_db_engine
+            .filter(|s| !s.trim().is_empty()),
     }
 }
 
@@ -10005,6 +10013,8 @@ fn profile_row_to_wire(r: hyperion_state::profiles::ProfileRow) -> HostingProfil
         slack_webhook: r.slack_webhook,
         wp_plugins: r.wp_plugins,
         wp_themes: r.wp_themes,
+        default_php_version: r.default_php_version,
+        default_db_engine: r.default_db_engine,
         created_at: r.created_at,
         updated_at: r.updated_at,
     }

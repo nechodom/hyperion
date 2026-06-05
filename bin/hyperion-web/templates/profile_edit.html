@@ -116,6 +116,40 @@
       <input id="p_slack" name="slack_webhook" type="url" value="{% if let Some(w) = profile.slack_webhook %}{{ w }}{% endif %}" placeholder="https://hooks.slack.com/services/T.../B.../...">
     </div>
 
+    {# Wizard pre-fill — when set, /hostings/new auto-selects
+       these runtime values in step 3 the moment the operator
+       picks this profile. Both optional; blank = "no preference,
+       wizard keeps its global defaults". #}
+    <h2 style="font-size:0.95rem;margin:1.5rem 0 0.6rem">
+      Wizard defaults <span class="muted" style="font-weight:400;font-size:0.82rem">— pre-fills the new-hosting form when this profile is picked</span>
+    </h2>
+    <div class="field-row" style="margin-bottom:1rem">
+      <div class="field" style="flex:1">
+        <label for="p_default_php_version">Pre-fill PHP version</label>
+        <select id="p_default_php_version" name="default_php_version">
+          <option value=""{% if profile.default_php_version.is_none() %} selected{% endif %}>— no preference —</option>
+          {% for v in ["8.1", "8.2", "8.3", "8.4"] %}
+          <option value="{{ v }}"
+                  {% if let Some(cur) = profile.default_php_version.as_ref() %}{% if cur == v %} selected{% endif %}{% endif %}>
+            PHP {{ v }}
+          </option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="field" style="flex:1">
+        <label for="p_default_db_engine">Pre-fill database</label>
+        <select id="p_default_db_engine" name="default_db_engine">
+          <option value=""{% if profile.default_db_engine.is_none() %} selected{% endif %}>— no preference —</option>
+          {% for (val, label) in [("mariadb", "MariaDB"), ("postgres", "PostgreSQL"), ("none", "No DB (static)")] %}
+          <option value="{{ val }}"
+                  {% if let Some(cur) = profile.default_db_engine.as_ref() %}{% if cur == val %} selected{% endif %}{% endif %}>
+            {{ label }}
+          </option>
+          {% endfor %}
+        </select>
+      </div>
+    </div>
+
     <h2 style="font-size:0.95rem;margin:1.5rem 0 0.6rem">
       WordPress plugins + themes <span class="muted" style="font-weight:400;font-size:0.82rem">— installed when this profile is applied to a WP-enabled hosting</span>
     </h2>

@@ -232,9 +232,21 @@
         </tr>
       </thead>
       <tbody>
-        {% for n in nodes %}
-        <tr>
-          <td><strong>{{ n.label }}</strong></td>
+        {# Server-side pre-tagged: each `nodes` entry is `(NodeSummary,
+           is_test)` so the template doesn't need to do string-search
+           inside the loop. askama destructures the tuple as
+           `(n, is_test)`. #}
+        {% for (n, is_test) in nodes %}
+        <tr{% if is_test %} style="background:color-mix(in oklab, var(--warn) 6%, transparent)"{% endif %}>
+          <td>
+            <strong>{{ n.label }}</strong>
+            {% if is_test %}
+            <span class="tag" title="Marked as a test node in Settings → Cluster — hostings here use the auto-domain template instead of free-form domains"
+                  style="background:var(--warn);color:white;border-color:transparent;font-size:0.65rem;margin-left:0.35rem;font-weight:700;letter-spacing:0.05em">
+              TEST
+            </span>
+            {% endif %}
+          </td>
           <td><code style="font-size:0.74rem">{{ n.node_id }}</code></td>
           <td><span class="tag">v{{ n.agent_version }}</span></td>
           <td>{% if let Some(ip) = n.public_ip %}<code>{{ ip }}</code>{% else %}<span class="text-soft">—</span>{% endif %}</td>

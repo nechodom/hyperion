@@ -36,6 +36,18 @@ pub struct HostingProfile {
     /// Same syntax as `wp_plugins`, but for themes.
     #[serde(default)]
     pub wp_themes: String,
+    /// Optional pre-fill for the wizard's PHP-version dropdown.
+    /// `None` (or empty string from older agents) = wizard keeps
+    /// its global default. `Some("8.4")` = wizard auto-selects
+    /// PHP 8.4 when this profile is chosen.
+    #[serde(default)]
+    pub default_php_version: Option<String>,
+    /// Optional pre-fill for the wizard's DB engine dropdown.
+    /// One of "mariadb" / "postgres" / "none" or None = no
+    /// preference. "none" is meaningful — a profile for static
+    /// sites explicitly says "don't provision a DB".
+    #[serde(default)]
+    pub default_db_engine: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -80,6 +92,12 @@ pub struct ProfileInput {
     pub wp_plugins: String,
     #[serde(default)]
     pub wp_themes: String,
+    /// See `HostingProfile::default_php_version`.
+    #[serde(default)]
+    pub default_php_version: Option<String>,
+    /// See `HostingProfile::default_db_engine`.
+    #[serde(default)]
+    pub default_db_engine: Option<String>,
 }
 
 /// One row in the WordPress asset library — operator-uploaded

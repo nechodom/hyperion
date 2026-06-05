@@ -159,7 +159,7 @@
         </tr>
       </thead>
       <tbody>
-      {% for r in rows %}
+      {% for (r, is_test) in rows %}
         <tr>
           <td style="padding-right:0">
             <input type="checkbox" class="bulk-row" name="selected" value="{{ r.domain }}" aria-label="Select {{ r.domain }}">
@@ -187,6 +187,16 @@
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="margin-right:0.25rem;vertical-align:-1px"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
                 {{ n }}
               </span>
+              {# is_test is pre-computed server-side per row from
+                 the cluster.test_node_ids CSV — see ListTpl in
+                 handlers/hostings.rs. Operator sees prod vs test
+                 at a glance instead of memorising node IDs. #}
+              {% if is_test %}
+              <span class="tag" title="Provisioned on a test node — not a production site"
+                    style="background:var(--warn);color:white;border-color:transparent;font-size:0.62rem;font-weight:700;letter-spacing:0.05em;margin-left:0.2rem;padding:0.1rem 0.35rem">
+                TEST
+              </span>
+              {% endif %}
             {% else %}
               <span class="text-soft">—</span>
             {% endif %}
