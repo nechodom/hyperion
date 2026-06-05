@@ -135,23 +135,32 @@
     <input type="hidden" name="profile_id" id="profile_id" value="0">
     <div class="profile-picker">
       {# "None" option keeps the previous behaviour for operators
-         who don't want a profile. #}
-      <label class="profile-card selected" data-pid="0">
-        <input type="radio" name="profile_radio" value="0" checked
-               onclick="document.getElementById('profile_id').value='0';
-                        document.querySelectorAll('.profile-card').forEach(c => c.classList.remove('selected'));
-                        this.closest('.profile-card').classList.add('selected');">
+         who don't want a profile. data-wp-plugins / data-wp-themes
+         are empty here — JS reads them and unlocks the WP toggle
+         in step 4. #}
+      <label class="profile-card selected" data-pid="0" data-wp-plugins="" data-wp-themes="">
+        <input type="radio" name="profile_radio" value="0" checked>
         <div class="profile-card-body">
           <div class="profile-name">None / custom</div>
           <div class="profile-meta">Use raw defaults; tune limits later from the detail page.</div>
         </div>
       </label>
       {% for p in profiles %}
-      <label class="profile-card" data-pid="{{ p.id }}">
-        <input type="radio" name="profile_radio" value="{{ p.id }}"
-               onclick="document.getElementById('profile_id').value='{{ p.id }}';
-                        document.querySelectorAll('.profile-card').forEach(c => c.classList.remove('selected'));
-                        this.closest('.profile-card').classList.add('selected');">
+      {# data-wp-plugins / data-wp-themes carry the raw newline-
+         separated lists from the profile so the wizard JS can:
+           1. Show "installs N plugins" on the card itself
+           2. Force-check + lock the "Install WordPress" toggle in
+              step 4 when the profile has any meaningful WP content
+              (commented-out lines don't count — same filter as the
+              server-side `profile_has_meaningful_wp_content`).
+         askama escapes the data-* values for us — only the
+         template author needs to be careful about newlines, and
+         our serialiser uses `\n` which survives HTML attr escaping
+         fine. #}
+      <label class="profile-card" data-pid="{{ p.id }}"
+             data-wp-plugins="{{ p.wp_plugins }}"
+             data-wp-themes="{{ p.wp_themes }}">
+        <input type="radio" name="profile_radio" value="{{ p.id }}">
         <div class="profile-card-body">
           <div class="profile-name">{{ p.name }}</div>
           {% if !p.description.is_empty() %}
@@ -162,7 +171,29 @@
             <span title="PHP-FPM max_children">{{ p.php_max_children }} workers</span>
             <span title="DB max connections">{{ p.db_max_connections }} DB conn</span>
             {% if let Some(d) = p.disk_hard_mb %}<span title="Disk hard cap">{{ d }} MB disk</span>{% endif %}
+            {# WP install indicator — server-side handler decides
+               whether to force WP install based on the meaningful-
+               line filter. Template-side we render a rough "has
+               WP" hint based on non-empty fields. The JS reads
+               data-wp-plugins / data-wp-themes (raw fields) and
+               recomputes the same logic to lock the checkbox. #}
+            {% if !p.wp_plugins.is_empty() %}
+              <span class="profile-wp-badge" title="Profile installs WP plugins after provisioning">
+                WP plugins
+              </span>
+            {% endif %}
+            {% if !p.wp_themes.is_empty() %}
+              <span class="profile-wp-badge" title="Profile installs WP themes after provisioning">
+                WP themes
+              </span>
+            {% endif %}
           </div>
+          {% if !p.wp_plugins.is_empty() || !p.wp_themes.is_empty() %}
+          <div class="profile-meta" style="margin-top:0.35rem;color:var(--accent);font-weight:500">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:0.2rem"><polyline points="20 6 9 17 4 12"/></svg>
+            WordPress install is required for this profile
+          </div>
+          {% endif %}
         </div>
       </label>
       {% endfor %}
@@ -293,13 +324,27 @@
     </div><!-- /wizard-step 3 -->
 
     <div class="wizard-step" data-step="4" style="display:none">
-    {# Install WordPress on create — toggle reveals extra fields. #}
+    {# Install WordPress on create — toggle reveals extra fields.
+       Profile-driven mode: when the selected profile carries WP
+       plugins / themes, the profile picker's JS force-checks AND
+       disables this checkbox so the operator can't opt out (the
+       agent would silently fail to install the profile's plugins
+       on a non-WP hosting). #}
     <div class="card-section" id="wp-install-row" style="margin-top:1rem">
       <label class="field-checkbox" style="font-weight:600">
-        <input type="checkbox" name="install_wp" value="on"
+        <input type="checkbox" id="install-wp-checkbox" name="install_wp" value="on"
                onchange="document.getElementById('wp-fields').style.display=this.checked?'grid':'none';">
         Install WordPress on this hosting after provisioning
       </label>
+      <p id="install-wp-forced-notice"
+         style="display:none;margin:0.4rem 0 0;padding:0.55rem 0.75rem;
+                background:color-mix(in oklab, var(--accent) 8%, transparent);
+                border:1px solid color-mix(in oklab, var(--accent) 35%, transparent);
+                border-radius:6px;font-size:0.85rem;color:var(--text)">
+        <strong>Required by the selected profile.</strong> WordPress is installed automatically
+        so the profile's plugins and themes have somewhere to land. To skip the WP install
+        entirely, change the profile back to <em>None / custom</em> in step 1.
+      </p>
       <div id="wp-fields" style="display:none;grid-template-columns:1fr 1fr;gap:0.5rem;margin-top:0.6rem">
         <div class="field" style="margin:0">
           <label for="wp_admin_user">Admin username <span class="hint">leave blank for <code>admin</code></span></label>
@@ -439,6 +484,72 @@
   sel.addEventListener('change', applyMode);
   nameInput.addEventListener('input', renderPreview);
   applyMode();
+})();
+
+// Profile picker — selecting a card stamps profile_id and (when
+// the profile mandates WP) force-checks + locks the "Install
+// WordPress" toggle in step 4. JS is the UI side; post_create on
+// the server is the source of truth and also forces install_wp on
+// when the profile has WP content (so a hand-crafted POST can't
+// skip the install).
+(function () {
+  'use strict';
+  const profileIdField = document.getElementById('profile_id');
+  const cards = document.querySelectorAll('.profile-card');
+  if (!profileIdField || cards.length === 0) return;
+
+  const wpToggle = document.getElementById('install-wp-checkbox');
+  const wpForcedNotice = document.getElementById('install-wp-forced-notice');
+  const wpFields = document.getElementById('wp-fields');
+
+  function hasMeaningfulLines(s) {
+    if (!s) return false;
+    return s.split(/\r?\n/).some(raw => {
+      const line = raw.trim();
+      if (!line) return false;
+      if (line.startsWith('#') || line.startsWith(';')) return false;
+      return true;
+    });
+  }
+
+  function selectCard(card) {
+    cards.forEach(c => c.classList.remove('selected'));
+    card.classList.add('selected');
+    profileIdField.value = card.dataset.pid || '0';
+    const plugins = card.dataset.wpPlugins || '';
+    const themes = card.dataset.wpThemes || '';
+    const profileForcesWp = hasMeaningfulLines(plugins) || hasMeaningfulLines(themes);
+    if (!wpToggle) return;
+    if (profileForcesWp) {
+      // Force checked + locked. Operator can't uncheck without
+      // changing the profile selection (better UX than a silently-
+      // skipped plugin install).
+      wpToggle.checked = true;
+      wpToggle.disabled = true;
+      if (wpFields) wpFields.style.display = 'grid';
+      if (wpForcedNotice) wpForcedNotice.style.display = '';
+    } else {
+      wpToggle.disabled = false;
+      if (wpForcedNotice) wpForcedNotice.style.display = 'none';
+      // Don't auto-uncheck — operator may have ticked it manually.
+    }
+  }
+
+  cards.forEach(card => {
+    card.addEventListener('click', () => selectCard(card));
+    const radio = card.querySelector('input[type="radio"]');
+    if (radio) {
+      radio.addEventListener('change', () => {
+        if (radio.checked) selectCard(card);
+      });
+    }
+  });
+
+  // Initial sync from whatever's pre-selected (e.g. when the form
+  // re-renders after a server-side validation error and the
+  // operator's last choice is checked).
+  const initial = document.querySelector('.profile-card input[type="radio"]:checked');
+  if (initial) selectCard(initial.closest('.profile-card'));
 })();
 
 // Wizard step navigation. Without JS, all `.wizard-step` blocks
@@ -628,6 +739,15 @@
   padding: 0.05rem 0.35rem;
   font-size: 0.7rem;
   color: var(--text-dim);
+}
+/* WP badge on profile cards — visually distinct so the operator
+   sees AT A GLANCE that picking this profile triggers a WP
+   install. Accent-tinted instead of the muted limits chips. */
+.profile-card-body .profile-limits span.profile-wp-badge {
+  background: color-mix(in oklab, var(--accent) 14%, transparent);
+  border-color: color-mix(in oklab, var(--accent) 35%, transparent);
+  color: var(--accent);
+  font-weight: 600;
 }
 </style>
 

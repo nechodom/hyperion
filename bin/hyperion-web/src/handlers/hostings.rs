@@ -665,41 +665,53 @@ pub async fn post_create(
     .await?;
     match resp {
         RpcResponse::HostingCreate(mut created) => {
-            // Apply the wizard-selected profile before WP install so
-            // the WP-side plugin/theme list in the profile lands on
-            // a hosting that already has its limits stamped. Failure
-            // is logged + skipped — the hosting is live regardless.
-            if form.profile_id > 0 {
-                let apply = crate::dispatcher::dispatch_to_node(
-                    &state,
-                    target,
-                    Request::ProfileApply {
-                        sel: HostingSelector::Id(created.id.clone()),
-                        profile_id: form.profile_id,
-                    },
-                )
-                .await;
-                match apply {
-                    Ok(RpcResponse::ProfileApply(_)) => {}
-                    Ok(RpcResponse::Error(e)) => {
-                        tracing::warn!(profile_id=form.profile_id, error=%e, "profile apply failed");
-                    }
-                    Ok(_) => {
-                        tracing::warn!("profile apply: unexpected response");
-                    }
-                    Err(e) => {
-                        tracing::warn!(profile_id=form.profile_id, error=%e, "profile apply RPC failed");
-                    }
-                }
-            }
-            // Optional WordPress install — only when checkbox ticked,
-            // database is provisioned, and kind is php (no point
-            // installing WP on a static or reverse_proxy hosting).
-            let wp_was_requested = form.install_wp.eq_ignore_ascii_case("on") ||
+            // ──────────────────────────────────────────────────────
+            //  Profile-driven WP install detection.
+            //
+            //  When the operator picks a profile that includes WP
+            //  plugins or themes, profile_apply would try to install
+            //  them on a hosting that has no WordPress yet → every
+            //  plugin install would fail silently and the operator
+            //  would never see those plugins.
+            //
+            //  Fix: fetch the selected profile, check whether its
+            //  wp_plugins/wp_themes lists contain anything meaningful,
+            //  and if so:
+            //    1. Force WP install on (server-side enforcement —
+            //       even if the wizard's checkbox somehow wasn't set
+            //       to "on", e.g. operator hand-crafted a POST).
+            //    2. Defer profile_apply to AFTER the install so
+            //       plugins land on a real WP install.
+            //  Also synthesize sensible WP credentials when the
+            //  profile mandates WP but the operator didn't fill in
+            //  the WP form fields (admin_email defaults to
+            //  `admin@<domain>`, password is auto-generated and
+            //  shown on the success page).
+            // ──────────────────────────────────────────────────────
+            let selected_profile: Option<HostingProfile> = if form.profile_id > 0 {
+                fetch_all_profiles(&state).await.ok()
+                    .and_then(|profs| {
+                        profs.into_iter().find(|p| p.id == form.profile_id)
+                    })
+            } else {
+                None
+            };
+            let profile_forces_wp = selected_profile
+                .as_ref()
+                .is_some_and(|p| {
+                    profile_has_meaningful_wp_content(&p.wp_plugins)
+                        || profile_has_meaningful_wp_content(&p.wp_themes)
+                });
+            // Optional WordPress install — when the checkbox is ticked,
+            // OR a profile mandates it (plugins / themes in the
+            // profile), AND the hosting has a database AND it's a
+            // PHP kind (no WP on static / proxy / redirect).
+            let wp_form_checked = form.install_wp.eq_ignore_ascii_case("on") ||
                                    form.install_wp == "true" || form.install_wp == "1";
+            let wp_was_requested = wp_form_checked || profile_forces_wp;
             if wp_was_requested && created.db.is_some() && req.kind == "php" {
-                let admin_email = form.wp_admin_email.trim();
-                let admin_password = form.wp_admin_password.clone();
+                let admin_email_input = form.wp_admin_email.trim().to_string();
+                let admin_password_input = form.wp_admin_password.clone();
                 // Default "admin" preserves the previous behaviour
                 // for operators who leave the field blank, but
                 // explicit non-empty input wins.
@@ -708,6 +720,28 @@ pub async fn post_create(
                     "admin".to_string()
                 } else {
                     admin_user_raw.to_string()
+                };
+                // When the profile MANDATES WP install (plugins or
+                // themes in the profile), the operator may not have
+                // filled in the admin email / password fields — they
+                // were optional in the wizard's previous behaviour.
+                // Auto-synthesize sensible defaults rather than
+                // silently skipping the install:
+                //   - admin email: `admin@<domain>` (site owner can
+                //     change in wp-admin after first login)
+                //   - admin password: 24-char random, surfaced on
+                //     the post-create credentials card alongside the
+                //     DB password (operator must save it now — we
+                //     don't store the plaintext anywhere)
+                let admin_email = if admin_email_input.is_empty() && profile_forces_wp {
+                    format!("admin@{}", req.domain.as_str())
+                } else {
+                    admin_email_input
+                };
+                let admin_password = if admin_password_input.len() < 6 && profile_forces_wp {
+                    generate_wp_admin_password()
+                } else {
+                    admin_password_input
                 };
                 if admin_email.is_empty() || admin_password.len() < 6 {
                     // Don't fail the whole create — the hosting is
@@ -772,6 +806,38 @@ pub async fn post_create(
                             tracing::warn!(error=%e, "WP install failed");
                         }
                         _ => {}
+                    }
+                }
+            }
+
+            // Profile apply — AFTER the WP install so the profile's
+            // wp_plugins / wp_themes lists land on a hosting that
+            // actually has WordPress on it. Previously this ran
+            // BEFORE the install and every plugin failed silently
+            // because the agent's wp-cli call would hit a directory
+            // with no wp-config.php. Failure here is still logged +
+            // skipped — the hosting (and WP, if it was installed)
+            // are live regardless.
+            if form.profile_id > 0 {
+                let apply = crate::dispatcher::dispatch_to_node(
+                    &state,
+                    target,
+                    Request::ProfileApply {
+                        sel: HostingSelector::Id(created.id.clone()),
+                        profile_id: form.profile_id,
+                    },
+                )
+                .await;
+                match apply {
+                    Ok(RpcResponse::ProfileApply(_)) => {}
+                    Ok(RpcResponse::Error(e)) => {
+                        tracing::warn!(profile_id=form.profile_id, error=%e, "profile apply failed");
+                    }
+                    Ok(_) => {
+                        tracing::warn!("profile apply: unexpected response");
+                    }
+                    Err(e) => {
+                        tracing::warn!(profile_id=form.profile_id, error=%e, "profile apply RPC failed");
                     }
                 }
             }
@@ -2613,6 +2679,88 @@ pub fn parse_selector_public(s: &str) -> Result<HostingSelector, AppError> {
 /// Rules: 1..=60 chars, ASCII alphanumeric + `._@-`. No leading
 /// dash (looks like a CLI flag), no leading dot (hidden), no
 /// embedded whitespace.
+/// Does a profile's `wp_plugins` / `wp_themes` list contain at
+/// least one meaningful entry? Lines starting with `#` or `;` and
+/// blank lines are ignored (same parser semantics the agent uses).
+/// Returns `true` iff stripping comments+blanks leaves at least one
+/// non-empty token. Used by the wizard / post_create to decide
+/// whether the profile mandates a WP install.
+fn profile_has_meaningful_wp_content(list: &str) -> bool {
+    for raw in list.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with(';') {
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+/// Generate a 24-char WordPress admin password from a charset that
+/// avoids visually-ambiguous characters (no `0/O`, `1/l/I`) so the
+/// operator can read it off the credentials card without
+/// second-guessing. We use the OS's CSPRNG via `rand::thread_rng()`
+/// which is the same source used elsewhere in the codebase for
+/// generating DB passwords.
+fn generate_wp_admin_password() -> String {
+    use rand::Rng;
+    const CHARSET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ\
+                              abcdefghijkmnpqrstuvwxyz\
+                              23456789\
+                              !@#$%^&*-_=+";
+    let mut rng = rand::thread_rng();
+    (0..24)
+        .map(|_| {
+            let i = rng.gen_range(0..CHARSET.len());
+            CHARSET[i] as char
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod profile_helper_tests {
+    use super::{generate_wp_admin_password, profile_has_meaningful_wp_content};
+
+    #[test]
+    fn meaningful_wp_content_finds_plugins() {
+        assert!(profile_has_meaningful_wp_content("akismet"));
+        assert!(profile_has_meaningful_wp_content("yoast-seo!"));
+        assert!(profile_has_meaningful_wp_content("@asset:42"));
+        assert!(profile_has_meaningful_wp_content("  contact-form-7\n  classic-editor"));
+    }
+
+    #[test]
+    fn meaningful_wp_content_ignores_comments_and_blanks() {
+        assert!(!profile_has_meaningful_wp_content(""));
+        assert!(!profile_has_meaningful_wp_content("   "));
+        assert!(!profile_has_meaningful_wp_content("# header line"));
+        assert!(!profile_has_meaningful_wp_content("; another comment"));
+        assert!(!profile_has_meaningful_wp_content(
+            "# akismet\n\
+             ; yoast-seo\n\
+             \n"
+        ));
+    }
+
+    #[test]
+    fn meaningful_wp_content_mixed_still_truthy() {
+        assert!(profile_has_meaningful_wp_content(
+            "# Base set\nakismet\n# More:\nyoast-seo!\n"
+        ));
+    }
+
+    #[test]
+    fn generated_password_is_exactly_24_chars() {
+        for _ in 0..50 {
+            let p = generate_wp_admin_password();
+            assert_eq!(p.len(), 24, "password not 24 chars: {p:?}");
+            assert!(!p.chars().any(|c| c == '0' || c == 'O' || c == '1'
+                || c == 'l' || c == 'I'),
+                "password contains visually-ambiguous char: {p:?}");
+        }
+    }
+}
+
 fn is_valid_wp_username(s: &str) -> bool {
     if s.is_empty() || s.len() > 60 {
         return false;
