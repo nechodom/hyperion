@@ -421,6 +421,10 @@
                 data-confirm-body="The PHP-FPM pool for this site will be torn down and re-created on the chosen version. Expect a few hundred ms of 502s while the new pool starts. Persisted PHP limits (memory, max_children, etc.) carry over."
                 data-confirm-confirm-label="Switch"
                 data-confirm-variant="primary">
+            {# Session-wide CSRF token — the middleware accepts the same
+               session token for any path without a dedicated csrf_*
+               binding (same pattern as the access / acme-email forms). #}
+            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
             <input type="hidden" name="selector" value="{{ detail.domain }}">
             <input type="hidden" name="target_node"
                    value="{% if let Some(n) = detail.node_id %}{{ n }}{% endif %}">
