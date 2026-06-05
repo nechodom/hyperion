@@ -191,6 +191,29 @@ pub struct ClusterConfigView {
     /// control-plane-only node. Existing hostings on the master
     /// stay where they are; this only affects NEW creates.
     pub master_accepts_hostings: bool,
+
+    /// CSV of node ids that are TEST nodes — they host throwaway
+    /// staging sites, not production. Creating a hosting on a
+    /// test node forces the domain to follow `test_domain_template`
+    /// (so test sites can't squat real customer domains by
+    /// accident). Conversely, creating on a production node
+    /// refuses domains that match the test template.
+    #[serde(default)]
+    pub test_node_ids: String,
+
+    /// Template for auto-generated test-site domains. `{name}`
+    /// is the user-supplied short name and `{node}` is the
+    /// target node id. Default empty = test-node feature off.
+    /// Example: "test.{name}.{node}.testovaciverze.cz".
+    #[serde(default)]
+    pub test_domain_template: String,
+
+    /// When true, every WordPress install on a test node gets
+    /// `blog_public = 0` (Discourage search engines) so test
+    /// content never leaks into Google. Operator can still
+    /// flip it manually in the WP admin.
+    #[serde(default)]
+    pub test_wp_no_index: bool,
 }
 
 impl Default for ClusterConfigView {
@@ -199,7 +222,35 @@ impl Default for ClusterConfigView {
             // Permissive default = old behaviour. Operators
             // opt in to "control plane only" via the toggle.
             master_accepts_hostings: true,
+            test_node_ids: String::new(),
+            test_domain_template: String::new(),
+            test_wp_no_index: false,
         }
+    }
+}
+
+impl ClusterConfigView {
+    /// Is this node id flagged as a test node?
+    pub fn is_test_node(&self, node_id: &str) -> bool {
+        if self.test_node_ids.trim().is_empty() {
+            return false;
+        }
+        self.test_node_ids
+            .split(',')
+            .map(|s| s.trim())
+            .any(|s| !s.is_empty() && s == node_id)
+    }
+
+    /// Render the test domain for a given short name + node id.
+    /// Returns empty string when the template isn't configured.
+    pub fn render_test_domain(&self, name: &str, node_id: &str) -> String {
+        if self.test_domain_template.is_empty() {
+            return String::new();
+        }
+        self.test_domain_template
+            .replace("{name}", name.trim())
+            .replace("{node}", node_id.trim())
+            .to_ascii_lowercase()
     }
 }
 

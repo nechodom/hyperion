@@ -437,6 +437,57 @@
     </form>
   </div>
 
+  <div class="card" style="margin-top:1rem">
+    <h2 style="font-size:0.95rem;margin:0 0 0.6rem">
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+      Test nodes &amp; staging sites
+    </h2>
+    <p class="text-soft small" style="margin:0 0 0.8rem">
+      Designate certain nodes as <strong>test-only</strong>: hostings created there
+      get an auto-generated subdomain from a template you control, and you can
+      enforce that production domains never land on a test node (and vice versa).
+    </p>
+    <form method="post" action="/settings/config" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="cluster">
+
+      <div class="field">
+        <label for="test_node_ids">Test node IDs <span class="hint">comma-separated</span></label>
+        <input id="test_node_ids" name="test_node_ids" type="text" autocomplete="off"
+               value="{{ config.cluster.test_node_ids }}"
+               placeholder="stav, staging-1">
+        <p class="text-soft small" style="margin:0.3rem 0 0">
+          Use the node IDs shown on <a href="/install">/install</a>. Leave empty to disable the test-node feature entirely.
+        </p>
+      </div>
+
+      <div class="field">
+        <label for="test_domain_template">Auto-domain template</label>
+        <input id="test_domain_template" name="test_domain_template" type="text" autocomplete="off"
+               value="{{ config.cluster.test_domain_template }}"
+               placeholder="test.{name}.{node}.testovaciverze.cz">
+        <p class="text-soft small" style="margin:0.3rem 0 0">
+          Tokens: <code>{name}</code> = the short name the operator types on /hostings/new,
+          <code>{node}</code> = target node id. Result is lower-cased.
+          Example for <code>blog</code> on node <code>stav</code> with template
+          <code>test.{name}.{node}.testovaciverze.cz</code> → <code>test.blog.stav.testovaciverze.cz</code>.
+        </p>
+      </div>
+
+      <label class="field-checkbox" style="font-weight:600">
+        <input type="checkbox" name="test_wp_no_index" value="true"
+               {% if config.cluster.test_wp_no_index %}checked{% endif %}>
+        Discourage search engines for WP installs on test nodes
+      </label>
+      <p class="text-soft small" style="margin:0.3rem 0 0.8rem">
+        Sets <code>blog_public = 0</code> right after WP install on test nodes.
+        Operator can flip it later in WP admin → Reading.
+      </p>
+
+      <button type="submit" class="btn primary">Save test-node settings</button>
+    </form>
+  </div>
+
   <div class="card muted" style="margin-top:1rem">
     <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Multi-node tips</h2>
     <ul class="text-soft small" style="margin:0;padding-left:1.2rem;line-height:1.7">

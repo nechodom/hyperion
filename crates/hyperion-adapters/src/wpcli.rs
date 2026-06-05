@@ -215,7 +215,19 @@ pub async fn install_wordpress(
     let stdin = format!("{}\n", req.admin_password);
     cmd::run_with_stdin("/usr/bin/sudo", &install_argv_refs, stdin.as_bytes()).await?;
 
-    // 4. What core version did we end up with?
+    // 4. Optional: flip blog_public off when the caller asked for
+    // a no-index install (test-node WP preset). Best-effort —
+    // failure here doesn't roll back the install (the operator
+    // can flip it manually in WP admin → Reading).
+    if req.no_index {
+        let no_idx_args: [&str; 4] = ["option", "update", "blog_public", "0"];
+        let no_idx_argv = build_argv(user, htdocs, &no_idx_args);
+        if let Err(e) = cmd::run("/usr/bin/sudo", &argv_as_refs(&no_idx_argv)).await {
+            tracing::warn!(error = %e, "no_index post-install setting failed");
+        }
+    }
+
+    // 5. What core version did we end up with?
     let v_args: [&str; 2] = ["core", "version"];
     let v_argv = build_argv(user, htdocs, &v_args);
     let v = cmd::run("/usr/bin/sudo", &argv_as_refs(&v_argv)).await?;

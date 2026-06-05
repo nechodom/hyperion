@@ -29,6 +29,12 @@ pub struct WpInstallRequest {
     /// `latest` or a specific version like `6.5.3`.
     #[serde(default = "default_version")]
     pub version: String,
+    /// When true, the post-install runs `wp option update blog_public 0`
+    /// — flips the WP admin's "Discourage search engines from
+    /// indexing this site" toggle on. Set by the web layer for
+    /// hostings on test nodes when `cluster.test_wp_no_index` is on.
+    #[serde(default)]
+    pub no_index: bool,
 }
 
 fn default_locale() -> String {
@@ -211,6 +217,7 @@ mod tests {
             admin_password: "secret".into(),
             locale: "cs_CZ".into(),
             version: "6.5.3".into(),
+            no_index: false,
         };
         let s = serde_json::to_string(&r).expect("ser");
         let back: WpInstallRequest = serde_json::from_str(&s).expect("de");

@@ -8943,13 +8943,30 @@ fn read_cluster_section(
     let Ok(doc) = raw.parse::<toml_edit::DocumentMut>() else {
         return hyperion_types::ClusterConfigView::default();
     };
-    let accept = doc
-        .get("cluster")
+    let section = doc.get("cluster");
+    let accept = section
         .and_then(|s| s.get("master_accepts_hostings"))
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
+    let test_node_ids = section
+        .and_then(|s| s.get("test_node_ids"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let test_domain_template = section
+        .and_then(|s| s.get("test_domain_template"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let test_wp_no_index = section
+        .and_then(|s| s.get("test_wp_no_index"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     hyperion_types::ClusterConfigView {
         master_accepts_hostings: accept,
+        test_node_ids,
+        test_domain_template,
+        test_wp_no_index,
     }
 }
 
@@ -9005,8 +9022,12 @@ fn parse_agent_section_fields(
                 crate::config_persist::FieldValue::Int(parse_int(v)?)
             }
             // [cluster] — master web UI placement preferences
-            ("cluster", "master_accepts_hostings") => {
+            ("cluster", "master_accepts_hostings")
+            | ("cluster", "test_wp_no_index") => {
                 crate::config_persist::FieldValue::Bool(parse_bool(v)?)
+            }
+            ("cluster", "test_node_ids") | ("cluster", "test_domain_template") => {
+                crate::config_persist::FieldValue::Str(v.trim().to_string())
             }
             // Reject anything else.
             _ => {

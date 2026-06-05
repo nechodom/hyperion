@@ -144,7 +144,22 @@
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
       Domains
     </h2>
-    <div class="field">
+    {# Test-node short-name field — only meaningful when the target
+       is a test node + cluster.test_domain_template is set. JS
+       hides it when target is a prod node. Server validates anyway. #}
+    <div class="field test-only-field" id="test_site_name_field" style="display:none">
+      <label for="test_site_name">Test-site short name <span class="hint">letters / digits / dash, lowercase</span></label>
+      <input id="test_site_name" name="test_site_name" type="text"
+             value="" placeholder="blog" autocomplete="off"
+             pattern="[a-z0-9][a-z0-9-]{0,30}[a-z0-9]?" maxlength="32">
+      <p class="text-soft small" style="margin:0.3rem 0 0">
+        Final domain auto-fills below from the cluster template (see
+        Settings → Cluster → Test nodes).
+        <strong>Preview:</strong> <code id="test_domain_preview" style="color:var(--text-soft)">—</code>
+      </p>
+    </div>
+
+    <div class="field" id="domain_field">
       <label for="domain">Primary domain <span class="hint">root hostname, e.g. <code>example.com</code></span></label>
       <input id="domain" name="domain" type="text" required autofocus
              value="{{ domain_in|e }}" placeholder="example.com">
@@ -296,6 +311,59 @@
   }
   sel.addEventListener('change', refresh);
   refresh();
+})();
+
+// Test-node UX: swap "Primary domain" field for "Test-site short
+// name" when the operator picks a test node, and live-preview the
+// derived domain from the template.
+(function () {
+  'use strict';
+  {# `test_node_ids` is plain CSV from operator settings; `test_domain_template` is
+     a printf-ish template. Emit them as JS string literals via double-encoding
+     through .replace(). They never contain control chars (input validated). #}
+  const TEST_NODES = "{{ test_node_ids }}".split(',').map(s => s.trim()).filter(Boolean);
+  const TEMPLATE = "{{ test_domain_template }}";
+  if (TEST_NODES.length === 0 || !TEMPLATE) return;
+  const sel = document.getElementById('target_node');
+  const nameField = document.getElementById('test_site_name_field');
+  const domField = document.getElementById('domain_field');
+  const nameInput = document.getElementById('test_site_name');
+  const preview = document.getElementById('test_domain_preview');
+  const domInput = document.getElementById('domain');
+  if (!sel || !nameField || !domField || !nameInput) return;
+
+  function renderPreview() {
+    const v = (nameInput.value || '').toLowerCase().trim();
+    if (!v) { preview.textContent = '—'; return; }
+    const out = TEMPLATE.replace('{name}', v).replace('{node}', sel.value).toLowerCase();
+    preview.textContent = out;
+    // Mirror into the hidden domain field so server-side validation
+    // sees a non-empty value even if the operator never touched the
+    // domain row directly. The server-side test-node path takes
+    // `test_site_name` over `domain` anyway, but this keeps the
+    // ":required" client check happy.
+    domInput.value = out;
+  }
+
+  function applyMode() {
+    const isTest = TEST_NODES.includes(sel.value);
+    if (isTest) {
+      nameField.style.display = '';
+      domField.style.display = 'none';
+      // Make the short-name required + the domain non-required.
+      nameInput.required = true;
+      domInput.required = false;
+      renderPreview();
+    } else {
+      nameField.style.display = 'none';
+      domField.style.display = '';
+      nameInput.required = false;
+      domInput.required = true;
+    }
+  }
+  sel.addEventListener('change', applyMode);
+  nameInput.addEventListener('input', renderPreview);
+  applyMode();
 })();
 </script>
 

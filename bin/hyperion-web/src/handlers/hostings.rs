@@ -69,6 +69,13 @@ struct NewTpl<'a> {
     /// the Target-node dropdown — operator turned the master into
     /// a control-plane-only node via Settings → Cluster.
     master_accepts_hostings: bool,
+    /// CSV of node ids flagged as test-only. JS uses this to know
+    /// when to swap "Primary domain" for the "Test-site short name"
+    /// field + render a preview from the template.
+    test_node_ids: String,
+    /// Template for auto-generated test-site domains (e.g.
+    /// "test.{name}.{node}.testovaciverze.cz"). Empty = feature off.
+    test_domain_template: String,
 }
 
 /// Per-field append to `CreateForm` for the optional WP install
@@ -279,7 +286,8 @@ pub async fn get_new(State(state): State<SharedState>, ctx: AuthCtx) -> Result<R
     // Check the [cluster] section from agent.toml — master might be
     // set to control-plane-only, in which case we hide the master
     // option from the Target-node dropdown.
-    let master_accepts_hostings = fetch_master_accepts_hostings(&state).await;
+    let cluster_cfg = fetch_cluster_config(&state).await;
+    let master_accepts_hostings = cluster_cfg.master_accepts_hostings;
     let tpl = NewTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -297,6 +305,8 @@ pub async fn get_new(State(state): State<SharedState>, ctx: AuthCtx) -> Result<R
         nodes,
         target_node_in: String::new(),
         master_accepts_hostings,
+        test_node_ids: cluster_cfg.test_node_ids,
+        test_domain_template: cluster_cfg.test_domain_template,
     };
     // Browsers (and reverse proxies in front) can cache /hostings/new
     // by default. After an enrollment the dropdown should refresh on
@@ -352,6 +362,13 @@ pub struct CreateForm {
     /// anything else is a node_id from /install / NodesList.
     #[serde(default)]
     pub target_node: String,
+    /// Short site name for test-node hostings. When the target is
+    /// a test node + this is non-empty, the server renders the
+    /// final domain from `cluster.test_domain_template` and
+    /// IGNORES `domain` above. Pure UX field — production creates
+    /// leave it empty.
+    #[serde(default)]
+    pub test_site_name: String,
     /// "on" if the user checked the "install WordPress" checkbox.
     #[serde(default)]
     pub install_wp: String,
@@ -386,8 +403,98 @@ pub async fn post_create(
         return Err(AppError::Forbidden);
     }
     let csrf_token = super::session_csrf_token(&state, &ctx);
+
+    // ─── Test-node short-name expansion ─────────────────────────
+    // When the target is a test node + the operator filled the
+    // "Site name" field, we synthesize the final domain from the
+    // cluster template instead of using the free-form domain field.
+    // Production targets fall through unchanged.
+    let cluster_cfg = fetch_cluster_config(&state).await;
+    let mut effective_domain = form.domain.trim().to_string();
+    let target_is_test = !form.target_node.is_empty()
+        && form.target_node != crate::dispatcher::LOCAL_NODE_SENTINEL
+        && cluster_cfg.is_test_node(&form.target_node);
+    if target_is_test && !form.test_site_name.trim().is_empty() {
+        if cluster_cfg.test_domain_template.is_empty() {
+            return Ok(render_new_error(
+                &ctx,
+                &csrf_token,
+                &form,
+                "Target is a test node but Settings → Test nodes has no domain template. Set one first.",
+            ));
+        }
+        // Validate the short-name: lowercase alphanum + dash, no
+        // leading / trailing dash, ≤ 32 chars. Keeps the derived
+        // domain DNS-valid even with weird operator typos.
+        let name = form.test_site_name.trim().to_ascii_lowercase();
+        if name.is_empty() || name.len() > 32
+            || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+            || name.starts_with('-') || name.ends_with('-')
+        {
+            return Ok(render_new_error(
+                &ctx,
+                &csrf_token,
+                &form,
+                "Site name must be 1–32 chars of a–z 0–9 -, no leading/trailing dash.",
+            ));
+        }
+        effective_domain = cluster_cfg.render_test_domain(&name, &form.target_node);
+    } else if target_is_test && form.test_site_name.trim().is_empty() {
+        // Operator picked a test node but didn't fill the short-name
+        // field → enforce that the typed domain matches the template
+        // shape (e.g. ends in `.testovaciverze.cz`). Sniff the
+        // suffix from the template by stripping the `{name}.{node}.`
+        // prefix; rest is the enforced suffix.
+        if !cluster_cfg.test_domain_template.is_empty() {
+            let suffix = cluster_cfg
+                .test_domain_template
+                .rsplit_once('.')
+                .map(|(_, s)| format!(".{s}"))
+                .unwrap_or_default();
+            if !suffix.is_empty()
+                && !effective_domain
+                    .to_ascii_lowercase()
+                    .ends_with(&suffix.to_ascii_lowercase())
+            {
+                return Ok(render_new_error(
+                    &ctx,
+                    &csrf_token,
+                    &form,
+                    &format!(
+                        "Test-node hostings must end with `{suffix}` (per Settings → Test nodes). \
+                         Either pick a production node, fill the short Site name field, or \
+                         change the typed domain."
+                    ),
+                ));
+            }
+        }
+    } else if !target_is_test && !cluster_cfg.test_domain_template.is_empty() {
+        // Production target: refuse domains that match the test
+        // template — operator probably mis-routed.
+        let suffix = cluster_cfg
+            .test_domain_template
+            .rsplit_once('.')
+            .map(|(_, s)| format!(".{s}"))
+            .unwrap_or_default();
+        if !suffix.is_empty()
+            && effective_domain
+                .to_ascii_lowercase()
+                .ends_with(&suffix.to_ascii_lowercase())
+        {
+            return Ok(render_new_error(
+                &ctx,
+                &csrf_token,
+                &form,
+                &format!(
+                    "Domain ends with `{suffix}` which is reserved for test nodes. \
+                     Either pick a test node or use a different domain."
+                ),
+            ));
+        }
+    }
+
     // Parse inputs; render the form with an error if anything is malformed.
-    let domain = match Domain::parse(form.domain.trim()) {
+    let domain = match Domain::parse(&effective_domain) {
         Ok(d) => d,
         Err(e) => return Ok(render_new_error(&ctx, &csrf_token, &form, &e.to_string())),
     };
@@ -565,6 +672,9 @@ pub async fn post_create(
                         form.wp_locale.trim().to_string()
                     };
                     let site_url = format!("https://{}", req.domain.as_str());
+                    // Auto-enable WP no-index on test-node WP installs when
+                    // the operator turned it on in Settings → Test nodes.
+                    let no_index = target_is_test && cluster_cfg.test_wp_no_index;
                     let wp_req = hyperion_types::WpInstallRequest {
                         site_url: site_url.clone(),
                         title,
@@ -573,6 +683,7 @@ pub async fn post_create(
                         admin_password: admin_password.clone(),
                         locale,
                         version: "latest".to_string(),
+                        no_index,
                     };
                     let install_resp = crate::dispatcher::dispatch_to_node(
                         &state,
@@ -1371,6 +1482,10 @@ pub async fn post_wp_install(
         admin_password: form.admin_password,
         locale,
         version,
+        // Stand-alone WP install (existing hosting, not part of
+        // create flow) — leave no_index off; operator can flip
+        // it later in WP admin.
+        no_index: false,
     };
     let resp =
         hyperion_rpc_client::call(&state.agent_socket, Request::WpInstall { sel, req }).await?;
@@ -2408,6 +2523,15 @@ fn render_new_error<'a>(
         // Same reasoning — preserve the operator-set value on
         // re-render. Defaulting to true keeps backward-compat.
         master_accepts_hostings: true,
+        // Re-render skips the agent call; if the operator picked a
+        // test node, the JS will still hide/show the right fields
+        // because it reads from the `data-test-nodes` attribute on
+        // the dropdown (rendered straight from `test_node_ids`).
+        // Empty here means: don't fight with the operator's typed
+        // value — they're fixing a validation error, not switching
+        // node types.
+        test_node_ids: String::new(),
+        test_domain_template: String::new(),
     };
     Html(
         tpl.render()
@@ -2440,6 +2564,19 @@ async fn fetch_master_accepts_hostings(state: &SharedState) -> bool {
     match hyperion_rpc_client::call(&state.agent_socket, Request::AgentConfigView).await {
         Ok(RpcResponse::AgentConfigView(c)) => c.cluster.master_accepts_hostings,
         _ => true,
+    }
+}
+
+/// Fetch the full cluster config block — used by post_create to
+/// evaluate test-node placement rules. Returns the default
+/// (permissive) view on any RPC failure so a misconfigured agent
+/// doesn't deadlock the create form.
+pub(crate) async fn fetch_cluster_config(
+    state: &SharedState,
+) -> hyperion_types::ClusterConfigView {
+    match hyperion_rpc_client::call(&state.agent_socket, Request::AgentConfigView).await {
+        Ok(RpcResponse::AgentConfigView(c)) => c.cluster,
+        _ => hyperion_types::ClusterConfigView::default(),
     }
 }
 
