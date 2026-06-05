@@ -55,6 +55,15 @@ pub enum Request {
         reason: SuspendReason,
     },
     HostingResume(HostingSelector),
+    /// Change a hosting's PHP runtime version. The agent will tear
+    /// down the old FPM pool, persist the new version, bring up the
+    /// new pool, re-apply per-hosting PHP limits, and rewrite the
+    /// nginx vhost so fastcgi_pass points at the new socket. Fails
+    /// if the hosting isn't PHP-kind or is suspended/deleting.
+    HostingSetPhpVersion {
+        sel: HostingSelector,
+        version: hyperion_types::PhpVersion,
+    },
     TrashList,
     TrashRestore(HostingSelector),
     TrashPurge(HostingSelector),
@@ -629,6 +638,9 @@ pub enum Response {
     HostingGetLimits(HostingLimits),
     HostingSuspend,
     HostingResume,
+    /// Echoes the new (or already-current, on no-op) PHP version
+    /// so the caller's UI flash can confirm.
+    HostingSetPhpVersion(hyperion_types::PhpVersion),
     TrashList(Vec<hyperion_types::TrashEntry>),
     TrashRestore,
     TrashPurge,

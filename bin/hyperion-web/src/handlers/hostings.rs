@@ -227,6 +227,14 @@ struct DetailTpl<'a> {
     wp_extras_flash: bool,
     /// Set when set_wp_debug / set_redis returned an error — banner.
     wp_extras_error: Option<String>,
+    /// All PHP versions Hyperion knows about — drives the "Change
+    /// PHP version" dropdown on the PHP row. We pass the full set
+    /// (8.1 → 8.4) and let the agent reject a version whose FPM
+    /// service isn't installed; that error path is fine because
+    /// the operator can install it from /services first. Owned
+    /// `String` (not `&str`) so the askama template can compare
+    /// directly against `v.as_str()` without a deref dance.
+    php_options: Vec<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -870,6 +878,7 @@ pub async fn post_create(
                 csrf_wp_redis_rotate: csrf_token_for(&state, &ctx, "/hostings/wp/redis/rotate"),
                 wp_extras_flash: false,
                 wp_extras_error: None,
+                php_options: PHP_VERSION_OPTIONS.iter().map(|s| s.to_string()).collect(),
             };
             Ok(Html(tpl.render()?).into_response())
         }
@@ -882,6 +891,12 @@ pub async fn post_create(
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }
+
+/// Every PHP version the panel knows how to provision. Drives the
+/// PHP-version dropdown on the hosting detail page. Lives here
+/// (not in hyperion-types::PhpVersion::all()) so the UI list can
+/// be reordered / filtered without touching the type definition.
+const PHP_VERSION_OPTIONS: &[&str] = &["8.1", "8.2", "8.3", "8.4"];
 
 pub async fn get_detail(
     State(state): State<SharedState>,
@@ -1253,6 +1268,7 @@ pub async fn get_detail(
         csrf_wp_redis_rotate: csrf_token_for(&state, &ctx, "/hostings/wp/redis/rotate"),
         wp_extras_flash: q.wp_extras_saved.as_deref() == Some("1"),
         wp_extras_error: q.wp_extras_error,
+        php_options: PHP_VERSION_OPTIONS.iter().map(|s| s.to_string()).collect(),
     };
     Ok(Html(tpl.render()?).into_response())
 }
@@ -2127,6 +2143,54 @@ pub async fn post_set_acme_email(
         RpcResponse::SetHostingAcmeEmail => {
             Ok(Redirect::to(&format!("/hostings/{}", urlencoding(&form.selector))).into_response())
         }
+        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct SetPhpVersionForm {
+    pub selector: String,
+    /// One of "8.1", "8.2", "8.3", "8.4". Anything else returns 400.
+    pub php_version: String,
+    /// Optional target-node hint; honours the dispatcher's
+    /// local/remote routing the same way every other POST does.
+    #[serde(default)]
+    pub target_node: String,
+}
+
+/// POST /hostings/set-php-version — flip an existing hosting's PHP
+/// runtime version. The agent does the FPM teardown + bring-up +
+/// vhost rewrite atomically; on success we redirect back to the
+/// hosting detail with a success flash on the PHP card.
+pub async fn post_set_php_version(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<SetPhpVersionForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let version: hyperion_types::PhpVersion = form
+        .php_version
+        .trim()
+        .parse()
+        .map_err(|e: String| AppError::BadRequest(format!("php_version: {e}")))?;
+    let target = node_target(&form.target_node);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target,
+        Request::HostingSetPhpVersion { sel, version },
+    )
+    .await?;
+    match resp {
+        RpcResponse::HostingSetPhpVersion(v) => Ok(Redirect::to(&format!(
+            "/hostings/{}?flash=PHP+version+switched+to+{}",
+            urlencoding(&form.selector),
+            v
+        ))
+        .into_response()),
         RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
         _ => Err(AppError::Internal("unexpected response".into())),
     }

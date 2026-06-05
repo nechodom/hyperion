@@ -153,6 +153,14 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.resume(sel).await
     }
 
+    async fn hosting_set_php_version(
+        &self,
+        sel: HostingSelector,
+        version: hyperion_types::PhpVersion,
+    ) -> Result<hyperion_types::PhpVersion, RpcError> {
+        self.svc.set_php_version(sel, version).await
+    }
+
     async fn trash_list(&self) -> Result<Vec<hyperion_types::TrashEntry>, RpcError> {
         self.svc.list_trash().await
     }

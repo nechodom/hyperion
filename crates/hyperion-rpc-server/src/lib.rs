@@ -117,6 +117,12 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(_) => Response::HostingResume,
             Err(e) => Response::Error(e),
         },
+        Request::HostingSetPhpVersion { sel, version } => {
+            match api.hosting_set_php_version(sel, version).await {
+                Ok(v) => Response::HostingSetPhpVersion(v),
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::TrashList => match api.trash_list().await {
             Ok(v) => Response::TrashList(v),
             Err(e) => Response::Error(e),
@@ -854,6 +860,13 @@ mod tests {
         }
         async fn hosting_resume(&self, _: HostingSelector) -> Result<(), RpcError> {
             Ok(())
+        }
+        async fn hosting_set_php_version(
+            &self,
+            _: HostingSelector,
+            v: hyperion_types::PhpVersion,
+        ) -> Result<hyperion_types::PhpVersion, RpcError> {
+            Ok(v)
         }
         async fn trash_list(&self) -> Result<Vec<hyperion_types::TrashEntry>, RpcError> {
             Ok(vec![])

@@ -703,6 +703,27 @@ pub async fn set_acme_contact_email(
     Ok(r.rows_affected())
 }
 
+/// Update the hosting's `php_version` column. `None` means "drop
+/// PHP, become a static site" — we accept it but the service layer
+/// rejects it (static-vs-PHP is a kind change handled elsewhere) so
+/// the DB level stays permissive.
+pub async fn set_php_version(
+    pool: &SqlitePool,
+    id: &HostingId,
+    php_version: Option<PhpVersion>,
+    now: i64,
+) -> Result<u64, StateError> {
+    let r = sqlx::query(
+        "UPDATE hostings SET php_version = ?, updated_at = ? WHERE id = ?",
+    )
+    .bind(php_version.map(|v| v.as_str()))
+    .bind(now)
+    .bind(id.as_str())
+    .execute(pool)
+    .await?;
+    Ok(r.rows_affected())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -749,6 +770,41 @@ mod tests {
         let id2 = HostingId::new_v7();
         let r = insert(&pool, &id2, "example.cz", suid, None, "/y", 2, None).await;
         assert!(r.is_err(), "duplicate domain must fail");
+    }
+
+    #[tokio::test]
+    async fn set_php_version_round_trip() {
+        let pool = open_memory().await.expect("open");
+        let suid = fresh_user(&pool, "ex_cz", 1042).await;
+        let id = HostingId::new_v7();
+        insert(
+            &pool,
+            &id,
+            "example.cz",
+            suid,
+            Some(PhpVersion::V8_3),
+            "/x",
+            1,
+            None,
+        )
+        .await
+        .expect("insert");
+
+        // Switch to 8.4.
+        let n = set_php_version(&pool, &id, Some(PhpVersion::V8_4), 100)
+            .await
+            .expect("update");
+        assert_eq!(n, 1, "should update exactly one row");
+        let got = get_by_id(&pool, &id).await.expect("get").expect("present");
+        assert_eq!(got.php_version, Some(PhpVersion::V8_4));
+        assert_eq!(got.updated_at, 100, "updated_at should be refreshed");
+
+        // Setting to None is accepted at the DB level (service layer
+        // is what blocks it).
+        let n = set_php_version(&pool, &id, None, 200).await.expect("clear");
+        assert_eq!(n, 1);
+        let got = get_by_id(&pool, &id).await.expect("get").expect("present");
+        assert_eq!(got.php_version, None);
     }
 
     #[tokio::test]

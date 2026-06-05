@@ -51,6 +51,10 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::hostings::post_set_limits),
         )
         .route(
+            "/hostings/set-php-version",
+            post(handlers::hostings::post_set_php_version),
+        )
+        .route(
             "/hostings/acme-email",
             post(handlers::hostings::post_set_acme_email),
         )

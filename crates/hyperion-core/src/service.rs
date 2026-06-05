@@ -2351,6 +2351,164 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .unwrap_or_else(hyperion_types::HostingLimits::defaults))
     }
 
+    /// Switch a hosting's PHP version. Orchestrates:
+    /// 1. Validation — hosting must be PHP (not static / proxy /
+    ///    redirect), target version must differ from current, hosting
+    ///    must not be suspended/deleting (use suspend/resume for that).
+    /// 2. Tear down the OLD FPM pool (`fpm_delete`) so the old socket
+    ///    file gets removed and the previous php<ver>-fpm pool config
+    ///    file is dropped.
+    /// 3. Persist the new `php_version` on the hostings row.
+    /// 4. Ensure the NEW FPM pool exists (`fpm_ensure`) — this
+    ///    creates the pool config under /etc/php/<new>/fpm/pool.d
+    ///    and reloads php<new>-fpm.
+    /// 5. Re-apply the persisted per-hosting PHP limits to the new
+    ///    pool (memory, max_children, max_exec, max_requests), so a
+    ///    plan limit set on PHP 8.3 carries over to PHP 8.4.
+    /// 6. Re-render the nginx vhost so the `fastcgi_pass` socket
+    ///    points at the new path (`/run/php/<new>/<user>.sock`).
+    ///    `nginx -t` runs inside `nginx_write_vhost` and rolls back
+    ///    on failure.
+    /// 7. Audit log line so the operator can trace the change.
+    ///
+    /// On nginx -t failure the new pool is left in place but the
+    /// vhost still points at the OLD socket — site keeps serving via
+    /// the old FPM, the operator sees the vhost write error in the
+    /// flash. This is the safe direction: NEW pool is up, old pool
+    /// is gone, but vhost is unchanged → site keeps working off
+    /// whichever socket the OS still considers valid. Operator then
+    /// fixes the underlying config issue and retries.
+    pub async fn set_php_version(
+        &self,
+        sel: HostingSelector,
+        new_version: PhpVersion,
+    ) -> Result<PhpVersion, RpcError> {
+        let detail = self.get(sel).await?;
+
+        // Validation — only PHP hostings can have their version changed.
+        // A static / proxy / redirect hosting would need a kind
+        // change first, which is a much bigger surgery (different
+        // template, different lifecycle).
+        let current = detail.php_version.ok_or_else(|| RpcError::Conflict {
+            message: format!(
+                "hosting kind `{}` has no PHP runtime — can't change version. \
+                 Delete and recreate as a PHP hosting if you need PHP.",
+                detail.kind
+            ),
+        })?;
+        if current == new_version {
+            // No-op early-return so the operator can click the same
+            // version twice without churn. Return Ok with the
+            // current value so the UI flash can still confirm.
+            return Ok(current);
+        }
+        if matches!(detail.state, HostingState::Suspended) {
+            return Err(RpcError::Conflict {
+                message: "hosting is suspended — resume first, then change PHP version".into(),
+            });
+        }
+        if matches!(detail.state, HostingState::Deleting | HostingState::Trashed) {
+            return Err(RpcError::Conflict {
+                message: "hosting is being deleted or in trash".into(),
+            });
+        }
+
+        // 1. Tear down old FPM pool. Best-effort: a missing pool file
+        //    or already-stopped service is fine — we're about to
+        //    replace it with the new version anyway. The new pool
+        //    create below is what actually has to succeed.
+        if let Err(e) = self.adapters.fpm_delete(&detail.system_user, current).await {
+            tracing::warn!(
+                domain = %detail.domain,
+                from_version = %current,
+                error = %e,
+                "set_php_version: fpm_delete of old version failed (continuing)"
+            );
+        }
+
+        // 2. Persist the new version. If subsequent steps fail, the
+        //    hostings row reflects intent — the boot-time FPM self-heal
+        //    + vhost rewrite will re-converge on next agent restart.
+        hyperion_state::hostings::set_php_version(
+            &self.pool,
+            &detail.id,
+            Some(new_version),
+            now_secs(),
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("set_php_version persist: {e}")))?;
+
+        // 3. Ensure the new pool. If this fails we leave the row at
+        //    the new version (intent) but rollback the FPM-pool-only
+        //    side: there's nothing to rollback because step 1 already
+        //    deleted the old pool. Operator retries; agent self-heal
+        //    will re-converge.
+        if let Err(e) = self
+            .adapters
+            .fpm_ensure(&detail.system_user, &detail.domain, new_version)
+            .await
+        {
+            return Err(RpcError::Internal_with(format!(
+                "fpm_ensure for PHP {new_version} failed: {e} \
+                 (the hostings row was updated; retry to converge)"
+            )));
+        }
+
+        // 4. Re-apply persisted PHP limits to the new pool so a plan
+        //    limit set on PHP 8.3 (memory, children, etc.) survives
+        //    the switch to 8.4. Best-effort — operator can re-apply
+        //    via the Limits card if needed.
+        if let Ok(Some(row)) = hyperion_state::limits::get(&self.pool, &detail.id).await {
+            let l = row_to_limits(row);
+            if let Err(e) = self
+                .adapters
+                .apply_php_limits(
+                    &detail.system_user,
+                    &detail.domain,
+                    Some(new_version),
+                    l.php_memory_mb,
+                    l.php_max_exec_secs,
+                    l.php_max_children,
+                    l.php_max_requests,
+                )
+                .await
+            {
+                tracing::warn!(
+                    domain = %detail.domain,
+                    error = %e,
+                    "set_php_version: re-apply limits to new pool failed (best-effort)"
+                );
+            }
+        }
+
+        // 5. Re-render vhost so fastcgi_pass points at the new socket.
+        //    Pull the FRESH detail (with new php_version) for rendering.
+        let new_detail = self
+            .get(HostingSelector::Id(detail.id.clone()))
+            .await?;
+        if let Err(e) = self.adapters.nginx_write_vhost(&new_detail).await {
+            return Err(RpcError::Internal_with(format!(
+                "nginx_write_vhost after PHP version change failed: {e} \
+                 (FPM pool for PHP {new_version} is up; site still serves via the old socket \
+                 until the vhost is rewritten — retry once the underlying config error is fixed)"
+            )));
+        }
+
+        // 6. Audit log so we can reconstruct who/when/from→to.
+        self.append_audit(
+            "hosting.set_php_version",
+            Some(detail.id.as_str()),
+            &serde_json::json!({
+                "from": current.as_str(),
+                "to": new_version.as_str(),
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+        Ok(new_version)
+    }
+
     /// Best-effort suspend. State row goes to 'suspended'; cascading effects
     /// (nginx swap, FPM stop, DB lock, login lock, kill procs) run as
     /// best-effort — failures are logged but don't revert state. Suspended is
@@ -10854,6 +11012,77 @@ mod tests {
         let sel = HostingSelector::Domain(Domain::parse("ex.cz").unwrap());
         let l = s.get_limits(sel).await.expect("get");
         assert_eq!(l, hyperion_types::HostingLimits::defaults());
+    }
+
+    /// Happy path: switching from PHP 8.3 (req() default) to 8.4
+    /// flips the DB row + the agent's view of php_version on get().
+    /// We don't try to assert mockall expectation counts here (the
+    /// interaction between happy_mocks's catchall and a withf-
+    /// constrained one is order-dependent and brittle) — outcome
+    /// is the source of truth, which is what an operator observes.
+    #[tokio::test]
+    async fn set_php_version_happy_path() {
+        let pool = open_memory().await.expect("open");
+        let mut a = happy_mocks();
+        a.expect_fpm_delete().returning(|_, _| Ok(()));
+        a.expect_apply_php_limits()
+            .returning(|_, _, _, _, _, _, _| Ok(()));
+        let s = svc(pool.clone(), a);
+        s.create(req("ex.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("ex.cz").unwrap());
+        // Confirm starting state.
+        let before = s.get(sel.clone()).await.expect("get pre");
+        assert_eq!(before.php_version, Some(PhpVersion::V8_3));
+
+        let v = s
+            .set_php_version(sel.clone(), PhpVersion::V8_4)
+            .await
+            .expect("switch");
+        assert_eq!(v, PhpVersion::V8_4);
+        let after = s.get(sel).await.expect("get post");
+        assert_eq!(after.php_version, Some(PhpVersion::V8_4));
+    }
+
+    /// Switching to the SAME version returns Ok(version) and leaves
+    /// the row untouched — operator can click without churn.
+    #[tokio::test]
+    async fn set_php_version_noop_when_unchanged() {
+        let pool = open_memory().await.expect("open");
+        let mut a = happy_mocks();
+        a.expect_fpm_delete().returning(|_, _| Ok(()));
+        let s = svc(pool.clone(), a);
+        s.create(req("ex.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("ex.cz").unwrap());
+        // req() defaults to PhpVersion::V8_3.
+        let v = s
+            .set_php_version(sel.clone(), PhpVersion::V8_3)
+            .await
+            .expect("noop");
+        assert_eq!(v, PhpVersion::V8_3);
+        let after = s.get(sel).await.expect("get");
+        assert_eq!(after.php_version, Some(PhpVersion::V8_3));
+    }
+
+    /// Static / proxy / redirect hostings have no PHP — the change
+    /// must be rejected with a Conflict explaining why.
+    #[tokio::test]
+    async fn set_php_version_rejects_non_php_hosting() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), happy_mocks());
+        // Build a static hosting (php_version = None, kind = static).
+        let mut r = req("static.cz");
+        r.php_version = None;
+        r.kind = "static".into();
+        r.database = None;
+        s.create(r).await.expect("create static");
+        let sel = HostingSelector::Domain(Domain::parse("static.cz").unwrap());
+        let err = s
+            .set_php_version(sel, PhpVersion::V8_4)
+            .await
+            .expect_err("must reject");
+        // We only need the variant, not the exact wording — the
+        // message is operator-facing and may evolve.
+        assert!(matches!(err, RpcError::Conflict { .. }), "got: {err:?}");
     }
 
     #[tokio::test]

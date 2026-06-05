@@ -35,6 +35,17 @@ pub trait AgentApi: Send + Sync + 'static {
         reason: SuspendReason,
     ) -> Result<(), RpcError>;
     async fn hosting_resume(&self, sel: HostingSelector) -> Result<(), RpcError>;
+    /// Change the PHP version of an existing PHP hosting. Tears
+    /// down the old FPM pool, brings up the new one, re-applies
+    /// persisted limits, and rewrites the nginx vhost to point at
+    /// the new socket. Errors when the hosting is not PHP-kind,
+    /// suspended, deleting, or when the new version equals the
+    /// current (treated as no-op).
+    async fn hosting_set_php_version(
+        &self,
+        sel: HostingSelector,
+        version: hyperion_types::PhpVersion,
+    ) -> Result<hyperion_types::PhpVersion, RpcError>;
 
     /// /trash page: list every trashed hosting on this node with
     /// seconds-remaining until GC.

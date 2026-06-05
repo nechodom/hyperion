@@ -407,7 +407,41 @@
     <dt>System user</dt><dd><code>{{ detail.system_user }}</code></dd>
     <dt>Document root</dt><dd><code>{{ detail.root_dir }}</code></dd>
     <dt>PHP</dt>
-    <dd>{% if let Some(v) = detail.php_version %}<span class="tag">PHP {{ v }}</span>{% else %}<span class="text-soft">static (no PHP)</span>{% endif %}</dd>
+    <dd>
+      {% if let Some(v) = detail.php_version %}
+        <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap">
+          <span class="tag" id="php-current-tag">PHP {{ v }}</span>
+          {# Inline change form — only shown to operators with manage
+             rights (server-side enforced anyway). Static / proxy /
+             redirect hostings don't get the form because there's no
+             PHP to switch. #}
+          <form method="post" action="/hostings/set-php-version"
+                style="display:inline-flex;gap:0.4rem;align-items:center;margin:0"
+                data-confirm-title="Change PHP version"
+                data-confirm-body="The PHP-FPM pool for this site will be torn down and re-created on the chosen version. Expect a few hundred ms of 502s while the new pool starts. Persisted PHP limits (memory, max_children, etc.) carry over."
+                data-confirm-confirm-label="Switch"
+                data-confirm-variant="primary">
+            <input type="hidden" name="selector" value="{{ detail.domain }}">
+            <input type="hidden" name="target_node"
+                   value="{% if let Some(n) = detail.node_id %}{{ n }}{% endif %}">
+            <select name="php_version" aria-label="New PHP version"
+                    style="padding:0.25rem 0.5rem;font-size:0.85rem">
+              {%- for opt in php_options %}
+              <option value="{{ opt }}"{% if opt == v.as_str() %} selected{% endif %}>
+                PHP {{ opt }}{% if opt == v.as_str() %} (current){% endif %}
+              </option>
+              {%- endfor %}
+            </select>
+            <button type="submit" class="btn small">Switch</button>
+          </form>
+        </div>
+        <div class="muted" style="font-size:0.78rem;margin-top:0.35rem">
+          Socket: <code style="font-size:inherit">/run/php/{{ v }}/{{ detail.system_user }}.sock</code>
+        </div>
+      {% else %}
+        <span class="text-soft">static (no PHP)</span>
+      {% endif %}
+    </dd>
     {% if !detail.aliases.is_empty() %}
     <dt>Aliases</dt><dd>{{ detail.aliases.join(", ") }}</dd>
     {% endif %}

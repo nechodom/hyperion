@@ -408,6 +408,7 @@ fn print_pretty(resp: &Response) {
         }
         Response::HostingSuspend => println!("✓ suspended"),
         Response::HostingResume => println!("✓ resumed"),
+        Response::HostingSetPhpVersion(v) => println!("✓ PHP version set to {v}"),
         Response::TrashList(entries) => {
             println!("{:<32} {:<14} {:<14} NODE", "DOMAIN", "TRASHED_AT", "PURGE_IN");
             for e in entries.iter() {
