@@ -241,13 +241,21 @@ pub async fn install_wordpress(
 /// wp-cli plugin slug pattern. Plugin folder names on wordpress.org are
 /// `[a-z0-9-]+` (no underscores, no caps). We accept underscores too
 /// because a handful of older premium plugins use them.
-static SLUG_RX: once_cell::sync::Lazy<regex::Regex> =
-    once_cell::sync::Lazy::new(|| regex::Regex::new(r"^[a-zA-Z0-9_\-]{1,80}$").expect("rx"));
+///
+/// `.expect_used` lint is denied crate-wide; for a hardcoded regex
+/// the only way it can fail is a compile-time bug in the literal
+/// itself — which would surface in the locale_regex_* tests below.
+/// `unwrap_or_else(|_| unreachable!(...))` documents that intent.
+static SLUG_RX: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
+    regex::Regex::new(r"^[a-zA-Z0-9_\-]{1,80}$")
+        .unwrap_or_else(|e| panic!("BUG: SLUG_RX failed to compile: {e}"))
+});
 
 /// HTTP URL pattern for `wp plugin install <url>`. Bounded length; no
 /// embedded credentials; scheme http/https only.
 static URL_RX: once_cell::sync::Lazy<regex::Regex> = once_cell::sync::Lazy::new(|| {
-    regex::Regex::new(r"^https?://[A-Za-z0-9_\-./%~=&?+:]{1,512}$").expect("rx")
+    regex::Regex::new(r"^https?://[A-Za-z0-9_\-./%~=&?+:]{1,512}$")
+        .unwrap_or_else(|e| panic!("BUG: URL_RX failed to compile: {e}"))
 });
 
 /// Validate a plugin slug. Used at the boundary before `wp` argv build.

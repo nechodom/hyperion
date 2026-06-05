@@ -2621,6 +2621,80 @@ hr.divider {
   td a, td button { padding: 0.25rem 0.4rem; margin: -0.25rem -0.4rem; }
 }
 
+/* ────────────────────────────────────────────────────────────────
+ *  ADDITIONAL MOBILE POLISH (≤ 760 / ≤ 480)
+ *  Targets specific pain points reported on phones:
+ *  - KPI tiles wrapping awkwardly
+ *  - cols-2 / cols-3 grids overflowing
+ *  - Tabs bar squeezing icons + labels off-screen
+ *  - Page-header actions running off the edge
+ *  - "spread" rows wrapping but not stacking cleanly
+ *  - Filter chips on list pages stretching off-screen
+ * ──────────────────────────────────────────────────────────────── */
+@media (max-width: 760px) {
+  .grid.cols-2,
+  .grid.cols-3 { grid-template-columns: 1fr; }
+
+  /* KPI tiles: 2-up on tablets, 1-up on phones (handled below). */
+  .kpi-grid { grid-template-columns: 1fr 1fr; gap: 0.6rem; }
+  .kpi-card { padding: 0.7rem 0.85rem; }
+  .kpi-value { font-size: 1.3rem !important; }
+  .kpi-label { font-size: 0.72rem; }
+
+  /* "spread" rows (title + secondary control) wrap; align both
+     halves at start so the secondary doesn't jam against the title. */
+  .spread { flex-wrap: wrap; gap: 0.4rem; align-items: flex-start; }
+
+  /* Filter chips on /hostings list — let them wrap + shrink padding. */
+  .filter-chips { flex-wrap: wrap; gap: 0.3rem; }
+  .filter-chips .chip { font-size: 0.78rem; padding: 0.25rem 0.55rem; }
+
+  /* dl.kv: stack key over value instead of side-by-side which
+     starts wrapping into single chars at narrow widths. */
+  dl.kv {
+    grid-template-columns: 1fr;
+    gap: 0.3rem 0;
+  }
+  dl.kv dt { padding-top: 0.3rem; opacity: 0.7; }
+}
+
+@media (max-width: 480px) {
+  .kpi-grid { grid-template-columns: 1fr; gap: 0.5rem; }
+  .kpi-card { padding: 0.6rem 0.75rem; }
+  .kpi-value { font-size: 1.15rem !important; }
+
+  /* Page header h1 + subtitle stack tighter so the actions row
+     doesn't push them off-screen at 360 px. */
+  .page-header h1 { font-size: 1.15rem; }
+  .page-header .subtitle { font-size: 0.78rem; line-height: 1.35; }
+
+  /* Tabs: keep them swipeable horizontally but tighter. */
+  .tabs { padding: 0.2rem; gap: 0; margin-bottom: 0.6rem; }
+  .tab { padding: 0.4rem 0.5rem; font-size: 0.78rem; gap: 0.25rem; }
+  .tab .tab-badge { font-size: 0.62rem; padding: 0.05rem 0.35rem; }
+
+  /* Activity feed: drop the dot column on the narrowest viewport. */
+  .activity-item { grid-template-columns: 1fr; column-gap: 0; }
+  .activity-item .activity-dot { display: none; }
+
+  /* Modal: cap height + scroll body so it never blocks the buttons. */
+  .modal, #app-modal { max-height: 90vh; overflow: hidden; }
+  #app-modal-body { max-height: 50vh; overflow-y: auto; }
+
+  /* Login card: dial back padding so it fits 360 × 640 without
+     forcing a viewport scroll. */
+  .login-card { padding: 1.2rem 1rem; }
+  .login-card h1 { font-size: 1.2rem; }
+
+  /* Forms inside cards: tighter row-gap. */
+  .field + .field { margin-top: 0.6rem; }
+
+  /* Stats card sparkline 4-up → 2-up on phones (saves vertical space). */
+  .card [style*="grid-template-columns:repeat(auto-fit,minmax(180px,1fr))"] {
+    grid-template-columns: 1fr 1fr !important;
+  }
+}
+
 /* ============================================================
  *  CUSTOMER ROLE — slim tenant chrome
  *  Body gets `role-customer` class set by the nav-shim script

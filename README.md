@@ -22,6 +22,53 @@
 - **Expiration + grace** — schedule notifications, auto-suspend on the due date, grace window before auto-delete. Operator can opt out per hosting.
 - **Backups** — tar.gz of htdocs + mysqldump / pg_dump + JSON manifest, kept on local disk by default. Optional push to an off-site FTP / FTPS / SFTP target after every backup. Retention policy: max age + minimum N per hosting.
 
+### Per-hosting controls
+
+The hosting detail page exposes operator-level knobs that map directly
+to nginx, FPM, and the WordPress install. Every save runs through
+`nginx -t` (or `wp config set`) before commit — rollback on any
+failure with the verbatim daemon error surfaced in the UI.
+
+- **HTTP basic auth** — bcrypt htpasswd, ACME bypass so LE renewals don't 401.
+- **HSTS** with a presets dropdown (1h → 2y), `force HTTPS` toggle.
+- **Custom nginx snippet** appended inside the HTTPS `server { }` (32 KiB cap, validated).
+- **Maintenance mode** — 503 page with ACME bypass.
+- **Redirect-only hosting kind** — separate template, no FPM/htdocs; 301/302/307/308 + preserve-path toggle.
+- **Per-hosting FastCGI page cache** — per-id zone in `conf.d/`, bypasses logged-in/PHPSESSID cookies.
+- **WP debug toggle** (`WP_DEBUG` / `WP_DEBUG_LOG` / `WP_DEBUG_DISPLAY`) plus a "rotate debug.log" button.
+- **Per-hosting Redis object cache** — auto-allocated DB slot, dedicated ACL user, `WP_REDIS_*` written to `wp-config.php`.
+- **Vhost auto-heal** — when nginx-write detects missing cert files it bootstraps a self-signed cert so `nginx -t` always passes (the LE cert is re-issued on the next renewal tick).
+
+### File manager
+
+- **Browse + upload + download + delete + mkdir + rename** under `htdocs/`.
+- **Inline editor** for text files — textarea + Save, no SCP round-trip.
+- **Symlinks refused** at the adapter layer; path traversal refused after canonicalisation; 64 MB write cap.
+- **3-dot per-row menu** with type-the-name delete confirmation for safety.
+
+### Cluster / multi-node
+
+- **Master + worker model.** Master holds the web UI, audit log, and enrolled-nodes registry. Workers run an agent that the master drives via a signed RPC channel (Ed25519 envelope over self-signed HTTPS on port 9443). No DNS dependency between master and workers — IP-based.
+- **Per-page node switcher.** Service health, stats, install — all pages have a "View on node:" dropdown. Picking a worker shows that worker's services and metrics, not the master's.
+- **Auto-placement** — when creating a hosting, pick "★ auto" and the master scores every node (load + memory + hosting count, normalised) and chooses the best-fit. Falls back to master if no workers are online.
+- **One-click migrate** between any two nodes (master ↔ worker, worker → worker). Snapshot on source, master proxies bundle bytes when source is a worker, target fetches via signed URL, source gets suspended (not deleted) so you can verify before pulling the trigger.
+- **Remote node update** from the master UI. Pick a worker, tick "System packages" and/or "Hyperion", click Start — apt-get + update.sh run on the worker in the background, log streams live into the panel.
+- **Connectivity test button** on each enrolled node.
+- **Cluster-wide stats** as the default `/stats` view. Drop down to a single node for per-node sparklines.
+- **Cluster monitoring overview** at `/monitoring` — every hosting with monitor enabled across the cluster, sorted alerting-first.
+- **Test-node mode** — designate certain nodes as test-only via Settings. Test hostings get auto-generated subdomains from a template (`test.{name}.{node}.testovaciverze.cz`), prod hostings refuse to land there + vice versa, WP installs on test nodes get `blog_public = 0` (no-index).
+- **Master-as-control-plane toggle** (Settings → Cluster) — when on, the master refuses new hosting creates and the Target-node dropdown hides it.
+
+### RBAC + multi-tenancy
+
+Five roles: **super_admin** (god mode + user management), **admin** (sees everything, can't manage users), **operator** (internal staff with CRUD on assigned hostings), **customer** (end-user / tenant — slim nav, only their own hostings), **viewer** (read-only on granted hostings).
+
+- **Per-hosting access grants** for operator/customer/viewer roles.
+- **2FA (TOTP)** with backup codes.
+- **Profile pictures** — upload PNG/JPG/WEBP avatars (server detects format from magic bytes, not just Content-Type).
+- **Notification bell** — in-app feed of cert renewal failures, monitor alerts, etc. Per-user fan-out, mark-read + mark-all-read.
+- **Audit log** with BLAKE3 hash chain.
+
 ### Multi-node cluster
 
 - **Master + worker model.** Master holds the web UI, audit log, and enrolled-nodes registry. Workers run an agent that the master drives via a signed RPC channel (Ed25519 envelope over self-signed HTTPS on port 9443). No DNS dependency between master and workers — IP-based.
