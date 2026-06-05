@@ -1908,14 +1908,28 @@ pub struct WpDebugForm {
 
 fn redirect_after_wp_extras(form_selector: &str, error: Option<String>) -> Response {
     match error {
-        Some(e) => Redirect::to(&format!(
-            "/hostings/{}?wp_extras_error={}",
-            urlencoding(form_selector),
-            urlencoding(&e)
-        ))
-        .into_response(),
+        Some(e) => {
+            // Two parallel channels so the error is visible no matter
+            // where the operator is on the page:
+            //   - `flash_error` triggers the top-of-page red toast via
+            //     base.html's onload shim. Visible regardless of which
+            //     tab is currently active or how far the page is
+            //     scrolled — perfect for the post-redirect case where
+            //     the form lived inside a deeply-nested card.
+            //   - `wp_extras_error` populates the in-card banner so
+            //     the message is still there after the toast fades
+            //     (7s). Until we wire this banner into every
+            //     WP-extras card, it lives inside Debug + Redis only.
+            Redirect::to(&format!(
+                "/hostings/{}?wp_extras_error={}&flash_error={}#wordpress",
+                urlencoding(form_selector),
+                urlencoding(&e),
+                urlencoding(&e),
+            ))
+            .into_response()
+        }
         None => Redirect::to(&format!(
-            "/hostings/{}?wp_extras_saved=1",
+            "/hostings/{}?wp_extras_saved=1&flash=Settings+saved#wordpress",
             urlencoding(form_selector)
         ))
         .into_response(),
