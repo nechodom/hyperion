@@ -477,6 +477,23 @@ pub struct EmailLogEntry {
     pub sent_at: i64,
 }
 
+/// One outbound mail sent BY a hosted PHP site (captured by the
+/// site-mail-wrapper). Distinct from the Hyperion-sent emails in
+/// EmailLogEntry — those flow through our SMTP config, these flow
+/// through the local sendmail.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SiteEmailLogEntry {
+    pub ts: i64,
+    /// system_user — maps to a hosting via the same field on
+    /// HostingDetail (`detail.system_user`).
+    pub user: String,
+    pub from_address: String,
+    pub to_address: String,
+    pub subject: String,
+    /// First ~1 KB of body, captured at send time.
+    pub body_excerpt: String,
+}
+
 /// Outcome of `EmailSmtpAutodetect`. `found = false` means we
 /// couldn't reach any local relay; UI then offers the manual form
 /// with a hint about typical relay choices.

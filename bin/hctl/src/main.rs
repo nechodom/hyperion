@@ -419,6 +419,15 @@ fn print_pretty(resp: &Response) {
         }
         Response::TrashRestore => println!("✓ restored"),
         Response::TrashPurge => println!("✓ purged"),
+        Response::SiteEmailLogList(entries) => {
+            println!("{:<14} {:<28} {:<28} SUBJECT", "TS", "FROM", "TO");
+            for e in entries.iter() {
+                println!(
+                    "{:<14} {:<28} {:<28} {}",
+                    e.ts, e.from_address, e.to_address, e.subject
+                );
+            }
+        }
         Response::HostingSetVhostOptions(o) => {
             println!("✓ vhost options applied");
             println!("  basic_auth_enabled  = {}", o.basic_auth_enabled);

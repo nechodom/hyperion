@@ -39,7 +39,7 @@ pub use stats::{
     HostingFileContent,
     HostingFileEntry, HostingStats, MonitorConfigView, MonitorHistory, MonitorOverviewItem,
     MonitorSamplePoint, NodeMetricPoint, NodeMetricsHistory, NodeStats, NodeSummary,
-    NodeUpdateStatus, NotificationFeed, NotificationView, TrashEntry,
+    NodeUpdateStatus, NotificationFeed, NotificationView, SiteEmailLogEntry, TrashEntry,
     ServiceHealth, ServiceInstallStatus, ServicesHealth, SlackConfigView, SmtpAutodetect,
     UpdateStatus, Web2faEnrollment, WebHostingAccess, WebLoginResult, WebUserSummary,
     WebVerify2faResult,

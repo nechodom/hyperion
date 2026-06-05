@@ -476,6 +476,14 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.email_log_list(hosting_id, limit).await
     }
 
+    async fn site_email_log_list(
+        &self,
+        system_user: String,
+        limit: i64,
+    ) -> Result<Vec<hyperion_types::SiteEmailLogEntry>, RpcError> {
+        self.svc.site_email_log_list(system_user, limit).await
+    }
+
     async fn email_smtp_autodetect(&self) -> Result<hyperion_types::SmtpAutodetect, RpcError> {
         self.svc.email_smtp_autodetect().await
     }

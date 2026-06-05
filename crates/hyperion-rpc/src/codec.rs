@@ -295,6 +295,13 @@ pub enum Request {
         hosting_id: Option<String>,
         limit: i64,
     },
+    /// Outbound mail sent BY a hosted PHP site, captured by the
+    /// site-mail-wrapper. Reads
+    /// /var/lib/hyperion/site-mail/<system_user>.jsonl
+    SiteEmailLogList {
+        system_user: String,
+        limit: i64,
+    },
     /// Probe localhost for a usable SMTP relay so the UI can
     /// pre-fill the email config form. Cheap — just TCP connect.
     EmailSmtpAutodetect,
@@ -679,6 +686,7 @@ pub enum Response {
     HostingImport(hyperion_types::HostingImportResult),
     HostingImportFromUrl(hyperion_types::HostingImportResult),
     EmailLogList(Vec<hyperion_types::EmailLogEntry>),
+    SiteEmailLogList(Vec<hyperion_types::SiteEmailLogEntry>),
     EmailSmtpAutodetect(hyperion_types::SmtpAutodetect),
     WpPluginList(hyperion_types::WpPluginListResponse),
     WpPluginAction(hyperion_types::WpPluginActionResult),

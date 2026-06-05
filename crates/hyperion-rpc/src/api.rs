@@ -293,6 +293,14 @@ pub trait AgentApi: Send + Sync + 'static {
         limit: i64,
     ) -> Result<Vec<hyperion_types::EmailLogEntry>, RpcError>;
 
+    /// Read the per-user JSONL captured by the site-mail wrapper.
+    /// Returns the most recent `limit` lines, newest first.
+    async fn site_email_log_list(
+        &self,
+        system_user: String,
+        limit: i64,
+    ) -> Result<Vec<hyperion_types::SiteEmailLogEntry>, RpcError>;
+
     /// Probe localhost for a usable SMTP relay.
     async fn email_smtp_autodetect(&self) -> Result<hyperion_types::SmtpAutodetect, RpcError>;
 

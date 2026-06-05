@@ -4524,6 +4524,54 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .collect())
     }
 
+    /// Read the site-mail wrapper's JSONL for one user. Returns
+    /// the most recent `limit` lines, newest first.
+    ///
+    /// Filesystem path is
+    /// `/var/lib/hyperion/site-mail/<system_user>.jsonl`. Missing
+    /// file → empty vec (sites that haven't sent mail yet). Lines
+    /// that fail to parse are silently skipped so a corrupted
+    /// entry can't take down the whole log.
+    pub async fn site_email_log_list(
+        &self,
+        system_user: String,
+        limit: i64,
+    ) -> Result<Vec<hyperion_types::SiteEmailLogEntry>, RpcError> {
+        if !system_user
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        {
+            return Err(RpcError::Validation {
+                message: format!("invalid system_user: {system_user:?}"),
+            });
+        }
+        let limit = limit.clamp(1, 500) as usize;
+        let path = std::path::PathBuf::from("/var/lib/hyperion/site-mail")
+            .join(format!("{system_user}.jsonl"));
+        let bytes = match tokio::fs::read(&path).await {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+            Err(e) => {
+                return Err(RpcError::Internal_with(format!("read jsonl: {e}")));
+            }
+        };
+        let s = String::from_utf8_lossy(&bytes);
+        let mut out: Vec<hyperion_types::SiteEmailLogEntry> = s
+            .lines()
+            .rev()
+            .take(limit)
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect();
+        // Truncate the body excerpt for wire safety (the wrapper
+        // already caps at ~1 KB but defence in depth).
+        for r in &mut out {
+            if r.body_excerpt.len() > 2048 {
+                r.body_excerpt.truncate(2048);
+            }
+        }
+        Ok(out)
+    }
+
     /// Probe localhost for a usable SMTP relay so the operator can
     /// click "Auto-detect" on the Settings page instead of typing
     /// host/port/security by hand.

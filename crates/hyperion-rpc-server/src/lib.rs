@@ -404,6 +404,12 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::SiteEmailLogList { system_user, limit } => {
+            match api.site_email_log_list(system_user, limit).await {
+                Ok(v) => Response::SiteEmailLogList(v),
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::EmailSmtpAutodetect => match api.email_smtp_autodetect().await {
             Ok(v) => Response::EmailSmtpAutodetect(v),
             Err(e) => Response::Error(e),
@@ -1121,6 +1127,13 @@ mod tests {
             _: Option<String>,
             _: i64,
         ) -> Result<Vec<hyperion_types::EmailLogEntry>, RpcError> {
+            Ok(vec![])
+        }
+        async fn site_email_log_list(
+            &self,
+            _: String,
+            _: i64,
+        ) -> Result<Vec<hyperion_types::SiteEmailLogEntry>, RpcError> {
             Ok(vec![])
         }
         async fn email_smtp_autodetect(

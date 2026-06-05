@@ -2118,6 +2118,59 @@
   {% endif %}
 </div>
 
+<div class="card hover" style="margin-top:1rem">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2L11 13"/><path d="M22 2L15 22L11 13L2 9L22 2Z"/></svg>
+    Mail sent by this site
+  </h2>
+  <p class="muted">
+    Outbound mail captured by the local <code>sendmail_path</code> wrapper —
+    every <code>mail()</code> / <code>wp_mail()</code> the PHP site sends gets
+    logged here. The wrapper writes to
+    <code>/var/lib/hyperion/site-mail/{{ detail.system_user }}.jsonl</code>
+    and forwards to the real sendmail, so delivery is unaffected. The log
+    rotates at 10 MB; we read the most recent 50 entries.
+  </p>
+
+  {% if site_emails.is_empty() %}
+    <div class="empty" style="padding:1.5rem 1rem">
+      <p class="muted">
+        No outbound mail captured yet. The wrapper is configured via this hosting's
+        FPM pool (php_admin_value[sendmail_path]); if you've just installed Hyperion,
+        restart php-fpm so the new value takes effect.
+      </p>
+    </div>
+  {% else %}
+  <div class="table-wrap" style="margin:0 -1.5rem">
+    <table>
+      <thead>
+        <tr>
+          <th>Sent</th>
+          <th>From</th>
+          <th>To</th>
+          <th>Subject</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for e in site_emails %}
+        <tr>
+          <td class="muted numeric" title="{{ e.ts }}">{{ crate::handlers::stats::fmt_ago(e.ts) }}</td>
+          <td><code style="font-size:0.78rem">{{ e.from_address }}</code></td>
+          <td><code style="font-size:0.78rem">{{ e.to_address }}</code></td>
+          <td>
+            <strong>{{ e.subject }}</strong>
+            {% if !e.body_excerpt.is_empty() %}
+              <div class="muted" style="font-size:0.76rem;margin-top:0.15rem;white-space:pre-wrap;font-family:ui-monospace,Menlo,Consolas,monospace">{{ e.body_excerpt }}</div>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+
 </div><!-- /tab-emails -->
 
 <!-- ============== MIGRATION TAB ============== -->

@@ -183,6 +183,23 @@ elif (( ! DO_BUILD )); then
   log "--no-build: skipping binary install."
 fi
 
+#-------- 3b. site-mail-wrapper -------------------------------------------
+# Tiny bash shim that PHP-FPM execs as `sendmail_path` for every
+# pool. Logs metadata of outgoing site mail to /var/lib/hyperion/
+# site-mail/<user>.jsonl, then forwards to the real sendmail. Idempotent
+# install — only updates the file when its content actually changed
+# so we don't restart FPM pools unnecessarily.
+SITE_MAIL_SRC="$INSTALL_DIR/packaging/install/site-mail-wrapper.sh"
+SITE_MAIL_DST="/usr/local/lib/hyperion/site-mail-wrapper"
+if [[ -f "$SITE_MAIL_SRC" ]]; then
+  install -d -m 0755 /usr/local/lib/hyperion
+  if ! cmp -s "$SITE_MAIL_SRC" "$SITE_MAIL_DST"; then
+    log "Updating site-mail wrapper at $SITE_MAIL_DST ..."
+    install -m 0755 "$SITE_MAIL_SRC" "$SITE_MAIL_DST"
+  fi
+  install -d -m 0750 /var/lib/hyperion/site-mail
+fi
+
 #-------- 4. Refresh systemd units ----------------------------------------
 refresh_unit() {
   local svc="$1"

@@ -164,6 +164,11 @@ struct DetailTpl<'a> {
     /// behalf of this hosting (alerts, cert reminders, monitor
     /// down/up, billing). Drives the new Emails tab.
     email_log: Vec<hyperion_types::EmailLogEntry>,
+    /// Last 50 outbound mails sent BY the hosted PHP site itself,
+    /// captured by /usr/local/lib/hyperion/site-mail-wrapper into
+    /// the per-user JSONL. Distinct from `email_log` above which
+    /// is Hyperion-system mail.
+    site_emails: Vec<hyperion_types::SiteEmailLogEntry>,
     /// Session-wide CSRF token used by the newer forms that don't have
     /// dedicated csrf_* fields plumbed (access, acme-email, monitor,
     /// backup delete). Middleware accepts both.
@@ -833,6 +838,7 @@ pub async fn post_create(
                 monitor_history: hyperion_types::MonitorHistory::default(),
                 wp_plugins: hyperion_types::WpPluginListResponse::default(),
                 email_log: vec![],
+                site_emails: vec![],
                 csrf_token: super::session_csrf_token(&state, &ctx),
                 target_node: target.unwrap_or("").to_string(),
                 all_nodes: fetch_remote_nodes(&state).await.unwrap_or_default(),
@@ -1022,12 +1028,37 @@ pub async fn get_detail(
             _ => vec![],
         }
     };
-    let (wp_plugins, wp_themes, spf, monitor_pair, email_log) = tokio::join!(
+    // Site-outbound mail — captured by the wrapper on the agent
+    // where the hosting lives, so dispatch this one through
+    // dispatch_to_node instead of the local socket. We hand a
+    // clone of `state` into the future to keep the other join!
+    // members' borrows happy.
+    let site_emails_fut = {
+        let su = detail.system_user.clone();
+        let state2 = state.clone();
+        async move {
+            match crate::dispatcher::dispatch_to_node(
+                &state2,
+                target,
+                Request::SiteEmailLogList {
+                    system_user: su,
+                    limit: 50,
+                },
+            )
+            .await
+            {
+                Ok(RpcResponse::SiteEmailLogList(r)) => r,
+                _ => vec![],
+            }
+        }
+    };
+    let (wp_plugins, wp_themes, spf, monitor_pair, email_log, site_emails) = tokio::join!(
         wp_plugins_fut,
         wp_themes_fut,
         spf_fut,
         monitor_fut,
         email_log_fut,
+        site_emails_fut,
     );
     let (monitor_config, monitor_history) = monitor_pair;
 
@@ -1152,6 +1183,7 @@ pub async fn get_detail(
         monitor_history,
         wp_plugins,
         email_log,
+        site_emails,
         csrf_token: super::session_csrf_token(&state, &ctx),
         target_node: owner_node.clone().unwrap_or_default(),
         all_nodes: fetch_remote_nodes(&state).await.unwrap_or_default(),
