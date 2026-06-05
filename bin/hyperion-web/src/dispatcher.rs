@@ -24,6 +24,15 @@ pub enum DispatchError {
     Local(#[from] ClientError),
     #[error("remote rpc: {0}")]
     Remote(#[from] RemoteClientError),
+    /// Specifically when the master couldn't even open a TCP
+    /// connection to the worker — curl exit 6/7/28. Distinct from
+    /// `Remote` because the recipe to fix it is very different
+    /// (agent down / firewall) and the raw curl message would leak
+    /// the worker's IP if surfaced verbatim. The `kind` field is
+    /// already pre-scrubbed; the `node_id` is the operator-chosen
+    /// label so it's safe to display.
+    #[error("node {node_id} unreachable: {kind}")]
+    NodeUnreachable { node_id: String, kind: String },
     #[error("target node {0} is not enrolled")]
     UnknownNode(String),
     #[error("target node {0} has no public_ip on record — cannot reach")]
@@ -32,6 +41,22 @@ pub enum DispatchError {
     NoSigner,
     #[error("unexpected response from nodes_list")]
     UnexpectedNodesListResponse,
+}
+
+/// Translate `RemoteClientError::HttpError { code, stderr }` for
+/// well-known curl exit codes into a short, IP-free hint. Returns
+/// `Some(kind)` when this *is* a TCP-layer failure (caller should
+/// upgrade to `NodeUnreachable`); `None` when it's an
+/// application-level error (4xx / 5xx response from the agent).
+fn classify_curl_failure(code: Option<i32>) -> Option<&'static str> {
+    match code {
+        Some(6) => Some("DNS lookup failed for the worker's hostname"),
+        Some(7) => Some("TCP connect refused (agent down or firewall blocking 9443)"),
+        Some(28) => Some("Timed out waiting for the worker to respond"),
+        Some(35) => Some("TLS handshake failed (agent's cert is not valid yet)"),
+        Some(56) => Some("Connection reset by the worker mid-handshake"),
+        _ => None,
+    }
 }
 
 /// Sentinel value used in form fields when the operator wants the
@@ -119,9 +144,34 @@ async fn dispatch_remote(
         .as_ref()
         .ok_or(DispatchError::NoSigner)?;
     let endpoint = resolve_node_endpoint(state, node_id).await?;
-    let resp =
-        call_remote(&endpoint, signer, node_id, req, RemoteCallOpts::default()).await?;
-    Ok(resp)
+    match call_remote(&endpoint, signer, node_id, req, RemoteCallOpts::default()).await {
+        Ok(resp) => Ok(resp),
+        Err(RemoteClientError::HttpError { code, stderr }) => {
+            // Upgrade TCP-layer failures to NodeUnreachable so the
+            // operator gets an actionable themed error page and the
+            // worker's IP is never surfaced. For non-connect HTTP
+            // errors (4xx/5xx from the agent) we fall through to the
+            // generic Remote variant — those carry agent-side error
+            // bodies which are safe (don't include the worker's IP).
+            if let Some(hint) = classify_curl_failure(code) {
+                tracing::warn!(
+                    node = node_id,
+                    curl_exit = ?code,
+                    "worker connect failure (translated to NodeUnreachable)"
+                );
+                Err(DispatchError::NodeUnreachable {
+                    node_id: node_id.to_string(),
+                    kind: hint.to_string(),
+                })
+            } else {
+                Err(DispatchError::Remote(RemoteClientError::HttpError {
+                    code,
+                    stderr,
+                }))
+            }
+        }
+        Err(e) => Err(DispatchError::Remote(e)),
+    }
 }
 
 /// Look up the target node's public IP from the master's `nodes`
@@ -162,6 +212,9 @@ impl From<DispatchError> for crate::error::AppError {
         match e {
             DispatchError::Local(ClientError::Io(io)) => AppError::Rpc(io.to_string()),
             DispatchError::Remote(re) => AppError::Rpc(re.to_string()),
+            DispatchError::NodeUnreachable { node_id, kind } => {
+                AppError::NodeUnreachable { node_id, hint: kind }
+            }
             DispatchError::UnknownNode(n) => AppError::BadRequest(format!(
                 "node {n} is not enrolled — pick a different target"
             )),
