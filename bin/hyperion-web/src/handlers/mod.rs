@@ -19,6 +19,7 @@ pub mod services_health;
 pub mod settings;
 pub mod statics;
 pub mod stats;
+pub mod trash;
 pub mod users;
 
 /// Uppercase first ASCII letter of `username`, or `?` if empty / non-ASCII.

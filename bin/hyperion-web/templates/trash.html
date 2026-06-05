@@ -1,0 +1,104 @@
+{% extends "base.html" %}
+{% block title %}Trash · hyperion{% endblock %}
+{% block main %}
+
+<div class="page-header">
+  <div>
+    <h1>Trash</h1>
+    <div class="subtitle">
+      {% if trash_enabled %}
+        Soft-deleted hostings — files / DB / user preserved until purged.
+        Retention: <strong>{{ retention_days }} days</strong>.
+      {% else %}
+        <span class="text-soft">Trash is currently OFF</span> — deletes are immediate + permanent.
+        Turn this on in <a href="/settings#cluster">Settings → Cluster</a> to soft-delete instead.
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+{% if let Some(e) = error %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">{{ e }}</div>
+  </div>
+{% endif %}
+{% if let Some(m) = flash %}
+  <div class="flash success">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+    <div class="flash-body">{{ m }}</div>
+  </div>
+{% endif %}
+
+{% if entries.is_empty() %}
+<div class="card">
+  <div class="empty">
+    <div class="empty-illustration">
+      <svg viewBox="0 0 24 24" width="56" height="56" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/></svg>
+    </div>
+    <h3>Trash is empty</h3>
+    <p class="text-soft">
+      {% if trash_enabled %}
+        Deleted hostings will land here for {{ retention_days }} days before the scheduler hard-deletes them.
+      {% else %}
+        Enable the trash toggle in Settings → Cluster to soft-delete instead of hard-delete.
+      {% endif %}
+    </p>
+  </div>
+</div>
+{% else %}
+<div class="card no-pad-table">
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Domain</th>
+          <th class="hide-on-phone">Node</th>
+          <th>Deleted</th>
+          <th>Auto-purge in</th>
+          <th class="right">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for e in entries %}
+        <tr>
+          <td><strong>{{ e.domain }}</strong></td>
+          <td class="hide-on-phone"><span class="tag">{{ e.node_id }}</span></td>
+          <td class="text-soft small" title="{{ e.trashed_at }}">{{ crate::handlers::stats::fmt_ago(e.trashed_at) }}</td>
+          <td class="text-soft small">
+            {% if e.seconds_remaining <= 86400 %}
+              <span style="color:var(--warn)">{{ crate::handlers::trash::fmt_remaining(e.seconds_remaining) }}</span>
+            {% else %}
+              {{ crate::handlers::trash::fmt_remaining(e.seconds_remaining) }}
+            {% endif %}
+          </td>
+          <td class="right">
+            <div style="display:inline-flex;gap:0.35rem;align-items:center">
+              <form method="post" action="/trash/restore" style="display:inline;margin:0">
+                <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                <input type="hidden" name="selector" value="{{ e.domain }}">
+                <input type="hidden" name="target_node" value="{{ e.node_id }}">
+                <button class="btn small" type="submit" title="Bring this hosting back online">Restore</button>
+              </form>
+              <form method="post" action="/trash/purge" style="display:inline;margin:0"
+                    data-confirm-title="Permanently delete {{ e.domain }}"
+                    data-confirm-body="Files, database, system user and certs will be removed NOW. This skips the retention window. Type the domain to confirm — there is no undo."
+                    data-confirm-confirm-label="Delete permanently"
+                    data-confirm-variant="danger"
+                    data-confirm-require="{{ e.domain }}">
+                <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                <input type="hidden" name="selector" value="{{ e.domain }}">
+                <input type="hidden" name="target_node" value="{{ e.node_id }}">
+                <button class="btn small danger" type="submit" title="Skip the retention window and delete now">Delete</button>
+              </form>
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+{% endblock %}

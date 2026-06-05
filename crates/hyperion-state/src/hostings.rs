@@ -35,6 +35,10 @@ pub struct HostingRow {
     /// Migration 021 — WordPress + Redis app-layer toggles. Default
     /// values match a fresh non-WP hosting.
     pub wp_extras: hyperion_types::WpExtras,
+    /// Migration 026 — when the row is `state = 'trashed'`, the
+    /// unix-epoch second when delete was issued. `None` for any
+    /// non-trashed row.
+    pub trashed_at: Option<i64>,
 }
 
 pub async fn insert(
@@ -103,6 +107,99 @@ pub async fn set_state(
     Ok(())
 }
 
+/// Set state = Trashed + stamp trashed_at = now. The scheduler
+/// reads `trashed_at` to decide when to GC; the UI uses it for
+/// the "X days remaining" badge on /trash.
+pub async fn mark_trashed(
+    pool: &SqlitePool,
+    id: &HostingId,
+    now: i64,
+) -> Result<(), StateError> {
+    sqlx::query(
+        "UPDATE hostings SET state = 'trashed', trashed_at = ?, updated_at = ? WHERE id = ?",
+    )
+    .bind(now)
+    .bind(now)
+    .bind(id.as_str())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Restore a trashed hosting back to Active (clears trashed_at).
+pub async fn unmark_trashed(
+    pool: &SqlitePool,
+    id: &HostingId,
+    now: i64,
+) -> Result<(), StateError> {
+    sqlx::query(
+        "UPDATE hostings SET state = 'active', trashed_at = NULL, updated_at = ? WHERE id = ?",
+    )
+    .bind(now)
+    .bind(id.as_str())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Trashed rows whose retention window has expired (now -
+/// trashed_at >= retention_secs). Caller passes the resolved
+/// retention seconds — the state crate doesn't know about
+/// the cluster config.
+pub async fn list_trashed_expired(
+    pool: &SqlitePool,
+    now: i64,
+    retention_secs: i64,
+) -> Result<Vec<HostingRow>, StateError> {
+    let cutoff = now - retention_secs;
+    let ids: Vec<(String,)> = sqlx::query_as(
+        "SELECT id FROM hostings WHERE state = 'trashed' AND trashed_at <= ? \
+         ORDER BY trashed_at",
+    )
+    .bind(cutoff)
+    .fetch_all(pool)
+    .await?;
+    let mut out = Vec::with_capacity(ids.len());
+    for (id,) in ids {
+        if let Some(row) = get_by_id(pool, &HostingId(id)).await? {
+            out.push(row);
+        }
+    }
+    Ok(out)
+}
+
+/// All currently-trashed hostings (any age). Used by the
+/// /trash page UI.
+pub async fn list_trashed(pool: &SqlitePool) -> Result<Vec<HostingRow>, StateError> {
+    let ids: Vec<(String,)> = sqlx::query_as(
+        "SELECT id FROM hostings WHERE state = 'trashed' ORDER BY trashed_at DESC",
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut out = Vec::with_capacity(ids.len());
+    for (id,) in ids {
+        if let Some(row) = get_by_id(pool, &HostingId(id)).await? {
+            out.push(row);
+        }
+    }
+    Ok(out)
+}
+
+/// Read just the trashed_at timestamp (NULL for not-trashed).
+/// Used by the service layer to compute "days remaining".
+pub async fn get_trashed_at(
+    pool: &SqlitePool,
+    id: &HostingId,
+) -> Result<Option<i64>, StateError> {
+    let row: Option<(Option<i64>,)> = sqlx::query_as(
+        "SELECT trashed_at FROM hostings WHERE id = ?",
+    )
+    .bind(id.as_str())
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.and_then(|(t,)| t))
+}
+
 pub async fn delete(pool: &SqlitePool, id: &HostingId) -> Result<(), StateError> {
     sqlx::query("DELETE FROM hostings WHERE id = ?")
         .bind(id.as_str())
@@ -137,7 +234,9 @@ pub async fn get_by_domain(
 
 pub async fn list(pool: &SqlitePool) -> Result<Vec<HostingSummary>, StateError> {
     let rows: Vec<(String, String, String, Option<String>, i64, Option<String>)> = sqlx::query_as(
-        "SELECT id, domain, state, php_version, created_at, node_id FROM hostings ORDER BY domain",
+        "SELECT id, domain, state, php_version, created_at, node_id FROM hostings \
+         WHERE state != 'trashed' \
+         ORDER BY domain",
     )
     .fetch_all(pool)
     .await?;
@@ -180,6 +279,7 @@ type RawHostingHead = (
     String,           // kind
     Option<String>,   // proxy_upstream_url
     Option<String>,   // node_id
+    Option<i64>,      // trashed_at (NULL when not trashed)
 );
 type RawHostingVhost = (
     i64,    // basic_auth_enabled
@@ -198,11 +298,11 @@ type RawHostingVhost = (
 
 const QUERY_BASE: &str =
     "SELECT id, domain, state, system_user_id, php_version, root_dir, created_at, updated_at, \
-            acme_contact_email, kind, proxy_upstream_url, node_id \
+            acme_contact_email, kind, proxy_upstream_url, node_id, trashed_at \
      FROM hostings WHERE id = ?";
 const QUERY_DOMAIN: &str =
     "SELECT id, domain, state, system_user_id, php_version, root_dir, created_at, updated_at, \
-            acme_contact_email, kind, proxy_upstream_url, node_id \
+            acme_contact_email, kind, proxy_upstream_url, node_id, trashed_at \
      FROM hostings WHERE domain = ?";
 const QUERY_VHOST_BY_ID: &str =
     "SELECT basic_auth_enabled, basic_auth_user, basic_auth_hash, force_https, hsts_max_age, \
@@ -246,6 +346,7 @@ async fn fetch_one<'a>(
         kind,
         proxy_upstream_url,
         node_id,
+        trashed_at,
     )) = row
     else {
         return Ok(None);
@@ -329,6 +430,7 @@ async fn fetch_one<'a>(
         node_id,
         vhost_options,
         wp_extras,
+        trashed_at,
     }))
 }
 

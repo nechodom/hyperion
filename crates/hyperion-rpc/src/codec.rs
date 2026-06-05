@@ -40,6 +40,9 @@ pub enum Request {
         reason: SuspendReason,
     },
     HostingResume(HostingSelector),
+    TrashList,
+    TrashRestore(HostingSelector),
+    TrashPurge(HostingSelector),
     /// Apply per-hosting vhost options. See `AgentRpc::hosting_set_vhost_options`.
     HostingSetVhostOptions {
         sel: HostingSelector,
@@ -593,6 +596,9 @@ pub enum Response {
     HostingGetLimits(HostingLimits),
     HostingSuspend,
     HostingResume,
+    TrashList(Vec<hyperion_types::TrashEntry>),
+    TrashRestore,
+    TrashPurge,
     HostingSetVhostOptions(hyperion_types::VhostOptions),
     HostingSetWpDebug(hyperion_types::WpExtras),
     HostingSetRedis(hyperion_types::WpExtras),

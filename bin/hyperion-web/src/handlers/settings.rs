@@ -257,7 +257,7 @@ fn synthesize_unchecked_checkboxes(
     let known: &[&str] = match section {
         "email" => &["enabled"],
         "backup_remote" => &["enabled"],
-        "cluster" => &["master_accepts_hostings", "test_wp_no_index"],
+        "cluster" => &["master_accepts_hostings", "test_wp_no_index", "trash_enabled"],
         _ => return,
     };
     for k in known {

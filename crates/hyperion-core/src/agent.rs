@@ -139,6 +139,16 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.resume(sel).await
     }
 
+    async fn trash_list(&self) -> Result<Vec<hyperion_types::TrashEntry>, RpcError> {
+        self.svc.list_trash().await
+    }
+    async fn trash_restore(&self, sel: HostingSelector) -> Result<(), RpcError> {
+        self.svc.restore_from_trash(sel).await
+    }
+    async fn trash_purge(&self, sel: HostingSelector) -> Result<(), RpcError> {
+        self.svc.purge_from_trash(sel).await
+    }
+
     async fn hosting_set_vhost_options(
         &self,
         sel: HostingSelector,

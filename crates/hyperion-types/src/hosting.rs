@@ -13,6 +13,12 @@ pub enum HostingState {
     Suspended,
     Failed,
     Deleting,
+    /// Soft-deleted: files / DB / OS user preserved, nginx serves
+    /// 503, FPM stopped, OS login locked. GC'd to a hard delete
+    /// after `cluster.trash_retention_days` (default 30). Set
+    /// when `cluster.trash_enabled = true` + operator hits delete;
+    /// the `trashed_at` column on the row carries the deadline.
+    Trashed,
 }
 
 impl HostingState {
@@ -23,6 +29,7 @@ impl HostingState {
             Self::Suspended => "suspended",
             Self::Failed => "failed",
             Self::Deleting => "deleting",
+            Self::Trashed => "trashed",
         }
     }
 }
@@ -42,6 +49,7 @@ impl FromStr for HostingState {
             "suspended" => Ok(Self::Suspended),
             "failed" => Ok(Self::Failed),
             "deleting" => Ok(Self::Deleting),
+            "trashed" => Ok(Self::Trashed),
             other => Err(format!("unknown state: {other}")),
         }
     }

@@ -214,6 +214,21 @@ pub struct ClusterConfigView {
     /// flip it manually in the WP admin.
     #[serde(default)]
     pub test_wp_no_index: bool,
+
+    /// When true, hosting `delete` is a SOFT delete: nginx → 503,
+    /// FPM stop, DB lock, OS user lock, files preserved. State
+    /// flips to "trashed" with a `trashed_at` timestamp. Scheduler
+    /// purges trashed sites older than `trash_retention_days`.
+    /// Operator can also Restore (un-trash) or Delete permanently
+    /// from /trash. Default off = existing hard-delete behaviour.
+    #[serde(default)]
+    pub trash_enabled: bool,
+
+    /// How many days to keep a trashed hosting before the
+    /// scheduler GCs it. Clamped to 1..=365 at the boundary;
+    /// default 30. Only matters when `trash_enabled = true`.
+    #[serde(default)]
+    pub trash_retention_days: i64,
 }
 
 impl Default for ClusterConfigView {
@@ -225,6 +240,8 @@ impl Default for ClusterConfigView {
             test_node_ids: String::new(),
             test_domain_template: String::new(),
             test_wp_no_index: false,
+            trash_enabled: false,
+            trash_retention_days: 30,
         }
     }
 }
@@ -531,6 +548,24 @@ pub struct ServiceInstallStatus {
 /// State of the most-recent (or in-progress) node update job
 /// triggered via Request::NodeUpdateRun. Returned by
 /// NodeUpdateStatus so the UI can poll progress.
+/// One row on the /trash page. Computed by the master web from
+/// each agent's `list_trash` response — the seconds_remaining
+/// field is server-computed so the UI doesn't have to know about
+/// trash_retention_days.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TrashEntry {
+    pub id: String,
+    pub domain: String,
+    /// Unix-epoch seconds the hosting went to trash.
+    pub trashed_at: i64,
+    /// Unix-epoch seconds when the scheduler will purge it.
+    pub purge_at: i64,
+    /// `purge_at - now()` clamped at 0.
+    pub seconds_remaining: i64,
+    /// Which node hosts the (still-on-disk) site.
+    pub node_id: String,
+}
+
 /// One notification surfaced in the bell-icon dropdown.
 /// Wire-side mirror of `hyperion_state::notifications::NotificationRow`,
 /// dropping the per-user pointer (the wire response is already

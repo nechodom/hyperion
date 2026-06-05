@@ -488,6 +488,44 @@
     </form>
   </div>
 
+  <div class="card" style="margin-top:1rem">
+    <h2 style="font-size:0.95rem;margin:0 0 0.6rem">
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
+      Trash / soft-delete
+    </h2>
+    <p class="text-soft small" style="margin:0 0 0.8rem">
+      When on, deleting a hosting moves it to <a href="/trash">/trash</a>:
+      nginx serves 503, FPM stops, DB user is locked, OS user is locked,
+      but files / DB / certs / user are preserved. After the retention
+      window the scheduler runs the hard-delete pipeline automatically.
+      Off (the default) = immediate hard-delete as before.
+    </p>
+    <form method="post" action="/settings/config" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="cluster">
+
+      <label class="field-checkbox" style="font-weight:600">
+        <input type="checkbox" name="trash_enabled" value="true"
+               {% if config.cluster.trash_enabled %}checked{% endif %}>
+        Enable trash for hosting deletes
+      </label>
+
+      <div class="field">
+        <label for="trash_retention_days">Retention <span class="hint">days · 1..=365</span></label>
+        <input id="trash_retention_days" name="trash_retention_days" type="number"
+               min="1" max="365" step="1"
+               value="{{ config.cluster.trash_retention_days }}">
+        <p class="text-soft small" style="margin:0.3rem 0 0">
+          The scheduler hard-deletes any trashed hosting older than this.
+          Operators can also Restore (un-trash) or Delete permanently
+          from /trash before the timer expires.
+        </p>
+      </div>
+
+      <button type="submit" class="btn primary">Save trash settings</button>
+    </form>
+  </div>
+
   <div class="card muted" style="margin-top:1rem">
     <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Multi-node tips</h2>
     <ul class="text-soft small" style="margin:0;padding-left:1.2rem;line-height:1.7">

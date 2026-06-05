@@ -117,6 +117,18 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(_) => Response::HostingResume,
             Err(e) => Response::Error(e),
         },
+        Request::TrashList => match api.trash_list().await {
+            Ok(v) => Response::TrashList(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::TrashRestore(sel) => match api.trash_restore(sel).await {
+            Ok(()) => Response::TrashRestore,
+            Err(e) => Response::Error(e),
+        },
+        Request::TrashPurge(sel) => match api.trash_purge(sel).await {
+            Ok(()) => Response::TrashPurge,
+            Err(e) => Response::Error(e),
+        },
         Request::HostingSetVhostOptions {
             sel,
             options,
@@ -809,6 +821,15 @@ mod tests {
             Ok(())
         }
         async fn hosting_resume(&self, _: HostingSelector) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn trash_list(&self) -> Result<Vec<hyperion_types::TrashEntry>, RpcError> {
+            Ok(vec![])
+        }
+        async fn trash_restore(&self, _: HostingSelector) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn trash_purge(&self, _: HostingSelector) -> Result<(), RpcError> {
             Ok(())
         }
         async fn hosting_set_vhost_options(

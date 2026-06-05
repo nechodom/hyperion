@@ -408,6 +408,17 @@ fn print_pretty(resp: &Response) {
         }
         Response::HostingSuspend => println!("✓ suspended"),
         Response::HostingResume => println!("✓ resumed"),
+        Response::TrashList(entries) => {
+            println!("{:<32} {:<14} {:<14} NODE", "DOMAIN", "TRASHED_AT", "PURGE_IN");
+            for e in entries.iter() {
+                println!(
+                    "{:<32} {:<14} {:<14} {}",
+                    e.domain, e.trashed_at, e.seconds_remaining, e.node_id
+                );
+            }
+        }
+        Response::TrashRestore => println!("✓ restored"),
+        Response::TrashPurge => println!("✓ purged"),
         Response::HostingSetVhostOptions(o) => {
             println!("✓ vhost options applied");
             println!("  basic_auth_enabled  = {}", o.basic_auth_enabled);

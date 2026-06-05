@@ -1970,6 +1970,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
     pub async fn delete(&self, sel: HostingSelector, opts: DeleteOpts) -> Result<(), RpcError> {
         let detail = self.get(sel.clone()).await?;
+
+        // Soft-delete branch: when cluster.trash_enabled = true,
+        // route to trash() which preserves files / DB / user and
+        // flips the row to state=trashed. The scheduler GCs it
+        // to a hard delete after retention_days.
+        let cluster_cfg = read_cluster_section(self.agent_config_path.as_deref());
+        if cluster_cfg.trash_enabled {
+            return self.trash_hosting(detail).await;
+        }
+
         hostings::set_state(&self.pool, &detail.id, HostingState::Deleting, now_secs())
             .await
             .map_err(|e| RpcError::Internal_with(format!("set deleting: {e}")))?;
@@ -2032,6 +2042,238 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .await
             .map_err(|e| RpcError::Internal_with(format!("delete row: {e}")))?;
         Ok(())
+    }
+
+    // ────────────────────────── Trash / recycle bin ──────────────────────────
+
+    /// Move a hosting to the trash. Same side-effects as suspend
+    /// (nginx 503, FPM stop, DB lock, OS user locked, processes
+    /// killed) PLUS set state=Trashed + stamp `trashed_at`. Files /
+    /// DB / OS user / certs are PRESERVED — the scheduler GC's
+    /// them later, or the operator can purge / restore explicitly
+    /// from /trash.
+    ///
+    /// Internal: called from `delete()` when cluster.trash_enabled.
+    async fn trash_hosting(&self, detail: HostingDetail) -> Result<(), RpcError> {
+        // Mirror the suspend side-effects.
+        let _ = self
+            .adapters
+            .nginx_apply_suspended(&detail.domain, Some("Hosting is in trash".into()))
+            .await;
+        if let Some(ver) = detail.php_version {
+            let _ = self.adapters.fpm_delete(&detail.system_user, ver).await;
+        }
+        if let Some(db) = detail.database.as_ref() {
+            let _ = self.adapters.db_lock(db.engine, &db.db_user).await;
+        }
+        let _ = self.adapters.linux_lock_login(&detail.system_user).await;
+        let _ = self.adapters.kill_user_procs(&detail.system_user).await;
+
+        hostings::mark_trashed(&self.pool, &detail.id, now_secs())
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("mark trashed: {e}")))?;
+
+        self.append_audit(
+            "hosting.trash",
+            Some(detail.id.as_str()),
+            &serde_json::json!({"domain": detail.domain}).to_string(),
+            "ok",
+        )
+        .await;
+        // Notify admins so the bell catches "this site went to trash".
+        self.notify_admins(
+            "warn",
+            "Hosting moved to trash",
+            &format!("{} will be GC'd after the trash retention window.", detail.domain),
+            "/trash",
+            "hosting.trash",
+        )
+        .await;
+        Ok(())
+    }
+
+    /// Restore a trashed hosting back to Active. Reverses the
+    /// suspend side-effects (unlock OS user, unlock DB, restart
+    /// FPM, write the real vhost back). Refuses if state isn't
+    /// Trashed.
+    pub async fn restore_from_trash(&self, sel: HostingSelector) -> Result<(), RpcError> {
+        let detail = self.get(sel).await?;
+        if detail.state != HostingState::Trashed {
+            return Err(RpcError::Conflict {
+                message: format!(
+                    "hosting must be in trash to restore (current state: {})",
+                    detail.state.as_str()
+                ),
+            });
+        }
+        let _ = self.adapters.linux_unlock_login(&detail.system_user).await;
+        if let Some(db) = detail.database.as_ref() {
+            let _ = self.adapters.db_unlock(db.engine, &db.db_user).await;
+        }
+        if let Some(ver) = detail.php_version {
+            let _ = self
+                .adapters
+                .fpm_ensure(&detail.system_user, &detail.domain, ver)
+                .await;
+        }
+        let _ = self.adapters.nginx_write_vhost(&detail).await;
+        hostings::unmark_trashed(&self.pool, &detail.id, now_secs())
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("unmark: {e}")))?;
+        self.append_audit(
+            "hosting.trash.restore",
+            Some(detail.id.as_str()),
+            &serde_json::json!({"domain": detail.domain}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
+    /// Permanently delete a trashed hosting NOW (skips waiting for
+    /// the GC). Operator-driven. Hosting state must be Trashed —
+    /// refuses on Active so the caller doesn't bypass the trash
+    /// flow by accident.
+    pub async fn purge_from_trash(&self, sel: HostingSelector) -> Result<(), RpcError> {
+        let detail = self.get(sel.clone()).await?;
+        if detail.state != HostingState::Trashed {
+            return Err(RpcError::Conflict {
+                message: format!(
+                    "purge_from_trash refuses non-trashed hosting (state: {})",
+                    detail.state.as_str()
+                ),
+            });
+        }
+        // First need to flip back to Deleting (the delete() guard
+        // refuses to re-trash a trashed row). We bypass delete() and
+        // call the hard-delete machinery directly here so the trash
+        // setting doesn't redirect us back into trash().
+        self.hard_delete_internal(detail, DeleteOpts::default()).await?;
+        Ok(())
+    }
+
+    /// Tick: iterate trashed rows past their retention window and
+    /// hard-delete each. Called by the scheduler. Returns the
+    /// number of rows GC'd.
+    pub async fn trash_gc_tick(&self) -> Result<i64, RpcError> {
+        let cluster_cfg = read_cluster_section(self.agent_config_path.as_deref());
+        if !cluster_cfg.trash_enabled {
+            return Ok(0);
+        }
+        let retention_secs = cluster_cfg.trash_retention_days * 24 * 3600;
+        let expired = hostings::list_trashed_expired(&self.pool, now_secs(), retention_secs)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("list expired: {e}")))?;
+        let mut purged = 0i64;
+        for row in expired {
+            let id = row.id.clone();
+            // Build a HostingDetail from the row (mirror service::get).
+            let sel = HostingSelector::Id(id.clone());
+            if let Ok(detail) = self.get(sel).await {
+                if self
+                    .hard_delete_internal(detail, DeleteOpts::default())
+                    .await
+                    .is_ok()
+                {
+                    purged += 1;
+                }
+            }
+        }
+        if purged > 0 {
+            tracing::info!(count = purged, "trash GC: purged expired hostings");
+        }
+        Ok(purged)
+    }
+
+    /// The hard-delete pipeline extracted so both `delete()` (when
+    /// trash is off) and `purge_from_trash()` / GC (when trash is
+    /// on) can share it. Keeps the existing public delete() body
+    /// readable instead of branching deep inside.
+    async fn hard_delete_internal(
+        &self,
+        detail: HostingDetail,
+        opts: DeleteOpts,
+    ) -> Result<(), RpcError> {
+        hostings::set_state(&self.pool, &detail.id, HostingState::Deleting, now_secs())
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("set deleting: {e}")))?;
+        let _ = self
+            .adapters
+            .nginx_delete_vhost(&detail.domain, Some(detail.id.to_string()))
+            .await;
+        let _ = self.adapters.acme_delete(&detail.domain).await;
+        let _ = certificates::delete(&self.pool, &detail.domain).await;
+        if let Some(db) = detail.database.as_ref() {
+            if !opts.keep_database {
+                let _ = self
+                    .adapters
+                    .db_drop(db.engine, &db.db_name, &db.db_user)
+                    .await;
+            }
+        }
+        if let Some(ver) = detail.php_version {
+            let _ = self.adapters.fpm_delete(&detail.system_user, ver).await;
+        }
+        let hosting_root = format!(
+            "{}/{}/{}",
+            self.paths.home_root, detail.system_user, detail.domain
+        );
+        let _ = self.adapters.remove_hosting_tree(&hosting_root).await;
+        if !opts.keep_user {
+            let (others,): (i64,) =
+                sqlx::query_as("SELECT count(*) FROM hostings WHERE system_user_id = (SELECT id FROM system_users WHERE name = ?) AND id != ?")
+                    .bind(&detail.system_user)
+                    .bind(detail.id.as_str())
+                    .fetch_one(&self.pool)
+                    .await
+                    .map_err(|e| RpcError::Internal_with(format!("count: {e}")))?;
+            if others == 0 {
+                let _ = self.adapters.delete_user(&detail.system_user).await;
+                if let Ok(Some(row)) =
+                    system_users::get_by_name(&self.pool, &detail.system_user).await
+                {
+                    let _ = system_users::delete(&self.pool, row.id).await;
+                }
+            }
+        }
+        hostings::delete(&self.pool, &detail.id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("delete row: {e}")))?;
+        self.append_audit(
+            "hosting.purge",
+            Some(detail.id.as_str()),
+            &serde_json::json!({"domain": detail.domain}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
+    /// Read all trashed hostings + compute the "days remaining"
+    /// for the /trash list. Returns the wire-friendly summary.
+    pub async fn list_trash(&self) -> Result<Vec<hyperion_types::TrashEntry>, RpcError> {
+        let cluster_cfg = read_cluster_section(self.agent_config_path.as_deref());
+        let retention_secs = cluster_cfg.trash_retention_days * 24 * 3600;
+        let now = now_secs();
+        let rows = hostings::list_trashed(&self.pool)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("list trashed: {e}")))?;
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let trashed_at = r.trashed_at.unwrap_or(0);
+                let purge_at = trashed_at + retention_secs;
+                let secs_remaining = (purge_at - now).max(0);
+                hyperion_types::TrashEntry {
+                    id: r.id.as_str().to_string(),
+                    domain: r.domain,
+                    trashed_at,
+                    purge_at,
+                    seconds_remaining: secs_remaining,
+                    node_id: r.node_id.unwrap_or_default(),
+                }
+            })
+            .collect())
     }
 
     /// Apply / replace the per-hosting limits. Persists the row, then asks the
@@ -2802,6 +3044,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // and continue.
         if let Err(e) = self.prune_old_migration_bundles().await {
             tracing::warn!(error=%e, "migration bundle prune failed");
+        }
+        // Trash GC: hard-delete any trashed hosting past the
+        // retention window. No-op when cluster.trash_enabled = false.
+        if let Err(e) = self.trash_gc_tick().await {
+            tracing::warn!(error=%e, "trash GC failed");
         }
         Ok(processed)
     }
@@ -9133,11 +9380,22 @@ fn read_cluster_section(
         .and_then(|s| s.get("test_wp_no_index"))
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let trash_enabled = section
+        .and_then(|s| s.get("trash_enabled"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let trash_retention_days = section
+        .and_then(|s| s.get("trash_retention_days"))
+        .and_then(|v| v.as_integer())
+        .unwrap_or(30)
+        .clamp(1, 365);
     hyperion_types::ClusterConfigView {
         master_accepts_hostings: accept,
         test_node_ids,
         test_domain_template,
         test_wp_no_index,
+        trash_enabled,
+        trash_retention_days,
     }
 }
 
@@ -9194,11 +9452,21 @@ fn parse_agent_section_fields(
             }
             // [cluster] — master web UI placement preferences
             ("cluster", "master_accepts_hostings")
-            | ("cluster", "test_wp_no_index") => {
+            | ("cluster", "test_wp_no_index")
+            | ("cluster", "trash_enabled") => {
                 crate::config_persist::FieldValue::Bool(parse_bool(v)?)
             }
             ("cluster", "test_node_ids") | ("cluster", "test_domain_template") => {
                 crate::config_persist::FieldValue::Str(v.trim().to_string())
+            }
+            ("cluster", "trash_retention_days") => {
+                let n = parse_int(v)?;
+                if !(1..=365).contains(&n) {
+                    return Err(bad(format!(
+                        "trash_retention_days must be 1..=365, got {n}"
+                    )));
+                }
+                crate::config_persist::FieldValue::Int(n)
             }
             // Reject anything else.
             _ => {

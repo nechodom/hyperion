@@ -35,6 +35,14 @@ pub trait AgentApi: Send + Sync + 'static {
         reason: SuspendReason,
     ) -> Result<(), RpcError>;
     async fn hosting_resume(&self, sel: HostingSelector) -> Result<(), RpcError>;
+
+    /// /trash page: list every trashed hosting on this node with
+    /// seconds-remaining until GC.
+    async fn trash_list(&self) -> Result<Vec<hyperion_types::TrashEntry>, RpcError>;
+    /// Un-trash a hosting back to Active.
+    async fn trash_restore(&self, sel: HostingSelector) -> Result<(), RpcError>;
+    /// Skip the retention window and hard-delete this hosting now.
+    async fn trash_purge(&self, sel: HostingSelector) -> Result<(), RpcError>;
     /// Apply the per-hosting vhost options (basic auth, HSTS, custom
     /// snippet, maintenance mode, FastCGI cache, redirect target).
     /// On the worker side this is validated with `nginx -t` before
