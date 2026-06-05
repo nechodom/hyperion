@@ -446,6 +446,18 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::EmailSmtpAutodetect(v),
             Err(e) => Response::Error(e),
         },
+        Request::MtaDiagnostics => match api.mta_diagnostics().await {
+            Ok(v) => Response::MtaDiagnostics(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::MtaReconfigure => match api.mta_reconfigure().await {
+            Ok(mode) => Response::MtaReconfigure { mode },
+            Err(e) => Response::Error(e),
+        },
+        Request::MtaTestSend { to } => match api.mta_test_send(to).await {
+            Ok((exit_code, output)) => Response::MtaTestSend { exit_code, output },
+            Err(e) => Response::Error(e),
+        },
         Request::WpPluginList { hosting } => match api.wp_plugin_list(hosting).await {
             Ok(v) => Response::WpPluginList(v),
             Err(e) => Response::Error(e),
@@ -1187,6 +1199,15 @@ mod tests {
             &self,
         ) -> Result<hyperion_types::SmtpAutodetect, RpcError> {
             Ok(hyperion_types::SmtpAutodetect::default())
+        }
+        async fn mta_diagnostics(&self) -> Result<hyperion_types::MtaDiagnostics, RpcError> {
+            Ok(hyperion_types::MtaDiagnostics::default())
+        }
+        async fn mta_reconfigure(&self) -> Result<String, RpcError> {
+            Ok("skipped".to_string())
+        }
+        async fn mta_test_send(&self, _: String) -> Result<(i32, String), RpcError> {
+            Ok((0, String::new()))
         }
         async fn wp_plugin_list(
             &self,

@@ -160,6 +160,14 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::settings::post_email_test),
         )
         .route(
+            "/settings/mta-reconfigure",
+            post(handlers::settings::post_mta_reconfigure),
+        )
+        .route(
+            "/settings/mta-test",
+            post(handlers::settings::post_mta_test),
+        )
+        .route(
             "/api/email-autodetect",
             post(handlers::settings::post_email_autodetect),
         )

@@ -340,6 +340,23 @@ pub enum Request {
     /// Probe localhost for a usable SMTP relay so the UI can
     /// pre-fill the email config form. Cheap — just TCP connect.
     EmailSmtpAutodetect,
+    /// Read live MTA (postfix) state: mode, myhostname, relayhost,
+    /// mailq depth, recent log tail. Drives the /settings MTA card.
+    /// No remote network calls — all probes are local.
+    MtaDiagnostics,
+    /// Re-apply the boot-time postfix configuration on demand. Picks
+    /// the right mode (relay vs direct-MX) based on the current
+    /// [email] section. Used by the /settings "Reconfigure" button
+    /// when the operator changed agent.toml without restarting
+    /// hyperion-agent.
+    MtaReconfigure,
+    /// Send a one-line test email via `/usr/sbin/sendmail` (which is
+    /// postfix once installed). Different from EmailSendTest which
+    /// uses the lettre SMTP client directly — this exercises the
+    /// PHP `mail()` → wrapper → sendmail → relay/MX chain end-to-end.
+    MtaTestSend {
+        to: String,
+    },
     /// Import a migration bundle from a source node's signed URL.
     /// `base_url` is e.g. `https://source-master/api/migration/bundle/<id>`
     /// — the agent appends `/manifest.json?t=<token>` and
@@ -730,6 +747,17 @@ pub enum Response {
     /// surfaces as Response::Error so the UI can distinguish.
     FtpVerifyLogin { accepted: bool },
     EmailSmtpAutodetect(hyperion_types::SmtpAutodetect),
+    MtaDiagnostics(hyperion_types::MtaDiagnostics),
+    /// Echoes the mode that was just applied — `"direct-mx"`,
+    /// `"smart-host"`, or `"skipped"` (postfix not installed).
+    MtaReconfigure { mode: String },
+    /// `exit_code` from /usr/sbin/sendmail (0 = queued). `output`
+    /// is whatever sendmail printed to stderr (usually empty on
+    /// success).
+    MtaTestSend {
+        exit_code: i32,
+        output: String,
+    },
     WpPluginList(hyperion_types::WpPluginListResponse),
     WpPluginAction(hyperion_types::WpPluginActionResult),
     // Web users / roles / 2FA

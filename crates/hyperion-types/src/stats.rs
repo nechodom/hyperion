@@ -533,6 +533,53 @@ pub struct SmtpAutodetect {
     pub notes: String,
 }
 
+/// Diagnostics for the local MTA (postfix), returned by
+/// `Request::MtaDiagnostics`. Drives the "MTA" card in /settings.
+/// Every field is read live — no caching — so the operator sees
+/// current state on every page load. Cheap probes only (no SMTP
+/// connect, no DNS lookup); page render stays sub-100ms.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct MtaDiagnostics {
+    /// "direct-mx" | "smart-host" | "default" | "not-installed".
+    /// "default" means postfix is installed but Hyperion hasn't
+    /// applied either mode — UI shows a "Reconfigure" prompt.
+    pub mode: String,
+    /// True iff `/usr/sbin/sendmail` exists and is executable.
+    /// Without this PHP `mail()` returns false on every call.
+    pub sendmail_executable: bool,
+    /// `systemctl is-active postfix` — true when running.
+    pub service_active: bool,
+    /// `systemctl is-enabled postfix` — true when set to autostart.
+    pub service_enabled: bool,
+    /// True when `/etc/postfix/hyperion-relay.marker` exists, i.e.
+    /// the boot self-heal already wrote a managed config. False
+    /// means the operator is on default-Debian postfix (or never
+    /// installed it). The marker body is in `marker_body`.
+    pub marker_present: bool,
+    /// Raw contents of the marker file (when present) — operator-
+    /// friendly grep target. No secrets.
+    pub marker_body: String,
+    /// `postconf myhostname` — what postfix uses as HELO and
+    /// @-domain on local mail. Must match the IP's PTR record for
+    /// most receivers to accept the mail.
+    pub myhostname: String,
+    /// True iff myhostname contains at least one dot (a poor
+    /// proxy for "is a real FQDN" but catches the most common
+    /// botched case where the box just has a short hostname).
+    pub myhostname_is_fqdn: bool,
+    /// `postconf relayhost`. Empty string = direct MX. Non-empty
+    /// = smart-host (and matches the [email] smtp_host/port).
+    pub relayhost: String,
+    /// `postqueue -p | tail -1` — "Mail queue is empty" or
+    /// "-- N Kbytes in M Requests." Cheap operator hint about
+    /// stuck mail.
+    pub mailq_summary: String,
+    /// Best-effort tail of `/var/log/mail.log` (last 12 lines).
+    /// Empty when the log doesn't exist (fresh install) or we
+    /// can't read it (rare permissions issue).
+    pub recent_log_tail: Vec<String>,
+}
+
 /// What we know about whether Hyperion is up-to-date. Returned by
 /// `Request::UpdateCheck`; cached agent-side so the GitHub Releases
 /// API isn't hit on every page load.

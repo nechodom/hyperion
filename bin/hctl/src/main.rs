@@ -409,6 +409,33 @@ fn print_pretty(resp: &Response) {
         Response::HostingSuspend => println!("✓ suspended"),
         Response::HostingResume => println!("✓ resumed"),
         Response::HostingSetPhpVersion(v) => println!("✓ PHP version set to {v}"),
+        Response::MtaDiagnostics(d) => {
+            println!("mode             {}", d.mode);
+            println!("sendmail exec    {}", d.sendmail_executable);
+            println!("service active   {}", d.service_active);
+            println!("service enabled  {}", d.service_enabled);
+            println!("myhostname       {}", d.myhostname);
+            println!("myhostname FQDN  {}", d.myhostname_is_fqdn);
+            println!("relayhost        {}", if d.relayhost.is_empty() { "(direct MX)" } else { d.relayhost.as_str() });
+            println!("mailq            {}", d.mailq_summary);
+            if !d.recent_log_tail.is_empty() {
+                println!("recent log tail:");
+                for line in d.recent_log_tail.iter() {
+                    println!("  {line}");
+                }
+            }
+        }
+        Response::MtaReconfigure { mode } => println!("✓ postfix reconfigured: {mode}"),
+        Response::MtaTestSend { exit_code, output } => {
+            if *exit_code == 0 {
+                println!("✓ sendmail queued the message (exit 0)");
+            } else {
+                println!("✗ sendmail exit {exit_code}");
+                if !output.is_empty() {
+                    println!("{output}");
+                }
+            }
+        }
         Response::TrashList(entries) => {
             println!("{:<32} {:<14} {:<14} NODE", "DOMAIN", "TRASHED_AT", "PURGE_IN");
             for e in entries.iter() {

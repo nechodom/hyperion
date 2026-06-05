@@ -42,6 +42,13 @@ struct SettingsTpl<'a> {
     /// the "Raw TOML" tab. Failing to read shows "(could not
     /// read /etc/hyperion/agent.toml: …)".
     raw_toml: String,
+    /// Live MTA (postfix) state — mode (smart-host / direct-mx /
+    /// not-installed / default), myhostname, relayhost, mailq depth,
+    /// recent mail.log. Drives the new "MTA" card under the SMTP
+    /// relay form. Defaults to MtaDiagnostics::default() on RPC
+    /// failure (card renders "unknown" and offers a Reconfigure
+    /// button — operator at least sees the slot exists).
+    mta: hyperion_types::MtaDiagnostics,
     error: Option<String>,
     flash: Option<String>,
     flash_error: Option<String>,
@@ -65,7 +72,7 @@ pub async fn get_settings(
     ctx: AuthCtx,
     axum::extract::Query(q): axum::extract::Query<SettingsQuery>,
 ) -> Result<Response, AppError> {
-    let (config_res, update_res, emails_res) = tokio::join!(
+    let (config_res, update_res, emails_res, mta_res) = tokio::join!(
         hyperion_rpc_client::call(&state.agent_socket, Request::AgentConfigView),
         hyperion_rpc_client::call(
             &state.agent_socket,
@@ -75,6 +82,7 @@ pub async fn get_settings(
             &state.agent_socket,
             Request::EmailLogList { hosting_id: None, limit: 5 },
         ),
+        hyperion_rpc_client::call(&state.agent_socket, Request::MtaDiagnostics),
     );
     let (config, error) = match config_res {
         Ok(RpcResponse::AgentConfigView(c)) => (c, None),
@@ -92,6 +100,10 @@ pub async fn get_settings(
     let recent_emails: Vec<EmailLogEntry> = match emails_res {
         Ok(RpcResponse::EmailLogList(rows)) => rows,
         _ => vec![],
+    };
+    let mta: hyperion_types::MtaDiagnostics = match mta_res {
+        Ok(RpcResponse::MtaDiagnostics(d)) => d,
+        _ => hyperion_types::MtaDiagnostics::default(),
     };
     // Enrolled nodes — for the "send test from <node>" dropdown.
     // Best-effort: NodesList failure → empty Vec → dropdown shows
@@ -125,6 +137,7 @@ pub async fn get_settings(
         recent_emails,
         nodes,
         raw_toml,
+        mta,
         error,
         flash: q.flash,
         flash_error: q.flash_error,
@@ -443,6 +456,122 @@ fn email_test_ip(headers: &HeaderMap, peer: SocketAddr) -> std::net::IpAddr {
         }
     }
     peer.ip()
+}
+
+#[derive(Deserialize)]
+pub struct MtaTestForm {
+    pub to: String,
+}
+
+/// POST /settings/mta-reconfigure — re-apply postfix smart-host /
+/// direct-MX config based on the current `[email]` section. Used
+/// when the operator changed agent.toml without restarting the
+/// agent, or wants to roll forward after reverting a hand-edit.
+pub async fn post_mta_reconfigure(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+) -> Result<Response, AppError> {
+    if !ctx.is_admin_or_higher() {
+        return Ok(
+            Redirect::to("/settings?flash_error=admin+role+required+to+reconfigure+MTA#mail")
+                .into_response(),
+        );
+    }
+    let resp = hyperion_rpc_client::call(&state.agent_socket, Request::MtaReconfigure).await?;
+    match resp {
+        RpcResponse::MtaReconfigure { mode } => {
+            let msg = match mode.as_str() {
+                "skipped" => "postfix not installed — install it from /services first".to_string(),
+                m => format!("postfix reconfigured: now in {m} mode"),
+            };
+            Ok(
+                Redirect::to(&format!("/settings?flash={}#mail", urlencode(&msg)))
+                    .into_response(),
+            )
+        }
+        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
+            "/settings?flash_error={}#mail",
+            urlencode(&format!("MTA reconfigure failed: {e}"))
+        ))
+        .into_response()),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+/// POST /settings/mta-test — send a test mail via /usr/sbin/sendmail
+/// (exercises the PHP `mail()` chain end-to-end). Distinct from the
+/// existing /settings/email-test which uses the lettre SMTP client
+/// — this one validates the WHOLE pipe including postfix's
+/// outgoing leg.
+pub async fn post_mta_test(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Form(form): Form<MtaTestForm>,
+) -> Result<Response, AppError> {
+    if !ctx.is_admin_or_higher() {
+        return Ok(
+            Redirect::to("/settings?flash_error=admin+role+required+to+send+test+emails#mail")
+                .into_response(),
+        );
+    }
+    // Same per-IP rate limit as the SMTP-relay test. Prevents a
+    // compromised cookie from turning the local MTA into an
+    // address-enumerator or spam vector.
+    let ip = email_test_ip(&headers, peer);
+    if !state.ratelimit.check("mta-test", ip, Bucket::per_minute(3)) {
+        return Ok(Redirect::to(
+            "/settings?flash_error=test+email+rate+limit+exceeded+%E2%80%94+wait+a+minute#mail",
+        )
+        .into_response());
+    }
+    let to = form.to.trim().to_string();
+    if to.len() > 254 {
+        return Ok(
+            Redirect::to("/settings?flash_error=address+too+long+%28max+254+chars%29#mail")
+                .into_response(),
+        );
+    }
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::MtaTestSend { to: to.clone() },
+    )
+    .await?;
+    match resp {
+        RpcResponse::MtaTestSend { exit_code, output } => {
+            if exit_code == 0 {
+                let msg = format!(
+                    "Sendmail queued the message to {to} (exit 0). \
+                     Check the recipient's inbox/spam + `tail /var/log/mail.log` \
+                     on this node for delivery progress."
+                );
+                Ok(
+                    Redirect::to(&format!("/settings?flash={}#mail", urlencode(&msg)))
+                        .into_response(),
+                )
+            } else {
+                let trimmed = output.trim();
+                let tail = if trimmed.is_empty() {
+                    "(no output from sendmail)".to_string()
+                } else {
+                    trimmed.chars().take(180).collect()
+                };
+                let msg = format!("sendmail exit {exit_code}: {tail}");
+                Ok(Redirect::to(&format!(
+                    "/settings?flash_error={}#mail",
+                    urlencode(&msg)
+                ))
+                .into_response())
+            }
+        }
+        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
+            "/settings?flash_error={}#mail",
+            urlencode(&e.to_string())
+        ))
+        .into_response()),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
 }
 
 #[cfg(test)]

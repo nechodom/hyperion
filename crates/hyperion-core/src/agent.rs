@@ -523,6 +523,18 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.email_smtp_autodetect().await
     }
 
+    async fn mta_diagnostics(&self) -> Result<hyperion_types::MtaDiagnostics, RpcError> {
+        self.svc.mta_diagnostics().await
+    }
+
+    async fn mta_reconfigure(&self) -> Result<String, RpcError> {
+        self.svc.mta_reconfigure().await
+    }
+
+    async fn mta_test_send(&self, to: String) -> Result<(i32, String), RpcError> {
+        self.svc.mta_test_send(to).await
+    }
+
     async fn wp_plugin_list(
         &self,
         hosting: hyperion_rpc::HostingSelector,

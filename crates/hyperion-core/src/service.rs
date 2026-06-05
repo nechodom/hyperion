@@ -8150,6 +8150,254 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(code)
     }
 
+    /// Live MTA (postfix) diagnostics for the /settings card.
+    /// Every probe is local + cheap; no SMTP connect, no DNS lookup.
+    /// Returns the same answer the boot self-heal sees so the UI
+    /// reflects the current on-disk config and live service state.
+    pub async fn mta_diagnostics(&self) -> Result<hyperion_types::MtaDiagnostics, RpcError> {
+        use tokio::process::Command;
+
+        // is /usr/sbin/sendmail there + executable?
+        let sendmail_executable = match tokio::fs::metadata("/usr/sbin/sendmail").await {
+            Ok(m) => {
+                use std::os::unix::fs::PermissionsExt;
+                m.permissions().mode() & 0o111 != 0
+            }
+            Err(_) => false,
+        };
+
+        // postfix service state — separate probes so the operator
+        // can see "installed but not running" distinctly from "not
+        // installed".
+        let service_active = Command::new("/usr/bin/systemctl")
+            .args(["is-active", "--quiet", "postfix.service"])
+            .status()
+            .await
+            .map(|s| s.success())
+            .unwrap_or(false);
+        let service_enabled = Command::new("/usr/bin/systemctl")
+            .args(["is-enabled", "--quiet", "postfix.service"])
+            .status()
+            .await
+            .map(|s| s.success())
+            .unwrap_or(false);
+        let postfix_known = Command::new("/usr/bin/systemctl")
+            .args(["cat", "postfix.service"])
+            .output()
+            .await
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+
+        // marker — our boot self-heal writes this on every config
+        // application. Body contains `mode=direct-mx` or
+        // `relayhost=[smtp.x]:port`. Plain-text grep target.
+        let marker_path = "/etc/postfix/hyperion-relay.marker";
+        let marker_body = tokio::fs::read_to_string(marker_path)
+            .await
+            .unwrap_or_default();
+        let marker_present = !marker_body.is_empty();
+
+        // postconf reads. We grab both myhostname and relayhost in
+        // one call; postconf -h prints the value only (no key=).
+        async fn postconf_get(key: &str) -> String {
+            Command::new("/usr/sbin/postconf")
+                .args(["-h", key])
+                .output()
+                .await
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                .unwrap_or_default()
+        }
+        let myhostname = postconf_get("myhostname").await;
+        let relayhost = postconf_get("relayhost").await;
+        let myhostname_is_fqdn = myhostname.contains('.');
+
+        // Decide mode from observable state, not just the marker.
+        let mode = if !postfix_known {
+            "not-installed".to_string()
+        } else if marker_body.contains("mode=direct-mx") {
+            "direct-mx".to_string()
+        } else if !relayhost.is_empty() {
+            // Marker missing but relayhost set — operator-edited.
+            "smart-host".to_string()
+        } else if marker_present {
+            // Marker present but no relayhost set yet: smart-host
+            // config in flight, or an older marker. Treat as
+            // direct-mx since that's what postfix actually does
+            // with empty relayhost.
+            "direct-mx".to_string()
+        } else {
+            "default".to_string()
+        };
+
+        // mailq summary — `postqueue -p` is identical to `mailq`.
+        // The last line is either "Mail queue is empty" or
+        // "-- N Kbytes in M Requests."
+        let mailq_summary = Command::new("/usr/sbin/postqueue")
+            .args(["-p"])
+            .output()
+            .await
+            .ok()
+            .and_then(|o| {
+                if !o.status.success() {
+                    return None;
+                }
+                let body = String::from_utf8_lossy(&o.stdout);
+                let last = body
+                    .lines()
+                    .rev()
+                    .find(|l| !l.trim().is_empty())
+                    .map(|s| s.trim().to_string());
+                last
+            })
+            .unwrap_or_default();
+
+        // Last 12 lines of /var/log/mail.log — cheap signal for
+        // recent send activity / rejects. We don't shell out to
+        // `tail`; just read the file and grab the tail in Rust.
+        let recent_log_tail = match tokio::fs::read_to_string("/var/log/mail.log").await {
+            Ok(body) => {
+                let lines: Vec<String> =
+                    body.lines().rev().take(12).map(|s| s.to_string()).collect();
+                lines.into_iter().rev().collect()
+            }
+            Err(_) => Vec::new(),
+        };
+
+        Ok(hyperion_types::MtaDiagnostics {
+            mode,
+            sendmail_executable,
+            service_active,
+            service_enabled,
+            marker_present,
+            marker_body,
+            myhostname,
+            myhostname_is_fqdn,
+            relayhost,
+            mailq_summary,
+            recent_log_tail,
+        })
+    }
+
+    /// Operator-triggered re-apply of the boot postfix config. Picks
+    /// smart-host vs direct-MX based on the current `[email]` section,
+    /// returns the mode that was applied. Used by the /settings
+    /// "Reconfigure" button when the operator changed agent.toml
+    /// without restarting the agent (or wants to roll forward after
+    /// reverting their own hand-edits).
+    pub async fn mta_reconfigure(&self) -> Result<String, RpcError> {
+        if !hyperion_adapters::postfix::is_installed().await {
+            return Ok("skipped".to_string());
+        }
+        match self.email_config.as_ref() {
+            Some(cfg) if !cfg.smtp_host.trim().is_empty() => {
+                hyperion_adapters::postfix::ensure_relay_config(cfg)
+                    .await
+                    .map_err(|e| RpcError::Internal_with(format!("postfix relay: {e}")))?;
+                Ok("smart-host".to_string())
+            }
+            _ => {
+                let fqdn = tokio::process::Command::new("/bin/hostname")
+                    .arg("-f")
+                    .output()
+                    .await
+                    .ok()
+                    .and_then(|o| {
+                        if !o.status.success() {
+                            return None;
+                        }
+                        let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                        if s.is_empty() { None } else { Some(s) }
+                    })
+                    .unwrap_or_else(|| "localhost".to_string());
+                hyperion_adapters::postfix::ensure_direct_delivery_config(&fqdn)
+                    .await
+                    .map_err(|e| RpcError::Internal_with(format!("postfix direct: {e}")))?;
+                Ok("direct-mx".to_string())
+            }
+        }
+    }
+
+    /// Send a one-line test mail via `/usr/sbin/sendmail`. This
+    /// exercises the PHP `mail()` chain end-to-end (PHP would go
+    /// site-mail-wrapper → sendmail; here we skip the wrapper and
+    /// call sendmail directly, which is what the wrapper does
+    /// anyway after logging). Returns (exit_code, stderr).
+    pub async fn mta_test_send(&self, to: String) -> Result<(i32, String), RpcError> {
+        let to = to.trim();
+        if to.is_empty() || !to.contains('@') {
+            return Err(RpcError::Validation {
+                message: "destination address is required and must contain '@'".into(),
+            });
+        }
+        // Bound the address — Location-header / argv-length safety.
+        if to.len() > 254 {
+            return Err(RpcError::Validation {
+                message: "address too long (RFC5321 max is 254 chars)".into(),
+            });
+        }
+        // Synthesize a From that postfix will accept. The operator
+        // controls `[email].from_address` so we use it when set;
+        // fall back to admin@hostname as last resort.
+        let from = self
+            .email_config
+            .as_ref()
+            .map(|c| c.from_address.clone())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "admin@localhost".to_string());
+        let body = format!(
+            "From: {from}\r\n\
+             To: {to}\r\n\
+             Subject: Hyperion MTA test\r\n\
+             Content-Type: text/plain; charset=UTF-8\r\n\
+             \r\n\
+             This is a test email from hyperion-agent via /usr/sbin/sendmail.\r\n\
+             If you can read this, your MTA accepted it.\r\n\
+             Whether it actually delivered is between postfix and the recipient's MX.\r\n",
+        );
+        let mut child = tokio::process::Command::new("/usr/sbin/sendmail")
+            .args(["-t", "-f", &from])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .map_err(|e| RpcError::Internal_with(format!("spawn sendmail: {e}")))?;
+        if let Some(mut stdin) = child.stdin.take() {
+            use tokio::io::AsyncWriteExt;
+            stdin
+                .write_all(body.as_bytes())
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("write to sendmail stdin: {e}")))?;
+            let _ = stdin.shutdown().await;
+        }
+        let out = child
+            .wait_with_output()
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("wait sendmail: {e}")))?;
+        let exit_code = out.status.code().unwrap_or(-1);
+        let mut output = String::from_utf8_lossy(&out.stderr).into_owned();
+        if !out.stdout.is_empty() {
+            if !output.is_empty() && !output.ends_with('\n') {
+                output.push('\n');
+            }
+            output.push_str(&String::from_utf8_lossy(&out.stdout));
+        }
+        self.append_audit(
+            "mta.test_send",
+            None,
+            &serde_json::json!({
+                "to": to,
+                "from": from,
+                "exit_code": exit_code,
+            })
+            .to_string(),
+            if exit_code == 0 { "ok" } else { "failed" },
+        )
+        .await;
+        Ok((exit_code, output))
+    }
+
     /// Delete a single backup run + its archive file(s) on disk.
     /// Refuses when the backup is still `running` (would orphan the
     /// in-flight process). Logs `backup.delete` in the audit log

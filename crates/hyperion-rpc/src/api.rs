@@ -329,6 +329,17 @@ pub trait AgentApi: Send + Sync + 'static {
     /// Probe localhost for a usable SMTP relay.
     async fn email_smtp_autodetect(&self) -> Result<hyperion_types::SmtpAutodetect, RpcError>;
 
+    /// Read live MTA state for the /settings UI card.
+    async fn mta_diagnostics(&self) -> Result<hyperion_types::MtaDiagnostics, RpcError>;
+
+    /// Re-apply postfix smart-host or direct-MX config based on
+    /// current [email] settings. Returns the mode that was applied.
+    async fn mta_reconfigure(&self) -> Result<String, RpcError>;
+
+    /// Send a test email via `/usr/sbin/sendmail`. Returns
+    /// (exit_code, output). 0 = sendmail accepted into queue.
+    async fn mta_test_send(&self, to: String) -> Result<(i32, String), RpcError>;
+
     /// Import a migration bundle by URL — downloads from the source
     /// node's signed `/api/migration/bundle/<id>` endpoint then runs
     /// the regular import.
