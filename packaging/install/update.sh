@@ -274,6 +274,47 @@ until this is fixed manually (apt-get install -y $pkgs)."
   fi
 done
 
+#-------- 4b. MTA (so PHP mail() actually delivers) -----------------------
+# PHP's mail() execs $sendmail_path → hyperion's site-mail wrapper →
+# `/usr/sbin/sendmail`. Default Debian installs ship without any MTA,
+# so /usr/sbin/sendmail doesn't exist and every mail() call returns
+# false. The "Mail sent by this site" log stays empty (the wrapper
+# logs BEFORE calling sendmail, but the operator-facing symptom is
+# usually "WordPress doesn't send email" which they notice first).
+#
+# Install postfix as "Internet Site" by default — it provides the
+# `/usr/sbin/sendmail` compat binary and delivers via direct MX
+# lookup. Operators on networks where outbound TCP/25 is blocked
+# (AWS, GCP, some corporate DCs) need to switch to a smart-host
+# relay configuration manually:
+#   postconf -e 'relayhost = [smtp.example.com]:587'
+#   postconf -e 'smtp_sasl_auth_enable = yes'
+#   ...
+# Preseeding with the "Satellite system" type would be cleaner here
+# but it needs a relay host AT install time and we don't always
+# know one.
+if [[ ! -x /usr/sbin/sendmail ]]; then
+  log "No MTA installed — installing postfix as Internet Site so PHP mail() works ..."
+  echo "postfix postfix/main_mailer_type select Internet Site" | debconf-set-selections
+  echo "postfix postfix/mailname string $(hostname -f 2>/dev/null || hostname)" | debconf-set-selections
+  if (( APT_UPDATED == 0 )); then
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq || true
+    APT_UPDATED=1
+  fi
+  if DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postfix; then
+    systemctl reset-failed postfix >/dev/null 2>&1 || true
+    systemctl enable --now postfix >/dev/null 2>&1 || true
+    if [[ -x /usr/sbin/sendmail ]]; then
+      log "postfix installed — /usr/sbin/sendmail available, mail() should work."
+    else
+      warn "postfix installed but /usr/sbin/sendmail still missing — check 'apt-get install -y postfix' output."
+    fi
+  else
+    warn "postfix install failed — PHP mail() will keep returning false."
+    warn "Manual fix: apt-get install -y postfix  (or any other MTA that provides /usr/sbin/sendmail)"
+  fi
+fi
+
 # Per-version /run/php/<ver>/ subdirs for FPM sockets — without this
 # hyperion's per-user FPM pools (listen = /run/php/8.x/<user>.sock)
 # fail to open and nginx returns 502. /run is tmpfs so the snippet
@@ -295,7 +336,7 @@ fi
 # services; first hosting create then failed with
 #   "php8.3-fpm.service is not active, cannot reload"
 # Bring them up here so the agent's adapter never has to self-heal.
-for svc in nginx mariadb postgresql vsftpd \
+for svc in nginx mariadb postgresql vsftpd postfix \
            php8.1-fpm php8.2-fpm php8.3-fpm php8.4-fpm; do
   if unit_installed "$svc.service"; then
     # Clear any stale "failed" state from previous botched starts

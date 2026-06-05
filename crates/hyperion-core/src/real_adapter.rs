@@ -498,6 +498,75 @@ impl AdapterPort for RealAdapter {
         Ok((quarantined, scanned))
     }
 
+    async fn ensure_vhost_log_dirs(&self) -> Result<(usize, usize), AdapterError> {
+        let sites_dir = &self.nginx_paths.sites_enabled;
+        let mut entries = match tokio::fs::read_dir(sites_dir).await {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((0, 0)),
+            Err(e) => return Err(AdapterError::Io(e)),
+        };
+        let mut scanned = 0usize;
+        let mut created = 0usize;
+        while let Some(entry) = entries.next_entry().await.map_err(AdapterError::Io)? {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("conf") {
+                continue;
+            }
+            scanned += 1;
+            let body = match tokio::fs::read_to_string(&path).await {
+                Ok(b) => b,
+                Err(e) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %e,
+                        "ensure_vhost_log_dirs: read failed (skipping)"
+                    );
+                    continue;
+                }
+            };
+            for log_path in extract_log_paths(&body) {
+                // Defensive: only create dirs under /home or /var.
+                // We never want to mkdir somewhere weird if a vhost
+                // gets pasted in pointing at /etc or /.
+                if !log_path.starts_with("/home")
+                    && !log_path.starts_with("/var")
+                {
+                    continue;
+                }
+                let Some(parent) = log_path.parent() else {
+                    continue;
+                };
+                if tokio::fs::metadata(&parent).await.is_ok() {
+                    continue;
+                }
+                tracing::warn!(
+                    vhost = %path.display(),
+                    log_dir = %parent.display(),
+                    "ensure_vhost_log_dirs: parent dir missing — creating"
+                );
+                if let Err(e) = tokio::fs::create_dir_all(&parent).await {
+                    tracing::error!(
+                        path = %parent.display(),
+                        error = %e,
+                        "ensure_vhost_log_dirs: mkdir -p failed"
+                    );
+                    continue;
+                }
+                // Best-effort chown to the hosting's system user if
+                // we can derive it from the path. Path shape:
+                // /home/<user>/<domain>/logs → owner = <user>.
+                if let Some(user) = derive_system_user_from_log_path(parent) {
+                    let _ = tokio::process::Command::new("/usr/bin/chown")
+                        .args(["-R", &format!("{user}:{user}"), &parent.display().to_string()])
+                        .status()
+                        .await;
+                }
+                created += 1;
+            }
+        }
+        Ok((created, scanned))
+    }
+
     async fn repair_orphan_certs(&self) -> Result<(usize, usize), AdapterError> {
         let sites_dir = &self.nginx_paths.sites_enabled;
         let mut entries = match tokio::fs::read_dir(sites_dir).await {
@@ -1158,6 +1227,71 @@ fn extract_pool_user_directives(body: &str) -> Vec<(&'static str, String)> {
     out
 }
 
+/// Extract every `access_log <path>;` and `error_log <path>;`
+/// value from an nginx config body. Handles inline options after
+/// the path (e.g. `access_log /x/y.log combined buffer=32k;`) by
+/// taking only the first whitespace-separated token after the
+/// directive. Skips comments and lines where the directive isn't
+/// at the start of the (trimmed) line.
+fn extract_log_paths(body: &str) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    for raw in body.lines() {
+        let line = raw.trim_start();
+        let rest = if let Some(r) = line.strip_prefix("access_log ") {
+            r
+        } else if let Some(r) = line.strip_prefix("error_log ") {
+            r
+        } else {
+            continue;
+        };
+        let value = rest.trim().trim_end_matches(';').trim();
+        // Take only the first whitespace-separated token — that's
+        // the file path. Subsequent tokens are options (format,
+        // buffer size, gzip level, …).
+        let path = value.split_whitespace().next().unwrap_or("");
+        // Skip the sentinel "off" which disables logging.
+        if path.is_empty() || path == "off" {
+            continue;
+        }
+        out.push(std::path::PathBuf::from(path));
+    }
+    out
+}
+
+/// Given a log dir path of the shape
+/// `/home/<system_user>/<domain>/logs`, return `<system_user>`.
+/// Returns `None` for any other path shape so we don't try to
+/// chown e.g. `/var/log/nginx/...` to a non-existent user.
+fn derive_system_user_from_log_path(p: &std::path::Path) -> Option<String> {
+    let comps: Vec<_> = p.components().collect();
+    // Need: "/", "home", "<user>", "<domain>", "logs" → 5 comps.
+    if comps.len() < 4 {
+        return None;
+    }
+    let mut it = comps.iter();
+    // RootDir
+    it.next()?;
+    // "home"
+    match it.next()? {
+        std::path::Component::Normal(s) if s.to_str() == Some("home") => {}
+        _ => return None,
+    }
+    let user = match it.next()? {
+        std::path::Component::Normal(s) => s.to_str()?.to_string(),
+        _ => return None,
+    };
+    // Validate as a POSIX-shape username so we never chown to
+    // something injected.
+    if user.is_empty()
+        || !user
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return None;
+    }
+    Some(user)
+}
+
 /// Parse the path of the first failing pool file out of
 /// `php-fpm<ver> -t` stderr.
 ///
@@ -1664,6 +1798,88 @@ mod tests {
         assert_eq!(
             p,
             std::path::PathBuf::from("/etc/php/8.3/fpm/pool.d/y.conf")
+        );
+    }
+
+    // ─────────── nginx log-dir self-heal ───────────
+
+    #[test]
+    fn extract_log_paths_real_world_vhost() {
+        let body = r#"
+            server {
+                listen 443 ssl;
+                http2 on;
+                root /home/x_cz/x.cz/htdocs;
+                access_log /home/x_cz/x.cz/logs/access.log;
+                error_log  /home/x_cz/x.cz/logs/error.log;
+            }
+        "#;
+        let got = extract_log_paths(body);
+        assert_eq!(
+            got,
+            vec![
+                std::path::PathBuf::from("/home/x_cz/x.cz/logs/access.log"),
+                std::path::PathBuf::from("/home/x_cz/x.cz/logs/error.log"),
+            ]
+        );
+    }
+
+    /// nginx allows `access_log <path> [format] [buffer=N]` —
+    /// our parser must only take the path (first token).
+    #[test]
+    fn extract_log_paths_strips_format_options() {
+        let body = "access_log /var/log/nginx/x.log combined buffer=32k;\n";
+        assert_eq!(
+            extract_log_paths(body),
+            vec![std::path::PathBuf::from("/var/log/nginx/x.log")]
+        );
+    }
+
+    /// `access_log off` disables logging — must be ignored, not
+    /// treated as a path called "off".
+    #[test]
+    fn extract_log_paths_ignores_off_sentinel() {
+        let body = "access_log off;\nerror_log off;\n";
+        assert!(extract_log_paths(body).is_empty());
+    }
+
+    #[test]
+    fn derive_system_user_from_log_path_typical_shape() {
+        let p = std::path::Path::new("/home/alice_cz/alice.cz/logs");
+        assert_eq!(derive_system_user_from_log_path(p), Some("alice_cz".to_string()));
+    }
+
+    #[test]
+    fn derive_system_user_from_log_path_rejects_non_home_paths() {
+        assert_eq!(
+            derive_system_user_from_log_path(std::path::Path::new("/var/log/nginx")),
+            None
+        );
+        assert_eq!(
+            derive_system_user_from_log_path(std::path::Path::new("/etc")),
+            None
+        );
+        assert_eq!(
+            derive_system_user_from_log_path(std::path::Path::new("/home")),
+            None
+        );
+    }
+
+    /// Path-injection guard: reject usernames with shell or path
+    /// metacharacters before we ever shell out to chown.
+    #[test]
+    fn derive_system_user_from_log_path_rejects_garbage() {
+        assert_eq!(
+            derive_system_user_from_log_path(std::path::Path::new(
+                "/home/$(rm -rf)/x.cz/logs"
+            )),
+            None
+        );
+        assert_eq!(
+            derive_system_user_from_log_path(std::path::Path::new(
+                "/home/a:b/x.cz/logs"
+            )),
+            None
         );
     }
 }

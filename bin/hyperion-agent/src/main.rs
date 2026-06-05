@@ -201,9 +201,32 @@ async fn main() -> anyhow::Result<()> {
     {
         let repair_svc = svc.clone();
         tokio::spawn(async move {
+            // ALSO heal missing log dirs in the same pass. nginx opens
+            // every access_log / error_log file at startup; a missing
+            // parent dir produces the same emerg-exit as a missing
+            // cert. We do this BEFORE the cert sweep so a node whose
+            // certs AND log dirs are both broken can recover in one
+            // nginx_reload at the end.
+            let log_dirs = repair_svc.adapters.ensure_vhost_log_dirs().await;
+            let mut need_reload = false;
+            match log_dirs {
+                Ok((0, _)) => tracing::debug!("boot: vhost log dir sweep clean"),
+                Ok((created, scanned)) => {
+                    tracing::warn!(
+                        created,
+                        scanned,
+                        "boot: created missing nginx log dirs — will reload"
+                    );
+                    need_reload = true;
+                }
+                Err(e) => tracing::error!(error = %e, "boot: vhost log dir sweep failed"),
+            }
             match repair_svc.adapters.repair_orphan_certs().await {
                 Ok((0, _scanned)) => {
                     tracing::debug!("boot: orphan cert sweep clean");
+                    if need_reload {
+                        let _ = repair_svc.adapters.nginx_reload().await;
+                    }
                 }
                 Ok((repaired, scanned)) => {
                     tracing::warn!(

@@ -102,6 +102,18 @@ pub trait AdapterPort: Send + Sync {
         Ok((0, 0))
     }
 
+    /// Walk every enabled nginx vhost on this node, parse out the
+    /// `access_log` / `error_log` paths, and mkdir -p the parent
+    /// directory for each path that doesn't exist. A vhost
+    /// referencing a non-existent log dir makes `nginx -t` exit 1
+    /// with `[emerg] open() ".../access.log" failed (2: No such
+    /// file or directory)` — which bricks ALL nginx reloads the
+    /// same way the missing-cert bug did. Returns (created,
+    /// scanned). Default impl returns (0, 0).
+    async fn ensure_vhost_log_dirs(&self) -> Result<(usize, usize), AdapterError> {
+        Ok((0, 0))
+    }
+
     /// Walk every PHP-FPM pool file on this node, parse out the
     /// `user`, `group`, `listen.owner`, `listen.group` directives,
     /// and quarantine pools whose referenced Unix user doesn't
