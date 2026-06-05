@@ -842,6 +842,73 @@ async fn run_service_install(
         }
     }
 
+    // Per-package debconf preseeding — without this, packages with
+    // interactive postinst questions (postfix's "type of mail server",
+    // "mailname", iptables-persistent, mariadb-server root password,
+    // etc.) hang forever even with DEBIAN_FRONTEND=noninteractive
+    // because the question is mandatory.
+    if pkg == "postfix" {
+        // Internet Site = direct MX delivery. Same default as
+        // update.sh's MTA install block. Operators on networks
+        // where outbound TCP/25 is blocked can switch to smart-host
+        // mode manually after install (postconf -e relayhost=...).
+        let mailname = match tokio::process::Command::new("/bin/hostname")
+            .arg("-f")
+            .output()
+            .await
+        {
+            Ok(o) if o.status.success() => {
+                let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if s.is_empty() {
+                    "localhost".to_string()
+                } else {
+                    s
+                }
+            }
+            _ => "localhost".to_string(),
+        };
+        let selections = format!(
+            "postfix postfix/main_mailer_type select Internet Site\n\
+             postfix postfix/mailname string {mailname}\n",
+        );
+        // Pipe selections via stdin to debconf-set-selections. The
+        // child process exits 0 even if input is malformed (it just
+        // doesn't apply), so we treat any non-zero as a real spawn
+        // failure rather than a config problem.
+        let mut child = match tokio::process::Command::new("/usr/bin/debconf-set-selections")
+            .env("DEBIAN_FRONTEND", "noninteractive")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                append_line(
+                    &slot,
+                    &format!("debconf-set-selections spawn failed: {e}"),
+                )
+                .await;
+                let mut g = slot.lock().await;
+                g.state = "failed".to_string();
+                g.finished_at = now_secs();
+                g.exit_code = 127;
+                return;
+            }
+        };
+        if let Some(mut stdin) = child.stdin.take() {
+            use tokio::io::AsyncWriteExt;
+            let _ = stdin.write_all(selections.as_bytes()).await;
+            let _ = stdin.shutdown().await;
+        }
+        let _ = child.wait().await;
+        append_line(
+            &slot,
+            &format!("──── preseeded postfix: Internet Site, mailname={mailname} ────"),
+        )
+        .await;
+    }
+
     // Step 1: apt-get install. Hard-cap at 10 min via timeout above
     // (tokio::spawn'd, so we wrap with timeout here).
     let install_code = tokio::time::timeout(
@@ -8055,6 +8122,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             "postgresql" => Some("postgresql"),
             "redis-server" => Some("redis-server"),
             "vsftpd" => Some("vsftpd"),
+            // postfix provides /usr/sbin/sendmail for PHP mail().
+            // Install path runs the same debconf preseeding as
+            // update.sh (Internet Site, hostname-derived mailname)
+            // — see `run_service_install`.
+            "postfix" => Some("postfix"),
             "php8.1-fpm" => Some("php8.1-fpm"),
             "php8.2-fpm" => Some("php8.2-fpm"),
             "php8.3-fpm" => Some("php8.3-fpm"),
@@ -8832,6 +8904,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             ("postgresql", "PostgreSQL (database)"),
             ("redis-server", "Redis (object cache)"),
             ("vsftpd", "vsftpd (FTP)"),
+            // MTA — provides /usr/sbin/sendmail for PHP mail().
+            // When down/missing every hosted site's mail() returns
+            // false and the per-hosting "Mail sent by this site"
+            // log stays empty. Surface here so the operator can
+            // see "MTA down" at a glance instead of grep'ing the
+            // wrapper's stderr breadcrumbs.
+            ("postfix", "postfix (MTA for PHP mail)"),
             ("php8.1-fpm", "PHP 8.1 FPM"),
             ("php8.2-fpm", "PHP 8.2 FPM"),
             ("php8.3-fpm", "PHP 8.3 FPM"),
