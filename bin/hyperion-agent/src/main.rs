@@ -128,24 +128,32 @@ async fn main() -> anyhow::Result<()> {
     } else {
         Some(cfg.email.default_to.clone())
     };
-    // Postfix smart-host self-heal. When [email] is enabled AND
-    // postfix is installed, point postfix at the SAME SMTP relay
-    // that Hyperion uses for its own outbound (cert reminders,
-    // monitor alerts, etc.). Without this, PHP mail() from hosted
-    // sites goes through postfix's default Internet-Site mode (direct
-    // MX from the VPS IP) which fails for almost every real
-    // recipient — no SPF / DKIM / PTR, IP often blocklisted, port 25
-    // blocked on AWS/GCP. With it, site mail() and Hyperion mail
-    // share one authenticated relay.
+    // Postfix self-heal. Postfix is always brought to one of two
+    // known-good states at boot (idempotent):
     //
-    // The reverse (operator flipped [email] off): leave postfix
-    // running in default mode and clear our managed config so the
-    // operator's hand-edited main.cf isn't fighting our markers.
+    //   (A) Smart-host mode — when [email] is enabled AND has a
+    //       non-empty smtp_host. Site mail() and Hyperion's own
+    //       outbound share the same authenticated SMTP relay.
+    //
+    //   (B) Direct-MX mode — when [email] is empty / disabled.
+    //       Postfix does its own MX lookup and SMTPs the recipient
+    //       directly from this node's IP. Works fine for operators
+    //       who handle their own PTR / SPF / DKIM and aren't behind
+    //       a port-25-blocked provider. We harden the defaults:
+    //       myhostname = `hostname -f`, smtp_helo_name = $myhostname,
+    //       myorigin = $myhostname, inet_interfaces = loopback-only
+    //       (the public port 25 listener stays closed so this box
+    //       can never accidentally be an open relay).
+    //
+    // The two modes share a single marker file so a future operator
+    // can `cat /etc/postfix/hyperion-relay.marker` to see which one
+    // the agent picked.
     {
         let email_cfg_for_postfix = email_cfg.clone();
+        let agent_hostname = hostname_or_unknown();
         tokio::spawn(async move {
             if !hyperion_core::postfix_is_installed().await {
-                tracing::debug!("boot: postfix not installed — skipping smart-host config");
+                tracing::debug!("boot: postfix not installed — skipping mail config");
                 return;
             }
             match email_cfg_for_postfix {
@@ -155,25 +163,60 @@ async fn main() -> anyhow::Result<()> {
                             tracing::info!(
                                 relay = %cfg.smtp_host,
                                 port = cfg.smtp_port,
-                                "boot: postfix configured as smart-host via Hyperion's [email] relay"
+                                "boot: postfix configured as smart-host via [email] relay"
                             );
                         }
                         Err(e) => {
                             tracing::error!(
                                 error = %e,
-                                "boot: postfix smart-host config FAILED — PHP mail() will keep \
-                                 going through default direct-MX delivery (likely won't reach \
-                                 inboxes). Fix the error and restart hyperion-agent."
+                                "boot: postfix smart-host config FAILED — PHP mail() will \
+                                 not deliver. Fix the error and restart hyperion-agent."
                             );
                         }
                     }
                 }
                 _ => {
-                    if let Err(e) = hyperion_core::postfix_rollback_relay_config().await {
+                    // Direct-MX mode. Resolve a real FQDN from
+                    // `hostname -f`; fall back to the short hostname
+                    // if the box doesn't have a configured DNS
+                    // domain (operator can still send, just from an
+                    // unqualified HELO — many receivers reject this,
+                    // so we log a warning).
+                    let fqdn = match tokio::process::Command::new("/bin/hostname")
+                        .arg("-f")
+                        .output()
+                        .await
+                    {
+                        Ok(o) if o.status.success() => {
+                            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                            if s.is_empty() { agent_hostname.clone() } else { s }
+                        }
+                        _ => agent_hostname.clone(),
+                    };
+                    if !fqdn.contains('.') {
                         tracing::warn!(
-                            error = %e,
-                            "boot: postfix rollback after [email] disable failed"
+                            hostname = %fqdn,
+                            "boot: postfix direct-MX configured with a non-FQDN HELO — \
+                             most receivers will reject mail. Set a proper FQDN with \
+                             `hostnamectl set-hostname <name>.<domain>` and ensure the IP's \
+                             PTR record matches."
                         );
+                    }
+                    match hyperion_core::postfix_ensure_direct_delivery_config(&fqdn).await {
+                        Ok(()) => {
+                            tracing::info!(
+                                myhostname = %fqdn,
+                                "boot: postfix configured for direct MX delivery — \
+                                 operator handles PTR / SPF / DKIM"
+                            );
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                error = %e,
+                                "boot: postfix direct-MX config FAILED — PHP mail() may not \
+                                 deliver. Fix the error and restart hyperion-agent."
+                            );
+                        }
                     }
                 }
             }

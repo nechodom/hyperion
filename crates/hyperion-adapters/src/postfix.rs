@@ -154,6 +154,117 @@ pub async fn ensure_relay_config(cfg: &EmailConfig) -> Result<(), AdapterError> 
     Ok(())
 }
 
+/// Configure postfix for **direct MX delivery** — no SMTP relay,
+/// no third-party provider. The operator handles SPF / DKIM / PTR
+/// records themselves and accepts that delivery success depends on
+/// their VPS IP's reputation. This is the "I just want to send mail
+/// from my own box" path.
+///
+/// What we set (via `postconf -e`):
+/// * `myhostname` = the operator-supplied FQDN. This is what postfix
+///   uses as the SMTP HELO/EHLO greeting AND as the @ domain on
+///   local mail. It MUST be a real FQDN matching the IP's PTR
+///   record — receiving servers reject anything else.
+/// * `smtp_helo_name = $myhostname` — belt-and-braces so a future
+///   distro default doesn't override HELO with something dumb.
+/// * `myorigin = $myhostname` — From-stamp on local-originated mail
+///   (without this, "root@stav" appears, which receiving servers
+///   often reject as a hostname-only domain).
+/// * `mydestination = $myhostname, localhost.$mydomain, localhost`
+///   — postfix only accepts mail TO these (we don't want this box
+///   to be an open relay).
+/// * `relayhost = ` (cleared) — direct MX lookup for every send.
+/// * `inet_interfaces = loopback-only` — refuse to listen for
+///   inbound SMTP on the public IP. Hyperion's not a mail-server
+///   panel; the only legitimate SMTP traffic INTO this box is from
+///   localhost (the PHP wrapper → /usr/sbin/sendmail). Closing the
+///   public port 25 listener eliminates a whole class of relay/
+///   abuse risk.
+/// * `inet_protocols = all` — IPv4 + IPv6 outbound (some recipients
+///   only have v6 MX records).
+/// * `smtputf8_enable = yes` — non-ASCII headers / addresses go
+///   through unmangled.
+///
+/// The same marker file (`hyperion-relay.marker`) used by relay
+/// mode is written here too — its body just changes to reflect
+/// the active mode, so an operator can `cat` it to see which path
+/// the agent picked.
+pub async fn ensure_direct_delivery_config(myhostname: &str) -> Result<(), AdapterError> {
+    let myhostname = myhostname.trim();
+    if myhostname.is_empty() {
+        return Err(AdapterError::Other(
+            "postfix direct delivery: myhostname is empty — pass a real FQDN".into(),
+        ));
+    }
+    // Sanity-check the FQDN shape so we never paste shell garbage
+    // into main.cf. Letters, digits, dots, hyphens — POSIX hostname
+    // chars plus dot.
+    if !myhostname
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+    {
+        return Err(AdapterError::Other(format!(
+            "postfix direct delivery: myhostname `{myhostname}` has invalid chars"
+        )));
+    }
+
+    let postconf_lines: &[&str] = &[
+        &format!("myhostname={myhostname}"),
+        "smtp_helo_name=$myhostname",
+        "myorigin=$myhostname",
+        // Loopback aliases plus our own hostname. Operator can
+        // expand this later if they really want this box to accept
+        // mail for additional domains, but the safe default is no.
+        "mydestination=$myhostname, localhost.$mydomain, localhost",
+        // Closed listener: public port 25 returns "connection refused"
+        // so we can't be turned into an open relay. The wrapper still
+        // reaches /usr/sbin/sendmail because PHP execs it locally —
+        // /usr/sbin/sendmail talks to the postfix master via UNIX
+        // socket (/var/spool/postfix/...), not the network listener.
+        "inet_interfaces=loopback-only",
+        "inet_protocols=all",
+        "smtputf8_enable=yes",
+    ];
+    for line in postconf_lines {
+        cmd::run("/usr/sbin/postconf", &["-e", line]).await?;
+    }
+    // Explicitly clear the relayhost (in case we were in smart-host
+    // mode before). postconf -X drops the parameter, postfix then
+    // falls back to its built-in default (empty = direct MX).
+    let _ = cmd::run("/usr/sbin/postconf", &["-X", "relayhost"]).await;
+    // Same with SASL knobs — they were set by ensure_relay_config
+    // and would otherwise sit there inert but confusing.
+    for key in [
+        "smtp_sasl_auth_enable",
+        "smtp_sasl_password_maps",
+        "smtp_sasl_security_options",
+        "smtp_sasl_tls_security_options",
+    ] {
+        let _ = cmd::run("/usr/sbin/postconf", &["-X", key]).await;
+    }
+    // Best-effort: remove the sasl_passwd files left behind by an
+    // earlier smart-host config. Failure is fine — postfix doesn't
+    // care about a stale unreferenced file.
+    for path in [
+        SASL_PASSWD_PATH,
+        &format!("{SASL_PASSWD_PATH}.db"),
+        &format!("{SASL_PASSWD_PATH}.lmdb"),
+    ] {
+        let _ = tokio::fs::remove_file(path).await;
+    }
+
+    let marker = format!(
+        "# managed by hyperion-agent — DO NOT EDIT by hand.\n\
+         mode=direct-mx\n\
+         myhostname={myhostname}\n\
+         # Operator is responsible for the IP's PTR record + SPF\n\
+         # on every domain hosted on this node.\n",
+    );
+    atomic_write(Path::new(HYPERION_MARKER), marker.as_bytes(), 0o644).await?;
+    cmd::run("/usr/bin/systemctl", &["reload", "postfix"]).await?;
+    Ok(())
+}
+
 /// Undo `ensure_relay_config`. Called when `[email] enabled = false`
 /// in agent.toml — we leave postfix running in default-Internet-Site
 /// mode rather than tearing it down completely, so the operator can
@@ -231,5 +342,55 @@ mod tests {
         c.smtp_host = "   ".into();
         let err = ensure_relay_config(&c).await.expect_err("must reject");
         assert!(err.to_string().contains("smtp_host is empty"));
+    }
+
+    #[tokio::test]
+    async fn ensure_direct_delivery_rejects_empty_hostname() {
+        let err = ensure_direct_delivery_config("")
+            .await
+            .expect_err("must reject");
+        assert!(err.to_string().contains("myhostname is empty"));
+    }
+
+    #[tokio::test]
+    async fn ensure_direct_delivery_rejects_whitespace_hostname() {
+        let err = ensure_direct_delivery_config("   ")
+            .await
+            .expect_err("must reject");
+        assert!(err.to_string().contains("myhostname is empty"));
+    }
+
+    /// Path-injection guard: hostname with shell metachars must NOT
+    /// reach `postconf -e myhostname=...` — they're passed as argv
+    /// so no shell, but bad input also signals we'd never get a
+    /// real FQDN out of this.
+    #[tokio::test]
+    async fn ensure_direct_delivery_rejects_shell_metachars() {
+        let err = ensure_direct_delivery_config("stav;rm -rf /")
+            .await
+            .expect_err("must reject");
+        assert!(err.to_string().contains("invalid chars"));
+        let err = ensure_direct_delivery_config("$(whoami).cz")
+            .await
+            .expect_err("must reject");
+        assert!(err.to_string().contains("invalid chars"));
+    }
+
+    /// Real FQDNs pass the input validation. We don't actually run
+    /// postconf in tests, so the test only proves "input validation
+    /// doesn't false-positive on legitimate hostnames".
+    #[test]
+    fn fqdn_charset_accepts_real_hostnames() {
+        for fqdn in [
+            "stav.example.cz",
+            "mail-01.eu-central-1.aws.example.com",
+            "01-prod.tvujkluster.cz",
+        ] {
+            assert!(
+                fqdn.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-'),
+                "false-positive reject for: {fqdn}"
+            );
+        }
     }
 }
