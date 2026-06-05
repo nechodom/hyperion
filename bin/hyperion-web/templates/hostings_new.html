@@ -49,11 +49,22 @@
   </div>
 {% endif %}
 
+{# Wizard step indicator. JS toggles which `.wizard-step` is
+   visible; without JS the whole form renders top-to-bottom which
+   is the original behaviour. #}
+<ol class="wizard-stepper" id="wizard-stepper" style="display:none">
+  <li data-step="1" class="active"><span class="num">1</span> Where</li>
+  <li data-step="2"><span class="num">2</span> What</li>
+  <li data-step="3"><span class="num">3</span> Domain</li>
+  <li data-step="4"><span class="num">4</span> WordPress</li>
+</ol>
+
 <div style="display:grid;grid-template-columns:minmax(0,2fr) minmax(0,1fr);gap:1.25rem;align-items:start">
 <div class="card">
-  <form method="post" action="/hostings">
+  <form method="post" action="/hostings" id="wizard-form">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
 
+    <div class="wizard-step" data-step="1">
     {# Target node selector. Only renders when there's at least one
        remote enrolled node; on a single-node setup the form silently
        targets the master, which is the existing behaviour. #}
@@ -113,6 +124,58 @@
     <input type="hidden" name="target_node" value="local">
     {% endif %}
 
+    {# Profile picker — wizard step 1. Selecting one stamps
+       profile_id; post_create dispatches profile_apply right after
+       the hosting goes Active so limits / plugins / themes land
+       without an extra operator click. #}
+    <h2 style="margin-top:1rem">
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7h-9"/><path d="M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></svg>
+      Profile
+    </h2>
+    <input type="hidden" name="profile_id" id="profile_id" value="0">
+    <div class="profile-picker">
+      {# "None" option keeps the previous behaviour for operators
+         who don't want a profile. #}
+      <label class="profile-card selected" data-pid="0">
+        <input type="radio" name="profile_radio" value="0" checked
+               onclick="document.getElementById('profile_id').value='0';
+                        document.querySelectorAll('.profile-card').forEach(c => c.classList.remove('selected'));
+                        this.closest('.profile-card').classList.add('selected');">
+        <div class="profile-card-body">
+          <div class="profile-name">None / custom</div>
+          <div class="profile-meta">Use raw defaults; tune limits later from the detail page.</div>
+        </div>
+      </label>
+      {% for p in profiles %}
+      <label class="profile-card" data-pid="{{ p.id }}">
+        <input type="radio" name="profile_radio" value="{{ p.id }}"
+               onclick="document.getElementById('profile_id').value='{{ p.id }}';
+                        document.querySelectorAll('.profile-card').forEach(c => c.classList.remove('selected'));
+                        this.closest('.profile-card').classList.add('selected');">
+        <div class="profile-card-body">
+          <div class="profile-name">{{ p.name }}</div>
+          {% if !p.description.is_empty() %}
+            <div class="profile-meta">{{ p.description }}</div>
+          {% endif %}
+          <div class="profile-limits">
+            <span title="PHP memory_limit">{{ p.php_memory_mb }} MB PHP</span>
+            <span title="PHP-FPM max_children">{{ p.php_max_children }} workers</span>
+            <span title="DB max connections">{{ p.db_max_connections }} DB conn</span>
+            {% if let Some(d) = p.disk_hard_mb %}<span title="Disk hard cap">{{ d }} MB disk</span>{% endif %}
+          </div>
+        </div>
+      </label>
+      {% endfor %}
+    </div>
+    {% if profiles.is_empty() %}
+    <p class="text-soft small" style="margin:0.5rem 0 0">
+      No profiles defined yet. Create one in <a href="/profiles">/profiles</a>
+      to bundle PHP / DB / WP-plugin / theme stamps under a friendly name.
+    </p>
+    {% endif %}
+    </div><!-- /wizard-step 1 -->
+
+    <div class="wizard-step" data-step="2" style="display:none">
     <h2>
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 22h20"/><path d="M2 12h20"/><path d="M2 2h20"/><path d="M6 22V2"/><path d="M18 22V2"/></svg>
       Hosting type
@@ -140,7 +203,10 @@
       </p>
     </div>
 
-    <h2 style="margin-top:1.4rem">
+    </div><!-- /wizard-step 2 -->
+
+    <div class="wizard-step" data-step="3" style="display:none">
+    <h2 style="margin-top:0">
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
       Domains
     </h2>
@@ -224,6 +290,9 @@
       </div>
     </div>
 
+    </div><!-- /wizard-step 3 -->
+
+    <div class="wizard-step" data-step="4" style="display:none">
     {# Install WordPress on create — toggle reveals extra fields. #}
     <div class="card-section" id="wp-install-row" style="margin-top:1rem">
       <label class="field-checkbox" style="font-weight:600">
@@ -273,12 +342,18 @@
       </p>
     </div>
 
-    <div class="btn-group" style="margin-top:1rem">
-      <button class="btn primary lg" type="submit" id="provision-submit">
-        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
-        <span id="provision-submit-label">Provision</span>
-      </button>
+    </div><!-- /wizard-step 4 -->
+
+    <div class="btn-group wizard-nav" style="margin-top:1rem;justify-content:space-between;display:flex">
       <a href="/hostings" class="btn ghost">Cancel</a>
+      <div style="display:flex;gap:0.5rem">
+        <button class="btn" type="button" id="wizard-back" style="display:none">← Back</button>
+        <button class="btn primary" type="button" id="wizard-next">Next →</button>
+        <button class="btn primary lg" type="submit" id="provision-submit" style="display:none">
+          <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+          <span id="provision-submit-label">Provision</span>
+        </button>
+      </div>
     </div>
   </form>
 </div>
@@ -365,7 +440,196 @@
   nameInput.addEventListener('input', renderPreview);
   applyMode();
 })();
+
+// Wizard step navigation. Without JS, all `.wizard-step` blocks
+// render (default style block keeps them inline-display). With JS,
+// only one is visible at a time and Next/Back buttons drive the
+// transition. The final step swaps Next for the submit button.
+(function () {
+  'use strict';
+  const stepper = document.getElementById('wizard-stepper');
+  const steps = document.querySelectorAll('.wizard-step');
+  const backBtn = document.getElementById('wizard-back');
+  const nextBtn = document.getElementById('wizard-next');
+  const submitBtn = document.getElementById('provision-submit');
+  if (!stepper || steps.length === 0) return;
+
+  // JS is on — un-hide the stepper.
+  stepper.style.display = 'flex';
+
+  let current = 1;
+  const total = steps.length;
+
+  function show(n) {
+    current = Math.max(1, Math.min(total, n));
+    steps.forEach((el) => {
+      const isMine = Number(el.dataset.step) === current;
+      el.style.display = isMine ? '' : 'none';
+    });
+    stepper.querySelectorAll('li').forEach((li) => {
+      const sn = Number(li.dataset.step);
+      li.classList.toggle('active', sn === current);
+      li.classList.toggle('done', sn < current);
+    });
+    backBtn.style.display = current > 1 ? '' : 'none';
+    if (current === total) {
+      nextBtn.style.display = 'none';
+      submitBtn.style.display = '';
+    } else {
+      nextBtn.style.display = '';
+      submitBtn.style.display = 'none';
+    }
+    // Scroll the stepper into view on transition so the operator
+    // sees the new step from the top, not from wherever they last
+    // scrolled.
+    if (stepper.scrollIntoView) stepper.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  // Validate the inputs in the current step before advancing.
+  // Browser's native :required + pattern validity handles this for
+  // free — we just call checkValidity() on every input in the
+  // current step.
+  function validateCurrentStep() {
+    const stepEl = document.querySelector('.wizard-step[data-step="' + current + '"]');
+    if (!stepEl) return true;
+    const inputs = stepEl.querySelectorAll('input, select, textarea');
+    for (const el of inputs) {
+      if (!el.checkValidity()) {
+        el.reportValidity();
+        return false;
+      }
+    }
+    return true;
+  }
+
+  nextBtn.addEventListener('click', () => {
+    if (!validateCurrentStep()) return;
+    show(current + 1);
+  });
+  backBtn.addEventListener('click', () => show(current - 1));
+
+  // Also let the stepper itself be clickable — operator can jump
+  // back to any prior step. Forward jumps go through validation.
+  stepper.querySelectorAll('li').forEach((li) => {
+    li.addEventListener('click', () => {
+      const target = Number(li.dataset.step);
+      if (target < current) {
+        show(target);
+      } else if (target > current) {
+        // Walk forward step by step so each gets validated.
+        while (current < target) {
+          if (!validateCurrentStep()) return;
+          show(current + 1);
+        }
+      }
+    });
+  });
+
+  show(1);
+})();
 </script>
+
+<style>
+/* Wizard stepper — horizontal pill row at the top of the create
+   form. Hidden by default + revealed by JS so a non-JS browser
+   sees the original single-page form. */
+.wizard-stepper {
+  list-style: none;
+  padding: 0.5rem 0.75rem;
+  margin: 0 0 1rem;
+  display: none;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  font-size: 0.85rem;
+}
+.wizard-stepper li {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.3rem 0.65rem;
+  border-radius: var(--radius-sm);
+  color: var(--text-soft);
+  cursor: pointer;
+  transition: background var(--t-fast), color var(--t-fast);
+}
+.wizard-stepper li:hover { background: var(--surface-2); color: var(--text); }
+.wizard-stepper li.active {
+  background: color-mix(in oklab, var(--primary) 18%, transparent);
+  color: var(--text);
+}
+.wizard-stepper li.done .num {
+  background: var(--success);
+  color: white;
+  border-color: var(--success);
+}
+.wizard-stepper li .num {
+  display: inline-grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  font-weight: 700;
+  font-size: 0.72rem;
+}
+
+/* Profile picker — single-column on phones, 2-up otherwise. */
+.profile-picker {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 0.6rem;
+  margin: 0.5rem 0 0.4rem;
+}
+.profile-card {
+  position: relative;
+  display: block;
+  border: 1.5px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.7rem 0.85rem;
+  cursor: pointer;
+  background: var(--surface);
+  transition: border-color var(--t-fast), background var(--t-fast);
+}
+.profile-card:hover { border-color: var(--primary-h); }
+.profile-card.selected {
+  border-color: var(--primary);
+  background: color-mix(in oklab, var(--primary) 8%, transparent);
+}
+.profile-card input[type="radio"] {
+  position: absolute;
+  top: 0.7rem;
+  right: 0.7rem;
+  accent-color: var(--primary);
+}
+.profile-card-body .profile-name {
+  font-weight: 600;
+  font-size: 0.92rem;
+  color: var(--text);
+}
+.profile-card-body .profile-meta {
+  font-size: 0.78rem;
+  color: var(--text-soft);
+  margin-top: 0.2rem;
+}
+.profile-card-body .profile-limits {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  margin-top: 0.45rem;
+}
+.profile-card-body .profile-limits span {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  padding: 0.05rem 0.35rem;
+  font-size: 0.7rem;
+  color: var(--text-dim);
+}
+</style>
 
 <div class="card muted">
   <h2 style="margin-bottom:0.6rem">

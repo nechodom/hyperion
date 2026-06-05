@@ -76,6 +76,11 @@ struct NewTpl<'a> {
     /// Template for auto-generated test-site domains (e.g.
     /// "test.{name}.{node}.testovaciverze.cz"). Empty = feature off.
     test_domain_template: String,
+    /// All defined hosting profiles, so the wizard's step 1 can
+    /// render a picker. Selecting one stamps the profile_id field
+    /// in the form; post_create dispatches profile_apply after the
+    /// hosting goes Active.
+    profiles: Vec<hyperion_types::HostingProfile>,
 }
 
 /// Per-field append to `CreateForm` for the optional WP install
@@ -307,6 +312,7 @@ pub async fn get_new(State(state): State<SharedState>, ctx: AuthCtx) -> Result<R
         master_accepts_hostings,
         test_node_ids: cluster_cfg.test_node_ids,
         test_domain_template: cluster_cfg.test_domain_template,
+        profiles: fetch_all_profiles(&state).await.unwrap_or_default(),
     };
     // Browsers (and reverse proxies in front) can cache /hostings/new
     // by default. After an enrollment the dropdown should refresh on
@@ -390,6 +396,13 @@ pub struct CreateForm {
     /// Locale; defaults to en_US if blank.
     #[serde(default)]
     pub wp_locale: String,
+    /// Hosting-profile id selected in the wizard's first step.
+    /// `0` (or absent) = no profile — operator wants raw defaults.
+    /// When non-zero, post_create dispatches profile_apply right
+    /// after the hosting goes Active so limits / wp plugins /
+    /// themes get stamped in.
+    #[serde(default)]
+    pub profile_id: i64,
 }
 
 pub async fn post_create(
@@ -629,6 +642,33 @@ pub async fn post_create(
     .await?;
     match resp {
         RpcResponse::HostingCreate(mut created) => {
+            // Apply the wizard-selected profile before WP install so
+            // the WP-side plugin/theme list in the profile lands on
+            // a hosting that already has its limits stamped. Failure
+            // is logged + skipped — the hosting is live regardless.
+            if form.profile_id > 0 {
+                let apply = crate::dispatcher::dispatch_to_node(
+                    &state,
+                    target,
+                    Request::ProfileApply {
+                        sel: HostingSelector::Id(created.id.clone()),
+                        profile_id: form.profile_id,
+                    },
+                )
+                .await;
+                match apply {
+                    Ok(RpcResponse::ProfileApply(_)) => {}
+                    Ok(RpcResponse::Error(e)) => {
+                        tracing::warn!(profile_id=form.profile_id, error=%e, "profile apply failed");
+                    }
+                    Ok(_) => {
+                        tracing::warn!("profile apply: unexpected response");
+                    }
+                    Err(e) => {
+                        tracing::warn!(profile_id=form.profile_id, error=%e, "profile apply RPC failed");
+                    }
+                }
+            }
             // Optional WordPress install — only when checkbox ticked,
             // database is provisioned, and kind is php (no point
             // installing WP on a static or reverse_proxy hosting).
@@ -2532,6 +2572,10 @@ fn render_new_error<'a>(
         // node types.
         test_node_ids: String::new(),
         test_domain_template: String::new(),
+        // Re-render skips re-fetching the profile list — empty is
+        // fine because the operator's already past step 1 (the form
+        // still carries profile_id from the original submit).
+        profiles: Vec::new(),
     };
     Html(
         tpl.render()
