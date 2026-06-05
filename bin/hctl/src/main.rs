@@ -473,6 +473,11 @@ fn print_pretty(resp: &Response) {
             None => println!("avatar: (none)"),
         },
         Response::AvatarSet => println!("✓ avatar updated"),
+        Response::EmailChangeRequest { masked_to } => {
+            println!("✓ verification code sent to {masked_to}");
+        }
+        Response::EmailChangeConfirm => println!("✓ email changed"),
+        Response::EmailChangeCancel => println!("✓ pending email change cancelled"),
         Response::MonitorOverview(items) => {
             println!(
                 "{:<32} {:<10} {:>5} {:>7} {:>4} {}",

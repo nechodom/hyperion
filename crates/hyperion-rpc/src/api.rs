@@ -450,6 +450,22 @@ pub trait AgentApi: Send + Sync + 'static {
         filename: Option<String>,
     ) -> Result<(), RpcError>;
 
+    /// Verify current_password + store the new_email pending +
+    /// send a 6-digit code to it. Returns the masked target.
+    async fn email_change_request(
+        &self,
+        user_id: i64,
+        new_email: String,
+        current_password: String,
+    ) -> Result<String, RpcError>;
+    /// Validate the 6-digit code; on success, swap email → pending.
+    async fn email_change_confirm(
+        &self,
+        user_id: i64,
+        code: String,
+    ) -> Result<(), RpcError>;
+    async fn email_change_cancel(&self, user_id: i64) -> Result<(), RpcError>;
+
     /// Per-hosting monitor: get config + recent samples.
     async fn monitor_get(
         &self,

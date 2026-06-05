@@ -263,6 +263,99 @@ pub async fn post_change_password(
     }
 }
 
+// ─────────── Email change with verification ───────────
+
+#[derive(serde::Deserialize)]
+pub struct EmailChangeRequestForm {
+    pub new_email: String,
+    pub current_password: String,
+}
+
+pub async fn post_email_change_request(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<EmailChangeRequestForm>,
+) -> Result<Response, AppError> {
+    let Some(sess) = ctx.session.clone() else {
+        return Ok(Redirect::to("/login").into_response());
+    };
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::EmailChangeRequest {
+            user_id: sess.user_id,
+            new_email: form.new_email,
+            current_password: form.current_password,
+        },
+    )
+    .await
+    .map_err(AppError::from)?;
+    match resp {
+        RpcResponse::EmailChangeRequest { masked_to } => Ok(Redirect::to(&format!(
+            "/profile?flash=Code+sent+to+{}",
+            urlencode(&masked_to)
+        ))
+        .into_response()),
+        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
+            "/profile?error={}",
+            urlencode(&e.to_string())
+        ))
+        .into_response()),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct EmailChangeConfirmForm {
+    pub code: String,
+}
+
+pub async fn post_email_change_confirm(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<EmailChangeConfirmForm>,
+) -> Result<Response, AppError> {
+    let Some(sess) = ctx.session.clone() else {
+        return Ok(Redirect::to("/login").into_response());
+    };
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::EmailChangeConfirm {
+            user_id: sess.user_id,
+            code: form.code.trim().to_string(),
+        },
+    )
+    .await
+    .map_err(AppError::from)?;
+    match resp {
+        RpcResponse::EmailChangeConfirm => {
+            Ok(Redirect::to("/profile?flash=Email+changed").into_response())
+        }
+        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
+            "/profile?error={}",
+            urlencode(&e.to_string())
+        ))
+        .into_response()),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+pub async fn post_email_change_cancel(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+) -> Result<Response, AppError> {
+    let Some(sess) = ctx.session.clone() else {
+        return Ok(Redirect::to("/login").into_response());
+    };
+    let _ = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::EmailChangeCancel {
+            user_id: sess.user_id,
+        },
+    )
+    .await;
+    Ok(Redirect::to("/profile?flash=Cancelled").into_response())
+}
+
 fn urlencode(s: &str) -> String {
     s.bytes()
         .map(|b| match b {

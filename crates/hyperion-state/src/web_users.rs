@@ -188,6 +188,101 @@ pub async fn set_email(
     Ok(())
 }
 
+/// Stash a pending email-change request. Overwrites any prior
+/// pending change for the user. The code_hash is argon2-hashed
+/// already; this layer doesn't know the plaintext.
+pub async fn set_pending_email(
+    pool: &SqlitePool,
+    user_id: i64,
+    new_email: &str,
+    code_hash: &str,
+    expires_at: i64,
+    now: i64,
+) -> Result<(), StateError> {
+    sqlx::query(
+        "UPDATE web_users \
+         SET pending_email = ?, pending_email_code_hash = ?, \
+             pending_email_expires_at = ?, pending_email_attempts = 0, \
+             updated_at = ? \
+         WHERE id = ?",
+    )
+    .bind(new_email)
+    .bind(code_hash)
+    .bind(expires_at)
+    .bind(now)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Tuple of the four pending-email columns for one user.
+/// `None` (the outer Option) when no pending change exists at all.
+#[derive(Debug, Clone)]
+pub struct PendingEmail {
+    pub new_email: String,
+    pub code_hash: String,
+    pub expires_at: i64,
+    pub attempts: i64,
+}
+
+pub async fn get_pending_email(
+    pool: &SqlitePool,
+    user_id: i64,
+) -> Result<Option<PendingEmail>, StateError> {
+    let row: Option<(Option<String>, Option<String>, Option<i64>, i64)> = sqlx::query_as(
+        "SELECT pending_email, pending_email_code_hash, \
+                pending_email_expires_at, pending_email_attempts \
+         FROM web_users WHERE id = ?",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.and_then(|(em, hh, ex, at)| match (em, hh, ex) {
+        (Some(em), Some(hh), Some(ex)) => Some(PendingEmail {
+            new_email: em,
+            code_hash: hh,
+            expires_at: ex,
+            attempts: at,
+        }),
+        _ => None,
+    }))
+}
+
+pub async fn clear_pending_email(
+    pool: &SqlitePool,
+    user_id: i64,
+) -> Result<(), StateError> {
+    sqlx::query(
+        "UPDATE web_users SET pending_email = NULL, pending_email_code_hash = NULL, \
+                              pending_email_expires_at = NULL, pending_email_attempts = 0 \
+         WHERE id = ?",
+    )
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn bump_pending_email_attempts(
+    pool: &SqlitePool,
+    user_id: i64,
+) -> Result<i64, StateError> {
+    sqlx::query(
+        "UPDATE web_users SET pending_email_attempts = pending_email_attempts + 1 \
+         WHERE id = ?",
+    )
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+    let row: (i64,) =
+        sqlx::query_as("SELECT pending_email_attempts FROM web_users WHERE id = ?")
+            .bind(user_id)
+            .fetch_one(pool)
+            .await?;
+    Ok(row.0)
+}
+
 /// Set the avatar filename for a user. `None` clears the avatar
 /// (UI then falls back to the initial-letter pill).
 pub async fn set_avatar_filename(

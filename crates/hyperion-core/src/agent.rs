@@ -657,6 +657,27 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     ) -> Result<(), RpcError> {
         self.svc.avatar_set(user_id, filename).await
     }
+
+    async fn email_change_request(
+        &self,
+        user_id: i64,
+        new_email: String,
+        current_password: String,
+    ) -> Result<String, RpcError> {
+        self.svc
+            .email_change_request(user_id, new_email, current_password)
+            .await
+    }
+    async fn email_change_confirm(
+        &self,
+        user_id: i64,
+        code: String,
+    ) -> Result<(), RpcError> {
+        self.svc.email_change_confirm(user_id, code).await
+    }
+    async fn email_change_cancel(&self, user_id: i64) -> Result<(), RpcError> {
+        self.svc.email_change_cancel(user_id).await
+    }
     async fn monitor_get(
         &self,
         sel: HostingSelector,

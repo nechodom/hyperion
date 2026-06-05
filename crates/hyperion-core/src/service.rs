@@ -6047,6 +6047,177 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(())
     }
 
+    /// Begin an email-change flow: verify the current password,
+    /// store the new email + a hashed 6-digit code (15min TTL),
+    /// dispatch the code to the NEW address. Returns the masked
+    /// recipient so the UI can confirm without echoing the full
+    /// address back to the operator's screen.
+    ///
+    /// We require the current password as a soft-2FA gate so a
+    /// stolen session can't silently take over the account by
+    /// pointing email at attacker-controlled inbox.
+    pub async fn email_change_request(
+        &self,
+        user_id: i64,
+        new_email: String,
+        current_password: String,
+    ) -> Result<String, RpcError> {
+        let new_email = new_email.trim().to_string();
+        if !new_email.contains('@') || new_email.len() > 254 {
+            return Err(RpcError::Validation {
+                message: "new_email is not a valid address".into(),
+            });
+        }
+        let row = hyperion_state::web_users::get_by_id(&self.pool, user_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("get user: {e}")))?
+            .ok_or_else(|| RpcError::NotFound {
+                kind: "web_user".into(),
+                id: user_id.to_string(),
+            })?;
+        if new_email == row.email {
+            return Err(RpcError::Validation {
+                message: "new email matches current email".into(),
+            });
+        }
+        let ok = hyperion_auth::verify_password(&current_password, &row.password_hash)
+            .map_err(|e| RpcError::Internal_with(format!("verify: {e}")))?;
+        if !ok {
+            return Err(RpcError::Validation {
+                message: "current password is incorrect".into(),
+            });
+        }
+        // Generate a 6-digit code. We use a CSPRNG so brute-force
+        // resistance comes from the limited attempt count, not from
+        // the entropy of the code.
+        use rand::Rng;
+        let code: u32 = rand::thread_rng().gen_range(0..1_000_000);
+        let code_str = format!("{:06}", code);
+        let code_hash = hyperion_auth::hash_password(&code_str)
+            .map_err(|e| RpcError::Internal_with(format!("hash code: {e}")))?;
+        let expires_at = now_secs() + 15 * 60;
+        hyperion_state::web_users::set_pending_email(
+            &self.pool,
+            user_id,
+            &new_email,
+            &code_hash,
+            expires_at,
+            now_secs(),
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("stash: {e}")))?;
+
+        // Dispatch the email. Failure here doesn't roll back the
+        // pending row — the operator may have a typo'd email, in
+        // which case they should retry with a different one (which
+        // overwrites the pending row).
+        if let Some(cfg) = &self.email_config {
+            let body = format!(
+                "Hyperion email-change verification\n\n\
+                 Code: {code_str}\n\n\
+                 Enter this code on the profile page within 15 minutes to confirm \
+                 the change. If you didn't request this, ignore this email — your \
+                 current address remains in place.\n"
+            );
+            if let Err(e) = hyperion_adapters::email::send_text(
+                cfg,
+                &new_email,
+                "Hyperion: confirm your new email",
+                &body,
+            )
+            .await
+            {
+                tracing::warn!(error = %e, "email-change: send failed");
+                return Err(RpcError::Internal_with(format!(
+                    "couldn't send verification email: {e}. Check Settings → Email."
+                )));
+            }
+        } else {
+            return Err(RpcError::Conflict {
+                message: "no SMTP configured — configure Settings → Email first".into(),
+            });
+        }
+
+        self.append_audit(
+            "web.user.email_change_requested",
+            None,
+            &serde_json::json!({
+                "user_id": user_id,
+                "new_email": &new_email,
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+        Ok(mask_email(&new_email))
+    }
+
+    pub async fn email_change_confirm(
+        &self,
+        user_id: i64,
+        code: String,
+    ) -> Result<(), RpcError> {
+        let pending = hyperion_state::web_users::get_pending_email(&self.pool, user_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("get pending: {e}")))?
+            .ok_or_else(|| RpcError::Validation {
+                message: "no email change in progress".into(),
+            })?;
+        if now_secs() > pending.expires_at {
+            // Expired — clear so the operator gets a clean slate
+            // when they request again.
+            let _ = hyperion_state::web_users::clear_pending_email(&self.pool, user_id).await;
+            return Err(RpcError::Validation {
+                message: "verification code expired — request a new one".into(),
+            });
+        }
+        if pending.attempts >= 5 {
+            let _ = hyperion_state::web_users::clear_pending_email(&self.pool, user_id).await;
+            return Err(RpcError::Validation {
+                message: "too many wrong codes — request a new email change".into(),
+            });
+        }
+        let ok = hyperion_auth::verify_password(&code, &pending.code_hash)
+            .map_err(|e| RpcError::Internal_with(format!("verify code: {e}")))?;
+        if !ok {
+            let _ = hyperion_state::web_users::bump_pending_email_attempts(
+                &self.pool, user_id,
+            )
+            .await;
+            return Err(RpcError::Validation {
+                message: "wrong code".into(),
+            });
+        }
+        hyperion_state::web_users::set_email(
+            &self.pool,
+            user_id,
+            &pending.new_email,
+            now_secs(),
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("set email: {e}")))?;
+        let _ = hyperion_state::web_users::clear_pending_email(&self.pool, user_id).await;
+        self.append_audit(
+            "web.user.email_changed",
+            None,
+            &serde_json::json!({
+                "user_id": user_id,
+                "new_email": &pending.new_email,
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
+    pub async fn email_change_cancel(&self, user_id: i64) -> Result<(), RpcError> {
+        hyperion_state::web_users::clear_pending_email(&self.pool, user_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("clear: {e}")))?;
+        Ok(())
+    }
+
     pub async fn web_user_set_role(&self, user_id: i64, role: String) -> Result<(), RpcError> {
         let parsed: hyperion_state::web_users::WebRole = role.parse().map_err(|e: String| {
             RpcError::Validation { message: e }
@@ -9211,6 +9382,30 @@ async fn check_usr_writable() -> Option<String> {
              `mount | grep ' / '` to verify; if you see `ro,` you'll need to remount RW \
              (`mount -o remount,rw /` then retry) or pick a different base image."
         )),
+    }
+}
+
+/// Mask an email address for display: keep the first letter +
+/// last letter of the local part, replace the rest with `****`.
+/// `"kevin@example.cz"` → `"k****n@example.cz"`. Single-letter
+/// locals collapse to `*@example.cz`.
+fn mask_email(s: &str) -> String {
+    if let Some(at) = s.find('@') {
+        let local = &s[..at];
+        let domain = &s[at..];
+        match local.chars().count() {
+            0 => format!("***{domain}"),
+            1 => format!("*{domain}"),
+            2 => format!("**{domain}"),
+            _ => {
+                let mut chars = local.chars();
+                let first = chars.next().unwrap_or('?');
+                let last = chars.last().unwrap_or('?');
+                format!("{first}****{last}{domain}")
+            }
+        }
+    } else {
+        "****".to_string()
     }
 }
 

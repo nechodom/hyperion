@@ -170,5 +170,45 @@
   <p class="text-soft small" style="margin-top:0.4rem">Min 8 characters. You'll stay logged in — no need to re-authenticate.</p>
 </div>
 
+<div class="card" style="margin-top:1rem">
+  <h2 style="margin:0 0 0.6rem">
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+    Change email
+  </h2>
+  {% if let Some(u) = user %}
+  <p class="text-soft small" style="margin:0 0 0.6rem">
+    Current address: <code>{{ u.email }}</code>. We'll send a 6-digit
+    code to the new address; enter it here to confirm.
+  </p>
+  {% endif %}
+
+  {# Request step — always rendered. A pending request just shows
+     the confirm form below alongside this one (operator can cancel
+     + start over by submitting a new email). #}
+  <form method="post" action="/profile/email/request" autocomplete="off"
+        style="display:flex;flex-direction:column;gap:0.4rem">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <input type="email" name="new_email" placeholder="new@example.com" required maxlength="254">
+    <input type="password" name="current_password" placeholder="current password" required>
+    <button type="submit" class="btn primary small" style="align-self:flex-start">Send verification code</button>
+  </form>
+
+  <details style="margin-top:0.8rem">
+    <summary style="cursor:pointer;font-size:0.88rem;color:var(--text-dim)">Already requested? Enter the code</summary>
+    <form method="post" action="/profile/email/confirm" autocomplete="off"
+          style="display:flex;gap:0.4rem;align-items:center;margin-top:0.5rem">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="text" name="code" placeholder="123456"
+             inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required autocomplete="off"
+             style="font-size:1.1rem;letter-spacing:0.2em;width:8rem">
+      <button type="submit" class="btn primary small">Confirm</button>
+      <form method="post" action="/profile/email/cancel" style="display:inline;margin:0">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <button type="submit" class="btn small ghost">Cancel pending</button>
+      </form>
+    </form>
+  </details>
+</div>
+
 </div>
 {% endblock %}

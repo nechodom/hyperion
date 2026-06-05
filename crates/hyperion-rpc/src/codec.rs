@@ -464,6 +464,25 @@ pub enum Request {
     AvatarFilename {
         user_id: i64,
     },
+    /// Request an email change: store the pending new_email +
+    /// hashed code + send the code to the new address. Returns
+    /// the (masked) email address so the UI can confirm where
+    /// the code went without echoing the full address.
+    EmailChangeRequest {
+        user_id: i64,
+        new_email: String,
+        current_password: String,
+    },
+    /// Confirm an email change with the 6-digit code that landed
+    /// in the new address's inbox.
+    EmailChangeConfirm {
+        user_id: i64,
+        code: String,
+    },
+    /// Cancel a pending change.
+    EmailChangeCancel {
+        user_id: i64,
+    },
     /// Set or clear the avatar basename. `None` clears.
     AvatarSet {
         user_id: i64,
@@ -690,6 +709,10 @@ pub enum Response {
     MonitorOverview(Vec<hyperion_types::MonitorOverviewItem>),
     AvatarFilename(Option<String>),
     AvatarSet,
+    /// Returns the masked target address (e.g. "k****@example.cz").
+    EmailChangeRequest { masked_to: String },
+    EmailChangeConfirm,
+    EmailChangeCancel,
     MonitorGet {
         config: hyperion_types::MonitorConfigView,
         history: hyperion_types::MonitorHistory,

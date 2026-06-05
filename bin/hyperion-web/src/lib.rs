@@ -222,6 +222,18 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::profile::post_change_password),
         )
         .route(
+            "/profile/email/request",
+            post(handlers::profile::post_email_change_request),
+        )
+        .route(
+            "/profile/email/confirm",
+            post(handlers::profile::post_email_change_confirm),
+        )
+        .route(
+            "/profile/email/cancel",
+            post(handlers::profile::post_email_change_cancel),
+        )
+        .route(
             "/hostings/dns-check-domain",
             post(handlers::hostings::post_dns_check_domain),
         )

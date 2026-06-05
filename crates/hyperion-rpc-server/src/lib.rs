@@ -558,6 +558,27 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::EmailChangeRequest { user_id, new_email, current_password } => {
+            match api
+                .email_change_request(user_id, new_email, current_password)
+                .await
+            {
+                Ok(masked_to) => Response::EmailChangeRequest { masked_to },
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::EmailChangeConfirm { user_id, code } => {
+            match api.email_change_confirm(user_id, code).await {
+                Ok(()) => Response::EmailChangeConfirm,
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::EmailChangeCancel { user_id } => {
+            match api.email_change_cancel(user_id).await {
+                Ok(()) => Response::EmailChangeCancel,
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::MonitorGet { sel } => match api.monitor_get(sel).await {
             Ok((config, history)) => Response::MonitorGet { config, history },
             Err(e) => Response::Error(e),
@@ -1263,6 +1284,20 @@ mod tests {
             Ok(None)
         }
         async fn avatar_set(&self, _: i64, _: Option<String>) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn email_change_request(
+            &self,
+            _: i64,
+            _: String,
+            _: String,
+        ) -> Result<String, RpcError> {
+            Ok(String::new())
+        }
+        async fn email_change_confirm(&self, _: i64, _: String) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn email_change_cancel(&self, _: i64) -> Result<(), RpcError> {
             Ok(())
         }
         async fn monitor_get(
