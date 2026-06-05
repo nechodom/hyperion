@@ -102,11 +102,40 @@ pub trait AdapterPort: Send + Sync {
         Ok((0, 0))
     }
 
+    /// Walk every PHP-FPM pool file on this node, parse out the
+    /// `user`, `group`, `listen.owner`, `listen.group` directives,
+    /// and quarantine pools whose referenced Unix user doesn't
+    /// exist on the system. A single bad pool brings DOWN the
+    /// whole php<ver>-fpm service (FPM exits 78 EX_CONFIG and
+    /// systemd gives up after 5 retries) — quarantining lets the
+    /// service start and surface the issue without burying every
+    /// other hosting on the same PHP version.
+    ///
+    /// "Quarantine" = rename `<pool>.conf` → `<pool>.conf.hyperion-
+    /// quarantined-<unix-ts>`. FPM only loads `*.conf`, so the
+    /// renamed file is ignored at next reload; the operator can
+    /// inspect or recover it manually.
+    ///
+    /// Returns `(quarantined, scanned)` so the boot path can log
+    /// a useful number and trigger an FPM reload only when there
+    /// was actual work. Default impl returns (0, 0).
+    async fn repair_orphan_fpm_pools(&self) -> Result<(usize, usize), AdapterError> {
+        Ok((0, 0))
+    }
+
     /// `systemctl reload nginx` with self-heal (auto-promotes to
     /// `start` if nginx is not running). Used by the boot-time
     /// orphan-cert sweep to recover the live process after a repair.
     /// Default impl is a no-op (mocks don't manage systemd).
     async fn nginx_reload(&self) -> Result<(), AdapterError> {
+        Ok(())
+    }
+
+    /// `systemctl restart php<ver>-fpm` for one version, with
+    /// "not active → start" self-heal. Used by the boot-time
+    /// FPM-pool repair to recover after quarantining a broken
+    /// pool. Default impl is a no-op.
+    async fn fpm_restart(&self, _version: PhpVersion) -> Result<(), AdapterError> {
         Ok(())
     }
 

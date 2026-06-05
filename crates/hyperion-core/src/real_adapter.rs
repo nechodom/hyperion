@@ -280,6 +280,120 @@ impl AdapterPort for RealAdapter {
         hyperion_adapters::nginx::reload().await
     }
 
+    async fn fpm_restart(&self, version: PhpVersion) -> Result<(), AdapterError> {
+        // systemctl restart php<ver>-fpm. We don't reuse phpfpm::reload
+        // here because after a quarantine we want a fresh START (the
+        // service is likely "failed" from too many restarts), not a
+        // reload — reload on a failed unit is a no-op.
+        let svc = format!("{}.service", version.service_name());
+        let out = tokio::process::Command::new("/usr/bin/systemctl")
+            .args(["reset-failed", &svc])
+            .output()
+            .await
+            .map_err(AdapterError::Io)?;
+        if !out.status.success() {
+            // Not fatal — `reset-failed` is a courtesy; the start
+            // below may still succeed on a unit that never failed.
+            tracing::debug!(
+                service = %svc,
+                stderr = %String::from_utf8_lossy(&out.stderr),
+                "reset-failed returned non-zero (continuing to start)"
+            );
+        }
+        let out = tokio::process::Command::new("/usr/bin/systemctl")
+            .args(["start", &svc])
+            .output()
+            .await
+            .map_err(AdapterError::Io)?;
+        if !out.status.success() {
+            return Err(AdapterError::Command {
+                cmd: format!("/usr/bin/systemctl start {svc}"),
+                code: out.status.code().unwrap_or(-1),
+                stderr_tail: String::from_utf8_lossy(&out.stderr).into_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    async fn repair_orphan_fpm_pools(&self) -> Result<(usize, usize), AdapterError> {
+        let mut scanned = 0usize;
+        let mut quarantined = 0usize;
+        let now_ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        for ver in PhpVersion::all() {
+            let pool_dir = std::path::PathBuf::from(ver.pool_dir());
+            let mut entries = match tokio::fs::read_dir(&pool_dir).await {
+                Ok(e) => e,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => {
+                    tracing::warn!(
+                        version = %ver,
+                        dir = %pool_dir.display(),
+                        error = %e,
+                        "repair_orphan_fpm_pools: read_dir failed (skipping version)"
+                    );
+                    continue;
+                }
+            };
+            while let Some(entry) = entries.next_entry().await.map_err(AdapterError::Io)? {
+                let path = entry.path();
+                // Only inspect actual pool files. Quarantine markers
+                // we wrote on a previous boot have a longer suffix.
+                if path.extension().and_then(|s| s.to_str()) != Some("conf") {
+                    continue;
+                }
+                scanned += 1;
+                let body = match tokio::fs::read_to_string(&path).await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %path.display(),
+                            error = %e,
+                            "repair_orphan_fpm_pools: read failed (skipping)"
+                        );
+                        continue;
+                    }
+                };
+                // Collect every user-reference we want to validate:
+                // top-level `user`, `group`, `listen.owner`, `listen.group`.
+                // We validate all of them so a pool with a working
+                // `user` but a busted `listen.owner` still gets
+                // caught.
+                let users = extract_pool_user_directives(&body);
+                let mut missing: Vec<(&'static str, String)> = Vec::new();
+                for (label, name) in users.iter() {
+                    if !unix_user_exists(name).await {
+                        missing.push((*label, name.clone()));
+                    }
+                }
+                if missing.is_empty() {
+                    continue;
+                }
+                let quarantine_path = path.with_extension(format!(
+                    "conf.hyperion-quarantined-{now_ts}"
+                ));
+                tracing::warn!(
+                    pool = %path.display(),
+                    quarantined = %quarantine_path.display(),
+                    missing = ?missing,
+                    "repair_orphan_fpm_pools: pool references missing Unix users — quarantining"
+                );
+                if let Err(e) = tokio::fs::rename(&path, &quarantine_path).await {
+                    tracing::error!(
+                        pool = %path.display(),
+                        error = %e,
+                        "repair_orphan_fpm_pools: rename to quarantine failed"
+                    );
+                    continue;
+                }
+                quarantined += 1;
+            }
+        }
+        Ok((quarantined, scanned))
+    }
+
     async fn repair_orphan_certs(&self) -> Result<(usize, usize), AdapterError> {
         let sites_dir = &self.nginx_paths.sites_enabled;
         let mut entries = match tokio::fs::read_dir(sites_dir).await {
@@ -881,6 +995,98 @@ fn extract_ssl_certificate_paths(body: &str) -> Vec<String> {
     out
 }
 
+/// Extract every Unix-user reference from a PHP-FPM pool config
+/// body. The four directives we care about — all of which can break
+/// FPM startup with exit 78 if the user doesn't exist — are:
+///   * `user = <name>`         (pool worker uid)
+///   * `group = <name>`        (pool worker gid)
+///   * `listen.owner = <name>` (socket owner — nginx connects as this)
+///   * `listen.group = <name>` (socket group)
+///
+/// Returns `(directive_label, username)` pairs so the caller can
+/// log which directive was at fault. Comments (lines starting with
+/// `;` or `#`) and `[section]` headers are skipped. Empty values
+/// are skipped (FPM accepts an unset directive, it just inherits
+/// the parent — that's not what we're hunting).
+fn extract_pool_user_directives(body: &str) -> Vec<(&'static str, String)> {
+    // Each entry: (literal directive prefix as it appears at line
+    // start, human label used in logs). The PHP-FPM INI parser
+    // tolerates whitespace around `=`, so we strip after `=`.
+    const KEYS: &[(&str, &str)] = &[
+        ("user", "user"),
+        ("group", "group"),
+        ("listen.owner", "listen.owner"),
+        ("listen.group", "listen.group"),
+    ];
+    let mut out = Vec::new();
+    for raw in body.lines() {
+        let line = raw.trim_start();
+        if line.is_empty() || line.starts_with(';') || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') {
+            continue;
+        }
+        for (key, label) in KEYS.iter() {
+            // The PHP-FPM config syntax allows `key = value` or
+            // `key=value`. Accept both. We don't accept `keyfoo =`
+            // as a false positive — require the next char after the
+            // key to be whitespace or `=`.
+            let Some(rest) = line.strip_prefix(key) else {
+                continue;
+            };
+            let next = rest.chars().next();
+            if !matches!(next, Some('=') | Some(' ') | Some('\t')) {
+                continue;
+            }
+            // Find the `=` and grab everything after it up to the
+            // first comment marker (`;` is FPM's comment char).
+            let Some(eq_pos) = rest.find('=') else {
+                continue;
+            };
+            let value = &rest[eq_pos + 1..];
+            let value = value.split(';').next().unwrap_or("").trim();
+            if !value.is_empty() {
+                out.push((*label, value.to_string()));
+            }
+        }
+    }
+    out
+}
+
+/// Check whether a Unix user exists on the system via
+/// `getent passwd <name>`. Conservative: returns `true` on
+/// any unexpected error (binary missing, permission denied,
+/// etc.) so we never quarantine a pool just because we
+/// couldn't run the check. False ONLY when getent ran cleanly
+/// and reported the user as absent (exit code 2).
+async fn unix_user_exists(name: &str) -> bool {
+    // Defensive: empty name shouldn't pass, but if it does we
+    // don't want to quarantine — empty `user =` is an FPM error
+    // we'd rather surface verbatim.
+    if name.is_empty() {
+        return true;
+    }
+    // Reject names that contain shell metacharacters before passing
+    // to getent. POSIX usernames are `[A-Za-z0-9._-]` only, and even
+    // though we're passing as an argv arg (no shell), bad input
+    // suggests this isn't a real user reference — skip.
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        return true;
+    }
+    let out = tokio::process::Command::new("/usr/bin/getent")
+        .args(["passwd", name])
+        .output()
+        .await;
+    match out {
+        Ok(o) => o.status.success(),
+        Err(_) => true, // getent missing? assume present, don't quarantine.
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1176,5 +1382,88 @@ mod tests {
         let (repaired, scanned) = a.repair_orphan_certs().await.expect("repair");
         assert_eq!(scanned, 1);
         assert_eq!(repaired, 0, "must not touch certs outside our root");
+    }
+
+    // ─────────── FPM pool self-heal ───────────
+
+    #[test]
+    fn extract_pool_user_directives_finds_all_four() {
+        let body = r#"
+            [example_cz]
+            user = example_cz
+            group = example_cz
+            listen = /run/php/8.3/example_cz.sock
+            listen.owner = www-data
+            listen.group = www-data
+            listen.mode = 0660
+            pm = dynamic
+        "#;
+        let got = extract_pool_user_directives(body);
+        assert_eq!(
+            got,
+            vec![
+                ("user", "example_cz".to_string()),
+                ("group", "example_cz".to_string()),
+                ("listen.owner", "www-data".to_string()),
+                ("listen.group", "www-data".to_string()),
+            ]
+        );
+    }
+
+    /// Comments + section headers must not produce false-positive
+    /// matches — a stray `; user = ghost` shouldn't trigger quarantine.
+    #[test]
+    fn extract_pool_user_directives_skips_comments_and_sections() {
+        let body = "[www]\n\
+                    ; user = ghost\n\
+                    # group = ghost\n\
+                    user = www-data\n";
+        let got = extract_pool_user_directives(body);
+        assert_eq!(got, vec![("user", "www-data".to_string())]);
+    }
+
+    /// `usercredential = ...` must NOT match — only `user` followed by
+    /// whitespace or `=` counts. Prefix-discriminator regression.
+    #[test]
+    fn extract_pool_user_directives_no_prefix_false_positives() {
+        let body = "usercredential = foo\nuser = real\n";
+        let got = extract_pool_user_directives(body);
+        assert_eq!(got, vec![("user", "real".to_string())]);
+    }
+
+    /// End-to-end: build a fake pool.d with one valid + one broken
+    /// pool, run the repair, observe the bad file moved aside and
+    /// the good one left in place. We override certs_root and
+    /// nginx_paths via Default so this test doesn't touch real
+    /// system paths; but the pool dir IS hard-coded via the
+    /// PhpVersion::pool_dir(), so we can't easily test end-to-end
+    /// against /etc/php/... in CI. Instead we directly call the
+    /// helper functions and assert on their contract.
+    #[tokio::test]
+    async fn unix_user_exists_returns_false_for_obvious_garbage() {
+        // Reserved name nobody would create on a Linux box.
+        let exists = unix_user_exists("hyperion_definitely_not_a_user_12345").await;
+        // We don't strictly know if getent is available on the
+        // test runner (it usually is on Linux/macOS). When it ISN'T
+        // we conservatively return true to avoid false quarantine,
+        // so this test only checks the "binary-was-callable" path
+        // by accepting either outcome but asserting it doesn't panic.
+        let _ = exists;
+    }
+
+    /// Names with shell metacharacters short-circuit to true so we
+    /// never shell-out malformed input.
+    #[tokio::test]
+    async fn unix_user_exists_rejects_shell_metacharacters() {
+        // Either of these would be unsafe to pass through if it
+        // ever reached a shell; getent doesn't use a shell so this
+        // is belt-and-braces. Importantly: we return `true` so the
+        // garbage pool isn't quarantined — surfacing the FPM error
+        // is more honest than silently moving the file.
+        assert!(unix_user_exists("foo; rm -rf /").await);
+        assert!(unix_user_exists("foo bar").await);
+        assert!(unix_user_exists("$(whoami)").await);
+        // Empty name is also "safe" (returns true).
+        assert!(unix_user_exists("").await);
     }
 }

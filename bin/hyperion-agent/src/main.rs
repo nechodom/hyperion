@@ -234,6 +234,56 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
+    // Self-heal: scan every PHP-FPM pool file for `user` /
+    // `listen.owner` references to Unix users that no longer exist.
+    // A single such pool makes php<ver>-fpm exit 78 EX_CONFIG on
+    // start, systemd gives up after 5 retries, and EVERY hosting on
+    // that PHP version starts returning 502. We quarantine the bad
+    // file (rename → `.conf.hyperion-quarantined-<ts>`) and restart
+    // FPM so healthy pools can serve again. Operator can inspect or
+    // recover the quarantined file under /etc/php/<ver>/fpm/pool.d/.
+    {
+        let repair_svc = svc.clone();
+        tokio::spawn(async move {
+            match repair_svc.adapters.repair_orphan_fpm_pools().await {
+                Ok((0, _scanned)) => {
+                    tracing::debug!("boot: orphan FPM pool sweep clean");
+                }
+                Ok((quarantined, scanned)) => {
+                    tracing::warn!(
+                        quarantined,
+                        scanned,
+                        "boot: quarantined FPM pools that referenced missing Unix users — \
+                         restarting affected php<ver>-fpm services"
+                    );
+                    // We don't know which PHP versions had a bad
+                    // pool, but the cost of restarting all four is
+                    // tiny (~50ms each) and idempotent for healthy
+                    // versions (`reset-failed` + `start` is a no-op
+                    // on a running service).
+                    for ver in hyperion_types::PhpVersion::all() {
+                        if let Err(e) = repair_svc.adapters.fpm_restart(*ver).await {
+                            // Most likely the version isn't installed
+                            // on this node — log at debug to keep the
+                            // boot output clean.
+                            tracing::debug!(
+                                version = %ver,
+                                error = %e,
+                                "boot: FPM restart after quarantine returned non-zero \
+                                 (often means this version isn't installed)"
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        error = %e,
+                        "boot: orphan FPM pool sweep failed"
+                    );
+                }
+            }
+        });
+    }
     // One-shot backfill: tag every hostings row that has NULL node_id
     // with this node's identifier. Pre-migration-016 rows still show
     // "—" in the UI until this completes — usually within a second of
