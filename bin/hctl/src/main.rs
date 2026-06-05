@@ -436,6 +436,18 @@ fn print_pretty(resp: &Response) {
                 }
             }
         }
+        Response::MtaQueueFlush { attempted, output } => {
+            println!("✓ queue flush requested · {attempted} message(s) still in queue after flush");
+            if !output.is_empty() {
+                println!("{output}");
+            }
+        }
+        Response::MtaQueueClear { cleared, output } => {
+            println!("✓ queue clear · {cleared} message(s) discarded");
+            if !output.is_empty() {
+                println!("{output}");
+            }
+        }
         Response::TrashList(entries) => {
             println!("{:<32} {:<14} {:<14} NODE", "DOMAIN", "TRASHED_AT", "PURGE_IN");
             for e in entries.iter() {

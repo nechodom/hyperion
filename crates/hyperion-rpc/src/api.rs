@@ -340,6 +340,17 @@ pub trait AgentApi: Send + Sync + 'static {
     /// (exit_code, output). 0 = sendmail accepted into queue.
     async fn mta_test_send(&self, to: String) -> Result<(i32, String), RpcError>;
 
+    /// `postqueue -f` — retry every deferred message right now.
+    /// Returns (attempted, output) where `attempted` is the count
+    /// we parsed out of the post-flush mailq summary (best
+    /// effort).
+    async fn mta_queue_flush(&self) -> Result<(usize, String), RpcError>;
+
+    /// `postsuper -d ALL` — discard every queued message.
+    /// Returns (cleared, output). Destructive operation; the UI
+    /// must gate it behind a type-to-confirm modal.
+    async fn mta_queue_clear(&self) -> Result<(usize, String), RpcError>;
+
     /// Import a migration bundle by URL — downloads from the source
     /// node's signed `/api/migration/bundle/<id>` endpoint then runs
     /// the regular import.

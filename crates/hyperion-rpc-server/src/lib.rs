@@ -458,6 +458,14 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok((exit_code, output)) => Response::MtaTestSend { exit_code, output },
             Err(e) => Response::Error(e),
         },
+        Request::MtaQueueFlush => match api.mta_queue_flush().await {
+            Ok((attempted, output)) => Response::MtaQueueFlush { attempted, output },
+            Err(e) => Response::Error(e),
+        },
+        Request::MtaQueueClear => match api.mta_queue_clear().await {
+            Ok((cleared, output)) => Response::MtaQueueClear { cleared, output },
+            Err(e) => Response::Error(e),
+        },
         Request::WpPluginList { hosting } => match api.wp_plugin_list(hosting).await {
             Ok(v) => Response::WpPluginList(v),
             Err(e) => Response::Error(e),
@@ -1207,6 +1215,12 @@ mod tests {
             Ok("skipped".to_string())
         }
         async fn mta_test_send(&self, _: String) -> Result<(i32, String), RpcError> {
+            Ok((0, String::new()))
+        }
+        async fn mta_queue_flush(&self) -> Result<(usize, String), RpcError> {
+            Ok((0, String::new()))
+        }
+        async fn mta_queue_clear(&self) -> Result<(usize, String), RpcError> {
             Ok((0, String::new()))
         }
         async fn wp_plugin_list(

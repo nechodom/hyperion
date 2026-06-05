@@ -535,6 +535,14 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.mta_test_send(to).await
     }
 
+    async fn mta_queue_flush(&self) -> Result<(usize, String), RpcError> {
+        self.svc.mta_queue_flush().await
+    }
+
+    async fn mta_queue_clear(&self) -> Result<(usize, String), RpcError> {
+        self.svc.mta_queue_clear().await
+    }
+
     async fn wp_plugin_list(
         &self,
         hosting: hyperion_rpc::HostingSelector,

@@ -8231,27 +8231,50 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             "default".to_string()
         };
 
-        // mailq summary — `postqueue -p` is identical to `mailq`.
-        // The last line is either "Mail queue is empty" or
-        // "-- N Kbytes in M Requests."
-        let mailq_summary = Command::new("/usr/sbin/postqueue")
-            .args(["-p"])
-            .output()
-            .await
-            .ok()
-            .and_then(|o| {
-                if !o.status.success() {
-                    return None;
+        // mailq output — full body + parsed summary. The summary
+        // line is the last non-empty line; either "Mail queue is
+        // empty" or "-- N Kbytes in M Requests."
+        let (mailq_summary, mailq_total, mailq_detail) =
+            match Command::new("/usr/sbin/postqueue").args(["-p"]).output().await {
+                Ok(o) if o.status.success() => {
+                    let body = String::from_utf8_lossy(&o.stdout).into_owned();
+                    let summary = body
+                        .lines()
+                        .rev()
+                        .find(|l| !l.trim().is_empty())
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_default();
+                    // Parse "N Requests" out of "-- 0 Kbytes in N Requests."
+                    let total = summary
+                        .split_whitespace()
+                        .position(|w| w == "Request" || w == "Requests")
+                        .and_then(|i| {
+                            let words: Vec<&str> = summary.split_whitespace().collect();
+                            i.checked_sub(1).and_then(|j| words.get(j).copied())
+                        })
+                        .and_then(|s| s.parse::<usize>().ok())
+                        .unwrap_or(0);
+                    // Cap detail at 4 KB so a runaway queue can't
+                    // bloat the RPC response.
+                    let detail = if body.len() > 4096 {
+                        let mut truncated: String = body.chars().take(4000).collect();
+                        truncated.push_str("\n… (truncated)\n");
+                        truncated
+                    } else {
+                        body
+                    };
+                    (summary, total, detail)
                 }
-                let body = String::from_utf8_lossy(&o.stdout);
-                let last = body
-                    .lines()
-                    .rev()
-                    .find(|l| !l.trim().is_empty())
-                    .map(|s| s.trim().to_string());
-                last
-            })
-            .unwrap_or_default();
+                _ => (String::new(), 0usize, String::new()),
+            };
+
+        // Outbound TCP/25 probe. We try gmail-smtp-in.l.google.com
+        // because (a) it always exists, (b) it's a common-enough
+        // target that Hetzner/AWS/GCP egress filters affecting THEIR
+        // port-25 access affect EVERYONE's. 3-second hard timeout.
+        // We do this even when relayhost is set, because direct-MX
+        // is what the operator may want to flip to.
+        let (outbound_port_25_ok, outbound_port_25_msg) = probe_outbound_port_25().await;
 
         // Last 12 lines of /var/log/mail.log — cheap signal for
         // recent send activity / rejects. We don't shell out to
@@ -8276,8 +8299,101 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             myhostname_is_fqdn,
             relayhost,
             mailq_summary,
+            mailq_total,
+            mailq_detail,
+            outbound_port_25_ok,
+            outbound_port_25_msg,
             recent_log_tail,
         })
+    }
+
+    /// `postqueue -f` — tell postfix to retry every deferred
+    /// message right now. Returns the count of messages in queue
+    /// AFTER the flush (often the same since flushed messages may
+    /// stay deferred when the underlying problem isn't fixed),
+    /// plus the verbatim postqueue stdout/stderr.
+    pub async fn mta_queue_flush(&self) -> Result<(usize, String), RpcError> {
+        let out = tokio::process::Command::new("/usr/sbin/postqueue")
+            .args(["-f"])
+            .output()
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("spawn postqueue: {e}")))?;
+        let mut output = String::from_utf8_lossy(&out.stdout).into_owned();
+        if !out.stderr.is_empty() {
+            if !output.is_empty() && !output.ends_with('\n') {
+                output.push('\n');
+            }
+            output.push_str(&String::from_utf8_lossy(&out.stderr));
+        }
+        // Re-probe queue depth so the UI knows whether the flush
+        // helped. Best-effort.
+        let attempted = self.queue_depth_now().await;
+        self.append_audit(
+            "mta.queue_flush",
+            None,
+            &serde_json::json!({ "attempted_after_flush": attempted })
+                .to_string(),
+            if out.status.success() { "ok" } else { "failed" },
+        )
+        .await;
+        Ok((attempted, output))
+    }
+
+    /// `postsuper -d ALL` — discard every queued message.
+    /// Returns the count of messages that were in queue BEFORE the
+    /// discard. UI must gate this with a confirm — it can't be
+    /// undone.
+    pub async fn mta_queue_clear(&self) -> Result<(usize, String), RpcError> {
+        let before = self.queue_depth_now().await;
+        let out = tokio::process::Command::new("/usr/sbin/postsuper")
+            .args(["-d", "ALL"])
+            .output()
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("spawn postsuper: {e}")))?;
+        let mut output = String::from_utf8_lossy(&out.stdout).into_owned();
+        if !out.stderr.is_empty() {
+            if !output.is_empty() && !output.ends_with('\n') {
+                output.push('\n');
+            }
+            output.push_str(&String::from_utf8_lossy(&out.stderr));
+        }
+        self.append_audit(
+            "mta.queue_clear",
+            None,
+            &serde_json::json!({ "cleared_count": before })
+                .to_string(),
+            if out.status.success() { "ok" } else { "failed" },
+        )
+        .await;
+        Ok((before, output))
+    }
+
+    /// Cheap helper used by both the queue-ops audit logs above and
+    /// indirectly via mta_diagnostics. Returns 0 if postqueue isn't
+    /// available rather than failing.
+    async fn queue_depth_now(&self) -> usize {
+        let out = tokio::process::Command::new("/usr/sbin/postqueue")
+            .args(["-p"])
+            .output()
+            .await;
+        let Ok(o) = out else { return 0 };
+        if !o.status.success() {
+            return 0;
+        }
+        let body = String::from_utf8_lossy(&o.stdout);
+        body.lines()
+            .rev()
+            .find(|l| !l.trim().is_empty())
+            .and_then(|line| {
+                line.split_whitespace()
+                    .position(|w| w == "Request" || w == "Requests")
+                    .and_then(|i| {
+                        let words: Vec<&str> = line.split_whitespace().collect();
+                        i.checked_sub(1).and_then(|j| words.get(j).copied())
+                    })
+                    .and_then(|s| s.parse::<usize>().ok())
+            })
+            .unwrap_or(0)
     }
 
     /// Operator-triggered re-apply of the boot postfix config. Picks
@@ -10312,6 +10428,50 @@ fn expiry_row_to_dto(row: hyperion_state::scheduler::ExpiryRow) -> hyperion_type
         owner_email: row.owner_email,
         grace_days: row.grace_days,
         warning_offsets_days: row.warning_offsets_days,
+    }
+}
+
+/// Quick TCP probe to a public SMTP server's port 25 to tell the
+/// operator whether their ISP / cloud-provider egress filters
+/// block outbound mail. Returns `(maybe_ok, human_msg)` so the UI
+/// can render "OK · 47 ms" / "BLOCKED — timeout after 3s" / "DNS
+/// failed".
+///
+/// Target host is a public anycast SMTP server (Google's MX). Cheap
+/// + always-on. We don't talk SMTP; just connect + close.
+async fn probe_outbound_port_25() -> (Option<bool>, String) {
+    use std::time::Instant;
+    use tokio::net::TcpStream;
+    const TARGET: &str = "gmail-smtp-in.l.google.com:25";
+    const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+    let started = Instant::now();
+    let connect = tokio::time::timeout(TIMEOUT, TcpStream::connect(TARGET)).await;
+    let elapsed = started.elapsed().as_millis();
+    match connect {
+        Ok(Ok(_)) => (
+            Some(true),
+            format!("OK · TCP/25 to {TARGET} reachable in {elapsed} ms"),
+        ),
+        Ok(Err(e)) => {
+            // ConnectionRefused / NetworkUnreachable / etc. — usually
+            // an egress block. Surface kind() so operator knows
+            // whether to call support or check their firewall.
+            (
+                Some(false),
+                format!(
+                    "BLOCKED — connect to {TARGET} failed after {elapsed} ms: {e}. \
+                     Most cloud providers (Hetzner, AWS, GCP) block outbound TCP/25 by \
+                     default — file a support ticket to unblock."
+                ),
+            )
+        }
+        Err(_) => (
+            Some(false),
+            format!(
+                "BLOCKED — connect to {TARGET} timed out after 3 s. \
+                 Same fix as above: ISP / hosting provider egress filter."
+            ),
+        ),
     }
 }
 

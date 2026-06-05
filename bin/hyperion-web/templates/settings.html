@@ -307,12 +307,28 @@
           {% if mta.service_active %}<span class="pill ok">active</span>{% else %}<span class="pill err">inactive</span>{% endif %}
           {% if mta.service_enabled %}<span class="pill ok" style="margin-left:0.4rem">autostart on</span>{% else %}<span class="pill warn" style="margin-left:0.4rem">autostart off</span>{% endif %}
         </dd>
+        <dt>outbound TCP/25</dt>
+        <dd>
+          {% match mta.outbound_port_25_ok %}
+          {% when Some with (true) %}
+            <span class="pill ok">reachable</span>
+            <span class="text-soft small" style="margin-left:0.4rem">{{ mta.outbound_port_25_msg }}</span>
+          {% when Some with (false) %}
+            <span class="pill err">blocked</span>
+            <div class="text-soft small" style="margin-top:0.25rem">{{ mta.outbound_port_25_msg }}</div>
+          {% when None %}
+            <span class="text-soft">(not probed)</span>
+          {% endmatch %}
+        </dd>
         <dt>mail queue</dt>
         <dd>
           {% if mta.mailq_summary.is_empty() %}
             <span class="text-soft">(unknown — postqueue not available)</span>
+          {% else if mta.mailq_total > 0 %}
+            <span class="pill warn">{{ mta.mailq_total }} stuck</span>
+            <code style="font-size:0.85rem;margin-left:0.4rem">{{ mta.mailq_summary }}</code>
           {% else %}
-            <code style="font-size:0.85rem">{{ mta.mailq_summary }}</code>
+            <span class="pill ok">empty</span>
           {% endif %}
         </dd>
         {% if mta.marker_present %}
@@ -328,14 +344,59 @@
         {% endif %}
       </dl>
 
+      {# Stuck-mail panel — auto-expanded when there's anything
+         in the queue so the operator can immediately see what's
+         stuck + why. Hidden when empty so the card stays tidy. #}
+      {% if mta.mailq_total > 0 %}
+      <div class="alert alert-warn" role="alert" style="margin-top:0.8rem">
+        <strong>{{ mta.mailq_total }} message(s) deferred in postfix queue.</strong>
+        Most common reason: outbound TCP/25 blocked by your hosting provider
+        (see the row above). Other possibilities: PTR mismatch, recipient
+        rejected for SPF, recipient MX timeout.
+      </div>
+      <details open style="margin-top:0.8rem">
+        <summary style="cursor:pointer;font-weight:600;font-size:0.85rem;color:var(--text-dim)">
+          postqueue -p — full queue listing
+        </summary>
+        <pre style="margin:0.4rem 0 0;padding:0.6rem 0.8rem;background:var(--surface-2);border-radius:6px;font-size:0.74rem;overflow-x:auto;max-height:14rem"><code>{{ mta.mailq_detail }}</code></pre>
+      </details>
+      {% endif %}
+
       {% if !mta.recent_log_tail.is_empty() %}
-      <details style="margin-top:0.8rem">
+      <details{% if mta.mailq_total > 0 %} open{% endif %} style="margin-top:0.8rem">
         <summary style="cursor:pointer;font-weight:600;font-size:0.85rem;color:var(--text-dim)">
           /var/log/mail.log — last 12 lines
         </summary>
         <pre style="margin:0.4rem 0 0;padding:0.6rem 0.8rem;background:var(--surface-2);border-radius:6px;font-size:0.74rem;overflow-x:auto;max-height:14rem"><code>{% for line in mta.recent_log_tail %}{{ line }}
 {% endfor %}</code></pre>
       </details>
+      {% endif %}
+
+      {# Queue-only actions — only render when there's something
+         to act on. Keeps the default card minimal. #}
+      {% if mta.mailq_total > 0 %}
+      <div class="row" style="gap:0.5rem;margin-top:0.8rem;flex-wrap:wrap">
+        <form method="post" action="/settings/mta-queue-flush" style="margin:0">
+          <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+          <button class="btn small" type="submit"
+                  title="Tell postfix to retry every deferred message right now (postqueue -f). Useful after fixing the underlying connectivity issue.">
+            <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/><path d="M20.49 15a9 9 0 0 1-14.85 3.36L1 14"/></svg>
+            Flush queue (retry now)
+          </button>
+        </form>
+        <form method="post" action="/settings/mta-queue-clear" style="margin:0"
+              data-confirm-title="Discard {{ mta.mailq_total }} queued message(s)"
+              data-confirm-body="postsuper -d ALL removes every message in postfix's queue. Use this only when the messages are unrecoverable (wrong recipient, dead domain, etc.). This cannot be undone."
+              data-confirm-confirm-label="Discard all"
+              data-confirm-variant="danger">
+          <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+          <button class="btn small ghost" type="submit"
+                  title="postsuper -d ALL — discard every queued message. Destructive.">
+            <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
+            Clear queue ({{ mta.mailq_total }})
+          </button>
+        </form>
+      </div>
       {% endif %}
 
       <div class="row" style="gap:0.5rem;margin-top:1rem;flex-wrap:wrap">

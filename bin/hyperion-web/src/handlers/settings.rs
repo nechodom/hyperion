@@ -463,6 +463,78 @@ pub struct MtaTestForm {
     pub to: String,
 }
 
+/// POST /settings/mta-queue-flush — `postqueue -f` to retry all
+/// deferred mail now. Admin-only; no rate limit (it's cheap and
+/// idempotent — re-clicking is fine).
+pub async fn post_mta_queue_flush(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+) -> Result<Response, AppError> {
+    if !ctx.is_admin_or_higher() {
+        return Ok(
+            Redirect::to("/settings?flash_error=admin+role+required#mail").into_response(),
+        );
+    }
+    let resp = hyperion_rpc_client::call(&state.agent_socket, Request::MtaQueueFlush).await?;
+    match resp {
+        RpcResponse::MtaQueueFlush { attempted, output } => {
+            let msg = if attempted == 0 {
+                "Queue flush requested · queue is now empty".to_string()
+            } else {
+                let tail: String = output.lines().take(2).collect::<Vec<_>>().join(" · ");
+                let tail = if tail.is_empty() { "(no output)".into() } else { tail };
+                format!(
+                    "Queue flush requested · {attempted} message(s) still deferred — \
+                     check the log tail for the reason · {tail}"
+                )
+            };
+            Ok(
+                Redirect::to(&format!("/settings?flash={}#mail", urlencode(&msg)))
+                    .into_response(),
+            )
+        }
+        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
+            "/settings?flash_error={}#mail",
+            urlencode(&format!("queue flush failed: {e}"))
+        ))
+        .into_response()),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+/// POST /settings/mta-queue-clear — `postsuper -d ALL`. Destructive;
+/// gated by the type-to-confirm modal in the template.
+pub async fn post_mta_queue_clear(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+) -> Result<Response, AppError> {
+    if !ctx.is_admin_or_higher() {
+        return Ok(
+            Redirect::to("/settings?flash_error=admin+role+required#mail").into_response(),
+        );
+    }
+    let resp = hyperion_rpc_client::call(&state.agent_socket, Request::MtaQueueClear).await?;
+    match resp {
+        RpcResponse::MtaQueueClear { cleared, output: _ } => {
+            let msg = if cleared == 0 {
+                "Queue clear requested · nothing was in queue".to_string()
+            } else {
+                format!("Queue clear · {cleared} message(s) discarded")
+            };
+            Ok(
+                Redirect::to(&format!("/settings?flash={}#mail", urlencode(&msg)))
+                    .into_response(),
+            )
+        }
+        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
+            "/settings?flash_error={}#mail",
+            urlencode(&format!("queue clear failed: {e}"))
+        ))
+        .into_response()),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
 /// POST /settings/mta-reconfigure — re-apply postfix smart-host /
 /// direct-MX config based on the current `[email]` section. Used
 /// when the operator changed agent.toml without restarting the

@@ -168,6 +168,14 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::settings::post_mta_test),
         )
         .route(
+            "/settings/mta-queue-flush",
+            post(handlers::settings::post_mta_queue_flush),
+        )
+        .route(
+            "/settings/mta-queue-clear",
+            post(handlers::settings::post_mta_queue_clear),
+        )
+        .route(
             "/api/email-autodetect",
             post(handlers::settings::post_email_autodetect),
         )

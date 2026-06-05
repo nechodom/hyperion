@@ -574,6 +574,28 @@ pub struct MtaDiagnostics {
     /// "-- N Kbytes in M Requests." Cheap operator hint about
     /// stuck mail.
     pub mailq_summary: String,
+    /// Number of messages parsed out of the summary line
+    /// ("M Requests" → M). 0 when the queue is empty. The UI uses
+    /// this to decide whether to auto-expand the queue/log details.
+    #[serde(default)]
+    pub mailq_total: usize,
+    /// Full `postqueue -p` output, capped at ~4 KB so a runaway
+    /// queue doesn't blow out the diagnostics RPC. Empty when the
+    /// queue is empty or postqueue isn't available.
+    #[serde(default)]
+    pub mailq_detail: String,
+    /// Tiny outbound connectivity probe — `tcp connect to
+    /// gmail-smtp-in.l.google.com:25` with a 3-second timeout.
+    /// `None` means "we didn't try / DNS lookup failed";
+    /// `Some(true)` = SMTP relay can reach the wider Internet on
+    /// port 25 from this node; `Some(false)` = blocked (probably
+    /// ISP egress filter — request unblock from support).
+    #[serde(default)]
+    pub outbound_port_25_ok: Option<bool>,
+    /// One-line human-readable explanation of the port-25 probe
+    /// (latency, error message, "not probed because ...").
+    #[serde(default)]
+    pub outbound_port_25_msg: String,
     /// Best-effort tail of `/var/log/mail.log` (last 12 lines).
     /// Empty when the log doesn't exist (fresh install) or we
     /// can't read it (rare permissions issue).

@@ -357,6 +357,16 @@ pub enum Request {
     MtaTestSend {
         to: String,
     },
+    /// `postqueue -f` — tell postfix to attempt delivery of every
+    /// deferred message now (instead of waiting for the next
+    /// retry tick). Useful right after fixing the underlying
+    /// connectivity issue (port 25 unblock, PTR fix).
+    MtaQueueFlush,
+    /// `postsuper -d ALL` — discard every queued message. Used
+    /// when the operator gave up on stuck mail (deferred forever
+    /// because the recipient is wrong / domain gone). Destructive
+    /// — UI shows a type-to-confirm modal.
+    MtaQueueClear,
     /// Import a migration bundle from a source node's signed URL.
     /// `base_url` is e.g. `https://source-master/api/migration/bundle/<id>`
     /// — the agent appends `/manifest.json?t=<token>` and
@@ -756,6 +766,18 @@ pub enum Response {
     /// success).
     MtaTestSend {
         exit_code: i32,
+        output: String,
+    },
+    /// Number of deferred messages postfix attempted to retry +
+    /// stderr from postqueue. (operator may want to see "Mail
+    /// queue is empty" → "0 attempted").
+    MtaQueueFlush {
+        attempted: usize,
+        output: String,
+    },
+    /// Number of messages discarded by `postsuper -d ALL`.
+    MtaQueueClear {
+        cleared: usize,
         output: String,
     },
     WpPluginList(hyperion_types::WpPluginListResponse),
