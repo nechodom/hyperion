@@ -8590,6 +8590,79 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         ))
     }
 
+    /// Operator-triggered `mount -o remount,rw /` to flip the
+    /// rootfs read-write. Refuses early if /usr is ALREADY
+    /// writable (operator may have just bumped the wrong button
+    /// on a clean image). On success the audit log entry plus
+    /// the returned message tell the operator they can now retry
+    /// the install. On failure the verbatim mount stderr lands
+    /// in the message so the operator can see whether their
+    /// image is genuinely immutable (snap-managed, ostree, etc.).
+    pub async fn remount_usr_rw(&self) -> Result<(bool, String), RpcError> {
+        // Early-out — if /usr is already writable there's nothing
+        // to remount. Saves the operator from a no-op `mount`
+        // invocation that might confuse them on the audit log.
+        if check_usr_writable().await.is_none() {
+            return Err(RpcError::Validation {
+                message: "/usr is already writable — no remount needed".into(),
+            });
+        }
+        let out = tokio::process::Command::new("/bin/mount")
+            .args(["-o", "remount,rw", "/"])
+            .output()
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("spawn mount: {e}")))?;
+        // Concatenate stdout + stderr for the operator. mount
+        // usually says nothing on success and emits to stderr on
+        // failure.
+        let mut message = String::from_utf8_lossy(&out.stderr).into_owned();
+        if !out.stdout.is_empty() {
+            if !message.is_empty() && !message.ends_with('\n') {
+                message.push('\n');
+            }
+            message.push_str(&String::from_utf8_lossy(&out.stdout));
+        }
+        // Re-probe writability after the remount attempt.
+        let now_writable = check_usr_writable().await.is_none();
+        let success = out.status.success() && now_writable;
+        self.append_audit(
+            "system.remount_usr_rw",
+            None,
+            &serde_json::json!({
+                "exit_code": out.status.code(),
+                "now_writable": now_writable,
+            })
+            .to_string(),
+            if success { "ok" } else { "failed" },
+        )
+        .await;
+        if success {
+            Ok((
+                true,
+                "Rootfs is now mounted read-write. Retry the package install — \
+                 apt-get should succeed. Note: this is NOT persistent across \
+                 reboots; if your /etc/fstab has the rootfs as `ro`, the next \
+                 boot will revert."
+                    .to_string(),
+            ))
+        } else {
+            let tail = if message.trim().is_empty() {
+                "(mount produced no diagnostic output)".to_string()
+            } else {
+                message
+            };
+            Ok((
+                false,
+                format!(
+                    "Remount failed. mount said:\n{tail}\n\n\
+                     Most likely your VPS image is genuinely immutable \
+                     (snap-managed, ostree, or a hardened ISO). Switch to a \
+                     standard Debian / Ubuntu cloud image and re-run install-node.sh."
+                ),
+            ))
+        }
+    }
+
     /// Cheap helper used by both the queue-ops audit logs above and
     /// indirectly via mta_diagnostics. Returns 0 if postqueue isn't
     /// available rather than failing.

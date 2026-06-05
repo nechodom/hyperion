@@ -153,6 +153,10 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::services_health::post_service_install),
         )
         .route(
+            "/services/remount-usr-rw",
+            post(handlers::services_health::post_remount_usr_rw),
+        )
+        .route(
             "/services/install-status",
             get(handlers::services_health::get_service_install_status),
         )

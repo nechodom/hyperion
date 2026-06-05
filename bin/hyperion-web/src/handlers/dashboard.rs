@@ -152,12 +152,50 @@ async fn fetch(state: &SharedState) -> (Option<AgentInfo>, Vec<HostingSummary>, 
         Ok(_) => return (None, vec![], Some("unexpected agent response".into())),
         Err(e) => return (None, vec![], Some(format!("rpc: {e}"))),
     };
-    let recent = match hyperion_rpc_client::call(&state.agent_socket, Request::HostingList).await {
-        Ok(RpcResponse::HostingList(mut v)) => {
-            v.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-            v.into_iter().take(8).collect()
-        }
-        _ => vec![],
-    };
+    // Recent hostings — fan-out across master + every enrolled
+    // worker so a hosting created on `s4` shows up on the master's
+    // dashboard. Previously only master-local was probed which
+    // matched what /hostings did pre-fanout, but now the operator
+    // expects parity. Bumped to 15 (was 8) with "View all →" on
+    // the card linking to /hostings for the full table.
+    let recent = fetch_recent_multi_node(state).await;
     (info, recent, None)
+}
+
+async fn fetch_recent_multi_node(state: &SharedState) -> Vec<HostingSummary> {
+    // Master's own hostings — tag with the LOCAL sentinel so the
+    // dashboard's node-chip rendering keeps working.
+    let mut all: Vec<HostingSummary> = match hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::HostingList,
+    )
+    .await
+    {
+        Ok(RpcResponse::HostingList(mut v)) => {
+            for r in &mut v {
+                r.node_id = Some(crate::dispatcher::LOCAL_NODE_SENTINEL.to_string());
+            }
+            v
+        }
+        _ => Vec::new(),
+    };
+    // Each enrolled remote node, best-effort.
+    let nodes: Vec<hyperion_types::NodeSummary> =
+        match hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await {
+            Ok(RpcResponse::NodesList(v)) => v,
+            _ => Vec::new(),
+        };
+    for n in nodes {
+        if let Ok(RpcResponse::HostingList(mut remote)) =
+            crate::dispatcher::dispatch_to_node(state, Some(&n.node_id), Request::HostingList)
+                .await
+        {
+            for r in &mut remote {
+                r.node_id = Some(n.node_id.clone());
+            }
+            all.extend(remote);
+        }
+    }
+    all.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    all.into_iter().take(15).collect()
 }

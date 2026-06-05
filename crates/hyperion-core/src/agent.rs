@@ -551,6 +551,10 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.panel_provision(hostname, skip_dns_check).await
     }
 
+    async fn remount_usr_rw(&self) -> Result<(bool, String), RpcError> {
+        self.svc.remount_usr_rw().await
+    }
+
     async fn wp_plugin_list(
         &self,
         hosting: hyperion_rpc::HostingSelector,

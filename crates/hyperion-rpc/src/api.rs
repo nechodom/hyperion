@@ -359,6 +359,11 @@ pub trait AgentApi: Send + Sync + 'static {
         skip_dns_check: bool,
     ) -> Result<(String, String, String), RpcError>;
 
+    /// Attempt `mount -o remount,rw /` to flip the rootfs to
+    /// read-write. Returns (success, message). Refuses (Validation)
+    /// when /usr is already writable.
+    async fn remount_usr_rw(&self) -> Result<(bool, String), RpcError>;
+
     /// Import a migration bundle by URL — downloads from the source
     /// node's signed `/api/migration/bundle/<id>` endpoint then runs
     /// the regular import.

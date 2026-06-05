@@ -380,6 +380,11 @@ pub enum Request {
         #[serde(default)]
         skip_dns_check: bool,
     },
+    /// `mount -o remount,rw /` — attempt to flip the rootfs to
+    /// read-write so apt-get can install packages. Used when the
+    /// service-install preflight detects /usr is read-only.
+    /// Refused (validation error) if /usr is already writable.
+    RemountUsrRw,
     /// Import a migration bundle from a source node's signed URL.
     /// `base_url` is e.g. `https://source-master/api/migration/bundle/<id>`
     /// — the agent appends `/manifest.json?t=<token>` and
@@ -802,6 +807,12 @@ pub enum Response {
         message: String,
         panel_url: String,
     },
+    /// Result of `mount -o remount,rw /`. `success` true → /usr
+    /// is now writable; `message` is the mount output (often
+    /// empty on success). `success` false + message = failed
+    /// remount (e.g. snap-managed rootfs that genuinely cannot
+    /// be made RW — operator needs a different base image).
+    RemountUsrRw { success: bool, message: String },
     WpPluginList(hyperion_types::WpPluginListResponse),
     WpPluginAction(hyperion_types::WpPluginActionResult),
     // Web users / roles / 2FA

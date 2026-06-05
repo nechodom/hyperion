@@ -330,3 +330,62 @@ fn urlencode(s: &str) -> String {
         })
         .collect()
 }
+
+#[derive(Deserialize)]
+pub struct RemountForm {
+    /// Target node — empty / "local" = master, otherwise node_id
+    /// from /install. Matches the same pattern as the install/
+    /// restart forms on this page.
+    #[serde(default)]
+    pub node: String,
+}
+
+/// POST /services/remount-usr-rw — one-click `mount -o remount,rw /`
+/// against the chosen node. Used when the operator hit the
+/// "/usr is not writable" preflight on a service-install attempt
+/// and would otherwise have to SSH in. Confirmation modal in the
+/// template warns about the risk (non-persistent across reboots,
+/// might fail on snap-managed images).
+pub async fn post_remount_usr_rw(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<RemountForm>,
+) -> Result<Response, AppError> {
+    if !ctx.is_super_admin() {
+        return Ok(Redirect::to("/").into_response());
+    }
+    let target = if form.node.is_empty()
+        || form.node == crate::dispatcher::LOCAL_NODE_SENTINEL
+    {
+        None
+    } else {
+        Some(form.node.as_str())
+    };
+    let resp =
+        crate::dispatcher::dispatch_to_node(&state, target, Request::RemountUsrRw).await?;
+    let dest = match resp {
+        RpcResponse::RemountUsrRw { success, message } => {
+            let label = if success { "flash" } else { "flash_error" };
+            let head = if success {
+                "/usr is now writable — retry the install."
+            } else {
+                "Remount FAILED — see details:"
+            };
+            // Strip newlines so the redirect Location header stays
+            // single-line; the body is short anyway.
+            let msg = format!("{head} {}", message.replace('\n', " "));
+            format!(
+                "/services?{}{label}={}",
+                query_node_prefix(target),
+                urlencode(&msg)
+            )
+        }
+        RpcResponse::Error(e) => format!(
+            "/services?{}flash_error={}",
+            query_node_prefix(target),
+            urlencode(&e.to_string())
+        ),
+        _ => return Err(AppError::Internal("unexpected response".into())),
+    };
+    Ok(Redirect::to(&dest).into_response())
+}

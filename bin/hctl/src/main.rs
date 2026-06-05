@@ -455,6 +455,16 @@ fn print_pretty(resp: &Response) {
             }
             println!("{message}");
         }
+        Response::RemountUsrRw { success, message } => {
+            if *success {
+                println!("✓ /usr is now writable");
+            } else {
+                println!("✗ remount failed");
+            }
+            if !message.is_empty() {
+                println!("{message}");
+            }
+        }
         Response::TrashList(entries) => {
             println!("{:<32} {:<14} {:<14} NODE", "DOMAIN", "TRASHED_AT", "PURGE_IN");
             for e in entries.iter() {

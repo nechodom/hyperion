@@ -218,6 +218,39 @@
     instead of just the generic dpkg-returned-1 wrapper.
   </p>
 </div>
+
+{# Rootfs read-only escape hatch. apt fails with "Read-only file
+   system" on snap-managed images / immutable VPS flavours / when
+   /etc/fstab mounts the rootfs `ro`. This card runs the same
+   `mount -o remount,rw /` the operator would type by hand, with
+   a fresh re-probe so they immediately see whether it worked. #}
+<div class="card" style="margin-top:1rem">
+  <h2 style="display:flex;align-items:center;gap:0.5rem;margin:0 0 0.4rem">
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    Rootfs is read-only?
+  </h2>
+  <p class="text-soft small" style="margin:0 0 0.7rem">
+    If an Install above failed with
+    <code>/usr is not writable</code> or
+    <code>Read-only file system (os error 30)</code>, your VPS rootfs
+    is mounted <code>ro</code>. The button below runs
+    <code>mount -o remount,rw /</code> on the chosen node. <strong>Not persistent across reboots</strong>
+    (your <code>/etc/fstab</code> still says <code>ro</code>); fixes the immediate
+    install but a reboot reverts. For a permanent fix, edit
+    <code>/etc/fstab</code> or pick a non-immutable image.
+  </p>
+  <form method="post" action="/services/remount-usr-rw" style="display:inline-flex;gap:0.5rem;align-items:center"
+        data-confirm-title="Remount / read-write on {{ current_label }}"
+        data-confirm-body="Runs `mount -o remount,rw /` on {{ current_label }}. On snap-managed / ostree-style images this will FAIL (immutable by design). On normal Debian / Ubuntu images this is safe and routine."
+        data-confirm-confirm-label="Remount rw"
+        data-confirm-variant="primary">
+    <input type="hidden" name="node" value="{{ current_node }}">
+    <button class="btn" type="submit">
+      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><polyline points="21 3 21 9 15 9"/></svg>
+      Try remount /usr rw
+    </button>
+  </form>
+</div>
 {% endif %}
 
 <p class="text-soft small" style="margin-top:1rem">
