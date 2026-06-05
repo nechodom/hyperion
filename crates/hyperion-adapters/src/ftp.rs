@@ -86,6 +86,94 @@ pub async fn ensure_vsftpd_running() -> Result<(), AdapterError> {
     }
 }
 
+/// Names of every system user that currently has an FTP-usable
+/// password (shadow field 2 is a real hash, not `!` / `*` / empty).
+/// Read in one shot from /etc/shadow — root only, agent runs as
+/// root. Operators with empty/locked shadow rows are excluded so
+/// the result equals "operators who CAN log in via vsftpd".
+pub async fn list_users_with_password() -> Result<Vec<String>, AdapterError> {
+    let raw = match tokio::fs::read_to_string("/etc/shadow").await {
+        Ok(s) => s,
+        Err(e) => {
+            return Err(AdapterError::Other(format!(
+                "read /etc/shadow: {e} (agent must run as root)"
+            )))
+        }
+    };
+    let mut out = Vec::new();
+    for line in raw.lines() {
+        let mut it = line.splitn(3, ':');
+        let Some(user) = it.next() else { continue };
+        let Some(hash) = it.next() else { continue };
+        if user.is_empty() {
+            continue;
+        }
+        // Real hashes are at least 13 chars and never start with !/*.
+        // Empty + "!" + "*" mean "no usable password" → skip.
+        if !hash.is_empty() && !hash.starts_with('!') && !hash.starts_with('*') {
+            out.push(user.to_string());
+        }
+    }
+    Ok(out)
+}
+
+/// Probe vsftpd by attempting an FTP login against localhost with
+/// the given credentials. Returns Ok(true) on a successful auth,
+/// Ok(false) on auth refused (530), and Err on transport-level
+/// failure (vsftpd down, network broken, curl missing).
+///
+/// Uses curl because it's already a hard dep for backups + ACME,
+/// no extra crate. Times out after 5s so a hung vsftpd doesn't
+/// deadlock the page render.
+pub async fn probe_login(user: &str, password: &str) -> Result<bool, AdapterError> {
+    // Defence: curl's --user splits on the first colon, so an
+    // operator-supplied password CAN'T contain ':' or it'd be
+    // misparsed. We refuse upfront rather than corrupting the test.
+    if password.contains(':') {
+        return Err(AdapterError::Other(
+            "ftp probe refused: password contains ':' which curl's --user can't represent".into(),
+        ));
+    }
+    // Quote-proof: pass the credential via --user-agent? No — just
+    // sanitise the user (we own it; system users match a tight
+    // pattern already). Curl handles arbitrary password chars fine
+    // when passed via --user `<u>:<p>` because we're not going
+    // through a shell.
+    let user_arg = format!("{}:{}", user, password);
+    let out = tokio::process::Command::new("/usr/bin/curl")
+        .args([
+            "-s",
+            "-S",
+            "-o",
+            "/dev/null",
+            "-w",
+            "%{http_code}",
+            "--max-time",
+            "5",
+            "--user",
+            &user_arg,
+            "ftp://127.0.0.1/",
+        ])
+        .output()
+        .await
+        .map_err(|e| AdapterError::Other(format!("spawn curl: {e}")))?;
+    // curl's "FTP response code" lives in %{http_code} for FTP too.
+    // 230 = login OK. 530 = login incorrect / disabled.
+    // 0 (or empty) = connection failed before any response.
+    let code = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    match code.as_str() {
+        "230" => Ok(true),
+        "530" => Ok(false),
+        // Unauthenticated transport failure — report as Err so the
+        // UI can show "couldn't reach vsftpd" instead of a silent
+        // false-negative login.
+        _ => Err(AdapterError::Other(format!(
+            "ftp probe transport failure (curl code {code}): {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     /// Pure-function sanity: ensure the error string we match against

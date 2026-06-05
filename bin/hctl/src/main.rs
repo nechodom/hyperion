@@ -419,6 +419,25 @@ fn print_pretty(resp: &Response) {
         }
         Response::TrashRestore => println!("✓ restored"),
         Response::TrashPurge => println!("✓ purged"),
+        Response::FtpAccountsList(accounts) => {
+            println!("{:<24} {:<28} {:<10} STATUS", "USER", "DOMAIN", "STATE");
+            for a in accounts.iter() {
+                println!(
+                    "{:<24} {:<28} {:<10} {}",
+                    a.user,
+                    a.domain,
+                    a.hosting_state,
+                    if a.has_password { "set" } else { "disabled" }
+                );
+            }
+        }
+        Response::FtpVerifyLogin { accepted } => {
+            if *accepted {
+                println!("✓ FTP login OK");
+            } else {
+                println!("✗ FTP login refused (530)");
+            }
+        }
         Response::SiteEmailLogList(entries) => {
             println!("{:<14} {:<28} {:<28} SUBJECT", "TS", "FROM", "TO");
             for e in entries.iter() {

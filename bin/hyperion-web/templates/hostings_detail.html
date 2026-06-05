@@ -1646,7 +1646,77 @@
       <button class="btn" type="submit">Disable FTP</button>
     </form>
   </div>
+
+  {# Status badge for THIS hosting's user. Drives "is the password
+     actually set" feedback without leaking the password back. #}
+  <p style="margin:1rem 0 0;font-size:0.88rem">
+    <strong>This hosting's FTP account:</strong>
+    {% if let Some(ok) = ftp_login_ok %}
+      {% if ok %}
+        <span class="pill ok">password set</span>
+      {% else %}
+        <span class="pill" style="background:var(--surface-2);color:var(--text-soft)">no password</span>
+      {% endif %}
+    {% else %}
+      <span class="pill" style="background:var(--surface-2);color:var(--text-soft)">no password</span>
+    {% endif %}
+  </p>
 </div>
+
+<div class="card hover" style="margin-top:1rem">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+    All FTP accounts on this node
+    <span class="text-soft small" style="font-weight:400;margin-left:0.5rem">{{ ftp_accounts.len() }}</span>
+  </h2>
+  {% if ftp_accounts.is_empty() %}
+    <p class="muted" style="font-size:0.88rem;margin:0">
+      No FTP accounts on this node yet. Set a password above to create one.
+    </p>
+  {% else %}
+  <div class="table-wrap" style="margin:0 -1.5rem -1.4rem">
+    <table>
+      <thead>
+        <tr>
+          <th>System user</th>
+          <th>Domain</th>
+          <th>State</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+      {% for a in ftp_accounts %}
+        <tr {% if a.user == detail.system_user %}style="background:color-mix(in oklab, var(--primary-soft) 30%, transparent)"{% endif %}>
+          <td><code style="font-size:0.82rem">{{ a.user }}</code></td>
+          <td>
+            {% if a.domain.is_empty() %}
+              <span class="text-soft">—</span>
+            {% else %}
+              <a href="/hostings/{{ a.domain }}">{{ a.domain }}</a>
+            {% endif %}
+          </td>
+          <td>
+            {% if a.hosting_state.is_empty() %}
+              <span class="text-soft">—</span>
+            {% else %}
+              <span class="pill {% if a.hosting_state == "active" %}ok{% else if a.hosting_state == "suspended" %}warn{% endif %}">{{ a.hosting_state }}</span>
+            {% endif %}
+          </td>
+          <td>
+            {% if a.has_password %}
+              <span class="pill ok">password set</span>
+            {% else %}
+              <span class="pill">disabled</span>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>
+
 </div><!-- /tab-ftp -->
 
 <div class="tab-panel" id="tab-backups">

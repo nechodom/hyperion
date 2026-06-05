@@ -394,9 +394,22 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // Pass the resolved state_file path so agent_info() can read
-    // enrollment state without re-deriving it.
+    // enrollment state without re-deriving it. `with_version`
+    // stamps the build-time git SHA so /install + the connectivity
+    // test see the actual deployed revision instead of the
+    // hardcoded Cargo.toml version (which never changes).
+    let agent_version: String = {
+        let short: String = env!("HYPERION_GIT_SHA").chars().take(12).collect();
+        if short == "dev-unknown" || short.is_empty() {
+            // Fallback for dev builds outside a git checkout.
+            env!("CARGO_PKG_VERSION").to_string()
+        } else {
+            short
+        }
+    };
     let agent: Arc<dyn hyperion_rpc::AgentApi> = Arc::new(
-        hyperion_core::AgentImpl::with_state_file(svc, state_file.clone()),
+        hyperion_core::AgentImpl::with_state_file(svc, state_file.clone())
+            .with_version(agent_version),
     );
 
     // Inbound master→node remote RPC HTTPS listener. Disabled by

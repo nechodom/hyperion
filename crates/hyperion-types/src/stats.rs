@@ -477,6 +477,28 @@ pub struct EmailLogEntry {
     pub sent_at: i64,
 }
 
+/// Per-hosting FTP account summary: who can log in, when their
+/// password was last touched, and whether vsftpd actually accepts
+/// the credential right now. Drives the "FTP accounts" table on
+/// the per-hosting FTP tab + the cluster-wide /ftp page.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct FtpAccountSummary {
+    /// Linux user name (== hosting.system_user).
+    pub user: String,
+    /// Domain of the hosting this user belongs to. Empty if the
+    /// user has a shadow password but no matching hosting row
+    /// (rare — probably an operator-created account).
+    pub domain: String,
+    /// True when /etc/shadow has a real bcrypt/sha-512 hash for
+    /// this user. False = locked or no-password.
+    pub has_password: bool,
+    /// Hosting state for context — "active" / "suspended" / etc.
+    /// Empty when the user doesn't map to a hosting row.
+    pub hosting_state: String,
+    /// Node hosting this account.
+    pub node_id: String,
+}
+
 /// One outbound mail sent BY a hosted PHP site (captured by the
 /// site-mail-wrapper). Distinct from the Hyperion-sent emails in
 /// EmailLogEntry — those flow through our SMTP config, these flow

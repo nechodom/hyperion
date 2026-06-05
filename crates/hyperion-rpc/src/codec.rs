@@ -1,7 +1,7 @@
 //! JSON length-prefixed framing.
 //!
 //! Each frame on the wire is `u32be length || JSON bytes`.
-//! `MAX_FRAME` (4 MiB) is enforced both at write and read.
+//! `MAX_FRAME` is enforced both at write and read.
 
 use crate::{
     error::RpcError,
@@ -17,7 +17,22 @@ use hyperion_validate::Domain;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
-pub const MAX_FRAME: usize = 4 * 1024 * 1024;
+/// Hard cap on a single JSON frame (length-prefixed).
+///
+/// History:
+///   v0: 4 MiB. Plugin / theme upload (WpAssetUpload) blew past
+///       this on 17 MB ZIPs because Vec<u8> serialised as a JSON
+///       byte-array balloons to ~4x the binary size.
+///   v1: Switched WpAssetUpload/Replace `bytes` to base64-encoded
+///       String (~1.37x wire), and raised the cap to 128 MiB so
+///       the 100 MB web body limit + base64 overhead + envelope
+///       all fit comfortably with headroom for backup restores.
+///
+/// The cap is shared by Unix-socket RPC (master ↔ local agent)
+/// and signed HTTPS RPC (master ↔ worker on :9443). The latter
+/// is bounded by network MTU rather than memory pressure, so the
+/// real ceiling is whatever the operator's plumbing tolerates.
+pub const MAX_FRAME: usize = 128 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
@@ -170,11 +185,12 @@ pub enum Request {
         kind: String,
         /// Original filename the operator picked.
         original_name: String,
-        /// Raw ZIP bytes. Serialized as a JSON byte array — verbose
-        /// on the wire (~4x base64) but the RPC is over a local
-        /// Unix socket and plugin ZIPs are <5 MB in practice. Worth
-        /// the simplicity vs. adding a serde_bytes / base64 dep.
-        bytes: Vec<u8>,
+        /// Raw ZIP bytes, base64-encoded (standard alphabet, padding).
+        /// JSON byte-arrays were ~4x the binary size and started
+        /// hitting MAX_FRAME on real plugin uploads (17 MB ZIPs
+        /// → ~65 MB JSON). Base64 is ~1.37x and survives JSON
+        /// without escapes.
+        bytes_b64: String,
         /// Web user who triggered the upload.
         uploaded_by: String,
     },
@@ -207,7 +223,8 @@ pub enum Request {
     WpAssetReplace {
         id: i64,
         original_name: String,
-        bytes: Vec<u8>,
+        /// See WpAssetUpload.bytes_b64.
+        bytes_b64: String,
         uploaded_by: String,
     },
     /// Push the current bytes of `asset_id` onto every hosting that
@@ -301,6 +318,15 @@ pub enum Request {
     SiteEmailLogList {
         system_user: String,
         limit: i64,
+    },
+    /// Per-node: list every Linux user with an FTP-usable shadow
+    /// password + map back to the matching hosting (if any).
+    FtpAccountsList,
+    /// Probe vsftpd at localhost with the given credentials.
+    /// Returns Ok(true)=login ok, Ok(false)=auth refused, Err=transport.
+    FtpVerifyLogin {
+        user: String,
+        password: String,
     },
     /// Probe localhost for a usable SMTP relay so the UI can
     /// pre-fill the email config form. Cheap — just TCP connect.
@@ -687,6 +713,10 @@ pub enum Response {
     HostingImportFromUrl(hyperion_types::HostingImportResult),
     EmailLogList(Vec<hyperion_types::EmailLogEntry>),
     SiteEmailLogList(Vec<hyperion_types::SiteEmailLogEntry>),
+    FtpAccountsList(Vec<hyperion_types::FtpAccountSummary>),
+    /// True = login accepted, false = refused. Transport failure
+    /// surfaces as Response::Error so the UI can distinguish.
+    FtpVerifyLogin { accepted: bool },
     EmailSmtpAutodetect(hyperion_types::SmtpAutodetect),
     WpPluginList(hyperion_types::WpPluginListResponse),
     WpPluginAction(hyperion_types::WpPluginActionResult),

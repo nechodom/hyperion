@@ -4532,6 +4532,73 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// file → empty vec (sites that haven't sent mail yet). Lines
     /// that fail to parse are silently skipped so a corrupted
     /// entry can't take down the whole log.
+    /// List every Linux user on this node with an FTP-usable shadow
+    /// password + join with the hostings table so the operator sees
+    /// domain + state alongside the user. Users without a matching
+    /// hosting row are still listed (they're operator-created
+    /// accounts) with empty domain/state.
+    pub async fn ftp_accounts_list(
+        &self,
+    ) -> Result<Vec<hyperion_types::FtpAccountSummary>, RpcError> {
+        let users = hyperion_adapters::ftp::list_users_with_password()
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("read shadow: {e}")))?;
+        // Index hostings by system_user for the join.
+        // Build a system_user → (domain, state) cache so the
+        // shadow → hostings join is a single SQL query rather
+        // than N fan-out gets.
+        let rows: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT su.name, h.domain, h.state \
+             FROM hostings h \
+             JOIN system_users su ON su.id = h.system_user_id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("join hostings: {e}")))?;
+        let by_user: std::collections::HashMap<String, (String, String)> =
+            rows.into_iter().map(|(u, d, s)| (u, (d, s))).collect();
+        let mut out = Vec::with_capacity(users.len());
+        for user in users {
+            let (domain, state) = by_user
+                .get(&user)
+                .cloned()
+                .unwrap_or_else(|| (String::new(), String::new()));
+            out.push(hyperion_types::FtpAccountSummary {
+                user,
+                domain,
+                hosting_state: state,
+                has_password: true,
+                node_id: String::new(),
+            });
+        }
+        // Stable alphabetical for the UI.
+        out.sort_by(|a, b| a.user.cmp(&b.user));
+        Ok(out)
+    }
+
+    /// Forwards to the adapter's curl-based probe. Validates the
+    /// username shape upfront so a malicious caller can't smuggle
+    /// curl args via "user".
+    pub async fn ftp_verify_login(
+        &self,
+        user: String,
+        password: String,
+    ) -> Result<bool, RpcError> {
+        if !user
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            || user.is_empty()
+            || user.len() > 32
+        {
+            return Err(RpcError::Validation {
+                message: format!("invalid user: {user:?}"),
+            });
+        }
+        hyperion_adapters::ftp::probe_login(&user, &password)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("ftp probe: {e}")))
+    }
+
     pub async fn site_email_log_list(
         &self,
         system_user: String,

@@ -523,12 +523,14 @@ pub async fn post_wp_asset_upload(
     let original_name =
         original_name.ok_or_else(|| AppError::BadRequest("missing `file` field".into()))?;
     let bytes = bytes.ok_or_else(|| AppError::BadRequest("missing `file` bytes".into()))?;
+    use base64::Engine;
+    let bytes_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
         Request::WpAssetUpload {
             kind,
             original_name: original_name.clone(),
-            bytes,
+            bytes_b64,
             uploaded_by: ctx.username.clone(),
         },
     )
@@ -693,12 +695,14 @@ pub async fn post_wp_asset_replace(
     let original_name =
         original_name.ok_or_else(|| AppError::BadRequest("missing `file` field".into()))?;
     let bytes = bytes.ok_or_else(|| AppError::BadRequest("missing `file` bytes".into()))?;
+    use base64::Engine;
+    let bytes_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
         Request::WpAssetReplace {
             id,
             original_name: original_name.clone(),
-            bytes,
+            bytes_b64,
             uploaded_by: ctx.username.clone(),
         },
     )

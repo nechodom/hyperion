@@ -301,6 +301,20 @@ pub trait AgentApi: Send + Sync + 'static {
         limit: i64,
     ) -> Result<Vec<hyperion_types::SiteEmailLogEntry>, RpcError>;
 
+    /// List every Linux user on this node with an FTP-usable shadow
+    /// password. Joined with the local hosting table so the UI shows
+    /// "domain + state + node" alongside the user name.
+    async fn ftp_accounts_list(
+        &self,
+    ) -> Result<Vec<hyperion_types::FtpAccountSummary>, RpcError>;
+
+    /// Probe vsftpd at localhost with the supplied credential.
+    async fn ftp_verify_login(
+        &self,
+        user: String,
+        password: String,
+    ) -> Result<bool, RpcError>;
+
     /// Probe localhost for a usable SMTP relay.
     async fn email_smtp_autodetect(&self) -> Result<hyperion_types::SmtpAutodetect, RpcError>;
 

@@ -35,9 +35,23 @@ impl<A: AdapterPort + 'static> AgentImpl<A> {
         Self {
             svc,
             hostname: hostname_or_unknown(),
+            // CARGO_PKG_VERSION is hardcoded "0.1.0" in Cargo.toml
+            // and never changes. The hyperion-agent binary has its
+            // own build.rs that stamps HYPERION_GIT_SHA — call
+            // `.with_version(env!("HYPERION_GIT_SHA"))` from main
+            // to surface the actual deployed SHA in AgentInfo.
             version: env!("CARGO_PKG_VERSION").to_string(),
             node_state_file,
         }
+    }
+
+    /// Override the version string that AgentInfo reports.
+    /// hyperion-agent's main calls this with the build-time git
+    /// short SHA so /install + connectivity tests see a useful
+    /// version per agent instead of every node showing "v0.1.0".
+    pub fn with_version(mut self, version: impl Into<String>) -> Self {
+        self.version = version.into();
+        self
     }
 }
 
@@ -482,6 +496,19 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         limit: i64,
     ) -> Result<Vec<hyperion_types::SiteEmailLogEntry>, RpcError> {
         self.svc.site_email_log_list(system_user, limit).await
+    }
+
+    async fn ftp_accounts_list(
+        &self,
+    ) -> Result<Vec<hyperion_types::FtpAccountSummary>, RpcError> {
+        self.svc.ftp_accounts_list().await
+    }
+    async fn ftp_verify_login(
+        &self,
+        user: String,
+        password: String,
+    ) -> Result<bool, RpcError> {
+        self.svc.ftp_verify_login(user, password).await
     }
 
     async fn email_smtp_autodetect(&self) -> Result<hyperion_types::SmtpAutodetect, RpcError> {

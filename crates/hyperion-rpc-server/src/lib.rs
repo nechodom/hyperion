@@ -289,15 +289,23 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
         Request::WpAssetUpload {
             kind,
             original_name,
-            bytes,
+            bytes_b64,
             uploaded_by,
-        } => match api
-            .wp_asset_upload(kind, original_name, bytes, uploaded_by)
-            .await
-        {
-            Ok((id, deduped)) => Response::WpAssetUpload { id, deduped },
-            Err(e) => Response::Error(e),
-        },
+        } => {
+            use base64::Engine;
+            match base64::engine::general_purpose::STANDARD.decode(bytes_b64.as_bytes()) {
+                Ok(bytes) => match api
+                    .wp_asset_upload(kind, original_name, bytes, uploaded_by)
+                    .await
+                {
+                    Ok((id, deduped)) => Response::WpAssetUpload { id, deduped },
+                    Err(e) => Response::Error(e),
+                },
+                Err(e) => Response::Error(hyperion_rpc::RpcError::Validation {
+                    message: format!("bytes_b64 decode: {e}"),
+                }),
+            }
+        }
         Request::WpAssetList => match api.wp_asset_list().await {
             Ok(v) => Response::WpAssetList(v),
             Err(e) => Response::Error(e),
@@ -320,15 +328,23 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
         Request::WpAssetReplace {
             id,
             original_name,
-            bytes,
+            bytes_b64,
             uploaded_by,
-        } => match api
-            .wp_asset_replace(id, original_name, bytes, uploaded_by)
-            .await
-        {
-            Ok(()) => Response::WpAssetReplace,
-            Err(e) => Response::Error(e),
-        },
+        } => {
+            use base64::Engine;
+            match base64::engine::general_purpose::STANDARD.decode(bytes_b64.as_bytes()) {
+                Ok(bytes) => match api
+                    .wp_asset_replace(id, original_name, bytes, uploaded_by)
+                    .await
+                {
+                    Ok(()) => Response::WpAssetReplace,
+                    Err(e) => Response::Error(e),
+                },
+                Err(e) => Response::Error(hyperion_rpc::RpcError::Validation {
+                    message: format!("bytes_b64 decode: {e}"),
+                }),
+            }
+        }
         Request::WpAssetReinstallAll {
             asset_id,
             force_activate,
@@ -407,6 +423,16 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
         Request::SiteEmailLogList { system_user, limit } => {
             match api.site_email_log_list(system_user, limit).await {
                 Ok(v) => Response::SiteEmailLogList(v),
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::FtpAccountsList => match api.ftp_accounts_list().await {
+            Ok(v) => Response::FtpAccountsList(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::FtpVerifyLogin { user, password } => {
+            match api.ftp_verify_login(user, password).await {
+                Ok(accepted) => Response::FtpVerifyLogin { accepted },
                 Err(e) => Response::Error(e),
             }
         }
@@ -1135,6 +1161,14 @@ mod tests {
             _: i64,
         ) -> Result<Vec<hyperion_types::SiteEmailLogEntry>, RpcError> {
             Ok(vec![])
+        }
+        async fn ftp_accounts_list(
+            &self,
+        ) -> Result<Vec<hyperion_types::FtpAccountSummary>, RpcError> {
+            Ok(vec![])
+        }
+        async fn ftp_verify_login(&self, _: String, _: String) -> Result<bool, RpcError> {
+            Ok(true)
         }
         async fn email_smtp_autodetect(
             &self,

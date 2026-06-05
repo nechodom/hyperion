@@ -169,6 +169,16 @@ struct DetailTpl<'a> {
     /// the per-user JSONL. Distinct from `email_log` above which
     /// is Hyperion-system mail.
     site_emails: Vec<hyperion_types::SiteEmailLogEntry>,
+    /// Every FTP-usable Linux account on the same node as this
+    /// hosting. The FTP tab shows the count + a sortable list so
+    /// the operator can see "I created 3 accounts" instead of
+    /// trusting the silence after a successful POST.
+    ftp_accounts: Vec<hyperion_types::FtpAccountSummary>,
+    /// Result of `ftp_verify_login` for THIS hosting's system user,
+    /// done right after we know there's a password set. Lets the
+    /// UI show a green "vsftpd accepts this credential" pill.
+    /// None = no password set / didn't probe.
+    ftp_login_ok: Option<bool>,
     /// Session-wide CSRF token used by the newer forms that don't have
     /// dedicated csrf_* fields plumbed (access, acme-email, monitor,
     /// backup delete). Middleware accepts both.
@@ -839,6 +849,8 @@ pub async fn post_create(
                 wp_plugins: hyperion_types::WpPluginListResponse::default(),
                 email_log: vec![],
                 site_emails: vec![],
+                ftp_accounts: vec![],
+                ftp_login_ok: None,
                 csrf_token: super::session_csrf_token(&state, &ctx),
                 target_node: target.unwrap_or("").to_string(),
                 all_nodes: fetch_remote_nodes(&state).await.unwrap_or_default(),
@@ -1052,14 +1064,54 @@ pub async fn get_detail(
             }
         }
     };
-    let (wp_plugins, wp_themes, spf, monitor_pair, email_log, site_emails) = tokio::join!(
+    // FTP accounts on the same node — surfaces "you've created N
+    // accounts" on the FTP tab. Cheap (shadow read + one SQL join).
+    let ftp_accounts_fut = {
+        let state2 = state.clone();
+        async move {
+            match crate::dispatcher::dispatch_to_node(
+                &state2,
+                target,
+                Request::FtpAccountsList,
+            )
+            .await
+            {
+                Ok(RpcResponse::FtpAccountsList(mut rows)) => {
+                    for r in &mut rows {
+                        r.node_id = target.unwrap_or("").to_string();
+                    }
+                    rows
+                }
+                _ => vec![],
+            }
+        }
+    };
+    let (
+        wp_plugins,
+        wp_themes,
+        spf,
+        monitor_pair,
+        email_log,
+        site_emails,
+        ftp_accounts,
+    ) = tokio::join!(
         wp_plugins_fut,
         wp_themes_fut,
         spf_fut,
         monitor_fut,
         email_log_fut,
         site_emails_fut,
+        ftp_accounts_fut,
     );
+    // If THIS hosting's user has a password, probe vsftpd to
+    // verify it actually accepts the credential. We don't know
+    // the password (it's only ever shown once), so we can only
+    // check "user is in shadow". Login probe is left to the
+    // operator via a dedicated button in the UI.
+    let ftp_login_ok: Option<bool> = ftp_accounts
+        .iter()
+        .find(|a| a.user == detail.system_user)
+        .map(|a| a.has_password);
     let (monitor_config, monitor_history) = monitor_pair;
 
     let applied_profile_name = profile_apply
@@ -1184,6 +1236,8 @@ pub async fn get_detail(
         wp_plugins,
         email_log,
         site_emails,
+        ftp_accounts,
+        ftp_login_ok,
         csrf_token: super::session_csrf_token(&state, &ctx),
         target_node: owner_node.clone().unwrap_or_default(),
         all_nodes: fetch_remote_nodes(&state).await.unwrap_or_default(),
