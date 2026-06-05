@@ -127,31 +127,39 @@
               </td>
               <td class="text-soft small">{{ crate::handlers::stats::fmt_ago(e.modified_at) }}</td>
               <td class="right">
-                <div style="display:inline-flex;gap:0.3rem;align-items:center">
+                <div class="row-menu" style="display:inline-flex;gap:0.3rem;align-items:center;position:relative">
+                  {% if e.kind == "file" && e.inline_viewable && can_write %}
+                    <a class="btn small" href="/hostings/{{ selector }}/files?path={{ rel_path|e }}&file={{ e.rel_path|e }}&edit=1" title="Edit">✎</a>
+                  {% endif %}
                   {% if e.kind == "file" %}
                     <a class="btn small" href="/hostings/{{ selector }}/files/download?path={{ e.rel_path|e }}" title="Download">↓</a>
                   {% endif %}
                   {% if can_write %}
-                    <form method="post" action="/hostings/files/rename" style="display:inline-flex;gap:0.2rem;margin:0">
+                    <button type="button" class="btn small row-menu-toggle" title="More" aria-haspopup="true">⋯</button>
+                    <div class="row-menu-pop" hidden>
+                      <button type="button" class="row-menu-item" data-rename
+                              data-current="{{ e.name }}"
+                              data-from="{{ e.rel_path }}">Rename…</button>
+                      <form method="post" action="/hostings/files/delete" style="margin:0"
+                            data-confirm-title="Delete {{ e.name }}"
+                            data-confirm-body="This {{ e.kind }} will be removed. Directories must be empty. Permanent — no undo button."
+                            data-confirm-confirm-label="Delete"
+                            data-confirm-variant="danger"
+                            data-confirm-require="{{ e.name }}">
+                        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                        <input type="hidden" name="selector" value="{{ selector }}">
+                        <input type="hidden" name="rel_path" value="{{ e.rel_path }}">
+                        <input type="hidden" name="dir" value="{{ rel_path }}">
+                        <button class="row-menu-item row-menu-danger" type="submit">Delete</button>
+                      </form>
+                    </div>
+                    {# Hidden form posted by the JS rename prompt below. #}
+                    <form method="post" action="/hostings/files/rename" class="row-rename-form" style="display:none;margin:0">
                       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                       <input type="hidden" name="selector" value="{{ selector }}">
                       <input type="hidden" name="dir" value="{{ rel_path }}">
                       <input type="hidden" name="from" value="{{ e.rel_path }}">
-                      <input type="text" name="to_name" value="{{ e.name }}" pattern="[^/\\\\\0]+" required
-                             style="width:9rem;font-size:0.78rem;padding:0.2rem 0.35rem"
-                             title="Rename — edit this name and submit">
-                      <button class="btn small" type="submit" title="Rename to the value in the box">⟲</button>
-                    </form>
-                    <form method="post" action="/hostings/files/delete" style="display:inline;margin:0"
-                          data-confirm-title="Delete {{ e.name }}"
-                          data-confirm-body="This {{ e.kind }} will be removed. Directories must be empty. Permanent — no undo button."
-                          data-confirm-confirm-label="Delete"
-                          data-confirm-variant="danger">
-                      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-                      <input type="hidden" name="selector" value="{{ selector }}">
-                      <input type="hidden" name="rel_path" value="{{ e.rel_path }}">
-                      <input type="hidden" name="dir" value="{{ rel_path }}">
-                      <button class="btn small danger" type="submit" title="Delete">×</button>
+                      <input type="hidden" name="to_name" value="">
                     </form>
                   {% endif %}
                 </div>
@@ -167,7 +175,10 @@
 {% if let Some(v) = viewer %}
 <div class="card">
   <div class="spread" style="margin-bottom:0.6rem">
-    <h3 style="margin:0;font-size:0.95rem">{{ v.rel_path }}</h3>
+    <h3 style="margin:0;font-size:0.95rem">
+      {% if edit_mode %}<span class="pill" style="background:var(--warn);color:white;margin-right:0.4rem">EDITING</span>{% endif %}
+      {{ v.rel_path }}
+    </h3>
     <span class="text-soft small">{{ v.mime }} · {{ crate::handlers::files::fmt_size_u64(v.size) }}</span>
   </div>
   {% if v.truncated %}
@@ -175,9 +186,108 @@
       <div class="flash-body">File is larger than the 1 MiB inline cap — only a partial preview is rendered. Use scp/sftp for the full contents.</div>
     </div>
   {% endif %}
-  <pre style="margin:0;padding:0.85rem;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-md);overflow:auto;max-height:70vh;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:0.82rem;line-height:1.5"><code>{{ v.content }}</code></pre>
+  {% if edit_mode %}
+    {# Edit mode: editable textarea + Save / Cancel buttons. CSRF
+       ride-along _csrf in the form body (urlencoded → middleware
+       buffers + validates). #}
+    <form method="post" action="/hostings/files/edit-save" style="margin:0">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="selector" value="{{ selector }}">
+      <input type="hidden" name="rel_path" value="{{ v.rel_path }}">
+      <textarea name="content"
+                spellcheck="false"
+                style="width:100%;box-sizing:border-box;margin:0;padding:0.85rem;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-md);min-height:60vh;max-height:75vh;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:0.82rem;line-height:1.5;resize:vertical">{{ v.content }}</textarea>
+      <div style="display:flex;gap:0.5rem;margin-top:0.6rem;justify-content:flex-end">
+        <a class="btn" href="/hostings/{{ selector }}/files?path={{ rel_path|e }}&file={{ v.rel_path|e }}">Cancel</a>
+        <button class="btn primary" type="submit">Save</button>
+      </div>
+    </form>
+  {% else %}
+    <pre style="margin:0;padding:0.85rem;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-md);overflow:auto;max-height:70vh;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:0.82rem;line-height:1.5"><code>{{ v.content }}</code></pre>
+    {% if can_write %}
+    <div style="margin-top:0.6rem;text-align:right">
+      <a class="btn primary" href="/hostings/{{ selector }}/files?path={{ rel_path|e }}&file={{ v.rel_path|e }}&edit=1">Edit</a>
+    </div>
+    {% endif %}
+  {% endif %}
 </div>
 {% endif %}
 
 </div>
+
+<style>
+/* Per-row 3-dot dropdown menu — replaces the always-visible
+   rename input which was visually noisy. */
+.row-menu-toggle { padding-inline: 0.45rem; }
+.row-menu-pop {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  margin-top: 4px;
+  min-width: 9rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: 0 12px 32px rgba(0,0,0,0.35);
+  z-index: 50;
+  padding: 0.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+.row-menu-item {
+  background: transparent;
+  border: 0;
+  text-align: left;
+  padding: 0.45rem 0.7rem;
+  font-size: 0.85rem;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  color: var(--text);
+  width: 100%;
+}
+.row-menu-item:hover { background: var(--surface-2); }
+.row-menu-item.row-menu-danger { color: var(--danger); }
+</style>
+
+<script>
+(function () {
+  'use strict';
+  // Toggle 3-dot menus + close on outside click / Esc.
+  document.addEventListener('click', (ev) => {
+    const tog = ev.target.closest('.row-menu-toggle');
+    document.querySelectorAll('.row-menu-pop').forEach((p) => {
+      if (tog && p.parentElement.contains(tog)) {
+        const open = !p.hidden;
+        p.hidden = open;
+      } else {
+        p.hidden = true;
+      }
+    });
+  });
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape') {
+      document.querySelectorAll('.row-menu-pop').forEach((p) => { p.hidden = true; });
+    }
+  });
+  // Rename — prompt for new name, fill the hidden form, submit.
+  document.addEventListener('click', (ev) => {
+    const t = ev.target.closest('[data-rename]');
+    if (!t) return;
+    ev.preventDefault();
+    const current = t.dataset.current || '';
+    const next = prompt('New name (single component, no slashes):', current);
+    if (!next || next === current) return;
+    if (next.indexOf('/') >= 0 || next.indexOf('\\') >= 0 || next.indexOf('\0') >= 0) {
+      alert('Name cannot contain / \\ or NUL.');
+      return;
+    }
+    const wrap = t.closest('.row-menu');
+    const f = wrap && wrap.querySelector('.row-rename-form');
+    if (!f) return;
+    f.querySelector('input[name="to_name"]').value = next;
+    f.submit();
+  });
+})();
+</script>
 {% endblock %}

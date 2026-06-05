@@ -40,6 +40,10 @@ struct FilesTpl<'a> {
     csrf_token: String,
     /// Optional flash from ?flash=...; rendered as a green banner.
     flash: Option<String>,
+    /// When true, the viewer renders an editable textarea + Save
+    /// button instead of a read-only `<pre>`. Triggered by
+    /// `?file=...&edit=1`.
+    edit_mode: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -53,6 +57,9 @@ pub struct FilesQuery {
     /// Set after a successful POST → green banner in the UI.
     #[serde(default)]
     pub flash: Option<String>,
+    /// "1" → render the viewer in edit mode (textarea + Save button).
+    #[serde(default)]
+    pub edit: Option<String>,
 }
 
 pub async fn get_files(
@@ -108,6 +115,7 @@ pub async fn get_files(
     let breadcrumbs = build_breadcrumbs(&rel_path);
 
     let can_write = !ctx.is_read_only();
+    let edit_mode = q.edit.as_deref() == Some("1") && viewer.is_some() && can_write;
     let tpl = FilesTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -124,8 +132,60 @@ pub async fn get_files(
         can_write,
         csrf_token: super::session_csrf_token(&state, &ctx),
         flash: q.flash.clone(),
+        edit_mode,
     };
     Ok(Html(tpl.render()?).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct EditSaveForm {
+    pub selector: String,
+    pub rel_path: String,
+    pub content: String,
+}
+
+pub async fn post_edit_save(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<EditSaveForm>,
+) -> Result<Response, AppError> {
+    if let Some(r) = require_write(&ctx) {
+        return Ok(r);
+    }
+    let sel = parse_selector_public(&form.selector)?;
+    let bytes_b64 = base64::engine::general_purpose::STANDARD.encode(form.content.as_bytes());
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::HostingFileWrite {
+            sel,
+            rel_path: form.rel_path.clone(),
+            bytes_b64,
+        },
+    )
+    .await?;
+    let parent = parent_dir(&form.rel_path);
+    match resp {
+        RpcResponse::HostingFileWrite => {
+            // Stay on the editor after save so the operator can keep
+            // iterating; flash banner confirms the write landed.
+            Ok(Redirect::to(&format!(
+                "/hostings/{}/files?path={}&file={}&edit=1&flash=Saved",
+                crate::handlers::hostings::urlencoding(&form.selector),
+                crate::handlers::hostings::urlencoding(&parent),
+                crate::handlers::hostings::urlencoding(&form.rel_path)
+            ))
+            .into_response())
+        }
+        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
+            "/hostings/{}/files?path={}&file={}&edit=1&flash={}",
+            crate::handlers::hostings::urlencoding(&form.selector),
+            crate::handlers::hostings::urlencoding(&parent),
+            crate::handlers::hostings::urlencoding(&form.rel_path),
+            crate::handlers::hostings::urlencoding(&e.to_string())
+        ))
+        .into_response()),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
 }
 
 // ─────────── Write handlers ───────────

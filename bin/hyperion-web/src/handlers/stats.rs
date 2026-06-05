@@ -517,6 +517,49 @@ pub fn fmt_bytes(n: &i64) -> String {
     }
 }
 
+/// Build a tiny inline SVG polyline from a list of i64 values,
+/// normalised against the series max. Used by the hosting detail
+/// Stats card to render usage trends without pulling in a JS chart
+/// library.
+///
+/// `extractor` projects the bucket to a single i64 (disk, bw_out,
+/// requests, etc.). Empty inputs return an empty string.
+pub fn sparkline_svg(buckets: &[hyperion_types::HostingUsageBucket], extractor: fn(&hyperion_types::HostingUsageBucket) -> i64) -> String {
+    if buckets.len() < 2 {
+        return String::new();
+    }
+    let vals: Vec<i64> = buckets.iter().map(extractor).collect();
+    let max = vals.iter().copied().max().unwrap_or(1).max(1);
+    let n = vals.len();
+    let w: f64 = 220.0;
+    let h: f64 = 36.0;
+    let dx = if n > 1 { w / (n as f64 - 1.0) } else { 0.0 };
+    let mut points = String::with_capacity(n * 12);
+    for (i, v) in vals.iter().enumerate() {
+        let x = i as f64 * dx;
+        // Invert Y because SVG y grows downward, leaving 2 px top/bottom pad.
+        let y = h - 2.0 - ((*v as f64 / max as f64) * (h - 4.0));
+        if i > 0 {
+            points.push(' ');
+        }
+        points.push_str(&format!("{:.1},{:.1}", x, y));
+    }
+    format!(
+        r##"<svg viewBox="0 0 {w:.0} {h:.0}" preserveAspectRatio="none" style="width:100%;height:36px;display:block">
+            <polyline fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" points="{points}"/>
+            </svg>"##,
+        w = w,
+        h = h,
+        points = points,
+    )
+}
+
+/// Convenience projections used by the Stats card.
+pub fn bucket_disk(b: &hyperion_types::HostingUsageBucket) -> i64 { b.disk_used_bytes }
+pub fn bucket_bw_in(b: &hyperion_types::HostingUsageBucket) -> i64 { b.bw_in_bytes }
+pub fn bucket_bw_out(b: &hyperion_types::HostingUsageBucket) -> i64 { b.bw_out_bytes }
+pub fn bucket_requests(b: &hyperion_types::HostingUsageBucket) -> i64 { b.php_requests }
+
 /// 0-decimal percent display. Returns "?" if total == 0.
 pub fn fmt_percent(num: &i64, total: &i64) -> String {
     if *total <= 0 {

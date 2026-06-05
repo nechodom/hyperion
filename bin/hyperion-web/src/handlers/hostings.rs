@@ -185,6 +185,10 @@ struct DetailTpl<'a> {
     /// Set when set_vhost_options returned an error — banner in UI.
     vhost_error: Option<String>,
     /// WP debug toggle form CSRF.
+    /// Up to 48 hourly buckets of (disk, bw_in, bw_out, php_requests)
+    /// for the Stats card sparklines. Newest last, may be shorter
+    /// than 48 if the agent is freshly installed.
+    usage_buckets: Vec<hyperion_types::HostingUsageBucket>,
     csrf_wp_debug: String,
     /// WP debug.log rotate button CSRF.
     csrf_wp_debug_rotate: String,
@@ -686,6 +690,7 @@ pub async fn post_create(
                 csrf_vhost_options: csrf_token_for(&state, &ctx, "/hostings/vhost-options"),
                 vhost_saved: false,
                 vhost_error: None,
+                usage_buckets: vec![],
                 csrf_wp_debug: csrf_token_for(&state, &ctx, "/hostings/wp/debug"),
                 csrf_wp_debug_rotate: csrf_token_for(
                     &state,
@@ -732,95 +737,153 @@ pub async fn get_detail(
         return Ok(r);
     }
     let sel_id = HostingSelector::Id(detail.id.clone());
-    let limits = fetch_limits(&state, target, sel_id.clone())
-        .await
-        .unwrap_or_else(|_| hyperion_types::HostingLimits::defaults());
-    let wp_status = fetch_wp_status(&state, target, sel_id.clone())
-        .await
-        .unwrap_or(None);
-    // Only ask the agent for the plugin list when WP is actually
-    // installed — otherwise wp-cli fails with "Error: This does not
-    // seem to be a WordPress installation." and we'd render a flash.
-    let wp_plugins = if wp_status.is_some() {
+
+    // === Parallel RPC fan-out ===
+    // The hosting detail page used to do ~12 serial RPCs (limits,
+    // wp_status, plugins, themes, expiry, backups, stats, cron,
+    // profile_apply, profiles, spf, monitor, email_log). On a
+    // multi-node setup with 100ms+ per RPC that added up to >1s
+    // of page-render latency. tokio::join! buckets them so the
+    // whole page is bounded by the SLOWEST single RPC.
+    //
+    // wp_plugins + wp_themes still depend on wp_status (only
+    // probe wp-cli if WP is installed). We get wp_status in the
+    // first wave + conditionally fire plugins/themes in a tiny
+    // second wave.
+    let usage_fut = async {
         match crate::dispatcher::dispatch_to_node(
             &state,
             target,
-            Request::WpPluginList { hosting: sel_id.clone() },
+            Request::HostingUsage { sel: sel_id.clone(), limit: 48 },
         )
         .await
         {
-            Ok(RpcResponse::WpPluginList(r)) => r,
-            _ => hyperion_types::WpPluginListResponse::default(),
+            Ok(RpcResponse::HostingUsage(rows)) => rows,
+            _ => vec![],
         }
-    } else {
-        hyperion_types::WpPluginListResponse::default()
     };
-    let wp_themes = if wp_status.is_some() {
-        match crate::dispatcher::dispatch_to_node(
-            &state,
-            target,
-            Request::WpThemeList { hosting: sel_id.clone() },
+    let (
+        limits_res,
+        wp_status_res,
+        expiry_res,
+        backups_res,
+        stats_res,
+        cron_res,
+        profile_apply_res,
+        profiles_res,
+        usage_buckets,
+    ) = tokio::join!(
+        fetch_limits(&state, target, sel_id.clone()),
+        fetch_wp_status(&state, target, sel_id.clone()),
+        fetch_expiry(&state, target, sel_id.clone()),
+        fetch_backup_list(&state, target, sel_id.clone(), 10),
+        fetch_stats(&state, target, sel_id.clone()),
+        fetch_cron(&state, target, sel_id.clone()),
+        fetch_profile_apply(&state, target, sel_id.clone()),
+        fetch_all_profiles(&state),
+        usage_fut,
+    );
+    let limits = limits_res.unwrap_or_else(|_| hyperion_types::HostingLimits::defaults());
+    let wp_status = wp_status_res.unwrap_or(None);
+    let expiry = expiry_res.unwrap_or_else(|_| hyperion_types::HostingExpiry::defaults());
+    let backups = backups_res.unwrap_or_default();
+    let stats = stats_res.ok();
+    let cron_body = cron_res.unwrap_or_default();
+    let profile_apply = profile_apply_res.unwrap_or(None);
+    let profiles = profiles_res.unwrap_or_default();
+
+    let domain_for_spf = Domain::parse(&detail.domain).ok();
+
+    // Wave 2 — independent of wp_status, and WP plugins/themes
+    // only when WP is installed. Wave 1 already finished so we
+    // know wp_status now.
+    let wp_plugins_fut = async {
+        if wp_status.is_some() {
+            match crate::dispatcher::dispatch_to_node(
+                &state,
+                target,
+                Request::WpPluginList { hosting: sel_id.clone() },
+            )
+            .await
+            {
+                Ok(RpcResponse::WpPluginList(r)) => r,
+                _ => hyperion_types::WpPluginListResponse::default(),
+            }
+        } else {
+            hyperion_types::WpPluginListResponse::default()
+        }
+    };
+    let wp_themes_fut = async {
+        if wp_status.is_some() {
+            match crate::dispatcher::dispatch_to_node(
+                &state,
+                target,
+                Request::WpThemeList { hosting: sel_id.clone() },
+            )
+            .await
+            {
+                Ok(RpcResponse::WpThemeList(r)) => r,
+                _ => hyperion_types::WpThemeListResponse::default(),
+            }
+        } else {
+            hyperion_types::WpThemeListResponse::default()
+        }
+    };
+    let spf_fut = async {
+        match domain_for_spf {
+            Some(d) => match hyperion_rpc_client::call(
+                &state.agent_socket,
+                Request::DnsSpfCheck { domain: d },
+            )
+            .await
+            {
+                Ok(RpcResponse::DnsSpfCheck(r)) => Some(r),
+                _ => None,
+            },
+            None => None,
+        }
+    };
+    let monitor_fut = async {
+        match hyperion_rpc_client::call(
+            &state.agent_socket,
+            Request::MonitorGet { sel: sel_id.clone() },
         )
         .await
         {
-            Ok(RpcResponse::WpThemeList(r)) => r,
-            _ => hyperion_types::WpThemeListResponse::default(),
+            Ok(RpcResponse::MonitorGet { config, history }) => (config, history),
+            _ => (
+                hyperion_types::MonitorConfigView::default(),
+                hyperion_types::MonitorHistory::default(),
+            ),
         }
-    } else {
-        hyperion_types::WpThemeListResponse::default()
     };
-    let expiry = fetch_expiry(&state, target, sel_id.clone())
+    let email_log_fut = async {
+        match hyperion_rpc_client::call(
+            &state.agent_socket,
+            Request::EmailLogList {
+                hosting_id: Some(detail.id.as_str().to_string()),
+                limit: 50,
+            },
+        )
         .await
-        .unwrap_or_else(|_| hyperion_types::HostingExpiry::defaults());
-    let backups = fetch_backup_list(&state, target, sel_id.clone(), 10)
-        .await
-        .unwrap_or_default();
-    let stats = fetch_stats(&state, target, sel_id.clone()).await.ok();
-    let cron_body = fetch_cron(&state, target, sel_id.clone()).await.unwrap_or_default();
-    let profile_apply = fetch_profile_apply(&state, target, sel_id.clone()).await.unwrap_or(None);
-    let profiles = fetch_all_profiles(&state).await.unwrap_or_default();
+        {
+            Ok(RpcResponse::EmailLogList(r)) => r,
+            _ => vec![],
+        }
+    };
+    let (wp_plugins, wp_themes, spf, monitor_pair, email_log) = tokio::join!(
+        wp_plugins_fut,
+        wp_themes_fut,
+        spf_fut,
+        monitor_fut,
+        email_log_fut,
+    );
+    let (monitor_config, monitor_history) = monitor_pair;
+
     let applied_profile_name = profile_apply
         .as_ref()
         .and_then(|a| a.profile_id)
         .and_then(|pid| profiles.iter().find(|p| p.id == pid).map(|p| p.name.clone()));
-    let spf = match Domain::parse(&detail.domain) {
-        Ok(d) => match hyperion_rpc_client::call(
-            &state.agent_socket,
-            Request::DnsSpfCheck { domain: d },
-        )
-        .await
-        {
-            Ok(RpcResponse::DnsSpfCheck(r)) => Some(r),
-            _ => None,
-        },
-        Err(_) => None,
-    };
-    // Per-hosting monitor config + history for the Monitor tab.
-    let (monitor_config, monitor_history) = match hyperion_rpc_client::call(
-        &state.agent_socket,
-        Request::MonitorGet { sel: sel_id.clone() },
-    )
-    .await
-    {
-        Ok(RpcResponse::MonitorGet { config, history }) => (config, history),
-        _ => (
-            hyperion_types::MonitorConfigView::default(),
-            hyperion_types::MonitorHistory::default(),
-        ),
-    };
-    // Per-hosting email log for the Emails tab.
-    let email_log: Vec<hyperion_types::EmailLogEntry> = match hyperion_rpc_client::call(
-        &state.agent_socket,
-        Request::EmailLogList {
-            hosting_id: Some(detail.id.as_str().to_string()),
-            limit: 50,
-        },
-    )
-    .await
-    {
-        Ok(RpcResponse::EmailLogList(r)) => r,
-        _ => vec![],
-    };
     // Access tab data — fetched only for super_admin since they're the
     // only ones who see the tab. Empty vec for everyone else is cheap
     // and keeps the template happy.
@@ -946,6 +1009,7 @@ pub async fn get_detail(
         csrf_vhost_options: csrf_token_for(&state, &ctx, "/hostings/vhost-options"),
         vhost_saved: q.vhost_saved.as_deref() == Some("1"),
         vhost_error: q.vhost_error,
+        usage_buckets,
         csrf_wp_debug: csrf_token_for(&state, &ctx, "/hostings/wp/debug"),
         csrf_wp_debug_rotate: csrf_token_for(&state, &ctx, "/hostings/wp/debug-log/rotate"),
         csrf_wp_redis: csrf_token_for(&state, &ctx, "/hostings/wp/redis"),

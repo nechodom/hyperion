@@ -196,6 +196,14 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/hostings/files/mkdir", post(handlers::files::post_mkdir))
         .route("/hostings/files/rename", post(handlers::files::post_rename))
         .route(
+            "/hostings/files/edit-save",
+            post(handlers::files::post_edit_save)
+                // Edited content can be > 2 MB (operator edits a big
+                // wp-config.php or .htaccess); same body cap as the
+                // upload route would be overkill, 5 MB is plenty.
+                .layer(axum::extract::DefaultBodyLimit::max(5 * 1024 * 1024)),
+        )
+        .route(
             "/hostings/monitor/set",
             post(handlers::hostings::post_monitor_set),
         )

@@ -513,16 +513,52 @@
   <h2>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
     Stats
+    <span class="text-soft small" style="font-weight:400;margin-left:0.5rem">last 48 hours</span>
   </h2>
+
+  {# Stat grid with inline sparklines. Each cell: big number,
+     label, then a trend mini-chart over the last 48 hourly
+     buckets. Sparklines are empty when there's <2 samples yet. #}
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:1rem;margin-bottom:0.6rem">
+    <div>
+      <div class="text-soft small">Disk used</div>
+      <div style="font-size:1.3rem;font-weight:600;margin:0.15rem 0 0.3rem">{{ crate::handlers::stats::fmt_bytes(s.disk_bytes) }}</div>
+      {% if usage_buckets.len() >= 2 %}
+        <div style="color:var(--primary-h)">{{ crate::handlers::stats::sparkline_svg(usage_buckets, crate::handlers::stats::bucket_disk)|safe }}</div>
+      {% endif %}
+    </div>
+    <div>
+      <div class="text-soft small">BW in · 24h</div>
+      <div style="font-size:1.3rem;font-weight:600;margin:0.15rem 0 0.3rem">{{ crate::handlers::stats::fmt_bytes(s.bw_in_bytes_24h) }}</div>
+      {% if usage_buckets.len() >= 2 %}
+        <div style="color:var(--text-dim)">{{ crate::handlers::stats::sparkline_svg(usage_buckets, crate::handlers::stats::bucket_bw_in)|safe }}</div>
+      {% endif %}
+    </div>
+    <div>
+      <div class="text-soft small">BW out · 24h</div>
+      <div style="font-size:1.3rem;font-weight:600;margin:0.15rem 0 0.3rem">{{ crate::handlers::stats::fmt_bytes(s.bw_out_bytes_24h) }}</div>
+      {% if usage_buckets.len() >= 2 %}
+        <div style="color:var(--success)">{{ crate::handlers::stats::sparkline_svg(usage_buckets, crate::handlers::stats::bucket_bw_out)|safe }}</div>
+      {% endif %}
+    </div>
+    <div>
+      <div class="text-soft small">Requests · 24h</div>
+      <div style="font-size:1.3rem;font-weight:600;margin:0.15rem 0 0.3rem">{{ s.requests_24h }}</div>
+      {% if usage_buckets.len() >= 2 %}
+        <div style="color:var(--warn)">{{ crate::handlers::stats::sparkline_svg(usage_buckets, crate::handlers::stats::bucket_requests)|safe }}</div>
+      {% endif %}
+    </div>
+  </div>
+
   <dl class="kv">
-    <dt>Disk used</dt><dd>{{ crate::handlers::stats::fmt_bytes(s.disk_bytes) }}</dd>
-    <dt>BW in · 24h</dt><dd>{{ crate::handlers::stats::fmt_bytes(s.bw_in_bytes_24h) }}</dd>
-    <dt>BW out · 24h</dt><dd>{{ crate::handlers::stats::fmt_bytes(s.bw_out_bytes_24h) }}</dd>
-    <dt>Requests · 24h</dt><dd class="numeric">{{ s.requests_24h }}</dd>
+    <dt>Inodes used</dt><dd class="numeric">{% if !usage_buckets.is_empty() %}{{ usage_buckets[usage_buckets.len() - 1].inodes_used }}{% else %}—{% endif %}</dd>
+    <dt>Samples shown</dt><dd class="muted numeric">{{ usage_buckets.len() }} hourly buckets</dd>
     <dt>Last sampled</dt><dd class="muted numeric" title="{{ s.sampled_at }}">{{ crate::handlers::stats::fmt_ago(s.sampled_at) }}</dd>
   </dl>
+
   <p class="muted" style="font-size:0.82rem;margin-top:0.8rem;margin-bottom:0">
-    Numbers come from the agent's 5-minute sampler — du on the hosting tree + tail-parse of nginx access.log.
+    Sparklines normalise each metric to its own 48-hour max — they show shape, not absolute scale.
+    Numbers come from the agent's 5-minute sampler (du on the hosting tree + tail-parse of nginx access.log).
   </p>
 </div>
 {% endif %}
