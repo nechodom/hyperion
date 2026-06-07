@@ -298,6 +298,8 @@ async fn call(cli: &Cli) -> anyhow::Result<Response> {
             Request::HostingImportFromUrl {
                 base_url: base_url.clone(),
                 token: token.clone(),
+                override_domain: None,
+                override_aliases: Vec::new(),
             }
         }
         Cmd::Audit { limit } => Request::AuditList { limit: *limit },

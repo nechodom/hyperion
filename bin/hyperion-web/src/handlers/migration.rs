@@ -195,7 +195,12 @@ pub async fn post_import_from_url(
     }
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
-        Request::HostingImportFromUrl { base_url: base, token },
+        Request::HostingImportFromUrl {
+            base_url: base,
+            token,
+            override_domain: None,
+            override_aliases: Vec::new(),
+        },
     )
     .await?;
     match resp {

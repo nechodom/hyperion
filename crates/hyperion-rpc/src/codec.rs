@@ -492,7 +492,21 @@ pub enum Request {
     /// — the agent appends `/manifest.json?t=<token>` and
     /// `/archive.tar.gz?t=<token>`, downloads both, then runs the
     /// regular import.
-    HostingImportFromUrl { base_url: String, token: String },
+    HostingImportFromUrl {
+        base_url: String,
+        token: String,
+        /// When Some, the importer creates the new hosting under this
+        /// domain instead of the one captured in the manifest. Used
+        /// by `hosting clone` so the operator can duplicate
+        /// `example.cz` as `staging.example.cz` on a different node
+        /// without colliding with the live row. Default = None ⇒
+        /// preserves migration semantics (use manifest.domain).
+        #[serde(default)]
+        override_domain: Option<String>,
+        /// Likewise for aliases. Empty vec ⇒ use manifest aliases.
+        #[serde(default)]
+        override_aliases: Vec<String>,
+    },
     /// List installed WordPress plugins for `hosting`.
     WpPluginList { hosting: HostingSelector },
     /// Apply one plugin action via wp-cli. `slug` is the plugin

@@ -2341,6 +2341,56 @@
     <strong>After migration:</strong> update DNS to point at the target's IP. Once you've confirmed the new copy serves correctly, delete the suspended source from its Danger tab.
   </p>
 </div>
+
+{# Hosting clone — additive copy under a new domain. Same export
+   pipeline as migration but no source-suspend; importer rewrites
+   manifest.domain so the new hosting comes up under the chosen
+   `staging.example.cz` / `test.example.cz` / whatever. Useful for
+   staging deploys + test-node mirrors. Lands the operator on
+   /jobs/<id> for the live progress card. #}
+<div id="clone" class="card hover" style="margin-top:1rem">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+    Clone hosting
+  </h2>
+  <p class="text-soft small" style="margin:0 0 0.8rem">
+    Duplicate {{ detail.domain }} under a new domain (e.g. <code>staging.{{ detail.domain }}</code>) — same PHP version, DB engine, files + dump are restored. The source stays live; nothing is suspended.
+  </p>
+  <form method="post" action="/hostings/clone"
+        data-confirm-title="Clone {{ detail.domain }}"
+        data-confirm-body="A full export of {{ detail.domain }} will be taken (same as migrate), then re-imported as the new domain on the chosen node. The source is NOT touched. Cert + WP admin URL on the clone will need separate setup — the clone is a STAGING site by default."
+        data-confirm-confirm-label="Clone now"
+        data-confirm-variant="primary"
+        style="display:grid;grid-template-columns:1fr 1fr auto;gap:0.5rem;align-items:flex-end">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <input type="hidden" name="selector" value="{{ detail.domain }}">
+    <input type="hidden" name="source_node" value="{{ target_node }}">
+    <div class="field" style="margin:0">
+      <label for="clone_to_domain">New domain</label>
+      <input id="clone_to_domain" name="new_domain" type="text"
+             placeholder="staging.{{ detail.domain }}"
+             pattern="[a-zA-Z0-9.\-]+" required style="margin:0">
+    </div>
+    <div class="field" style="margin:0">
+      <label for="clone_target_node">Target node</label>
+      <select id="clone_target_node" name="target_node" style="margin:0">
+        <option value="">Same node ({{ target_node|e }})</option>
+        {% if !target_node.is_empty() %}
+        <option value="local">master (this node)</option>
+        {% endif %}
+        {% for n in all_nodes %}
+        {% if n.node_id != target_node %}
+        <option value="{{ n.node_id }}">{{ n.label }}{% if let Some(ip) = n.public_ip.as_ref() %} — {{ ip }}{% endif %}</option>
+        {% endif %}
+        {% endfor %}
+      </select>
+    </div>
+    <button class="btn primary" type="submit" style="margin:0">Clone</button>
+  </form>
+  <p class="text-soft small" style="margin:0.6rem 0 0">
+    Progress lives at <a href="/jobs?kind=hosting_clone">Background jobs → hosting_clone</a> — you'll be redirected to the live progress page after submit.
+  </p>
+</div>
 {% endif %}
 
 <div class="card hover" style="margin-top:1rem">

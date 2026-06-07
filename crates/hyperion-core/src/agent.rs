@@ -521,8 +521,12 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         &self,
         base_url: String,
         token: String,
+        override_domain: Option<String>,
+        override_aliases: Vec<String>,
     ) -> Result<hyperion_types::HostingImportResult, RpcError> {
-        self.svc.hosting_import_from_url(base_url, token).await
+        self.svc
+            .hosting_import_from_url(base_url, token, override_domain, override_aliases)
+            .await
     }
 
     async fn email_log_list(

@@ -450,6 +450,8 @@ pub trait AgentApi: Send + Sync + 'static {
         &self,
         base_url: String,
         token: String,
+        override_domain: Option<String>,
+        override_aliases: Vec<String>,
     ) -> Result<hyperion_types::HostingImportResult, RpcError>;
 
     /// List installed WordPress plugins for a hosting.

@@ -3964,6 +3964,289 @@ pub struct MigrationMoveForm {
     pub source_node: String,
 }
 
+/// Form input for "Clone this hosting to a new domain (and
+/// optionally a different node)". Renders into the cross-node
+/// migration tracker so the operator gets a live progress bar.
+#[derive(serde::Deserialize)]
+pub struct HostingCloneForm {
+    /// Source hosting selector (domain or id, same shape as
+    /// migrate uses).
+    pub selector: String,
+    /// New domain for the clone — e.g. `staging.example.cz`.
+    pub new_domain: String,
+    /// Optional target node. Empty / `LOCAL_NODE_SENTINEL` ⇒ clone
+    /// on the master itself (single-node deploy or staging clone
+    /// next to the original).
+    #[serde(default)]
+    pub target_node: String,
+    /// Hidden — populated by the page so the source-node dispatch
+    /// matches the original migration form.
+    #[serde(default)]
+    pub source_node: String,
+}
+
+pub async fn post_hosting_clone(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    headers: axum::http::HeaderMap,
+    Form(form): Form<HostingCloneForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let sel_url = urlencoding(&form.selector);
+
+    // ── Sanity gates ──
+    let new_domain = form.new_domain.trim().to_string();
+    if new_domain.is_empty() {
+        return Ok(Redirect::to(&format!(
+            "/hostings/{}?flash_error=Pick+a+target+domain+for+the+clone#clone",
+            sel_url
+        ))
+        .into_response());
+    }
+    if new_domain == form.selector.trim() {
+        return Ok(Redirect::to(&format!(
+            "/hostings/{}?flash_error={}#clone",
+            sel_url,
+            urlencoding("Clone domain must differ from the source domain.")
+        ))
+        .into_response());
+    }
+
+    let source_local = form.source_node.is_empty()
+        || form.source_node == crate::dispatcher::LOCAL_NODE_SENTINEL;
+    let source_node_str = if source_local {
+        crate::dispatcher::LOCAL_NODE_SENTINEL.to_string()
+    } else {
+        form.source_node.clone()
+    };
+    // Default target_node = source when empty so single-node deploys
+    // can clone in place.
+    let target_node_str = if form.target_node.trim().is_empty() {
+        source_node_str.clone()
+    } else {
+        form.target_node.trim().to_string()
+    };
+
+    // Reuse the migration job pattern — same kind="hosting_clone"
+    // bucket so /jobs shows them under their own filter row.
+    let master_url = super::derive_master_url(&state, &headers).await;
+    let bundle_ttl = crate::handlers::migration::BUNDLE_DOWNLOAD_TTL_SECS;
+    let payload = serde_json::json!({
+        "selector": form.selector,
+        "new_domain": new_domain,
+        "source_node": form.source_node,
+        "target_node": target_node_str,
+    });
+    let actor_uid = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
+    let actor_label = ctx.username.clone();
+    let clone_state = state.clone();
+    let clone_sel = sel.clone();
+    let clone_form_sel = form.selector.clone();
+    let clone_source = form.source_node.clone();
+    let clone_target = target_node_str.clone();
+    let clone_new_domain = new_domain.clone();
+
+    let job_id = crate::handlers::jobs::spawn_job(
+        state.clone(),
+        "hosting_clone",
+        Some(&new_domain),
+        &payload.to_string(),
+        &actor_label,
+        actor_uid,
+        move |reporter| async move {
+            run_clone_job(
+                reporter,
+                clone_state,
+                clone_sel,
+                clone_form_sel,
+                source_local,
+                clone_source,
+                clone_target,
+                clone_new_domain,
+                master_url,
+                bundle_ttl,
+            )
+            .await;
+        },
+    )
+    .await?;
+
+    Ok(Redirect::to(&format!("/jobs/{}", job_id)).into_response())
+}
+
+/// Background worker for hosting clone. Same shape as
+/// `run_migration_job` but:
+///   * does NOT suspend the source (clones are an additive op —
+///     the original keeps serving traffic)
+///   * passes `override_domain` so the importer creates the new
+///     hosting under `new_domain` instead of the manifest's
+///     captured domain
+///   * surfaces the new domain in the final step label so the
+///     operator can click it from the job page.
+#[allow(clippy::too_many_arguments)]
+async fn run_clone_job(
+    reporter: crate::handlers::jobs::JobReporter,
+    state: SharedState,
+    sel: hyperion_rpc::HostingSelector,
+    selector_text: String,
+    source_local: bool,
+    source_node: String,
+    target_node: String,
+    new_domain: String,
+    master_url: String,
+    bundle_ttl: i64,
+) {
+    let source_dispatch = if source_local {
+        None
+    } else {
+        Some(source_node.as_str())
+    };
+
+    reporter
+        .step(
+            &format!(
+                "Exporting source bundle on {}",
+                if source_local { "master" } else { source_node.as_str() }
+            ),
+            5,
+            &format!("source selector: {}\n", selector_text),
+        )
+        .await;
+    let export = match crate::dispatcher::dispatch_to_node(
+        &state,
+        source_dispatch,
+        Request::HostingExport { hosting: sel.clone() },
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            reporter
+                .finish(false, Some(format!("dispatch HostingExport: {e}")))
+                .await;
+            return;
+        }
+    };
+    let bundle = match export {
+        RpcResponse::HostingExport(b) => b,
+        RpcResponse::Error(e) => {
+            reporter.finish(false, Some(format!("Export failed: {e}"))).await;
+            return;
+        }
+        _ => {
+            reporter
+                .finish(false, Some("expected HostingExport response".into()))
+                .await;
+            return;
+        }
+    };
+    reporter
+        .step(
+            "Bundle ready on source",
+            30,
+            &format!(
+                "bundle_id={} archive_bytes={}\n",
+                bundle.bundle_id, bundle.archive_bytes
+            ),
+        )
+        .await;
+
+    if !source_local {
+        reporter
+            .step("Proxying bundle from worker to master", 45, "")
+            .await;
+        if let Err(e) =
+            pull_bundle_from_worker(&state, &source_node, &bundle.bundle_id).await
+        {
+            reporter
+                .finish(false, Some(format!("Bundle proxy failed: {e}")))
+                .await;
+            return;
+        }
+        reporter.step("Bundle landed on master", 55, "proxy ok\n").await;
+    } else {
+        reporter
+            .step("Bundle already on master (source was local)", 55, "")
+            .await;
+    }
+
+    let exp = hyperion_types::now_secs() + bundle_ttl;
+    let token =
+        hyperion_auth::bundle_sig::mint(state.csrf_key.as_ref(), &bundle.bundle_id, exp);
+    let base_url = format!("{master_url}/api/migration/bundle/{}", bundle.bundle_id);
+
+    reporter
+        .step(
+            &format!(
+                "Importing as {} on {}",
+                new_domain, target_node
+            ),
+            65,
+            &format!("override_domain={new_domain}\n"),
+        )
+        .await;
+    let import = match crate::dispatcher::dispatch_to_node(
+        &state,
+        Some(target_node.as_str()),
+        Request::HostingImportFromUrl {
+            base_url: base_url.clone(),
+            token: token.clone(),
+            override_domain: Some(new_domain.clone()),
+            override_aliases: Vec::new(),
+        },
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            reporter
+                .finish(false, Some(format!("dispatch HostingImportFromUrl: {e}")))
+                .await;
+            return;
+        }
+    };
+    let new_id = match import {
+        RpcResponse::HostingImportFromUrl(r) => r.new_hosting_id,
+        RpcResponse::Error(e) => {
+            reporter
+                .finish(false, Some(format!("Target import failed: {e}")))
+                .await;
+            return;
+        }
+        _ => {
+            reporter
+                .finish(false, Some("expected HostingImportFromUrl response".into()))
+                .await;
+            return;
+        }
+    };
+
+    tracing::info!(
+        source = %selector_text,
+        target_node = %target_node,
+        new_domain = %new_domain,
+        new_hosting_id = new_id.as_str(),
+        "hosting clone completed"
+    );
+
+    reporter
+        .step(
+            &format!(
+                "Done — clone live at {} (id {}) on {}",
+                new_domain,
+                new_id.as_str(),
+                target_node
+            ),
+            100,
+            "clone ok\n",
+        )
+        .await;
+    reporter.finish(true, None).await;
+}
+
 pub async fn post_migration_move(
     State(state): State<SharedState>,
     ctx: AuthCtx,
@@ -4156,6 +4439,8 @@ async fn run_migration_job(
         Request::HostingImportFromUrl {
             base_url: base_url.clone(),
             token: token.clone(),
+            override_domain: None,
+            override_aliases: Vec::new(),
         },
     )
     .await

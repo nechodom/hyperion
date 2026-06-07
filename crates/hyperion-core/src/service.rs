@@ -1205,6 +1205,70 @@ fn read_mail_fqdn() -> Option<String> {
 /// upstream can fill /var/lib partition.
 const MIGRATION_MAX_DOWNLOAD_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
+/// Rewrite a freshly-downloaded migration manifest in place to
+/// substitute `new_domain` (and optionally `new_aliases`) for the
+/// ones captured at export time. Powers the `hosting clone` flow:
+/// the archive stays bit-for-bit identical (its sha256 still
+/// matches the manifest's archive_sha256) but the importer creates
+/// a new hosting under the new domain.
+///
+/// Validates the new domain via the same parser the wizard uses —
+/// a malformed `staging..example.cz` is rejected here, NOT after
+/// the importer has half-created a hosting.
+async fn rewrite_manifest_domain(
+    manifest_path: &std::path::Path,
+    new_domain: &str,
+    new_aliases: &[String],
+) -> Result<(), RpcError> {
+    // Parse-check first so a typo doesn't burn the archive download.
+    let _ok = hyperion_validate::Domain::parse(new_domain).map_err(|e| {
+        RpcError::Validation {
+            message: format!("clone override_domain invalid: {e}"),
+        }
+    })?;
+    for a in new_aliases {
+        let _ = hyperion_validate::Domain::parse(a).map_err(|e| RpcError::Validation {
+            message: format!("clone override_aliases entry '{a}' invalid: {e}"),
+        })?;
+    }
+    let raw = tokio::fs::read(manifest_path).await.map_err(|e| {
+        RpcError::Internal_with(format!("read manifest for rewrite: {e}"))
+    })?;
+    let mut json: serde_json::Value = serde_json::from_slice(&raw).map_err(|e| {
+        RpcError::Validation {
+            message: format!("manifest is not valid JSON: {e}"),
+        }
+    })?;
+    if let Some(obj) = json.as_object_mut() {
+        obj.insert(
+            "domain".into(),
+            serde_json::Value::String(new_domain.to_string()),
+        );
+        if !new_aliases.is_empty() {
+            obj.insert(
+                "aliases".into(),
+                serde_json::Value::Array(
+                    new_aliases
+                        .iter()
+                        .map(|a| serde_json::Value::String(a.clone()))
+                        .collect(),
+                ),
+            );
+        }
+    } else {
+        return Err(RpcError::Validation {
+            message: "manifest must be a JSON object".into(),
+        });
+    }
+    let bytes = serde_json::to_vec_pretty(&json).map_err(|e| {
+        RpcError::Internal_with(format!("re-serialize manifest: {e}"))
+    })?;
+    tokio::fs::write(manifest_path, bytes).await.map_err(|e| {
+        RpcError::Internal_with(format!("write rewritten manifest: {e}"))
+    })?;
+    Ok(())
+}
+
 async fn curl_to_file(url: &str, dest: &std::path::Path) -> Result<(), RpcError> {
     // -f: fail with non-zero exit on 4xx/5xx (otherwise curl happily
     //     writes the error body to disk and we'd "import" garbage).
@@ -4710,6 +4774,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         &self,
         base_url: String,
         token: String,
+        override_domain: Option<String>,
+        override_aliases: Vec<String>,
     ) -> Result<hyperion_types::HostingImportResult, RpcError> {
         // Validate the URL shape before shelling out — we'd rather
         // refuse `file://` or random garbage at the boundary than
@@ -4746,6 +4812,30 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // Download manifest first — small file, fail fast on bad
         // signature / wrong URL before we burn time on the archive.
         curl_to_file(&manifest_url, &manifest_path).await?;
+
+        // CLONE OVERRIDES: when the caller passed `override_domain`
+        // (the typical `hosting clone` flow), rewrite the manifest
+        // on disk BEFORE the downstream importer reads it. The
+        // archive itself is unchanged — the importer creates a new
+        // hosting under the new domain and untars the same files +
+        // DB dump into it. The archive_sha256 in the manifest is
+        // preserved (it's the archive's checksum, not the
+        // manifest's), so the integrity check still passes.
+        if let Some(ref new_dom) = override_domain {
+            if let Err(e) = rewrite_manifest_domain(
+                &manifest_path,
+                new_dom,
+                &override_aliases,
+            )
+            .await
+            {
+                // Wipe staging before bailing — manifest rewrite is
+                // pre-archive, so we haven't burned the GB yet.
+                let _ = tokio::fs::remove_dir_all(&staging).await;
+                return Err(e);
+            }
+        }
+
         // Then the archive — can be many GB. curl streams to disk
         // directly so RSS stays flat.
         curl_to_file(&archive_url, &archive_path).await?;
