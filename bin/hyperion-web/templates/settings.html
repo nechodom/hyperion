@@ -558,11 +558,27 @@
    BACKUPS — remote target + retention policy
    ========================================================== #}
 <div class="tab-panel" id="tab-backups">
+
+  {# NEW S3/age multi-target page lives at /settings/backups —
+     this older single-target FTP/FTPS/SFTP card stays here as
+     the LEGACY path for ops that already have it wired. Point
+     operators at the new page first. #}
+  <div class="flash info" style="margin-bottom:1rem">
+    <div class="flash-body">
+      <strong>S3-compatible multi-target backups</strong> with
+      age client-side encryption + per-target retention policy
+      live at <a href="/settings/backups">Settings → Backups
+      (S3 + age)</a>. The FTP/FTPS/SFTP single-target form
+      below is the legacy path — leave it as-is if it's already
+      wired, otherwise prefer the S3 page.
+    </div>
+  </div>
+
   <div class="card">
     <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.5rem">
       <h2 style="margin:0">
         <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
-        Off-site backup target
+        Off-site backup target (legacy FTP/FTPS/SFTP)
       </h2>
       {% if config.backup_remote.enabled %}<span class="pill ok">pushing</span>
       {% else %}<span class="pill warn">local only</span>{% endif %}
