@@ -1285,6 +1285,30 @@ fn print_pretty(resp: &Response) {
         }
         Response::JobStarted { job_id } => println!("job started: {job_id}"),
         Response::JobAck => println!("ack"),
+        Response::BackupTargetList(list) => {
+            if list.is_empty() {
+                println!("no backup targets configured");
+            } else {
+                println!(
+                    "{:<5} {:<24} {:<10} {:<40} {:<10}",
+                    "id", "name", "enabled", "endpoint", "bucket"
+                );
+                for t in list {
+                    println!(
+                        "{:<5} {:<24} {:<10} {:<40} {:<10}",
+                        t.id, t.name, t.enabled, t.endpoint, t.bucket
+                    );
+                }
+            }
+        }
+        Response::BackupTargetUpserted { id } => println!("backup target upserted: id={id}"),
+        Response::BackupTargetDeleted => println!("backup target deleted"),
+        Response::BackupTargetProbe(p) => {
+            println!(
+                "probe: ok={} latency={}ms message={}",
+                p.ok, p.put_latency_ms, p.message
+            );
+        }
         Response::QuotaGet(r) => {
             println!("quota:");
             println!("  current disk         : {} KiB", r.current_disk_kib);

@@ -1,4 +1,5 @@
 pub mod audit;
+pub mod backups;
 pub mod avatar;
 pub mod dashboard;
 pub mod enroll;

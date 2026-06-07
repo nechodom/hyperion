@@ -91,6 +91,46 @@ pub struct HostingQuotaView {
     pub updated_at: i64,
 }
 
+/// Off-site backup destination (S3-compatible or local dir).
+/// Wire-format projection of the `backup_targets` row.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct BackupTargetView {
+    pub id: i64,
+    pub name: String,
+    /// "s3" | "local-dir".
+    pub kind: String,
+    pub endpoint: String,
+    pub bucket: String,
+    pub region: String,
+    pub access_key_id: String,
+    /// On-disk path under /etc/hyperion/secrets/ where the
+    /// secret_access_key plaintext lives. Caller never sees the
+    /// secret itself — it's read only by the backup runner at
+    /// upload time.
+    pub secret_key_id: Option<String>,
+    /// age public key the agent encrypts blobs to. Operator
+    /// keeps the matching identity OFF the node.
+    pub age_recipient: Option<String>,
+    pub retention_daily: i64,
+    pub retention_weekly: i64,
+    pub retention_monthly: i64,
+    pub enabled: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// Outcome of a "test connection" probe — operator clicks the
+/// button on /settings/backups; the agent does a PUT + DELETE
+/// round-trip against the configured target and reports.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct BackupTargetProbe {
+    pub ok: bool,
+    pub message: String,
+    /// Latency (ms) of the PUT round-trip. 0 when the probe
+    /// short-circuited before the upload.
+    pub put_latency_ms: i64,
+}
+
 /// Report of current vs policy. `current_usage_kib` reads from
 /// `quota -u <user>` (or `du -sk <home>` as fallback when the
 /// kernel-level quota subsystem isn't enabled).

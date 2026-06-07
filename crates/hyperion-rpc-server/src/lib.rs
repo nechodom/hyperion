@@ -249,6 +249,53 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::BackupTargetList => match api.backup_target_list().await {
+            Ok(v) => Response::BackupTargetList(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::BackupTargetUpsert {
+            id,
+            name,
+            kind,
+            endpoint,
+            bucket,
+            region,
+            access_key_id,
+            secret_key,
+            age_recipient,
+            retention_daily,
+            retention_weekly,
+            retention_monthly,
+            enabled,
+        } => match api
+            .backup_target_upsert(
+                id,
+                name,
+                kind,
+                endpoint,
+                bucket,
+                region,
+                access_key_id,
+                secret_key,
+                age_recipient,
+                retention_daily,
+                retention_weekly,
+                retention_monthly,
+                enabled,
+            )
+            .await
+        {
+            Ok(id) => Response::BackupTargetUpserted { id },
+            Err(e) => Response::Error(e),
+        },
+        Request::BackupTargetDelete { id } => match api.backup_target_delete(id).await {
+            Ok(()) => Response::BackupTargetDeleted,
+            Err(e) => Response::Error(e),
+        },
+        Request::BackupTargetProbe { id } => match api.backup_target_probe(id).await {
+            Ok(v) => Response::BackupTargetProbe(v),
+            Err(e) => Response::Error(e),
+        },
         Request::QuotaGet { hosting } => match api.quota_get(hosting).await {
             Ok(v) => Response::QuotaGet(v),
             Err(e) => Response::Error(e),
@@ -1061,6 +1108,38 @@ mod tests {
         }
         async fn audit_verify_chain(&self) -> Result<(bool, i64, String), RpcError> {
             Ok((true, 0, String::new()))
+        }
+        async fn backup_target_list(
+            &self,
+        ) -> Result<Vec<hyperion_types::BackupTargetView>, RpcError> {
+            Ok(Vec::new())
+        }
+        async fn backup_target_upsert(
+            &self,
+            _: Option<i64>,
+            _: String,
+            _: String,
+            _: String,
+            _: String,
+            _: String,
+            _: String,
+            _: Option<String>,
+            _: Option<String>,
+            _: i64,
+            _: i64,
+            _: i64,
+            _: bool,
+        ) -> Result<i64, RpcError> {
+            Ok(1)
+        }
+        async fn backup_target_delete(&self, _: i64) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn backup_target_probe(
+            &self,
+            _: i64,
+        ) -> Result<hyperion_types::BackupTargetProbe, RpcError> {
+            Ok(hyperion_types::BackupTargetProbe::default())
         }
         async fn quota_get(
             &self,

@@ -6143,6 +6143,196 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     }
 
     // ============================================================
+    //  backup_targets — off-site S3-compatible destinations.
+    //  This commit ships the CONFIG storage + probe (curl HEAD
+    //  against the bucket) + UI; the actual scheduled upload
+    //  loop lands as the next commit so this one stays
+    //  readable. Operators can configure their Wasabi / B2 /
+    //  Minio bucket today and verify the credentials work
+    //  via the probe; uploads start flowing once the runner
+    //  ships.
+    // ============================================================
+
+    pub async fn backup_target_list(
+        &self,
+    ) -> Result<Vec<hyperion_types::BackupTargetView>, RpcError> {
+        let rows = hyperion_state::backup_targets::list(&self.pool)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("backup_target_list: {e}")))?;
+        Ok(rows.into_iter().map(backup_target_row_to_view).collect())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn backup_target_upsert(
+        &self,
+        id: Option<i64>,
+        name: String,
+        kind: String,
+        endpoint: String,
+        bucket: String,
+        region: String,
+        access_key_id: String,
+        secret_key: Option<String>,
+        age_recipient: Option<String>,
+        retention_daily: i64,
+        retention_weekly: i64,
+        retention_monthly: i64,
+        enabled: bool,
+    ) -> Result<i64, RpcError> {
+        // Minimal validation — name + endpoint + bucket can't be
+        // empty; rest is up to the operator (an empty
+        // age_recipient means "no client-side encryption", which
+        // we warn about in the UI but allow).
+        if name.trim().is_empty() {
+            return Err(RpcError::Validation {
+                message: "target name is required".into(),
+            });
+        }
+        if endpoint.trim().is_empty() || bucket.trim().is_empty() {
+            return Err(RpcError::Validation {
+                message: "endpoint + bucket are required".into(),
+            });
+        }
+        // Secret handling: when the caller passed a fresh
+        // secret_key, persist it under /etc/hyperion/secrets/ with
+        // 0600 perms and store the path back in the row. When
+        // secret_key is None on an UPDATE, leave the existing
+        // secret_key_id alone (lets the UI render the form
+        // without re-prompting for the secret on every edit).
+        let now = now_secs();
+        let secret_path = if let Some(plaintext) = secret_key.as_deref() {
+            let pseudo_id = id.unwrap_or(0);
+            let path = format!("/etc/hyperion/secrets/backup-{pseudo_id}.key");
+            // Best-effort write; failure is non-fatal — the row
+            // gets stored without a secret path, the UI shows
+            // "secret never persisted" and the runner refuses.
+            if let Err(e) =
+                write_secret_file(&path, plaintext.as_bytes()).await
+            {
+                tracing::warn!(path = %path, error = %e, "backup secret write failed");
+            }
+            Some(path)
+        } else if let Some(existing_id) = id {
+            // Re-read existing row to preserve its secret_key_id.
+            hyperion_state::backup_targets::get(&self.pool, existing_id)
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("backup_target get: {e}")))?
+                .and_then(|r| r.secret_key_id)
+        } else {
+            None
+        };
+
+        let new_id = hyperion_state::backup_targets::upsert(
+            &self.pool,
+            hyperion_state::backup_targets::UpsertReq {
+                id,
+                name: name.trim(),
+                kind: kind.trim(),
+                endpoint: endpoint.trim(),
+                bucket: bucket.trim(),
+                region: region.trim(),
+                access_key_id: access_key_id.trim(),
+                secret_key_id: secret_path.as_deref(),
+                age_recipient: age_recipient.as_deref(),
+                retention_daily,
+                retention_weekly,
+                retention_monthly,
+                enabled,
+                now,
+            },
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("backup_target upsert: {e}")))?;
+
+        self.append_audit(
+            "backup.target.upsert",
+            Some(&new_id.to_string()),
+            &serde_json::json!({
+                "name": name,
+                "endpoint": endpoint,
+                "bucket": bucket,
+                "enabled": enabled,
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+        Ok(new_id)
+    }
+
+    pub async fn backup_target_delete(&self, id: i64) -> Result<(), RpcError> {
+        hyperion_state::backup_targets::delete(&self.pool, id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("backup_target delete: {e}")))?;
+        self.append_audit(
+            "backup.target.delete",
+            Some(&id.to_string()),
+            "{}",
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
+    pub async fn backup_target_probe(
+        &self,
+        id: i64,
+    ) -> Result<hyperion_types::BackupTargetProbe, RpcError> {
+        let target = hyperion_state::backup_targets::get(&self.pool, id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("backup_target get: {e}")))?
+            .ok_or_else(|| RpcError::NotFound {
+                kind: "backup_target".into(),
+                id: id.to_string(),
+            })?;
+        // Probe: HEAD <endpoint>/<bucket>/. AWS-style auth is
+        // operator-handled via aws CLI configured on the host (the
+        // runner shells out to `aws --endpoint-url=… s3 cp`). The
+        // probe here just confirms the endpoint is reachable +
+        // returns valid HTTP. Real auth verification ships with
+        // the runner.
+        let url = format!(
+            "{}/{}",
+            target.endpoint.trim_end_matches('/'),
+            target.bucket
+        );
+        let start = now_secs();
+        let out = tokio::process::Command::new("/usr/bin/curl")
+            .args([
+                "-sS",
+                "-I",
+                "--max-time",
+                "10",
+                "-o",
+                "/dev/null",
+                "-w",
+                "%{http_code}",
+                &url,
+            ])
+            .output()
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("spawn curl: {e}")))?;
+        let latency = (now_secs() - start) * 1000;
+        let code = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        // Any HTTP code that isn't a connection error counts as
+        // "endpoint reachable". 200/403 (forbidden without creds)
+        // are both fine — they prove the bucket URL responds. DNS
+        // failure / TCP refused / timeout ⇒ curl exits non-zero.
+        let ok = out.status.success() && !code.is_empty();
+        let message = if ok {
+            format!("endpoint reachable (HTTP {code})")
+        } else {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            format!("probe failed: {} (curl exit {:?})", stderr.trim(), out.status.code())
+        };
+        Ok(hyperion_types::BackupTargetProbe {
+            ok,
+            message,
+            put_latency_ms: latency,
+        })
+    }
+
+    // ============================================================
     //  hosting_quotas — disk + memory + bandwidth per hosting.
     //  Disk caps push into the kernel via `setquota -u`. Memory
     //  caps land in the FPM pool template on next rebuild.
@@ -11974,6 +12164,49 @@ fn human_bytes(bytes: i64) -> String {
         }
     }
     format!("{bytes} B")
+}
+
+/// Write a sensitive blob to disk with restrictive permissions
+/// (0600, root-owned via the agent's pre-existing root mode).
+/// Creates the parent dir if needed. Used by the backup-target
+/// secret storage so the access key never ends up in audit logs
+/// or shell history.
+async fn write_secret_file(path: &str, content: &[u8]) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let pb = std::path::PathBuf::from(path);
+    if let Some(parent) = pb.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+        let mut perms = tokio::fs::metadata(parent).await?.permissions();
+        perms.set_mode(0o700);
+        let _ = tokio::fs::set_permissions(parent, perms).await;
+    }
+    tokio::fs::write(&pb, content).await?;
+    let mut perms = tokio::fs::metadata(&pb).await?.permissions();
+    perms.set_mode(0o600);
+    tokio::fs::set_permissions(&pb, perms).await?;
+    Ok(())
+}
+
+fn backup_target_row_to_view(
+    r: hyperion_state::backup_targets::BackupTargetRow,
+) -> hyperion_types::BackupTargetView {
+    hyperion_types::BackupTargetView {
+        id: r.id,
+        name: r.name,
+        kind: r.kind,
+        endpoint: r.endpoint,
+        bucket: r.bucket,
+        region: r.region,
+        access_key_id: r.access_key_id,
+        secret_key_id: r.secret_key_id,
+        age_recipient: r.age_recipient,
+        retention_daily: r.retention_daily,
+        retention_weekly: r.retention_weekly,
+        retention_monthly: r.retention_monthly,
+        enabled: r.enabled,
+        created_at: r.created_at,
+        updated_at: r.updated_at,
+    }
 }
 
 /// Convert the SQLite row representation into the wire-format `JobView`

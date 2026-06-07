@@ -116,6 +116,33 @@ pub trait AgentApi: Send + Sync + 'static {
     /// failure.
     async fn audit_verify_chain(&self) -> Result<(bool, i64, String), RpcError>;
 
+    async fn backup_target_list(&self) -> Result<Vec<hyperion_types::BackupTargetView>, RpcError>;
+
+    #[allow(clippy::too_many_arguments)]
+    async fn backup_target_upsert(
+        &self,
+        id: Option<i64>,
+        name: String,
+        kind: String,
+        endpoint: String,
+        bucket: String,
+        region: String,
+        access_key_id: String,
+        secret_key: Option<String>,
+        age_recipient: Option<String>,
+        retention_daily: i64,
+        retention_weekly: i64,
+        retention_monthly: i64,
+        enabled: bool,
+    ) -> Result<i64, RpcError>;
+
+    async fn backup_target_delete(&self, id: i64) -> Result<(), RpcError>;
+
+    async fn backup_target_probe(
+        &self,
+        id: i64,
+    ) -> Result<hyperion_types::BackupTargetProbe, RpcError>;
+
     /// Read current per-hosting quota policy + usage.
     async fn quota_get(
         &self,

@@ -230,6 +230,58 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.audit_verify_chain().await
     }
 
+    async fn backup_target_list(
+        &self,
+    ) -> Result<Vec<hyperion_types::BackupTargetView>, RpcError> {
+        self.svc.backup_target_list().await
+    }
+
+    async fn backup_target_upsert(
+        &self,
+        id: Option<i64>,
+        name: String,
+        kind: String,
+        endpoint: String,
+        bucket: String,
+        region: String,
+        access_key_id: String,
+        secret_key: Option<String>,
+        age_recipient: Option<String>,
+        retention_daily: i64,
+        retention_weekly: i64,
+        retention_monthly: i64,
+        enabled: bool,
+    ) -> Result<i64, RpcError> {
+        self.svc
+            .backup_target_upsert(
+                id,
+                name,
+                kind,
+                endpoint,
+                bucket,
+                region,
+                access_key_id,
+                secret_key,
+                age_recipient,
+                retention_daily,
+                retention_weekly,
+                retention_monthly,
+                enabled,
+            )
+            .await
+    }
+
+    async fn backup_target_delete(&self, id: i64) -> Result<(), RpcError> {
+        self.svc.backup_target_delete(id).await
+    }
+
+    async fn backup_target_probe(
+        &self,
+        id: i64,
+    ) -> Result<hyperion_types::BackupTargetProbe, RpcError> {
+        self.svc.backup_target_probe(id).await
+    }
+
     async fn quota_get(
         &self,
         sel: hyperion_rpc::HostingSelector,

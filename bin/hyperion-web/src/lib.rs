@@ -327,6 +327,19 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/profiles/delete", post(handlers::profiles::post_delete))
         .route("/profiles/apply", post(handlers::profiles::post_apply))
         .route("/audit", get(handlers::audit::get_audit))
+        .route("/settings/backups", get(handlers::backups::get_backups))
+        .route(
+            "/settings/backups/upsert",
+            post(handlers::backups::post_upsert),
+        )
+        .route(
+            "/settings/backups/:id/delete",
+            post(handlers::backups::post_delete),
+        )
+        .route(
+            "/settings/backups/:id/probe",
+            post(handlers::backups::post_probe),
+        )
         .route("/audit/verify", post(handlers::audit::post_verify_chain))
         .route("/settings/sessions", get(handlers::sessions::get_sessions))
         .route(

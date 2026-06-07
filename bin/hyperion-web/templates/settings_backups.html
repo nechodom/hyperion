@@ -1,0 +1,162 @@
+{% extends "base.html" %}
+{% block title %}Backup targets · hyperion{% endblock %}
+{% block main %}
+<div class="page-header">
+  <div>
+    <h1>Backup targets</h1>
+    <div class="subtitle">
+      Off-site destinations for scheduled hosting backups. Generic S3-compatible (Wasabi, Backblaze B2, Minio, AWS).
+      Operator-supplied credentials + an age public key for client-side encryption.
+    </div>
+  </div>
+  <div>
+    <a href="/settings" class="btn ghost">← Settings</a>
+  </div>
+</div>
+
+<div class="flash info" style="margin-bottom:1rem">
+  <div class="flash-body">
+    <strong>Scheduler is not running yet.</strong> This release ships the configuration layer + reachability probe so you can wire your bucket today.
+    The hourly upload tick + retention pruning + weekly test-restore land in a follow-up commit. For now you can run a manual backup from the hosting detail page (which writes a local tarball under <code>/var/lib/hyperion/backups</code> — the off-site upload starts once the runner ships).
+  </div>
+</div>
+
+{% if !targets.is_empty() %}
+<div class="card" style="padding:0;margin-bottom:1rem">
+  <table class="data-table">
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Endpoint / bucket</th>
+        <th>Retention <span class="text-soft small">(daily / weekly / monthly)</span></th>
+        <th>age</th>
+        <th>Enabled</th>
+        <th>Probe</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for t in targets %}
+      <tr>
+        <td><strong>{{ t.name }}</strong></td>
+        <td>
+          <div class="text-soft small">{{ t.endpoint }}</div>
+          <div><code>{{ t.bucket }}</code> · region <code>{{ t.region }}</code></div>
+        </td>
+        <td>{{ t.retention_daily }} / {{ t.retention_weekly }} / {{ t.retention_monthly }}</td>
+        <td>
+          {% if t.age_recipient.is_some() %}
+            <span class="pill ok">configured</span>
+          {% else %}
+            <span class="pill warn">no encryption</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if t.enabled %}
+            <span class="pill ok">on</span>
+          {% else %}
+            <span class="pill">off</span>
+          {% endif %}
+        </td>
+        <td>
+          <button class="btn small"
+                  type="button"
+                  hx-post="/settings/backups/{{ t.id }}/probe"
+                  hx-vals='{"_csrf": "{{ csrf_token }}"}'
+                  hx-target="#probe-{{ t.id }}"
+                  hx-swap="innerHTML">
+            Probe
+          </button>
+          <span id="probe-{{ t.id }}" style="margin-left:0.4rem"></span>
+        </td>
+        <td>
+          <form method="post" action="/settings/backups/{{ t.id }}/delete" style="display:inline"
+                data-confirm-title="Delete backup target {{ t.name }}?"
+                data-confirm-body="Existing backup_runs that reference this target stay in the history (target_id becomes NULL). The secret file under /etc/hyperion/secrets/ is NOT removed — clean that up manually."
+                data-confirm-confirm-label="Delete"
+                data-confirm-variant="danger">
+            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+            <button class="btn small danger" type="submit">Delete</button>
+          </form>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>Add / edit target</h2>
+  <form method="post" action="/settings/backups/upsert" style="margin-top:0.6rem">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <input type="hidden" name="id" value="">
+    <div class="field-row">
+      <div class="field">
+        <label>Name <span class="hint">unique short label</span></label>
+        <input name="name" type="text" required placeholder="wasabi-eu">
+      </div>
+      <div class="field">
+        <label>Kind</label>
+        <select name="kind">
+          <option value="s3" selected>s3</option>
+          <option value="local-dir">local-dir</option>
+        </select>
+      </div>
+    </div>
+    <div class="field-row">
+      <div class="field">
+        <label>Endpoint</label>
+        <input name="endpoint" type="text" required placeholder="https://s3.eu-central-1.wasabisys.com">
+      </div>
+      <div class="field">
+        <label>Bucket</label>
+        <input name="bucket" type="text" required placeholder="hyperion-prod">
+      </div>
+      <div class="field">
+        <label>Region</label>
+        <input name="region" type="text" value="us-east-1">
+      </div>
+    </div>
+    <div class="field-row">
+      <div class="field">
+        <label>Access key ID</label>
+        <input name="access_key_id" type="text" required placeholder="AKIA…">
+      </div>
+      <div class="field">
+        <label>Secret key <span class="hint">written to /etc/hyperion/secrets/backup-&lt;id&gt;.key (0600)</span></label>
+        <input name="secret_key" type="password" placeholder="paste once, never echoed back">
+      </div>
+    </div>
+    <div class="field">
+      <label>age public recipient <span class="hint">blank = no encryption (NOT recommended)</span></label>
+      <input name="age_recipient" type="text" placeholder="age1xy…">
+    </div>
+    <div class="field-row">
+      <div class="field">
+        <label>Daily retention</label>
+        <input name="retention_daily" type="number" min="0" value="7">
+      </div>
+      <div class="field">
+        <label>Weekly retention</label>
+        <input name="retention_weekly" type="number" min="0" value="4">
+      </div>
+      <div class="field">
+        <label>Monthly retention</label>
+        <input name="retention_monthly" type="number" min="0" value="12">
+      </div>
+    </div>
+    <div class="field">
+      <label style="display:flex;align-items:center;gap:0.4rem">
+        <input type="checkbox" name="enabled" value="on" checked>
+        Enabled (scheduler will use this target)
+      </label>
+    </div>
+    <button class="btn primary" type="submit">Save target</button>
+  </form>
+  <p class="text-soft small" style="margin-top:0.8rem">
+    The agent shells out to <code>aws --endpoint-url=…</code> at upload time, so install the AWS CLI on every node:
+    <code>apt install awscli</code>. For age encryption, install <code>age</code>.
+  </p>
+</div>
+{% endblock %}

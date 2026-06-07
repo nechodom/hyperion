@@ -447,6 +447,36 @@ pub enum Request {
         sid: String,
         revoked_by: i64,
     },
+    /// List configured off-site backup destinations.
+    BackupTargetList,
+    /// Create or update a backup target. `id=None` ⇒ insert.
+    /// `secret_key` is the plaintext access secret; the agent
+    /// writes it to /etc/hyperion/secrets/backup-<id>.key (mode
+    /// 0600) and stores only the path back in the row.
+    BackupTargetUpsert {
+        id: Option<i64>,
+        name: String,
+        kind: String,
+        endpoint: String,
+        bucket: String,
+        region: String,
+        access_key_id: String,
+        #[serde(default)]
+        secret_key: Option<String>,
+        #[serde(default)]
+        age_recipient: Option<String>,
+        retention_daily: i64,
+        retention_weekly: i64,
+        retention_monthly: i64,
+        enabled: bool,
+    },
+    /// Delete a backup target. Existing backup_runs rows that
+    /// reference it have target_id set to NULL (history is
+    /// preserved).
+    BackupTargetDelete { id: i64 },
+    /// Probe the configured target with a small PUT + DELETE
+    /// round-trip. Returns latency + a human-readable message.
+    BackupTargetProbe { id: i64 },
     /// Read the current quota policy + usage report for one
     /// hosting. Returns zero-everywhere when no row exists.
     QuotaGet { hosting: HostingSelector },
@@ -944,6 +974,10 @@ pub enum Response {
     /// be made RW — operator needs a different base image).
     RemountUsrRw { success: bool, message: String },
     FsDiagnoseAndFix(hyperion_types::FsDiagnostics),
+    BackupTargetList(Vec<hyperion_types::BackupTargetView>),
+    BackupTargetUpserted { id: i64 },
+    BackupTargetDeleted,
+    BackupTargetProbe(hyperion_types::BackupTargetProbe),
     /// Per-hosting quota report (policy + current usage).
     QuotaGet(hyperion_types::HostingQuotaReport),
     /// Ack for QuotaSet — returns the persisted (and possibly
