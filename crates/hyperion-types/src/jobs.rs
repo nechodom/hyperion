@@ -49,3 +49,25 @@ impl JobView {
         matches!(self.state.as_str(), "done" | "failed" | "cancelled")
     }
 }
+
+/// One row from `web_sessions`. The signed-cookie Session in
+/// `hyperion-auth` is the wire-format the COOKIE carries; this is
+/// the projection the agent stores + the panel renders into
+/// /settings/sessions.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct WebSessionView {
+    pub sid: String,
+    pub user_id: i64,
+    pub ip: Option<String>,
+    pub user_agent: Option<String>,
+    pub created_at: i64,
+    pub last_seen_at: i64,
+    pub revoked_at: Option<i64>,
+    pub revoked_by: Option<i64>,
+}
+
+impl WebSessionView {
+    pub fn is_revoked(&self) -> bool {
+        self.revoked_at.is_some()
+    }
+}

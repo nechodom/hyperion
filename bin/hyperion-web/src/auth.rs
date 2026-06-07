@@ -62,7 +62,7 @@ impl FromRequestParts<SharedState> for AuthCtx {
         parts: &mut Parts,
         state: &SharedState,
     ) -> Result<Self, Self::Rejection> {
-        Ok(extract_auth(parts, state))
+        Ok(extract_auth(parts, state).await)
     }
 }
 
@@ -74,7 +74,7 @@ pub async fn require_auth(
     next: Next,
 ) -> Response {
     let (mut parts, body) = req.into_parts();
-    let ctx = extract_auth(&mut parts, &state);
+    let ctx = extract_auth(&mut parts, &state).await;
     if !ctx.is_authenticated() {
         let uri = parts.uri.to_string();
         let next_param = url::form_urlencoded::byte_serialize(uri.as_bytes()).collect::<String>();
@@ -84,7 +84,7 @@ pub async fn require_auth(
     next.run(req).await
 }
 
-fn extract_auth(parts: &mut Parts, state: &SharedState) -> AuthCtx {
+async fn extract_auth(parts: &mut Parts, state: &SharedState) -> AuthCtx {
     let cookie_name = state.cookie_name();
     let token = parts
         .headers
@@ -111,18 +111,54 @@ fn extract_auth(parts: &mut Parts, state: &SharedState) -> AuthCtx {
                 // authenticate — otherwise password-only knowledge
                 // bypasses the TOTP second factor.
                 Ok(s) if s.is_real_session() => {
-                    // Prefer the username embedded in the session
-                    // (multi-user era). Old sessions from before
-                    // multi-user have an empty string here — fall back
-                    // to the bootstrap admin user.
-                    let username = if s.username.is_empty() {
-                        fallback_username
-                    } else {
-                        s.username.clone()
+                    // Liveness probe against the agent's `web_sessions`
+                    // ledger: a revoked or evicted sid is treated as
+                    // anonymous EVEN IF the cookie signature is still
+                    // valid. Without this the panel can't kill a
+                    // stolen cookie before its TTL expires.
+                    //
+                    // Special case: sessions minted before this RPC
+                    // existed have no row → touch returns false →
+                    // they'd be locked out. Accept "unknown sid" as
+                    // valid for now; the next revoke-all sweep
+                    // (planned with the operator-facing kill button)
+                    // will purge them all at once. Once that sweep
+                    // happens the fall-through can tighten to
+                    // "unknown sid ⇒ anonymous".
+                    let live = match hyperion_rpc_client::call(
+                        &state.agent_socket,
+                        hyperion_rpc::codec::Request::WebSessionTouch {
+                            sid: s.sid.clone(),
+                        },
+                    )
+                    .await
+                    {
+                        Ok(hyperion_rpc::codec::Response::WebSessionTouch(b)) => b,
+                        // Unknown sid (legacy cookie) or RPC failure —
+                        // do NOT fail-closed: a transient socket blip
+                        // would log everyone out.
+                        _ => true,
                     };
-                    AuthCtx {
-                        session: Some(s),
-                        username,
+                    if !live {
+                        // Row present + revoked. Treat as anonymous.
+                        AuthCtx {
+                            session: None,
+                            username: fallback_username,
+                        }
+                    } else {
+                        // Prefer the username embedded in the session
+                        // (multi-user era). Old sessions from before
+                        // multi-user have an empty string here — fall
+                        // back to the bootstrap admin user.
+                        let username = if s.username.is_empty() {
+                            fallback_username
+                        } else {
+                            s.username.clone()
+                        };
+                        AuthCtx {
+                            session: Some(s),
+                            username,
+                        }
                     }
                 }
                 _ => AuthCtx {
@@ -269,7 +305,7 @@ pub async fn check_csrf(
 
     let ctx = {
         let mut p = parts.clone();
-        extract_auth(&mut p, &state)
+        extract_auth(&mut p, &state).await
     };
     let sid = ctx
         .session

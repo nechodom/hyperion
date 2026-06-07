@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block title %}Active sessions · hyperion{% endblock %}
+{% block main %}
+<div class="page-header">
+  <div>
+    <h1>Active sessions</h1>
+    <div class="subtitle">
+      Every login mints a row here. Revoke any that look suspicious —
+      a revoked cookie can NOT be used to authenticate, even if it's
+      still cryptographically valid.
+    </div>
+  </div>
+  <div>
+    <a href="/profile" class="btn ghost">← My profile</a>
+  </div>
+</div>
+
+{% if rows.is_empty() %}
+  <div class="card empty">
+    <div class="empty-title">No session rows for this account</div>
+    <p class="text-soft small">
+      Your current cookie was minted before the session ledger landed.
+      Re-login to start tracking active sessions here.
+    </p>
+  </div>
+{% else %}
+  <div class="card" style="padding:0">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>SID</th>
+          <th>IP</th>
+          <th>User-Agent</th>
+          <th>Created</th>
+          <th>Last seen</th>
+          <th>State</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rows %}
+          <tr>
+            <td>
+              <code>{{ r.sid }}</code>
+              {% if r.is_current %}
+                <span class="pill ok" style="margin-left:0.4rem">this session</span>
+              {% endif %}
+            </td>
+            <td><code>{{ r.ip }}</code></td>
+            <td class="text-soft small" style="max-width:24rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="{{ r.user_agent }}">
+              {{ r.user_agent }}
+            </td>
+            <td class="text-soft small">{{ r.created_ago }}</td>
+            <td class="text-soft small">{{ r.last_seen_ago }}</td>
+            <td>
+              {% if r.is_revoked %}
+                <span class="pill err">revoked</span>
+              {% else %}
+                <span class="pill ok">live</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if !r.is_revoked %}
+                <form method="post" action="/settings/sessions/revoke" style="margin:0"
+                      {% if r.is_current %}
+                        data-confirm-title="Revoke YOUR current session?"
+                        data-confirm-body="This will log you out immediately. Use this only if you want to drop your cookie deliberately (e.g. before stepping away from a shared screen). For other devices, prefer revoking the other rows."
+                        data-confirm-confirm-label="Revoke + log out"
+                        data-confirm-variant="danger"
+                      {% else %}
+                        data-confirm-title="Revoke this session?"
+                        data-confirm-body="The cookie tied to SID {{ r.sid }} from {{ r.ip }} will be killed on next request. The user (you, on another device) will have to log in again."
+                        data-confirm-confirm-label="Revoke"
+                        data-confirm-variant="danger"
+                      {% endif %}>
+                  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                  <input type="hidden" name="sid" value="{{ r.sid }}">
+                  <button class="btn small danger" type="submit">Revoke</button>
+                </form>
+              {% else %}
+                <span class="text-soft small">—</span>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endif %}
+{% endblock %}

@@ -226,6 +226,29 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::AuditList(v),
             Err(e) => Response::Error(e),
         },
+        Request::WebSessionInsert {
+            sid,
+            user_id,
+            ip,
+            user_agent,
+        } => match api.web_session_insert(sid, user_id, ip, user_agent).await {
+            Ok(()) => Response::WebSessionAck,
+            Err(e) => Response::Error(e),
+        },
+        Request::WebSessionTouch { sid } => match api.web_session_touch(sid).await {
+            Ok(v) => Response::WebSessionTouch(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::WebSessionList { user_id } => match api.web_session_list(user_id).await {
+            Ok(v) => Response::WebSessionList(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::WebSessionRevoke { sid, revoked_by } => {
+            match api.web_session_revoke(sid, revoked_by).await {
+                Ok(_) => Response::WebSessionAck,
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::AuditVerifyChain => match api.audit_verify_chain().await {
             Ok((ok, rows_checked, message)) => Response::AuditVerifyChain {
                 ok,
@@ -1005,6 +1028,31 @@ mod tests {
         }
         async fn audit_verify_chain(&self) -> Result<(bool, i64, String), RpcError> {
             Ok((true, 0, String::new()))
+        }
+        async fn web_session_insert(
+            &self,
+            _: String,
+            _: i64,
+            _: Option<String>,
+            _: Option<String>,
+        ) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn web_session_touch(&self, _: String) -> Result<bool, RpcError> {
+            Ok(true)
+        }
+        async fn web_session_list(
+            &self,
+            _: i64,
+        ) -> Result<Vec<hyperion_types::WebSessionView>, RpcError> {
+            Ok(Vec::new())
+        }
+        async fn web_session_revoke(
+            &self,
+            _: String,
+            _: i64,
+        ) -> Result<bool, RpcError> {
+            Ok(true)
         }
         async fn audit_list(&self, _: i64) -> Result<Vec<AuditEntryWire>, RpcError> {
             Ok(vec![])

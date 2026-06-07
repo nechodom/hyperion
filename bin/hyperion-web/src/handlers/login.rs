@@ -152,16 +152,17 @@ pub async fn post_login(
     );
 
     if db_has_users {
-        return post_login_via_rpc(state, &ip, form).await;
+        return post_login_via_rpc(state, &ip, form, headers).await;
     }
     // Bootstrap path: verify against the JSON file, then seed.
-    post_login_bootstrap(state, &ip, form).await
+    post_login_bootstrap(state, &ip, form, headers).await
 }
 
 async fn post_login_via_rpc(
     state: SharedState,
     ip: &str,
     form: LoginForm,
+    headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
@@ -177,7 +178,7 @@ async fn post_login_via_rpc(
         hyperion_rpc::codec::Response::WebLogin(result) => match result {
             hyperion_types::WebLoginResult::Ok { user_id, username, role, .. } => {
                 clear_throttle(ip);
-                mint_session_redirect(&state, user_id, username, role, &form.next)
+                mint_session_redirect(&state, user_id, username, role, &form.next, &headers).await
             }
             hyperion_types::WebLoginResult::NeedsTotp { user_id, .. } => {
                 // Stash user_id in a short-lived signed pending cookie
@@ -203,6 +204,7 @@ async fn post_login_bootstrap(
     state: SharedState,
     ip: &str,
     form: LoginForm,
+    headers: HeaderMap,
 ) -> Result<Response, AppError> {
     // Verify against the on-disk single-admin JSON file.
     let user = state.admin_user.clone();
@@ -237,7 +239,9 @@ async fn post_login_bootstrap(
             form.username.clone(),
             "super_admin".into(),
             &form.next,
-        );
+            &headers,
+        )
+        .await;
     }
     // Couldn't seed — issue a session under the legacy id anyway.
     mint_session_redirect(
@@ -246,7 +250,9 @@ async fn post_login_bootstrap(
         user.username.clone(),
         "super_admin".into(),
         &form.next,
+        &headers,
     )
+    .await
 }
 
 /// Mint a 5-minute "pending 2FA" cookie carrying `user_id`. Same
@@ -406,7 +412,7 @@ pub async fn post_login_2fa(
             if let Ok(v) = HeaderValue::from_str(&clear) {
                 headers.insert(header::SET_COOKIE, v);
             }
-            let r = mint_session_redirect(&state, user_id, username, role, &form.next)?;
+            let r = mint_session_redirect(&state, user_id, username, role, &form.next, &headers_in).await?;
             let mut combined = r;
             // Append the cookie-clear header.
             if let Some(v) = HeaderValue::from_str(&format!(
@@ -432,17 +438,18 @@ pub async fn post_login_2fa(
     }
 }
 
-fn mint_session_redirect(
+async fn mint_session_redirect(
     state: &SharedState,
     user_id: i64,
     username: String,
     role: String,
     next: &str,
+    req_headers: &HeaderMap,
 ) -> Result<Response, AppError> {
     let now = hyperion_types::now_secs();
     let sid = ulid::Ulid::new().to_string();
     let session = Session {
-        sid,
+        sid: sid.clone(),
         user_id,
         created_at: now,
         expires_at: now + state.session_ttl(),
@@ -454,6 +461,33 @@ fn mint_session_redirect(
         .session
         .sign(&session)
         .map_err(|e| AppError::Internal(e.to_string()))?;
+
+    // Track the session in the agent's `web_sessions` ledger so the
+    // /settings/sessions revoke flow can kill it later. Best-effort:
+    // if the RPC fails (agent socket down), the user still gets
+    // their cookie — they just won't show up in the active-sessions
+    // list. Auth middleware treats "missing row" as anonymous, so
+    // a missed insert here means the user has to log in again,
+    // not silent privilege escalation.
+    let ip = caller_ip(req_headers);
+    let ua = req_headers
+        .get(axum::http::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.chars().take(255).collect::<String>());
+    let r = hyperion_rpc_client::call(
+        &state.agent_socket,
+        hyperion_rpc::codec::Request::WebSessionInsert {
+            sid: sid.clone(),
+            user_id,
+            ip: Some(ip),
+            user_agent: ua,
+        },
+    )
+    .await;
+    if let Err(e) = r {
+        tracing::warn!(error=%e, sid=%sid, "web_session_insert RPC failed — cookie minted anyway");
+    }
+
     let mut headers = HeaderMap::new();
     headers.insert(header::SET_COOKIE, set_cookie(state, &token));
     let dest = redirect_target(next);
@@ -462,7 +496,25 @@ fn mint_session_redirect(
     Ok(resp)
 }
 
-pub async fn post_logout(State(state): State<SharedState>) -> Response {
+pub async fn post_logout(
+    State(state): State<SharedState>,
+    ctx: crate::auth::AuthCtx,
+) -> Response {
+    // Revoke the row backing this session so a stolen cookie can't
+    // outlive logout. Best-effort — the cookie is cleared either
+    // way; failing to revoke leaves the row in the table but the
+    // operator already lost their handle on it. Audit log gets a
+    // row from Service::web_session_revoke either way.
+    if let Some(s) = ctx.session.as_ref() {
+        let _ = hyperion_rpc_client::call(
+            &state.agent_socket,
+            hyperion_rpc::codec::Request::WebSessionRevoke {
+                sid: s.sid.clone(),
+                revoked_by: s.user_id,
+            },
+        )
+        .await;
+    }
     let mut headers = HeaderMap::new();
     headers.insert(header::SET_COOKIE, clear_cookie(&state));
     let mut resp = Redirect::to("/login").into_response();

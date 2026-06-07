@@ -230,6 +230,37 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.audit_verify_chain().await
     }
 
+    async fn web_session_insert(
+        &self,
+        sid: String,
+        user_id: i64,
+        ip: Option<String>,
+        user_agent: Option<String>,
+    ) -> Result<(), RpcError> {
+        self.svc
+            .web_session_insert(&sid, user_id, ip.as_deref(), user_agent.as_deref())
+            .await
+    }
+
+    async fn web_session_touch(&self, sid: String) -> Result<bool, RpcError> {
+        self.svc.web_session_touch(&sid).await
+    }
+
+    async fn web_session_list(
+        &self,
+        user_id: i64,
+    ) -> Result<Vec<hyperion_types::WebSessionView>, RpcError> {
+        self.svc.web_session_list(user_id).await
+    }
+
+    async fn web_session_revoke(
+        &self,
+        sid: String,
+        revoked_by: i64,
+    ) -> Result<bool, RpcError> {
+        self.svc.web_session_revoke(&sid, revoked_by).await
+    }
+
     async fn hosting_set_expiry(
         &self,
         sel: HostingSelector,

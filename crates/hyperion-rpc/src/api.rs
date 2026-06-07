@@ -116,6 +116,33 @@ pub trait AgentApi: Send + Sync + 'static {
     /// failure.
     async fn audit_verify_chain(&self) -> Result<(bool, i64, String), RpcError>;
 
+    /// Track a freshly-minted Session in the `web_sessions` ledger.
+    async fn web_session_insert(
+        &self,
+        sid: String,
+        user_id: i64,
+        ip: Option<String>,
+        user_agent: Option<String>,
+    ) -> Result<(), RpcError>;
+
+    /// Per-request liveness probe — true ⇒ live, false ⇒
+    /// revoked / unknown.
+    async fn web_session_touch(&self, sid: String) -> Result<bool, RpcError>;
+
+    /// Newest-first list of `user_id`'s sessions.
+    async fn web_session_list(
+        &self,
+        user_id: i64,
+    ) -> Result<Vec<hyperion_types::WebSessionView>, RpcError>;
+
+    /// Flip `revoked_at`. Returns true if the row existed and was
+    /// still live.
+    async fn web_session_revoke(
+        &self,
+        sid: String,
+        revoked_by: i64,
+    ) -> Result<bool, RpcError>;
+
     async fn hosting_set_expiry(
         &self,
         sel: HostingSelector,

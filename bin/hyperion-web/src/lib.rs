@@ -320,6 +320,11 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/profiles/apply", post(handlers::profiles::post_apply))
         .route("/audit", get(handlers::audit::get_audit))
         .route("/audit/verify", post(handlers::audit::post_verify_chain))
+        .route("/settings/sessions", get(handlers::sessions::get_sessions))
+        .route(
+            "/settings/sessions/revoke",
+            post(handlers::sessions::post_revoke),
+        )
         .route("/jobs", get(handlers::jobs::get_jobs))
         .route("/jobs/:id", get(handlers::jobs::get_job_detail))
         .route(

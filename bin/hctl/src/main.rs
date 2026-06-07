@@ -1283,6 +1283,30 @@ fn print_pretty(resp: &Response) {
         }
         Response::JobStarted { job_id } => println!("job started: {job_id}"),
         Response::JobAck => println!("ack"),
+        Response::WebSessionAck => println!("session ack"),
+        Response::WebSessionTouch(b) => {
+            println!("session {}", if *b { "live" } else { "revoked/unknown" })
+        }
+        Response::WebSessionList(rows) => {
+            if rows.is_empty() {
+                println!("no sessions");
+            } else {
+                println!(
+                    "{:<26} {:<16} {:<10} {:<10} {:<8}",
+                    "sid", "ip", "created", "last_seen", "state"
+                );
+                for r in rows {
+                    println!(
+                        "{:<26} {:<16} {:<10} {:<10} {:<8}",
+                        r.sid,
+                        r.ip.as_deref().unwrap_or("-"),
+                        r.created_at,
+                        r.last_seen_at,
+                        if r.is_revoked() { "revoked" } else { "live" }
+                    );
+                }
+            }
+        }
     }
 }
 

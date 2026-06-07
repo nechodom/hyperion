@@ -6052,6 +6052,70 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(())
     }
 
+    // ============================================================
+    //  web_sessions — backs the cookie ledger so revocation works.
+    // ============================================================
+
+    pub async fn web_session_insert(
+        &self,
+        sid: &str,
+        user_id: i64,
+        ip: Option<&str>,
+        user_agent: Option<&str>,
+    ) -> Result<(), RpcError> {
+        hyperion_state::web_sessions::insert(&self.pool, sid, user_id, ip, user_agent, now_secs())
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("web_session_insert: {e}")))
+    }
+
+    pub async fn web_session_touch(&self, sid: &str) -> Result<bool, RpcError> {
+        hyperion_state::web_sessions::touch_if_live(&self.pool, sid, now_secs())
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("web_session_touch: {e}")))
+    }
+
+    pub async fn web_session_list(
+        &self,
+        user_id: i64,
+    ) -> Result<Vec<hyperion_types::WebSessionView>, RpcError> {
+        let rows = hyperion_state::web_sessions::list_for_user(&self.pool, user_id, 100)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("web_session_list: {e}")))?;
+        Ok(rows
+            .into_iter()
+            .map(|r| hyperion_types::WebSessionView {
+                sid: r.sid,
+                user_id: r.user_id,
+                ip: r.ip,
+                user_agent: r.user_agent,
+                created_at: r.created_at,
+                last_seen_at: r.last_seen_at,
+                revoked_at: r.revoked_at,
+                revoked_by: r.revoked_by,
+            })
+            .collect())
+    }
+
+    pub async fn web_session_revoke(
+        &self,
+        sid: &str,
+        revoked_by: i64,
+    ) -> Result<bool, RpcError> {
+        let r = hyperion_state::web_sessions::revoke(&self.pool, sid, revoked_by, now_secs())
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("web_session_revoke: {e}")))?;
+        if r {
+            self.append_audit(
+                "web_session.revoke",
+                Some(sid),
+                &serde_json::json!({"revoked_by": revoked_by}).to_string(),
+                "ok",
+            )
+            .await;
+        }
+        Ok(r)
+    }
+
     /// Walk the full audit log and verify each row's row_hash
     /// against `BLAKE3(prev_hash || canonical fields)`. Returns
     /// `(ok, rows_checked, message)` — the message names the first

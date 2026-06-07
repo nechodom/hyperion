@@ -23,6 +23,7 @@ pub mod notifications;
 pub mod profiles;
 pub mod scheduler;
 pub mod system_users;
+pub mod web_sessions;
 pub mod web_users;
 pub mod wordpress;
 pub mod wp_assets;

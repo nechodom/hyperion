@@ -16,6 +16,7 @@ pub mod notifications;
 pub mod profile;
 pub mod profiles;
 pub mod search;
+pub mod sessions;
 pub mod services_health;
 pub mod settings;
 pub mod statics;

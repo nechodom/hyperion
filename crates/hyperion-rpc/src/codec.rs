@@ -420,6 +420,33 @@ pub enum Request {
         #[serde(default = "default_job_limit")]
         limit: i64,
     },
+    /// Insert a row in `web_sessions` immediately after a
+    /// successful login. The `sid` comes from the signed-cookie
+    /// Session token the panel mints. The agent is the source of
+    /// truth for which sids are live; the cookie alone is no
+    /// longer enough.
+    WebSessionInsert {
+        sid: String,
+        user_id: i64,
+        #[serde(default)]
+        ip: Option<String>,
+        #[serde(default)]
+        user_agent: Option<String>,
+    },
+    /// Per-request liveness probe + last_seen update. Returns
+    /// `Response::Bool(true)` when the session is live (row
+    /// present, revoked_at IS NULL); `false` for revoked /
+    /// missing rows (treat as anonymous).
+    WebSessionTouch { sid: String },
+    /// Newest-first list of `user_id`'s sessions (used by
+    /// /settings/sessions).
+    WebSessionList { user_id: i64 },
+    /// Flip `revoked_at`. Caller (panel) checks ownership before
+    /// dispatching — server only enforces existence.
+    WebSessionRevoke {
+        sid: String,
+        revoked_by: i64,
+    },
     /// Walk the entire audit_log hash chain and verify each row's
     /// `row_hash = BLAKE3(prev_hash || canonical_fields)`. Returns
     /// `Response::AuditVerifyChain { ok, broken_at_id, message }`
@@ -889,6 +916,13 @@ pub enum Response {
     /// be made RW — operator needs a different base image).
     RemountUsrRw { success: bool, message: String },
     FsDiagnoseAndFix(hyperion_types::FsDiagnostics),
+    /// Plain ack for write operations on web_sessions.
+    WebSessionAck,
+    /// Liveness probe response. `true` ⇒ session is live and
+    /// `last_seen_at` was updated.
+    WebSessionTouch(bool),
+    /// `/settings/sessions` list payload.
+    WebSessionList(Vec<hyperion_types::WebSessionView>),
     /// Audit chain verification result. `ok=true` means every
     /// row's `row_hash` reproduces from `prev_hash + canonical
     /// fields`; `message` is the empty string on success.
