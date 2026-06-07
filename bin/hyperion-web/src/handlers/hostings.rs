@@ -4136,6 +4136,34 @@ async fn run_clone_job(
         Some(source_node.as_str())
     };
 
+    // ---- 0. Version preflight (see run_migration_job for the
+    //         rationale; same cryptic curl bug bit clones too). ----
+    reporter
+        .step("Pre-flight: version check on source + target", 2, "")
+        .await;
+    let master_v = probe_agent_version(&state, None).await;
+    let src_v = probe_agent_version(&state, source_dispatch).await;
+    let tgt_v = probe_agent_version(&state, Some(target_node.as_str())).await;
+    if src_v != master_v || tgt_v != master_v {
+        reporter
+            .finish(
+                false,
+                Some(format!(
+                    "agent version mismatch — master {master_v}, source {src_v}, target {tgt_v}. \
+                     Update the lagging node via /install#node-{target_node} before re-running clone."
+                )),
+            )
+            .await;
+        return;
+    }
+    reporter
+        .step(
+            "Pre-flight: versions match",
+            4,
+            &format!("master={master_v} source={src_v} target={tgt_v}\n"),
+        )
+        .await;
+
     reporter
         .step(
             &format!(
@@ -4436,6 +4464,17 @@ pub async fn post_migration_move(
 /// 95% → Done 100%). Always calls `.finish()` exactly once — even
 /// on early bailout — so the row never gets stuck in `running`.
 #[allow(clippy::too_many_arguments)]
+/// Shared helper for migration + clone job preflight. Dispatches
+/// `AgentInfo` against `node` (None = local master) and returns
+/// the agent's version string, or "unknown" on RPC failure.
+/// Cheap (one round-trip) and read-only.
+async fn probe_agent_version(state: &SharedState, node: Option<&str>) -> String {
+    match crate::dispatcher::dispatch_to_node(state, node, Request::AgentInfo).await {
+        Ok(RpcResponse::AgentInfo(i)) => i.version,
+        _ => String::from("unknown"),
+    }
+}
+
 async fn run_migration_job(
     reporter: crate::handlers::jobs::JobReporter,
     state: SharedState,
@@ -4452,6 +4491,51 @@ async fn run_migration_job(
     } else {
         Some(source_node.as_str())
     };
+
+    // ---- 0. Version preflight ----
+    //
+    // The cross-node migration / clone pipeline calls
+    // `curl_to_file` on the TARGET node — if its agent binary
+    // is from before bb09ebc, every import dies with a cryptic
+    // `curl: option --max-time: expected a proper numerical
+    // parameter` ~2 s into the run. The error tail looks
+    // identical to the one the master-side fix already cured,
+    // so the operator wastes time re-reading their own commit
+    // history before realising the worker just wasn't updated.
+    //
+    // Stop that loop here: probe AgentInfo on source AND
+    // target, compare against the master's own version. Any
+    // mismatch ⇒ fail-fast with a clean message pointing
+    // directly at `/install#node-<id>` where the per-node
+    // Update button lives. The operator clicks once and
+    // re-runs the migration.
+    reporter
+        .step("Pre-flight: version check on source + target", 2, "")
+        .await;
+    let master_v = probe_agent_version(&state, None).await;
+    let src_v = probe_agent_version(&state, source_dispatch).await;
+    let tgt_v = probe_agent_version(&state, Some(target_node.as_str())).await;
+    if src_v != master_v || tgt_v != master_v {
+        reporter
+            .finish(
+                false,
+                Some(format!(
+                    "agent version mismatch — master {master_v}, source {src_v}, target {tgt_v}. \
+                     The cross-node migration curl bug was fixed in commit bb09ebc; \
+                     update the lagging node(s) via /install#node-{target_node} \
+                     (and the source if it isn't the master) before re-running migration."
+                )),
+            )
+            .await;
+        return;
+    }
+    reporter
+        .step(
+            "Pre-flight: versions match",
+            4,
+            &format!("master={master_v} source={src_v} target={tgt_v}\n"),
+        )
+        .await;
 
     // ---- 1. Export bundle on source ----
     reporter
