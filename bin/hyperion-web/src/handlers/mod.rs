@@ -5,6 +5,7 @@ pub mod enroll;
 pub mod health;
 pub mod hostings;
 pub mod install;
+pub mod jobs;
 pub mod login;
 pub mod emails;
 pub mod files;

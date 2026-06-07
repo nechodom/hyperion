@@ -562,6 +562,55 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.fs_diagnose_and_fix(dry_run).await
     }
 
+    async fn job_get(&self, id: String) -> Result<Option<hyperion_types::JobView>, RpcError> {
+        self.svc.job_get(&id).await
+    }
+
+    async fn job_list(
+        &self,
+        kind: Option<String>,
+        state: Option<String>,
+        limit: i64,
+    ) -> Result<Vec<hyperion_types::JobView>, RpcError> {
+        self.svc
+            .job_list(kind.as_deref(), state.as_deref(), limit)
+            .await
+    }
+
+    async fn job_start(
+        &self,
+        kind: String,
+        target: Option<String>,
+        payload_json: String,
+        actor_label: String,
+        actor_uid: i64,
+    ) -> Result<String, RpcError> {
+        self.svc
+            .job_start_external(&kind, target.as_deref(), &payload_json, &actor_label, actor_uid)
+            .await
+    }
+
+    async fn job_progress(
+        &self,
+        id: String,
+        step_label: String,
+        progress_pct: i64,
+        log_append: String,
+    ) -> Result<(), RpcError> {
+        self.svc
+            .job_progress_external(&id, &step_label, progress_pct, &log_append)
+            .await
+    }
+
+    async fn job_finish(
+        &self,
+        id: String,
+        ok: bool,
+        error: Option<String>,
+    ) -> Result<(), RpcError> {
+        self.svc.job_finish_external(&id, ok, error.as_deref()).await
+    }
+
     async fn wp_plugin_list(
         &self,
         hosting: hyperion_rpc::HostingSelector,

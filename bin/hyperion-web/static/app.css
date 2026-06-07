@@ -2868,3 +2868,80 @@ body.role-customer .header-action-new { display: none !important; }
   }
 }
 
+/* ============================================================
+   Background jobs — progress bar + live-polling spinner.
+
+   Used by /jobs (list), /jobs/<id> (detail) and any inline
+   migration/install/backup/clone progress panel embedded in
+   other pages. Stays consistent across all of them so an
+   operator who learns the bar once recognises it everywhere.
+   ============================================================ */
+
+.progress-bar {
+  position: relative;
+  height: 8px;
+  width: 100%;
+  background: var(--surface-2, #1a1a1a);
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.progress-bar-fill {
+  height: 100%;
+  background: var(--accent, #4a8aff);
+  transition: width 320ms ease-out;
+  border-radius: 4px;
+}
+
+.progress-bar-fill.done {
+  background: var(--success, #34c759);
+}
+
+.progress-bar-fill.failed {
+  background: var(--danger, #ff453a);
+}
+
+/* Tiny animated dot used in the job-detail header next to
+   the step label while a job is running. Pure CSS — no JS,
+   no image, CSP-safe. */
+.spinner-inline {
+  display: inline-block;
+  width: 0.85em;
+  height: 0.85em;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.85s linear infinite;
+  opacity: 0.7;
+  vertical-align: -0.1em;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Monospaced log tail block — shows the bounded ~16 KiB
+   from the agent without forcing the whole card to grow.
+   Falls back to the system mono stack on every platform. */
+.log-tail {
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 0.78rem;
+  line-height: 1.35;
+  background: var(--surface-2, #111);
+  color: var(--text, #ddd);
+  padding: 0.7rem 0.85rem;
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Inline error pill inside the progress card. Picks up the
+   same red the rest of the panel uses for failure states. */
+.job-error {
+  background: rgba(255, 69, 58, 0.12);
+  border: 1px solid rgba(255, 69, 58, 0.35);
+  color: var(--danger, #ff453a);
+  padding: 0.6rem 0.8rem;
+  border-radius: 6px;
+  font-size: 0.9rem;
+}

@@ -4002,92 +4002,195 @@ pub async fn post_migration_move(
         .into_response());
     }
 
-    // 1. Export the bundle on the source. Dispatches to the source
-    // node (master OR worker) so the archive lands on the source's
-    // local /var/lib/hyperion/migration/<id>/.
+    // Migration is 30-300 seconds depending on hosting size, with
+    // mysqldump + tar + scp + reimport phases. Doing this inline
+    // freezes the browser tab with no signal. Hand it to the generic
+    // job-tracker: open a `migration` row, tokio::spawn the work,
+    // redirect the operator to /jobs/<id> where they watch the live
+    // progress bar tick through each phase.
+    let master_url = super::derive_master_url(&state, &headers).await;
+    let bundle_ttl = crate::handlers::migration::BUNDLE_DOWNLOAD_TTL_SECS;
+    let payload = serde_json::json!({
+        "selector": form.selector,
+        "source_node": form.source_node,
+        "target_node": target_owned,
+    });
+    let migration_state = state.clone();
+    let migration_sel = sel.clone();
+    let migration_form_sel = form.selector.clone();
+    let migration_source_node = form.source_node.clone();
+    let migration_target = target_owned.clone();
+    let actor_label = ctx.username.clone();
+    let actor_uid = ctx
+        .session
+        .as_ref()
+        .map(|s| s.user_id)
+        .unwrap_or(0);
+
+    let job_id = crate::handlers::jobs::spawn_job(
+        state.clone(),
+        "migration",
+        Some(&form.selector),
+        &payload.to_string(),
+        &actor_label,
+        actor_uid,
+        move |reporter| async move {
+            run_migration_job(
+                reporter,
+                migration_state,
+                migration_sel,
+                migration_form_sel,
+                source_local,
+                migration_source_node,
+                migration_target,
+                master_url,
+                bundle_ttl,
+            )
+            .await;
+        },
+    )
+    .await?;
+
+    // 200 OK with redirect to the live progress page.
+    Ok(Redirect::to(&format!("/jobs/{}", job_id)).into_response())
+}
+
+/// Run the migration in the background, ticking progress at each
+/// phase boundary so the operator's progress bar advances in
+/// readable jumps (Export 25% → Bundle 45% → Import 80% → Suspend
+/// 95% → Done 100%). Always calls `.finish()` exactly once — even
+/// on early bailout — so the row never gets stuck in `running`.
+#[allow(clippy::too_many_arguments)]
+async fn run_migration_job(
+    reporter: crate::handlers::jobs::JobReporter,
+    state: SharedState,
+    sel: hyperion_rpc::HostingSelector,
+    selector_text: String,
+    source_local: bool,
+    source_node: String,
+    target_node: String,
+    master_url: String,
+    bundle_ttl: i64,
+) {
     let source_dispatch = if source_local {
         None
     } else {
-        Some(form.source_node.as_str())
+        Some(source_node.as_str())
     };
-    let export = crate::dispatcher::dispatch_to_node(
+
+    // ---- 1. Export bundle on source ----
+    reporter
+        .step(
+            &format!("Exporting bundle on {}", if source_local { "master" } else { source_node.as_str() }),
+            5,
+            "scheduling HostingExport RPC\n",
+        )
+        .await;
+    let export = match crate::dispatcher::dispatch_to_node(
         &state,
         source_dispatch,
         Request::HostingExport { hosting: sel.clone() },
     )
-    .await?;
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            reporter.finish(false, Some(format!("dispatch HostingExport: {e}"))).await;
+            return;
+        }
+    };
     let bundle = match export {
         RpcResponse::HostingExport(b) => b,
         RpcResponse::Error(e) => {
-            return Ok(Redirect::to(&format!(
-                "/hostings/{}?flash_error={}#migration",
-                sel_url,
-                urlencoding(&format!("Export failed: {e}"))
-            ))
-            .into_response());
+            reporter.finish(false, Some(format!("Export failed: {e}"))).await;
+            return;
         }
-        _ => return Err(AppError::Internal("expected HostingExport".into())),
+        _ => {
+            reporter.finish(false, Some("expected HostingExport response".into())).await;
+            return;
+        }
     };
-
-    // 1b. When the source was a worker the bundle files live on
-    // its disk — pull them to the master so the existing
-    // /api/migration/bundle/ download URL serves the right bytes.
-    if !source_local {
-        if let Err(e) = pull_bundle_from_worker(
-            &state,
-            &form.source_node,
-            &bundle.bundle_id,
+    reporter
+        .step(
+            "Bundle ready on source",
+            30,
+            &format!(
+                "bundle_id={} archive_bytes={}\n",
+                bundle.bundle_id, bundle.archive_bytes
+            ),
         )
-        .await
-        {
-            return Ok(Redirect::to(&format!(
-                "/hostings/{}?flash_error={}#migration",
-                sel_url,
-                urlencoding(&format!("Bundle proxy failed: {e}"))
-            ))
-            .into_response());
+        .await;
+
+    // ---- 1b. Pull bundle to master if source was a worker ----
+    if !source_local {
+        reporter
+            .step("Proxying bundle from worker to master", 45, "")
+            .await;
+        if let Err(e) = pull_bundle_from_worker(&state, &source_node, &bundle.bundle_id).await {
+            reporter.finish(false, Some(format!("Bundle proxy failed: {e}"))).await;
+            return;
         }
+        reporter.step("Bundle landed on master", 55, "proxy ok\n").await;
+    } else {
+        reporter
+            .step("Bundle already on master (source was local)", 55, "")
+            .await;
     }
 
-    // 2. Mint a signed download URL so the target node can fetch
-    //    archive.tar.gz + manifest.json from the master's
-    //    /api/migration/bundle/<id>/ route. Reuse the same TTL +
-    //    signing-key path the standalone export already uses.
-    let master_url = super::derive_master_url(&state, &headers).await;
-    let exp = hyperion_types::now_secs()
-        + crate::handlers::migration::BUNDLE_DOWNLOAD_TTL_SECS;
-    let token =
-        hyperion_auth::bundle_sig::mint(state.csrf_key.as_ref(), &bundle.bundle_id, exp);
+    // ---- 2. Mint signed download URL ----
+    let exp = hyperion_types::now_secs() + bundle_ttl;
+    let token = hyperion_auth::bundle_sig::mint(state.csrf_key.as_ref(), &bundle.bundle_id, exp);
     let base_url = format!("{master_url}/api/migration/bundle/{}", bundle.bundle_id);
-    // 3. Tell the TARGET node to fetch + import. Importer
-    // appends `?t=<token>` to both manifest.json + archive.tar.gz.
-    let import = crate::dispatcher::dispatch_to_node(
+
+    // ---- 3. Import on target ----
+    reporter
+        .step(
+            &format!("Importing on target {}", target_node),
+            65,
+            &format!("HostingImportFromUrl base_url={}\n", base_url),
+        )
+        .await;
+    let import = match crate::dispatcher::dispatch_to_node(
         &state,
-        Some(&target_owned),
+        Some(target_node.as_str()),
         Request::HostingImportFromUrl {
             base_url: base_url.clone(),
             token: token.clone(),
         },
     )
-    .await?;
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            reporter.finish(false, Some(format!("dispatch HostingImportFromUrl: {e}"))).await;
+            return;
+        }
+    };
     let new_id = match import {
         RpcResponse::HostingImportFromUrl(r) => r.new_hosting_id,
         RpcResponse::Error(e) => {
-            return Ok(Redirect::to(&format!(
-                "/hostings/{}?flash_error={}#migration",
-                sel_url,
-                urlencoding(&format!("Target import failed: {e}"))
-            ))
-            .into_response());
+            reporter.finish(false, Some(format!("Target import failed: {e}"))).await;
+            return;
         }
-        _ => return Err(AppError::Internal("expected HostingImportFromUrl".into())),
+        _ => {
+            reporter
+                .finish(false, Some("expected HostingImportFromUrl response".into()))
+                .await;
+            return;
+        }
     };
+    reporter
+        .step(
+            "Imported on target",
+            85,
+            &format!("new_hosting_id={}\n", new_id.as_str()),
+        )
+        .await;
 
-    // 4. Suspend the source — leaves it offline-but-recoverable so
-    //    the operator can verify the new hosting works before
-    //    pulling the trigger on delete. Best-effort. Dispatched to
-    //    the SOURCE node (master OR worker) so we suspend the right
-    //    copy when the source isn't the master.
+    // ---- 4. Suspend source (best-effort) ----
+    reporter
+        .step("Suspending source copy (best-effort)", 95, "")
+        .await;
     let _ = crate::dispatcher::dispatch_to_node(
         &state,
         source_dispatch,
@@ -4095,7 +4198,7 @@ pub async fn post_migration_move(
             sel: sel.clone(),
             reason: hyperion_types::SuspendReason::Manual {
                 message: Some(format!(
-                    "Migrated to node {target_owned} as {} — verify and delete here when ready.",
+                    "Migrated to node {target_node} as {} — verify and delete here when ready.",
                     new_id.as_str()
                 )),
             },
@@ -4103,18 +4206,25 @@ pub async fn post_migration_move(
     )
     .await;
 
-    self::audit_migration_move(&state, &ctx, &form.selector, &target_owned, &new_id).await;
+    tracing::info!(
+        selector = %selector_text,
+        target_node = %target_node,
+        new_hosting_id = new_id.as_str(),
+        "migration job completed"
+    );
 
-    // 5. Land the operator on the NEW hosting's detail page.
-    Ok(Redirect::to(&format!(
-        "/hostings/{}?flash={}",
-        urlencoding(&form.selector),
-        urlencoding(&format!(
-            "Migrated to node {target_owned}. New hosting id: {}. Source is suspended — delete it from the Danger tab once you've verified the new one is live.",
-            new_id.as_str()
-        ))
-    ))
-    .into_response())
+    reporter
+        .step(
+            &format!(
+                "Done — new hosting id {} on {}",
+                new_id.as_str(),
+                target_node
+            ),
+            100,
+            "all phases ok\n",
+        )
+        .await;
+    reporter.finish(true, None).await;
 }
 
 /// Write an audit-log entry on the master for the migration move.

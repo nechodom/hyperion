@@ -10,6 +10,7 @@ pub mod db;
 pub mod dns;
 pub mod hosting;
 pub mod ids;
+pub mod jobs;
 pub mod limits;
 pub mod migration;
 pub mod php;
@@ -25,6 +26,7 @@ pub use hosting::{
     HostingDetail, HostingState, HostingSummary, VhostOptions, WpExtras, WpRedisConfig,
 };
 pub use ids::{AgentId, HostingId, SecretId};
+pub use jobs::JobView;
 pub use limits::{
     BackupRunWire, ExpiringHosting, HostingExpiry, HostingLimits, HostingUsageBucket,
     NodeInviteMint, NodeInviteSummary, OverBwPolicy, SuspendReason,

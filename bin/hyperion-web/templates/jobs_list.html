@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+{% block title %}Background jobs · hyperion{% endblock %}
+{% block main %}
+<div class="page-header">
+  <div>
+    <h1>Background jobs</h1>
+    <div class="subtitle">
+      Live progress for migrations, installs, backups, cert renewals and other long-running ops.
+    </div>
+  </div>
+</div>
+
+{# Compact filter row — same shape as /audit so the eye doesn't have
+   to relearn. Filters are server-side via query string (no JS). #}
+<div class="card" style="margin-bottom:1rem;padding:0.85rem 1rem">
+  <form method="get" action="/jobs"
+        style="display:grid;grid-template-columns:auto auto 1fr;gap:0.5rem 0.75rem;align-items:center">
+    <label style="display:flex;gap:0.4rem;align-items:center">
+      <span class="text-soft small">Kind</span>
+      <select name="kind" class="input">
+        <option value="" {% if kind_filter.is_empty() %}selected{% endif %}>(all)</option>
+        <option value="migration" {% if kind_filter == "migration" %}selected{% endif %}>migration</option>
+        <option value="install" {% if kind_filter == "install" %}selected{% endif %}>install</option>
+        <option value="backup" {% if kind_filter == "backup" %}selected{% endif %}>backup</option>
+        <option value="acme_issue" {% if kind_filter == "acme_issue" %}selected{% endif %}>acme_issue</option>
+        <option value="cert_renew" {% if kind_filter == "cert_renew" %}selected{% endif %}>cert_renew</option>
+        <option value="node_update" {% if kind_filter == "node_update" %}selected{% endif %}>node_update</option>
+        <option value="hosting_clone" {% if kind_filter == "hosting_clone" %}selected{% endif %}>hosting_clone</option>
+        <option value="wp_reinstall_all" {% if kind_filter == "wp_reinstall_all" %}selected{% endif %}>wp_reinstall_all</option>
+        <option value="rofs_fix" {% if kind_filter == "rofs_fix" %}selected{% endif %}>rofs_fix</option>
+        <option value="db_reset" {% if kind_filter == "db_reset" %}selected{% endif %}>db_reset</option>
+      </select>
+    </label>
+    <label style="display:flex;gap:0.4rem;align-items:center">
+      <span class="text-soft small">State</span>
+      <select name="state" class="input">
+        <option value="" {% if state_filter.is_empty() %}selected{% endif %}>(all)</option>
+        <option value="running" {% if state_filter == "running" %}selected{% endif %}>running</option>
+        <option value="done" {% if state_filter == "done" %}selected{% endif %}>done</option>
+        <option value="failed" {% if state_filter == "failed" %}selected{% endif %}>failed</option>
+        <option value="cancelled" {% if state_filter == "cancelled" %}selected{% endif %}>cancelled</option>
+      </select>
+    </label>
+    <div style="display:flex;gap:0.5rem;justify-content:flex-end">
+      <button type="submit" class="btn">Apply</button>
+      <a href="/jobs" class="btn ghost">Clear</a>
+    </div>
+  </form>
+</div>
+
+{% if jobs.is_empty() %}
+  <div class="card empty">
+    <div class="empty-icon">📭</div>
+    <div class="empty-title">No jobs match these filters</div>
+    <p class="text-soft small">When you start a migration, install, backup or cert renewal, it'll show up here with a live progress bar.</p>
+  </div>
+{% else %}
+  <div class="card" style="padding:0">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Kind</th>
+          <th>Target</th>
+          <th style="width:18rem">Progress</th>
+          <th>State</th>
+          <th>Started by</th>
+          <th>Started</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for j in jobs %}
+          <tr>
+            <td><code>{{ j.kind }}</code></td>
+            <td>{% if let Some(t) = j.target %}<code>{{ t }}</code>{% else %}<span class="text-soft">—</span>{% endif %}</td>
+            <td>
+              <div style="display:flex;align-items:center;gap:0.4rem">
+                <div class="progress-bar" style="flex:1">
+                  <div class="progress-bar-fill {% if j.state == "failed" %}failed{% else if j.state == "done" %}done{% endif %}"
+                       style="width:{{ j.progress_pct }}%"></div>
+                </div>
+                <span class="text-soft small" style="width:3.5rem;text-align:right">{{ j.progress_pct }}%</span>
+              </div>
+              {% if !j.step_label.is_empty() %}
+                <div class="text-soft small" style="margin-top:0.15rem">{{ j.step_label }}</div>
+              {% endif %}
+            </td>
+            <td>
+              {% if j.state == "running" %}
+                <span class="pill warn">running</span>
+              {% else if j.state == "done" %}
+                <span class="pill ok">done</span>
+              {% else if j.state == "failed" %}
+                <span class="pill err">failed</span>
+              {% else %}
+                <span class="pill">{{ j.state }}</span>
+              {% endif %}
+            </td>
+            <td>{{ j.actor_label }}</td>
+            <td><span class="text-soft small">{{ j.started_at }}</span></td>
+            <td><a href="/jobs/{{ j.id }}" class="btn small">View</a></td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endif %}
+{% endblock %}

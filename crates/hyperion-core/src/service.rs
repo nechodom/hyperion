@@ -8663,6 +8663,150 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
     }
 
+    // ================================================================
+    //  Generic background-job tracker (`jobs` table). Powers the
+    //  "live progress" UX on migration / install / backup / clone /
+    //  cert renewal / etc. The orchestrating side (panel, hctl, or a
+    //  service method) opens a row with `job_start_*`, ticks
+    //  `job_progress_*` at each phase, and closes with
+    //  `job_finish_*`. The HTMX-polled web fragment reads `job_get`
+    //  every 2 seconds.
+    // ================================================================
+
+    /// Open a job row from an in-process caller (the agent itself).
+    /// Returns the freshly minted ULID `job_id`.
+    pub async fn job_start(
+        &self,
+        kind: &str,
+        target: Option<&str>,
+        payload_json: &str,
+        actor_label: &str,
+        actor_uid: i64,
+    ) -> Result<String, RpcError> {
+        let id = ulid::Ulid::new().to_string();
+        hyperion_state::jobs::start(
+            &self.pool,
+            hyperion_state::jobs::StartReq {
+                id: &id,
+                kind,
+                target,
+                payload_json,
+                actor_uid,
+                actor_label,
+                started_at: now_secs(),
+            },
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("job_start: {e}")))?;
+        Ok(id)
+    }
+
+    /// Service-side progress tick (used by intra-service callers).
+    pub async fn job_progress(
+        &self,
+        id: &str,
+        step_label: &str,
+        progress_pct: i64,
+        log_append: &str,
+    ) -> Result<(), RpcError> {
+        hyperion_state::jobs::progress(
+            &self.pool,
+            id,
+            step_label,
+            progress_pct,
+            log_append,
+            now_secs(),
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("job_progress: {e}")))?;
+        Ok(())
+    }
+
+    /// Service-side terminal-state flip.
+    pub async fn job_finish(
+        &self,
+        id: &str,
+        ok: bool,
+        error: Option<&str>,
+    ) -> Result<(), RpcError> {
+        hyperion_state::jobs::finish(&self.pool, id, ok, error, now_secs())
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("job_finish: {e}")))?;
+        Ok(())
+    }
+
+    /// Look up one job. `None` = unknown id (rotated out or never
+    /// existed).
+    pub async fn job_get(&self, id: &str) -> Result<Option<hyperion_types::JobView>, RpcError> {
+        let row = hyperion_state::jobs::read(&self.pool, id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("job_read: {e}")))?;
+        Ok(row.map(job_row_to_view))
+    }
+
+    /// Newest-first list. `kind` / `state` are optional pinning
+    /// filters; both `None` = all jobs.
+    pub async fn job_list(
+        &self,
+        kind: Option<&str>,
+        state: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<hyperion_types::JobView>, RpcError> {
+        let rows = hyperion_state::jobs::list(&self.pool, kind, state, limit)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("job_list: {e}")))?;
+        Ok(rows.into_iter().map(job_row_to_view).collect())
+    }
+
+    // External (RPC) variants — same as the in-process methods but
+    // exposed at the AgentApi boundary. They live here (not as
+    // standalone functions) so the panel can call them via the
+    // signed RPC envelope same as any other agent method.
+
+    pub async fn job_start_external(
+        &self,
+        kind: &str,
+        target: Option<&str>,
+        payload_json: &str,
+        actor_label: &str,
+        actor_uid: i64,
+    ) -> Result<String, RpcError> {
+        self.job_start(kind, target, payload_json, actor_label, actor_uid).await
+    }
+
+    pub async fn job_progress_external(
+        &self,
+        id: &str,
+        step_label: &str,
+        progress_pct: i64,
+        log_append: &str,
+    ) -> Result<(), RpcError> {
+        self.job_progress(id, step_label, progress_pct, log_append).await
+    }
+
+    pub async fn job_finish_external(
+        &self,
+        id: &str,
+        ok: bool,
+        error: Option<&str>,
+    ) -> Result<(), RpcError> {
+        self.job_finish(id, ok, error).await
+    }
+
+    /// Sweep `running` rows whose `updated_at` is older than
+    /// `stale_secs` and flip to `failed`. Run at agent startup and
+    /// hourly from the scheduler tick. Without this an agent crash
+    /// mid-job leaves the UI polling a forever-spinning row.
+    pub async fn jobs_reap_stale(&self, stale_secs: i64) -> Result<u64, RpcError> {
+        let n = hyperion_state::jobs::reap_stale(&self.pool, now_secs(), stale_secs)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("jobs_reap_stale: {e}")))?;
+        if n > 0 {
+            tracing::warn!(rows = n, "reaped stale jobs (agent crash mid-run?)");
+        }
+        Ok(n)
+    }
+
     /// Full ROFS diagnose + (optional) auto-fix sequence.
     ///
     /// Gather phase (always runs):
@@ -11215,6 +11359,27 @@ impl RpcErrorExt for RpcError {
 trait RpcErrorExt {
     #[allow(non_snake_case)]
     fn Internal_with(msg: String) -> Self;
+}
+
+/// Convert the SQLite row representation into the wire-format `JobView`
+/// the UI + hctl consume. Pure mapping, no I/O.
+fn job_row_to_view(r: hyperion_state::jobs::JobRow) -> hyperion_types::JobView {
+    hyperion_types::JobView {
+        id: r.id,
+        kind: r.kind,
+        target: r.target,
+        state: r.state,
+        step_label: r.step_label,
+        progress_pct: r.progress_pct,
+        log_tail: r.log_tail,
+        error: r.error,
+        payload_json: r.payload_json,
+        actor_uid: r.actor_uid,
+        actor_label: r.actor_label,
+        started_at: r.started_at,
+        updated_at: r.updated_at,
+        finished_at: r.finished_at,
+    }
 }
 
 /// Classify the VPS image based on filesystem fingerprints — drives

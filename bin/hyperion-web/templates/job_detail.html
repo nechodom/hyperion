@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Job {{ job.id }} · hyperion{% endblock %}
+{% block main %}
+<div class="page-header">
+  <div>
+    <h1>
+      Job
+      <code style="font-size:0.85em;font-weight:400">{{ job.id }}</code>
+    </h1>
+    <div class="subtitle">
+      <code>{{ job.kind }}</code>
+      {% if let Some(t) = job.target %} · target <code>{{ t }}</code>{% endif %}
+      · started by {{ job.actor_label }}
+    </div>
+  </div>
+  <div>
+    <a href="/jobs" class="btn ghost">← All jobs</a>
+  </div>
+</div>
+
+{# Progress card. When `is_running`, hx-trigger="every 2s" polls
+   /jobs/<id>/progress and swaps just THIS card's content. When
+   the job goes terminal the fragment renders with no trigger and
+   polling stops by itself. #}
+<div id="job-progress"
+     {% if is_running %}
+       hx-get="/jobs/{{ job.id }}/progress"
+       hx-trigger="every 2s"
+       hx-swap="innerHTML"
+     {% endif %}>
+  {% include "_job_progress.html" %}
+</div>
+{% endblock %}

@@ -1,0 +1,58 @@
+{# Inline progress card. Rendered both by job_detail.html (full
+   page chrome) and /jobs/<id>/progress (HTMX fragment, swapped in
+   place every 2 seconds while running). Stays identical in both
+   contexts so the swap doesn't cause visual jitter. #}
+<div class="card">
+  <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:1rem;margin-bottom:0.6rem">
+    <div>
+      <h2 style="margin:0;font-size:1.1rem;display:flex;align-items:center;gap:0.5rem">
+        {% if job.state == "running" %}
+          <span class="spinner-inline"></span>
+        {% else if job.state == "done" %}
+          <span class="pill ok">done</span>
+        {% else if job.state == "failed" %}
+          <span class="pill err">failed</span>
+        {% else %}
+          <span class="pill">{{ job.state }}</span>
+        {% endif %}
+        {{ job.step_label }}
+      </h2>
+      <div class="text-soft small" style="margin-top:0.15rem">
+        Elapsed {{ elapsed }} ·
+        {% if let Some(t) = job.target %} target <code>{{ t }}</code> ·{% endif %}
+        kind <code>{{ job.kind }}</code>
+      </div>
+    </div>
+    <div style="text-align:right">
+      <div style="font-size:2rem;font-weight:600;line-height:1">{{ job.progress_pct }}%</div>
+    </div>
+  </div>
+
+  <div class="progress-bar" style="height:10px">
+    <div class="progress-bar-fill {% if job.state == "failed" %}failed{% else if job.state == "done" %}done{% endif %}"
+         style="width:{{ job.progress_pct }}%"></div>
+  </div>
+
+  {% if let Some(e) = job.error %}
+    <div class="job-error" style="margin-top:0.8rem">
+      <strong>Error:</strong> <code>{{ e }}</code>
+    </div>
+  {% endif %}
+
+  {% if !job.log_tail.is_empty() %}
+    <details style="margin-top:0.9rem" {% if !is_running %}open{% endif %}>
+      <summary class="text-soft small">Log tail ({{ job.log_tail.len() }} bytes)</summary>
+      <pre class="log-tail" style="margin-top:0.4rem;max-height:30rem;overflow:auto">{{ job.log_tail }}</pre>
+    </details>
+  {% endif %}
+
+  {% if job.state == "done" %}
+    <p class="text-soft small" style="margin-top:0.7rem">
+      ✓ Finished in {{ elapsed }}.
+    </p>
+  {% else if job.state == "failed" %}
+    <p class="text-soft small" style="margin-top:0.7rem">
+      ✗ Failed after {{ elapsed }}. Re-run the operation from the source page to retry.
+    </p>
+  {% endif %}
+</div>

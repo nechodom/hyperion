@@ -371,6 +371,45 @@ pub trait AgentApi: Send + Sync + 'static {
         dry_run: bool,
     ) -> Result<hyperion_types::FsDiagnostics, RpcError>;
 
+    /// Look up a single background job. Returns `None` if rotated out
+    /// of the table.
+    async fn job_get(&self, id: String) -> Result<Option<hyperion_types::JobView>, RpcError>;
+
+    /// List background jobs, newest first.
+    async fn job_list(
+        &self,
+        kind: Option<String>,
+        state: Option<String>,
+        limit: i64,
+    ) -> Result<Vec<hyperion_types::JobView>, RpcError>;
+
+    /// Open a new job row, returning a fresh `job_id`.
+    async fn job_start(
+        &self,
+        kind: String,
+        target: Option<String>,
+        payload_json: String,
+        actor_label: String,
+        actor_uid: i64,
+    ) -> Result<String, RpcError>;
+
+    /// Tick progress on an in-flight job.
+    async fn job_progress(
+        &self,
+        id: String,
+        step_label: String,
+        progress_pct: i64,
+        log_append: String,
+    ) -> Result<(), RpcError>;
+
+    /// Flip a job to a terminal state.
+    async fn job_finish(
+        &self,
+        id: String,
+        ok: bool,
+        error: Option<String>,
+    ) -> Result<(), RpcError>;
+
     /// Import a migration bundle by URL — downloads from the source
     /// node's signed `/api/migration/bundle/<id>` endpoint then runs
     /// the regular import.

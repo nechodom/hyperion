@@ -34,6 +34,13 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 /// real ceiling is whatever the operator's plumbing tolerates.
 pub const MAX_FRAME: usize = 128 * 1024 * 1024;
 
+/// Default `limit` for `Request::JobList` when the caller omits one.
+/// 50 is enough for the dashboard "recent jobs" widget without
+/// blowing past frame size; the explicit cap is 1000 server-side.
+fn default_job_limit() -> i64 {
+    50
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
 pub enum Request {
@@ -397,6 +404,54 @@ pub enum Request {
     FsDiagnoseAndFix {
         #[serde(default)]
         dry_run: bool,
+    },
+    /// Look up a single background job by id. Returns `None` if the
+    /// id has been rotated out of the table (very rare; rows are
+    /// retained for at least 30 days).
+    JobGet { id: String },
+    /// List background jobs, newest first. `kind=None` returns all
+    /// kinds; `state=None` returns all states. `limit` is clamped to
+    /// 1..=1000 server-side.
+    JobList {
+        #[serde(default)]
+        kind: Option<String>,
+        #[serde(default)]
+        state: Option<String>,
+        #[serde(default = "default_job_limit")]
+        limit: i64,
+    },
+    /// Open a new background job row, returning a freshly-minted
+    /// `job_id`. Called by the panel (or hctl) when it kicks off a
+    /// tokio::spawn for migration / install / backup / clone / cert
+    /// renewal / etc. Subsequent `JobProgress` + `JobFinish` calls
+    /// reference the same id.
+    JobStart {
+        kind: String,
+        target: Option<String>,
+        #[serde(default)]
+        payload_json: String,
+        actor_label: String,
+        #[serde(default)]
+        actor_uid: i64,
+    },
+    /// Append a progress tick. `step_label` is what the UI shows
+    /// big; `progress_pct` drives the bar; `log_append` is appended
+    /// to the bounded `log_tail`. All three are independently
+    /// optional in practice (empty string / 0 / empty are fine).
+    JobProgress {
+        id: String,
+        step_label: String,
+        progress_pct: i64,
+        #[serde(default)]
+        log_append: String,
+    },
+    /// Flip a job to a terminal state. `ok=false` records the
+    /// `error` message for the UI; `ok=true` ignores it.
+    JobFinish {
+        id: String,
+        ok: bool,
+        #[serde(default)]
+        error: Option<String>,
     },
     /// Import a migration bundle from a source node's signed URL.
     /// `base_url` is e.g. `https://source-master/api/migration/bundle/<id>`
@@ -827,6 +882,16 @@ pub enum Response {
     /// be made RW — operator needs a different base image).
     RemountUsrRw { success: bool, message: String },
     FsDiagnoseAndFix(hyperion_types::FsDiagnostics),
+    /// Look-up response for `JobGet`. `None` = job id unknown.
+    JobGet(Option<hyperion_types::JobView>),
+    /// Newest-first list of jobs. Empty when no rows match.
+    JobList(Vec<hyperion_types::JobView>),
+    /// Returns the `job_id` minted by `JobStart` (and reused for
+    /// later `JobProgress` / `JobFinish` ticks).
+    JobStarted { job_id: String },
+    /// Plain ack for `JobProgress` / `JobFinish`. No payload — the
+    /// caller already knows the id.
+    JobAck,
     WpPluginList(hyperion_types::WpPluginListResponse),
     WpPluginAction(hyperion_types::WpPluginActionResult),
     // Web users / roles / 2FA

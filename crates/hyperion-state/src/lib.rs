@@ -13,6 +13,7 @@ pub mod db;
 pub mod email_log;
 pub mod hostings;
 pub mod invites;
+pub mod jobs;
 pub mod limits;
 pub mod metrics;
 pub mod monitors;

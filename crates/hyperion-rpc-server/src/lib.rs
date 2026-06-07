@@ -484,6 +484,43 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(d) => Response::FsDiagnoseAndFix(d),
             Err(e) => Response::Error(e),
         },
+        Request::JobGet { id } => match api.job_get(id).await {
+            Ok(v) => Response::JobGet(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::JobList { kind, state, limit } => match api.job_list(kind, state, limit).await {
+            Ok(v) => Response::JobList(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::JobStart {
+            kind,
+            target,
+            payload_json,
+            actor_label,
+            actor_uid,
+        } => match api
+            .job_start(kind, target, payload_json, actor_label, actor_uid)
+            .await
+        {
+            Ok(job_id) => Response::JobStarted { job_id },
+            Err(e) => Response::Error(e),
+        },
+        Request::JobProgress {
+            id,
+            step_label,
+            progress_pct,
+            log_append,
+        } => match api
+            .job_progress(id, step_label, progress_pct, log_append)
+            .await
+        {
+            Ok(()) => Response::JobAck,
+            Err(e) => Response::Error(e),
+        },
+        Request::JobFinish { id, ok, error } => match api.job_finish(id, ok, error).await {
+            Ok(()) => Response::JobAck,
+            Err(e) => Response::Error(e),
+        },
         Request::WpPluginList { hosting } => match api.wp_plugin_list(hosting).await {
             Ok(v) => Response::WpPluginList(v),
             Err(e) => Response::Error(e),
@@ -1256,6 +1293,44 @@ mod tests {
             _: bool,
         ) -> Result<hyperion_types::FsDiagnostics, RpcError> {
             Ok(hyperion_types::FsDiagnostics::default())
+        }
+        async fn job_get(&self, _: String) -> Result<Option<hyperion_types::JobView>, RpcError> {
+            Ok(None)
+        }
+        async fn job_list(
+            &self,
+            _: Option<String>,
+            _: Option<String>,
+            _: i64,
+        ) -> Result<Vec<hyperion_types::JobView>, RpcError> {
+            Ok(Vec::new())
+        }
+        async fn job_start(
+            &self,
+            _: String,
+            _: Option<String>,
+            _: String,
+            _: String,
+            _: i64,
+        ) -> Result<String, RpcError> {
+            Ok("mock-job-id".into())
+        }
+        async fn job_progress(
+            &self,
+            _: String,
+            _: String,
+            _: i64,
+            _: String,
+        ) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn job_finish(
+            &self,
+            _: String,
+            _: bool,
+            _: Option<String>,
+        ) -> Result<(), RpcError> {
+            Ok(())
         }
         async fn wp_plugin_list(
             &self,

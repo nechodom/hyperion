@@ -1241,6 +1241,68 @@ fn print_pretty(resp: &Response) {
                 }
             }
         }
+        Response::JobGet(Some(j)) => print_job(j),
+        Response::JobGet(None) => println!("job not found"),
+        Response::JobList(list) => {
+            if list.is_empty() {
+                println!("no jobs");
+            } else {
+                println!(
+                    "{:<26} {:<14} {:<10} {:>4}% {:<8} {}",
+                    "id", "kind", "state", "pct", "elapsed", "target"
+                );
+                for j in list {
+                    let elapsed = match j.finished_at {
+                        Some(f) => f - j.started_at,
+                        None => j.updated_at - j.started_at,
+                    };
+                    println!(
+                        "{:<26} {:<14} {:<10} {:>4}% {:<8} {}",
+                        j.id,
+                        j.kind,
+                        j.state,
+                        j.progress_pct,
+                        format_args!("{}s", elapsed),
+                        j.target.as_deref().unwrap_or("-")
+                    );
+                }
+            }
+        }
+        Response::JobStarted { job_id } => println!("job started: {job_id}"),
+        Response::JobAck => println!("ack"),
+    }
+}
+
+/// Pretty-print one job — same fields as the live progress card
+/// shows in the web UI, but for the CLI / SSH operator.
+fn print_job(j: &hyperion_types::JobView) {
+    println!("job {}:", j.id);
+    println!("  kind        : {}", j.kind);
+    println!("  state       : {}", j.state);
+    println!(
+        "  target      : {}",
+        j.target.as_deref().unwrap_or("(none)")
+    );
+    println!("  actor       : {} (uid={})", j.actor_label, j.actor_uid);
+    println!("  started_at  : {}", j.started_at);
+    println!("  updated_at  : {}", j.updated_at);
+    if let Some(f) = j.finished_at {
+        println!("  finished_at : {f} (Δ={}s)", f - j.started_at);
+    }
+    println!("  step        : {}", j.step_label);
+    println!("  progress    : {}%", j.progress_pct);
+    if let Some(e) = &j.error {
+        println!("  error       : {e}");
+    }
+    if !j.payload_json.is_empty() && j.payload_json != "{}" {
+        println!("  payload     : {}", j.payload_json);
+    }
+    if !j.log_tail.is_empty() {
+        println!("  --- log tail ---");
+        print!("{}", j.log_tail);
+        if !j.log_tail.ends_with('\n') {
+            println!();
+        }
     }
 }
 
