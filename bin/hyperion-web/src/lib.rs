@@ -398,5 +398,80 @@ pub fn build_router(state: SharedState) -> Router {
             "/api/migration/bundle/:bundle_id/:filename",
             get(handlers::migration::get_bundle_file),
         )
+        .layer(axum::middleware::from_fn(security_headers))
         .with_state(state)
+}
+
+/// Defence-in-depth headers applied to every response:
+///   * **Content-Security-Policy** — blocks injection of external
+///     `<script src=…>` and forces same-origin for fetch/img/form
+///     submits. Currently allows `'unsafe-inline'` for script and
+///     style because the legacy templates rely on ~11 inline
+///     `onclick`/`onchange` handlers and many `style="…"` attributes.
+///     Tightening to nonce-only would require refactoring those to
+///     delegated listeners + classes — tracked as future work.
+///     Even without nonce, blocking remote `<script>` defangs
+///     stored-XSS that injects a `<script src=evil.example.com>`
+///     tag (the most common payload).
+///   * **X-Frame-Options DENY** — paranoia in addition to
+///     `frame-ancestors 'none'` for ancient browsers.
+///   * **X-Content-Type-Options nosniff** — stops MIME sniffing
+///     turning a benign `.txt` upload into a script.
+///   * **Referrer-Policy strict-origin** — leaks only the panel
+///     hostname (not URL path) when the operator clicks an external
+///     link from a hosting-detail page.
+///   * **Permissions-Policy** — locks down browser sensors the
+///     panel never needs (camera, mic, geolocation, …) so a
+///     compromised iframe can't request them.
+///   * **HSTS** — once we've served HTTPS, refuse plain HTTP for
+///     2 years. `includeSubDomains` because every hosting under
+///     the same parent zone should also be HTTPS-only.
+async fn security_headers(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mut resp = next.run(req).await;
+    let h = resp.headers_mut();
+    // CSP. Order matters only for readability; semicolons are the
+    // separator. NB: `frame-ancestors 'none'` is what actually
+    // prevents click-jacking — XFO is the belt-and-braces.
+    h.insert(
+        "content-security-policy",
+        axum::http::HeaderValue::from_static(
+            "default-src 'self'; \
+             script-src 'self' 'unsafe-inline'; \
+             style-src 'self' 'unsafe-inline'; \
+             img-src 'self' data:; \
+             font-src 'self' data:; \
+             connect-src 'self'; \
+             form-action 'self'; \
+             base-uri 'self'; \
+             object-src 'none'; \
+             frame-ancestors 'none'; \
+             frame-src 'none'",
+        ),
+    );
+    h.insert(
+        "x-frame-options",
+        axum::http::HeaderValue::from_static("DENY"),
+    );
+    h.insert(
+        "x-content-type-options",
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+    h.insert(
+        "referrer-policy",
+        axum::http::HeaderValue::from_static("strict-origin"),
+    );
+    h.insert(
+        "permissions-policy",
+        axum::http::HeaderValue::from_static(
+            "camera=(), microphone=(), geolocation=(), payment=(), usb=(), magnetometer=(), accelerometer=(), gyroscope=()",
+        ),
+    );
+    h.insert(
+        "strict-transport-security",
+        axum::http::HeaderValue::from_static("max-age=63072000; includeSubDomains"),
+    );
+    resp
 }

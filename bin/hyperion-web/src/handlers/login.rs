@@ -23,7 +23,13 @@ static THROTTLE: once_cell::sync::Lazy<Mutex<ThrottleState>> =
         })
     });
 
-const THROTTLE_WINDOW_SECS: i64 = 5 * 60;
+// Sliding window — 5 failed attempts per IP within 15 minutes. Bumped
+// from 5min to 15min after staging-env brute-force tests showed an
+// attacker could still rotate through ~12 password guesses per hour
+// per IP with the old 5min reset. 15min trades 3× window depth for
+// the same legitimate-user friction (one fat-finger password recovers
+// in ~3 minutes — well under the window).
+const THROTTLE_WINDOW_SECS: i64 = 15 * 60;
 const THROTTLE_LIMIT: u32 = 5;
 
 fn caller_ip(headers: &HeaderMap) -> String {
@@ -331,6 +337,22 @@ pub async fn post_login_2fa(
     headers_in: HeaderMap,
     Form(form): Form<Login2faForm>,
 ) -> Result<Response, AppError> {
+    // Throttle the second factor too — without this, an attacker who
+    // captured the password could brute-force the 6-digit TOTP from
+    // the pending-2fa cookie (~1M attempts to enumerate). Reuses the
+    // same per-IP bucket as the password step, so a failed-password
+    // burst also blocks 2FA tries from that IP and vice-versa.
+    let ip = caller_ip(&headers_in);
+    if !check_throttle(&ip) {
+        tracing::warn!(ip = %ip, "2fa verify throttled");
+        return Ok((
+            StatusCode::TOO_MANY_REQUESTS,
+            [("retry-after", "900")],
+            "Too many failed login attempts. Wait 15 minutes and try again.",
+        )
+            .into_response());
+    }
+
     // Recover the pending-2fa cookie.
     let cookie_name = format!("{}_pending2fa", state.cookie_name());
     let token = headers_in
@@ -398,6 +420,11 @@ pub async fn post_login_2fa(
             Ok(combined)
         }
         hyperion_rpc::codec::Response::WebVerify2fa(hyperion_types::WebVerify2faResult::Invalid) => {
+            // Record the failure in the IP bucket so a wrong-code burst
+            // contributes to the same throttle as wrong-password tries.
+            // Without this, an attacker could try unlimited 6-digit
+            // codes per session-cookie issuance.
+            record_failure(&ip);
             Ok(Redirect::to("/login/2fa?error=invalid").into_response())
         }
         hyperion_rpc::codec::Response::Error(e) => Err(AppError::Rpc(e.to_string())),
