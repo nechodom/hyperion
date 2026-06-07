@@ -6052,6 +6052,27 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(())
     }
 
+    /// Walk the full audit log and verify each row's row_hash
+    /// against `BLAKE3(prev_hash || canonical fields)`. Returns
+    /// `(ok, rows_checked, message)` — the message names the first
+    /// bad row when the chain is broken, so an operator can grep
+    /// /var/log + dmesg + the surrounding rows for clues. The
+    /// log is bounded in practice (the GC ticker prunes >90 day
+    /// entries) so this is cheap even on a busy node.
+    pub async fn audit_verify_chain(&self) -> Result<(bool, i64, String), RpcError> {
+        // Count first so we can report it even on failure (operator
+        // wants "1234 rows, broke at row 712" — a bare "bad chain"
+        // is unhelpful).
+        let rows_checked: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_log")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("audit count: {e}")))?;
+        match hyperion_state::audit::verify_chain(&self.pool).await {
+            Ok(()) => Ok((true, rows_checked, String::new())),
+            Err(e) => Ok((false, rows_checked, e.to_string())),
+        }
+    }
+
     pub async fn audit_list(
         &self,
         limit: i64,

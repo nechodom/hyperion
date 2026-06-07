@@ -67,6 +67,27 @@
   </form>
 </div>
 
+{# Tamper-evident verify button — walks every row in audit_log and
+   re-computes row_hash from prev_hash + canonical fields. Lands a
+   green/red pill into #audit-chain-result. The check is read-only,
+   no CSRF needed (admin role gate is enough). #}
+<div class="card" style="margin-bottom:1rem;padding:0.7rem 1rem;display:flex;gap:0.6rem;align-items:center;flex-wrap:wrap">
+  <button class="btn small"
+          type="button"
+          hx-post="/audit/verify"
+          hx-target="#audit-chain-result"
+          hx-swap="innerHTML"
+          hx-indicator="#audit-chain-spinner">
+    <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+    Verify chain
+  </button>
+  <span class="text-soft small">
+    Walks every row + recomputes BLAKE3 — flags tampering or DB corruption.
+  </span>
+  <span id="audit-chain-spinner" class="htmx-indicator text-soft small">checking…</span>
+  <span id="audit-chain-result" style="margin-left:auto"></span>
+</div>
+
 <div class="card no-pad-table">
   {% if rows.is_empty() %}
     <div class="empty">

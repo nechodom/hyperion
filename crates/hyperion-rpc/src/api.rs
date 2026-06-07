@@ -110,6 +110,12 @@ pub trait AgentApi: Send + Sync + 'static {
 
     async fn audit_list(&self, limit: i64) -> Result<Vec<AuditEntryWire>, RpcError>;
 
+    /// Walk the audit chain and verify each row_hash. Returns
+    /// (ok, rows_checked, message) — message is empty on success,
+    /// "row {id} mismatch" or "row {id} prev_hash mismatch" on
+    /// failure.
+    async fn audit_verify_chain(&self) -> Result<(bool, i64, String), RpcError>;
+
     async fn hosting_set_expiry(
         &self,
         sel: HostingSelector,

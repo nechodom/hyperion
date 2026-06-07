@@ -226,6 +226,14 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::AuditList(v),
             Err(e) => Response::Error(e),
         },
+        Request::AuditVerifyChain => match api.audit_verify_chain().await {
+            Ok((ok, rows_checked, message)) => Response::AuditVerifyChain {
+                ok,
+                rows_checked,
+                message,
+            },
+            Err(e) => Response::Error(e),
+        },
         Request::CertIssue { domain } => match api.cert_issue(domain).await {
             Ok(v) => Response::CertIssue(v),
             Err(e) => Response::Error(e),
@@ -994,6 +1002,9 @@ mod tests {
             _: i64,
         ) -> Result<Vec<HostingUsageBucket>, RpcError> {
             Ok(vec![])
+        }
+        async fn audit_verify_chain(&self) -> Result<(bool, i64, String), RpcError> {
+            Ok((true, 0, String::new()))
         }
         async fn audit_list(&self, _: i64) -> Result<Vec<AuditEntryWire>, RpcError> {
             Ok(vec![])

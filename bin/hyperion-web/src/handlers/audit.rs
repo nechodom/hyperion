@@ -159,6 +159,49 @@ pub async fn get_audit(
     Ok(Html(tpl.render()?).into_response())
 }
 
+/// HTMX-target endpoint behind the "Verify chain" button on the
+/// audit page. Walks the entire log, returns an HTML pill that
+/// drops into a sibling target div. Read-only — admin-only at
+/// the role level, but causes no side effects so we don't gate
+/// it behind CSRF either.
+pub async fn post_verify_chain(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+) -> Result<Response, AppError> {
+    if !ctx.is_admin_or_higher() {
+        return Ok(Html(
+            "<div class=\"pill err\">admin role required</div>".to_string(),
+        )
+        .into_response());
+    }
+    let resp = hyperion_rpc_client::call(&state.agent_socket, Request::AuditVerifyChain).await?;
+    let html = match resp {
+        RpcResponse::AuditVerifyChain {
+            ok: true,
+            rows_checked,
+            ..
+        } => format!(
+            "<div class=\"pill ok\">✓ Chain verified · {rows_checked} row{}</div>",
+            if rows_checked == 1 { "" } else { "s" }
+        ),
+        RpcResponse::AuditVerifyChain {
+            ok: false,
+            rows_checked,
+            message,
+        } => format!(
+            "<div class=\"pill err\" title=\"{}\">✗ Chain BROKEN at row · {rows_checked} row{} checked</div>",
+            askama_escape::escape(&message, askama_escape::Html),
+            if rows_checked == 1 { "" } else { "s" }
+        ),
+        RpcResponse::Error(e) => format!(
+            "<div class=\"pill err\">verify failed: {}</div>",
+            askama_escape::escape(&e.to_string(), askama_escape::Html)
+        ),
+        _ => "<div class=\"pill err\">unexpected response</div>".into(),
+    };
+    Ok(Html(html).into_response())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

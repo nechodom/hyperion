@@ -603,6 +603,19 @@ fn print_pretty(resp: &Response) {
                 );
             }
         }
+        Response::AuditVerifyChain {
+            ok,
+            rows_checked,
+            message,
+        } => {
+            if *ok {
+                println!("audit chain OK ({rows_checked} rows verified)");
+            } else {
+                println!(
+                    "audit chain BROKEN — {rows_checked} rows checked, error: {message}"
+                );
+            }
+        }
         Response::AuditList(rows) => {
             println!(
                 "{:>5} {:<19} {:<14} {:<22} {:<10}",

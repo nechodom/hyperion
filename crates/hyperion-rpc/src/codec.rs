@@ -420,6 +420,13 @@ pub enum Request {
         #[serde(default = "default_job_limit")]
         limit: i64,
     },
+    /// Walk the entire audit_log hash chain and verify each row's
+    /// `row_hash = BLAKE3(prev_hash || canonical_fields)`. Returns
+    /// `Response::AuditVerifyChain { ok, broken_at_id, message }`
+    /// where `ok=false` flags the first row that doesn't match —
+    /// strong signal of either DB corruption or someone editing
+    /// audit_log directly.
+    AuditVerifyChain,
     /// Open a new background job row, returning a freshly-minted
     /// `job_id`. Called by the panel (or hctl) when it kicks off a
     /// tokio::spawn for migration / install / backup / clone / cert
@@ -882,6 +889,14 @@ pub enum Response {
     /// be made RW — operator needs a different base image).
     RemountUsrRw { success: bool, message: String },
     FsDiagnoseAndFix(hyperion_types::FsDiagnostics),
+    /// Audit chain verification result. `ok=true` means every
+    /// row's `row_hash` reproduces from `prev_hash + canonical
+    /// fields`; `message` is the empty string on success.
+    AuditVerifyChain {
+        ok: bool,
+        rows_checked: i64,
+        message: String,
+    },
     /// Look-up response for `JobGet`. `None` = job id unknown.
     JobGet(Option<hyperion_types::JobView>),
     /// Newest-first list of jobs. Empty when no rows match.

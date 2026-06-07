@@ -226,6 +226,10 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.audit_list(limit).await
     }
 
+    async fn audit_verify_chain(&self) -> Result<(bool, i64, String), RpcError> {
+        self.svc.audit_verify_chain().await
+    }
+
     async fn hosting_set_expiry(
         &self,
         sel: HostingSelector,
