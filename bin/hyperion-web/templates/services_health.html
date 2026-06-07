@@ -273,6 +273,30 @@
     <span id="fs-diagnose-spinner" class="htmx-indicator text-soft small">running…</span>
   </div>
   <div id="fs-diagnose-result"></div>
+
+  {# Quick-fire alternative for operators who know the install
+     just needs `mount -o remount,rw /` on the current node — skips
+     the diagnose flow entirely. Same RPC the auto-fix's first step
+     runs, just without the gather phase or step-by-step report.
+     Useful when an Install above clearly bailed with ROFS and
+     you'd rather not read three paragraphs of report. #}
+  <details style="margin-top:0.8rem">
+    <summary class="text-soft small" style="cursor:pointer">
+      Just remount / read-write (skip diagnose)
+    </summary>
+    <form method="post" action="/services/remount-usr-rw"
+          style="display:inline-flex;gap:0.5rem;align-items:center;margin-top:0.5rem"
+          data-confirm-title="Remount / read-write on {{ current_label }}"
+          data-confirm-body="Runs `mount -o remount,rw /` on {{ current_label }} with no diagnostic. On snap-managed / ostree-style images this will FAIL (immutable by design) and you'll need the full diagnose. On normal Debian / Ubuntu images this is safe and routine."
+          data-confirm-confirm-label="Remount rw"
+          data-confirm-variant="primary">
+      <input type="hidden" name="node" value="{{ current_node }}">
+      <button class="btn small" type="submit">
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><polyline points="21 3 21 9 15 9"/></svg>
+        Remount / rw on {{ current_label }}
+      </button>
+    </form>
+  </details>
 </div>
 {% endif %}
 

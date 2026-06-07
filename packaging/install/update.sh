@@ -152,7 +152,26 @@ if (( DO_BUILD && PREFER_PREBUILT )); then
   done
   if (( fetch_ok )); then
     # Verify SHA256 of each downloaded file matches SHA256SUMS.
-    if ( cd "$TMP" && sha256sum --quiet --check SHA256SUMS 2>/dev/null ); then
+    #
+    # On worker nodes HAVE_WEB=0 so hyperion-web was NOT downloaded.
+    # Running `sha256sum --check SHA256SUMS` against the upstream
+    # list would then print
+    #     hyperion-web: FAILED open or read
+    # which reads exactly like a broken install even though it's
+    # the intended "no web binary on a worker" path. Filter the
+    # SHA256SUMS list down to just the files we actually fetched
+    # before handing it to sha256sum.
+    EXPECTED=(hyperion-agent hctl)
+    (( HAVE_WEB )) && EXPECTED+=(hyperion-web)
+    if (
+        cd "$TMP"
+        for f in "${EXPECTED[@]}"; do
+          grep -E "[[:space:]]${f}\$" SHA256SUMS || {
+            echo "  expected file '$f' missing from SHA256SUMS" >&2
+            exit 1
+          }
+        done | sha256sum --quiet --check - 2>/dev/null
+    ); then
       log "Pre-built binaries verified by SHA256SUMS — installing"
       install -m 0755 "$TMP/hyperion-agent" /usr/sbin/hyperion-agent
       install -m 0755 "$TMP/hctl"           /usr/bin/hctl

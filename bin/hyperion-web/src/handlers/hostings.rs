@@ -4688,26 +4688,6 @@ async fn run_migration_job(
     reporter.finish(true, None).await;
 }
 
-/// Write an audit-log entry on the master for the migration move.
-/// Best-effort — failure here doesn't block the operator.
-async fn audit_migration_move(
-    state: &SharedState,
-    _ctx: &AuthCtx,
-    selector: &str,
-    target_node: &str,
-    new_id: &hyperion_types::HostingId,
-) {
-    // The audit RPC is server-side under hosting actions; reusing
-    // it here would require a dedicated RPC. For now just log.
-    tracing::info!(
-        selector = selector,
-        target_node = target_node,
-        new_hosting_id = new_id.as_str(),
-        operator = %_ctx.username,
-        "hosting migrated via one-click UI"
-    );
-    let _ = state;
-}
 
 pub async fn post_migration_export(
     State(state): State<SharedState>,
