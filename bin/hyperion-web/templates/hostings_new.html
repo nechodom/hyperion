@@ -275,27 +275,38 @@
              value="{{ aliases_in|e }}" placeholder="www.example.com, m.example.com">
     </div>
 
-    {# DNS preflight — operator clicks before submitting to avoid a
-       failed provisioning + cert flow when DNS doesn't point here. #}
+    {# DNS preflight — visible by default, auto-fires when the
+       domain field loses focus. Operators kept skipping the old
+       collapsed <details> version and then chased a failed cert
+       flow on a domain that pointed elsewhere. Warn-with-override:
+       a mismatch shows a yellow box but does NOT block the form
+       (operators legitimately create hostings before DNS swap). #}
     <div class="field" style="margin-top:0.5rem">
-      <details>
-        <summary style="cursor:pointer;font-weight:600;font-size:0.85rem;color:var(--text-dim)">
-          DNS preflight (optional, recommended before issuing HTTPS later)
-        </summary>
-        <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;margin-top:0.5rem">
-          <button class="btn small"
-                  type="button"
-                  hx-post="/hostings/dns-check-domain"
-                  hx-target="#dns-create-result"
-                  hx-swap="innerHTML"
-                  hx-include="closest form > input[name='domain']"
-                  hx-vals='{"_csrf": "{{ csrf_token }}"}'>
-            Check DNS for primary domain
-          </button>
-          <span class="text-soft small">Verifies the primary domain resolves to this node's public IP.</span>
-        </div>
-        <div id="dns-create-result"></div>
-      </details>
+      <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;margin-bottom:0.4rem">
+        <span style="font-weight:600;font-size:0.85rem">DNS preflight</span>
+        <button class="btn small ghost"
+                type="button"
+                hx-post="/hostings/dns-check-domain"
+                hx-target="#dns-create-result"
+                hx-swap="innerHTML"
+                hx-include="closest form > input[name='domain']"
+                hx-vals='{"_csrf": "{{ csrf_token }}"}'>
+          <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          Check now
+        </button>
+        <span class="text-soft small">Verifies the primary domain resolves to this node's public IP.</span>
+      </div>
+      <div id="dns-create-result"></div>
+      {# Auto-check trigger: HTMX listens for a custom `dnsblur` event
+         dispatched by base.html's domain-field handler. Avoids the
+         operator forgetting to click before submit. #}
+      <span hidden
+            hx-post="/hostings/dns-check-domain"
+            hx-trigger="dnsblur from:body"
+            hx-target="#dns-create-result"
+            hx-swap="innerHTML"
+            hx-include="closest form > input[name='domain']"
+            hx-vals='{"_csrf": "{{ csrf_token }}"}'></span>
     </div>
 
     <div class="card-section">
@@ -892,4 +903,23 @@
   <p class="muted" style="font-size:0.85rem;margin-top:1rem;margin-bottom:0">Any step that fails triggers LIFO rollback — the system never half-creates a hosting.</p>
 </div>
 </div>
+
+{# Auto-fire DNS preflight when the operator leaves the domain field
+   with a non-empty value. Dispatches a `dnsblur` event on the body
+   that the hidden HTMX listener picks up. Debounced so a rapid
+   re-focus doesn't fire twice. No external deps, CSP-safe. #}
+<script>
+(function () {
+  'use strict';
+  const dom = document.querySelector('input[name="domain"]');
+  if (!dom) return;
+  let last = '';
+  dom.addEventListener('blur', function () {
+    const v = (dom.value || '').trim();
+    if (!v || v === last) return;
+    last = v;
+    document.body.dispatchEvent(new CustomEvent('dnsblur'));
+  });
+})();
+</script>
 {% endblock %}

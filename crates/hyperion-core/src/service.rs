@@ -1220,8 +1220,22 @@ async fn curl_to_file(url: &str, dest: &std::path::Path) -> Result<(), RpcError>
     //   set up a proxy.
     // --proto =https,http: refuse file:// / gopher:// / dict://
     //   even if the URL parser somehow accepts them.
-    let mut args: Vec<String> = vec![
+    // -k upfront, not inserted later. The previous version called
+    // args.insert(2, "-k") AFTER building the vec — index 2 was the
+    // "1800" slot, so the insertion left curl seeing `--max-time -k`
+    // and the import failed with
+    //   "curl: option --max-time: expected a proper numerical parameter"
+    // every single migration. Spot the bug by listing the indices:
+    // vec is [-fsS, --max-time, 1800, --max-filesize, …], so
+    // insert(2, "-k") yields [-fsS, --max-time, -k, 1800, …].
+    //
+    // -k is required because the migration source serves on a
+    // self-signed cert (same chicken-egg as enrollment — no DNS at
+    // install). Trust on first use: the bundle's signed token +
+    // BLAKE3 digest are the integrity guarantees, NOT TLS.
+    let args: Vec<String> = vec![
         "-fsS".into(),
+        "-k".into(),
         "--max-time".into(), "1800".into(),
         "--max-filesize".into(), MIGRATION_MAX_DOWNLOAD_BYTES.to_string(),
         "--max-redirs".into(), "0".into(),
@@ -1229,11 +1243,6 @@ async fn curl_to_file(url: &str, dest: &std::path::Path) -> Result<(), RpcError>
         "-o".into(), dest.display().to_string(),
         url.to_string(),
     ];
-    // Migration source uses self-signed cert by default (same chicken-
-    // egg as enrollment — no DNS at install). Trust on first use:
-    // the bundle's signed token + BLAKE3 digest are the integrity
-    // guarantees, NOT TLS.
-    args.insert(2, "-k".into());
     let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let out = tokio::process::Command::new("/usr/bin/curl")
         .args(&arg_refs)
@@ -5788,6 +5797,44 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
         }
 
+        // Disk usage — probe the filesystems that matter to the panel
+        // (rootfs + /var where hyperion + sites + dumps + backups
+        // live) and emit warn at >=80% / error at >=95%. Without
+        // this, the operator only learns rootfs is full when an
+        // install / WP plugin upload / cert renewal fails with
+        // ENOSPC deep in a stack trace.
+        if let Ok(usages) = probe_disk_usages().await {
+            for u in &usages {
+                if u.used_pct >= 95 {
+                    out.push(DashboardAlert {
+                        kind: "disk_critical".into(),
+                        severity: "error".into(),
+                        message: format!(
+                            "Disk {} is {}% full ({} free of {}) — installs / cert renewals / backups WILL fail. Free space immediately.",
+                            u.mount,
+                            u.used_pct,
+                            human_bytes(u.total_bytes - u.used_bytes),
+                            human_bytes(u.total_bytes)
+                        ),
+                        hosting: None,
+                    });
+                } else if u.used_pct >= 80 {
+                    out.push(DashboardAlert {
+                        kind: "disk_warn".into(),
+                        severity: "warn".into(),
+                        message: format!(
+                            "Disk {} is {}% full ({} free of {}) — clean dumps/logs before it bites.",
+                            u.mount,
+                            u.used_pct,
+                            human_bytes(u.total_bytes - u.used_bytes),
+                            human_bytes(u.total_bytes)
+                        ),
+                        hosting: None,
+                    });
+                }
+            }
+        }
+
         // Severity sort: error first, then warn, then info.
         out.sort_by_key(|a| match a.severity.as_str() {
             "error" => 0,
@@ -6351,16 +6398,52 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .await;
 
             // Surface a bell-icon notification on failure so admins
-            // see it in the UI without grep-the-audit-log.
-            if let CertRenewOutcome::Failed { error } = &outcome {
-                self.notify_admins(
-                    "error",
-                    "Cert renewal failed",
-                    &format!("{domain_str} — {error}"),
-                    &format!("/hostings/{}", domain_str),
-                    "cert.renew_failed",
-                )
-                .await;
+            // see it in the UI without grep-the-audit-log. The kind
+            // string carries the domain so the bell can show one
+            // distinct row per failing cert (instead of all failures
+            // collapsing to a single "cert.renew_failed" line). The
+            // tick runs daily → at most one notification per cert
+            // per day; admins who miss day 30 still see days 29..0.
+            //
+            // ALSO: if the cert is approaching the 14-day red band
+            // and renewal failed (or wasn't due yet because of
+            // staging), fire a separate "expiring soon" notification
+            // so the operator can intervene manually before the cert
+            // goes red on the dashboard. Same per-cert kind for the
+            // bell to render distinct rows.
+            let days_left = (cert.not_after - now) / 86400;
+            match &outcome {
+                CertRenewOutcome::Failed { error } => {
+                    self.notify_admins(
+                        if days_left < 7 { "error" } else { "warn" },
+                        "Cert renewal failed",
+                        &format!(
+                            "{domain_str} — {error} ({} day(s) until expiry)",
+                            days_left
+                        ),
+                        &format!("/hostings/{}", domain_str),
+                        &format!("cert.renew_failed:{domain_str}"),
+                    )
+                    .await;
+                }
+                CertRenewOutcome::Renewed { .. } if days_left < 14 => {
+                    // Edge case: renewal succeeded but the cert was
+                    // already inside the red band. Notify so the
+                    // operator knows their automation caught it
+                    // before expiry (informational, not a failure).
+                    self.notify_admins(
+                        "info",
+                        "Cert renewed close to expiry",
+                        &format!(
+                            "{domain_str} — was {} day(s) from expiry, now renewed.",
+                            days_left
+                        ),
+                        &format!("/hostings/{}", domain_str),
+                        &format!("cert.renewed_late:{domain_str}"),
+                    )
+                    .await;
+                }
+                _ => {}
             }
 
             out.push(CertRenewResult {
@@ -11361,6 +11444,84 @@ trait RpcErrorExt {
     fn Internal_with(msg: String) -> Self;
 }
 
+/// Snapshot of one filesystem's usage, parsed from `df -P -B1`.
+/// `used_pct` is rounded down so a 79.999% filesystem is reported
+/// as 79, not 80 — operators trust round trips of this number.
+#[derive(Debug, Clone)]
+struct DiskUsage {
+    mount: String,
+    total_bytes: i64,
+    used_bytes: i64,
+    used_pct: i64,
+}
+
+/// Probe filesystem usage via `df -P -B1` on the mounts the panel
+/// cares about. POSIX mode (`-P`) keeps the columns stable across
+/// distros; `-B1` outputs bytes (not KiB) so the math is exact.
+///
+/// Returns empty on any parsing failure — alerts are best-effort
+/// and we'd rather under-warn than crash the dashboard.
+async fn probe_disk_usages() -> std::io::Result<Vec<DiskUsage>> {
+    // Hand-picked list: the mountpoints any practical Hyperion
+    // node could fill up. `/var` is where hosting trees + DB dumps
+    // + nginx logs + apt cache + hyperion's own data dir
+    // (/var/lib/hyperion) all live; `/` covers everything else
+    // including immutable images that don't carve /var separately.
+    // df ignores a missing mount with exit 1 and an error on
+    // stderr; we just drop those rows.
+    let out = tokio::process::Command::new("df")
+        .args(["-P", "-B1", "/", "/var", "/home", "/tmp"])
+        .output()
+        .await?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut seen_mounts = std::collections::HashSet::new();
+    let mut rows = Vec::new();
+    // First line is the header — skip it.
+    for line in stdout.lines().skip(1) {
+        // `df -P -B1` columns: Filesystem 1-blocks Used Available Capacity Mounted-on
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        if cols.len() < 6 {
+            continue;
+        }
+        let mount = cols[cols.len() - 1].to_string();
+        // The same physical device often appears multiple times in
+        // our requested list (`/` and `/home` on a single-partition
+        // VPS). Dedup by mount so we don't double-alert.
+        if !seen_mounts.insert(mount.clone()) {
+            continue;
+        }
+        let total: i64 = cols[1].parse().unwrap_or(0);
+        let used: i64 = cols[2].parse().unwrap_or(0);
+        if total <= 0 {
+            continue;
+        }
+        // `df` rounds Capacity to whole percent; redo it ourselves
+        // from bytes for accuracy.
+        let pct = (used.saturating_mul(100) / total).clamp(0, 100);
+        rows.push(DiskUsage {
+            mount,
+            total_bytes: total,
+            used_bytes: used,
+            used_pct: pct,
+        });
+    }
+    Ok(rows)
+}
+
+/// Format `bytes` as a short human string ("12.3 GiB"). Used by
+/// the dashboard banner — the operator wants "8 GiB free" not
+/// "8589934592 bytes". Caps at TiB; anything bigger would be a
+/// genuine surprise on a hosting node.
+fn human_bytes(bytes: i64) -> String {
+    let units = [("TiB", 1i64 << 40), ("GiB", 1 << 30), ("MiB", 1 << 20), ("KiB", 1 << 10)];
+    for (label, scale) in units.iter() {
+        if bytes >= *scale {
+            return format!("{:.1} {}", bytes as f64 / *scale as f64, label);
+        }
+    }
+    format!("{bytes} B")
+}
+
 /// Convert the SQLite row representation into the wire-format `JobView`
 /// the UI + hctl consume. Pure mapping, no I/O.
 fn job_row_to_view(r: hyperion_state::jobs::JobRow) -> hyperion_types::JobView {
@@ -13087,5 +13248,20 @@ mod tests {
         // operator to remount something we don't understand.
         assert_eq!(classify_image_kind("zfs", ""), "unknown");
         assert_eq!(classify_image_kind("", ""), "unknown");
+    }
+
+    /// human_bytes feeds the disk-warning banner — round-trip
+    /// readability matters because operators read these numbers
+    /// off a dashboard and act on them. Boundary at the 1024
+    /// flip from KiB→MiB→GiB→TiB.
+    #[test]
+    fn human_bytes_picks_right_unit() {
+        assert_eq!(human_bytes(0), "0 B");
+        assert_eq!(human_bytes(512), "512 B");
+        assert_eq!(human_bytes(1024), "1.0 KiB");
+        assert_eq!(human_bytes(1536), "1.5 KiB");
+        assert_eq!(human_bytes(1024 * 1024), "1.0 MiB");
+        assert_eq!(human_bytes(2_500_000_000), "2.3 GiB");
+        assert_eq!(human_bytes(2 * 1024i64.pow(4)), "2.0 TiB");
     }
 }
