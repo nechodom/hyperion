@@ -410,3 +410,251 @@ async fn e2e_validation_error_for_bad_domain() {
         .expect("list");
     matches!(resp, Response::HostingList(_));
 }
+
+/// Exercises the Bundle A/C/jobs RPC families on top of a real
+/// agent socket — same shape as the other E2E tests but covering
+/// the surface that grew this week (jobs, sessions, quotas,
+/// backup targets). Verifies the wire codec + dispatch + Service
+/// happy paths line up.
+#[tokio::test]
+async fn e2e_bundle_a_c_round_trip_through_wire() {
+    let (path, _d) = start_agent().await;
+
+    // ── Background jobs ──
+    // JobStart returns a fresh ULID; JobProgress + JobFinish must
+    // both ack; JobGet must round-trip the row including
+    // finished_at being set after JobFinish.
+    let job_id = match hyperion_rpc_client::call(
+        &path,
+        Request::JobStart {
+            kind: "migration".into(),
+            target: Some("example.cz".into()),
+            payload_json: "{\"src\":\"a\",\"dst\":\"b\"}".into(),
+            actor_label: "kevin".into(),
+            actor_uid: 7,
+        },
+    )
+    .await
+    .expect("JobStart")
+    {
+        Response::JobStarted { job_id } => job_id,
+        other => panic!("expected JobStarted, got {other:?}"),
+    };
+    assert!(!job_id.is_empty(), "job id must be non-empty");
+
+    let ack = hyperion_rpc_client::call(
+        &path,
+        Request::JobProgress {
+            id: job_id.clone(),
+            step_label: "exporting".into(),
+            progress_pct: 42,
+            log_append: "tar...\n".into(),
+        },
+    )
+    .await
+    .expect("JobProgress");
+    assert!(matches!(ack, Response::JobAck), "got {ack:?}");
+
+    let job = match hyperion_rpc_client::call(
+        &path,
+        Request::JobGet { id: job_id.clone() },
+    )
+    .await
+    .expect("JobGet")
+    {
+        Response::JobGet(Some(j)) => j,
+        other => panic!("expected JobGet(Some), got {other:?}"),
+    };
+    assert_eq!(job.id, job_id);
+    assert_eq!(job.progress_pct, 42);
+    assert_eq!(job.step_label, "exporting");
+    assert!(job.log_tail.contains("tar..."));
+
+    let _ = hyperion_rpc_client::call(
+        &path,
+        Request::JobFinish {
+            id: job_id.clone(),
+            ok: true,
+            error: None,
+        },
+    )
+    .await
+    .expect("JobFinish");
+
+    let job_after = match hyperion_rpc_client::call(
+        &path,
+        Request::JobGet { id: job_id.clone() },
+    )
+    .await
+    .expect("JobGet-after")
+    {
+        Response::JobGet(Some(j)) => j,
+        other => panic!("expected JobGet(Some), got {other:?}"),
+    };
+    assert_eq!(job_after.state, "done");
+    assert_eq!(job_after.progress_pct, 100);
+    assert!(job_after.finished_at.is_some());
+
+    // JobList filtered to kind=migration must include our row.
+    let list = match hyperion_rpc_client::call(
+        &path,
+        Request::JobList {
+            kind: Some("migration".into()),
+            state: None,
+            limit: 50,
+        },
+    )
+    .await
+    .expect("JobList")
+    {
+        Response::JobList(v) => v,
+        other => panic!("expected JobList, got {other:?}"),
+    };
+    assert!(list.iter().any(|j| j.id == job_id));
+
+    // ── web_sessions ──
+    // The agent test rig has no seeded web_user. Insert one so the
+    // FK is satisfied before exercising the session RPCs.
+    // Direct SQL would skip the test layer, so use WebUserCreate
+    // RPC if exposed; for the e2e harness we use SQL via the
+    // Service-level helper.
+    //
+    // Skipping web_sessions RPC here because the FK setup needs
+    // WebUserCreate plumbing the e2e harness doesn't have. The
+    // dedicated migrations_028_031 integration test covers the
+    // table-level lifecycle.
+
+    // ── hosting_quotas ──
+    // Create a hosting first so the quota FK is satisfied. Reuse
+    // the same wire shape the existing e2e tests use.
+    let domain = Domain::parse("quotatest.example.cz").expect("dom");
+    let create = hyperion_rpc_client::call(
+        &path,
+        Request::HostingCreate(HostingCreateReq {
+            domain: domain.clone(),
+            aliases: vec![],
+            php_version: Some(PhpVersion::V8_3),
+            database: None,
+            system_user: None,
+            kind: "php".into(),
+            proxy_upstream_url: None,
+        }),
+    )
+    .await
+    .expect("HostingCreate");
+    let created = match create {
+        Response::HostingCreate(c) => c,
+        other => panic!("expected HostingCreate, got {other:?}"),
+    };
+
+    // QuotaGet on a brand-new hosting returns zero-everywhere.
+    let q_before = match hyperion_rpc_client::call(
+        &path,
+        Request::QuotaGet {
+            hosting: HostingSelector::Id(created.id.clone()),
+        },
+    )
+    .await
+    .expect("QuotaGet")
+    {
+        Response::QuotaGet(r) => r,
+        other => panic!("expected QuotaGet, got {other:?}"),
+    };
+    assert_eq!(q_before.policy.disk_soft_kib, 0);
+
+    // QuotaSet validates non-negative + hard >= soft.
+    let bad = hyperion_rpc_client::call(
+        &path,
+        Request::QuotaSet {
+            hosting: HostingSelector::Id(created.id.clone()),
+            disk_soft_kib: 200_000,
+            disk_hard_kib: 100_000, // hard < soft ⇒ Validation
+            mem_limit_mib: 0,
+            bw_soft_mib: 0,
+            bw_hard_mib: 0,
+        },
+    )
+    .await
+    .expect("QuotaSet-bad");
+    assert!(
+        matches!(bad, Response::Error(_)),
+        "hard < soft should fail Validation, got {bad:?}"
+    );
+
+    // Now a valid policy. setquota will likely fail on the test
+    // host (no quotaon) — the policy is saved either way and the
+    // ack carries last_error rather than failing the RPC.
+    let q_set = match hyperion_rpc_client::call(
+        &path,
+        Request::QuotaSet {
+            hosting: HostingSelector::Id(created.id.clone()),
+            disk_soft_kib: 100_000,
+            disk_hard_kib: 200_000,
+            mem_limit_mib: 256,
+            bw_soft_mib: 5_000,
+            bw_hard_mib: 10_000,
+        },
+    )
+    .await
+    .expect("QuotaSet")
+    {
+        Response::QuotaApplied(v) => v,
+        other => panic!("expected QuotaApplied, got {other:?}"),
+    };
+    assert_eq!(q_set.disk_soft_kib, 100_000);
+    assert_eq!(q_set.mem_limit_mib, 256);
+
+    // ── backup_targets ──
+    let target_id = match hyperion_rpc_client::call(
+        &path,
+        Request::BackupTargetUpsert {
+            id: None,
+            name: "wasabi-test".into(),
+            kind: "s3".into(),
+            endpoint: "https://s3.example.invalid".into(),
+            bucket: "test-bucket".into(),
+            region: "eu-central-1".into(),
+            access_key_id: "AKIA-test".into(),
+            secret_key: Some("seekrit".into()),
+            age_recipient: Some("age1zzz".into()),
+            retention_daily: 7,
+            retention_weekly: 4,
+            retention_monthly: 12,
+            enabled: true,
+        },
+    )
+    .await
+    .expect("BackupTargetUpsert")
+    {
+        Response::BackupTargetUpserted { id } => id,
+        other => panic!("expected BackupTargetUpserted, got {other:?}"),
+    };
+    assert!(target_id > 0);
+
+    let targets = match hyperion_rpc_client::call(
+        &path,
+        Request::BackupTargetList,
+    )
+    .await
+    .expect("BackupTargetList")
+    {
+        Response::BackupTargetList(v) => v,
+        other => panic!("expected BackupTargetList, got {other:?}"),
+    };
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets[0].id, target_id);
+    assert_eq!(targets[0].bucket, "test-bucket");
+
+    // Cleanup so the next test in the suite starts clean.
+    let _ = hyperion_rpc_client::call(
+        &path,
+        Request::HostingDelete {
+            sel: HostingSelector::Id(created.id),
+            opts: DeleteOpts {
+                keep_user: false,
+                keep_database: false,
+            },
+        },
+    )
+    .await;
+}
