@@ -95,11 +95,44 @@ pub async fn derive_master_url(
     state: &crate::state::SharedState,
     headers: &axum::http::HeaderMap,
 ) -> String {
-    let scheme = headers
+    // Scheme detection — priority order:
+    //   1. X-Forwarded-Proto when behind a reverse proxy
+    //   2. host header carries an explicit `:443` or `:8443` port
+    //      (Hyperion's own TLS listener) ⇒ force https. Without
+    //      this rule a single-host master without secure_cookies=true
+    //      derives `http://master.tld:8443`, which the target node
+    //      then hits and curl bails with `Received HTTP/0.9 when
+    //      not allowed` (curl's symptom for "TLS handshake bytes
+    //      arrived where HTTP was expected"). The user just hit
+    //      this on stav with `http://178.105.99.35:8443/...`.
+    //   3. listen port from agent.toml (same TLS-port inference
+    //      when the host header is useless and we fell through
+    //      to cached_public_ip).
+    //   4. secure_cookies flag — boolean operator preference.
+    //   5. plain http as last resort.
+    let host_header = headers.get("host").and_then(|v| v.to_str().ok()).map(String::from);
+    let listen_port = port_from_listen(&state.cfg.web.listen);
+
+    let scheme_from_proto = headers
         .get("x-forwarded-proto")
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_lowercase())
-        .filter(|s| s == "http" || s == "https")
+        .filter(|s| s == "http" || s == "https");
+
+    let scheme_from_port = host_header
+        .as_deref()
+        .and_then(port_from_host_header)
+        .or(listen_port)
+        .and_then(|p| match p {
+            443 | 8443 => Some("https".to_string()),
+            // 80 + 8080 + 8000 etc. don't get forced http — operator
+            // might be terminating TLS in front; let the secure_cookies
+            // / x-forwarded-proto cases speak.
+            _ => None,
+        });
+
+    let scheme = scheme_from_proto
+        .or(scheme_from_port)
         .unwrap_or_else(|| {
             if state.cfg.web.secure_cookies {
                 "https".to_string()
@@ -107,22 +140,38 @@ pub async fn derive_master_url(
                 "http".to_string()
             }
         });
-    if let Some(h) = headers.get("host").and_then(|v| v.to_str().ok()) {
+
+    if let Some(h) = host_header.as_deref() {
         if !host_is_useless(h) {
             return format!("{scheme}://{h}");
         }
     }
-    let port = port_from_listen(&state.cfg.web.listen);
     if let Some(pub_ip) = cached_public_ip().await {
-        return match port {
+        return match listen_port {
             Some(p) => format!("{scheme}://{pub_ip}:{p}"),
             None => format!("{scheme}://{pub_ip}"),
         };
     }
     format!(
         "{scheme}://CHANGE-ME-set-master-url-below:{}",
-        port.unwrap_or(8443)
+        listen_port.unwrap_or(8443)
     )
+}
+
+/// Extract the explicit port from a Host header. Returns None
+/// when the header has no port (browser elided the default 80/443).
+/// Handles bracketed IPv6 (`[::1]:8443`) + bare hostnames + IPv4.
+fn port_from_host_header(host: &str) -> Option<u16> {
+    if host.starts_with('[') {
+        // [::1]:8443 → after ']:' is "8443"
+        let after = host.split("]:").nth(1)?;
+        return after.parse().ok();
+    }
+    // Bare IPv6 (no brackets, multiple colons) ⇒ no explicit port.
+    if host.matches(':').count() > 1 {
+        return None;
+    }
+    host.split(':').nth(1).and_then(|s| s.parse().ok())
 }
 
 /// True iff `host` is a value that no remote node can reach us at:
@@ -235,5 +284,33 @@ mod tests {
     fn port_from_listen_handles_ipv6_brackets() {
         assert_eq!(port_from_listen("[::]:8443"), Some(8443));
         assert_eq!(port_from_listen("[::1]:443"), Some(443));
+    }
+
+    /// The Host header carries the URL the operator's browser
+    /// hit. derive_master_url uses the port there to force https
+    /// when the agent's TLS listener (8443) or standard TLS (443)
+    /// is in play — otherwise a master without secure_cookies=true
+    /// builds `http://master:8443/…` which the worker hits and
+    /// curl bails on the TLS handshake (Received HTTP/0.9 when
+    /// not allowed). User hit this on stav after the --max-time
+    /// fix landed.
+    #[test]
+    fn port_from_host_header_extracts_explicit_port() {
+        // IPv4 + port.
+        assert_eq!(port_from_host_header("178.105.99.35:8443"), Some(8443));
+        assert_eq!(port_from_host_header("master.tld:443"), Some(443));
+        // No port (browser elided default 80/443).
+        assert_eq!(port_from_host_header("master.tld"), None);
+        assert_eq!(port_from_host_header("178.105.99.35"), None);
+        // IPv6 bracketed.
+        assert_eq!(port_from_host_header("[::1]:8443"), Some(8443));
+        assert_eq!(port_from_host_header("[2a00:1450:4001:830::200e]:443"), Some(443));
+        // IPv6 bare (no brackets) ⇒ no explicit port — multiple
+        // colons confuse a naive split, so we MUST not return one
+        // of the address segments as the port.
+        assert_eq!(port_from_host_header("::1"), None);
+        assert_eq!(port_from_host_header("2a00:1450:4001:830::200e"), None);
+        // Garbage after the colon is not a port.
+        assert_eq!(port_from_host_header("master.tld:not-a-port"), None);
     }
 }
