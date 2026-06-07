@@ -116,6 +116,25 @@ pub trait AgentApi: Send + Sync + 'static {
     /// failure.
     async fn audit_verify_chain(&self) -> Result<(bool, i64, String), RpcError>;
 
+    /// Read current per-hosting quota policy + usage.
+    async fn quota_get(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::HostingQuotaReport, RpcError>;
+
+    /// Persist a new policy + push it into the kernel via setquota.
+    /// Returns the saved row (with applied_at / last_error reflecting
+    /// the kernel call's outcome).
+    async fn quota_set(
+        &self,
+        sel: HostingSelector,
+        disk_soft_kib: i64,
+        disk_hard_kib: i64,
+        mem_limit_mib: i64,
+        bw_soft_mib: i64,
+        bw_hard_mib: i64,
+    ) -> Result<hyperion_types::HostingQuotaView, RpcError>;
+
     /// Track a freshly-minted Session in the `web_sessions` ledger.
     async fn web_session_insert(
         &self,

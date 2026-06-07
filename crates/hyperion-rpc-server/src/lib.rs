@@ -249,6 +249,31 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::QuotaGet { hosting } => match api.quota_get(hosting).await {
+            Ok(v) => Response::QuotaGet(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::QuotaSet {
+            hosting,
+            disk_soft_kib,
+            disk_hard_kib,
+            mem_limit_mib,
+            bw_soft_mib,
+            bw_hard_mib,
+        } => match api
+            .quota_set(
+                hosting,
+                disk_soft_kib,
+                disk_hard_kib,
+                mem_limit_mib,
+                bw_soft_mib,
+                bw_hard_mib,
+            )
+            .await
+        {
+            Ok(v) => Response::QuotaApplied(v),
+            Err(e) => Response::Error(e),
+        },
         Request::AuditVerifyChain => match api.audit_verify_chain().await {
             Ok((ok, rows_checked, message)) => Response::AuditVerifyChain {
                 ok,
@@ -1036,6 +1061,23 @@ mod tests {
         }
         async fn audit_verify_chain(&self) -> Result<(bool, i64, String), RpcError> {
             Ok((true, 0, String::new()))
+        }
+        async fn quota_get(
+            &self,
+            _: hyperion_rpc::HostingSelector,
+        ) -> Result<hyperion_types::HostingQuotaReport, RpcError> {
+            Ok(hyperion_types::HostingQuotaReport::default())
+        }
+        async fn quota_set(
+            &self,
+            _: hyperion_rpc::HostingSelector,
+            _: i64,
+            _: i64,
+            _: i64,
+            _: i64,
+            _: i64,
+        ) -> Result<hyperion_types::HostingQuotaView, RpcError> {
+            Ok(hyperion_types::HostingQuotaView::default())
         }
         async fn web_session_insert(
             &self,

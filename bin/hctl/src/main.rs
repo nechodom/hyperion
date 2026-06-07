@@ -1285,6 +1285,42 @@ fn print_pretty(resp: &Response) {
         }
         Response::JobStarted { job_id } => println!("job started: {job_id}"),
         Response::JobAck => println!("ack"),
+        Response::QuotaGet(r) => {
+            println!("quota:");
+            println!("  current disk         : {} KiB", r.current_disk_kib);
+            println!("  kernel quotas enabled: {}", r.quotas_enabled_on_fs);
+            println!("  policy:");
+            println!("    disk_soft_kib  : {}", r.policy.disk_soft_kib);
+            println!("    disk_hard_kib  : {}", r.policy.disk_hard_kib);
+            println!("    mem_limit_mib  : {}", r.policy.mem_limit_mib);
+            println!("    bw_soft_mib    : {}", r.policy.bw_soft_mib);
+            println!("    bw_hard_mib    : {}", r.policy.bw_hard_mib);
+            if let Some(at) = r.policy.applied_at {
+                println!("    applied_at     : {at}");
+            }
+            if let Some(err) = &r.policy.last_error {
+                println!("    last_error     : {err}");
+            }
+            if !r.setup_hint.is_empty() {
+                println!("  setup hint:");
+                for line in r.setup_hint.lines() {
+                    println!("    {line}");
+                }
+            }
+        }
+        Response::QuotaApplied(v) => {
+            println!("quota saved:");
+            println!(
+                "  disk soft={} KiB  hard={} KiB  mem={} MiB  bw_soft={} MiB  bw_hard={} MiB",
+                v.disk_soft_kib, v.disk_hard_kib, v.mem_limit_mib, v.bw_soft_mib, v.bw_hard_mib
+            );
+            if let Some(at) = v.applied_at {
+                println!("  applied to kernel at: {at}");
+            }
+            if let Some(err) = &v.last_error {
+                println!("  kernel error: {err}");
+            }
+        }
         Response::WebSessionAck => println!("session ack"),
         Response::WebSessionTouch(b) => {
             println!("session {}", if *b { "live" } else { "revoked/unknown" })

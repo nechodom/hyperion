@@ -71,3 +71,38 @@ impl WebSessionView {
         self.revoked_at.is_some()
     }
 }
+
+/// Per-hosting quota policy + last-applied state. Powers the
+/// "Quota" tab on the hosting detail page and the QuotaSet /
+/// QuotaGet RPCs. Zero values mean "no cap".
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct HostingQuotaView {
+    pub hosting_id: String,
+    pub disk_soft_kib: i64,
+    pub disk_hard_kib: i64,
+    pub mem_limit_mib: i64,
+    pub bw_soft_mib: i64,
+    pub bw_hard_mib: i64,
+    /// Set when the kernel last accepted a setquota call.
+    pub applied_at: Option<i64>,
+    /// Set when the last setquota call failed (e.g. quotaon not
+    /// enabled on the filesystem hosting the user's home dir).
+    pub last_error: Option<String>,
+    pub updated_at: i64,
+}
+
+/// Report of current vs policy. `current_usage_kib` reads from
+/// `quota -u <user>` (or `du -sk <home>` as fallback when the
+/// kernel-level quota subsystem isn't enabled).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct HostingQuotaReport {
+    pub policy: HostingQuotaView,
+    pub current_disk_kib: i64,
+    /// True when `quotaon` is enabled on the mount carrying the
+    /// hosting's home dir. False ⇒ `setquota` would no-op; the UI
+    /// shows a setup-guidance banner.
+    pub quotas_enabled_on_fs: bool,
+    /// Human-readable hint when quotas_enabled_on_fs is false.
+    pub setup_hint: String,
+}
+

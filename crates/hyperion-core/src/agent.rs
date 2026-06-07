@@ -230,6 +230,34 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.audit_verify_chain().await
     }
 
+    async fn quota_get(
+        &self,
+        sel: hyperion_rpc::HostingSelector,
+    ) -> Result<hyperion_types::HostingQuotaReport, RpcError> {
+        self.svc.quota_get(sel).await
+    }
+
+    async fn quota_set(
+        &self,
+        sel: hyperion_rpc::HostingSelector,
+        disk_soft_kib: i64,
+        disk_hard_kib: i64,
+        mem_limit_mib: i64,
+        bw_soft_mib: i64,
+        bw_hard_mib: i64,
+    ) -> Result<hyperion_types::HostingQuotaView, RpcError> {
+        self.svc
+            .quota_set(
+                sel,
+                disk_soft_kib,
+                disk_hard_kib,
+                mem_limit_mib,
+                bw_soft_mib,
+                bw_hard_mib,
+            )
+            .await
+    }
+
     async fn web_session_insert(
         &self,
         sid: String,

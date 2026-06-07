@@ -211,6 +211,13 @@ struct DetailTpl<'a> {
     /// CSRF token for the vhost options form (basic auth, HSTS,
     /// FastCGI cache, custom snippet, maintenance mode, redirect).
     csrf_vhost_options: String,
+    /// Per-hosting quota report (policy + current usage + kernel
+    /// enabled flag). Drives the Quota tab. Best-effort: a
+    /// `QuotaGet` RPC failure on a worker node yields a default
+    /// report so the tab still renders without taking the whole
+    /// page down.
+    quota: hyperion_types::HostingQuotaReport,
+    csrf_quota_set: String,
     /// Set by the post handler on success — banner in the UI.
     vhost_saved: bool,
     /// Set when set_vhost_options returned an error — banner in UI.
@@ -967,6 +974,8 @@ pub async fn post_create(
                 wp_assets: fetch_wp_assets(&state).await.unwrap_or_default(),
                 wp_themes: hyperion_types::WpThemeListResponse::default(),
                 csrf_vhost_options: csrf_token_for(&state, &ctx, "/hostings/vhost-options"),
+                quota: hyperion_types::HostingQuotaReport::default(),
+                csrf_quota_set: csrf_token_for(&state, &ctx, "/hostings/quota/set"),
                 vhost_saved: false,
                 vhost_error: None,
                 usage_buckets: vec![],
@@ -1203,6 +1212,24 @@ pub async fn get_detail(
             }
         }
     };
+    // Quota fan-out joins the same RPC bucket so the Quota tab
+    // doesn't add a sequential round-trip to the page load.
+    let quota_fut = {
+        let state2 = state.clone();
+        let sel = sel_id.clone();
+        async move {
+            match crate::dispatcher::dispatch_to_node(
+                &state2,
+                target,
+                Request::QuotaGet { hosting: sel },
+            )
+            .await
+            {
+                Ok(RpcResponse::QuotaGet(r)) => r,
+                _ => hyperion_types::HostingQuotaReport::default(),
+            }
+        }
+    };
     let (
         wp_plugins,
         wp_themes,
@@ -1211,6 +1238,7 @@ pub async fn get_detail(
         email_log,
         site_emails,
         ftp_accounts,
+        quota,
     ) = tokio::join!(
         wp_plugins_fut,
         wp_themes_fut,
@@ -1219,6 +1247,7 @@ pub async fn get_detail(
         email_log_fut,
         site_emails_fut,
         ftp_accounts_fut,
+        quota_fut,
     );
     // If THIS hosting's user has a password, probe vsftpd to
     // verify it actually accepts the credential. We don't know
@@ -1361,6 +1390,8 @@ pub async fn get_detail(
         wp_assets: fetch_wp_assets(&state).await.unwrap_or_default(),
         wp_themes,
         csrf_vhost_options: csrf_token_for(&state, &ctx, "/hostings/vhost-options"),
+        quota,
+        csrf_quota_set: csrf_token_for(&state, &ctx, "/hostings/quota/set"),
         vhost_saved: q.vhost_saved.as_deref() == Some("1"),
         vhost_error: q.vhost_error,
         usage_buckets,
@@ -4245,6 +4276,67 @@ async fn run_clone_job(
         )
         .await;
     reporter.finish(true, None).await;
+}
+
+#[derive(serde::Deserialize)]
+pub struct QuotaSetForm {
+    pub selector: String,
+    #[serde(default)]
+    pub disk_soft_mib: i64,
+    #[serde(default)]
+    pub disk_hard_mib: i64,
+    #[serde(default)]
+    pub mem_limit_mib: i64,
+    #[serde(default)]
+    pub bw_soft_mib: i64,
+    #[serde(default)]
+    pub bw_hard_mib: i64,
+}
+
+pub async fn post_quota_set(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<QuotaSetForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let sel_url = urlencoding(&form.selector);
+    // UI accepts MiB for both disk fields (cleaner than asking
+    // operators to type kibibytes). Convert to KiB at the boundary
+    // — setquota wants 1024-byte blocks.
+    let disk_soft_kib = form.disk_soft_mib.saturating_mul(1024);
+    let disk_hard_kib = form.disk_hard_mib.saturating_mul(1024);
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::QuotaSet {
+            hosting: sel,
+            disk_soft_kib,
+            disk_hard_kib,
+            mem_limit_mib: form.mem_limit_mib,
+            bw_soft_mib: form.bw_soft_mib,
+            bw_hard_mib: form.bw_hard_mib,
+        },
+    )
+    .await?;
+    let flash = match resp {
+        RpcResponse::QuotaApplied(v) => {
+            if let Some(err) = v.last_error.as_deref() {
+                format!("Quota saved (kernel: {err})")
+            } else {
+                "Quota saved + applied to the kernel.".to_string()
+            }
+        }
+        RpcResponse::Error(e) => format!("Quota set failed: {e}"),
+        _ => "Quota set: unexpected response".into(),
+    };
+    Ok(Redirect::to(&format!(
+        "/hostings/{}?flash={}#quota",
+        sel_url,
+        urlencoding(&flash)
+    ))
+    .into_response())
 }
 
 pub async fn post_migration_move(

@@ -1545,6 +1545,81 @@
   </form>
 </div>
 
+{# Quota — kernel-enforced disk caps via setquota, plus advisory
+   bandwidth + memory budgets. Separate from the "Limits" card
+   above because setquota requires the operator to enable usrquota
+   on the filesystem; we surface that pre-flight as a banner. #}
+<div id="quota" class="card hover" style="margin-top:1rem">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
+    Quota
+  </h2>
+  {% if !quota.quotas_enabled_on_fs %}
+    <div class="flash warn" style="margin-bottom:0.8rem">
+      <div class="flash-body">
+        <strong>Kernel quotas aren't enabled.</strong>
+        Disk usage shown below comes from <code>du</code>, but
+        <code>setquota</code> won't enforce caps until you enable
+        them on the filesystem.
+        <details style="margin-top:0.4rem">
+          <summary style="cursor:pointer">How to enable</summary>
+          <pre class="log-tail" style="margin-top:0.4rem">{{ quota.setup_hint }}</pre>
+        </details>
+      </div>
+    </div>
+  {% endif %}
+  <div class="row" style="margin-bottom:0.8rem;gap:1.4rem">
+    <span><strong>Current disk usage:</strong> {{ quota.current_disk_kib / 1024 }} MiB</span>
+    {% if let Some(at) = quota.policy.applied_at %}
+      <span class="text-soft small">last applied to kernel: {{ at }}</span>
+    {% endif %}
+    {% if let Some(err) = quota.policy.last_error.as_ref() %}
+      <span class="pill err" title="{{ err }}">kernel rejected last apply</span>
+    {% endif %}
+  </div>
+  <form method="post" action="/hostings/quota/set">
+    <input type="hidden" name="_csrf" value="{{ csrf_quota_set }}">
+    <input type="hidden" name="selector" value="{{ detail.domain }}">
+    <div class="field-row">
+      <div class="field">
+        <label for="disk_soft_mib">Disk soft cap <span class="hint">MiB · 0 = unlimited</span></label>
+        <input id="disk_soft_mib" name="disk_soft_mib" type="number" min="0"
+               value="{{ quota.policy.disk_soft_kib / 1024 }}">
+      </div>
+      <div class="field">
+        <label for="disk_hard_mib">Disk hard cap <span class="hint">MiB · 0 = unlimited</span></label>
+        <input id="disk_hard_mib" name="disk_hard_mib" type="number" min="0"
+               value="{{ quota.policy.disk_hard_kib / 1024 }}">
+      </div>
+    </div>
+    <div class="field-row">
+      <div class="field">
+        <label for="quota_mem_limit_mib">PHP memory_limit <span class="hint">MiB · 0 = inherit php.ini</span></label>
+        <input id="quota_mem_limit_mib" name="mem_limit_mib" type="number" min="0"
+               value="{{ quota.policy.mem_limit_mib }}">
+      </div>
+      <div class="field">
+        <label for="bw_soft_mib">Bandwidth soft <span class="hint">MiB / month · 0 = unlimited</span></label>
+        <input id="bw_soft_mib" name="bw_soft_mib" type="number" min="0"
+               value="{{ quota.policy.bw_soft_mib }}">
+      </div>
+      <div class="field">
+        <label for="bw_hard_mib">Bandwidth hard <span class="hint">MiB / month · 0 = unlimited</span></label>
+        <input id="bw_hard_mib" name="bw_hard_mib" type="number" min="0"
+               value="{{ quota.policy.bw_hard_mib }}">
+      </div>
+    </div>
+    <button class="btn primary" type="submit">
+      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+      Save + apply quota
+    </button>
+  </form>
+  <p class="text-soft small" style="margin:0.8rem 0 0">
+    Disk caps push into the kernel via <code>setquota -u</code>. Hard cap blocks writes with ENOSPC; soft cap triggers the grace period.
+    Bandwidth is informational + alert-driven (no kernel enforcement). Memory landed on next FPM pool rebuild.
+  </p>
+</div>
+
 <div class="card hover">
   <h2>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>

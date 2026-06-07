@@ -78,6 +78,10 @@ pub fn build_router(state: SharedState) -> Router {
             "/hostings/clone",
             post(handlers::hostings::post_hosting_clone),
         )
+        .route(
+            "/hostings/quota/set",
+            post(handlers::hostings::post_quota_set),
+        )
         .route("/hostings/import", get(handlers::migration::get_import))
         .route(
             "/hostings/migration/import-from-url",

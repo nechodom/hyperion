@@ -447,6 +447,20 @@ pub enum Request {
         sid: String,
         revoked_by: i64,
     },
+    /// Read the current quota policy + usage report for one
+    /// hosting. Returns zero-everywhere when no row exists.
+    QuotaGet { hosting: HostingSelector },
+    /// Persist the policy + invoke `setquota` against the owner
+    /// uid. Returns `Response::QuotaApplied` with the applied row
+    /// (success) or `Response::Error` (validation / kernel failure).
+    QuotaSet {
+        hosting: HostingSelector,
+        disk_soft_kib: i64,
+        disk_hard_kib: i64,
+        mem_limit_mib: i64,
+        bw_soft_mib: i64,
+        bw_hard_mib: i64,
+    },
     /// Walk the entire audit_log hash chain and verify each row's
     /// `row_hash = BLAKE3(prev_hash || canonical_fields)`. Returns
     /// `Response::AuditVerifyChain { ok, broken_at_id, message }`
@@ -930,6 +944,11 @@ pub enum Response {
     /// be made RW — operator needs a different base image).
     RemountUsrRw { success: bool, message: String },
     FsDiagnoseAndFix(hyperion_types::FsDiagnostics),
+    /// Per-hosting quota report (policy + current usage).
+    QuotaGet(hyperion_types::HostingQuotaReport),
+    /// Ack for QuotaSet — returns the persisted (and possibly
+    /// kernel-applied) row.
+    QuotaApplied(hyperion_types::HostingQuotaView),
     /// Plain ack for write operations on web_sessions.
     WebSessionAck,
     /// Liveness probe response. `true` ⇒ session is live and

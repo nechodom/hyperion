@@ -6143,6 +6143,157 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     }
 
     // ============================================================
+    //  hosting_quotas — disk + memory + bandwidth per hosting.
+    //  Disk caps push into the kernel via `setquota -u`. Memory
+    //  caps land in the FPM pool template on next rebuild.
+    //  Bandwidth is informational + alert-driven for now.
+    // ============================================================
+
+    pub async fn quota_get(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::HostingQuotaReport, RpcError> {
+        let detail = self.get(sel).await?;
+        let row = hyperion_state::hosting_quotas::read(&self.pool, detail.id.as_str())
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("quota read: {e}")))?;
+        let policy = hyperion_types::HostingQuotaView {
+            hosting_id: row.hosting_id,
+            disk_soft_kib: row.disk_soft_kib,
+            disk_hard_kib: row.disk_hard_kib,
+            mem_limit_mib: row.mem_limit_mib,
+            bw_soft_mib: row.bw_soft_mib,
+            bw_hard_mib: row.bw_hard_mib,
+            applied_at: row.applied_at,
+            last_error: row.last_error,
+            updated_at: row.updated_at,
+        };
+        let (current_disk_kib, quotas_enabled_on_fs, setup_hint) =
+            quota_probe_current(&detail.system_user, &detail.root_dir).await;
+        Ok(hyperion_types::HostingQuotaReport {
+            policy,
+            current_disk_kib,
+            quotas_enabled_on_fs,
+            setup_hint,
+        })
+    }
+
+    pub async fn quota_set(
+        &self,
+        sel: HostingSelector,
+        disk_soft_kib: i64,
+        disk_hard_kib: i64,
+        mem_limit_mib: i64,
+        bw_soft_mib: i64,
+        bw_hard_mib: i64,
+    ) -> Result<hyperion_types::HostingQuotaView, RpcError> {
+        // Validation: hard must be >= soft when both non-zero.
+        // Zero ⇒ "no cap", which is allowed on either side.
+        if disk_soft_kib < 0
+            || disk_hard_kib < 0
+            || mem_limit_mib < 0
+            || bw_soft_mib < 0
+            || bw_hard_mib < 0
+        {
+            return Err(RpcError::Validation {
+                message: "quota values must be non-negative".into(),
+            });
+        }
+        if disk_soft_kib > 0 && disk_hard_kib > 0 && disk_hard_kib < disk_soft_kib {
+            return Err(RpcError::Validation {
+                message: "disk hard limit must be >= soft limit".into(),
+            });
+        }
+        if bw_soft_mib > 0 && bw_hard_mib > 0 && bw_hard_mib < bw_soft_mib {
+            return Err(RpcError::Validation {
+                message: "bandwidth hard limit must be >= soft limit".into(),
+            });
+        }
+
+        let detail = self.get(sel).await?;
+        let now = now_secs();
+        hyperion_state::hosting_quotas::upsert(
+            &self.pool,
+            detail.id.as_str(),
+            disk_soft_kib,
+            disk_hard_kib,
+            mem_limit_mib,
+            bw_soft_mib,
+            bw_hard_mib,
+            now,
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("quota upsert: {e}")))?;
+
+        // Push to kernel. Failure here doesn't fail the RPC — the
+        // policy is saved either way and the UI shows last_error
+        // so the operator can see the kernel didn't accept it
+        // (typically because quotaon isn't enabled on the mount).
+        let kernel_result =
+            apply_disk_quota(&detail.system_user, disk_soft_kib, disk_hard_kib).await;
+        match kernel_result {
+            Ok(()) => {
+                let _ = hyperion_state::hosting_quotas::mark_applied(
+                    &self.pool,
+                    detail.id.as_str(),
+                    now,
+                )
+                .await;
+                self.append_audit(
+                    "hosting.quota.set",
+                    Some(detail.id.as_str()),
+                    &serde_json::json!({
+                        "disk_soft_kib": disk_soft_kib,
+                        "disk_hard_kib": disk_hard_kib,
+                        "mem_limit_mib": mem_limit_mib,
+                        "bw_soft_mib": bw_soft_mib,
+                        "bw_hard_mib": bw_hard_mib,
+                    })
+                    .to_string(),
+                    "ok",
+                )
+                .await;
+            }
+            Err(e) => {
+                let _ = hyperion_state::hosting_quotas::mark_failed(
+                    &self.pool,
+                    detail.id.as_str(),
+                    &e,
+                    now,
+                )
+                .await;
+                self.append_audit(
+                    "hosting.quota.set",
+                    Some(detail.id.as_str()),
+                    &serde_json::json!({
+                        "error": e,
+                    })
+                    .to_string(),
+                    "failed",
+                )
+                .await;
+            }
+        }
+
+        // Re-read so the UI sees the post-apply state (including
+        // applied_at / last_error flips).
+        let row = hyperion_state::hosting_quotas::read(&self.pool, detail.id.as_str())
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("quota re-read: {e}")))?;
+        Ok(hyperion_types::HostingQuotaView {
+            hosting_id: row.hosting_id,
+            disk_soft_kib: row.disk_soft_kib,
+            disk_hard_kib: row.disk_hard_kib,
+            mem_limit_mib: row.mem_limit_mib,
+            bw_soft_mib: row.bw_soft_mib,
+            bw_hard_mib: row.bw_hard_mib,
+            applied_at: row.applied_at,
+            last_error: row.last_error,
+            updated_at: row.updated_at,
+        })
+    }
+
+    // ============================================================
     //  web_sessions — backs the cookie ledger so revocation works.
     // ============================================================
 
@@ -11617,6 +11768,134 @@ impl RpcErrorExt for RpcError {
 trait RpcErrorExt {
     #[allow(non_snake_case)]
     fn Internal_with(msg: String) -> Self;
+}
+
+/// Push a disk quota into the kernel via `setquota -u <user>
+/// <soft_blocks> <hard_blocks> 0 0 -a`. The `-a` flag means "every
+/// filesystem with quotas on", so we don't have to detect which
+/// mount the user's home dir actually lives on.
+///
+/// Inode limits are left at 0 (no cap) — operators care about disk
+/// space, not file count; capping inodes is a different policy
+/// knob we can expose later.
+///
+/// Returns `Ok(())` on exit 0 or `Err(stderr-tail)` otherwise. The
+/// most common failure is `setquota: Cannot wait for ... quotas
+/// turned off` when /etc/fstab doesn't carry `usrquota` — the UI
+/// surfaces that via the `setup_hint` returned alongside reads.
+async fn apply_disk_quota(
+    user: &str,
+    soft_kib: i64,
+    hard_kib: i64,
+) -> Result<(), String> {
+    // setquota refuses to run if quotaon hasn't been done on at
+    // least one mount. Probe `quotacheck`'s output cheaply via
+    // `quotaon -p` (print state). If no mount has quotas enabled,
+    // fail fast with a clean message instead of letting setquota
+    // produce its own confusing error.
+    let probe = tokio::process::Command::new("/usr/sbin/quotaon")
+        .args(["-p", "-a"])
+        .output()
+        .await;
+    if let Ok(p) = &probe {
+        let out = String::from_utf8_lossy(&p.stdout);
+        // `quotaon -p -a` lists each mount with "user quotas on" or
+        // "user quotas off". When ALL lines say off, setquota would
+        // fail. We tolerate stderr-only output too (some distros
+        // print to stderr).
+        let any_on = out.lines().any(|l| {
+            l.contains("user quotas on") || l.contains("group quotas on")
+        });
+        if !any_on && !out.is_empty() {
+            return Err(
+                "quotas not enabled on any filesystem — add usrquota,grpquota to /etc/fstab and run `mount -o remount /` + `quotacheck -ugm /` + `quotaon -v /`".into(),
+            );
+        }
+    }
+    let out = tokio::process::Command::new("/usr/sbin/setquota")
+        .args([
+            "-u",
+            user,
+            &soft_kib.to_string(),
+            &hard_kib.to_string(),
+            "0",
+            "0",
+            "-a",
+        ])
+        .output()
+        .await
+        .map_err(|e| format!("spawn setquota: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        Err(format!(
+            "setquota exit {}: {}{}",
+            out.status.code().unwrap_or(-1),
+            stderr.trim(),
+            stdout.trim(),
+        ))
+    }
+}
+
+/// Probe current disk usage for the hosting:
+///   1. `quota -u <user>` if quotas are enabled — single line, fast,
+///      reports the kernel's view (matches what `setquota` enforces)
+///   2. fallback `du -sk <home>` if quota is unavailable — slower but
+///      always works (lets the UI show *some* number even on VPSes
+///      without quotas configured).
+///
+/// Returns (current_disk_kib, quotas_enabled_on_fs, setup_hint).
+async fn quota_probe_current(
+    user: &str,
+    home_dir: &str,
+) -> (i64, bool, String) {
+    // `quota -u -q -w` prints used blocks in machine-readable form.
+    // Output (when quotas are on) is one line: "<fs>  <used>  <soft>
+    // <hard>  <files>  <soft>  <hard>". When quotas are off, exit
+    // code is non-zero and stderr is "Disk quotas for user <user>:
+    // none".
+    let q = tokio::process::Command::new("/usr/bin/quota")
+        .args(["-u", "-q", "-w", user])
+        .output()
+        .await;
+    if let Ok(out) = q {
+        if out.status.success() {
+            let s = String::from_utf8_lossy(&out.stdout);
+            for line in s.lines() {
+                let cols: Vec<&str> = line.split_whitespace().collect();
+                if cols.len() >= 2 {
+                    if let Ok(used) = cols[1].trim_end_matches('*').parse::<i64>() {
+                        return (
+                            used,
+                            true,
+                            String::new(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+    // Fallback: `du -sk` for the home dir.
+    let du = tokio::process::Command::new("/usr/bin/du")
+        .args(["-sk", home_dir])
+        .output()
+        .await;
+    let used = du
+        .ok()
+        .and_then(|o| {
+            if !o.status.success() {
+                return None;
+            }
+            let s = String::from_utf8_lossy(&o.stdout).into_owned();
+            s.split_whitespace()
+                .next()
+                .and_then(|n| n.parse::<i64>().ok())
+        })
+        .unwrap_or(0);
+    let hint = "Kernel quotas aren't enabled on this filesystem. Disk usage is shown from `du`, but `setquota` won't enforce caps. Edit /etc/fstab to add `usrquota,grpquota` and run `mount -o remount /` + `quotaon -v /` to enable.".to_string();
+    (used, false, hint)
 }
 
 /// Snapshot of one filesystem's usage, parsed from `df -P -B1`.

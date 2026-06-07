@@ -26,7 +26,7 @@ pub use hosting::{
     HostingDetail, HostingState, HostingSummary, VhostOptions, WpExtras, WpRedisConfig,
 };
 pub use ids::{AgentId, HostingId, SecretId};
-pub use jobs::{JobView, WebSessionView};
+pub use jobs::{HostingQuotaReport, HostingQuotaView, JobView, WebSessionView};
 pub use limits::{
     BackupRunWire, ExpiringHosting, HostingExpiry, HostingLimits, HostingUsageBucket,
     NodeInviteMint, NodeInviteSummary, OverBwPolicy, SuspendReason,
