@@ -741,7 +741,7 @@
       </form>
     </div>
   {% else if detail.database.is_none() %}
-    <p class="muted">This hosting has no database. WordPress needs MariaDB — recreate the hosting with <code>--db mariadb</code> first.</p>
+    <p class="muted">This hosting has no database. WordPress needs MariaDB — delete this hosting from the Danger tab and create a new one with MariaDB selected in the wizard.</p>
   {% else if detail.state.as_str() != "active" %}
     <p class="muted">Hosting must be <strong>active</strong> before installing WordPress (current state: <code>{{ detail.state.as_str() }}</code>).</p>
   {% else %}
@@ -1087,7 +1087,7 @@
     <code>WP_REDIS_*</code> constants into wp-config.php. You still
     need to install the
     <a href="https://wordpress.org/plugins/redis-cache/" target="_blank" rel="noopener">Redis Object Cache</a>
-    plugin in WordPress and click "Enable" — we don't side-load.
+    plugin from WP admin → Plugins yourself — Hyperion only wires the connection details into <code>wp-config.php</code>.
   </p>
   {% if detail.wp_extras.redis_enabled %}
   <p class="muted small">
@@ -1365,7 +1365,7 @@
         <label>
           <input type="checkbox" name="force_https" value="on"
                  {% if detail.vhost_options.force_https %}checked{% endif %}>
-          Force HTTP → HTTPS redirect (default: on)
+          Force HTTP → HTTPS redirect
         </label>
       </div>
       <div class="field">
@@ -2091,7 +2091,7 @@
       {{ monitor_history.samples.len() }} recent samples — bar height encodes response time, red = failed probe.
     </p>
   {% else %}
-    <p class="text-soft small">No samples yet. Save settings + wait one tick, or click "Probe now".</p>
+    <p class="text-soft small">No samples yet. Save settings and wait one tick, or click "Probe now".</p>
   {% endif %}
 
   <form method="post" action="/hostings/monitor/set" autocomplete="off">
@@ -2522,7 +2522,7 @@
   <form method="post" action="/hostings/delete" class="row gap-md"
         style="margin-top:0.5rem"
         data-confirm-title="Delete {{ detail.domain }}"
-        data-confirm-body="Files, database, system user and DNS records will be removed. This is permanent — restore is only possible from a backup. Type the domain to confirm."
+        data-confirm-body="Files, database, system user and nginx vhost will be removed. This is permanent — restore is only possible from a backup. Type the domain to confirm. External DNS records are NOT touched."
         data-confirm-confirm-label="Delete hosting"
         data-confirm-variant="danger"
         data-confirm-require="{{ detail.domain }}">

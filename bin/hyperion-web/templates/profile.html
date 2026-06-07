@@ -50,7 +50,7 @@
       {% endif %}
     </div>
     <div class="kpi-meta">
-      {% if u.totp_required %}required by admin{% else %}voluntary{% endif %}
+      {% if u.totp_required %}required by admin{% else %}optional{% endif %}
     </div>
   </div>
 </div>
@@ -201,18 +201,24 @@
 
   <details style="margin-top:0.8rem">
     <summary style="cursor:pointer;font-size:0.88rem;color:var(--text-dim)">Already requested? Enter the code</summary>
-    <form method="post" action="/profile/email/confirm" autocomplete="off"
-          style="display:flex;gap:0.4rem;align-items:center;margin-top:0.5rem">
-      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-      <input type="text" name="code" placeholder="123456"
-             inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required autocomplete="off"
-             style="font-size:1.1rem;letter-spacing:0.2em;width:8rem">
-      <button type="submit" class="btn primary small">Confirm</button>
+    {# Two SIBLING forms — nested <form> tags are invalid HTML and
+       caused the Cancel button to mis-route through the outer
+       form's action. Wrap both in a flex row so the layout looks
+       like one composite form. #}
+    <div style="display:flex;gap:0.4rem;align-items:center;margin-top:0.5rem">
+      <form method="post" action="/profile/email/confirm" autocomplete="off"
+            style="display:flex;gap:0.4rem;align-items:center;margin:0">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <input type="text" name="code" placeholder="123456"
+               inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required autocomplete="off"
+               style="font-size:1.1rem;letter-spacing:0.2em;width:8rem">
+        <button type="submit" class="btn primary small">Confirm</button>
+      </form>
       <form method="post" action="/profile/email/cancel" style="display:inline;margin:0">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
         <button type="submit" class="btn small ghost">Cancel pending</button>
       </form>
-    </form>
+    </div>
   </details>
 </div>
 

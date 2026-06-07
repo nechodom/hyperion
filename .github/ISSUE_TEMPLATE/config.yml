@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 Discussions
+    url: https://github.com/nechodom/hyperion/discussions
+    about: Setup help, "how do I…?" questions, sharing patterns.
+  - name: 🔐 Security vulnerability
+    url: mailto:security@nechodom.dev
+    about: Please email — do NOT file a public issue. See SECURITY.md.
+  - name: 💼 Commercial support
+    url: mailto:hello@nechodom.dev
+    about: Production SLAs, sponsored features, migration help.

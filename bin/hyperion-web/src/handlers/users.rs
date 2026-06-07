@@ -103,7 +103,7 @@ pub async fn post_create(
     .await
     .map_err(AppError::from)?;
     match resp {
-        RpcResponse::WebUserCreate { id: _ } => Ok(Redirect::to("/admin/users?flash=user+created").into_response()),
+        RpcResponse::WebUserCreate { id: _ } => Ok(Redirect::to("/admin/users?flash=User+created").into_response()),
         RpcResponse::Error(e) => Ok(Redirect::to(&format!(
             "/admin/users?error={}",
             urlencode(&e.to_string())
@@ -136,7 +136,7 @@ pub async fn post_set_role(
     )
     .await
     .map_err(AppError::from)?;
-    flash_redirect(resp, "role updated")
+    flash_redirect(resp, "Role updated")
 }
 
 #[derive(Deserialize)]
@@ -171,7 +171,7 @@ pub async fn post_lock(
     )
     .await
     .map_err(AppError::from)?;
-    flash_redirect(resp, if locked { "user locked" } else { "user unlocked" })
+    flash_redirect(resp, if locked { "User locked" } else { "User unlocked" })
 }
 
 #[derive(Deserialize)]
@@ -195,7 +195,7 @@ pub async fn post_delete(
     )
     .await
     .map_err(AppError::from)?;
-    flash_redirect(resp, "user deleted")
+    flash_redirect(resp, "User deleted")
 }
 
 #[derive(Deserialize)]
@@ -221,7 +221,7 @@ pub async fn post_reset_password(
     )
     .await
     .map_err(AppError::from)?;
-    flash_redirect(resp, "password reset")
+    flash_redirect(resp, "Password reset")
 }
 
 fn flash_redirect(

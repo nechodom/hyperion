@@ -1,0 +1,55 @@
+name: 💡 Feature request
+description: Something you'd like Hyperion to do.
+title: "feat: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before opening a feature request, consider posting in
+        [Discussions → Ideas](https://github.com/nechodom/hyperion/discussions/categories/ideas)
+        first — it's a lower bar and lets others chime in. We
+        promote sticky ideas to issues with a milestone.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      placeholder: |
+        Example: "I run 30 sites across 4 nodes; when one node
+        goes down I have no way to bulk-migrate its hostings off
+        without opening each one."
+    validations:
+      required: true
+
+  - type: textarea
+    id: solution
+    attributes:
+      label: What would you like Hyperion to do?
+      placeholder: |
+        Example: "A 'Migrate all hostings off this node' button on
+        /install that takes a target node and queues an N-way
+        migration job."
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Workarounds you've tried
+      placeholder: |
+        Example: "I currently script `hctl hosting export` + `hctl
+        hosting import` per domain in a bash loop, but the cert
+        re-issue is fiddly."
+    validations:
+      required: false
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: Anti-scope — what should this NOT do?
+      description: |
+        Optional but appreciated. Helps us land a minimal MVP
+        instead of debating edge cases.
+    validations:
+      required: false

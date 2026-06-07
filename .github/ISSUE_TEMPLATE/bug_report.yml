@@ -1,0 +1,68 @@
+name: 🐛 Bug report
+description: Something's not working as expected.
+title: "bug: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug.
+
+        **Security vulnerabilities go to `security@nechodom.dev` —
+        please do NOT file them as public issues. See
+        [SECURITY.md](https://github.com/nechodom/hyperion/blob/main/SECURITY.md).**
+
+  - type: input
+    id: version
+    attributes:
+      label: Hyperion version
+      description: Output of `hctl info` (line starting with `agent:`)
+      placeholder: "agent: master.example.com version=0.1.0 schema=31"
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: OS / Debian version
+      description: `cat /etc/os-release | head -2`
+      placeholder: "Debian GNU/Linux 12 (bookworm)"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what_happened
+    attributes:
+      label: What happened?
+      description: Steps to reproduce + actual behaviour vs expected.
+      placeholder: |
+        1. Opened /hostings/new
+        2. Submitted with domain=example.com, php=8.3, db=mariadb
+        3. Got 500 page; log shows …
+
+        Expected: hosting created.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant log lines
+      description: |
+        Run:
+        ```
+        journalctl -u hyperion-agent --since "5 min ago" --no-pager
+        journalctl -u hyperion-web --since "5 min ago" --no-pager
+        ```
+        Paste the bits around the failure here.
+      render: shell
+    validations:
+      required: false
+
+  - type: textarea
+    id: extra
+    attributes:
+      label: Anything else?
+      description: Cluster topology, custom config, related issues, screenshots.
+    validations:
+      required: false

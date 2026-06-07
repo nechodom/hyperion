@@ -207,7 +207,7 @@
               <a class="btn small" href="/hostings/{{ r.domain }}">View</a>
               <form method="post" action="/hostings/delete" style="display:inline"
                     data-confirm-title="Delete {{ r.domain }}"
-                    data-confirm-body="Files, database, system user and DNS records will be removed. This is permanent — type the domain to confirm."
+                    data-confirm-body="Files, database, system user and nginx vhost will be removed. This is permanent — type the domain to confirm. External DNS records are NOT touched."
                     data-confirm-confirm-label="Delete"
                     data-confirm-variant="danger"
                     data-confirm-require="{{ r.domain }}">
@@ -265,7 +265,7 @@
     const pretty = action.charAt(0).toUpperCase() + action.slice(1);
     if (action === 'delete') {
       form.dataset.confirmTitle = 'Delete ' + n + ' ' + (n === 1 ? 'hosting' : 'hostings');
-      form.dataset.confirmBody = 'All files, databases, system users and DNS records will be removed. This is permanent.';
+      form.dataset.confirmBody = 'All files, databases, system users and nginx vhosts will be removed. This is permanent. External DNS records are NOT touched.';
       form.dataset.confirmConfirmLabel = 'Delete';
       form.dataset.confirmVariant = 'danger';
     } else if (action === 'install_asset') {
@@ -290,8 +290,16 @@
       form.dataset.confirmConfirmLabel = 'Install';
       form.dataset.confirmVariant = 'primary';
     } else {
+      // Per-action body so we don't produce grammatical garbage
+      // like "...will be backuped." / "...will be resumeed."
+      const bodyByAction = {
+        backup:  'Run a backup on each selected hosting now. Existing backups are kept.',
+        suspend: 'Suspend each selected hosting. Visitors will see HTTP 503 until you resume.',
+        resume:  'Resume each selected hosting (back to serving traffic).',
+      };
       form.dataset.confirmTitle = pretty + ' ' + n + ' ' + (n === 1 ? 'hosting' : 'hostings');
-      form.dataset.confirmBody = 'Selected hostings will be ' + action + 'ed.';
+      form.dataset.confirmBody = bodyByAction[action] ||
+        ('Apply ' + pretty.toLowerCase() + ' to ' + n + ' selected hosting(s).');
       form.dataset.confirmConfirmLabel = pretty;
       form.dataset.confirmVariant = 'primary';
     }

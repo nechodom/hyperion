@@ -407,7 +407,7 @@
     <li>Generate a labeled token above. <strong>Plaintext shown once</strong> — copy immediately; only its hash is persisted server-side.</li>
     <li>Paste the printed <code>curl … | sudo bash …</code> on the new VPS.</li>
     <li>Install script provisions deps, builds <code>hyperion-agent</code>, saves the token + master URL into <code>/etc/hyperion/agent.toml</code>, and starts the service.</li>
-    <li>Full mTLS enrollment (sub-project 1.5) consumes the token and rolls the new node into the cluster. Until that lands the node runs single-node.</li>
+    <li>The agent calls <code>POST /api/enroll</code> with the token, signs an mTLS cert, and joins the cluster. The new node appears in the Enrolled nodes list above within ~30 seconds.</li>
   </ol>
 </div>
 {% endblock %}

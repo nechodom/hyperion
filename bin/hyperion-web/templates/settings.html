@@ -86,7 +86,7 @@
   </a>
   <a class="tab" data-tab="backups" href="#backups" role="tab">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-    Backups
+    Backups <span class="text-soft small" style="font-weight:400">(legacy FTP)</span>
     {% if config.backup_remote.enabled %}<span class="tab-badge" style="background:var(--success);color:white">●</span>
     {% else %}<span class="tab-badge" style="background:var(--surface-2)">local</span>{% endif %}
   </a>
@@ -117,7 +117,7 @@
       <span class="grow"></span>
       <button type="button" class="btn small" id="email-autodetect">
         <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-        Auto-detect local
+        Probe local SMTP relay
       </button>
     </div>
     <p class="text-soft small" style="margin:0 0 1rem">
@@ -851,7 +851,7 @@
 <div class="flash warn" style="margin-top:1rem">
   <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
   <div class="flash-body">
-    Edits are written to <code>/etc/hyperion/agent.toml</code> with comments preserved (atomic write + <code>.bak</code> backup). The running agent keeps its old in-memory config until you restart it — use the <strong>Restart</strong> button on <a href="/services" style="color:inherit;text-decoration:underline">Service health</a> or run <code>systemctl restart hyperion-agent</code> on the node.
+    Edits are written to <code>/etc/hyperion/agent.toml</code> with comments preserved (atomic write + <code>.bak</code> backup). The running agent keeps its old in-memory config until you restart it — use the <strong>Restart</strong> button on <a href="/services" style="color:inherit;text-decoration:underline">Service health</a> or run <code>systemctl restart hyperion-agent</code> on this node.
   </div>
 </div>
 
