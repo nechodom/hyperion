@@ -13,12 +13,22 @@
     <aside class="login-aside">
       <div class="brand-block">
         <div style="font-family:var(--font-mono);font-weight:800;font-size:1.4rem;letter-spacing:0.04em;margin-bottom:2.5rem;text-transform:uppercase">
-          <span style="color:#34d399;text-shadow:0 0 22px rgba(52,211,153,0.6)">HY</span><span style="opacity:0.5;font-weight:500">·</span>PERION
+          <span style="color:#34d399;text-shadow:0 0 22px rgba(52,211,153,0.6)">HY</span><span style="opacity:0.7;font-weight:500">·</span>PERION
         </div>
         <h1>Hosting control,<br>without the bloat.</h1>
-        <p>nginx · PHP-FPM · MariaDB · PostgreSQL · ACME · multi-node enrollment — managed from one signed-in admin pane.</p>
+        <p class="lede">
+          One admin pane. Many sites. Multiple nodes.
+          Auto HTTPS, one-click WordPress, free forever.
+        </p>
+        <ul class="features">
+          <li>Self-hosted on your Debian boxes</li>
+          <li>Cluster-aware — scale across nodes from day one</li>
+          <li>Open source · AGPL-3.0</li>
+        </ul>
       </div>
-      <div class="footer">© hyperion · Debian 12+ · Rust + axum + askama</div>
+      <div class="footer">
+        Built in Rust — axum · askama · sqlx · Ed25519 signed RPC.
+      </div>
     </aside>
     <main class="login-form">
       <div class="login-card">
@@ -26,7 +36,7 @@
           <span style="color:var(--brand-accent);text-shadow:0 0 18px color-mix(in oklab,var(--brand-accent) 60%,transparent)">HY</span><span style="color:var(--text-soft);font-weight:500">·</span>PERION
         </div>
         <h2>Welcome back</h2>
-        <p class="subtitle">Sign in to manage your hostings.</p>
+        <p class="subtitle">Sign in to manage your sites and nodes.</p>
         {% if let Some(e) = error %}
           <div class="flash error">
             <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>

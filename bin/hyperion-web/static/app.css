@@ -1404,19 +1404,58 @@ select {
 .login-aside .brand-block { position: relative; }
 .login-aside .brand-block h1 {
   font-size: 2.5rem;
-  margin: 0 0 0.5rem;
+  margin: 0 0 0.9rem;
   letter-spacing: -0.03em;
   font-weight: 700;
+  /* subtle shadow lifts the headline off the gradient so it
+     stays readable across the brightest middle of the diagonal */
+  text-shadow: 0 2px 14px rgba(0, 0, 0, 0.35);
 }
-.login-aside .brand-block p {
+/* "Lede" paragraph (formerly the washed-out subtitle). Was
+   opacity:0.85 — barely visible against the gradient. Raise the
+   solid weight + drop the opacity trick in favour of a colour
+   that already has the soft-white feel without sacrificing
+   contrast. */
+.login-aside .brand-block .lede {
   font-size: 1.05rem;
-  opacity: 0.85;
-  max-width: 28rem;
-  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.95);
+  font-weight: 400;
+  max-width: 30rem;
+  line-height: 1.55;
+  margin: 0 0 1.4rem;
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.25);
+}
+/* Crisp three-bullet feature list under the lede. Bullet glyph is
+   a faux-checkmark coloured with the brand accent so the eye
+   reads them as "what you get". */
+.login-aside .brand-block .features {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+  max-width: 30rem;
+}
+.login-aside .brand-block .features li {
+  color: rgba(255, 255, 255, 0.92);
+  font-size: 0.95rem;
+  line-height: 1.4;
+  padding-left: 1.6rem;
+  position: relative;
+}
+.login-aside .brand-block .features li::before {
+  content: '✓';
+  position: absolute;
+  left: 0;
+  top: 0;
+  color: #34d399;
+  font-weight: 700;
+  text-shadow: 0 0 12px rgba(52, 211, 153, 0.5);
 }
 .login-aside .footer {
-  font-size: 0.8rem;
-  opacity: 0.7;
+  font-size: 0.85rem;
+  color: rgba(255, 255, 255, 0.7);
   position: relative;
 }
 .login-form {
