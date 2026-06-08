@@ -800,6 +800,10 @@ pub enum Request {
         public_ip: Option<String>,
     },
     NodesList,
+    /// Cluster-wide certificate inventory — every cert this agent
+    /// has issued or imported. Sorted by `not_after` ASC so the
+    /// expiring-soonest sit at the top.
+    CertOverview,
     /// Rename an enrolled node's display label. `node_id` is the
     /// immutable enrollment identifier; only `label` changes.
     NodeSetLabel { node_id: String, label: String },
@@ -1085,6 +1089,7 @@ pub enum Response {
         master_rpc_pubkey: Option<String>,
     },
     NodesList(Vec<NodeSummary>),
+    CertOverview(Vec<hyperion_types::CertOverviewItem>),
     /// Plain ack for NodeSetLabel.
     NodeLabelUpdated,
     /// Plain ack for NodeSetDrain.

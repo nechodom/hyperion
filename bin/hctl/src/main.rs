@@ -1347,6 +1347,22 @@ fn print_pretty(resp: &Response) {
         }
         Response::NodeLabelUpdated => println!("node label updated"),
         Response::NodeDrainUpdated => println!("node drain flag updated"),
+        Response::CertOverview(items) => {
+            if items.is_empty() {
+                println!("no certificates");
+            } else {
+                println!(
+                    "{:<40} {:<14} {:>5} {}",
+                    "domain", "issuer", "days", "band"
+                );
+                for it in items {
+                    println!(
+                        "{:<40} {:<14} {:>5} {}",
+                        it.domain, it.issuer, it.days_left, it.band
+                    );
+                }
+            }
+        }
         Response::WebSessionAck => println!("session ack"),
         Response::WebSessionTouch(b) => {
             println!("session {}", if *b { "live" } else { "revoked/unknown" })

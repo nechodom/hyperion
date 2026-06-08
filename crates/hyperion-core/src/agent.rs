@@ -1066,6 +1066,10 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.nodes_list().await
     }
 
+    async fn cert_overview(&self) -> Result<Vec<hyperion_types::CertOverviewItem>, RpcError> {
+        self.svc.cert_overview().await
+    }
+
     async fn node_set_label(&self, node_id: String, label: String) -> Result<(), RpcError> {
         self.svc.node_set_label(&node_id, &label).await
     }

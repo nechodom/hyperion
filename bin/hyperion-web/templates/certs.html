@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+{% block title %}Certificates · hyperion{% endblock %}
+{% block main %}
+<div class="page-header">
+  <div>
+    <h1>Certificates</h1>
+    <div class="subtitle">
+      Cluster-wide TLS inventory. Expiring soonest first — click any row to jump to its hosting.
+    </div>
+  </div>
+</div>
+
+{# Top-line summary cards. Quickly answer "do I have anything
+   on fire" without scanning the full table. #}
+<div class="kpi-grid" style="margin-bottom:1.2rem">
+  <div class="kpi-card" style="{% if expired > 0 %}border-color:var(--danger){% endif %}">
+    <div class="kpi-label">Expired</div>
+    <div class="kpi-value">{{ expired }}</div>
+    <div class="kpi-meta">already past not_after</div>
+  </div>
+  <div class="kpi-card" style="{% if critical > 0 %}border-color:var(--danger){% endif %}">
+    <div class="kpi-label">Critical &lt; 7 d</div>
+    <div class="kpi-value">{{ critical }}</div>
+    <div class="kpi-meta">act now</div>
+  </div>
+  <div class="kpi-card" style="{% if warning > 0 %}border-color:var(--warn){% endif %}">
+    <div class="kpi-label">Warning &lt; 30 d</div>
+    <div class="kpi-value">{{ warning }}</div>
+    <div class="kpi-meta">renew window opens</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-label">Healthy</div>
+    <div class="kpi-value">{{ ok }}</div>
+    <div class="kpi-meta">30+ days left</div>
+  </div>
+</div>
+
+{% if rows.is_empty() %}
+  <div class="card empty">
+    <div class="empty-title">No certificates yet</div>
+    <p class="text-soft small">
+      As hostings get TLS issued (Let's Encrypt or self-signed bootstrap), they'll appear here.
+      Create a hosting from <a href="/hostings/new">Hostings → New</a>.
+    </p>
+  </div>
+{% else %}
+  <div class="card" style="padding:0">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th>Domain</th>
+          <th>Issuer</th>
+          <th>Node</th>
+          <th class="right">Expires</th>
+          <th class="right">Days left</th>
+          <th class="right">State</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rows %}
+          <tr {% if r.band == "expired" || r.band == "critical" %}style="background:color-mix(in oklab, var(--danger) 6%, transparent)"{% else if r.band == "warning" %}style="background:color-mix(in oklab, var(--warn) 6%, transparent)"{% endif %}>
+            <td><a href="/hostings/{{ r.domain }}#ssl"><strong>{{ r.domain }}</strong></a></td>
+            <td>
+              <code>{{ r.issuer }}</code>
+              {% if r.issuer == "self-signed" %}
+                <span class="text-soft small" title="Bootstrap cert — click through and Issue cert once DNS resolves">bootstrap</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if r.node_id.is_empty() %}
+                <span class="text-soft small">master</span>
+              {% else %}
+                <code>{{ r.node_id }}</code>
+              {% endif %}
+            </td>
+            <td class="right" title="{{ r.not_after }}">{{ r.not_after }}</td>
+            <td class="right">
+              {% if r.days_left < 0 %}
+                <strong>{{ r.days_left.abs() }} days ago</strong>
+              {% else %}
+                {{ r.days_left }}
+              {% endif %}
+            </td>
+            <td class="right">
+              {% if r.band == "expired" %}
+                <span class="pill err">expired</span>
+              {% else if r.band == "critical" %}
+                <span class="pill err">critical</span>
+              {% else if r.band == "warning" %}
+                <span class="pill warn">warning</span>
+              {% else %}
+                <span class="pill ok">ok</span>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endif %}
+{% endblock %}

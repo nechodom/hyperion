@@ -5972,6 +5972,47 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(())
     }
 
+    /// Cluster-wide certificate inventory. One row per cert
+    /// known to this agent, computed `days_left` + `band` so the
+    /// UI can render without arithmetic. Sorted by expiry —
+    /// expiring soonest at the top. The `node_id` field carries
+    /// where the cert lives so the panel's cross-node fanout can
+    /// merge multiple agents' results into one screen.
+    pub async fn cert_overview(
+        &self,
+    ) -> Result<Vec<hyperion_types::CertOverviewItem>, RpcError> {
+        let rows = hyperion_state::certificates::list_all(&self.pool)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("cert_overview list: {e}")))?;
+        let now = now_secs();
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let days_left = (r.not_after - now) / 86400;
+                let band = if r.not_after <= now {
+                    "expired"
+                } else if days_left < 7 {
+                    "critical"
+                } else if days_left < 30 {
+                    "warning"
+                } else {
+                    "ok"
+                };
+                hyperion_types::CertOverviewItem {
+                    domain: r.domain,
+                    issuer: r.issuer,
+                    issued_at: r.issued_at,
+                    not_after: r.not_after,
+                    days_left,
+                    band: band.into(),
+                    // Local agent — handler fills this when fanning
+                    // out across nodes.
+                    node_id: String::new(),
+                }
+            })
+            .collect())
+    }
+
     /// Toggle a node's drain flag. Drained nodes are skipped by
     /// the auto-placer + create wizard; existing hostings keep
     /// serving traffic. Idempotent — drain on an already-drained

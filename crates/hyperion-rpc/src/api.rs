@@ -755,6 +755,9 @@ pub trait AgentApi: Send + Sync + 'static {
     /// List enrolled nodes (master-side `nodes` table).
     async fn nodes_list(&self) -> Result<Vec<NodeSummary>, RpcError>;
 
+    /// Cluster-wide certificate inventory.
+    async fn cert_overview(&self) -> Result<Vec<hyperion_types::CertOverviewItem>, RpcError>;
+
     /// Rename an enrolled node's display label. `node_id` is the
     /// immutable enrollment identifier; only the label changes.
     /// Returns Ok(()) on success even when the node_id is unknown

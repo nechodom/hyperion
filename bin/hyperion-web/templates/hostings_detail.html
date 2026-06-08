@@ -195,7 +195,7 @@
     {% if detail.state.as_str() == "suspended" %}
       <form method="post" action="/hostings/resume" style="display:inline">
         <input type="hidden" name="_csrf" value="{{ csrf_resume }}">
-        <input type="hidden" name="selector" value="{{ detail.domain }}">
+        <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
         <button class="btn primary" type="submit">
           <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
           Resume
@@ -208,7 +208,7 @@
             data-confirm-confirm-label="Suspend"
             data-confirm-variant="primary">
         <input type="hidden" name="_csrf" value="{{ csrf_suspend }}">
-        <input type="hidden" name="selector" value="{{ detail.domain }}">
+        <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
         <button class="btn" type="submit">
           <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
           Suspend
@@ -425,7 +425,7 @@
                session token for any path without a dedicated csrf_*
                binding (same pattern as the access / acme-email forms). #}
             <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-            <input type="hidden" name="selector" value="{{ detail.domain }}">
+            <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
             <input type="hidden" name="target_node"
                    value="{% if let Some(n) = detail.node_id %}{{ n }}{% endif %}">
             <select name="php_version" aria-label="New PHP version"
@@ -491,7 +491,7 @@
           data-confirm-confirm-label="Reset password"
           data-confirm-variant="danger">
       <input type="hidden" name="_csrf" value="{{ csrf_db_reset }}">
-      <input type="hidden" name="selector" value="{{ detail.domain }}">
+      <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
       <div class="row" style="gap:0.5rem;align-items:flex-end">
         <div class="field" style="flex:1;margin:0">
           <label for="db_new_pw">New password <span class="hint">≥ 12 chars</span></label>
@@ -639,7 +639,7 @@
     <form hx-post="/hostings/dns-check" hx-target="#dns-result" hx-swap="innerHTML"
           hx-indicator="#dns-spinner" style="display:flex;gap:0.5rem;align-items:center;margin-bottom:1.5rem">
       <input type="hidden" name="_csrf" value="{{ csrf_dns_check }}">
-      <input type="hidden" name="selector" value="{{ detail.domain }}">
+      <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
       <button class="btn" type="submit">
         <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
         Check DNS
@@ -653,7 +653,7 @@
           data-confirm-confirm-label="Issue certificate"
           data-confirm-variant="primary">
       <input type="hidden" name="_csrf" value="{{ csrf_cert_issue }}">
-      <input type="hidden" name="selector" value="{{ detail.domain }}">
+      <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
       <label class="field-checkbox">
         <input type="checkbox" name="staging" value="on" checked>
         Use Let's Encrypt <strong>staging</strong> first (recommended)
@@ -683,7 +683,7 @@
   <form method="post" action="/hostings/acme-email" autocomplete="off"
         style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-    <input type="hidden" name="selector" value="{{ detail.domain }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
     <input type="email" name="acme_email"
            placeholder="ops@customer.cz (leave blank to clear)"
            value="{% if let Some(e) = detail.acme_contact_email %}{{ e|e }}{% endif %}"
@@ -723,7 +723,7 @@
             data-confirm-confirm-label="Reset password"
             data-confirm-variant="danger">
         <input type="hidden" name="_csrf" value="{{ csrf_wp_reset }}">
-        <input type="hidden" name="selector" value="{{ detail.domain }}">
+        <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
         <div class="field-row">
           <div class="field">
             <label for="wp_reset_user">WP user</label>
@@ -747,7 +747,7 @@
   {% else %}
     <form method="post" action="/hostings/wp/install" autocomplete="off">
       <input type="hidden" name="_csrf" value="{{ csrf_wp_install }}">
-      <input type="hidden" name="selector" value="{{ detail.domain }}">
+      <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
       <div class="field-row">
         <div class="field">
           <label for="wp_site_url">Site URL</label>
@@ -817,7 +817,7 @@
   <div class="row" style="gap:0.5rem;margin-bottom:0.85rem;flex-wrap:wrap">
     <form method="post" action="/hostings/wp/plugin-action" style="display:inline">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-      <input type="hidden" name="selector" value="{{ detail.domain }}">
+      <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
       <input type="hidden" name="action" value="update_all">
       <button class="btn small" type="submit"
               {% if wp_plugins.updates_pending == 0 %}disabled{% endif %}>
@@ -831,7 +831,7 @@
       <form method="post" action="/hostings/wp/plugin-action" autocomplete="off"
             style="position:absolute;z-index:10;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:0.7rem;margin-top:0.4rem;box-shadow:var(--shadow);min-width:22rem">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-        <input type="hidden" name="selector" value="{{ detail.domain }}">
+        <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
         <input type="hidden" name="action" value="install">
         <div class="field" style="margin:0">
           <label for="wp_install_source">Source <span class="hint">wordpress.org slug or full https:// URL</span></label>
@@ -856,7 +856,7 @@
       <form method="post" action="/hostings/wp/install-from-asset" autocomplete="off"
             style="position:absolute;z-index:10;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:0.7rem;margin-top:0.4rem;box-shadow:var(--shadow);min-width:24rem">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-        <input type="hidden" name="selector" value="{{ detail.domain }}">
+        <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
         <div class="field" style="margin:0">
           <label for="wp_install_asset">Uploaded ZIP
             <a href="/profiles/wp-assets" class="text-soft" style="font-weight:400;font-size:0.78rem;margin-left:0.4rem">manage library →</a>
@@ -936,7 +936,7 @@
           <td>
             <form method="post" action="/hostings/wp/plugin-action" style="display:inline">
               <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-              <input type="hidden" name="selector" value="{{ detail.domain }}">
+              <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
               <input type="hidden" name="slug" value="{{ p.slug }}">
               <input type="hidden" name="action" value="{% if p.auto_update %}auto_update_disable{% else %}auto_update_enable{% endif %}">
               <button class="btn small ghost" type="submit"
@@ -954,7 +954,7 @@
               {% if p.update_available %}
                 <form method="post" action="/hostings/wp/plugin-action" style="display:inline">
                   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-                  <input type="hidden" name="selector" value="{{ detail.domain }}">
+                  <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
                   <input type="hidden" name="slug" value="{{ p.slug }}">
                   <input type="hidden" name="action" value="update">
                   <button class="btn small" type="submit" title="Update to {{ p.latest_version }}">Update</button>
@@ -963,7 +963,7 @@
               {% if p.status == "active" || p.status == "active-network" %}
                 <form method="post" action="/hostings/wp/plugin-action" style="display:inline">
                   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-                  <input type="hidden" name="selector" value="{{ detail.domain }}">
+                  <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
                   <input type="hidden" name="slug" value="{{ p.slug }}">
                   <input type="hidden" name="action" value="deactivate">
                   <button class="btn small ghost" type="submit">Deactivate</button>
@@ -971,7 +971,7 @@
               {% else %}
                 <form method="post" action="/hostings/wp/plugin-action" style="display:inline">
                   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-                  <input type="hidden" name="selector" value="{{ detail.domain }}">
+                  <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
                   <input type="hidden" name="slug" value="{{ p.slug }}">
                   <input type="hidden" name="action" value="activate">
                   <button class="btn small primary" type="submit">Activate</button>
@@ -982,7 +982,7 @@
                       data-confirm-confirm-label="Delete plugin"
                       data-confirm-variant="danger">
                   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-                  <input type="hidden" name="selector" value="{{ detail.domain }}">
+                  <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
                   <input type="hidden" name="slug" value="{{ p.slug }}">
                   <input type="hidden" name="action" value="delete">
                   <button class="btn small danger" type="submit">Delete</button>
@@ -1019,7 +1019,7 @@
   {% endif %}
   <form method="post" action="/hostings/wp/debug">
     <input type="hidden" name="_csrf" value="{{ csrf_wp_debug }}">
-    <input type="hidden" name="selector" value="{{ detail.domain }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
     {% if !target_node.is_empty() %}
     <input type="hidden" name="target_node" value="{{ target_node }}">
     {% endif %}
@@ -1054,7 +1054,7 @@
   </p>
   <form method="post" action="/hostings/wp/debug-log/rotate" style="display:inline">
     <input type="hidden" name="_csrf" value="{{ csrf_wp_debug_rotate }}">
-    <input type="hidden" name="selector" value="{{ detail.domain }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
     {% if !target_node.is_empty() %}
     <input type="hidden" name="target_node" value="{{ target_node }}">
     {% endif %}
@@ -1096,7 +1096,7 @@
   </p>
   <form method="post" action="/hostings/wp/redis" style="display:inline">
     <input type="hidden" name="_csrf" value="{{ csrf_wp_redis }}">
-    <input type="hidden" name="selector" value="{{ detail.domain }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
     <input type="hidden" name="enabled" value="off">
     {% if !target_node.is_empty() %}
     <input type="hidden" name="target_node" value="{{ target_node }}">
@@ -1111,7 +1111,7 @@
   </form>
   <form method="post" action="/hostings/wp/redis/rotate" style="display:inline">
     <input type="hidden" name="_csrf" value="{{ csrf_wp_redis_rotate }}">
-    <input type="hidden" name="selector" value="{{ detail.domain }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
     {% if !target_node.is_empty() %}
     <input type="hidden" name="target_node" value="{{ target_node }}">
     {% endif %}
@@ -1120,7 +1120,7 @@
   {% else %}
   <form method="post" action="/hostings/wp/redis">
     <input type="hidden" name="_csrf" value="{{ csrf_wp_redis }}">
-    <input type="hidden" name="selector" value="{{ detail.domain }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
     <input type="hidden" name="enabled" value="on">
     {% if !target_node.is_empty() %}
     <input type="hidden" name="target_node" value="{{ target_node }}">
@@ -1157,7 +1157,7 @@
   <div class="row" style="gap:0.5rem;margin-bottom:0.85rem;flex-wrap:wrap">
     <form method="post" action="/hostings/wp/theme-action" style="display:inline">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-      <input type="hidden" name="selector" value="{{ detail.domain }}">
+      <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
       <input type="hidden" name="action" value="update_all">
       <button class="btn small" type="submit" {% if wp_themes.updates_pending == 0 %}disabled{% endif %}>
         <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/><path d="M20.49 15a9 9 0 0 1-14.85 3.36L1 14"/></svg>
@@ -1170,7 +1170,7 @@
       <form method="post" action="/hostings/wp/theme-action" autocomplete="off"
             style="position:absolute;z-index:10;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:0.7rem;margin-top:0.4rem;box-shadow:var(--shadow);min-width:22rem">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-        <input type="hidden" name="selector" value="{{ detail.domain }}">
+        <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
         <input type="hidden" name="action" value="install">
         <div class="field" style="margin:0">
           <label for="wp_theme_install_source">Source <span class="hint">wordpress.org slug or full https:// URL</span></label>
@@ -1190,7 +1190,7 @@
       <form method="post" action="/hostings/wp/install-from-asset" autocomplete="off"
             style="position:absolute;z-index:10;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:0.7rem;margin-top:0.4rem;box-shadow:var(--shadow);min-width:24rem">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-        <input type="hidden" name="selector" value="{{ detail.domain }}">
+        <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
         <div class="field" style="margin:0">
           <label for="wp_theme_asset">Theme ZIP <span class="hint">from the asset library</span></label>
           <select id="wp_theme_asset" name="asset_id" required style="margin:0">
@@ -1254,7 +1254,7 @@
               {% if t.status != "active" %}
               <form method="post" action="/hostings/wp/theme-action" style="display:inline">
                 <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-                <input type="hidden" name="selector" value="{{ detail.domain }}">
+                <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
                 <input type="hidden" name="action" value="activate">
                 <input type="hidden" name="slug" value="{{ t.slug }}">
                 <button class="btn small" type="submit">Activate</button>
@@ -1263,7 +1263,7 @@
               {% if t.update_available %}
               <form method="post" action="/hostings/wp/theme-action" style="display:inline">
                 <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-                <input type="hidden" name="selector" value="{{ detail.domain }}">
+                <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
                 <input type="hidden" name="action" value="update">
                 <input type="hidden" name="slug" value="{{ t.slug }}">
                 <button class="btn small primary" type="submit">Update</button>
@@ -1276,7 +1276,7 @@
                     data-confirm-confirm-label="Delete theme"
                     data-confirm-variant="danger">
                 <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-                <input type="hidden" name="selector" value="{{ detail.domain }}">
+                <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
                 <input type="hidden" name="action" value="delete">
                 <input type="hidden" name="slug" value="{{ t.slug }}">
                 <button class="btn small danger" type="submit">Delete</button>
@@ -1322,7 +1322,7 @@
   </p>
   <form method="post" action="/hostings/vhost-options">
     <input type="hidden" name="_csrf" value="{{ csrf_vhost_options }}">
-    <input type="hidden" name="selector" value="{{ detail.domain }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
     {% if !target_node.is_empty() %}
     <input type="hidden" name="target_node" value="{{ target_node }}">
     {% endif %}
@@ -1496,7 +1496,7 @@
   </h2>
   <form method="post" action="/hostings/set-limits">
     <input type="hidden" name="_csrf" value="{{ csrf_limits }}">
-    <input type="hidden" name="selector" value="{{ detail.domain }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
     <div class="field-row">
       <div class="field">
         <label for="php_memory_mb">PHP memory <span class="hint">MB</span></label>
@@ -1579,7 +1579,7 @@
   </div>
   <form method="post" action="/hostings/quota/set">
     <input type="hidden" name="_csrf" value="{{ csrf_quota_set }}">
-    <input type="hidden" name="selector" value="{{ detail.domain }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
     <div class="field-row">
       <div class="field">
         <label for="disk_soft_mib">Disk soft cap <span class="hint">MiB · 0 = unlimited</span></label>
@@ -1632,7 +1632,7 @@
     </div>
     <form method="post" action="/hostings/expiry/clear" style="display:inline">
       <input type="hidden" name="_csrf" value="{{ csrf_expiry_clear }}">
-      <input type="hidden" name="selector" value="{{ detail.domain }}">
+      <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
       <button class="btn small" type="submit">Clear expiry</button>
     </form>
   {% else %}
@@ -1640,7 +1640,7 @@
   {% endif %}
   <form method="post" action="/hostings/expiry/set" style="margin-top:1rem">
     <input type="hidden" name="_csrf" value="{{ csrf_expiry_set }}">
-    <input type="hidden" name="selector" value="{{ detail.domain }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
     <div class="field-row">
       <div class="field">
         <label for="expires_on">Expires on <span class="hint">date · UTC</span></label>
@@ -1694,7 +1694,7 @@
           data-confirm-confirm-label="Apply"
           data-confirm-variant="primary">
       <input type="hidden" name="_csrf" value="{{ csrf_profile_apply }}">
-      <input type="hidden" name="selector" value="{{ detail.domain }}">
+      <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
       <div class="row" style="gap:0.5rem;align-items:flex-end">
         <div class="field" style="flex:1;margin:0">
           <label for="apply_profile">Profile</label>
@@ -1755,7 +1755,7 @@
   <div class="row" style="margin-top:0.7rem;gap:0.5rem">
     <form method="post" action="/hostings/ftp/set" style="display:inline">
       <input type="hidden" name="_csrf" value="{{ csrf_ftp_set }}">
-      <input type="hidden" name="selector" value="{{ detail.domain }}">
+      <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
       <input type="hidden" name="new_password" value="">
       <button class="btn primary" type="submit">
         <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
@@ -1768,7 +1768,7 @@
           data-confirm-confirm-label="Disable FTP"
           data-confirm-variant="danger">
       <input type="hidden" name="_csrf" value="{{ csrf_ftp_disable }}">
-      <input type="hidden" name="selector" value="{{ detail.domain }}">
+      <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
       <button class="btn" type="submit">Disable FTP</button>
     </form>
   </div>
@@ -1854,7 +1854,7 @@
   </h2>
   <form method="post" action="/hostings/backup-now" style="margin-bottom:1rem">
     <input type="hidden" name="_csrf" value="{{ csrf_backup_now }}">
-    <input type="hidden" name="selector" value="{{ detail.domain }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
     <button class="btn primary" type="submit">
       <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
       Run backup now
@@ -1894,7 +1894,7 @@
                         data-confirm-confirm-label="Restore"
                         data-confirm-variant="danger">
                     <input type="hidden" name="_csrf" value="{{ csrf_restore }}">
-                    <input type="hidden" name="selector" value="{{ detail.domain }}">
+                    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
                     <input type="hidden" name="archive_path" value="{{ p }}">
                     <button class="btn small" type="submit">Restore</button>
                   </form>
@@ -1907,7 +1907,7 @@
                       data-confirm-confirm-label="Delete backup"
                       data-confirm-variant="danger">
                   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-                  <input type="hidden" name="selector" value="{{ detail.domain }}">
+                  <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
                   <input type="hidden" name="backup_id" value="{{ b.id }}">
                   <button class="btn small danger" type="submit">Delete</button>
                 </form>
@@ -1936,7 +1936,7 @@
           data-confirm-body="Files and database for {{ detail.domain }} will be overwritten with the uploaded archive."
           data-confirm-confirm-label="Restore"
           data-confirm-variant="danger">
-      <input type="hidden" name="selector" value="{{ detail.domain }}">
+      <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
       <div class="row" style="gap:0.5rem;align-items:flex-end">
         <div class="field" style="flex:1;margin:0">
           <label for="restore_upload">Archive file</label>
@@ -1958,7 +1958,7 @@
           data-confirm-confirm-label="Restore"
           data-confirm-variant="danger">
       <input type="hidden" name="_csrf" value="{{ csrf_restore }}">
-      <input type="hidden" name="selector" value="{{ detail.domain }}">
+      <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
       <div class="row" style="gap:0.5rem;align-items:flex-end">
         <div class="field" style="flex:1;margin:0">
           <label for="restore_path">Archive path</label>
@@ -1988,7 +1988,7 @@
     <form hx-post="/hostings/logs" hx-target="#logs-output" hx-swap="innerHTML"
           hx-indicator="#log-spinner" style="display:inline">
       <input type="hidden" name="_csrf" value="{{ csrf_logs }}">
-      <input type="hidden" name="selector" value="{{ detail.domain }}">
+      <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
       <input type="hidden" name="kind" value="access">
       <input type="hidden" name="lines" value="200">
       <button class="btn small" type="submit">Tail access.log</button>
@@ -1996,7 +1996,7 @@
     <form hx-post="/hostings/logs" hx-target="#logs-output" hx-swap="innerHTML"
           hx-indicator="#log-spinner" style="display:inline">
       <input type="hidden" name="_csrf" value="{{ csrf_logs }}">
-      <input type="hidden" name="selector" value="{{ detail.domain }}">
+      <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
       <input type="hidden" name="kind" value="error">
       <input type="hidden" name="lines" value="200">
       <button class="btn small" type="submit">Tail error.log</button>
@@ -2004,7 +2004,7 @@
     <form hx-post="/hostings/logs" hx-target="#logs-output" hx-swap="innerHTML"
           hx-indicator="#log-spinner" style="display:inline">
       <input type="hidden" name="_csrf" value="{{ csrf_logs }}">
-      <input type="hidden" name="selector" value="{{ detail.domain }}">
+      <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
       <input type="hidden" name="kind" value="error">
       <input type="hidden" name="lines" value="1000">
       <button class="btn small" type="submit">Tail error.log · 1000 lines</button>
@@ -2031,7 +2031,7 @@
         data-confirm-confirm-label="Save crontab"
         data-confirm-variant="primary">
     <input type="hidden" name="_csrf" value="{{ csrf_cron }}">
-    <input type="hidden" name="selector" value="{{ detail.domain }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
     <textarea name="body" rows="10" spellcheck="false" style="font-family:var(--font-mono);font-size:12.5px"
               placeholder="# m h dom mon dow command&#10;0 3 * * * /usr/bin/php /home/{{ detail.system_user }}/{{ detail.domain }}/htdocs/wp-cron.php >/dev/null 2>&amp;1">{{ cron_body }}</textarea>
     <div class="row" style="margin-top:0.7rem">
@@ -2096,7 +2096,7 @@
 
   <form method="post" action="/hostings/monitor/set" autocomplete="off">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-    <input type="hidden" name="selector" value="{{ detail.domain }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
 
     <label class="field-checkbox" style="font-weight:600">
       <input type="checkbox" name="enabled" value="on" {% if monitor_config.enabled %}checked{% endif %}>
@@ -2161,7 +2161,7 @@
     <p class="text-soft small" style="margin:0 0 0.5rem">Fire one probe immediately. Records a sample regardless of the enabled flag.</p>
     <form method="post" action="/hostings/monitor/probe" style="display:inline">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-      <input type="hidden" name="selector" value="{{ detail.domain }}">
+      <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
       <button type="submit" class="btn small">
         <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polygon points="5 3 19 12 5 21 5 3"/></svg>
         Probe now
@@ -2392,7 +2392,7 @@
         data-confirm-variant="primary"
         style="display:flex;gap:0.5rem;align-items:flex-end;flex-wrap:wrap">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-    <input type="hidden" name="selector" value="{{ detail.domain }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
     {# source_node carries WHERE the hosting currently lives so the
        handler dispatches Export + Suspend to the right agent. #}
     <input type="hidden" name="source_node" value="{{ target_node }}">
@@ -2438,7 +2438,7 @@
         data-confirm-variant="primary"
         style="display:grid;grid-template-columns:1fr 1fr auto;gap:0.5rem;align-items:flex-end">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-    <input type="hidden" name="selector" value="{{ detail.domain }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
     <input type="hidden" name="source_node" value="{{ target_node }}">
     <div class="field" style="margin:0">
       <label for="clone_to_domain">New domain</label>
@@ -2485,7 +2485,7 @@
         data-confirm-confirm-label="Create bundle"
         data-confirm-variant="primary">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-    <input type="hidden" name="selector" value="{{ detail.domain }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
     <button class="btn primary" type="submit">
       <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
       Export migration bundle
@@ -2527,7 +2527,7 @@
         data-confirm-variant="danger"
         data-confirm-require="{{ detail.domain }}">
     <input type="hidden" name="_csrf" value="{{ csrf_delete }}">
-    <input type="hidden" name="selector" value="{{ detail.domain }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
     <label class="field-checkbox"><input type="checkbox" name="keep_user" value="on"> Keep the Linux user</label>
     <label class="field-checkbox"><input type="checkbox" name="keep_db" value="on"> Keep the database</label>
     <span class="grow"></span>

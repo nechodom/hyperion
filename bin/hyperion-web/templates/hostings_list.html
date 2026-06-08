@@ -185,11 +185,22 @@
       <tbody>
       {% for (r, is_test) in rows %}
         <tr>
+          {# Links use the hosting's ULID (`r.id`) — NOT the domain
+             — because after a cross-node migration BOTH the
+             suspended source and the active target share the same
+             domain. With domain-based links every "View" routed
+             to whichever row the master happened to have, which
+             was always the source (suspended) copy. The ULID is
+             globally unique so find_hosting_anywhere always
+             resolves it to the correct node + row.
+             Bulk action checkboxes ALSO move to the ID for the
+             same reason — bulk delete by domain would target
+             whichever copy the master sees first. #}
           <td style="padding-right:0">
-            <input type="checkbox" class="bulk-row" name="selected" value="{{ r.domain }}" aria-label="Select {{ r.domain }}">
+            <input type="checkbox" class="bulk-row" name="selected" value="{{ r.id.as_str() }}" aria-label="Select {{ r.domain }}">
           </td>
           <td>
-            <a href="/hostings/{{ r.domain }}"><strong>{{ r.domain }}</strong></a>
+            <a href="/hostings/{{ r.id.as_str() }}"><strong>{{ r.domain }}</strong></a>
           </td>
           <td class="hide-on-phone">
             {% if let Some(v) = r.php_version %}
@@ -228,7 +239,7 @@
           <td class="hide-on-phone muted numeric" title="{{ r.created_at }}">{{ crate::handlers::stats::fmt_ago(r.created_at) }}</td>
           <td class="right">
             <div class="row-actions">
-              <a class="btn small" href="/hostings/{{ r.domain }}">View</a>
+              <a class="btn small" href="/hostings/{{ r.id.as_str() }}">View</a>
               <form method="post" action="/hostings/delete" style="display:inline"
                     data-confirm-title="Delete {{ r.domain }}"
                     data-confirm-body="Files, database, system user and nginx vhost will be removed. This is permanent — type the domain to confirm. External DNS records are NOT touched."
@@ -236,7 +247,12 @@
                     data-confirm-variant="danger"
                     data-confirm-require="{{ r.domain }}">
                 <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-                <input type="hidden" name="selector" value="{{ r.domain }}">
+                {# selector value is the ULID id (not domain) — see
+                   note above the View link for the cross-node
+                   duplicate rationale. data-confirm-require still
+                   uses the domain because the operator types
+                   THAT to confirm the deletion. #}
+                <input type="hidden" name="selector" value="{{ r.id.as_str() }}">
                 {# Carry the node this hosting lives on so post_delete
                    dispatches the RPC to the right agent. Without
                    this, multi-node deletes silently no-op on the

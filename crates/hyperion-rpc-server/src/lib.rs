@@ -919,6 +919,10 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::NodesList(v),
             Err(e) => Response::Error(e),
         },
+        Request::CertOverview => match api.cert_overview().await {
+            Ok(v) => Response::CertOverview(v),
+            Err(e) => Response::Error(e),
+        },
         Request::NodeSetLabel { node_id, label } => match api.node_set_label(node_id, label).await {
             Ok(()) => Response::NodeLabelUpdated,
             Err(e) => Response::Error(e),
@@ -1838,6 +1842,11 @@ mod tests {
             _: i64,
         ) -> Result<(), RpcError> {
             Ok(())
+        }
+        async fn cert_overview(
+            &self,
+        ) -> Result<Vec<hyperion_types::CertOverviewItem>, RpcError> {
+            Ok(Vec::new())
         }
         async fn nodes_list(&self) -> Result<Vec<NodeSummary>, RpcError> {
             Ok(vec![])

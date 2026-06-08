@@ -75,6 +75,32 @@ pub async fn delete(pool: &SqlitePool, domain: &str) -> Result<(), StateError> {
     Ok(())
 }
 
+/// Newest-first list of every cert the agent knows about. Used by
+/// the cluster-wide `/certs` overview to give the operator one
+/// screen with "everything that's signed by us, when does each
+/// expire, who's at risk".
+pub async fn list_all(pool: &SqlitePool) -> Result<Vec<CertRow>, StateError> {
+    let rows: Vec<(i64, String, i64, i64, String, String, String)> = sqlx::query_as(
+        r#"SELECT id, domain, issued_at, not_after, cert_path, key_path, issuer
+             FROM certificates
+            ORDER BY not_after ASC"#,
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, domain, issued_at, not_after, cert_path, key_path, issuer)| CertRow {
+            id,
+            domain,
+            issued_at,
+            not_after,
+            cert_path,
+            key_path,
+            issuer,
+        })
+        .collect())
+}
+
 pub async fn find_expiring_within(
     pool: &SqlitePool,
     now: i64,

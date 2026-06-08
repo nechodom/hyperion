@@ -2,6 +2,26 @@
 
 use serde::{Deserialize, Serialize};
 
+/// One row on the cluster-wide /certs overview. Slimmer than
+/// `CertInfo` because the list doesn't need full SANs /
+/// fingerprint — operator clicks through to hosting detail for
+/// the full record.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct CertOverviewItem {
+    pub domain: String,
+    pub issuer: String,
+    pub issued_at: i64,
+    pub not_after: i64,
+    /// Days until expiry — computed server-side so the template
+    /// doesn't need date arithmetic. Negative ⇒ already expired.
+    pub days_left: i64,
+    /// One of "expired" | "critical" (<7d) | "warning" (<30d) |
+    /// "ok". Drives the UI pill colour.
+    pub band: String,
+    /// Node id this cert lives on. Empty string ⇒ master.
+    pub node_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CertInfo {
     pub domain: String,

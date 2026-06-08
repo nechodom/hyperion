@@ -19,7 +19,7 @@ pub mod spf;
 pub mod stats;
 pub mod wp;
 
-pub use cert::{CertInfo, CertRenewOutcome, CertRenewResult};
+pub use cert::{CertInfo, CertOverviewItem, CertRenewOutcome, CertRenewResult};
 pub use db::{DbProvision, DbSummary};
 pub use dns::{CertIssueRequest, DnsCheckResult};
 pub use hosting::{
