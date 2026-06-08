@@ -31,6 +31,13 @@ struct ListTpl<'a> {
     total_count: usize,
     q: String,
     state_filter: String,
+    /// Currently active sort column ("" / "domain" / "created" /
+    /// "state" / "node"). Template uses this to render the up/down
+    /// arrow on the active column header.
+    sort_key: String,
+    /// "asc" | "desc" — passed through the URL so the operator can
+    /// flip the direction by re-clicking the same column.
+    sort_dir: String,
     csrf_token: String,
     csrf_bulk: String,
     error: Option<String>,
@@ -256,6 +263,15 @@ pub struct ListQuery {
     pub state: String,
     #[serde(default)]
     pub bulk_flash: Option<String>,
+    /// Sort column. Empty / unknown ⇒ `domain` (alphabetical), the
+    /// default the list shipped with. Accepted: `domain`, `created`,
+    /// `updated`, `state`, `node`, `disk`.
+    #[serde(default)]
+    pub sort: String,
+    /// `asc` | `desc`. Empty ⇒ `asc` for textual columns,
+    /// `desc` for time/numeric (newest/largest first).
+    #[serde(default)]
+    pub dir: String,
 }
 
 pub async fn get_list(
@@ -270,11 +286,43 @@ pub async fn get_list(
     let rows = filter_by_access(&state, &ctx, rows).await;
     let needle = q.q.trim().to_lowercase();
     let state_filter = q.state.trim().to_lowercase();
-    let rows: Vec<HostingSummary> = rows
+    let mut rows: Vec<HostingSummary> = rows
         .into_iter()
         .filter(|r| needle.is_empty() || r.domain.to_lowercase().contains(&needle))
         .filter(|r| state_filter.is_empty() || r.state.as_str() == state_filter)
         .collect();
+    // ── Server-side sort ──
+    //
+    // Operators with 50+ hostings want to find "the one I created
+    // today" in a deterministic order. The list defaults to
+    // alphabetical-by-domain (preserves the long-standing UX);
+    // explicit ?sort= overrides — created (newest first by
+    // default), state, node, with ?dir= flipping the comparator.
+    let sort_key = q.sort.trim().to_lowercase();
+    let dir_desc = match q.dir.trim().to_lowercase().as_str() {
+        "desc" => Some(true),
+        "asc" => Some(false),
+        _ => None,
+    };
+    // Default direction per column — alphabetical = asc; time =
+    // newest-first; state = active first (asc by string works
+    // because Active < Failed < Provisioning < Suspended < Trashed).
+    let desc = dir_desc.unwrap_or(matches!(sort_key.as_str(), "created" | "updated"));
+    match sort_key.as_str() {
+        "created" => rows.sort_by_key(|r| r.created_at),
+        "state" => rows.sort_by(|a, b| a.state.as_str().cmp(b.state.as_str())),
+        "node" => rows.sort_by(|a, b| {
+            a.node_id
+                .as_deref()
+                .unwrap_or("")
+                .cmp(b.node_id.as_deref().unwrap_or(""))
+        }),
+        // Default + "domain" both fall here.
+        _ => rows.sort_by(|a, b| a.domain.to_lowercase().cmp(&b.domain.to_lowercase())),
+    }
+    if desc {
+        rows.reverse();
+    }
     // Pre-tag each row with `is_on_test_node` so the template can
     // render the TEST chip without doing closure-based set lookups
     // (askama can't parse Rust closures).
@@ -308,6 +356,8 @@ pub async fn get_list(
         total_count,
         q: q.q,
         state_filter,
+        sort_key: if sort_key.is_empty() { "domain".to_string() } else { sort_key },
+        sort_dir: if desc { "desc".into() } else { "asc".into() },
         csrf_token,
         csrf_bulk,
         error: None,

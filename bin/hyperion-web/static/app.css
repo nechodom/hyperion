@@ -2984,3 +2984,26 @@ body.role-customer .header-action-new { display: none !important; }
   border-radius: 6px;
   font-size: 0.9rem;
 }
+
+/* Sortable table-header links — used on /hostings, future
+   /notifications, etc. Inactive columns stay subtle; the active
+   one carries a small chevron + brand-tinted weight so the
+   operator can tell at a glance which axis the table is sorted on
+   without re-reading the URL. */
+.sort-link {
+  color: inherit;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-weight: inherit;
+}
+.sort-link:hover { text-decoration: underline; }
+.sort-link.active {
+  color: var(--accent, #4a8aff);
+  font-weight: 700;
+}
+.sort-arrow {
+  font-size: 0.8em;
+  opacity: 0.85;
+}

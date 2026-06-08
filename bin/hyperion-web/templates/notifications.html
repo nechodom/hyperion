@@ -1,0 +1,100 @@
+{% extends "base.html" %}
+{% block title %}Notifications · hyperion{% endblock %}
+{% block main %}
+<div class="page-header">
+  <div>
+    <h1>Notifications</h1>
+    <div class="subtitle">
+      Full archive — the bell dropdown shows only the last 10.
+      Cert renewals, backup status, hosting failures, migration
+      results all flow here.
+    </div>
+  </div>
+  <div>
+    <form method="post" action="/api/notifications/mark-all-read" style="display:inline">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <button class="btn ghost" type="submit">Mark all read</button>
+    </form>
+  </div>
+</div>
+
+<div class="card" style="margin-bottom:1rem;padding:0.85rem 1rem">
+  <form method="get" action="/notifications"
+        style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
+    <label style="display:flex;gap:0.4rem;align-items:center">
+      <span class="text-soft small">Kind</span>
+      <select name="kind" class="input" style="min-width:14rem">
+        <option value="" {% if kind_filter.is_empty() %}selected{% endif %}>(all)</option>
+        {% for k in known_kinds %}
+          <option value="{{ k.0|e }}" {% if k.1 %}selected{% endif %}>{{ k.0 }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <button type="submit" class="btn">Apply</button>
+    <a href="/notifications" class="btn ghost">Clear</a>
+    <span style="margin-left:auto" class="text-soft small">
+      {{ items.len() }} notification{% if items.len() != 1 %}s{% endif %}
+    </span>
+  </form>
+</div>
+
+{% if items.is_empty() %}
+  <div class="card empty">
+    <div class="empty-title">No notifications</div>
+    <p class="text-soft small">
+      Nothing to show here yet. As cert renewals, backups, and
+      cluster events happen, they'll appear in this list.
+    </p>
+  </div>
+{% else %}
+  <div class="card" style="padding:0">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th style="width:5rem">Severity</th>
+          <th>Title / body</th>
+          <th style="width:12rem">Kind</th>
+          <th style="width:9rem">When</th>
+          <th style="width:5rem">State</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for n in items %}
+          <tr {% if n.read_at.is_none() %}style="background:color-mix(in oklab, var(--accent) 4%, transparent)"{% endif %}>
+            <td>
+              {% if n.severity == "error" %}
+                <span class="pill err">error</span>
+              {% else if n.severity == "warn" %}
+                <span class="pill warn">warn</span>
+              {% else %}
+                <span class="pill ok">info</span>
+              {% endif %}
+            </td>
+            <td>
+              <div><strong>{{ n.title }}</strong></div>
+              <div class="text-soft small">{{ n.body }}</div>
+            </td>
+            <td><code style="font-size:0.78rem">{{ n.kind }}</code></td>
+            <td class="text-soft small" title="{{ n.created_at }}">
+              {{ crate::handlers::stats::fmt_ago(n.created_at) }}
+            </td>
+            <td>
+              {% if n.read_at.is_some() %}
+                <span class="text-soft small">read</span>
+              {% else %}
+                <span class="pill" style="background:var(--accent);color:white">new</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if !n.href.is_empty() %}
+                <a href="{{ n.href }}" class="btn small">Open</a>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endif %}
+{% endblock %}

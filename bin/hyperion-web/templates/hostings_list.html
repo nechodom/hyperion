@@ -148,13 +148,37 @@
   <div class="table-wrap">
     <table>
       <thead>
+        {# Sortable column headers. The current sort + direction
+           round-trip through the URL — re-clicking the active
+           column flips the direction. Filters (q, state) survive
+           the click via the include below. #}
         <tr>
           <th style="width:1px;padding-right:0"><input type="checkbox" id="bulk-all" aria-label="Select all"></th>
-          <th>Domain</th>
+          <th>
+            <a class="sort-link {% if sort_key == "domain" %}active{% endif %}"
+               href="/hostings?q={{ q|e }}&state={{ state_filter|e }}&sort=domain&dir={% if sort_key == "domain" && sort_dir == "asc" %}desc{% else %}asc{% endif %}">
+              Domain {% if sort_key == "domain" %}<span class="sort-arrow">{% if sort_dir == "asc" %}↑{% else %}↓{% endif %}</span>{% endif %}
+            </a>
+          </th>
           <th class="hide-on-phone">PHP</th>
-          <th>State</th>
-          <th class="hide-on-phone">Node</th>
-          <th class="hide-on-phone">Created</th>
+          <th>
+            <a class="sort-link {% if sort_key == "state" %}active{% endif %}"
+               href="/hostings?q={{ q|e }}&state={{ state_filter|e }}&sort=state&dir={% if sort_key == "state" && sort_dir == "asc" %}desc{% else %}asc{% endif %}">
+              State {% if sort_key == "state" %}<span class="sort-arrow">{% if sort_dir == "asc" %}↑{% else %}↓{% endif %}</span>{% endif %}
+            </a>
+          </th>
+          <th class="hide-on-phone">
+            <a class="sort-link {% if sort_key == "node" %}active{% endif %}"
+               href="/hostings?q={{ q|e }}&state={{ state_filter|e }}&sort=node&dir={% if sort_key == "node" && sort_dir == "asc" %}desc{% else %}asc{% endif %}">
+              Node {% if sort_key == "node" %}<span class="sort-arrow">{% if sort_dir == "asc" %}↑{% else %}↓{% endif %}</span>{% endif %}
+            </a>
+          </th>
+          <th class="hide-on-phone">
+            <a class="sort-link {% if sort_key == "created" %}active{% endif %}"
+               href="/hostings?q={{ q|e }}&state={{ state_filter|e }}&sort=created&dir={% if sort_key == "created" && sort_dir == "desc" %}asc{% else %}desc{% endif %}">
+              Created {% if sort_key == "created" %}<span class="sort-arrow">{% if sort_dir == "asc" %}↑{% else %}↓{% endif %}</span>{% endif %}
+            </a>
+          </th>
           <th class="right">Actions</th>
         </tr>
       </thead>

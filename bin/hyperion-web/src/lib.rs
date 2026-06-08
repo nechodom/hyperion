@@ -405,6 +405,10 @@ pub fn build_router(state: SharedState) -> Router {
         // Bell-icon notification feed. mark-read + mark-all-read are
         // CSRF-exempt at the middleware (see check_csrf comment).
         .route(
+            "/notifications",
+            get(handlers::notifications::get_archive),
+        )
+        .route(
             "/api/notifications/feed",
             get(handlers::notifications::get_feed),
         )
