@@ -762,6 +762,15 @@ pub trait AgentApi: Send + Sync + 'static {
     /// race with deletion.
     async fn node_set_label(&self, node_id: String, label: String) -> Result<(), RpcError>;
 
+    /// Toggle a node's drain flag.
+    async fn node_set_drain(
+        &self,
+        node_id: String,
+        drain: bool,
+        reason: String,
+        actor_uid: i64,
+    ) -> Result<(), RpcError>;
+
     /// Compute operator alerts (cert expiring, failed hostings, stale
     /// backups, high load) at request time.
     async fn dashboard_alerts(&self) -> Result<Vec<DashboardAlert>, RpcError>;

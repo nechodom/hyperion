@@ -1346,6 +1346,7 @@ fn print_pretty(resp: &Response) {
             }
         }
         Response::NodeLabelUpdated => println!("node label updated"),
+        Response::NodeDrainUpdated => println!("node drain flag updated"),
         Response::WebSessionAck => println!("session ack"),
         Response::WebSessionTouch(b) => {
             println!("session {}", if *b { "live" } else { "revoked/unknown" })

@@ -169,6 +169,51 @@ pub async fn touch_last_seen(
     Ok(())
 }
 
+/// Mark a node as drained — auto-placer + create wizard will skip
+/// it on the next dispatch. Idempotent: re-draining updates the
+/// timestamp + reason but doesn't error.
+pub async fn drain(
+    pool: &SqlitePool,
+    node_id: &str,
+    reason: &str,
+    drained_by: i64,
+    now: i64,
+) -> Result<(), StateError> {
+    sqlx::query(
+        r#"INSERT INTO node_drain (node_id, drained_at, reason, drained_by)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(node_id) DO UPDATE SET
+              drained_at = excluded.drained_at,
+              reason     = excluded.reason,
+              drained_by = excluded.drained_by"#,
+    )
+    .bind(node_id)
+    .bind(now)
+    .bind(reason)
+    .bind(drained_by)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Lift the drain flag. No-op when the node wasn't drained.
+pub async fn undrain(pool: &SqlitePool, node_id: &str) -> Result<(), StateError> {
+    sqlx::query("DELETE FROM node_drain WHERE node_id = ?")
+        .bind(node_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Set of currently-drained node ids. Cheap lookup the auto-
+/// placer + create wizard call before placing new hostings.
+pub async fn drained_set(pool: &SqlitePool) -> Result<std::collections::HashSet<String>, StateError> {
+    let rows: Vec<(String,)> = sqlx::query_as("SELECT node_id FROM node_drain")
+        .fetch_all(pool)
+        .await?;
+    Ok(rows.into_iter().map(|(n,)| n).collect())
+}
+
 /// Rename a node's display label without touching its `node_id`
 /// (the immutable enrollment identifier). The label is what shows
 /// up in dashboard dropdowns, the test-domain template token, the

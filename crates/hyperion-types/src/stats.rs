@@ -74,6 +74,16 @@ pub struct NodeSummary {
     pub public_ip: Option<String>,
     pub enrolled_at: i64,
     pub last_seen_at: i64,
+    /// When true, the auto-placer + create wizard skip this node.
+    /// Existing hostings on it keep serving traffic — drain is
+    /// for "stop new work" maintenance windows, not "evict".
+    /// `#[serde(default)]` so workers running the pre-032 schema
+    /// still parse this struct fine.
+    #[serde(default)]
+    pub is_drained: bool,
+    /// Optional operator note shown next to the "drained" pill.
+    #[serde(default)]
+    pub drain_reason: String,
 }
 
 /// Cluster-wide aggregate. Today single-node = node_stats[0]; later

@@ -94,6 +94,110 @@ pub async fn get_running_count(
     Ok(axum::Json(serde_json::json!({"count": n})).into_response())
 }
 
+/// POST /jobs/<id>/retry — replay a failed/cancelled job by
+/// reconstructing the spawn from the original `payload_json`.
+/// Currently understands `migration` + `hosting_clone` (the two
+/// kinds that ship with proper payload schemas). Other kinds
+/// return a clean "no retry handler for kind X" flash so the
+/// operator knows to redo the action from the source page
+/// instead of staring at a disabled button.
+pub async fn post_job_retry(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Result<Response, AppError> {
+    if !ctx.is_admin_or_higher() {
+        return Ok(
+            axum::response::Redirect::to("/jobs?flash_error=admin+role+required").into_response(),
+        );
+    }
+    let job = match fetch_job(&state, &id).await? {
+        Some(j) => j,
+        None => {
+            return Ok(axum::response::Redirect::to(
+                "/jobs?flash_error=Job+id+not+found",
+            )
+            .into_response());
+        }
+    };
+    if !job.is_terminal() {
+        return Ok(axum::response::Redirect::to(&format!(
+            "/jobs/{}?flash_error=Job+is+still+running",
+            id
+        ))
+        .into_response());
+    }
+    // Parse the payload according to the job kind. Both supported
+    // kinds were stored by the matching POST handler so the schema
+    // is well-known here.
+    let payload: serde_json::Value = serde_json::from_str(&job.payload_json).unwrap_or_default();
+    match job.kind.as_str() {
+        "migration" => {
+            let form = crate::handlers::hostings::MigrationMoveForm {
+                selector: payload
+                    .get("selector")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                target_node: payload
+                    .get("target_node")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                source_node: payload
+                    .get("source_node")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            };
+            crate::handlers::hostings::post_migration_move(
+                State(state),
+                ctx,
+                headers,
+                axum::Form(form),
+            )
+            .await
+        }
+        "hosting_clone" => {
+            let form = crate::handlers::hostings::HostingCloneForm {
+                selector: payload
+                    .get("selector")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                new_domain: payload
+                    .get("new_domain")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                target_node: payload
+                    .get("target_node")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                source_node: payload
+                    .get("source_node")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+            };
+            crate::handlers::hostings::post_hosting_clone(
+                State(state),
+                ctx,
+                headers,
+                axum::Form(form),
+            )
+            .await
+        }
+        other => Ok(axum::response::Redirect::to(&format!(
+            "/jobs/{}?flash_error=No+retry+handler+for+kind+'{}'+%E2%80%94+please+re-run+from+the+source+page",
+            id, other
+        ))
+        .into_response()),
+    }
+}
+
 pub async fn get_jobs(
     State(state): State<SharedState>,
     ctx: AuthCtx,

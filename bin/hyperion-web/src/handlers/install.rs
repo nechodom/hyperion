@@ -262,6 +262,61 @@ pub struct RenameNodeForm {
     pub label: String,
 }
 
+/// Form payload for toggling a node's drain (maintenance) flag.
+#[derive(Deserialize)]
+pub struct DrainNodeForm {
+    pub node_id: String,
+    /// "on" / "1" / "true" ⇒ drain; anything else ⇒ undrain.
+    #[serde(default)]
+    pub drain: String,
+    #[serde(default)]
+    pub reason: String,
+}
+
+pub async fn post_drain_node(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<DrainNodeForm>,
+) -> Result<Response, AppError> {
+    if !ctx.is_super_admin() {
+        return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
+    }
+    let node_id = form.node_id.trim().to_string();
+    if node_id.is_empty() {
+        return Err(AppError::BadRequest("missing node_id".into()));
+    }
+    let drain = matches!(form.drain.as_str(), "on" | "1" | "true");
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::NodeSetDrain {
+            node_id: node_id.clone(),
+            drain,
+            reason: form.reason.trim().to_string(),
+        },
+    )
+    .await?;
+    let flash = match resp {
+        RpcResponse::NodeDrainUpdated => {
+            if drain {
+                format!(
+                    "Node {} drained — auto-placer will skip it. Existing hostings keep serving.",
+                    node_id
+                )
+            } else {
+                format!("Node {} returned to active service.", node_id)
+            }
+        }
+        RpcResponse::Error(e) => format!("Drain toggle failed: {e}"),
+        _ => "Drain toggle: unexpected response".into(),
+    };
+    Ok(Redirect::to(&format!(
+        "/install?flash={}#node-{}",
+        urlencode(&flash),
+        urlencode(&node_id)
+    ))
+    .into_response())
+}
+
 pub async fn post_rename_node(
     State(state): State<SharedState>,
     ctx: AuthCtx,

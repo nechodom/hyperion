@@ -803,6 +803,15 @@ pub enum Request {
     /// Rename an enrolled node's display label. `node_id` is the
     /// immutable enrollment identifier; only `label` changes.
     NodeSetLabel { node_id: String, label: String },
+    /// Toggle a node's drain flag. `drain=true` marks the node as
+    /// maintenance — auto-placer + create wizard skip it; existing
+    /// hostings keep serving. `drain=false` lifts the flag.
+    NodeSetDrain {
+        node_id: String,
+        drain: bool,
+        #[serde(default)]
+        reason: String,
+    },
     NodeHeartbeat {
         node_id: String,
         secret: String,
@@ -1078,6 +1087,8 @@ pub enum Response {
     NodesList(Vec<NodeSummary>),
     /// Plain ack for NodeSetLabel.
     NodeLabelUpdated,
+    /// Plain ack for NodeSetDrain.
+    NodeDrainUpdated,
     NodeHeartbeat {
         /// Same as EnrollConsume — included on every heartbeat ack
         /// so already-enrolled nodes pick up the master pubkey

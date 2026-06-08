@@ -353,6 +353,10 @@ pub fn build_router(state: SharedState) -> Router {
             get(handlers::jobs::get_job_progress),
         )
         .route(
+            "/jobs/:id/retry",
+            post(handlers::jobs::post_job_retry),
+        )
+        .route(
             "/api/jobs-running-count",
             get(handlers::jobs::get_running_count),
         )
@@ -378,6 +382,10 @@ pub fn build_router(state: SharedState) -> Router {
         .route(
             "/install/rename-node",
             post(handlers::install::post_rename_node),
+        )
+        .route(
+            "/install/drain-node",
+            post(handlers::install::post_drain_node),
         )
         .route(
             "/install/update-node-status",

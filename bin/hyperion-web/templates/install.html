@@ -246,6 +246,12 @@
               TEST
             </span>
             {% endif %}
+            {% if n.is_drained %}
+            <span class="tag" title="{% if !n.drain_reason.is_empty() %}{{ n.drain_reason }}{% else %}Maintenance — auto-placer skips new work here{% endif %}"
+                  style="background:#888;color:white;border-color:transparent;font-size:0.65rem;margin-left:0.35rem;font-weight:700;letter-spacing:0.05em">
+              DRAINED
+            </span>
+            {% endif %}
           </td>
           <td><code style="font-size:0.74rem">{{ n.node_id }}</code></td>
           <td><span class="tag">v{{ n.agent_version }}</span></td>
@@ -291,6 +297,32 @@
                         title="Click to mark this node as test-only (auto-domains in the wizard)"
                         style="border-color:var(--warn);color:var(--warn)">
                   Mark as test
+                </button>
+                {% endif %}
+              </form>
+              {# Drain toggle — flips node_drain table. Drained
+                 nodes are skipped by the auto-placer + create
+                 wizard; existing hostings keep serving. Used for
+                 maintenance windows: kernel upgrade, hardware
+                 swap, agent fix-up. #}
+              <form method="post" action="/install/drain-node" style="display:inline"
+                    data-confirm-title="{% if n.is_drained %}Undrain {{ n.label }}{% else %}Drain {{ n.label }} (maintenance){% endif %}"
+                    data-confirm-body="{% if n.is_drained %}This node returns to active service. The auto-placer + create wizard will start placing new hostings here again.{% else %}New hostings will NOT be placed on this node until you undrain it. Existing hostings keep serving traffic — drain only affects new placement.{% endif %}"
+                    data-confirm-confirm-label="{% if n.is_drained %}Undrain{% else %}Drain{% endif %}"
+                    data-confirm-variant="primary">
+                <input type="hidden" name="_csrf" value="{{ csrf_test }}">
+                <input type="hidden" name="node_id" value="{{ n.node_id }}">
+                {% if n.is_drained %}
+                <button type="submit" class="btn small ghost"
+                        title="Currently drained — click to return to active service">
+                  Undrain
+                </button>
+                {% else %}
+                <input type="hidden" name="drain" value="on">
+                <input type="hidden" name="reason" value="Maintenance">
+                <button type="submit" class="btn small ghost"
+                        title="Pause new hosting placement on this node (existing keep serving)">
+                  Drain
                 </button>
                 {% endif %}
               </form>

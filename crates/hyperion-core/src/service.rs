@@ -5972,14 +5972,66 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(())
     }
 
+    /// Toggle a node's drain flag. Drained nodes are skipped by
+    /// the auto-placer + create wizard; existing hostings keep
+    /// serving traffic. Idempotent — drain on an already-drained
+    /// node updates the reason + timestamp without erroring.
+    pub async fn node_set_drain(
+        &self,
+        node_id: &str,
+        drain: bool,
+        reason: &str,
+        actor_uid: i64,
+    ) -> Result<(), RpcError> {
+        let trimmed = reason.trim();
+        if trimmed.chars().count() > 200 {
+            return Err(RpcError::Validation {
+                message: "drain reason too long (max 200 characters)".into(),
+            });
+        }
+        let now = now_secs();
+        if drain {
+            hyperion_state::nodes::drain(&self.pool, node_id, trimmed, actor_uid, now)
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("node drain: {e}")))?;
+        } else {
+            hyperion_state::nodes::undrain(&self.pool, node_id)
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("node undrain: {e}")))?;
+        }
+        self.append_audit(
+            if drain { "node.drain" } else { "node.undrain" },
+            Some(node_id),
+            &serde_json::json!({"reason": trimmed, "actor_uid": actor_uid}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
     /// List enrolled nodes (master-side view).
     pub async fn nodes_list(&self) -> Result<Vec<hyperion_types::NodeSummary>, RpcError> {
         let rows = hyperion_state::nodes::list(&self.pool)
             .await
             .map_err(|e| RpcError::Internal_with(format!("nodes list: {e}")))?;
+        let drained = hyperion_state::nodes::drained_set(&self.pool)
+            .await
+            .unwrap_or_default();
+        // Pre-load reasons for the drained set so the UI shows
+        // "drained: post-upgrade testing" instead of just a pill.
+        let reasons: std::collections::HashMap<String, String> = {
+            let rs: Vec<(String, String)> =
+                sqlx::query_as("SELECT node_id, reason FROM node_drain")
+                    .fetch_all(&self.pool)
+                    .await
+                    .unwrap_or_default();
+            rs.into_iter().collect()
+        };
         Ok(rows
             .into_iter()
             .map(|r| hyperion_types::NodeSummary {
+                is_drained: drained.contains(&r.node_id),
+                drain_reason: reasons.get(&r.node_id).cloned().unwrap_or_default(),
                 node_id: r.node_id,
                 label: r.label,
                 master_url: r.master_url,

@@ -923,6 +923,17 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(()) => Response::NodeLabelUpdated,
             Err(e) => Response::Error(e),
         },
+        Request::NodeSetDrain { node_id, drain, reason } => {
+            // actor_uid is captured at the RPC boundary via the
+            // master_rpc envelope's signing identity; for local
+            // panel calls we pass 0 and the audit row will show
+            // "system" — operator identity is captured separately
+            // in the web layer's audit append.
+            match api.node_set_drain(node_id, drain, reason, 0).await {
+                Ok(()) => Response::NodeDrainUpdated,
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::WpResetPassword {
             sel,
             wp_user,
@@ -1817,6 +1828,15 @@ mod tests {
             Ok(None)
         }
         async fn node_set_label(&self, _: String, _: String) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn node_set_drain(
+            &self,
+            _: String,
+            _: bool,
+            _: String,
+            _: i64,
+        ) -> Result<(), RpcError> {
             Ok(())
         }
         async fn nodes_list(&self) -> Result<Vec<NodeSummary>, RpcError> {

@@ -1070,6 +1070,16 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.node_set_label(&node_id, &label).await
     }
 
+    async fn node_set_drain(
+        &self,
+        node_id: String,
+        drain: bool,
+        reason: String,
+        actor_uid: i64,
+    ) -> Result<(), RpcError> {
+        self.svc.node_set_drain(&node_id, drain, &reason, actor_uid).await
+    }
+
     async fn wp_reset_password(
         &self,
         sel: HostingSelector,
