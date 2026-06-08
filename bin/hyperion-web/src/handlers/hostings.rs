@@ -1749,8 +1749,20 @@ pub async fn post_clear_expiry(
         Err(r) => return Ok(r),
     };
     let sel_url = urlencoding(&form.selector);
-    let resp =
-        hyperion_rpc_client::call(&state.agent_socket, Request::HostingClearExpiry(sel)).await?;
+    // Find owner node first — when the operator clicks Clear Expiry
+    // on a worker-hosted row, dispatch to the worker, not the
+    // master that doesn't know about that hosting.
+    let target_owned: Option<String> =
+        find_hosting_anywhere(&state, sel.clone())
+            .await
+            .ok()
+            .and_then(|(_d, n)| n);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target_owned.as_deref(),
+        Request::HostingClearExpiry(sel),
+    )
+    .await?;
     match resp {
         RpcResponse::HostingClearExpiry => {
             Ok(Redirect::to(&format!("/hostings/{}?expiry=cleared", sel_url)).into_response())
@@ -1812,8 +1824,19 @@ pub async fn post_wp_install(
         // it later in WP admin.
         no_index: false,
     };
-    let resp =
-        hyperion_rpc_client::call(&state.agent_socket, Request::WpInstall { sel, req }).await?;
+    // Find owner node so WpInstall lands on the right agent
+    // (post-migration the master may not own the row anymore).
+    let target_owned: Option<String> =
+        find_hosting_anywhere(&state, sel.clone())
+            .await
+            .ok()
+            .and_then(|(_d, n)| n);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target_owned.as_deref(),
+        Request::WpInstall { sel, req },
+    )
+    .await?;
     let sel_url = urlencoding(&form.selector);
     match resp {
         RpcResponse::WpInstall(_) => {
@@ -2534,13 +2557,15 @@ pub async fn post_monitor_set(
     Form(form): Form<MonitorSetForm>,
 ) -> Result<Response, AppError> {
     let sel = parse_selector(&form.selector)?;
+    // Cross-node aware: the form selector is now a ULID (after the
+    // duplicate-domain fix), so the master agent may not own the
+    // row at all. `find_hosting_anywhere` checks master first, then
+    // fans out to every enrolled worker. The returned `owner_node`
+    // is what we dispatch the MonitorSet RPC to so the config
+    // lands on the agent that actually serves the hosting.
+    let (detail, owner_node) = find_hosting_anywhere(&state, sel.clone()).await?;
+    let target = owner_node.as_deref();
     // Guard with manage-level access. super_admin / admin bypass.
-    let detail_resp =
-        hyperion_rpc_client::call(&state.agent_socket, Request::HostingGet(sel.clone())).await?;
-    let detail = match detail_resp {
-        RpcResponse::HostingGet(d) => d,
-        _ => return Err(AppError::Internal("expected HostingGet".into())),
-    };
     if let Err(r) = require_hosting_access(&state, &ctx, detail.id.as_str(), true).await {
         return Ok(r);
     }
@@ -2577,8 +2602,9 @@ pub async fn post_monitor_set(
     } else {
         Some(form.alert_webhook_url.trim().to_string())
     };
-    let resp = hyperion_rpc_client::call(
-        &state.agent_socket,
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target,
         Request::MonitorSet {
             sel: sel.clone(),
             enabled,
@@ -2612,17 +2638,17 @@ pub async fn post_monitor_probe(
     Form(form): Form<MonitorProbeForm>,
 ) -> Result<Response, AppError> {
     let sel = parse_selector(&form.selector)?;
-    let detail_resp =
-        hyperion_rpc_client::call(&state.agent_socket, Request::HostingGet(sel.clone())).await?;
-    let detail = match detail_resp {
-        RpcResponse::HostingGet(d) => d,
-        _ => return Err(AppError::Internal("expected HostingGet".into())),
-    };
+    let (detail, owner_node) = find_hosting_anywhere(&state, sel.clone()).await?;
+    let target = owner_node.as_deref();
     if let Err(r) = require_hosting_access(&state, &ctx, detail.id.as_str(), true).await {
         return Ok(r);
     }
-    let _ =
-        hyperion_rpc_client::call(&state.agent_socket, Request::MonitorProbeNow { sel }).await?;
+    let _ = crate::dispatcher::dispatch_to_node(
+        &state,
+        target,
+        Request::MonitorProbeNow { sel },
+    )
+    .await?;
     Ok(Redirect::to(&format!("/hostings/{}#monitor", urlencoding(&form.selector)))
         .into_response())
 }
@@ -3547,8 +3573,20 @@ pub async fn post_cert_issue(
         extra_sans: vec![],
     };
     let staging = req.staging;
-    let resp =
-        hyperion_rpc_client::call(&state.agent_socket, Request::CertIssueAcme { sel, req }).await?;
+    // Cert lives on the node that owns the hosting (nginx vhost +
+    // /etc/letsencrypt/live both go there). Find the right node
+    // before dispatching ACME.
+    let target_owned: Option<String> =
+        find_hosting_anywhere(&state, sel.clone())
+            .await
+            .ok()
+            .and_then(|(_d, n)| n);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target_owned.as_deref(),
+        Request::CertIssueAcme { sel, req },
+    )
+    .await?;
     match resp {
         RpcResponse::CertIssueAcme(_) => {
             let kind = if staging { "staging" } else { "prod" };
@@ -5008,8 +5046,18 @@ pub async fn post_ftp_disable(
         Err(r) => return Ok(r),
     };
     let sel_url = urlencoding(&form.selector);
-    let resp =
-        hyperion_rpc_client::call(&state.agent_socket, Request::FtpDisable { sel }).await?;
+    // FTP account lives on the node owning the hosting — find it.
+    let target_owned: Option<String> =
+        find_hosting_anywhere(&state, sel.clone())
+            .await
+            .ok()
+            .and_then(|(_d, n)| n);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target_owned.as_deref(),
+        Request::FtpDisable { sel },
+    )
+    .await?;
     match resp {
         RpcResponse::FtpDisable => {
             Ok(Redirect::to(&format!("/hostings/{}?ftp=disabled#settings", sel_url)).into_response())

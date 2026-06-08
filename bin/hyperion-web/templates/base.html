@@ -221,9 +221,19 @@ document.addEventListener('click', function (ev) {
   const STORAGE_KEY = 'hyperion.theme';   // values: '', 'light', 'dark'
   const root = document.documentElement;
   const saved = localStorage.getItem(STORAGE_KEY) || '';
-  applyTheme(saved);
 
+  // applyTheme reads `btn` from this closure (it highlights the
+  // active icon inside the toggle button). Function declarations
+  // ARE hoisted, but `const btn` is NOT — it sits in the temporal
+  // dead zone until the const line evaluates. The old order
+  // called applyTheme(saved) BEFORE the `const btn` declaration,
+  // so the function body tripped over a TDZ ReferenceError on
+  // every page load:
+  //   Uncaught ReferenceError: Cannot access 'btn' before initialization
+  //     at applyTheme (...)
+  // Initialize `btn` FIRST, then apply the saved theme.
   const btn = document.getElementById('theme-toggle');
+  applyTheme(saved);
   if (!btn) return;
   btn.addEventListener('click', cycle);
   document.addEventListener('keydown', (ev) => {
