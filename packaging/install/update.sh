@@ -134,6 +134,24 @@ git reset --hard "origin/$REF"
 NEW=$(git rev-parse --short HEAD)
 log "Source: $PREV → $NEW"
 
+# Self-update guard. Bash already loaded the running copy of this
+# script into memory; any changes in this very file that landed
+# in the new commits would only take effect on the NEXT run. To
+# avoid operators having to "run update.sh twice for the message
+# to be right", re-exec the freshly checked-out copy when this
+# file itself changed between PREV and NEW.
+#
+# The HYPERION_REEXEC env-var marker stops infinite loops: the
+# re-exec'd process sees the flag and skips this block.
+if [[ "$PREV" != "$NEW" && -z "${HYPERION_REEXEC:-}" ]]; then
+  if ! git diff --quiet "$PREV" "$NEW" -- packaging/install/update.sh 2>/dev/null; then
+    log "update.sh itself changed between $PREV and $NEW — re-exec'ing the fresh copy"
+    export HYPERION_REEXEC=1
+    exec "$0" "$@"
+  fi
+fi
+unset HYPERION_REEXEC
+
 #-------- 3. Install binaries — prefer GitHub release, fall back to local build
 PREBUILT_OK=0
 if (( DO_BUILD && PREFER_PREBUILT )); then
