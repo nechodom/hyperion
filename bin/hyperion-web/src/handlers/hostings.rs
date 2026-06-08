@@ -3480,13 +3480,13 @@ pub async fn post_dns_check(
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
-    let detail_resp =
-        hyperion_rpc_client::call(&state.agent_socket, Request::HostingGet(detail_sel)).await?;
-    let domain = match detail_resp {
-        RpcResponse::HostingGet(d) => Domain::parse(&d.domain)?,
-        RpcResponse::Error(e) => return Err(AppError::Rpc(e.to_string())),
-        _ => return Err(AppError::Internal("unexpected response".into())),
-    };
+    // Find the hosting across the cluster — the operator may be
+    // looking at a worker-hosted row whose master row doesn't
+    // exist. DnsCheck itself runs from the MASTER (dig from our
+    // network egress) regardless of where the hosting lives, so
+    // we only need find_anywhere for the domain lookup.
+    let (detail, _) = find_hosting_anywhere(&state, detail_sel).await?;
+    let domain = Domain::parse(&detail.domain)?;
     let resp =
         hyperion_rpc_client::call(&state.agent_socket, Request::DnsCheck { domain }).await?;
     let html = match resp {

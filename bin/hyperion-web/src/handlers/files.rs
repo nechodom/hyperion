@@ -69,16 +69,13 @@ pub async fn get_files(
     axum::extract::Query(q): axum::extract::Query<FilesQuery>,
 ) -> Result<Response, AppError> {
     let sel = parse_selector_public(&selector)?;
-    let detail_resp =
-        hyperion_rpc_client::call(&state.agent_socket, Request::HostingGet(sel.clone())).await?;
-    let detail = match detail_resp {
-        RpcResponse::HostingGet(d) => d,
-        RpcResponse::Error(hyperion_rpc::RpcError::NotFound { .. }) => {
-            return Err(AppError::NotFound);
-        }
-        RpcResponse::Error(e) => return Err(AppError::Rpc(e.to_string())),
-        _ => return Err(AppError::Internal("unexpected response".into())),
-    };
+    // Cross-node aware lookup — file operations MUST run on the
+    // node that owns the hosting (files live in /home/<user>/...
+    // on that node's disk, not master's). find_hosting_anywhere
+    // checks master first, then fans out to every worker.
+    let (detail, owner_node) =
+        crate::handlers::hostings::find_hosting_anywhere(&state, sel.clone()).await?;
+    let target = owner_node.as_deref();
     // RBAC: same guard as detail page — read level is fine.
     if let Err(r) = require_hosting_access(&state, &ctx, detail.id.as_str(), false).await {
         return Ok(r);
@@ -86,8 +83,9 @@ pub async fn get_files(
 
     // Decide whether we're browsing a directory or viewing a file.
     let (viewer, rel_path, entries, error) = if let Some(file_path) = q.file.clone() {
-        let resp = hyperion_rpc_client::call(
-            &state.agent_socket,
+        let resp = crate::dispatcher::dispatch_to_node(
+            &state,
+            target,
             Request::HostingFileRead {
                 sel: sel.clone(),
                 rel_path: file_path.clone(),
@@ -98,17 +96,17 @@ pub async fn get_files(
             RpcResponse::HostingFileRead(c) => {
                 // Re-list the parent dir so the listing still shows.
                 let parent = parent_dir(&file_path);
-                let list = list_dir(&state, sel.clone(), parent.clone()).await;
+                let list = list_dir(&state, target, sel.clone(), parent.clone()).await;
                 (Some(c), parent, list.entries, list.error)
             }
             RpcResponse::Error(e) => {
-                let list = list_dir(&state, sel.clone(), q.path.clone()).await;
+                let list = list_dir(&state, target, sel.clone(), q.path.clone()).await;
                 (None, q.path.clone(), list.entries, Some(e.to_string()))
             }
             _ => return Err(AppError::Internal("unexpected response".into())),
         }
     } else {
-        let list = list_dir(&state, sel.clone(), q.path.clone()).await;
+        let list = list_dir(&state, target, sel.clone(), q.path.clone()).await;
         (None, q.path.clone(), list.entries, list.error)
     };
 
@@ -153,9 +151,14 @@ pub async fn post_edit_save(
         return Ok(r);
     }
     let sel = parse_selector_public(&form.selector)?;
+    let owner_node = crate::handlers::hostings::find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
     let bytes_b64 = base64::engine::general_purpose::STANDARD.encode(form.content.as_bytes());
-    let resp = hyperion_rpc_client::call(
-        &state.agent_socket,
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        owner_node.as_deref(),
         Request::HostingFileWrite {
             sel,
             rel_path: form.rel_path.clone(),
@@ -235,8 +238,13 @@ pub async fn post_delete(
         return Ok(r);
     }
     let sel = parse_selector_public(&form.selector)?;
-    let resp = hyperion_rpc_client::call(
-        &state.agent_socket,
+    let owner_node = crate::handlers::hostings::find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        owner_node.as_deref(),
         Request::HostingFileDelete {
             sel,
             rel_path: form.rel_path.clone(),
@@ -272,13 +280,18 @@ pub async fn post_mkdir(
         return Ok(redirect_back(&form.selector, &form.dir, "Invalid name"));
     }
     let sel = parse_selector_public(&form.selector)?;
+    let owner_node = crate::handlers::hostings::find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
     let rel_path = if form.dir.is_empty() {
         form.name.clone()
     } else {
         format!("{}/{}", form.dir.trim_end_matches('/'), form.name)
     };
-    let resp = hyperion_rpc_client::call(
-        &state.agent_socket,
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        owner_node.as_deref(),
         Request::HostingFileMkdir {
             sel,
             rel_path: rel_path.clone(),
@@ -321,8 +334,13 @@ pub async fn post_rename(
         format!("{}/{}", parent, form.to_name)
     };
     let sel = parse_selector_public(&form.selector)?;
-    let resp = hyperion_rpc_client::call(
-        &state.agent_socket,
+    let owner_node = crate::handlers::hostings::find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        owner_node.as_deref(),
         Request::HostingFileRename {
             sel,
             from: form.from.clone(),
@@ -397,8 +415,13 @@ pub async fn post_upload(
         format!("{}/{}", dir.trim_end_matches('/'), fname)
     };
     let bytes_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    let resp = hyperion_rpc_client::call(
-        &state.agent_socket,
+    let owner_node = crate::handlers::hostings::find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        owner_node.as_deref(),
         Request::HostingFileWrite {
             sel,
             rel_path,
@@ -425,19 +448,17 @@ pub async fn get_download(
     axum::extract::Query(q): axum::extract::Query<DownloadQuery>,
 ) -> Result<Response, AppError> {
     let sel = parse_selector_public(&selector)?;
+    // Cross-node aware — the file lives on the owner node's disk.
+    let (detail, owner_node) =
+        crate::handlers::hostings::find_hosting_anywhere(&state, sel.clone()).await?;
+    let target = owner_node.as_deref();
     // Read access is enough for download — same as the inline reader.
-    let detail_resp =
-        hyperion_rpc_client::call(&state.agent_socket, Request::HostingGet(sel.clone())).await?;
-    let detail = match detail_resp {
-        RpcResponse::HostingGet(d) => d,
-        RpcResponse::Error(e) => return Err(AppError::Rpc(e.to_string())),
-        _ => return Err(AppError::Internal("unexpected response".into())),
-    };
     if let Err(r) = require_hosting_access(&state, &ctx, detail.id.as_str(), false).await {
         return Ok(r);
     }
-    let resp = hyperion_rpc_client::call(
-        &state.agent_socket,
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target,
         Request::HostingFileDownload {
             sel,
             rel_path: q.path.clone(),
@@ -478,11 +499,13 @@ struct DirListing {
 
 async fn list_dir(
     state: &SharedState,
+    target: Option<&str>,
     sel: hyperion_rpc::wire::HostingSelector,
     rel_path: String,
 ) -> DirListing {
-    match hyperion_rpc_client::call(
-        &state.agent_socket,
+    match crate::dispatcher::dispatch_to_node(
+        state,
+        target,
         Request::HostingFileList { sel, rel_path },
     )
     .await
