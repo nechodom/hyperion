@@ -1345,6 +1345,7 @@ fn print_pretty(resp: &Response) {
                 println!("  kernel error: {err}");
             }
         }
+        Response::NodeLabelUpdated => println!("node label updated"),
         Response::WebSessionAck => println!("session ack"),
         Response::WebSessionTouch(b) => {
             println!("session {}", if *b { "live" } else { "revoked/unknown" })

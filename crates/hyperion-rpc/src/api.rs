@@ -755,6 +755,13 @@ pub trait AgentApi: Send + Sync + 'static {
     /// List enrolled nodes (master-side `nodes` table).
     async fn nodes_list(&self) -> Result<Vec<NodeSummary>, RpcError>;
 
+    /// Rename an enrolled node's display label. `node_id` is the
+    /// immutable enrollment identifier; only the label changes.
+    /// Returns Ok(()) on success even when the node_id is unknown
+    /// (no-op) so the master's "rename" form is forgiving on a
+    /// race with deletion.
+    async fn node_set_label(&self, node_id: String, label: String) -> Result<(), RpcError>;
+
     /// Compute operator alerts (cert expiring, failed hostings, stale
     /// backups, high load) at request time.
     async fn dashboard_alerts(&self) -> Result<Vec<DashboardAlert>, RpcError>;

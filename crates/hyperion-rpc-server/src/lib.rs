@@ -919,6 +919,10 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::NodesList(v),
             Err(e) => Response::Error(e),
         },
+        Request::NodeSetLabel { node_id, label } => match api.node_set_label(node_id, label).await {
+            Ok(()) => Response::NodeLabelUpdated,
+            Err(e) => Response::Error(e),
+        },
         Request::WpResetPassword {
             sel,
             wp_user,
@@ -1811,6 +1815,9 @@ mod tests {
             _: String,
         ) -> Result<Option<String>, RpcError> {
             Ok(None)
+        }
+        async fn node_set_label(&self, _: String, _: String) -> Result<(), RpcError> {
+            Ok(())
         }
         async fn nodes_list(&self) -> Result<Vec<NodeSummary>, RpcError> {
             Ok(vec![])

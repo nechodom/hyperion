@@ -294,11 +294,50 @@
                 </button>
                 {% endif %}
               </form>
+              {# Inline rename — toggles the rename-{{ n.node_id }}
+                 row below into view. Keeps the label change next
+                 to the node it belongs to instead of buried in a
+                 separate page. #}
+              <button type="button" class="btn small ghost"
+                      title="Rename the display label (the node_id stays the same)"
+                      onclick="document.getElementById('rename-{{ n.node_id }}').style.display='table-row';this.disabled=true">
+                Rename
+              </button>
               <button type="button" class="btn small primary"
                       onclick="document.getElementById('upd-{{ n.node_id }}').style.display='block';this.style.display='none'">
                 Update…
               </button>
             </div>
+          </td>
+        </tr>
+        {# Inline rename row — hidden until the operator clicks
+           Rename. Submits POST /install/rename-node which calls
+           the NodeSetLabel RPC. The node_id is the immutable
+           enrollment identifier; only the operator-visible label
+           changes. After submit the page redirects back to this
+           anchor (#node-{{ n.node_id }}) so the row is highlighted. #}
+        <tr id="rename-{{ n.node_id }}" style="display:none;background:var(--surface-1)">
+          <td colspan="8" style="padding:0.85rem 1.2rem">
+            <form method="post" action="/install/rename-node"
+                  style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
+              <input type="hidden" name="_csrf" value="{{ csrf_test }}">
+              <input type="hidden" name="node_id" value="{{ n.node_id }}">
+              <label for="label-{{ n.node_id }}" style="font-weight:600;font-size:0.85rem">
+                New label
+              </label>
+              <input id="label-{{ n.node_id }}" name="label" type="text"
+                     value="{{ n.label|e }}" maxlength="80" required
+                     style="flex:1;min-width:18rem;margin:0">
+              <button class="btn small primary" type="submit">Save</button>
+              <button class="btn small ghost" type="button"
+                      onclick="document.getElementById('rename-{{ n.node_id }}').style.display='none';
+                               this.closest('tbody').querySelectorAll('button.ghost').forEach(b=>{if(b.textContent.trim()==='Rename')b.disabled=false})">
+                Cancel
+              </button>
+              <span class="text-soft small" style="flex-basis:100%">
+                The label is what shows up in dropdowns, the sidebar, and the test-domain template token. The node_id (<code>{{ n.node_id }}</code>) stays the same.
+              </span>
+            </form>
           </td>
         </tr>
         {# Update controls + live status row — hidden until the

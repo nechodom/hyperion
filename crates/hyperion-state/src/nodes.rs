@@ -169,6 +169,28 @@ pub async fn touch_last_seen(
     Ok(())
 }
 
+/// Rename a node's display label without touching its `node_id`
+/// (the immutable enrollment identifier). The label is what shows
+/// up in dashboard dropdowns, the test-domain template token, the
+/// /install page, and so on — operators want to rename a freshly
+/// enrolled `host123.local` to "Frankfurt prod" without re-doing
+/// the enrollment dance.
+///
+/// Returns `true` when the row existed and was updated.
+pub async fn set_label(
+    pool: &SqlitePool,
+    node_id: &str,
+    label: &str,
+) -> Result<bool, StateError> {
+    let n = sqlx::query("UPDATE nodes SET label = ? WHERE node_id = ?")
+        .bind(label)
+        .bind(node_id)
+        .execute(pool)
+        .await?
+        .rows_affected();
+    Ok(n > 0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

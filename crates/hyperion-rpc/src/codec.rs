@@ -800,6 +800,9 @@ pub enum Request {
         public_ip: Option<String>,
     },
     NodesList,
+    /// Rename an enrolled node's display label. `node_id` is the
+    /// immutable enrollment identifier; only `label` changes.
+    NodeSetLabel { node_id: String, label: String },
     NodeHeartbeat {
         node_id: String,
         secret: String,
@@ -1073,6 +1076,8 @@ pub enum Response {
         master_rpc_pubkey: Option<String>,
     },
     NodesList(Vec<NodeSummary>),
+    /// Plain ack for NodeSetLabel.
+    NodeLabelUpdated,
     NodeHeartbeat {
         /// Same as EnrollConsume — included on every heartbeat ack
         /// so already-enrolled nodes pick up the master pubkey

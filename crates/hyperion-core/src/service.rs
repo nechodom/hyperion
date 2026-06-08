@@ -5934,6 +5934,44 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(out)
     }
 
+    /// Rename an enrolled node's display label. The `node_id` is
+    /// the immutable enrollment identifier; only the operator-
+    /// visible label changes. Validates length and trims surrounding
+    /// whitespace; an empty label is rejected (the UI prevents this
+    /// but defence-in-depth is cheap here).
+    pub async fn node_set_label(&self, node_id: &str, label: &str) -> Result<(), RpcError> {
+        let trimmed = label.trim();
+        if trimmed.is_empty() {
+            return Err(RpcError::Validation {
+                message: "label cannot be empty".into(),
+            });
+        }
+        if trimmed.chars().count() > 80 {
+            return Err(RpcError::Validation {
+                message: "label too long (max 80 characters)".into(),
+            });
+        }
+        // Refuse control chars / newlines — labels render into HTML
+        // attributes (option text, sidebar chips), so a stray newline
+        // turns into a confusing wrapped pill.
+        if trimmed.chars().any(|c| c.is_control()) {
+            return Err(RpcError::Validation {
+                message: "label cannot contain control characters".into(),
+            });
+        }
+        hyperion_state::nodes::set_label(&self.pool, node_id, trimmed)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("node_set_label: {e}")))?;
+        self.append_audit(
+            "node.label.update",
+            Some(node_id),
+            &serde_json::json!({"label": trimmed}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
     /// List enrolled nodes (master-side view).
     pub async fn nodes_list(&self) -> Result<Vec<hyperion_types::NodeSummary>, RpcError> {
         let rows = hyperion_state::nodes::list(&self.pool)

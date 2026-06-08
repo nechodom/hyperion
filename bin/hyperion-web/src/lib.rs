@@ -376,6 +376,10 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::install::post_update_node),
         )
         .route(
+            "/install/rename-node",
+            post(handlers::install::post_rename_node),
+        )
+        .route(
             "/install/update-node-status",
             get(handlers::install::get_update_node_status),
         )

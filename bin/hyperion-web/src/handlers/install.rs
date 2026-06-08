@@ -255,6 +255,55 @@ pub async fn post_update_node(
     }
 }
 
+/// Form payload for renaming an enrolled node's display label.
+#[derive(Deserialize)]
+pub struct RenameNodeForm {
+    pub node_id: String,
+    pub label: String,
+}
+
+pub async fn post_rename_node(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<RenameNodeForm>,
+) -> Result<Response, AppError> {
+    if !ctx.is_super_admin() {
+        return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
+    }
+    let node_id = form.node_id.trim().to_string();
+    let label = form.label.trim().to_string();
+    if node_id.is_empty() {
+        return Err(AppError::BadRequest("missing node_id".into()));
+    }
+    if label.is_empty() {
+        return Ok(Redirect::to(&format!(
+            "/install?flash_error={}#node-{}",
+            urlencode("Label cannot be empty."),
+            urlencode(&node_id)
+        ))
+        .into_response());
+    }
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::NodeSetLabel {
+            node_id: node_id.clone(),
+            label: label.clone(),
+        },
+    )
+    .await?;
+    let flash = match resp {
+        RpcResponse::NodeLabelUpdated => format!("Node renamed to '{label}'."),
+        RpcResponse::Error(e) => format!("Rename failed: {e}"),
+        _ => "Rename: unexpected response".into(),
+    };
+    Ok(Redirect::to(&format!(
+        "/install?flash={}#node-{}",
+        urlencode(&flash),
+        urlencode(&node_id)
+    ))
+    .into_response())
+}
+
 /// GET /install/update-node-status?node_id=… — returns a tiny HTML
 /// fragment with state pill + log tail. UI polls this via HTMX.
 #[derive(Deserialize)]
