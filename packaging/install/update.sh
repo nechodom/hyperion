@@ -144,8 +144,31 @@ if (( DO_BUILD && PREFER_PREBUILT )); then
   fetch_ok=1
   for f in hyperion-agent hctl SHA256SUMS $((( HAVE_WEB )) && echo hyperion-web); do
     [[ -z "$f" ]] && continue
-    if ! curl -fsSL --max-time 60 "$REL_BASE/$f" -o "$TMP/$f"; then
-      log "  no $f in release — falling back to cargo build"
+    # Capture both curl's exit code and the HTTP status separately
+    # so the fall-back message can name the real cause. The OLD
+    # message ("no <file> in release") attributed every transient
+    # GitHub 5xx as if the file were missing — operators saw
+    # "no hyperion-web in release" on a healthy install after a
+    # GitHub CDN hiccup and assumed the release was broken.
+    code=$(curl -sSL --max-time 60 -w '%{http_code}' \
+              -o "$TMP/$f" "$REL_BASE/$f" 2>"$TMP/$f.curlerr") || true
+    if [[ "$code" != "200" ]]; then
+      case "$code" in
+        404)
+          log "  '$f' not in the @$RELEASE_TAG release — falling back to cargo build"
+          ;;
+        5*)
+          log "  GitHub returned HTTP $code fetching '$f' (transient — likely rate-limit or CDN) — falling back to cargo build"
+          ;;
+        000|"")
+          # curl couldn't even open a connection; show its own error.
+          err=$(head -c 200 "$TMP/$f.curlerr" 2>/dev/null | tr -d '\n')
+          log "  network failure fetching '$f': ${err:-curl exit $?} — falling back to cargo build"
+          ;;
+        *)
+          log "  unexpected HTTP $code fetching '$f' — falling back to cargo build"
+          ;;
+      esac
       fetch_ok=0
       break
     fi
