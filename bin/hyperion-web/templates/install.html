@@ -285,7 +285,7 @@
                     data-confirm-body="{% if is_test %}This node will go back to production-only mode. Existing hostings stay where they are; the wizard will accept production domains on it again, and the TEST chip on /hostings will go away on the next refresh.{% else %}This node will be flagged as test-only. New hostings created here MUST use the auto-domain template (see Settings → Cluster → Test nodes), and the wizard refuses to put a production domain on it. Existing hostings are unaffected but will show a TEST chip.{% endif %}"
                     data-confirm-confirm-label="{% if is_test %}Unmark as test{% else %}Mark as test{% endif %}"
                     data-confirm-variant="{% if is_test %}primary{% else %}primary{% endif %}">
-                <input type="hidden" name="_csrf" value="{{ csrf_test }}">
+                <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                 <input type="hidden" name="node_id" value="{{ n.node_id }}">
                 {% if is_test %}
                 <button type="submit" class="btn small ghost"
@@ -310,7 +310,7 @@
                     data-confirm-body="{% if n.is_drained %}This node returns to active service. The auto-placer + create wizard will start placing new hostings here again.{% else %}New hostings will NOT be placed on this node until you undrain it. Existing hostings keep serving traffic — drain only affects new placement.{% endif %}"
                     data-confirm-confirm-label="{% if n.is_drained %}Undrain{% else %}Drain{% endif %}"
                     data-confirm-variant="primary">
-                <input type="hidden" name="_csrf" value="{{ csrf_test }}">
+                <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                 <input type="hidden" name="node_id" value="{{ n.node_id }}">
                 {% if n.is_drained %}
                 <button type="submit" class="btn small ghost"
@@ -352,7 +352,7 @@
           <td colspan="8" style="padding:0.85rem 1.2rem">
             <form method="post" action="/install/rename-node"
                   style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
-              <input type="hidden" name="_csrf" value="{{ csrf_test }}">
+              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
               <input type="hidden" name="node_id" value="{{ n.node_id }}">
               <label for="label-{{ n.node_id }}" style="font-weight:600;font-size:0.85rem">
                 New label

@@ -49,6 +49,10 @@ struct JobDetailTpl<'a> {
     /// True when state is `running` — drives the live-polling
     /// trigger in the template (we stop polling once terminal).
     is_running: bool,
+    /// Session-wide CSRF token for the Retry button form. Wildcard
+    /// scope so a single token works for /jobs/<id>/retry without
+    /// having to mint one token per id.
+    csrf_token: String,
 }
 
 #[derive(Template)]
@@ -264,6 +268,7 @@ pub async fn get_job_detail(
     };
     let is_running = !job.is_terminal();
     let elapsed = format_elapsed(&job);
+    let csrf_token = super::session_csrf_token(&state, &ctx);
     let tpl = JobDetailTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -273,6 +278,7 @@ pub async fn get_job_detail(
         job,
         elapsed,
         is_running,
+        csrf_token,
     };
     Ok(Html(tpl.render()?).into_response())
 }

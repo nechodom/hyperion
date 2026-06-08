@@ -33,6 +33,12 @@ struct AuditTpl<'a> {
     /// the template doesn't need string equality (askama would need
     /// deref syntax we'd rather not push into templates).
     known_actions: Vec<(String, bool)>,
+    /// Session-wide CSRF token for the inline "Verify chain"
+    /// HTMX-driven button. Wildcard scope so a single token
+    /// covers all state-changing actions on this page (today
+    /// just one, but the verify card can grow more buttons
+    /// without re-plumbing).
+    csrf_token: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -140,6 +146,7 @@ pub async fn get_audit(
         .filter(|r| result_filter.is_empty() || r.result.to_lowercase() == result_filter)
         .collect();
     let filtered_count = rows.len();
+    let csrf_token = super::session_csrf_token(&state, &ctx);
     let tpl = AuditTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -155,6 +162,7 @@ pub async fn get_audit(
         result_filter,
         since_filter: since_label,
         known_actions,
+        csrf_token,
     };
     Ok(Html(tpl.render()?).into_response())
 }

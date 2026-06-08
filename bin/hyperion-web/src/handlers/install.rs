@@ -37,6 +37,14 @@ struct InstallTpl<'a> {
     csrf_test: String,
     /// CSRF for the per-row "Update node" button (apt + hyperion).
     csrf_update: String,
+    /// Session-wide CSRF token that validates against ANY POST in
+    /// the current session. Used by newer inline action forms
+    /// (drain, rename, toggle-test, future bulk ops) so we don't
+    /// have to mint + plumb a separate token per route — the old
+    /// path-specific `csrf_test` / `csrf_update` only validate
+    /// against their exact form_id, so re-using them on a
+    /// different action POSTed to the panel always failed CSRF.
+    csrf_token: String,
 }
 
 /// Wrap `fetch_nodes` + the cluster test-node CSV into a single
@@ -89,6 +97,7 @@ pub async fn get_install(
         csrf_revoke: csrf_token(&state, &ctx, "/install/invite/revoke"),
         csrf_test: csrf_token(&state, &ctx, "/install/test-node"),
         csrf_update: csrf_token(&state, &ctx, "/install/update-node"),
+        csrf_token: super::session_csrf_token(&state, &ctx),
     };
     Ok(Html(tpl.render()?).into_response())
 }
@@ -147,6 +156,7 @@ pub async fn post_invite(
         csrf_revoke: csrf_token(&state, &ctx, "/install/invite/revoke"),
         csrf_test: csrf_token(&state, &ctx, "/install/test-node"),
         csrf_update: csrf_token(&state, &ctx, "/install/update-node"),
+        csrf_token: super::session_csrf_token(&state, &ctx),
     };
     // The rendered page carries the plaintext invite token. Make sure
     // browser/proxy caches don't keep it around past the first view.
@@ -701,6 +711,7 @@ async fn render_with_error(
         csrf_revoke: csrf_token(state, ctx, "/install/invite/revoke"),
         csrf_test: csrf_token(state, ctx, "/install/test-node"),
         csrf_update: csrf_token(state, ctx, "/install/update-node"),
+        csrf_token: super::session_csrf_token(state, ctx),
     };
     Html(
         tpl.render()
