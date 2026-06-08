@@ -59,7 +59,7 @@
         {% for it in items %}
         <tr>
           <td>
-            <a href="/hostings/{{ it.domain }}#monitor"><strong>{{ it.domain }}</strong></a>
+            <a href="/hostings/{{ it.hosting_id }}#monitor"><strong>{{ it.domain }}</strong></a>
           </td>
           <td>
             {% if it.alert_state == "alerting" %}

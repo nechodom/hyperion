@@ -227,7 +227,7 @@
         <tbody>
           {% for r in recent %}
           <tr>
-            <td><a href="/hostings/{{ r.domain }}">{{ r.domain }}</a></td>
+            <td><a href="/hostings/{{ r.id.as_str() }}">{{ r.domain }}</a></td>
             <td>{% if let Some(v) = r.php_version %}<span class="tag">PHP {{ v }}</span>{% else %}<span class="text-soft">static</span>{% endif %}</td>
             <td>
               <span class="pill
