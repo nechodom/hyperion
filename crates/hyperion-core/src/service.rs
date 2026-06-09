@@ -3430,7 +3430,40 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         if let Err(e) = self.trash_gc_tick().await {
             tracing::warn!(error=%e, "trash GC failed");
         }
+        // Audit retention: purge audit_log entries older than the
+        // configured window. No-op when audit_retention_days = 0
+        // (the default — keep forever). Updates the chain anchor
+        // so verify_chain keeps working on the truncated chain.
+        if let Err(e) = self.audit_retention_tick().await {
+            tracing::warn!(error=%e, "audit retention failed");
+        }
         Ok(processed)
+    }
+
+    /// Purge audit_log entries older than `cluster.audit_retention_days`.
+    /// No-op when the setting is 0. Logs an info line each time entries
+    /// are actually purged so operators see "I lost N audit rows on
+    /// 2026-06-09" in journald — important context if anyone ever
+    /// challenges the chain.
+    pub(crate) async fn audit_retention_tick(&self) -> Result<(), RpcError> {
+        let cluster_cfg = read_cluster_section(self.agent_config_path.as_deref());
+        if cluster_cfg.audit_retention_days <= 0 {
+            return Ok(());
+        }
+        let cutoff = now_secs() - cluster_cfg.audit_retention_days * 86_400;
+        let (deleted, new_anchor) =
+            hyperion_state::audit::purge_older_than(&self.pool, cutoff, now_secs())
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("audit purge: {e}")))?;
+        if deleted > 0 {
+            tracing::info!(
+                deleted,
+                retention_days = cluster_cfg.audit_retention_days,
+                anchor_set = new_anchor.is_some(),
+                "audit retention purge"
+            );
+        }
+        Ok(())
     }
 
     /// Remove `/var/lib/hyperion/migration/<id>/` directories whose
@@ -11737,6 +11770,11 @@ fn read_cluster_section(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .unwrap_or_default();
+    let audit_retention_days = section
+        .and_then(|s| s.get("audit_retention_days"))
+        .and_then(|v| v.as_integer())
+        .unwrap_or(0)
+        .clamp(0, 3650);
     hyperion_types::ClusterConfigView {
         master_accepts_hostings: accept,
         test_node_ids,
@@ -11745,6 +11783,7 @@ fn read_cluster_section(
         panel_hostname,
         trash_enabled,
         trash_retention_days,
+        audit_retention_days,
     }
 }
 
@@ -11815,6 +11854,15 @@ fn parse_agent_section_fields(
                 if !(1..=365).contains(&n) {
                     return Err(bad(format!(
                         "trash_retention_days must be 1..=365, got {n}"
+                    )));
+                }
+                crate::config_persist::FieldValue::Int(n)
+            }
+            ("cluster", "audit_retention_days") => {
+                let n = parse_int(v)?;
+                if !(0..=3650).contains(&n) {
+                    return Err(bad(format!(
+                        "audit_retention_days must be 0..=3650 (0 = keep forever), got {n}"
                     )));
                 }
                 crate::config_persist::FieldValue::Int(n)

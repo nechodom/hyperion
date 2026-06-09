@@ -249,6 +249,18 @@ pub struct ClusterConfigView {
     /// default 30. Only matters when `trash_enabled = true`.
     #[serde(default)]
     pub trash_retention_days: i64,
+
+    /// How many days to keep audit-log entries before the
+    /// scheduler purges them. Clamped to 0..=3650; `0` = keep
+    /// forever (the default — matches pre-retention behaviour).
+    ///
+    /// The audit log is a tamper-evident hash chain; purging
+    /// would break `verify_chain` so we anchor the chain at the
+    /// oldest surviving row's prev_hash (single-row table
+    /// `audit_chain_anchor`) and resume verification from
+    /// there. Verifier transparently honours the anchor.
+    #[serde(default)]
+    pub audit_retention_days: i64,
 }
 
 impl Default for ClusterConfigView {
@@ -263,6 +275,7 @@ impl Default for ClusterConfigView {
             panel_hostname: String::new(),
             trash_enabled: false,
             trash_retention_days: 30,
+            audit_retention_days: 0, // 0 = keep forever
         }
     }
 }

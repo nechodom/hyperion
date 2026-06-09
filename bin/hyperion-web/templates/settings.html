@@ -881,6 +881,40 @@
     </form>
   </div>
 
+  <div class="card" style="margin-top:1rem">
+    <h2 style="font-size:0.95rem;margin:0 0 0.6rem">
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M7 14l4-4 4 4 6-6"/></svg>
+      Audit log retention
+    </h2>
+    <p class="text-soft small" style="margin:0 0 0.8rem;line-height:1.55">
+      The audit log records every state-changing operation as a
+      tamper-evident BLAKE3 hash chain. Without retention it grows
+      indefinitely; on a busy cluster that's tens of MB / month.
+      Set a window (days) below to auto-purge older entries — the
+      chain anchors itself at the oldest surviving row so
+      <code>verify_chain</code> still works on what's left.
+      <strong>0 (the default) = keep forever.</strong>
+    </p>
+    <form method="post" action="/settings/config" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="cluster">
+      <div class="field">
+        <label for="audit_retention_days">Retain audit entries for <span class="hint">days · 0..=3650 · 0 = forever</span></label>
+        <input id="audit_retention_days" name="audit_retention_days" type="number"
+               min="0" max="3650" step="1"
+               value="{{ config.cluster.audit_retention_days }}">
+        <p class="text-soft small" style="margin:0.3rem 0 0;line-height:1.55">
+          Typical: <code>90</code> for compliance-light setups,
+          <code>365</code> for tighter rules, <code>0</code> if you
+          download <code>/audit?export=csv</code> off-cluster and
+          want everything kept locally. Purges run during the normal
+          scheduler tick (~60s cadence) — no extra cron job.
+        </p>
+      </div>
+      <button type="submit" class="btn primary">Save audit retention</button>
+    </form>
+  </div>
+
   <div class="card muted" style="margin-top:1rem">
     <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Multi-node tips</h2>
     <ul class="text-soft small" style="margin:0;padding-left:1.2rem;line-height:1.7">

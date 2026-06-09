@@ -77,6 +77,101 @@ pub async fn append(pool: &SqlitePool, req: AppendReq<'_>) -> Result<i64, StateE
 }
 
 /// Verify the entire chain. Returns AuditChain on first mismatch.
+/// Anchor — present iff a retention sweep has previously truncated
+/// the head of the chain. When present, verify_chain starts with
+/// `expected_prev = anchor_hash` instead of GENESIS_HASH; this is
+/// the hash that the now-oldest row's `prev_hash` points to.
+///
+/// Single-row pattern (CHECK id=1). `None` = chain has never been
+/// truncated, verify starts at GENESIS_HASH as before.
+pub async fn get_anchor(pool: &SqlitePool) -> Result<Option<AuditAnchor>, StateError> {
+    let row: Option<(String, i64, i64)> = sqlx::query_as(
+        "SELECT anchor_hash, last_purged_id, last_purge_ts FROM audit_chain_anchor WHERE id = 1",
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|(h, lid, lts)| AuditAnchor {
+        anchor_hash: h,
+        last_purged_id: lid,
+        last_purge_ts: lts,
+    }))
+}
+
+#[derive(Debug, Clone)]
+pub struct AuditAnchor {
+    pub anchor_hash: String,
+    pub last_purged_id: i64,
+    pub last_purge_ts: i64,
+}
+
+/// Delete audit rows older than `cutoff_ts` and update the anchor so
+/// `verify_chain` keeps working on the truncated chain.
+///
+/// Returns `(deleted_count, new_anchor)`. `new_anchor` is `None` when
+/// every row was deleted (next append starts a brand-new chain from
+/// GENESIS_HASH) or when there was nothing to delete.
+///
+/// Atomicity: anchor update + delete run in one transaction so a
+/// crash mid-sweep can't leave the chain unverifiable.
+pub async fn purge_older_than(
+    pool: &SqlitePool,
+    cutoff_ts: i64,
+    now_ts: i64,
+) -> Result<(i64, Option<String>), StateError> {
+    let mut tx = pool.begin().await?;
+    // The oldest surviving row's `prev_hash` is what verify_chain
+    // needs to seed its expected_prev with. Capture BEFORE deleting
+    // so we don't have to re-query.
+    let survivor: Option<(String,)> = sqlx::query_as(
+        "SELECT prev_hash FROM audit_log WHERE ts >= ? ORDER BY id ASC LIMIT 1",
+    )
+    .bind(cutoff_ts)
+    .fetch_optional(&mut *tx)
+    .await?;
+    // Highest id we're about to delete — purely informational, for
+    // the anchor row + operator forensics.
+    let last_purged: Option<i64> = sqlx::query_as("SELECT MAX(id) FROM audit_log WHERE ts < ?")
+        .bind(cutoff_ts)
+        .fetch_optional(&mut *tx)
+        .await?
+        .and_then(|(v,): (Option<i64>,)| v);
+    let deleted = sqlx::query("DELETE FROM audit_log WHERE ts < ?")
+        .bind(cutoff_ts)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected() as i64;
+    if deleted == 0 {
+        tx.commit().await?;
+        return Ok((0, None));
+    }
+    if let Some((anchor_hash,)) = survivor {
+        sqlx::query(
+            "INSERT INTO audit_chain_anchor (id, anchor_hash, last_purged_id, last_purge_ts)
+             VALUES (1, ?, ?, ?)
+             ON CONFLICT (id) DO UPDATE SET
+                 anchor_hash = excluded.anchor_hash,
+                 last_purged_id = excluded.last_purged_id,
+                 last_purge_ts = excluded.last_purge_ts",
+        )
+        .bind(&anchor_hash)
+        .bind(last_purged.unwrap_or(0))
+        .bind(now_ts)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok((deleted, Some(anchor_hash)))
+    } else {
+        // Every row deleted (very aggressive retention or empty
+        // post-cutoff window). Clear the anchor so the next append
+        // starts a fresh chain from GENESIS_HASH.
+        sqlx::query("DELETE FROM audit_chain_anchor WHERE id = 1")
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok((deleted, None))
+    }
+}
+
 pub async fn verify_chain(pool: &SqlitePool) -> Result<(), StateError> {
     let rows: Vec<(
         i64,
@@ -95,7 +190,12 @@ pub async fn verify_chain(pool: &SqlitePool) -> Result<(), StateError> {
     )
     .fetch_all(pool)
     .await?;
-    let mut expected_prev = GENESIS_HASH.to_string();
+    // If a retention sweep has truncated the head of the chain,
+    // start with the anchor's recorded hash instead of GENESIS.
+    let mut expected_prev = match get_anchor(pool).await? {
+        Some(a) => a.anchor_hash,
+        None => GENESIS_HASH.to_string(),
+    };
     for (
         id,
         ts,
