@@ -324,6 +324,43 @@ HTML
   log "Installed default maintenance page at $MAINT_HTML"
 fi
 
+#-------- 3d. Heal vhosts written by an older Hyperion --------------------
+# Releases before commit 1609e75 emitted a standalone `http2 on;`
+# directive in every TLS server block. That syntax requires nginx
+# 1.25.1+ but Debian 12 ships nginx 1.22, so every reload after
+# upgrade fails with:
+#   [emerg] unknown directive "http2"
+# Fix the existing files in place — strip the bare `http2 on;`
+# line and add `http2` as a parameter on the matching listen
+# directive. Idempotent; safe to re-run.
+if command -v nginx >/dev/null 2>&1; then
+  shopt -s nullglob
+  HEALED_ANY=0
+  for f in /etc/nginx/sites-enabled/*.conf /etc/nginx/sites-available/*.conf; do
+    [[ -f "$f" ]] || continue
+    if grep -qE "^\s*http2\s+on\s*;" "$f"; then
+      log "Healing legacy http2 directive in $f ..."
+      # Add `http2` to any `listen ... ssl;` (or `ssl` not yet
+      # followed by http2) on a non-comment line. Then nuke the
+      # standalone http2 on; line.
+      sed -i -E \
+        -e 's/^(\s*listen\s+[^#]*\bssl)(\s*;)/\1 http2\2/g' \
+        -e '/^\s*http2\s+on\s*;\s*$/d' \
+        "$f"
+      HEALED_ANY=1
+    fi
+  done
+  if (( HEALED_ANY )); then
+    if nginx -t >/dev/null 2>&1; then
+      systemctl reload nginx 2>/dev/null || true
+      log "Healed vhosts + reloaded nginx."
+    else
+      log "WARNING: nginx -t still fails after healing — inspect manually."
+    fi
+  fi
+  shopt -u nullglob
+fi
+
 #-------- 4. Refresh systemd units ----------------------------------------
 refresh_unit() {
   local svc="$1"
