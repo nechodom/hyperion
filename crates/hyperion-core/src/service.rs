@@ -9656,20 +9656,48 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
 
         // ── fix phase ────────────────────────────────────────
-        // Step 1: remount,rw /
+        //
+        // Order matters for the operator-readable progress bar:
+        //   1. remount,rw /        — the 90% case (rootfs ro/rw flap)
+        //   2. remount,rw /usr     — when /usr is a separate mount
+        //                            (still common on modern systemd
+        //                            distros that split /usr; in
+        //                            practice this fires for ext4
+        //                            root with /usr in /etc/fstab)
+        //   3. chattr -i /usr      — only when lsattr ACTUALLY saw
+        //                            the immutable attribute set.
+        //                            The previous "defensive even on
+        //                            ext4" branch fired chattr
+        //                            unconditionally and predictably
+        //                            failed with "Read-only file
+        //                            system while setting flags on
+        //                            /usr" on any system where /usr
+        //                            was still ro after step 1. The
+        //                            failure was confusing — the UI
+        //                            showed a red exit-1 pill on an
+        //                            otherwise-successful run because
+        //                            step 3 (the real fix) cleaned
+        //                            up after. Tighten the condition
+        //                            to the actual lsattr signal so
+        //                            the only red step is a step
+        //                            that really failed.
+
+        // Step 1.
         d.fix_steps.push(self.run_fix_step("mount -o remount,rw /", "/bin/mount", &["-o", "remount,rw", "/"]).await);
         d.usr_writable_now = check_usr_writable().await.is_none();
-        if !d.usr_writable_now {
-            // Step 2: chattr -i /usr — defensive even if lsattr
-            // didn't see the flag; harmless on a non-immutable dir.
-            if d.immutable_attr_set || matches!(d.root_fstype.as_str(), "ext4" | "xfs" | "btrfs") {
-                d.fix_steps.push(self.run_fix_step("chattr -i /usr", "/usr/bin/chattr", &["-i", "/usr"]).await);
-                d.usr_writable_now = check_usr_writable().await.is_none();
-            }
-        }
+
+        // Step 2: separate /usr mountpoint.
         if !d.usr_writable_now && !d.usr_mount_line.is_empty() {
-            // Step 3: separate /usr mountpoint — remount it too.
             d.fix_steps.push(self.run_fix_step("mount -o remount,rw /usr", "/bin/mount", &["-o", "remount,rw", "/usr"]).await);
+            d.usr_writable_now = check_usr_writable().await.is_none();
+        }
+
+        // Step 3: chattr ONLY if lsattr saw the immutable bit. The
+        // previous over-eager branch on ext4 produced spurious red
+        // "Read-only file system" errors that confused the operator
+        // even when the overall fix succeeded.
+        if !d.usr_writable_now && d.immutable_attr_set {
+            d.fix_steps.push(self.run_fix_step("chattr -i /usr", "/usr/bin/chattr", &["-i", "/usr"]).await);
             d.usr_writable_now = check_usr_writable().await.is_none();
         }
 
