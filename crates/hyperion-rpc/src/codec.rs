@@ -402,6 +402,10 @@ pub enum Request {
         #[serde(default)]
         skip_dns_check: bool,
     },
+    /// Read the current panel-vhost ACME progress for the live
+    /// progress card on /settings#cluster. Returns None when no
+    /// panel hostname is configured yet.
+    PanelCertStatus,
     /// `mount -o remount,rw /` — attempt to flip the rootfs to
     /// read-write so apt-get can install packages. Used when the
     /// service-install preflight detects /usr is read-only.
@@ -1024,6 +1028,10 @@ pub enum Response {
         message: String,
         panel_url: String,
     },
+    /// Live snapshot of the panel ACME issuance. `None` when no
+    /// panel hostname is configured (or the bg task hasn't seeded
+    /// the state yet — UI shows "not started" in that case).
+    PanelCertStatus(Option<hyperion_types::PanelCertProgress>),
     /// Result of `mount -o remount,rw /`. `success` true → /usr
     /// is now writable; `message` is the mount output (often
     /// empty on success). `success` false + message = failed

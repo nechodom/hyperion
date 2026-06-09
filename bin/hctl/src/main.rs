@@ -457,6 +457,17 @@ fn print_pretty(resp: &Response) {
             }
             println!("{message}");
         }
+        Response::PanelCertStatus(snap) => match snap {
+            None => println!("panel cert: no issuance in progress"),
+            Some(p) => {
+                println!("panel:    {}", p.hostname);
+                println!("stage:    {}", p.stage);
+                println!("message:  {}", p.message);
+                if p.not_after > 0 {
+                    println!("not_after: {} (unix)", p.not_after);
+                }
+            }
+        },
         Response::RemountUsrRw { success, message } => {
             if *success {
                 println!("✓ /usr is now writable");

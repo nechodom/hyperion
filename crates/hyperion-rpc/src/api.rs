@@ -448,6 +448,12 @@ pub trait AgentApi: Send + Sync + 'static {
         skip_dns_check: bool,
     ) -> Result<(String, String, String), RpcError>;
 
+    /// Live snapshot of the panel ACME issuance — drives the
+    /// progress card on /settings#cluster.
+    async fn panel_cert_status(
+        &self,
+    ) -> Result<Option<hyperion_types::PanelCertProgress>, RpcError>;
+
     /// Attempt `mount -o remount,rw /` to flip the rootfs to
     /// read-write. Returns (success, message). Refuses (Validation)
     /// when /usr is already writable.

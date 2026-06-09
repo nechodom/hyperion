@@ -601,6 +601,10 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::PanelCertStatus => match api.panel_cert_status().await {
+            Ok(v) => Response::PanelCertStatus(v),
+            Err(e) => Response::Error(e),
+        },
         Request::RemountUsrRw => match api.remount_usr_rw().await {
             Ok((success, message)) => Response::RemountUsrRw { success, message },
             Err(e) => Response::Error(e),
@@ -1525,6 +1529,11 @@ mod tests {
             _: bool,
         ) -> Result<(String, String, String), RpcError> {
             Ok(("ok-cert-pending".into(), "test".into(), String::new()))
+        }
+        async fn panel_cert_status(
+            &self,
+        ) -> Result<Option<hyperion_types::PanelCertProgress>, RpcError> {
+            Ok(None)
         }
         async fn remount_usr_rw(&self) -> Result<(bool, String), RpcError> {
             Ok((true, String::new()))

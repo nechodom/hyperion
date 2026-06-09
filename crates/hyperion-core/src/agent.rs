@@ -679,6 +679,23 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.panel_provision(hostname, skip_dns_check).await
     }
 
+    async fn panel_cert_status(
+        &self,
+    ) -> Result<Option<hyperion_types::PanelCertProgress>, RpcError> {
+        // Map the in-memory Service::PanelProgress (which holds the
+        // lock-friendly internal repr) to the wire DTO. They're the
+        // same fields — keeping them as separate types lets the
+        // wire schema evolve independently of the internal state.
+        let svc_state = self.svc.panel_cert_status().await?;
+        Ok(svc_state.map(|p| hyperion_types::PanelCertProgress {
+            hostname: p.hostname,
+            stage: p.stage,
+            message: p.message,
+            started_at: p.started_at,
+            not_after: p.not_after,
+        }))
+    }
+
     async fn remount_usr_rw(&self) -> Result<(bool, String), RpcError> {
         self.svc.remount_usr_rw().await
     }

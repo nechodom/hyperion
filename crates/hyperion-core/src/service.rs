@@ -321,7 +321,27 @@ pub trait AdapterPort: Send + Sync {
     async fn redis_delete_acl(&self, username: &str) -> Result<(), AdapterError>;
 }
 
-#[derive(Clone)]
+/// Live state of the panel-vhost ACME issuance.
+#[derive(Debug, Clone)]
+pub struct PanelProgress {
+    /// Hostname the operator picked, e.g. "panel.example.cz".
+    pub hostname: String,
+    /// "self-signed" — bootstrap cert only, ACME not started yet
+    /// "issuing"     — ACME flow running (HTTP-01 challenge)
+    /// "issued"      — real cert from Let's Encrypt is now serving
+    /// "failed"      — ACME flow errored; `message` carries the reason
+    pub stage: String,
+    /// Free-form human description of the current step, e.g.
+    /// "DNS validated, ordering certificate…" or the error reason.
+    pub message: String,
+    /// Wall-clock seconds since UNIX epoch when this state was set.
+    /// Drives the elapsed-time display in the progress card.
+    pub started_at: i64,
+    /// Set only when `stage = "issued"` — the cert's not_after, so
+    /// the UI can show "real cert · valid until …".
+    pub not_after: i64,
+}
+
 pub struct HostingService<A: AdapterPort + 'static> {
     pub pool: SqlitePool,
     pub adapters: Arc<A>,
@@ -359,6 +379,11 @@ pub struct HostingService<A: AdapterPort + 'static> {
     /// serving a fullchain.pem whose public key doesn't match the
     /// privkey.pem.
     pub cert_issue_locks: Arc<tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
+    /// Live state of the panel-vhost ACME issuance — drives the
+    /// progress card on /settings#cluster. None ⇒ no panel hostname
+    /// configured (or agent just started and hasn't checked yet).
+    /// Updated by `panel_provision` + its background ACME task.
+    pub panel_progress: Arc<tokio::sync::RwLock<Option<PanelProgress>>>,
     /// Ed25519 signing key for master→node remote RPC. `Some` on
     /// masters where /etc/hyperion/master-rpc.key was successfully
     /// loaded or auto-generated; `None` on workers, or on masters
@@ -1530,6 +1555,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             update_cache: Arc::new(tokio::sync::RwLock::new(None)),
             current_git_sha: "dev-unknown".into(),
             cert_issue_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            panel_progress: Arc::new(tokio::sync::RwLock::new(None)),
             master_rpc_signer: None,
             node_state_file: None,
             node_update: Arc::new(tokio::sync::Mutex::new(
@@ -9230,6 +9256,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// Returns `(status, message, panel_url)`. `status` ∈
     /// {"ok-cert-pending", "ok", "dns-failed", "nginx-failed",
     /// "validation-failed"}.
+    /// Read the current panel ACME progress. Used by /settings to
+    /// drive the HTMX-polled progress card.
+    pub async fn panel_cert_status(
+        &self,
+    ) -> Result<Option<PanelProgress>, RpcError> {
+        Ok(self.panel_progress.read().await.clone())
+    }
+
     pub async fn panel_provision(
         &self,
         hostname: String,
@@ -9360,26 +9394,128 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             ));
         }
 
-        // ── 6. ACME issuance — best effort, background ───────
-        // Real cert may take 30 s; we don't block the RPC on it.
-        // The renewal scheduler will retry on its own tick.
-        let hostname_for_acme = hostname.clone();
-        let adapters = self.adapters.clone();
-        tokio::spawn(async move {
-            tracing::info!(
-                hostname = %hostname_for_acme,
-                "panel: kicking off background ACME issuance"
-            );
-            // We don't have a hosting context so we use the
-            // generic acme_issue. Real LE issuance happens
-            // through the per-hosting CertIssueAcme path which
-            // requires a hosting row — out of scope for this
-            // initial wiring. Self-signed is good enough until
-            // the operator runs `hctl cert renew` or hits the
-            // SSL tab equivalent for the panel later.
-            let _ = adapters;
-            let _ = hostname_for_acme;
-        });
+        // ── 6. ACME issuance — REAL LE cert in background ────
+        // Self-signed is already serving (step 4). The bg task
+        // calls the same `acme::issue_http01` flow we use for
+        // hostings, updates `panel_progress` so the UI can poll
+        // for live status, and re-renders the panel vhost when
+        // the real cert lands so nginx picks it up.
+        let panel_progress = self.panel_progress.clone();
+        let acme_email = self.acme_contact_email.clone();
+        let challenge_root = self.paths.acme_challenge_root.clone();
+        let hostname_bg = hostname.clone();
+        let cert_path_bg = cert_path.clone();
+        let key_path_bg = key_path.clone();
+        let acme_root_bg = acme_root.clone();
+        let bootstrap_not_after = cert_info.not_after;
+        // Seed progress with "self-signed" so the UI immediately
+        // sees a card + can start polling.
+        {
+            let mut g = panel_progress.write().await;
+            *g = Some(PanelProgress {
+                hostname: hostname.clone(),
+                stage: "self-signed".into(),
+                message: "Bootstrap self-signed cert serving — Let's Encrypt issuance starting…".into(),
+                started_at: now_secs(),
+                not_after: bootstrap_not_after,
+            });
+        }
+        let email_trimmed = acme_email.trim().to_string();
+        let bad_email = email_trimmed.is_empty()
+            || email_trimmed.ends_with("@example.com")
+            || email_trimmed.ends_with("@example.org")
+            || email_trimmed.ends_with("@example.net")
+            || email_trimmed.ends_with("@hyperion.invalid")
+            || !email_trimmed.contains('@');
+        if bad_email {
+            // Don't burn an ACME account on a placeholder address —
+            // surface the actionable error in the progress card.
+            let mut g = panel_progress.write().await;
+            *g = Some(PanelProgress {
+                hostname: hostname.clone(),
+                stage: "failed".into(),
+                message: format!(
+                    "ACME contact email \"{email_trimmed}\" is a placeholder. Edit Settings → TLS / ACME and retry."
+                ),
+                started_at: now_secs(),
+                not_after: bootstrap_not_after,
+            });
+        } else {
+            tokio::spawn(async move {
+                {
+                    let mut g = panel_progress.write().await;
+                    *g = Some(PanelProgress {
+                        hostname: hostname_bg.clone(),
+                        stage: "issuing".into(),
+                        message: "Requesting cert from Let's Encrypt + serving HTTP-01 challenge…".into(),
+                        started_at: now_secs(),
+                        not_after: 0,
+                    });
+                }
+                let result = hyperion_adapters::acme::issue_http01(
+                    hyperion_adapters::acme::IssueRequest {
+                        domain: &hostname_bg,
+                        sans: &[],
+                        contact_email: &email_trimmed,
+                        staging: false,
+                        challenge_root: std::path::Path::new(&challenge_root),
+                        certs_root: "/etc/hyperion/certs",
+                    },
+                )
+                .await;
+                match result {
+                    Ok(info) => {
+                        // Re-render panel vhost — paths unchanged,
+                        // reload picks up the new cert chain.
+                        let input = hyperion_adapters::nginx::PanelVhostInput {
+                            domain: &hostname_bg,
+                            cert_path: &cert_path_bg,
+                            key_path: &key_path_bg,
+                            acme_challenge_root: &acme_root_bg,
+                        };
+                        let paths = hyperion_adapters::nginx::Paths::debian_defaults();
+                        let reload_err =
+                            hyperion_adapters::nginx::write_panel_vhost(&paths, &input)
+                                .await
+                                .err();
+                        let mut g = panel_progress.write().await;
+                        if let Some(e) = reload_err {
+                            *g = Some(PanelProgress {
+                                hostname: hostname_bg,
+                                stage: "failed".into(),
+                                message: format!(
+                                    "Cert issued but nginx reload failed: {e}"
+                                ),
+                                started_at: now_secs(),
+                                not_after: info.not_after,
+                            });
+                        } else {
+                            *g = Some(PanelProgress {
+                                hostname: hostname_bg,
+                                stage: "issued".into(),
+                                message: format!(
+                                    "Real Let's Encrypt cert serving · issuer: {}",
+                                    info.issuer
+                                ),
+                                started_at: now_secs(),
+                                not_after: info.not_after,
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error=%e, "panel ACME issuance failed");
+                        let mut g = panel_progress.write().await;
+                        *g = Some(PanelProgress {
+                            hostname: hostname_bg,
+                            stage: "failed".into(),
+                            message: format!("ACME issuance failed: {e}"),
+                            started_at: now_secs(),
+                            not_after: bootstrap_not_after,
+                        });
+                    }
+                }
+            });
+        }
 
         self.append_audit(
             "panel.provision",
@@ -13614,6 +13750,7 @@ mod tests {
             update_cache: Arc::new(tokio::sync::RwLock::new(None)),
             current_git_sha: "dev-unknown".into(),
             cert_issue_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            panel_progress: Arc::new(tokio::sync::RwLock::new(None)),
             master_rpc_signer: None,
             node_state_file: None,
             node_update: Arc::new(tokio::sync::Mutex::new(
@@ -13691,6 +13828,7 @@ mod tests {
             update_cache: Arc::new(tokio::sync::RwLock::new(None)),
             current_git_sha: "dev-unknown".into(),
             cert_issue_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            panel_progress: Arc::new(tokio::sync::RwLock::new(None)),
             master_rpc_signer: None,
             node_state_file: None,
             node_update: Arc::new(tokio::sync::Mutex::new(
@@ -13735,6 +13873,7 @@ mod tests {
             update_cache: Arc::new(tokio::sync::RwLock::new(None)),
             current_git_sha: "dev-unknown".into(),
             cert_issue_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            panel_progress: Arc::new(tokio::sync::RwLock::new(None)),
             master_rpc_signer: None,
             node_state_file: None,
             node_update: Arc::new(tokio::sync::Mutex::new(
@@ -13847,6 +13986,7 @@ mod tests {
             update_cache: Arc::new(tokio::sync::RwLock::new(None)),
             current_git_sha: "dev-unknown".into(),
             cert_issue_locks: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            panel_progress: Arc::new(tokio::sync::RwLock::new(None)),
             master_rpc_signer: None,
             node_state_file: None,
             node_update: Arc::new(tokio::sync::Mutex::new(

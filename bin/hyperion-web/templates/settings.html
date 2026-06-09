@@ -728,11 +728,29 @@
         (3) nginx vhost lands at <code>/etc/nginx/sites-enabled/hyperion-panel.conf</code>
         with a self-signed cert so the reload doesn't fail,
         (4) nginx <code>-t</code> + reload,
-        (5) Let's Encrypt issuance kicks off in the background — replace the
-        self-signed cert within ~30s on success. Watch /services for the panel
-        vhost to flip green.
+        (5) Let's Encrypt issuance kicks off in the background — the
+        live progress bar below tracks it.
       </p>
     </form>
+
+    {# ─── Live ACME progress card ─────────────────────────────
+       Polls /settings/panel-cert-status every 2s while issuance
+       is in progress. Stops polling itself once stage flips to
+       "issued" or "failed". Initially loads once on page mount —
+       if no panel hostname is set yet the endpoint returns "not
+       in progress" and the card stays compact. #}
+    <div style="margin-top:1rem;padding:0.85rem 1rem;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm)">
+      <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.4rem">
+        <svg class="h-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        <strong style="font-size:0.92rem">Live cert issuance</strong>
+      </div>
+      <div id="panel-cert-status"
+           hx-get="/settings/panel-cert-status"
+           hx-trigger="load"
+           hx-swap="innerHTML">
+        <div class="text-soft small" style="padding:0.4rem 0">Loading status…</div>
+      </div>
+    </div>
   </div>
 
   <div class="card" style="margin-top:1rem">

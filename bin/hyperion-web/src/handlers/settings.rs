@@ -475,6 +475,88 @@ pub struct PanelProvisionForm {
 ///
 /// Redirects back to /settings#cluster with a flash message
 /// containing the agent's reply (status + panel URL).
+/// GET /settings/panel-cert-status — tiny HTML fragment for the
+/// HTMX poll loop on /settings#cluster. The progress card polls
+/// every 2 s while stage is "issuing" / "self-signed", and stops
+/// polling once it lands on "issued" / "failed". Output: a
+/// single <div> whose contents the page swaps in place.
+pub async fn get_panel_cert_status(
+    State(state): State<SharedState>,
+    _ctx: AuthCtx,
+) -> Result<Response, AppError> {
+    let snap = match hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::PanelCertStatus,
+    )
+    .await
+    {
+        Ok(RpcResponse::PanelCertStatus(v)) => v,
+        _ => None,
+    };
+    let body = match snap {
+        None => String::from(
+            "<div class=\"text-soft small\" style=\"padding:0.4rem 0\">No panel cert issuance in progress.</div>"
+        ),
+        Some(p) => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs() as i64)
+                .unwrap_or(0);
+            let elapsed = (now - p.started_at).max(0);
+            // Stage-driven visual: pill colour + progress bar +
+            // whether HTMX keeps polling.
+            let (pill_class, pill_text, bar_pct, bar_color, keep_polling) = match p.stage.as_str() {
+                "self-signed" => ("warn", "self-signed", 10, "var(--warn)", true),
+                "issuing"     => ("warn", "issuing…",    50 + ((elapsed % 30) * 50 / 30).min(40) as i64, "var(--accent)", true),
+                "issued"      => ("ok",   "real LE cert", 100, "var(--success)", false),
+                "failed"      => ("err",  "failed",       100, "var(--danger)", false),
+                _             => ("",     p.stage.as_str(),0, "var(--surface-2)", false),
+            };
+            let trigger_attrs = if keep_polling {
+                "hx-get=\"/settings/panel-cert-status\" hx-trigger=\"every 2s\" hx-swap=\"innerHTML\" hx-target=\"this\""
+            } else {
+                ""
+            };
+            let elapsed_str = if elapsed < 60 {
+                format!("{}s", elapsed)
+            } else {
+                format!("{}m {}s", elapsed / 60, elapsed % 60)
+            };
+            format!(
+                "<div {trigger}><div style=\"display:flex;align-items:center;gap:0.6rem;flex-wrap:wrap;margin-bottom:0.5rem\">\
+                   <span class=\"pill {pill}\">{txt}</span>\
+                   <span class=\"text-soft small\">{host}</span>\
+                   <span class=\"text-soft small\">· elapsed {elapsed}</span>\
+                 </div>\
+                 <div style=\"height:6px;border-radius:3px;background:var(--surface-2);overflow:hidden;margin-bottom:0.5rem\">\
+                   <div style=\"width:{pct}%;height:100%;background:{color};transition:width 0.4s ease\"></div>\
+                 </div>\
+                 <div class=\"text-soft small\" style=\"line-height:1.5\">{msg}</div></div>",
+                trigger = trigger_attrs,
+                pill = pill_class,
+                txt = pill_text,
+                host = html_escape(&p.hostname),
+                elapsed = elapsed_str,
+                pct = bar_pct,
+                color = bar_color,
+                msg = html_escape(&p.message),
+            )
+        }
+    };
+    Ok((
+        [("content-type", "text/html; charset=utf-8")],
+        body,
+    )
+        .into_response())
+}
+
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
 pub async fn post_panel_provision(
     State(state): State<SharedState>,
     ctx: AuthCtx,

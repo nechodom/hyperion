@@ -37,6 +37,27 @@ pub struct CertRenewResult {
     pub outcome: CertRenewOutcome,
 }
 
+/// Snapshot of the panel-vhost ACME issuance state. Returned by
+/// the `PanelCertStatus` RPC and rendered as a progress card on
+/// /settings#cluster. `stage` is one of:
+///
+///   - "self-signed" — bootstrap cert serving, ACME hasn't started yet
+///   - "issuing"     — ACME flow in progress (HTTP-01 challenge)
+///   - "issued"      — real LE cert installed + nginx reloaded
+///   - "failed"      — ACME flow errored; `message` carries the reason
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PanelCertProgress {
+    pub hostname: String,
+    pub stage: String,
+    pub message: String,
+    /// Wall-clock seconds since UNIX epoch when this state began.
+    /// Drives "elapsed 27s" in the progress card.
+    pub started_at: i64,
+    /// Cert not_after — set on the bootstrap (self-signed) too so
+    /// the operator sees the bootstrap expiry while waiting.
+    pub not_after: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum CertRenewOutcome {
