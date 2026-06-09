@@ -368,6 +368,95 @@ pub async fn post_config(
     Ok(Redirect::to(&dest).into_response())
 }
 
+#[derive(Deserialize)]
+pub struct PanelProvisionForm {
+    /// FQDN the operator wants the panel reachable at, e.g.
+    /// `panel.example.com`. Server-side validation (in the RPC
+    /// `panel_provision` impl) trims, lowercases, rejects bare
+    /// IPs, refuses anything with a path / port / scheme.
+    pub hostname: String,
+    /// Skip the DNS A/AAAA preflight. Use when the operator KNOWS
+    /// the record has propagated but our resolver hasn't caught
+    /// up yet (TTL > 0 cache, recently-changed authoritative).
+    #[serde(default)]
+    pub skip_dns_check: Option<String>,
+    pub _csrf: String,
+}
+
+/// POST /settings/panel-provision — super_admin only. Binds the
+/// Hyperion control panel to a public hostname:
+///
+///   1. Validates hostname + DNS resolves to this box (unless
+///      `skip_dns_check` is on).
+///   2. Persists `cluster.panel_hostname` to agent.toml.
+///   3. Writes the panel's nginx vhost
+///      (`/etc/nginx/sites-enabled/hyperion-panel.conf`) with a
+///      self-signed cert so nginx will start even before ACME.
+///   4. Reloads nginx.
+///   5. Triggers a background ACME issuance via Let's Encrypt.
+///      Status `ok-cert-pending` means steps 1–4 succeeded and the
+///      cert will land within ~30s; flip the page or check
+///      /services for the new vhost.
+///
+/// Redirects back to /settings#tab-cluster with a flash message
+/// containing the agent's reply (status + panel URL).
+pub async fn post_panel_provision(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<PanelProvisionForm>,
+) -> Result<Response, AppError> {
+    if !ctx.is_super_admin() {
+        return Ok(Redirect::to("/").into_response());
+    }
+    let hostname = form.hostname.trim().to_lowercase();
+    if hostname.is_empty() {
+        return Ok(Redirect::to(
+            "/settings?flash_error=Panel+hostname+is+required#tab-cluster",
+        )
+        .into_response());
+    }
+    let skip_dns_check = matches!(
+        form.skip_dns_check.as_deref(),
+        Some("on" | "true" | "1" | "yes")
+    );
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::PanelProvision { hostname: hostname.clone(), skip_dns_check },
+    )
+    .await
+    .map_err(AppError::from)?;
+    let dest = match resp {
+        RpcResponse::PanelProvision { status, message, panel_url } => {
+            // Build a friendly one-liner flash. Truncate the agent's
+            // multi-line `message` to its first non-empty line so the
+            // URL query stays readable — full message lands in the
+            // agent's structured logs anyway.
+            let first_line = message
+                .lines()
+                .find(|l| !l.trim().is_empty())
+                .unwrap_or("")
+                .to_string();
+            let key = match status.as_str() {
+                "ok" | "ok-cert-pending" => "flash",
+                _ => "flash_error",
+            };
+            let url_hint = if panel_url.is_empty() {
+                String::new()
+            } else {
+                format!(" — {}", panel_url)
+            };
+            let summary = format!("{status}: {first_line}{url_hint}");
+            format!("/settings?{key}={}#tab-cluster", urlencode(&summary))
+        }
+        RpcResponse::Error(e) => format!(
+            "/settings?flash_error={}#tab-cluster",
+            urlencode(&e.to_string())
+        ),
+        _ => return Err(AppError::Internal("unexpected response".into())),
+    };
+    Ok(Redirect::to(&dest).into_response())
+}
+
 /// POST /api/email-autodetect
 ///
 /// Probes the local box for a usable SMTP relay so the operator can

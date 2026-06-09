@@ -663,7 +663,69 @@
    CLUSTER — multi-node controls
    ========================================================== #}
 <div class="tab-panel" id="tab-cluster">
+
+  {# ==========================================================
+     PANEL DOMAIN — bind the control panel itself to a hostname.
+     This is the very first thing operators look for after the
+     initial install, so it sits at the top of the cluster tab.
+     ========================================================== #}
   <div class="card">
+    <h2>
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+      Panel domain
+    </h2>
+    {% if !config.cluster.panel_hostname.is_empty() %}
+    <p class="text-soft small" style="margin:0 0 0.6rem;line-height:1.55">
+      The control panel is reachable at
+      <strong><a href="https://{{ config.cluster.panel_hostname }}:8443" target="_blank" rel="noopener">https://{{ config.cluster.panel_hostname }}:8443</a></strong>
+      (also on port 443 if you've fronted the panel via nginx). Save the form below with a new hostname to migrate; the existing vhost stays in place until the next nginx reload after a different hostname lands.
+    </p>
+    {% else %}
+    <p class="text-soft small" style="margin:0 0 0.6rem;line-height:1.55">
+      Right now the panel is only reachable via the raw IP + port (e.g. <code>https://1.2.3.4:8443</code>) with a self-signed cert. Bind it to a real hostname below: the agent will write the nginx vhost, generate a temporary self-signed cert so nginx starts, then trigger a Let's Encrypt issuance in the background.
+    </p>
+    {% endif %}
+    <form method="post" action="/settings/panel-provision" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+
+      <div class="field">
+        <label for="panel_hostname">Panel hostname <span class="hint">FQDN, e.g. panel.example.com</span></label>
+        <input id="panel_hostname" name="hostname" type="text"
+               autocomplete="off" autocapitalize="none" spellcheck="false"
+               value="{{ config.cluster.panel_hostname }}"
+               placeholder="panel.example.com"
+               pattern="[a-zA-Z0-9.\-]+"
+               required>
+        <p class="text-soft small" style="margin:0.3rem 0 0;line-height:1.55">
+          The A / AAAA record for this name <strong>must point to this server</strong>
+          before submitting (the agent does a DNS preflight unless you tick the
+          override below). After provisioning, your URL becomes
+          <code>https://&lt;hostname&gt;:8443</code> — bookmark the new URL, the
+          old IP-based URL stays working but won't have a trusted cert.
+        </p>
+      </div>
+
+      <label class="field-checkbox" style="margin:0.4rem 0 0.6rem">
+        <input type="checkbox" name="skip_dns_check" value="on">
+        Skip DNS preflight <span class="text-soft small">— record propagated but cache is stale</span>
+      </label>
+
+      <button type="submit" class="btn primary">Provision panel hostname</button>
+      <p class="text-soft small" style="margin:0.6rem 0 0;line-height:1.55">
+        <strong>What happens:</strong>
+        (1) DNS preflight,
+        (2) <code>cluster.panel_hostname</code> persists to agent.toml,
+        (3) nginx vhost lands at <code>/etc/nginx/sites-enabled/hyperion-panel.conf</code>
+        with a self-signed cert so the reload doesn't fail,
+        (4) nginx <code>-t</code> + reload,
+        (5) Let's Encrypt issuance kicks off in the background — replace the
+        self-signed cert within ~30s on success. Watch /services for the panel
+        vhost to flip green.
+      </p>
+    </form>
+  </div>
+
+  <div class="card" style="margin-top:1rem">
     <h2>
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
       Cluster placement
