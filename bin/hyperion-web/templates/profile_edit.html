@@ -162,19 +162,155 @@
       Lines starting with <code>#</code> are comments.
     </p>
     <div class="field-row">
+      {# ─── PLUGINS column ─── #}
       <div class="field" style="flex:1">
         <label for="p_wp_plugins">Plugins</label>
         <textarea id="p_wp_plugins" name="wp_plugins" rows="6"
                   style="font-family:var(--font-mono);font-size:0.85rem;width:100%"
                   placeholder="akismet!&#10;wordpress-seo&#10;@asset:7    # internal client plugin">{{ profile.wp_plugins }}</textarea>
+        {% if !plugin_assets.is_empty() %}
+        {# Asset library picker — ticking an entry appends
+           `@asset:N!` to the textarea above (with `!` so the asset
+           also gets activated). Pre-checks any entry whose
+           `@asset:N` is already present in the textarea. #}
+        <details class="asset-picker" style="margin-top:0.5rem">
+          <summary>
+            Add from library <span class="text-soft small">({{ plugin_assets.len() }} uploaded plugin{% if plugin_assets.len() != 1 %}s{% endif %})</span>
+          </summary>
+          <div class="asset-picker-body">
+            {% for a in plugin_assets %}
+            <label class="asset-row">
+              <input type="checkbox" class="asset-tick"
+                     data-textarea="p_wp_plugins"
+                     data-asset-id="{{ a.id }}">
+              <span class="asset-name">{{ a.original_name }}</span>
+              <span class="text-soft small">{{ a.size_bytes / 1024 }} KB · ref: {{ a.profile_refs }}</span>
+            </label>
+            {% endfor %}
+          </div>
+        </details>
+        {% endif %}
       </div>
+
+      {# ─── THEMES column ─── #}
       <div class="field" style="flex:1">
         <label for="p_wp_themes">Themes</label>
         <textarea id="p_wp_themes" name="wp_themes" rows="6"
                   style="font-family:var(--font-mono);font-size:0.85rem;width:100%"
                   placeholder="astra!&#10;@asset:3">{{ profile.wp_themes }}</textarea>
+        {% if !theme_assets.is_empty() %}
+        <details class="asset-picker" style="margin-top:0.5rem">
+          <summary>
+            Add from library <span class="text-soft small">({{ theme_assets.len() }} uploaded theme{% if theme_assets.len() != 1 %}s{% endif %})</span>
+          </summary>
+          <div class="asset-picker-body">
+            {% for a in theme_assets %}
+            <label class="asset-row">
+              <input type="checkbox" class="asset-tick"
+                     data-textarea="p_wp_themes"
+                     data-asset-id="{{ a.id }}">
+              <span class="asset-name">{{ a.original_name }}</span>
+              <span class="text-soft small">{{ a.size_bytes / 1024 }} KB · ref: {{ a.profile_refs }}</span>
+            </label>
+            {% endfor %}
+          </div>
+        </details>
+        {% endif %}
       </div>
     </div>
+
+    <style>
+      /* Library picker — collapsible card under each WP textarea
+         so the operator can tick uploaded plugins/themes by name
+         instead of looking up `@asset:N` IDs by hand. Hidden by
+         default to keep the form short when the library is empty
+         or the operator only types public slugs. */
+      details.asset-picker {
+        border: 1px solid var(--border);
+        border-radius: var(--radius-sm);
+        background: var(--surface-1);
+      }
+      details.asset-picker > summary {
+        cursor: pointer;
+        padding: 0.5rem 0.75rem;
+        font-size: 0.82rem;
+        font-weight: 600;
+        list-style: none;
+        user-select: none;
+      }
+      details.asset-picker > summary::-webkit-details-marker { display: none; }
+      details.asset-picker > summary::after {
+        content: "▾";
+        float: right;
+        color: var(--text-soft);
+        transition: transform 0.15s ease;
+      }
+      details.asset-picker[open] > summary::after { transform: rotate(180deg); }
+      .asset-picker-body {
+        max-height: 14rem;
+        overflow-y: auto;
+        padding: 0.3rem 0.4rem 0.5rem;
+      }
+      .asset-row {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        padding: 0.35rem 0.55rem;
+        border-radius: var(--radius-xs);
+        cursor: pointer;
+        font-size: 0.85rem;
+      }
+      .asset-row:hover { background: var(--surface-2); }
+      .asset-row input { margin: 0; flex: none; }
+      .asset-name { flex: 1; min-width: 0; overflow-wrap: anywhere; font-weight: 500; }
+    </style>
+    <script>
+      (function () {
+        'use strict';
+        // Pre-check rows whose @asset:N already appears in the
+        // textarea; toggling a checkbox edits the textarea in
+        // place. We DON'T scrape the textarea on every input — only
+        // sync on checkbox toggle, so the operator's free-form
+        // edits to the textarea aren't overwritten.
+        const taPlugins = document.getElementById('p_wp_plugins');
+        const taThemes = document.getElementById('p_wp_themes');
+        if (!taPlugins || !taThemes) return;
+
+        function hasAssetLine(text, id) {
+          const re = new RegExp('(^|\\n)\\s*@asset:' + id + '\\b', 'm');
+          return re.test(text);
+        }
+        function appendAssetLine(textarea, id) {
+          let v = textarea.value.replace(/\s+$/, '');
+          if (v.length > 0) v += '\n';
+          textarea.value = v + '@asset:' + id + '!';
+        }
+        function removeAssetLine(textarea, id) {
+          // Strip any line that consists of `@asset:<id>` (with
+          // optional `!` + optional trailing comment). Preserve
+          // surrounding lines exactly.
+          const re = new RegExp('(?:^|\\n)\\s*@asset:' + id + '!?\\s*(?:#[^\\n]*)?(?=\\n|$)', 'g');
+          textarea.value = textarea.value.replace(re, '').replace(/\n{3,}/g, '\n\n').replace(/^\n+/, '');
+        }
+
+        // Initialise checkbox state from the existing textarea
+        // content + wire change handlers.
+        document.querySelectorAll('.asset-tick').forEach(cb => {
+          const taId = cb.dataset.textarea;
+          const ta = document.getElementById(taId);
+          const id = cb.dataset.assetId;
+          if (!ta || !id) return;
+          cb.checked = hasAssetLine(ta.value, id);
+          cb.addEventListener('change', () => {
+            if (cb.checked) {
+              if (!hasAssetLine(ta.value, id)) appendAssetLine(ta, id);
+            } else {
+              removeAssetLine(ta, id);
+            }
+          });
+        });
+      })();
+    </script>
 
     <div class="row" style="margin-top:1rem;gap:0.5rem">
       <button class="btn primary" type="submit">

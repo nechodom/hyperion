@@ -26,6 +26,11 @@ struct ProfilesTpl<'a> {
     csrf_clone: String,
     flash: Option<String>,
     error: Option<String>,
+    /// Pre-split asset library — feeds the "Add from library"
+    /// picker on the New profile form. Empty list ⇒ picker hides
+    /// itself; operator falls back to typing `@asset:N` by hand.
+    plugin_assets: Vec<WpAssetSummary>,
+    theme_assets: Vec<WpAssetSummary>,
 }
 
 #[derive(Template)]
@@ -42,6 +47,12 @@ struct ProfileEditTpl<'a> {
     price_major: String,
     csrf_update: String,
     error: Option<String>,
+    /// Uploaded plugin assets — drives the "Add from library" picker
+    /// next to the wp_plugins textarea so operators don't have to
+    /// look up `@asset:N` IDs in a separate tab.
+    plugin_assets: Vec<WpAssetSummary>,
+    /// Uploaded theme assets — same purpose, separate list.
+    theme_assets: Vec<WpAssetSummary>,
 }
 
 #[derive(Deserialize, Default)]
@@ -58,6 +69,18 @@ pub async fn get_profiles(
     Query(q): Query<ProfilesQuery>,
 ) -> Result<Response, AppError> {
     let profiles = fetch_profiles(&state).await.unwrap_or_default();
+    // Asset library — best-effort. An empty list hides the picker.
+    let assets: Vec<WpAssetSummary> = match hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::WpAssetList,
+    )
+    .await
+    {
+        Ok(RpcResponse::WpAssetList(v)) => v,
+        _ => Vec::new(),
+    };
+    let (plugin_assets, theme_assets): (Vec<_>, Vec<_>) =
+        assets.into_iter().partition(|a| a.kind == "plugin");
     let tpl = ProfilesTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -70,6 +93,8 @@ pub async fn get_profiles(
         csrf_clone: csrf_token(&state, &ctx, "/profiles/clone"),
         flash: q.flash,
         error: q.error,
+        plugin_assets,
+        theme_assets,
     };
     Ok(Html(tpl.render()?).into_response())
 }
@@ -324,6 +349,21 @@ pub async fn get_edit(
         Some(m) => format!("{:.2}", m as f64 / 100.0),
         None => String::new(),
     };
+    // Asset library — feeds the "Add from library" picker. Failure
+    // here shouldn't 500 the edit page; an empty Vec just hides
+    // the picker entirely and the operator falls back to typing
+    // `@asset:N` by hand.
+    let assets: Vec<WpAssetSummary> = match hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::WpAssetList,
+    )
+    .await
+    {
+        Ok(RpcResponse::WpAssetList(v)) => v,
+        _ => Vec::new(),
+    };
+    let (plugin_assets, theme_assets): (Vec<_>, Vec<_>) =
+        assets.into_iter().partition(|a| a.kind == "plugin");
     let tpl = ProfileEditTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -334,6 +374,8 @@ pub async fn get_edit(
         price_major,
         csrf_update: csrf_token(&state, &ctx, &format!("/profiles/{}/update", id)),
         error: q.error,
+        plugin_assets,
+        theme_assets,
     };
     Ok(Html(tpl.render()?).into_response())
 }
