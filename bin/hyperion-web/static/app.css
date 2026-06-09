@@ -2734,6 +2734,44 @@ hr.divider {
   .kpi-card { padding: 0.6rem 0.75rem; }
   .kpi-value { font-size: 1.15rem !important; }
 
+  /* Tables in "card" mode: opt-in via `.data-table--cards` on the
+     table. Each row collapses into a stacked card with its first
+     cell as title and the rest stacked underneath. Used on phones
+     for /hostings, /trash, /jobs lists where the squished-table
+     view loses too much info. Templates don't need any per-td
+     changes — the CSS just unfolds the tr into a flex column. */
+  .data-table--cards { display: block; }
+  .data-table--cards thead { display: none; }
+  .data-table--cards tbody { display: block; }
+  .data-table--cards tr {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 0.6rem;
+    padding: 0.75rem 0.85rem;
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    margin-bottom: 0.55rem;
+  }
+  .data-table--cards td {
+    border: none;
+    padding: 0;
+    flex: 0 1 auto;
+  }
+  /* First TD (often a checkbox or icon) and second TD (the domain
+     / name) anchor the card visually at top-left. */
+  .data-table--cards td:first-child { order: -1; }
+  /* Actions cell drops to the bottom and stretches full-width. */
+  .data-table--cards td.right,
+  .data-table--cards td:last-child {
+    flex: 1 0 100%;
+    text-align: left;
+    display: flex;
+    gap: 0.4rem;
+    flex-wrap: wrap;
+  }
+  .data-table--cards td:last-child .btn { flex: 1 1 auto; min-width: 7rem; }
+
   /* Page header h1 + subtitle stack tighter so the actions row
      doesn't push them off-screen at 360 px. */
   .page-header h1 { font-size: 1.15rem; }
