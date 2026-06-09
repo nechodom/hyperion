@@ -3844,14 +3844,29 @@ pub struct BulkForm {
     /// type expects a String — use the manual deserializer instead.
     #[serde(default)]
     pub selected: Vec<String>,
-    /// Asset id for the `install_asset` bulk action. 0 / unset for
-    /// every other action.
+    /// Asset id for the `install_asset` bulk action. Empty string
+    /// (the wizard's "no asset picked" state) and missing field
+    /// both map to 0 — install_asset then gets refused with a clean
+    /// flash message rather than blowing up with a 422 deserialise
+    /// error from serde trying to parse "" as i64.
+    ///
+    /// We accept the field as a String so the empty case is valid;
+    /// `asset_id_parsed()` does the i64 conversion safely.
     #[serde(default)]
-    pub asset_id: i64,
+    pub asset_id: String,
     /// Whether to also activate the asset after install. Plain
     /// HTML checkbox → "on" when ticked, missing when not.
     #[serde(default)]
     pub activate: Option<String>,
+}
+
+impl BulkForm {
+    /// Parse `asset_id` lazily. Empty / missing / non-numeric ⇒ 0
+    /// (which the install_asset branch already rejects with a
+    /// human flash, so falling through is safe).
+    fn asset_id_parsed(&self) -> i64 {
+        self.asset_id.trim().parse().unwrap_or(0)
+    }
 }
 
 pub async fn post_bulk(
@@ -3870,7 +3885,7 @@ pub async fn post_bulk(
     }
     // Pre-flight validation for install_asset — surface a single
     // clean error rather than echoing it per-selected hosting.
-    if form.action == "install_asset" && form.asset_id <= 0 {
+    if form.action == "install_asset" && form.asset_id_parsed() <= 0 {
         return Ok(Redirect::to(
             "/hostings?bulk_flash=Pick+an+asset+from+the+library+before+running+the+bulk+install",
         )
@@ -3919,7 +3934,7 @@ pub async fn post_bulk(
             },
             "install_asset" => Request::WpInstallFromAsset {
                 sel,
-                asset_id: form.asset_id,
+                asset_id: form.asset_id_parsed(),
                 activate,
             },
             other => {
