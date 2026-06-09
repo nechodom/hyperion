@@ -183,7 +183,7 @@
         </tr>
       </thead>
       <tbody>
-      {% for (r, is_test) in rows %}
+      {% for (r, is_test, is_unreachable) in rows %}
         <tr>
           {# Links use the hosting's ULID (`r.id`) — NOT the domain
              — because after a cross-node migration BOTH the
@@ -230,6 +230,17 @@
               <span class="tag" title="Provisioned on a test node — not a production site"
                     style="background:var(--warn);color:white;border-color:transparent;font-size:0.62rem;font-weight:700;letter-spacing:0.05em;margin-left:0.2rem;padding:0.1rem 0.35rem">
                 TEST
+              </span>
+              {% endif %}
+              {% if is_unreachable %}
+              {# Node heartbeat is stale (> 5 min). Master can't run RPC on
+                 it right now — backups, monitor probes, cert renews are
+                 paused. The site itself may still be serving traffic if
+                 nginx + FPM on the worker are up; we just can't see /
+                 manage it from here until the agent comes back. #}
+              <span class="tag" title="This node's hyperion-agent hasn't checked in for 5+ minutes. The site may still be serving traffic, but we can't run management RPCs against it (backups, cert renew, monitor probes are paused) until the agent comes back."
+                    style="background:var(--danger);color:white;border-color:transparent;font-size:0.62rem;font-weight:700;letter-spacing:0.05em;margin-left:0.2rem;padding:0.1rem 0.35rem">
+                NODE OFFLINE
               </span>
               {% endif %}
             {% else %}

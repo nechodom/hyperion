@@ -23,11 +23,15 @@ struct ListTpl<'a> {
     active: &'static str,
     css_version: &'static str,
     htmx_version: &'static str,
-    /// Each entry is `(hosting, is_on_test_node)`. Pre-tagged on
-    /// the server so the askama template doesn't need to do a
-    /// closure-based set-lookup inside the loop (askama can't
-    /// parse Rust closures).
-    rows: Vec<(HostingSummary, bool)>,
+    /// Each entry is `(hosting, is_on_test_node, is_on_unreachable_node)`.
+    /// Pre-tagged on the server so the askama template doesn't need
+    /// to do a closure-based set-lookup inside the loop (askama can't
+    /// parse Rust closures). `unreachable` ⇒ that node's heartbeat
+    /// is more than UNREACHABLE_HEARTBEAT_SECS stale, which usually
+    /// means the worker agent is down (the actual hosting may still
+    /// be serving traffic on the worker, but we can't operate on it
+    /// from the master while the agent is offline).
+    rows: Vec<(HostingSummary, bool, bool)>,
     total_count: usize,
     q: String,
     state_filter: String,
@@ -327,9 +331,9 @@ pub async fn get_list(
     if desc {
         rows.reverse();
     }
-    // Pre-tag each row with `is_on_test_node` so the template can
-    // render the TEST chip without doing closure-based set lookups
-    // (askama can't parse Rust closures).
+    // Pre-tag each row with `is_on_test_node` + `is_on_unreachable_node`
+    // so the template can render the TEST chip + offline pill without
+    // doing closure-based set lookups (askama can't parse Rust closures).
     let test_set: std::collections::HashSet<String> = fetch_cluster_config(&state)
         .await
         .test_node_ids
@@ -337,7 +341,30 @@ pub async fn get_list(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
-    let rows: Vec<(HostingSummary, bool)> = rows
+    // Compute "unreachable" set: any node whose last_seen_at heartbeat
+    // is more than UNREACHABLE_HEARTBEAT_SECS old. The agent posts
+    // heartbeats every ~30s; 5 min of silence is a clear "the worker
+    // is gone" signal. Best-effort — if NodesList errors we just
+    // tag nothing (graceful degradation).
+    const UNREACHABLE_HEARTBEAT_SECS: i64 = 300;
+    let now_secs: i64 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let unreachable_set: std::collections::HashSet<String> = match hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::NodesList,
+    )
+    .await
+    {
+        Ok(RpcResponse::NodesList(ns)) => ns
+            .into_iter()
+            .filter(|n| n.last_seen_at > 0 && (now_secs - n.last_seen_at) > UNREACHABLE_HEARTBEAT_SECS)
+            .map(|n| n.node_id)
+            .collect(),
+        _ => std::collections::HashSet::new(),
+    };
+    let rows: Vec<(HostingSummary, bool, bool)> = rows
         .into_iter()
         .map(|r| {
             let is_test = r
@@ -345,7 +372,12 @@ pub async fn get_list(
                 .as_ref()
                 .map(|n| test_set.contains(n))
                 .unwrap_or(false);
-            (r, is_test)
+            let is_unreachable = r
+                .node_id
+                .as_ref()
+                .map(|n| unreachable_set.contains(n))
+                .unwrap_or(false);
+            (r, is_test, is_unreachable)
         })
         .collect();
     let csrf_token = csrf_token_for(&state, &ctx, "/hostings/delete");
