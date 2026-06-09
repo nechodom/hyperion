@@ -1,11 +1,16 @@
 ## Screenshots
 
-Drop the three PNGs in this folder (exact filenames matter — the
-top-level README's `<img src="...">` references them by name):
+Drop the screenshot PNGs in this folder (exact filenames matter
+— the top-level README's `<img src="...">` references them by
+name). Currently embedded in the README:
 
 - `dashboard.png` — the "Welcome back, admin." dashboard page.
-- `hostings.png`  — the /hostings list (with or without rows).
 - `stats.png`    — the /stats cluster overview.
+
+Adding more screenshots? Drop the file here, add a corresponding
+`<td>` cell to the screenshot `<table>` in the top-level
+README.md, and update the table's `width` percentages so they
+still sum to ~100%.
 
 After replacing / refreshing the files:
 

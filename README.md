@@ -27,19 +27,13 @@ transaction. Manages a fleet of VPSes from one screen.
 
 <table>
   <tr>
-    <td width="33%" align="center">
+    <td width="50%" align="center">
       <a href="docs/screenshots/dashboard.png">
         <img src="docs/screenshots/dashboard.png" alt="Dashboard — overview card with KPIs, sparklines, recent activity feed" width="100%">
       </a>
       <br><sub><b>Dashboard</b> — KPI tiles, load + bandwidth sparklines, audit feed.</sub>
     </td>
-    <td width="33%" align="center">
-      <a href="docs/screenshots/hostings.png">
-        <img src="docs/screenshots/hostings.png" alt="Hostings list — empty state with create-first-hosting CTA" width="100%">
-      </a>
-      <br><sub><b>Hostings</b> — every site at a glance, full-text search, state filters.</sub>
-    </td>
-    <td width="33%" align="center">
+    <td width="50%" align="center">
       <a href="docs/screenshots/stats.png">
         <img src="docs/screenshots/stats.png" alt="Stats — cluster-wide KPIs, per-node breakdown, load/memory/bandwidth/requests sparklines" width="100%">
       </a>
