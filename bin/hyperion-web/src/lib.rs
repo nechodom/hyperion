@@ -396,6 +396,10 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::install::post_drain_node),
         )
         .route(
+            "/install/remove-node",
+            post(handlers::install::post_remove_node),
+        )
+        .route(
             "/install/update-node-status",
             get(handlers::install::get_update_node_status),
         )

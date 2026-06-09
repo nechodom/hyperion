@@ -214,6 +214,47 @@ pub async fn drained_set(pool: &SqlitePool) -> Result<std::collections::HashSet<
     Ok(rows.into_iter().map(|(n,)| n).collect())
 }
 
+/// Delete a node row + cascade its drain marker. Caller is
+/// responsible for the policy decision ("there are still hostings
+/// here, refuse" vs "force-detach") — this fn just runs the SQL.
+/// Returns `true` when the row existed and was removed.
+///
+/// Hostings whose `node_id` referenced this row are NOT cascaded;
+/// they get orphaned (node_id stays set, but find_hosting_anywhere
+/// will no longer route to a node that doesn't exist). The Service
+/// layer optionally NULLs them when force-removing.
+pub async fn delete(pool: &SqlitePool, node_id: &str) -> Result<bool, StateError> {
+    let mut tx = pool.begin().await?;
+    // Drop the drain marker first to keep the schema consistent.
+    sqlx::query("DELETE FROM node_drain WHERE node_id = ?")
+        .bind(node_id)
+        .execute(&mut *tx)
+        .await?;
+    let n = sqlx::query("DELETE FROM nodes WHERE node_id = ?")
+        .bind(node_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+    tx.commit().await?;
+    Ok(n > 0)
+}
+
+/// Count hostings currently routed to this node — used by the
+/// node-removal flow's "are you sure?" gate. Excludes trashed
+/// rows since those are headed for hard-delete anyway.
+pub async fn count_hostings_on_node(
+    pool: &SqlitePool,
+    node_id: &str,
+) -> Result<i64, StateError> {
+    let (n,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM hostings WHERE node_id = ? AND state != 'trashed'",
+    )
+    .bind(node_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(n)
+}
+
 /// Rename a node's display label without touching its `node_id`
 /// (the immutable enrollment identifier). The label is what shows
 /// up in dashboard dropdowns, the test-domain template token, the

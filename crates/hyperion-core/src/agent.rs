@@ -1087,6 +1087,15 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.node_set_drain(&node_id, drain, &reason, actor_uid).await
     }
 
+    async fn node_remove(
+        &self,
+        node_id: String,
+        force: bool,
+        actor_uid: i64,
+    ) -> Result<(bool, i64), RpcError> {
+        self.svc.node_remove(&node_id, force, actor_uid).await
+    }
+
     async fn wp_reset_password(
         &self,
         sel: HostingSelector,

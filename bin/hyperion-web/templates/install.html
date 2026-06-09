@@ -339,6 +339,41 @@
                       onclick="document.getElementById('upd-{{ n.node_id }}').style.display='block';this.style.display='none'">
                 Update…
               </button>
+              {# Remove node — two-stage gate. The first click goes
+                 through the confirm-modal with type-to-confirm (the
+                 label). If hostings still reference the node, the
+                 backend refuses with a clear flash; the operator
+                 expands the "force" details below + ticks the
+                 checkbox + re-submits to orphan-and-delete. #}
+              <details class="inline-action" style="display:inline-block;position:relative">
+                <summary class="btn small danger" style="list-style:none;cursor:pointer"
+                         title="Drop this node from the cluster registry">
+                  Remove…
+                </summary>
+                <div style="position:absolute;right:0;top:calc(100% + 6px);z-index:20;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:0.75rem;box-shadow:var(--shadow);min-width:22rem">
+                  <form method="post" action="/install/remove-node"
+                        data-confirm-title="Remove node {{ n.label }}"
+                        data-confirm-body="Drops the node from the master's registry. The agent on the remote box keeps running (Hyperion stays installed there). Type the label to confirm."
+                        data-confirm-confirm-label="Remove"
+                        data-confirm-variant="danger"
+                        data-confirm-require="{{ n.label }}">
+                    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                    <input type="hidden" name="node_id" value="{{ n.node_id }}">
+                    <p class="text-soft small" style="margin:0 0 0.5rem;line-height:1.45">
+                      The node row is removed from the master DB.
+                      The remote agent keeps running locally; re-enrol
+                      with a fresh invite token to bring it back.
+                    </p>
+                    <label class="field-checkbox" style="margin:0 0 0.5rem;font-size:0.85rem">
+                      <input type="checkbox" name="force" value="on">
+                      Force — orphan any hostings still here (they keep serving on the detached box)
+                    </label>
+                    <button type="submit" class="btn small danger" style="width:100%">
+                      Remove node
+                    </button>
+                  </form>
+                </div>
+              </details>
             </div>
           </td>
         </tr>

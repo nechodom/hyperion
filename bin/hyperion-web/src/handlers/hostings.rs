@@ -607,15 +607,13 @@ pub async fn post_create(
     } else if target_is_test && form.test_site_name.trim().is_empty() {
         // Operator picked a test node but didn't fill the short-name
         // field → enforce that the typed domain matches the template
-        // shape (e.g. ends in `.testovaciverze.cz`). Sniff the
-        // suffix from the template by stripping the `{name}.{node}.`
-        // prefix; rest is the enforced suffix.
+        // shape (e.g. ends in `.testovaciverze.cz`). Sniff the suffix
+        // properly via `extract_test_suffix` — the previous
+        // `rsplit_once('.')` was a bug: for template
+        // `{name}.{node}.testovaciverze.cz` it returned `.cz` and
+        // blocked EVERY .cz domain in the cluster.
         if !cluster_cfg.test_domain_template.is_empty() {
-            let suffix = cluster_cfg
-                .test_domain_template
-                .rsplit_once('.')
-                .map(|(_, s)| format!(".{s}"))
-                .unwrap_or_default();
+            let suffix = extract_test_suffix(&cluster_cfg.test_domain_template);
             if !suffix.is_empty()
                 && !effective_domain
                     .to_ascii_lowercase()
@@ -636,11 +634,7 @@ pub async fn post_create(
     } else if !target_is_test && !cluster_cfg.test_domain_template.is_empty() {
         // Production target: refuse domains that match the test
         // template — operator probably mis-routed.
-        let suffix = cluster_cfg
-            .test_domain_template
-            .rsplit_once('.')
-            .map(|(_, s)| format!(".{s}"))
-            .unwrap_or_default();
+        let suffix = extract_test_suffix(&cluster_cfg.test_domain_template);
         if !suffix.is_empty()
             && effective_domain
                 .to_ascii_lowercase()
@@ -2857,6 +2851,86 @@ pub async fn require_manage_for_selector(
 
 pub(crate) fn urlencoding(s: &str) -> String {
     url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
+}
+
+/// Extract the literal suffix from a test-domain template.
+///
+/// Given a template like `{name}.{node}.testovaciverze.cz`,
+/// returns `.testovaciverze.cz` — the part *after* the last
+/// placeholder. That's the bit a domain on a test node has to
+/// end with for the suffix-match check to work.
+///
+/// The previous implementation used `rsplit_once('.')` which
+/// just split on the LAST dot, returning `.cz` for any
+/// multi-label template. That blocked every single `.cz` domain
+/// in the cluster from being created on production nodes — the
+/// suffix check thought EVERY .cz was a "test-node leak".
+///
+/// Templates with no placeholders fall back to treating the
+/// entire string as the literal suffix (with a leading dot if
+/// not present). Empty template ⇒ empty suffix ⇒ no check fires.
+fn extract_test_suffix(template: &str) -> String {
+    let t = template.trim();
+    if t.is_empty() {
+        return String::new();
+    }
+    // Find the LAST closing brace from a `{xxx}` placeholder; whatever
+    // comes after it is the literal suffix. For `{name}.{node}.foo.bar`
+    // that's `.foo.bar`; for `{name}.foo.bar` it's `.foo.bar` too.
+    let after_last_placeholder = match t.rfind('}') {
+        Some(idx) => &t[idx + 1..],
+        None => t, // no placeholders at all
+    };
+    // Trim a leading `.` so we can always add exactly one back.
+    let inner = after_last_placeholder.trim_start_matches('.');
+    if inner.is_empty() {
+        String::new()
+    } else {
+        format!(".{inner}")
+    }
+}
+
+#[cfg(test)]
+mod test_suffix_tests {
+    use super::extract_test_suffix;
+
+    #[test]
+    fn typical_multi_placeholder() {
+        // The case that bit Kevin — `.cz` would falsely block every
+        // production .cz domain. Now correctly yields the full suffix.
+        assert_eq!(
+            extract_test_suffix("{name}.{node}.testovaciverze.cz"),
+            ".testovaciverze.cz"
+        );
+    }
+
+    #[test]
+    fn single_placeholder() {
+        assert_eq!(
+            extract_test_suffix("{name}.staging.example.com"),
+            ".staging.example.com"
+        );
+    }
+
+    #[test]
+    fn no_placeholder() {
+        assert_eq!(
+            extract_test_suffix("staging.example.com"),
+            ".staging.example.com"
+        );
+    }
+
+    #[test]
+    fn empty() {
+        assert_eq!(extract_test_suffix(""), "");
+        assert_eq!(extract_test_suffix("   "), "");
+    }
+
+    #[test]
+    fn trailing_brace_only() {
+        // Degenerate but shouldn't panic.
+        assert_eq!(extract_test_suffix("{name}"), "");
+    }
 }
 
 fn parse_aliases(input: &str) -> Result<Vec<Domain>, String> {

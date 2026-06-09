@@ -289,7 +289,7 @@
                 hx-post="/hostings/dns-check-domain"
                 hx-target="#dns-create-result"
                 hx-swap="innerHTML"
-                hx-include="closest form > input[name='domain']"
+                hx-include="closest form input[name='domain']"
                 hx-vals='{"_csrf": "{{ csrf_token }}"}'>
           <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
           Check now
@@ -305,7 +305,7 @@
             hx-trigger="dnsblur from:body"
             hx-target="#dns-create-result"
             hx-swap="innerHTML"
-            hx-include="closest form > input[name='domain']"
+            hx-include="closest form input[name='domain']"
             hx-vals='{"_csrf": "{{ csrf_token }}"}'></span>
     </div>
 

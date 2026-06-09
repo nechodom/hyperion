@@ -777,6 +777,17 @@ pub trait AgentApi: Send + Sync + 'static {
         actor_uid: i64,
     ) -> Result<(), RpcError>;
 
+    /// Delete an enrolled node row. Returns `(removed, blocking)`:
+    /// `removed=true` iff the row was deleted; `blocking>0` ⇒ hostings
+    /// still reference it and the request was refused (caller must
+    /// pass `force=true` to override + orphan the rows).
+    async fn node_remove(
+        &self,
+        node_id: String,
+        force: bool,
+        actor_uid: i64,
+    ) -> Result<(bool, i64), RpcError>;
+
     /// Compute operator alerts (cert expiring, failed hostings, stale
     /// backups, high load) at request time.
     async fn dashboard_alerts(&self) -> Result<Vec<DashboardAlert>, RpcError>;

@@ -821,6 +821,17 @@ pub enum Request {
         #[serde(default)]
         reason: String,
     },
+    /// Remove an enrolled node from the master's registry. Refuses
+    /// unless `force=true` when hostings still reference the node —
+    /// the UI surfaces the count and asks the operator to either
+    /// migrate them away first or confirm the orphan-them path. The
+    /// agent on the removed node keeps running locally; this RPC
+    /// only mutates master state.
+    NodeRemove {
+        node_id: String,
+        #[serde(default)]
+        force: bool,
+    },
     NodeHeartbeat {
         node_id: String,
         secret: String,
@@ -1100,6 +1111,14 @@ pub enum Response {
     NodeLabelUpdated,
     /// Plain ack for NodeSetDrain.
     NodeDrainUpdated,
+    /// Result of NodeRemove. `removed=true` ⇒ the row is gone;
+    /// `removed=false` + a non-zero `hostings_blocking` ⇒ refusal,
+    /// operator must either move hostings off the node first or
+    /// resubmit with `force=true`.
+    NodeRemoved {
+        removed: bool,
+        hostings_blocking: i64,
+    },
     NodeHeartbeat {
         /// Same as EnrollConsume — included on every heartbeat ack
         /// so already-enrolled nodes pick up the master pubkey

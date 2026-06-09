@@ -942,6 +942,15 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::NodeRemove { node_id, force } => {
+            match api.node_remove(node_id, force, 0).await {
+                Ok((removed, hostings_blocking)) => Response::NodeRemoved {
+                    removed,
+                    hostings_blocking,
+                },
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::WpResetPassword {
             sel,
             wp_user,
@@ -1849,6 +1858,14 @@ mod tests {
             _: i64,
         ) -> Result<(), RpcError> {
             Ok(())
+        }
+        async fn node_remove(
+            &self,
+            _: String,
+            _: bool,
+            _: i64,
+        ) -> Result<(bool, i64), RpcError> {
+            Ok((true, 0))
         }
         async fn cert_overview(
             &self,

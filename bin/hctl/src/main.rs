@@ -1366,6 +1366,17 @@ fn print_pretty(resp: &Response) {
         }
         Response::NodeLabelUpdated => println!("node label updated"),
         Response::NodeDrainUpdated => println!("node drain flag updated"),
+        Response::NodeRemoved { removed, hostings_blocking } => {
+            if *removed {
+                println!("✓ node removed (orphaned hostings: {hostings_blocking})");
+            } else if *hostings_blocking > 0 {
+                eprintln!(
+                    "✗ refused — {hostings_blocking} hosting(s) still here. Re-run with --force to orphan and delete."
+                );
+            } else {
+                eprintln!("✗ node not found");
+            }
+        }
         Response::CertOverview(items) => {
             if items.is_empty() {
                 println!("no certificates");

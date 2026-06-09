@@ -369,6 +369,87 @@ pub async fn post_rename_node(
     .into_response())
 }
 
+#[derive(Deserialize)]
+pub struct RemoveNodeForm {
+    pub node_id: String,
+    /// "on" / "1" / "true" → orphan hostings + delete anyway.
+    /// Empty / "off" → refuse if hostings still reference the node.
+    #[serde(default)]
+    pub force: String,
+}
+
+/// POST /install/remove-node — drop an enrolled node from the
+/// master's registry. Refuses by default when hostings still
+/// reference the node; the operator can re-submit with `force=on`
+/// to orphan them.
+///
+/// The agent on the removed node keeps running unchanged — this
+/// only mutates master-side state. To "re-enrol" later, mint a
+/// fresh invite token and run the enrol command on the worker.
+pub async fn post_remove_node(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<RemoveNodeForm>,
+) -> Result<Response, AppError> {
+    if !ctx.is_super_admin() {
+        return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
+    }
+    let node_id = form.node_id.trim().to_string();
+    if node_id.is_empty() {
+        return Err(AppError::BadRequest("missing node_id".into()));
+    }
+    let force = matches!(form.force.as_str(), "on" | "1" | "true");
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::NodeRemove {
+            node_id: node_id.clone(),
+            force,
+        },
+    )
+    .await?;
+    // Decompose first into a tuple (success, flash) so the
+    // ergonomics work out — match arms move the inner RpcError /
+    // bool values, which then can't be re-borrowed below.
+    let (success, flash): (bool, String) = match resp {
+        RpcResponse::NodeRemoved { removed: true, hostings_blocking } => {
+            let msg = if hostings_blocking > 0 {
+                format!(
+                    "Node {} removed. {} hosting(s) were orphaned — they keep their nginx/FPM running on the now-detached box, but cannot be managed from the master until you re-enrol the node or migrate them.",
+                    node_id, hostings_blocking
+                )
+            } else {
+                format!("Node {} removed from the cluster.", node_id)
+            };
+            (true, msg)
+        }
+        RpcResponse::NodeRemoved { removed: false, hostings_blocking } if hostings_blocking > 0 => {
+            (false, format!(
+                "Refused — {} hosting(s) still live on {}. Migrate them off first (Settings → Cluster placement), OR re-submit with the Force option ticked to orphan them and delete the node anyway.",
+                hostings_blocking, node_id
+            ))
+        }
+        RpcResponse::NodeRemoved { removed: false, .. } => {
+            (false, format!("Node {} not found (already removed?)", node_id))
+        }
+        RpcResponse::Error(e) => (false, format!("Remove failed: {e}")),
+        _ => (false, "Remove: unexpected response".into()),
+    };
+    let key = if success { "flash" } else { "flash_error" };
+    // On success the node id is gone, so don't anchor on it.
+    let anchor = if success {
+        String::new()
+    } else {
+        format!("#node-{}", urlencode(&node_id))
+    };
+    Ok(Redirect::to(&format!(
+        "/install?{}={}{}",
+        key,
+        urlencode(&flash),
+        anchor
+    ))
+    .into_response())
+}
+
 /// GET /install/update-node-status?node_id=… — returns a tiny HTML
 /// fragment with state pill + log tail. UI polls this via HTMX.
 #[derive(Deserialize)]

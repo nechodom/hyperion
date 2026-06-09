@@ -6083,6 +6083,62 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(())
     }
 
+    /// Remove an enrolled node row. The caller is the master's web
+    /// UI (via NodeRemove RPC) — workers should not be able to
+    /// nuke their own row from the master via this path.
+    ///
+    /// Two-stage gate:
+    ///   1. Count hostings still routed to this node (excluding
+    ///      trashed). If non-zero and `force=false`, refuse with
+    ///      `Ok((false, count))` so the UI can show the count and
+    ///      offer "force" path or "move them off first" advice.
+    ///   2. If `force=true`, the DAO drops the node row + its
+    ///      drain marker. Hostings stay in the DB with their old
+    ///      node_id (orphaned); `find_hosting_anywhere` lookups
+    ///      will fail for them until the operator either re-enrols
+    ///      a node under the same node_id OR migrates the hostings
+    ///      to a different node manually.
+    ///
+    /// Audited either way. Unknown node_id ⇒ `Ok((false, 0))` so
+    /// the UI form is forgiving on a double-submit race.
+    pub async fn node_remove(
+        &self,
+        node_id: &str,
+        force: bool,
+        actor_uid: i64,
+    ) -> Result<(bool, i64), RpcError> {
+        // Refuse silently on empty / non-existent (audit still logs).
+        let existed = hyperion_state::nodes::get_by_node_id(&self.pool, node_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("nodes lookup: {e}")))?
+            .is_some();
+        if !existed {
+            return Ok((false, 0));
+        }
+        let count = hyperion_state::nodes::count_hostings_on_node(&self.pool, node_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("hostings on node count: {e}")))?;
+        if count > 0 && !force {
+            return Ok((false, count));
+        }
+        let removed = hyperion_state::nodes::delete(&self.pool, node_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("node delete: {e}")))?;
+        self.append_audit(
+            "node.remove",
+            Some(node_id),
+            &serde_json::json!({
+                "force": force,
+                "hostings_orphaned": count,
+                "actor_uid": actor_uid
+            })
+            .to_string(),
+            if removed { "ok" } else { "noop" },
+        )
+        .await;
+        Ok((removed, count))
+    }
+
     /// List enrolled nodes (master-side view).
     pub async fn nodes_list(&self) -> Result<Vec<hyperion_types::NodeSummary>, RpcError> {
         let rows = hyperion_state::nodes::list(&self.pool)
