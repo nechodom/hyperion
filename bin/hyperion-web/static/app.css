@@ -428,6 +428,16 @@ pre code {
   border-bottom: 1px solid var(--border);
 }
 
+/* Universal `[hidden]` rescuer. The HTML5 `hidden` attribute is
+   spec'd as `display: none`, but any explicit `display: flex/grid/
+   block` rule on the same element overrides it (specificity wins
+   over the UA stylesheet). Any popup / dropdown we toggle via the
+   `hidden` attribute therefore stays VISIBLE despite the JS doing
+   the right thing — the file-manager 3-dot menu was a notable
+   victim (every row's menu showed at once). Add `!important` so
+   author rules can't accidentally reintroduce the bug. */
+[hidden] { display: none !important; }
+
 .breadcrumbs {
   display: flex;
   align-items: center;

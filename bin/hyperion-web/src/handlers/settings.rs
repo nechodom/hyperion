@@ -297,6 +297,12 @@ pub async fn post_config(
     let mut fields = form.fields;
     fields.remove("section");
     fields.remove("_csrf");
+    // `_return_tab` is a UI hint — pull it out BEFORE field validation
+    // so it doesn't get written to agent.toml as if it were a real
+    // config key.
+    let return_tab_override = fields
+        .remove("_return_tab")
+        .and_then(|v| sanitize_return_tab(&v));
     // "Leave blank to keep" for sensitive fields — empty string would
     // overwrite a real password / webhook URL with "".
     let drop_if_empty: &[&str] = match form.section.as_str() {
@@ -323,6 +329,15 @@ pub async fn post_config(
     )
     .await
     .map_err(AppError::from)?;
+    // Map TOML section → URL hash so the redirect lands the operator
+    // back on the SAME tab they just saved. Without this the redirect
+    // bounces them to /settings (no fragment) which always opens the
+    // first tab — annoying when you're iterating on cluster settings
+    // and keep getting yanked back to Mail. Forms can override the
+    // mapping with a hidden `_return_tab` field (sanitised), which
+    // is how the Retention tab — which writes cluster.* fields but
+    // visually lives elsewhere — keeps the operator in place.
+    let tab = return_tab_override.unwrap_or_else(|| section_to_tab(&form.section));
     let dest = match resp {
         RpcResponse::AgentConfigUpdate => {
             // Spawn a delayed restart so the redirect response gets back
@@ -358,14 +373,56 @@ pub async fn post_config(
                 }
             });
             format!(
-                "/settings?flash=Section+%5B{}%5D+saved+%E2%80%94+hyperion-agent+restarting+%28~5s%29",
-                urlencode(&form.section)
+                "/settings?flash=Section+%5B{}%5D+saved+%E2%80%94+hyperion-agent+restarting+%28~5s%29#{}",
+                urlencode(&form.section),
+                tab
             )
         }
-        RpcResponse::Error(e) => format!("/settings?flash_error={}", urlencode(&e.to_string())),
+        RpcResponse::Error(e) => format!(
+            "/settings?flash_error={}#{}",
+            urlencode(&e.to_string()),
+            tab
+        ),
         _ => return Err(AppError::Internal("unexpected response".into())),
     };
     Ok(Redirect::to(&dest).into_response())
+}
+
+/// Map the agent.toml section name to the /settings tab id. The two
+/// vocabularies don't line up 1:1 — the UI groups related sections
+/// onto one tab (e.g. backup_remote + backup_retention both live
+/// under #backups). Unknown sections fall back to "mail" because
+/// it's the leftmost tab; better than dumping the operator on a
+/// random screen.
+///
+/// Forms can override this entirely via a hidden `_return_tab` field
+/// — that's how the Retention tab (which writes `cluster.*` fields
+/// but lives on its own tab) keeps the operator in place after save.
+fn section_to_tab(section: &str) -> &'static str {
+    match section {
+        "email" => "mail",
+        "acme" => "tls",
+        "slack" => "notifications",
+        "backup_remote" | "backup_retention" => "backups",
+        "cluster" => "cluster",
+        _ => "mail",
+    }
+}
+
+/// Sanitise an operator-supplied `_return_tab` hint. Only known tab
+/// ids are honoured so a malicious / typo'd value can't poison the
+/// redirect URL.
+fn sanitize_return_tab(v: &str) -> Option<&'static str> {
+    match v.trim() {
+        "mail" => Some("mail"),
+        "tls" => Some("tls"),
+        "notifications" => Some("notifications"),
+        "backups" => Some("backups"),
+        "cluster" => Some("cluster"),
+        "retention" => Some("retention"),
+        "raw" => Some("raw"),
+        _ => None,
+    }
 }
 
 #[derive(Deserialize)]
@@ -398,7 +455,7 @@ pub struct PanelProvisionForm {
 ///      cert will land within ~30s; flip the page or check
 ///      /services for the new vhost.
 ///
-/// Redirects back to /settings#tab-cluster with a flash message
+/// Redirects back to /settings#cluster with a flash message
 /// containing the agent's reply (status + panel URL).
 pub async fn post_panel_provision(
     State(state): State<SharedState>,
@@ -411,7 +468,7 @@ pub async fn post_panel_provision(
     let hostname = form.hostname.trim().to_lowercase();
     if hostname.is_empty() {
         return Ok(Redirect::to(
-            "/settings?flash_error=Panel+hostname+is+required#tab-cluster",
+            "/settings?flash_error=Panel+hostname+is+required#cluster",
         )
         .into_response());
     }
@@ -446,10 +503,10 @@ pub async fn post_panel_provision(
                 format!(" — {}", panel_url)
             };
             let summary = format!("{status}: {first_line}{url_hint}");
-            format!("/settings?{key}={}#tab-cluster", urlencode(&summary))
+            format!("/settings?{key}={}#cluster", urlencode(&summary))
         }
         RpcResponse::Error(e) => format!(
-            "/settings?flash_error={}#tab-cluster",
+            "/settings?flash_error={}#cluster",
             urlencode(&e.to_string())
         ),
         _ => return Err(AppError::Internal("unexpected response".into())),

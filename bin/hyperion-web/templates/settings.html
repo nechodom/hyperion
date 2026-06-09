@@ -94,6 +94,10 @@
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
     Cluster
   </a>
+  <a class="tab" data-tab="retention" href="#retention" role="tab">
+    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+    Retention
+  </a>
   <a class="tab" data-tab="raw" href="#raw" role="tab" style="margin-left:auto">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
     Raw TOML
@@ -843,8 +847,27 @@
     </form>
   </div>
 
-  <div class="card" style="margin-top:1rem">
-    <h2 style="font-size:0.95rem;margin:0 0 0.6rem">
+  <div class="card muted" style="margin-top:1rem">
+    <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Multi-node tips</h2>
+    <ul class="text-soft small" style="margin:0;padding-left:1.2rem;line-height:1.7">
+      <li><strong><a href="/install">Nodes &amp; install</a></strong> page lists enrolled workers, lets you mint invite tokens for new ones, run a connectivity test, and trigger remote apt/hyperion updates.</li>
+      <li><strong>Updates</strong> — pick any enrolled node from <a href="/install">/install</a> → click <em>Update…</em> → tick <em>System packages</em> and/or <em>Hyperion</em> → log streams live in the row.</li>
+      <li><strong>Stats</strong> at <a href="/stats">/stats</a> default to the <em>cluster total</em>: hostings, disk and bandwidth summed across master + all workers. Switch the dropdown to a node to see per-node sparklines.</li>
+      <li><strong>Service health</strong> at <a href="/services">/services</a> shows each node's systemd units. Click <em>Install</em> to apt-install a missing service — output streams live (no more "dpkg returned an error" with no detail).</li>
+    </ul>
+  </div>
+</div>
+
+{# ==========================================================
+   RETENTION — trash window + audit-log retention. These both
+   write to cluster.* TOML keys but live in their own tab so
+   the Cluster tab can focus on placement / topology, and
+   compliance-minded operators can find the retention knobs at
+   a glance without scrolling past four other cards.
+   ========================================================== #}
+<div class="tab-panel" id="tab-retention">
+  <div class="card">
+    <h2 style="margin:0 0 0.4rem">
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
       Trash / soft-delete
     </h2>
@@ -858,6 +881,10 @@
     <form method="post" action="/settings/config" autocomplete="off">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <input type="hidden" name="section" value="cluster">
+      {# Tell post_config to land us back on /settings#retention
+         instead of the section→tab default (which would send us
+         to #cluster). #}
+      <input type="hidden" name="_return_tab" value="retention">
 
       <label class="field-checkbox" style="font-weight:600">
         <input type="checkbox" name="trash_enabled" value="true"
@@ -882,7 +909,7 @@
   </div>
 
   <div class="card" style="margin-top:1rem">
-    <h2 style="font-size:0.95rem;margin:0 0 0.6rem">
+    <h2 style="margin:0 0 0.4rem">
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M7 14l4-4 4 4 6-6"/></svg>
       Audit log retention
     </h2>
@@ -898,6 +925,7 @@
     <form method="post" action="/settings/config" autocomplete="off">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <input type="hidden" name="section" value="cluster">
+      <input type="hidden" name="_return_tab" value="retention">
       <div class="field">
         <label for="audit_retention_days">Retain audit entries for <span class="hint">days · 0..=3650 · 0 = forever</span></label>
         <input id="audit_retention_days" name="audit_retention_days" type="number"
@@ -913,16 +941,6 @@
       </div>
       <button type="submit" class="btn primary">Save audit retention</button>
     </form>
-  </div>
-
-  <div class="card muted" style="margin-top:1rem">
-    <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Multi-node tips</h2>
-    <ul class="text-soft small" style="margin:0;padding-left:1.2rem;line-height:1.7">
-      <li><strong><a href="/install">Nodes &amp; install</a></strong> page lists enrolled workers, lets you mint invite tokens for new ones, run a connectivity test, and trigger remote apt/hyperion updates.</li>
-      <li><strong>Updates</strong> — pick any enrolled node from <a href="/install">/install</a> → click <em>Update…</em> → tick <em>System packages</em> and/or <em>Hyperion</em> → log streams live in the row.</li>
-      <li><strong>Stats</strong> at <a href="/stats">/stats</a> default to the <em>cluster total</em>: hostings, disk and bandwidth summed across master + all workers. Switch the dropdown to a node to see per-node sparklines.</li>
-      <li><strong>Service health</strong> at <a href="/services">/services</a> shows each node's systemd units. Click <em>Install</em> to apt-install a missing service — output streams live (no more "dpkg returned an error" with no detail).</li>
-    </ul>
   </div>
 </div>
 

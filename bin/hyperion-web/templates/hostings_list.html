@@ -92,13 +92,21 @@
   </div>
 </div>
 {% else %}
+{# Bulk form is INTENTIONALLY empty and lives OUTSIDE the table.
+   The bulk-action buttons + per-row checkboxes use HTML5
+   `form="bulk-form"` association to submit to it. The previous
+   structure (whole table wrapped in this form) caused the
+   per-row Delete <form> elements to nest — HTML forbids that,
+   browsers strip the inner form during parsing, and clicking
+   per-row Delete silently submitted the bulk form instead. #}
 <form method="post" action="/hostings/bulk" id="bulk-form">
-<input type="hidden" name="_csrf" value="{{ csrf_bulk }}">
-<input type="hidden" name="action" id="bulk-action" value="">
-{# Carries the asset id when the operator picks one for the
-   bulk install action. Empty / 0 for all other actions. #}
-<input type="hidden" name="asset_id" id="bulk-asset-id" value="">
-<input type="hidden" name="activate" id="bulk-activate" value="">
+  <input type="hidden" name="_csrf" value="{{ csrf_bulk }}">
+  <input type="hidden" name="action" id="bulk-action" value="">
+  {# Carries the asset id when the operator picks one for the
+     bulk install action. Empty / 0 for all other actions. #}
+  <input type="hidden" name="asset_id" id="bulk-asset-id" value="">
+  <input type="hidden" name="activate" id="bulk-activate" value="">
+</form>
 
 <div class="card no-pad-table">
   <div style="padding:0.85rem 1.5rem;display:flex;align-items:center;gap:0.5rem;border-bottom:1px solid var(--border);flex-wrap:wrap">
@@ -140,10 +148,11 @@
       </div>
     </details>
     {% endif %}
-    <button type="button" class="btn small" data-bulk="suspend" disabled>Suspend</button>
-    <button type="button" class="btn small" data-bulk="resume" disabled>Resume</button>
-    <button type="button" class="btn small" data-bulk="backup" disabled>Backup now</button>
-    <button type="button" class="btn small danger" data-bulk="delete" disabled>Delete</button>
+    {# HTML5 `form` attribute lets these submit-buttons (type=button + JS-driven, see script at the bottom) and below the checkboxes belong to the bulk form even though they're outside it in the DOM. #}
+    <button type="button" form="bulk-form" class="btn small" data-bulk="suspend" disabled>Suspend</button>
+    <button type="button" form="bulk-form" class="btn small" data-bulk="resume" disabled>Resume</button>
+    <button type="button" form="bulk-form" class="btn small" data-bulk="backup" disabled>Backup now</button>
+    <button type="button" form="bulk-form" class="btn small danger" data-bulk="delete" disabled>Delete</button>
   </div>
   <div class="table-wrap">
     <table>
@@ -153,7 +162,7 @@
            column flips the direction. Filters (q, state) survive
            the click via the include below. #}
         <tr>
-          <th style="width:1px;padding-right:0"><input type="checkbox" id="bulk-all" aria-label="Select all"></th>
+          <th style="width:1px;padding-right:0"><input type="checkbox" form="bulk-form" id="bulk-all" aria-label="Select all"></th>
           <th>
             <a class="sort-link {% if sort_key == "domain" %}active{% endif %}"
                href="/hostings?q={{ q|e }}&state={{ state_filter|e }}&sort=domain&dir={% if sort_key == "domain" && sort_dir == "asc" %}desc{% else %}asc{% endif %}">
@@ -197,7 +206,11 @@
              same reason — bulk delete by domain would target
              whichever copy the master sees first. #}
           <td style="padding-right:0">
-            <input type="checkbox" class="bulk-row" name="selected" value="{{ r.id.as_str() }}" aria-label="Select {{ r.domain }}">
+            {# form="bulk-form" associates this checkbox with the bulk
+               form sitting above the card. Required because the
+               checkbox is inside the per-row context where the bulk
+               form no longer wraps. #}
+            <input type="checkbox" form="bulk-form" class="bulk-row" name="selected" value="{{ r.id.as_str() }}" aria-label="Select {{ r.domain }}">
           </td>
           <td>
             <a href="/hostings/{{ r.id.as_str() }}"><strong>{{ r.domain }}</strong></a>
@@ -289,7 +302,6 @@
     </table>
   </div>
 </div>
-</form>
 
 <script>
 (function () {

@@ -235,6 +235,11 @@
   flex-direction: column;
   gap: 0.1rem;
 }
+/* `display: flex` above overrides the user-agent's implicit
+   `[hidden] { display: none }` rule, which is why EVERY row's
+   menu was visible at once. Force `display: none` when the
+   attribute is set so the JS toggle actually hides them. */
+.row-menu-pop[hidden] { display: none !important; }
 .row-menu-item {
   background: transparent;
   border: 0;
