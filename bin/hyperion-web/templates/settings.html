@@ -132,6 +132,11 @@
     <form method="post" action="/settings/config" autocomplete="off">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <input type="hidden" name="section" value="email">
+      {# _checkboxes lists boolean fields THIS form owns. Synth-false
+         applies only here. Without it, unchecking + saving was a
+         no-op; with section-wide synth, saving here would silently
+         reset other sections' checkboxes. #}
+      <input type="hidden" name="_checkboxes" value="enabled">
       <label class="field-checkbox" style="font-weight:600">
         <input type="checkbox" name="enabled" value="true" {% if config.email.enabled %}checked{% endif %}>
         Enable SMTP relay
@@ -593,6 +598,7 @@
     <form method="post" action="/settings/config" autocomplete="off">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <input type="hidden" name="section" value="backup_remote">
+      <input type="hidden" name="_checkboxes" value="enabled">
       <label class="field-checkbox" style="font-weight:600">
         <input type="checkbox" name="enabled" value="true" {% if config.backup_remote.enabled %}checked{% endif %}>
         Push every backup to a remote target
@@ -737,6 +743,7 @@
     <form method="post" action="/settings/config" autocomplete="off">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <input type="hidden" name="section" value="cluster">
+      <input type="hidden" name="_checkboxes" value="master_accepts_hostings">
       <label class="field-checkbox" style="font-weight:600">
         <input type="checkbox" name="master_accepts_hostings" value="true"
                {% if config.cluster.master_accepts_hostings %}checked{% endif %}>
@@ -772,6 +779,7 @@
     <form method="post" action="/settings/config" autocomplete="off">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <input type="hidden" name="section" value="cluster">
+      <input type="hidden" name="_checkboxes" value="test_wp_no_index">
 
       <div class="field">
         <label>Test nodes <span class="hint">tick which nodes should be treated as test</span></label>
@@ -885,6 +893,7 @@
          instead of the section→tab default (which would send us
          to #cluster). #}
       <input type="hidden" name="_return_tab" value="retention">
+      <input type="hidden" name="_checkboxes" value="trash_enabled">
 
       <label class="field-checkbox" style="font-weight:600">
         <input type="checkbox" name="trash_enabled" value="true"

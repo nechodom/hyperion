@@ -260,22 +260,32 @@ pub struct ConfigEditForm {
 /// handler treats a missing field as "leave alone", so without this
 /// helper, unchecking a checkbox would silently do nothing.
 ///
-/// For each section that has known boolean checkboxes, we insert
-/// the explicit "false" when the field is missing. Listed by
-/// section so a future section can opt in without grep-archaeology.
+/// **Per-FORM declaration**, not per-section. Each `<form>` carries
+/// a hidden `_checkboxes` field with the comma-separated names of
+/// the checkboxes IT owns. Synthesize-false only those.
+///
+/// Why per-form and not per-section: the `cluster` section has
+/// multiple sub-forms (Master placement, Test nodes, Trash,
+/// Audit retention, …). A section-wide list would synthesize
+/// `trash_enabled=false` whenever the operator saved the Audit
+/// Retention form — silently turning trash off on every save.
+/// Kevin reported exactly that: "trash se vypne po restartu agenta"
+/// — the restart was a red herring; the unintended `false` got
+/// persisted by the previous form save.
+///
+/// Forms without checkboxes omit `_checkboxes` entirely (or leave
+/// it empty); the helper is a no-op then.
 fn synthesize_unchecked_checkboxes(
-    section: &str,
     fields: &mut std::collections::BTreeMap<String, String>,
+    declared: &str,
 ) {
-    let known: &[&str] = match section {
-        "email" => &["enabled"],
-        "backup_remote" => &["enabled"],
-        "cluster" => &["master_accepts_hostings", "test_wp_no_index", "trash_enabled"],
-        _ => return,
-    };
-    for k in known {
-        if !fields.contains_key(*k) {
-            fields.insert((*k).to_string(), "false".to_string());
+    for name in declared.split(',') {
+        let n = name.trim();
+        if n.is_empty() {
+            continue;
+        }
+        if !fields.contains_key(n) {
+            fields.insert(n.to_string(), "false".to_string());
         }
     }
 }
@@ -303,6 +313,12 @@ pub async fn post_config(
     let return_tab_override = fields
         .remove("_return_tab")
         .and_then(|v| sanitize_return_tab(&v));
+    // `_checkboxes` declares which boolean checkboxes THIS specific
+    // form is responsible for. Synth-false defaults apply only to
+    // these — see comment on synthesize_unchecked_checkboxes for the
+    // bug this prevents (saving one cluster sub-form silently
+    // resetting another sub-form's checkboxes to false).
+    let declared_checkboxes = fields.remove("_checkboxes").unwrap_or_default();
     // "Leave blank to keep" for sensitive fields — empty string would
     // overwrite a real password / webhook URL with "".
     let drop_if_empty: &[&str] = match form.section.as_str() {
@@ -318,8 +334,10 @@ pub async fn post_config(
     }
     // Unchecked checkboxes don't show up in the form at all — but our
     // service knows the field is required. Synthesise the missing
-    // booleans as "false" so unchecking persists.
-    synthesize_unchecked_checkboxes(&form.section, &mut fields);
+    // booleans as "false" so unchecking persists. ONLY for checkboxes
+    // this form actually declared via `_checkboxes`; cross-form
+    // synthesis is the bug Kevin hit.
+    synthesize_unchecked_checkboxes(&mut fields, &declared_checkboxes);
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
         Request::AgentConfigUpdate {
@@ -832,38 +850,59 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[test]
-    fn unchecked_cluster_checkbox_synthesizes_false() {
+    fn declared_unchecked_synthesizes_false() {
         // Browser sends NO master_accepts_hostings when the box is
-        // unchecked. Synthesizer must insert false so the unchecking
-        // persists.
+        // unchecked. The form declared it via `_checkboxes`, so the
+        // synthesiser inserts false so the unchecking persists.
         let mut fields: BTreeMap<String, String> = BTreeMap::new();
-        synthesize_unchecked_checkboxes("cluster", &mut fields);
+        synthesize_unchecked_checkboxes(&mut fields, "master_accepts_hostings");
         assert_eq!(fields.get("master_accepts_hostings"), Some(&"false".into()));
     }
 
     #[test]
-    fn checked_cluster_checkbox_preserved() {
+    fn checked_value_is_preserved() {
         // When the box IS checked, browser sends "true" (or "on" — we
         // pass through whatever the form sent). Don't clobber it.
         let mut fields: BTreeMap<String, String> = BTreeMap::new();
         fields.insert("master_accepts_hostings".into(), "true".into());
-        synthesize_unchecked_checkboxes("cluster", &mut fields);
+        synthesize_unchecked_checkboxes(&mut fields, "master_accepts_hostings");
         assert_eq!(fields.get("master_accepts_hostings"), Some(&"true".into()));
     }
 
     #[test]
-    fn unchecked_email_enabled_synthesizes_false() {
-        // Regression: existing behaviour for [email].enabled stays.
+    fn comma_list_handles_multiple() {
         let mut fields: BTreeMap<String, String> = BTreeMap::new();
-        synthesize_unchecked_checkboxes("email", &mut fields);
-        assert_eq!(fields.get("enabled"), Some(&"false".into()));
+        fields.insert("test_wp_no_index".into(), "true".into());
+        synthesize_unchecked_checkboxes(&mut fields, "trash_enabled, test_wp_no_index");
+        // trash_enabled was missing → synthesised false
+        assert_eq!(fields.get("trash_enabled"), Some(&"false".into()));
+        // test_wp_no_index was present → preserved
+        assert_eq!(fields.get("test_wp_no_index"), Some(&"true".into()));
     }
 
     #[test]
-    fn unknown_section_does_nothing() {
+    fn empty_declaration_does_nothing() {
+        // The regression test for Kevin's bug — saving the Audit
+        // Retention form (no checkboxes in it) MUST NOT touch
+        // `trash_enabled` or any other unrelated boolean.
         let mut fields: BTreeMap<String, String> = BTreeMap::new();
-        synthesize_unchecked_checkboxes("acme", &mut fields);
-        assert!(fields.is_empty());
+        fields.insert("audit_retention_days".into(), "90".into());
+        synthesize_unchecked_checkboxes(&mut fields, "");
+        assert!(!fields.contains_key("trash_enabled"));
+        assert!(!fields.contains_key("master_accepts_hostings"));
+    }
+
+    #[test]
+    fn declared_field_already_present_unchanged() {
+        // Cross-form bug guard: even if a form (hypothetically)
+        // declares `trash_enabled` but the operator never had access
+        // to a trash_enabled control on this form, the field comes in
+        // missing and we'd insert false. That's by design ONLY when
+        // the form OWNS the checkbox — `_checkboxes` is the contract.
+        let mut fields: BTreeMap<String, String> = BTreeMap::new();
+        fields.insert("trash_enabled".into(), "true".into());
+        synthesize_unchecked_checkboxes(&mut fields, "trash_enabled");
+        assert_eq!(fields.get("trash_enabled"), Some(&"true".into()));
     }
 
     #[test]
