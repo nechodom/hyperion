@@ -8,6 +8,37 @@
   <span>{{ detail.domain }}</span>
 </div>
 
+{# Live WP install progress card — shown ONLY after a fresh create
+   that spawned a background WP install + profile apply job. The
+   inner div HTMX-polls /jobs/<id>/progress every 2s and the whole
+   card disappears once the job lands on terminal state (done /
+   failed). Sits ABOVE the credentials so the operator sees install
+   status first; creds are still right below so they can be copied
+   while the install runs. #}
+{% if let Some(job_id) = wp_install_job_id %}
+<div class="card" style="margin-bottom:1rem;border-left:3px solid var(--accent)">
+  <div style="display:flex;align-items:center;gap:0.6rem;margin-bottom:0.6rem">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accent)">
+      <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+    </svg>
+    <strong style="font-size:0.95rem">WordPress install + profile apply</strong>
+    <span class="text-soft small">running in the background</span>
+  </div>
+  <div id="wp-install-progress"
+       hx-get="/jobs/{{ job_id }}/progress"
+       hx-trigger="load, every 2s"
+       hx-swap="innerHTML">
+    <div class="text-soft small">Loading progress…</div>
+  </div>
+  <p class="text-soft small" style="margin:0.7rem 0 0;line-height:1.5">
+    The credentials below are valid <strong>immediately</strong> — copy them
+    while the install runs. Watch this card for plugin / theme progress;
+    refresh once it lands on <code>done</code> to see the populated
+    WordPress tab.
+  </p>
+</div>
+{% endif %}
+
 {% if let Some(c) = just_created %}
 <div class="creds-panel">
   <div class="creds-header">

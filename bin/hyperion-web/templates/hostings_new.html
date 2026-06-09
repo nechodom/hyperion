@@ -355,6 +355,13 @@
                onchange="document.getElementById('wp-fields').style.display=this.checked?'grid':'none';">
         Install WordPress on this hosting after provisioning
       </label>
+      <p class="text-soft small" style="margin:0.4rem 0 0;line-height:1.5">
+        Hyperion downloads the latest WordPress core, seeds the database,
+        creates the admin user, and (if a profile is picked) installs
+        every plugin and theme it lists. You'll see a live progress card
+        on the hosting page while it runs — usually 10–60 seconds depending
+        on plugin count.
+      </p>
       <p id="install-wp-forced-notice"
          style="display:none;margin:0.4rem 0 0;padding:0.55rem 0.75rem;
                 background:color-mix(in oklab, var(--accent) 8%, transparent);
@@ -374,12 +381,12 @@
                  title="ASCII letters, digits, and . _ @ -">
         </div>
         <div class="field" style="margin:0">
-          <label for="wp_admin_email">Admin email</label>
+          <label for="wp_admin_email">Admin email <span class="hint">leave blank for <code>admin@your-domain</code></span></label>
           <input id="wp_admin_email" name="wp_admin_email" type="email" placeholder="you@example.cz">
         </div>
         <div class="field" style="margin:0">
-          <label for="wp_admin_password">Admin password</label>
-          <input id="wp_admin_password" name="wp_admin_password" type="text" minlength="8" placeholder="≥ 8 characters">
+          <label for="wp_admin_password">Admin password <span class="hint">leave blank or &lt; 8 chars and we'll generate a strong one + show it once on the next page</span></label>
+          <input id="wp_admin_password" name="wp_admin_password" type="text" minlength="0" placeholder="≥ 8 chars or leave blank to auto-generate">
         </div>
         <div class="field" style="margin:0">
           <label for="wp_title">Site title (optional)</label>

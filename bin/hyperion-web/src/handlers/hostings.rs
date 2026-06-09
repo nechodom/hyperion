@@ -165,6 +165,11 @@ struct DetailTpl<'a> {
     ftp_error: Option<String>,
     ftp_flash: Option<String>,
     just_created: Option<HostingCreated>,
+    /// When the post-create flow spawned a background WP install /
+    /// profile-apply job, this carries the job id so the detail
+    /// page can render an inline progress card that HTMX-polls
+    /// `/jobs/<id>/progress`. None on the standard GET detail path.
+    wp_install_job_id: Option<String>,
     /// Drives the per-user Access tab — super_admin only.
     is_super_admin: bool,
     /// Existing access grants for this hosting (populated for super_admin).
@@ -825,61 +830,69 @@ pub async fn post_create(
                     profile_has_meaningful_wp_content(&p.wp_plugins)
                         || profile_has_meaningful_wp_content(&p.wp_themes)
                 });
-            // Optional WordPress install — when the checkbox is ticked,
-            // OR a profile mandates it (plugins / themes in the
-            // profile), AND the hosting has a database AND it's a
-            // PHP kind (no WP on static / proxy / redirect).
-            let wp_form_checked = form.install_wp.eq_ignore_ascii_case("on") ||
-                                   form.install_wp == "true" || form.install_wp == "1";
+            // ─── WordPress install + profile apply ───────────
+            //
+            // The previous synchronous path was responsible for the
+            // bug Kevin hit: the WP install step was guarded by 4
+            // conditions (db.is_some, kind == php, valid email,
+            // password ≥ 6), and EVERY failure mode landed in a
+            // `tracing::warn!` — operator saw a clean hosting detail
+            // page and no clue WP wasn't installed.
+            //
+            // Replacement: when WP is requested AND can run (db +
+            // php kind), we auto-fill missing credentials, dispatch
+            // the work to a background JOB, and surface a live
+            // progress card on the just-created hosting detail
+            // page. The credentials show immediately so the
+            // operator can copy them while the install runs.
+            //
+            // Bug-incompatible paths that still want the silent
+            // "skip" behaviour (no DB, non-PHP kind) get a clean
+            // wp_error flash instead of disappearing.
+            let wp_form_checked = form.install_wp.eq_ignore_ascii_case("on")
+                || form.install_wp == "true"
+                || form.install_wp == "1";
             let wp_was_requested = wp_form_checked || profile_forces_wp;
-            if wp_was_requested && created.db.is_some() && req.kind == "php" {
-                let admin_email_input = form.wp_admin_email.trim().to_string();
-                let admin_password_input = form.wp_admin_password.clone();
-                // Default "admin" preserves the previous behaviour
-                // for operators who leave the field blank, but
-                // explicit non-empty input wins.
+            let mut wp_install_job_id: Option<String> = None;
+            let mut wp_install_error: Option<String> = None;
+            if wp_was_requested && req.kind != "php" {
+                wp_install_error = Some(format!(
+                    "WordPress install was requested but the hosting kind is `{}` — WP needs a PHP hosting. Recreate with the PHP runtime selected.",
+                    req.kind
+                ));
+            } else if wp_was_requested && created.db.is_none() {
+                wp_install_error = Some(
+                    "WordPress install was requested but no database was provisioned. WP needs MariaDB — recreate with a database selected.".into(),
+                );
+            } else if wp_was_requested {
+                // Resolve credentials, auto-filling missing/short
+                // values regardless of whether the profile forced
+                // WP. The operator picked "install WP" — we honor
+                // that intent and fill the blanks rather than
+                // silently dropping the install.
                 let admin_user_raw = form.wp_admin_user.trim();
                 let admin_user = if admin_user_raw.is_empty() {
                     "admin".to_string()
                 } else {
                     admin_user_raw.to_string()
                 };
-                // When the profile MANDATES WP install (plugins or
-                // themes in the profile), the operator may not have
-                // filled in the admin email / password fields — they
-                // were optional in the wizard's previous behaviour.
-                // Auto-synthesize sensible defaults rather than
-                // silently skipping the install:
-                //   - admin email: `admin@<domain>` (site owner can
-                //     change in wp-admin after first login)
-                //   - admin password: 24-char random, surfaced on
-                //     the post-create credentials card alongside the
-                //     DB password (operator must save it now — we
-                //     don't store the plaintext anywhere)
-                let admin_email = if admin_email_input.is_empty() && profile_forces_wp {
+                let admin_email_input = form.wp_admin_email.trim().to_string();
+                let admin_email = if admin_email_input.is_empty() {
                     format!("admin@{}", req.domain.as_str())
                 } else {
                     admin_email_input
                 };
-                let admin_password = if admin_password_input.len() < 6 && profile_forces_wp {
+                let admin_password_input = form.wp_admin_password.clone();
+                let admin_password = if admin_password_input.len() < 6 {
                     generate_wp_admin_password()
                 } else {
                     admin_password_input
                 };
-                if admin_email.is_empty() || admin_password.len() < 6 {
-                    // Don't fail the whole create — the hosting is
-                    // alive. Just leave WP uninstalled.
-                    tracing::warn!(
-                        "WP install requested but missing/short credentials; skipping"
-                    );
-                } else if !is_valid_wp_username(&admin_user) {
-                    // Same fail-soft as above: keep the hosting,
-                    // skip WP, log so the operator sees the reason
-                    // in journalctl.
-                    tracing::warn!(
-                        admin_user = %admin_user,
-                        "WP install requested but admin username is invalid; skipping"
-                    );
+                if !is_valid_wp_username(&admin_user) {
+                    wp_install_error = Some(format!(
+                        "Admin username `{}` is not a valid WordPress username (letters, numbers, _, -, @, . only). Hosting was created — Re-run WP install from the WordPress tab once you've picked a valid name.",
+                        admin_user
+                    ));
                 } else {
                     let title = if form.wp_title.trim().is_empty() {
                         req.domain.as_str().to_string()
@@ -892,56 +905,84 @@ pub async fn post_create(
                         form.wp_locale.trim().to_string()
                     };
                     let site_url = format!("https://{}", req.domain.as_str());
-                    // Auto-enable WP no-index on test-node WP installs when
-                    // the operator turned it on in Settings → Test nodes.
                     let no_index = target_is_test && cluster_cfg.test_wp_no_index;
                     let wp_req = hyperion_types::WpInstallRequest {
                         site_url: site_url.clone(),
                         title,
                         admin_user: admin_user.clone(),
-                        admin_email: admin_email.to_string(),
+                        admin_email: admin_email.clone(),
                         admin_password: admin_password.clone(),
                         locale,
                         version: "latest".to_string(),
                         no_index,
                     };
-                    let install_resp = crate::dispatcher::dispatch_to_node(
-                        &state,
-                        target,
-                        Request::WpInstall {
-                            sel: HostingSelector::Id(created.id.clone()),
-                            req: wp_req,
+                    // Show the credentials immediately on the detail
+                    // page, even though the install runs in the
+                    // background — the operator must save the
+                    // password NOW (it's not stored in plaintext).
+                    created.wp = Some(hyperion_rpc::wire::WpCreatedInfo {
+                        admin_user: admin_user.clone(),
+                        admin_email: admin_email.clone(),
+                        admin_password: admin_password.clone(),
+                        admin_login_url: format!("{}/wp-login.php", site_url),
+                    });
+                    // Spawn the install job. The closure runs in a
+                    // detached tokio task; the handler returns the
+                    // detail page (with creds + a polling progress
+                    // card) within milliseconds.
+                    let job_state = state.clone();
+                    let job_target = target.map(|s| s.to_string());
+                    let job_target_owned = job_target.clone();
+                    let job_hosting_id = created.id.clone();
+                    let job_profile_id = form.profile_id;
+                    let job_payload = serde_json::json!({
+                        "hosting_id": created.id.as_str(),
+                        "domain": req.domain.as_str(),
+                        "admin_user": admin_user,
+                        "site_url": site_url,
+                        "profile_id": job_profile_id,
+                    });
+                    let actor_label = ctx.username.clone();
+                    let actor_uid = ctx
+                        .session
+                        .as_ref()
+                        .map(|s| s.user_id)
+                        .unwrap_or(0);
+                    let spawn_res = crate::handlers::jobs::spawn_job(
+                        state.clone(),
+                        "wp_install",
+                        Some(req.domain.as_str()),
+                        &job_payload.to_string(),
+                        &actor_label,
+                        actor_uid,
+                        move |reporter| async move {
+                            run_wp_install_job(
+                                reporter,
+                                job_state,
+                                job_target_owned,
+                                job_hosting_id,
+                                wp_req,
+                                job_profile_id,
+                            )
+                            .await;
                         },
                     )
                     .await;
-                    match install_resp {
-                        Ok(RpcResponse::WpInstall(_status)) => {
-                            // Tuck the WP creds into the response so
-                            // the credential panel renders them.
-                            created.wp = Some(hyperion_rpc::wire::WpCreatedInfo {
-                                admin_user: admin_user.clone(),
-                                admin_email: admin_email.to_string(),
-                                admin_password,
-                                admin_login_url: format!("{}/wp-login.php", site_url),
-                            });
+                    match spawn_res {
+                        Ok(id) => wp_install_job_id = Some(id),
+                        Err(e) => {
+                            wp_install_error = Some(format!(
+                                "Could not start the background WP install job: {e}. Run WP install manually from the WordPress tab."
+                            ));
                         }
-                        Ok(RpcResponse::Error(e)) => {
-                            tracing::warn!(error=%e, "WP install failed");
-                        }
-                        _ => {}
                     }
                 }
-            }
-
-            // Profile apply — AFTER the WP install so the profile's
-            // wp_plugins / wp_themes lists land on a hosting that
-            // actually has WordPress on it. Previously this ran
-            // BEFORE the install and every plugin failed silently
-            // because the agent's wp-cli call would hit a directory
-            // with no wp-config.php. Failure here is still logged +
-            // skipped — the hosting (and WP, if it was installed)
-            // are live regardless.
-            if form.profile_id > 0 {
+            } else if form.profile_id > 0 {
+                // No WP install requested, but a profile WAS chosen
+                // — apply it now (likely just PHP limits / expiry,
+                // since WP-content profiles trigger the path above).
+                // Synchronous because there's no wp-cli I/O to wait
+                // on, just a quick limits + expiry update.
                 let apply = crate::dispatcher::dispatch_to_node(
                     &state,
                     target,
@@ -954,13 +995,15 @@ pub async fn post_create(
                 match apply {
                     Ok(RpcResponse::ProfileApply(_)) => {}
                     Ok(RpcResponse::Error(e)) => {
-                        tracing::warn!(profile_id=form.profile_id, error=%e, "profile apply failed");
+                        wp_install_error = Some(format!(
+                            "Profile applied with errors: {e}. Hosting is alive — re-run from the Profile tab."
+                        ));
                     }
-                    Ok(_) => {
-                        tracing::warn!("profile apply: unexpected response");
-                    }
+                    Ok(_) => {}
                     Err(e) => {
-                        tracing::warn!(profile_id=form.profile_id, error=%e, "profile apply RPC failed");
+                        wp_install_error = Some(format!(
+                            "Profile apply RPC failed: {e}. Re-run from the Profile tab."
+                        ));
                     }
                 }
             }
@@ -1020,8 +1063,10 @@ pub async fn post_create(
                 csrf_ftp_disable: csrf_token_for(&state, &ctx, "/hostings/ftp/disable"),
                 ftp_new_password: None,
                 error: None,
-                wp_error: None,
-                wp_flash: None,
+                wp_error: wp_install_error,
+                wp_flash: wp_install_job_id
+                    .as_ref()
+                    .map(|_| "WordPress install kicked off in the background — live status above.".to_string()),
                 backup_error: None,
                 backup_flash: None,
                 expiry_error: None,
@@ -1039,6 +1084,7 @@ pub async fn post_create(
                 ftp_error: None,
                 ftp_flash: None,
                 just_created: Some(created),
+                wp_install_job_id,
                 is_super_admin: ctx.is_super_admin(),
                 access_grants: vec![],
                 users_for_access: vec![],
@@ -1487,6 +1533,7 @@ pub async fn get_detail(
             }
         }),
         just_created: None,
+        wp_install_job_id: None,
         is_super_admin: ctx.is_super_admin(),
         access_grants: access_grants_for_detail,
         users_for_access: users_for_access_for_detail,
@@ -4730,6 +4777,158 @@ pub async fn post_migration_move(
 /// `AgentInfo` against `node` (None = local master) and returns
 /// the agent's version string, or "unknown" on RPC failure.
 /// Cheap (one round-trip) and read-only.
+/// Background runner for the post-create WP install + profile-apply
+/// flow. Lives behind `spawn_job("wp_install", …)` so the handler
+/// can return the hosting detail page (with credentials) within
+/// milliseconds while the agent does the slow wp-cli work.
+///
+/// Steps it reports:
+///   2%  — Preparing
+///   10% — WordPress core download + install
+///   75% — Profile apply (plugins + themes if any)
+///   100% — Done
+async fn run_wp_install_job(
+    reporter: crate::handlers::jobs::JobReporter,
+    state: SharedState,
+    target_node: Option<String>,
+    hosting_id: hyperion_types::HostingId,
+    wp_req: hyperion_types::WpInstallRequest,
+    profile_id: i64,
+) {
+    let target = target_node.as_deref();
+    reporter
+        .step(
+            "Preparing WordPress install",
+            2,
+            "Resolving owner node + dispatch path…\n",
+        )
+        .await;
+
+    reporter
+        .step(
+            "Installing WordPress core",
+            10,
+            "Running wp-cli core install (download + DB seed + admin user)…\n",
+        )
+        .await;
+    let install_resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target,
+        Request::WpInstall {
+            sel: HostingSelector::Id(hosting_id.clone()),
+            req: wp_req,
+        },
+    )
+    .await;
+    match install_resp {
+        Ok(RpcResponse::WpInstall(_)) => {
+            reporter
+                .step(
+                    "WordPress installed",
+                    65,
+                    "wp-cli reported success — wp-config.php, wp-content/, admin user all in place.\n",
+                )
+                .await;
+        }
+        Ok(RpcResponse::Error(e)) => {
+            reporter
+                .finish(
+                    false,
+                    Some(format!(
+                        "WordPress install failed: {e}. The hosting itself is alive — re-run from /hostings/{}/wordpress.",
+                        hosting_id.as_str()
+                    )),
+                )
+                .await;
+            return;
+        }
+        Ok(other) => {
+            reporter
+                .finish(
+                    false,
+                    Some(format!(
+                        "WordPress install returned an unexpected RPC variant ({other:?}). Re-run from the WordPress tab."
+                    )),
+                )
+                .await;
+            return;
+        }
+        Err(e) => {
+            reporter
+                .finish(
+                    false,
+                    Some(format!(
+                        "WordPress install RPC failed (couldn't reach the agent): {e}. Re-run from the WordPress tab."
+                    )),
+                )
+                .await;
+            return;
+        }
+    }
+
+    // Profile apply runs AFTER WP install so plugins/themes land
+    // on a hosting that actually has wp-cli working. Profile may be
+    // 0 ("no profile picked") in which case we skip.
+    if profile_id > 0 {
+        reporter
+            .step(
+                "Applying profile (plugins + themes + limits)",
+                75,
+                "Running profile_apply — wp-cli plugin install + theme install for each entry…\n",
+            )
+            .await;
+        let apply = crate::dispatcher::dispatch_to_node(
+            &state,
+            target,
+            Request::ProfileApply {
+                sel: HostingSelector::Id(hosting_id.clone()),
+                profile_id,
+            },
+        )
+        .await;
+        match apply {
+            Ok(RpcResponse::ProfileApply(_)) => {
+                reporter
+                    .step("Profile applied", 95, "All plugins + themes installed.\n")
+                    .await;
+            }
+            Ok(RpcResponse::Error(e)) => {
+                reporter
+                    .finish(
+                        false,
+                        Some(format!(
+                            "WordPress is installed but profile apply failed: {e}. Re-run from the Profile tab on /hostings/{}.",
+                            hosting_id.as_str()
+                        )),
+                    )
+                    .await;
+                return;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                reporter
+                    .finish(
+                        false,
+                        Some(format!(
+                            "WordPress installed but profile apply RPC failed: {e}. Re-run from the Profile tab."
+                        )),
+                    )
+                    .await;
+                return;
+            }
+        }
+    }
+
+    reporter
+        .step(
+            "Done",
+            100,
+            "WordPress + profile (if any) finished — refresh the hosting detail page to see the new WP tab.\n",
+        )
+        .await;
+    reporter.finish(true, None).await;
+}
+
 async fn probe_agent_version(state: &SharedState, node: Option<&str>) -> String {
     match crate::dispatcher::dispatch_to_node(state, node, Request::AgentInfo).await {
         Ok(RpcResponse::AgentInfo(i)) => i.version,
