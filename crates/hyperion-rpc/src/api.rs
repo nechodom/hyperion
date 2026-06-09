@@ -269,6 +269,9 @@ pub trait AgentApi: Send + Sync + 'static {
     /// hyperion-web). Computed live via `systemctl is-active/is-enabled`.
     async fn services_health(&self) -> Result<hyperion_types::ServicesHealth, RpcError>;
 
+    /// Dump the firewall ruleset (nft, with iptables fallback). Read-only.
+    async fn firewall_list(&self) -> Result<hyperion_types::FirewallView, RpcError>;
+
     /// Restart a whitelisted systemd unit.
     async fn service_restart(&self, name: String) -> Result<(), RpcError>;
     /// apt-install + enable a whitelisted unit. Returns immediately;

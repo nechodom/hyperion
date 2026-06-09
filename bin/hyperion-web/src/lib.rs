@@ -333,6 +333,7 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/profiles/apply", post(handlers::profiles::post_apply))
         .route("/certs", get(handlers::certs::get_certs))
         .route("/certs/renew-all", post(handlers::certs::post_renew_all))
+        .route("/firewall", get(handlers::firewall::get_firewall))
         .route("/audit", get(handlers::audit::get_audit))
         .route("/settings/backups", get(handlers::backups::get_backups))
         .route(

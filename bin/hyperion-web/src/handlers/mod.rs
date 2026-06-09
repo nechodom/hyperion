@@ -4,6 +4,7 @@ pub mod certs;
 pub mod avatar;
 pub mod dashboard;
 pub mod enroll;
+pub mod firewall;
 pub mod health;
 pub mod hostings;
 pub mod install;

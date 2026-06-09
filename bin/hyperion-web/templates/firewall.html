@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% block title %}Firewall · hyperion{% endblock %}
+{% block main %}
+
+<div class="page-header">
+  <div>
+    <h1>Firewall</h1>
+    <div class="subtitle">
+      Read-only view of every node's <code>nft list ruleset</code>
+      (with <code>iptables -L</code> fallback). Use SSH + <code>nft</code> to
+      edit — we don't ship an in-UI rule editor on purpose, the
+      risk of locking yourself out remotely is too high.
+    </div>
+  </div>
+</div>
+
+{% if nodes.is_empty() %}
+  <div class="card empty">
+    <h3>No nodes</h3>
+    <p class="text-soft">No master or enrolled workers — nothing to query.</p>
+  </div>
+{% else %}
+  {% for n in nodes %}
+    <div class="card" style="margin-bottom:1rem">
+      <h2 style="display:flex;align-items:center;gap:0.7rem;flex-wrap:wrap">
+        <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+        <span>{{ n.label }}</span>
+        {% if n.node_id != n.label %}<code class="text-soft small">{{ n.node_id }}</code>{% endif %}
+        {% if n.unreachable %}
+          <span class="pill err">unreachable</span>
+        {% else %}
+          <span class="tag">{{ n.view.backend }}</span>
+        {% endif %}
+      </h2>
+
+      {% if n.unreachable %}
+        <p class="text-soft">
+          Could not reach this node's agent over RPC. The page renders
+          the rest of the cluster best-effort; retry the page or
+          check <a href="/install">/install</a> for the node's last
+          heartbeat.
+        </p>
+      {% else %}
+        {# Parsed open-ports summary — most operators look here first
+           to answer "is port 25 actually open?". Pills mirror the
+           backend; "—" when the parser found nothing (unusual
+           configs still show in raw below). #}
+        <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1rem;margin-bottom:0.8rem">
+          <div>
+            <div class="text-soft small" style="margin-bottom:0.3rem">Open TCP ports</div>
+            {% if n.view.open_tcp.is_empty() %}
+              <span class="text-soft">—</span>
+            {% else %}
+              <div style="display:flex;flex-wrap:wrap;gap:0.3rem">
+                {% for p in n.view.open_tcp %}
+                  <span class="tag" title="TCP {{ p }}">{{ p }}</span>
+                {% endfor %}
+              </div>
+            {% endif %}
+          </div>
+          <div>
+            <div class="text-soft small" style="margin-bottom:0.3rem">Open UDP ports</div>
+            {% if n.view.open_udp.is_empty() %}
+              <span class="text-soft">—</span>
+            {% else %}
+              <div style="display:flex;flex-wrap:wrap;gap:0.3rem">
+                {% for p in n.view.open_udp %}
+                  <span class="tag" title="UDP {{ p }}">{{ p }}</span>
+                {% endfor %}
+              </div>
+            {% endif %}
+          </div>
+        </div>
+
+        {% if !n.view.error.is_empty() %}
+          <div class="flash warn" style="margin-bottom:0.6rem;padding:0.45rem 0.7rem">
+            <div class="flash-body">
+              <strong>Parser note:</strong> <code>{{ n.view.error }}</code>
+            </div>
+          </div>
+        {% endif %}
+
+        <details>
+          <summary style="cursor:pointer;color:var(--text-dim);font-size:0.88rem;padding:0.3rem 0">
+            Show raw ruleset
+            {% if !n.view.raw.is_empty() %}
+              <span class="text-soft small">({{ n.view.raw.lines().count() }} lines)</span>
+            {% endif %}
+          </summary>
+          {% if n.view.raw.is_empty() %}
+            <p class="text-soft small" style="margin:0.5rem 0 0">
+              Empty — no rules returned by <code>{{ n.view.backend }}</code>.
+              On a fresh Debian box that means "no firewall configured;
+              the kernel default-accepts everything". Lock down with
+              <code>nft</code> when ready.
+            </p>
+          {% else %}
+            <pre style="background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.75rem;overflow:auto;font-size:0.78rem;line-height:1.4;max-height:32rem;margin-top:0.5rem">{{ n.view.raw }}</pre>
+          {% endif %}
+        </details>
+      {% endif %}
+    </div>
+  {% endfor %}
+{% endif %}
+
+{% endblock %}

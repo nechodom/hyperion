@@ -383,6 +383,10 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::ServicesHealth(v),
             Err(e) => Response::Error(e),
         },
+        Request::FirewallList => match api.firewall_list().await {
+            Ok(v) => Response::FirewallList(v),
+            Err(e) => Response::Error(e),
+        },
         Request::ServiceRestart { name } => match api.service_restart(name).await {
             Ok(()) => Response::ServiceRestart,
             Err(e) => Response::Error(e),
@@ -1302,6 +1306,9 @@ mod tests {
         }
         async fn services_health(&self) -> Result<hyperion_types::ServicesHealth, RpcError> {
             Ok(hyperion_types::ServicesHealth::default())
+        }
+        async fn firewall_list(&self) -> Result<hyperion_types::FirewallView, RpcError> {
+            Ok(hyperion_types::FirewallView::default())
         }
         async fn service_restart(&self, _: String) -> Result<(), RpcError> {
             Ok(())

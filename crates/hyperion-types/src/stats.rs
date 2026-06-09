@@ -167,6 +167,33 @@ pub struct ServicesHealth {
     pub warn_down: usize,
 }
 
+/// Read-only snapshot of the node's firewall state. The agent runs
+/// `nft list ruleset` (modern Debian default) and falls back to
+/// `iptables -L -n` for older boxes. We expose both the structured
+/// "open ports" view (parsed best-effort) and the full raw text so
+/// the operator can always eyeball the actual ruleset.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct FirewallView {
+    /// `"nft"` when nftables answered, `"iptables"` when we fell
+    /// back, or `"unknown"` when neither command returned a parseable
+    /// ruleset (very minimal containers, e.g.).
+    pub backend: String,
+    /// TCP listen ports the firewall explicitly accepts on the
+    /// public path (best-effort regex over the dumped ruleset).
+    /// Empty list ⇒ either no explicit rules or a parser miss —
+    /// fall back to the raw blob below.
+    pub open_tcp: Vec<u16>,
+    /// UDP listen ports similarly.
+    pub open_udp: Vec<u16>,
+    /// Full raw ruleset output. Always present, even when parsing
+    /// failed.
+    pub raw: String,
+    /// Stderr from the firewall command (empty on success). When
+    /// non-empty + `raw` empty, the operator gets context for why
+    /// the page shows no rules.
+    pub error: String,
+}
+
 /// Operator-facing view of the agent's effective config — minus
 /// secrets. The `Request::AgentConfigView` RPC returns this; the
 /// `/settings` UI page reads it. We deliberately do NOT echo

@@ -10811,6 +10811,150 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// any installed php-fpm version, vsftpd (FTP optional).
     /// "Missing optional" (severity=info): php-fpm units / vsftpd
     /// that aren't installed.
+    /// Dump the firewall ruleset. Tries `nft list ruleset` first
+    /// (Debian 12+ default); falls back to `iptables -L -n -v` on
+    /// boxes that still run legacy iptables. Best-effort regex over
+    /// the output extracts open TCP/UDP ports for a quick "what
+    /// can the world hit" panel; the raw output is always present
+    /// so the operator can verify by eye.
+    ///
+    /// Read-only — never mutates the ruleset. UI surface at
+    /// `/firewall` is similarly read-only by design (operators
+    /// edit via SSH + nft; we just give them visibility per-node).
+    pub async fn firewall_list(&self) -> Result<hyperion_types::FirewallView, RpcError> {
+        // Try nft first.
+        let nft = tokio::process::Command::new("/usr/sbin/nft")
+            .args(["list", "ruleset"])
+            .output()
+            .await;
+        let (backend, raw, error) = match nft {
+            Ok(o) if o.status.success() && !o.stdout.is_empty() => (
+                "nft".to_string(),
+                String::from_utf8_lossy(&o.stdout).into_owned(),
+                String::new(),
+            ),
+            Ok(o) => {
+                // nft is present but errored (e.g. empty ruleset on
+                // a fresh box, or operator running without root).
+                // Fall through to iptables — the legacy binary is
+                // still available on Debian as a compat shim.
+                let nft_err = String::from_utf8_lossy(&o.stderr).into_owned();
+                match tokio::process::Command::new("/usr/sbin/iptables")
+                    .args(["-L", "-n", "-v"])
+                    .output()
+                    .await
+                {
+                    Ok(o2) if o2.status.success() => (
+                        "iptables".to_string(),
+                        String::from_utf8_lossy(&o2.stdout).into_owned(),
+                        String::new(),
+                    ),
+                    Ok(o2) => (
+                        "unknown".to_string(),
+                        String::new(),
+                        format!(
+                            "nft: {} / iptables: {}",
+                            nft_err.trim(),
+                            String::from_utf8_lossy(&o2.stderr).trim()
+                        ),
+                    ),
+                    Err(e) => (
+                        "unknown".to_string(),
+                        String::new(),
+                        format!("nft: {} / iptables spawn: {e}", nft_err.trim()),
+                    ),
+                }
+            }
+            Err(_e) => match tokio::process::Command::new("/usr/sbin/iptables")
+                .args(["-L", "-n", "-v"])
+                .output()
+                .await
+            {
+                Ok(o) if o.status.success() => (
+                    "iptables".to_string(),
+                    String::from_utf8_lossy(&o.stdout).into_owned(),
+                    String::new(),
+                ),
+                Ok(o) => (
+                    "unknown".to_string(),
+                    String::new(),
+                    String::from_utf8_lossy(&o.stderr).into_owned(),
+                ),
+                Err(e) => ("unknown".to_string(), String::new(), e.to_string()),
+            },
+        };
+
+        // Best-effort port extraction. Matches:
+        //   nft:       `tcp dport 443 accept` / `tcp dport { 80, 443 } accept`
+        //   iptables:  `... tcp dpt:443 ... ACCEPT`
+        // Anything more exotic (port ranges, named sets) lands in
+        // the raw blob only — no false-positives in the parsed list.
+        use std::collections::BTreeSet;
+        let mut tcp = BTreeSet::new();
+        let mut udp = BTreeSet::new();
+        for line in raw.lines() {
+            let l = line.trim();
+            if l.is_empty() || l.starts_with('#') {
+                continue;
+            }
+            // nft pattern.
+            for proto in ["tcp", "udp"] {
+                if let Some(idx) = l.find(&format!("{proto} dport ")) {
+                    let after = &l[idx + proto.len() + " dport ".len()..];
+                    // Single port: "443 accept" / "443"
+                    // Set: "{ 80, 443 } accept"
+                    let trimmed = after.trim_start();
+                    if let Some(rest) = trimmed.strip_prefix('{') {
+                        let close = rest.find('}').unwrap_or(rest.len());
+                        for tok in rest[..close].split(',') {
+                            if let Ok(p) = tok.trim().parse::<u16>() {
+                                if proto == "tcp" {
+                                    tcp.insert(p);
+                                } else {
+                                    udp.insert(p);
+                                }
+                            }
+                        }
+                    } else {
+                        let tok = trimmed
+                            .split(|c: char| c.is_whitespace() || c == ',')
+                            .next()
+                            .unwrap_or("");
+                        if let Ok(p) = tok.parse::<u16>() {
+                            if proto == "tcp" {
+                                tcp.insert(p);
+                            } else {
+                                udp.insert(p);
+                            }
+                        }
+                    }
+                }
+                // iptables pattern: "... tcp dpt:NNN ... ACCEPT"
+                if l.contains("ACCEPT") {
+                    if let Some(idx) = l.find(&format!("{proto} dpt:")) {
+                        let after = &l[idx + proto.len() + " dpt:".len()..];
+                        let tok = after.split_whitespace().next().unwrap_or("");
+                        if let Ok(p) = tok.parse::<u16>() {
+                            if proto == "tcp" {
+                                tcp.insert(p);
+                            } else {
+                                udp.insert(p);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(hyperion_types::FirewallView {
+            backend,
+            open_tcp: tcp.into_iter().collect(),
+            open_udp: udp.into_iter().collect(),
+            raw,
+            error,
+        })
+    }
+
     pub async fn services_health(&self) -> Result<hyperion_types::ServicesHealth, RpcError> {
         // Workers don't run hyperion-web — only the master does. On a
         // worker node we'd otherwise flag hyperion-web as a "critical

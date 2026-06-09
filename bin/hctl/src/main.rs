@@ -916,6 +916,24 @@ fn print_pretty(resp: &Response) {
         Response::BackupDelete => {
             println!("backup deleted");
         }
+        Response::FirewallList(v) => {
+            println!("firewall backend: {}", v.backend);
+            if !v.open_tcp.is_empty() {
+                let s: Vec<String> = v.open_tcp.iter().map(|p| p.to_string()).collect();
+                println!("open tcp: {}", s.join(", "));
+            }
+            if !v.open_udp.is_empty() {
+                let s: Vec<String> = v.open_udp.iter().map(|p| p.to_string()).collect();
+                println!("open udp: {}", s.join(", "));
+            }
+            if !v.error.is_empty() {
+                eprintln!("error: {}", v.error);
+            }
+            if !v.raw.is_empty() {
+                println!("--- raw ---");
+                println!("{}", v.raw);
+            }
+        }
         Response::AgentConfigView(c) => {
             println!("agent: {} v{} (nginx user: {})",
                 c.hostname, c.agent_version,

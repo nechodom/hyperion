@@ -171,6 +171,11 @@ pub enum Request {
     /// (nginx, mariadb, postgresql, php-fpm versions, vsftpd, etc.)
     /// for the /health page + dashboard widget.
     ServicesHealth,
+    /// Dump the node's firewall ruleset. Tries `nft list ruleset`
+    /// first (modern Debian); falls back to `iptables -L -n -v`
+    /// when nftables isn't installed or returns empty. Read-only —
+    /// the operator inspects, doesn't mutate, via this RPC.
+    FirewallList,
     /// `systemctl restart <name>` on a whitelisted unit. Restarts
     /// hyperion-agent itself are refused (would terminate this RPC
     /// session); operator must SSH for self-restart.
@@ -895,6 +900,7 @@ pub enum Response {
     NodeMetricsHistory(hyperion_types::NodeMetricsHistory),
     SetHostingAcmeEmail,
     ServicesHealth(hyperion_types::ServicesHealth),
+    FirewallList(hyperion_types::FirewallView),
     BackupDelete,
     AgentConfigView(hyperion_types::AgentConfigView),
     /// SMTP response code from the relay (e.g. `Code(250)`).
