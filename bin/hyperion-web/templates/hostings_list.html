@@ -243,6 +243,15 @@
                 NODE OFFLINE
               </span>
               {% endif %}
+              {% if r.maintenance_mode %}
+              {# Operator-toggled maintenance: nginx returns 503 for every
+                 request (ACME challenges still served). Flip off via
+                 the Vhost options card on the hosting detail page. #}
+              <span class="tag" title="Maintenance mode is ON — nginx returns 503 for every request. ACME challenges and the hosting's underlying services (FPM, DB) keep running. Toggle off via the hosting detail page → Vhost options."
+                    style="background:var(--accent);color:white;border-color:transparent;font-size:0.62rem;font-weight:700;letter-spacing:0.05em;margin-left:0.2rem;padding:0.1rem 0.35rem">
+                MAINTENANCE
+              </span>
+              {% endif %}
             {% else %}
               <span class="text-soft">—</span>
             {% endif %}

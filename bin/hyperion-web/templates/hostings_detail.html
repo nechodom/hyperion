@@ -180,6 +180,16 @@
           on <strong>{{ n }}</strong>
         </span>
       {% endif %}
+      {% if detail.vhost_options.maintenance_mode %}
+        {# Loud maintenance pill in the page header — operators landing
+           on the detail page during a planned outage should see "yes
+           this is on purpose" immediately, not have to scroll to find
+           the Vhost options card. #}
+        <span class="pill" title="Maintenance mode is ON — nginx returns 503 for every request. Flip off in Vhost options below."
+              style="background:var(--accent);color:white;border-color:transparent;font-weight:700;letter-spacing:0.04em">
+          MAINTENANCE
+        </span>
+      {% endif %}
     </h1>
     <div class="subtitle">
       <code>{{ detail.id }}</code>

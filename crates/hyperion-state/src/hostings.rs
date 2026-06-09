@@ -233,15 +233,20 @@ pub async fn get_by_domain(
 }
 
 pub async fn list(pool: &SqlitePool) -> Result<Vec<HostingSummary>, StateError> {
-    let rows: Vec<(String, String, String, Option<String>, i64, Option<String>)> = sqlx::query_as(
-        "SELECT id, domain, state, php_version, created_at, node_id FROM hostings \
-         WHERE state != 'trashed' \
-         ORDER BY domain",
-    )
-    .fetch_all(pool)
-    .await?;
+    // `maintenance_mode` joins in for the MAINTENANCE pill on the
+    // hostings list. It's a separate column from migration 020 but
+    // lives on the same row so the query stays a single SELECT.
+    let rows: Vec<(String, String, String, Option<String>, i64, Option<String>, i64)> =
+        sqlx::query_as(
+            "SELECT id, domain, state, php_version, created_at, node_id, maintenance_mode \
+             FROM hostings \
+             WHERE state != 'trashed' \
+             ORDER BY domain",
+        )
+        .fetch_all(pool)
+        .await?;
     let mut out = Vec::with_capacity(rows.len());
-    for (id, domain, state, php_version, created_at, node_id) in rows {
+    for (id, domain, state, php_version, created_at, node_id, maintenance_mode) in rows {
         out.push(HostingSummary {
             id: HostingId(id),
             domain,
@@ -252,6 +257,7 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<HostingSummary>, StateError> 
             },
             created_at,
             node_id,
+            maintenance_mode: maintenance_mode != 0,
         });
     }
     Ok(out)

@@ -260,6 +260,70 @@ if [[ -f "$SITE_MAIL_SRC" ]]; then
   install -d -m 0750 /var/lib/hyperion/site-mail
 fi
 
+#-------- 3c. maintenance landing page ------------------------------------
+# When a hosting toggles `maintenance_mode`, its nginx vhost falls
+# through `try_files /maintenance.html =503` and tries to serve
+# /var/lib/hyperion/maintenance/maintenance.html. Without that file
+# visitors get the bare nginx 503 — works but ugly. Plant a friendly
+# Hyperion-branded page once; operators can replace it freely (we
+# only overwrite when the file is missing OR was a previous version
+# we ourselves wrote, identified by the "x-hyperion-maintenance"
+# marker comment).
+install -d -m 0755 /var/lib/hyperion/maintenance
+MAINT_HTML="/var/lib/hyperion/maintenance/maintenance.html"
+if [[ ! -f "$MAINT_HTML" ]] || grep -q "x-hyperion-maintenance" "$MAINT_HTML" 2>/dev/null; then
+  cat > "$MAINT_HTML" <<'HTML'
+<!-- x-hyperion-maintenance: v1 - operator may replace this file freely -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>We'll be right back</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      margin: 0; min-height: 100vh;
+      display: flex; align-items: center; justify-content: center;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+      color: #e2e8f0; padding: 1.5rem;
+    }
+    .card {
+      max-width: 480px; padding: 2.5rem 2rem;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 12px;
+      text-align: center; backdrop-filter: blur(8px);
+    }
+    .icon {
+      width: 56px; height: 56px; margin: 0 auto 1.4rem;
+      border-radius: 14px; background: rgba(99,102,241,0.18);
+      display: flex; align-items: center; justify-content: center;
+    }
+    h1 { margin: 0 0 0.6rem; font-size: 1.5rem; font-weight: 700; }
+    p { margin: 0 0 1rem; font-size: 0.95rem; line-height: 1.55; opacity: 0.85; }
+    .foot { margin-top: 1.4rem; font-size: 0.78rem; opacity: 0.5; }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <div class="icon">
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#a5b4fc" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+      </svg>
+    </div>
+    <h1>We'll be right back</h1>
+    <p>This site is under brief maintenance. Please check back in a few minutes.</p>
+    <div class="foot">HTTP 503 · Service Temporarily Unavailable</div>
+  </main>
+</body>
+</html>
+HTML
+  chmod 0644 "$MAINT_HTML"
+  log "Installed default maintenance page at $MAINT_HTML"
+fi
+
 #-------- 4. Refresh systemd units ----------------------------------------
 refresh_unit() {
   local svc="$1"

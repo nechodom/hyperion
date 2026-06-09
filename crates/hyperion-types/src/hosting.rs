@@ -67,6 +67,14 @@ pub struct HostingSummary {
     /// migration 016 and haven't been backfilled yet.
     #[serde(default)]
     pub node_id: Option<String>,
+    /// True iff the operator has toggled this hosting into
+    /// maintenance mode via /hostings/:id Settings. The site
+    /// returns 503 for every visitor request (ACME challenges
+    /// still served). Surfaced as a MAINTENANCE pill on the list
+    /// so the operator can see at a glance "which of my sites
+    /// are deliberately gated right now".
+    #[serde(default)]
+    pub maintenance_mode: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -305,6 +313,7 @@ mod tests {
             php_version: None,
             created_at: 0,
             node_id: Some("n".into()),
+            maintenance_mode: false,
         };
         let j = serde_json::to_string(&s).expect("serialize");
         let back: HostingSummary = serde_json::from_str(&j).expect("deserialize");
