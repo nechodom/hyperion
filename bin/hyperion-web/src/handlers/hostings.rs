@@ -2874,12 +2874,23 @@ fn extract_test_suffix(template: &str) -> String {
     if t.is_empty() {
         return String::new();
     }
+    // A real test-domain TEMPLATE always contains at least one
+    // `{...}` placeholder — that's the whole point (substitution
+    // slots for `name` / `node`). If the operator set the field to
+    // a bare suffix like `.cz` with no braces, we treat that as
+    // "no usable template" and skip the suffix check entirely —
+    // refusing to extract `.cz` as a fake "this is reserved"
+    // suffix that would falsely block every .cz domain in the
+    // cluster from being created on production nodes.
+    if !t.contains('{') || !t.contains('}') {
+        return String::new();
+    }
     // Find the LAST closing brace from a `{xxx}` placeholder; whatever
     // comes after it is the literal suffix. For `{name}.{node}.foo.bar`
     // that's `.foo.bar`; for `{name}.foo.bar` it's `.foo.bar` too.
     let after_last_placeholder = match t.rfind('}') {
         Some(idx) => &t[idx + 1..],
-        None => t, // no placeholders at all
+        None => return String::new(),
     };
     // Trim a leading `.` so we can always add exactly one back.
     let inner = after_last_placeholder.trim_start_matches('.');
@@ -2913,11 +2924,16 @@ mod test_suffix_tests {
     }
 
     #[test]
-    fn no_placeholder() {
-        assert_eq!(
-            extract_test_suffix("staging.example.com"),
-            ".staging.example.com"
-        );
+    fn no_placeholder_is_treated_as_no_template() {
+        // A "template" with no placeholders can't substitute anything,
+        // so it's not a real template — return empty so the suffix
+        // check is skipped. Earlier behaviour returned the whole
+        // string as a literal suffix; that turned a stray
+        // `test_domain_template = ".cz"` setting into a hard block on
+        // every .cz domain in the cluster.
+        assert_eq!(extract_test_suffix("staging.example.com"), "");
+        assert_eq!(extract_test_suffix(".cz"), "");
+        assert_eq!(extract_test_suffix("cz"), "");
     }
 
     #[test]
