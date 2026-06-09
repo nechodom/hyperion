@@ -7,6 +7,7 @@ use hyperion_auth::SessionSigner;
 use hyperion_core::master_rpc::MasterRpcSigner;
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 
 pub struct AppState {
     pub cfg: Config,
@@ -22,6 +23,13 @@ pub struct AppState {
     /// (created by hyperion-agent on first boot); `None` otherwise
     /// — the dispatcher refuses remote calls with a clean error.
     pub master_rpc_signer: Option<Arc<MasterRpcSigner>>,
+    /// Cached `cluster.panel_hostname` from agent.toml, refreshed
+    /// every 30 s by a background tokio task spawned at startup.
+    /// Drives the host-enforcement middleware that redirects raw-IP
+    /// requests to the configured hostname once the operator's
+    /// finished the panel-domain setup. Empty string = no panel
+    /// hostname set yet (middleware is a no-op).
+    pub panel_hostname: Arc<RwLock<String>>,
 }
 
 impl AppState {

@@ -13,6 +13,7 @@ pub mod ratelimit;
 pub mod state;
 
 use crate::state::SharedState;
+use axum::extract::State;
 use axum::middleware::from_fn_with_state;
 use axum::routing::{get, post};
 use axum::Router;
@@ -469,7 +470,103 @@ pub fn build_router(state: SharedState) -> Router {
             get(handlers::migration::get_bundle_file),
         )
         .layer(axum::middleware::from_fn(security_headers))
+        .layer(from_fn_with_state(state.clone(), enforce_panel_hostname))
         .with_state(state)
+}
+
+/// Once the operator's set up `cluster.panel_hostname` (via Panel
+/// domain provisioning in /settings#cluster), refuse requests
+/// whose Host header is a raw IP address — they get a 308 redirect
+/// to `https://<panel_hostname>:<port><path>` instead. Three reasons:
+///
+///   1. The Let's Encrypt cert is bound to the hostname, NOT the IP,
+///      so IP-based connections always carry the bootstrap self-
+///      signed cert + the browser warning.
+///   2. Bookmarks accumulating on the raw IP rot the moment the
+///      operator changes hosting providers (IP changes, hostname
+///      stays via DNS).
+///   3. Some browsers strip cookies / loosen security headers on
+///      raw-IP origins; sticking to the hostname keeps every
+///      defence-in-depth header working.
+///
+/// Always-allowed hosts (never redirected) — these are the paths
+/// used by local probes, internal health checks, and the
+/// debugging-from-SSH workflow:
+///   - empty Host (legacy HTTP/1.0 / curl without -H Host)
+///   - localhost / 127.0.0.1 / [::1] (with or without port)
+///
+/// When `panel_hostname` cache is empty (operator hasn't set one
+/// up yet) the middleware passes through unconditionally — no
+/// chicken-and-egg lockout.
+async fn enforce_panel_hostname(
+    State(state): State<crate::state::SharedState>,
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    // Snapshot the cached hostname WITHOUT holding the read lock
+    // across the await boundary inside next.run() — tokio RwLock's
+    // read guard isn't Send across awaits in axum's middleware
+    // signature anyway.
+    let panel = state.panel_hostname.read().await.clone();
+    if panel.trim().is_empty() {
+        return next.run(req).await;
+    }
+    // Read the Host header. Some HTTP clients send :authority
+    // instead (HTTP/2); axum normalises both into the host header
+    // when the request reaches us, so a single lookup is enough.
+    let host_header = req
+        .headers()
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    // Strip the port for comparison — "1.2.3.4:8443" → "1.2.3.4".
+    let host_only = host_header
+        .rsplit_once(':')
+        // Don't strip if the host LOOKS like IPv6 ("[::1]:8443").
+        // Bracket survives in `host_only` for the parse step below.
+        .filter(|(prefix, _)| !prefix.contains(']') && !prefix.contains('['))
+        .map(|(h, _)| h.to_string())
+        .unwrap_or_else(|| host_header.clone());
+    let host_lc = host_only.to_ascii_lowercase();
+    // Always-allowed: localhost variants + empty.
+    if host_lc.is_empty()
+        || host_lc == "localhost"
+        || host_lc == "127.0.0.1"
+        || host_lc == "::1"
+        || host_lc == "[::1]"
+    {
+        return next.run(req).await;
+    }
+    // Matches the configured hostname (case-insensitive)?
+    if host_lc == panel.to_ascii_lowercase() {
+        return next.run(req).await;
+    }
+    // Anything else — RAW IP, alternate hostname, etc. — redirect.
+    // Parse the host as an IP to confirm. Non-IP hostnames that
+    // don't match panel are ALSO redirected (operator may have
+    // multiple A records pointing here; canonicalise on the panel
+    // hostname). The port comes from the original request's Host
+    // header so we don't hardcode 8443.
+    let port_suffix = host_header
+        .rsplit_once(':')
+        .filter(|(prefix, _)| !prefix.contains(']') && !prefix.contains('['))
+        .map(|(_, port)| format!(":{port}"))
+        .unwrap_or_default();
+    let path_and_query = req
+        .uri()
+        .path_and_query()
+        .map(|pq| pq.as_str())
+        .unwrap_or("/");
+    let target = format!("https://{panel}{port_suffix}{path_and_query}");
+    let mut redirect = axum::response::Response::builder()
+        .status(axum::http::StatusCode::PERMANENT_REDIRECT)
+        .body(axum::body::Body::empty())
+        .expect("static redirect response always builds");
+    if let Ok(loc) = axum::http::HeaderValue::from_str(&target) {
+        redirect.headers_mut().insert(axum::http::header::LOCATION, loc);
+    }
+    redirect
 }
 
 /// Defence-in-depth headers applied to every response:

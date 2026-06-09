@@ -690,6 +690,14 @@
       <strong><a href="https://{{ config.cluster.panel_hostname }}:8443" target="_blank" rel="noopener">https://{{ config.cluster.panel_hostname }}:8443</a></strong>
       (also on port 443 if you've fronted the panel via nginx). Save the form below with a new hostname to migrate; the existing vhost stays in place until the next nginx reload after a different hostname lands.
     </p>
+    <p class="text-soft small" style="margin:0 0 0.6rem;line-height:1.55;padding:0.55rem 0.75rem;background:color-mix(in oklab,var(--success) 8%,transparent);border-left:3px solid var(--success);border-radius:4px">
+      <strong>🔒 Raw-IP access is auto-disabled.</strong> Requests
+      hitting the panel via <code>https://&lt;ip&gt;:8443</code>
+      get a 308 redirect to <code>https://{{ config.cluster.panel_hostname }}:8443</code>.
+      The hostname is mandatory once you've set it. Loopback
+      (<code>localhost</code> / <code>127.0.0.1</code>) stays open
+      for local health probes + SSH-tunnel debug.
+    </p>
     {% else %}
     <p class="text-soft small" style="margin:0 0 0.6rem;line-height:1.55">
       Right now the panel is only reachable via the raw IP + port (e.g. <code>https://1.2.3.4:8443</code>) with a self-signed cert. Bind it to a real hostname below: the agent will write the nginx vhost, generate a temporary self-signed cert so nginx starts, then trigger a Let's Encrypt issuance in the background.

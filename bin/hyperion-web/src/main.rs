@@ -85,7 +85,33 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
         admin_user: Arc::new(admin),
         ratelimit: Arc::new(hyperion_web::ratelimit::RateLimiter::new()),
         master_rpc_signer,
+        panel_hostname: Arc::new(tokio::sync::RwLock::new(String::new())),
     });
+    // Spawn a background refresher that polls the agent for the
+    // current `cluster.panel_hostname` every 30 s. The host-enforce
+    // middleware (in lib.rs) reads from this cache to redirect raw-IP
+    // requests once the operator's set up the panel domain.
+    {
+        let state_for_refresh = state.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
+            tick.set_missed_tick_behavior(
+                tokio::time::MissedTickBehavior::Delay,
+            );
+            loop {
+                tick.tick().await;
+                let resp = hyperion_rpc_client::call(
+                    &state_for_refresh.agent_socket,
+                    hyperion_rpc::codec::Request::AgentConfigView,
+                )
+                .await;
+                if let Ok(hyperion_rpc::codec::Response::AgentConfigView(cfg)) = resp {
+                    let mut g = state_for_refresh.panel_hostname.write().await;
+                    *g = cfg.cluster.panel_hostname;
+                }
+            }
+        });
+    }
     let app = hyperion_web::build_router(state);
     let bind_addr: std::net::SocketAddr = listen
         .parse()
