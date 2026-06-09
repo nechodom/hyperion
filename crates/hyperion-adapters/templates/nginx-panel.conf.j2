@@ -26,9 +26,12 @@ server {
 }
 
 server {
-    listen 443 ssl;
-    listen [::]:443 ssl;
-    http2 on;
+    # `http2` as a parameter on `listen` works on every nginx version
+    # we support (1.9.5+). The standalone `http2 on;` directive was
+    # only added in 1.25.1 (Sep 2023) and breaks on Debian 12's stock
+    # nginx 1.22, which is the cause of "unknown directive http2".
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
     server_name {{ domain }};
 
     ssl_certificate     {{ cert_path }};

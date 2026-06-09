@@ -1,9 +1,10 @@
 server {
+    # `http2` as listen parameter — Debian 12 nginx 1.22 only
+    # understands this form. `http2 on;` is 1.25.1+.
     listen 80;
     listen [::]:80;
-    listen 443 ssl;
-    listen [::]:443 ssl;
-    http2 on;
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
     server_name {{ domain }};
 
     ssl_certificate     {{ cert_path }};
