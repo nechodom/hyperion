@@ -6,10 +6,13 @@
   <div>
     <h1>Firewall</h1>
     <div class="subtitle">
-      Read-only view of every node's <code>nft list ruleset</code>
-      (with <code>iptables -L</code> fallback). Use SSH + <code>nft</code> to
-      edit — we don't ship an in-UI rule editor on purpose, the
-      risk of locking yourself out remotely is too high.
+      Per-node open-port inventory with the "why" attached — each
+      row labels its port against a known service (SSH, nginx,
+      Hyperion panel, etc.) so you don't have to remember <code>9443</code>
+      from <code>8443</code>. Templates below cover the common
+      "open these together" sets; the custom-port snippet generator
+      hands you a copy-pasteable <code>nft</code> command for
+      anything else.
     </div>
   </div>
 </div>
@@ -20,6 +23,11 @@
     <p class="text-soft">No master or enrolled workers — nothing to query.</p>
   </div>
 {% else %}
+  {# Per-node cards — service-health-style. Each open port is its
+     own row with a category-coloured pill (web/mail/db/etc.), the
+     port + proto, and the "why" label. Raw ruleset stays available
+     in the collapsed details at the bottom of each card for the
+     "I want to verify by eye" workflow. #}
   {% for n in nodes %}
     <div class="card" style="margin-bottom:1rem">
       <h2 style="display:flex;align-items:center;gap:0.7rem;flex-wrap:wrap">
@@ -29,7 +37,8 @@
         {% if n.unreachable %}
           <span class="pill err">unreachable</span>
         {% else %}
-          <span class="tag">{{ n.view.backend }}</span>
+          <span class="tag" title="Backend used to read the ruleset on this node">{{ n.view.backend }}</span>
+          <span class="text-soft small">· {{ n.view.ports.len() }} open port{% if n.view.ports.len() != 1 %}s{% endif %}</span>
         {% endif %}
       </h2>
 
@@ -40,67 +49,220 @@
           check <a href="/install">/install</a> for the node's last
           heartbeat.
         </p>
+      {% else if n.view.ports.is_empty() && n.view.raw.is_empty() %}
+        <div class="flash warn" style="margin:0.4rem 0 0.6rem;padding:0.55rem 0.85rem">
+          <div class="flash-body">
+            <strong>No firewall configured</strong> — the kernel
+            default-accepts on every port. On a freshly-imaged Debian
+            box this is the OOTB state. Lock down with
+            <code>nft</code> using one of the templates below.
+            {% if !n.view.error.is_empty() %}<br><br><strong>Probe error:</strong> <code>{{ n.view.error }}</code>{% endif %}
+          </div>
+        </div>
+      {% else if n.view.ports.is_empty() %}
+        <p class="text-soft small" style="margin:0.4rem 0">
+          The parser didn't recognise any explicit accept rules. This
+          can happen on exotic configs (port ranges, named sets,
+          chains we don't introspect). The raw ruleset below is
+          authoritative — scan it for "accept" / "ACCEPT" lines.
+        </p>
       {% else %}
-        {# Parsed open-ports summary — most operators look here first
-           to answer "is port 25 actually open?". Pills mirror the
-           backend; "—" when the parser found nothing (unusual
-           configs still show in raw below). #}
-        <div style="display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1rem;margin-bottom:0.8rem">
-          <div>
-            <div class="text-soft small" style="margin-bottom:0.3rem">Open TCP ports</div>
-            {% if n.view.open_tcp.is_empty() %}
-              <span class="text-soft">—</span>
-            {% else %}
-              <div style="display:flex;flex-wrap:wrap;gap:0.3rem">
-                {% for p in n.view.open_tcp %}
-                  <span class="tag" title="TCP {{ p }}">{{ p }}</span>
-                {% endfor %}
-              </div>
-            {% endif %}
-          </div>
-          <div>
-            <div class="text-soft small" style="margin-bottom:0.3rem">Open UDP ports</div>
-            {% if n.view.open_udp.is_empty() %}
-              <span class="text-soft">—</span>
-            {% else %}
-              <div style="display:flex;flex-wrap:wrap;gap:0.3rem">
-                {% for p in n.view.open_udp %}
-                  <span class="tag" title="UDP {{ p }}">{{ p }}</span>
-                {% endfor %}
-              </div>
-            {% endif %}
-          </div>
+        {# Service-health-style table: one row per port. #}
+        <div class="table-wrap" style="margin-top:0.6rem">
+          <table style="width:100%;border-collapse:collapse;font-size:0.88rem">
+            <thead>
+              <tr style="border-bottom:1px solid var(--border)">
+                <th style="text-align:left;padding:0.4rem 0.6rem;width:6rem">Port</th>
+                <th style="text-align:left;padding:0.4rem 0.6rem;width:4.5rem">Proto</th>
+                <th style="text-align:left;padding:0.4rem 0.6rem;width:8rem">Category</th>
+                <th style="text-align:left;padding:0.4rem 0.6rem">Reason / service</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for p in n.view.ports %}
+              <tr style="border-bottom:1px solid var(--border-subtle)">
+                <td style="padding:0.5rem 0.6rem;font-family:ui-monospace,Menlo,Consolas,monospace;font-weight:600">{{ p.port }}</td>
+                <td style="padding:0.5rem 0.6rem;color:var(--text-soft)">{{ p.proto }}</td>
+                <td style="padding:0.5rem 0.6rem">
+                  {% if p.category == "web" %}
+                    <span class="pill" style="background:#0ea5e9;color:white;font-size:0.7rem">web</span>
+                  {% else if p.category == "mail" %}
+                    <span class="pill" style="background:#8b5cf6;color:white;font-size:0.7rem">mail</span>
+                  {% else if p.category == "db" %}
+                    <span class="pill" style="background:#f59e0b;color:white;font-size:0.7rem">db</span>
+                  {% else if p.category == "hyperion" %}
+                    <span class="pill" style="background:var(--accent);color:white;font-size:0.7rem">hyperion</span>
+                  {% else if p.category == "infra" %}
+                    <span class="pill" style="background:#64748b;color:white;font-size:0.7rem">infra</span>
+                  {% else %}
+                    <span class="pill" style="background:var(--surface-2);color:var(--text-soft);font-size:0.7rem">unknown</span>
+                  {% endif %}
+                </td>
+                <td style="padding:0.5rem 0.6rem">
+                  {% if p.label == "Unknown" %}
+                    <span class="text-soft" style="font-style:italic">no match in well-known port table</span>
+                  {% else %}
+                    {{ p.label }}
+                  {% endif %}
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
         </div>
 
         {% if !n.view.error.is_empty() %}
-          <div class="flash warn" style="margin-bottom:0.6rem;padding:0.45rem 0.7rem">
+          <div class="flash warn" style="margin-top:0.6rem;padding:0.45rem 0.7rem">
             <div class="flash-body">
               <strong>Parser note:</strong> <code>{{ n.view.error }}</code>
             </div>
           </div>
         {% endif %}
 
-        <details>
+        <details style="margin-top:0.6rem">
           <summary style="cursor:pointer;color:var(--text-dim);font-size:0.88rem;padding:0.3rem 0">
             Show raw ruleset
             {% if !n.view.raw.is_empty() %}
               <span class="text-soft small">({{ n.view.raw.lines().count() }} lines)</span>
             {% endif %}
           </summary>
-          {% if n.view.raw.is_empty() %}
-            <p class="text-soft small" style="margin:0.5rem 0 0">
-              Empty — no rules returned by <code>{{ n.view.backend }}</code>.
-              On a fresh Debian box that means "no firewall configured;
-              the kernel default-accepts everything". Lock down with
-              <code>nft</code> when ready.
-            </p>
-          {% else %}
-            <pre style="background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.75rem;overflow:auto;font-size:0.78rem;line-height:1.4;max-height:32rem;margin-top:0.5rem">{{ n.view.raw }}</pre>
-          {% endif %}
+          <pre style="background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.75rem;overflow:auto;font-size:0.78rem;line-height:1.4;max-height:32rem;margin-top:0.5rem">{{ n.view.raw }}</pre>
         </details>
       {% endif %}
     </div>
   {% endfor %}
 {% endif %}
+
+{# ===== Port templates =====
+   Hardcoded "open these together" sets. Each template shows the
+   ports + a one-line description. Clicking "Show snippet" reveals
+   the nft commands to paste via SSH. Read-only by design — we
+   don't apply rules from the UI (lock-yourself-out risk). #}
+<div class="card" style="margin-top:1.5rem">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+    Port templates
+  </h2>
+  <p class="text-soft small" style="margin:0 0 1rem">
+    Common port sets you typically open together. Click any
+    template to reveal the <code>nft</code> snippet — copy, SSH to
+    the node, paste, then <code>nft -s list ruleset &gt;
+    /etc/nftables.conf</code> to persist.
+  </p>
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(20rem,1fr));gap:0.8rem">
+    {% for t in templates %}
+    <details style="background:var(--surface-1);border:1px solid var(--border);border-radius:var(--radius-md);padding:0.75rem 0.9rem">
+      <summary style="cursor:pointer;font-weight:600;display:flex;align-items:center;gap:0.5rem;list-style:none">
+        <span>{{ t.name }}</span>
+        <span class="text-soft small" style="font-weight:400">·</span>
+        <span class="text-soft small" style="font-weight:400">{{ t.ports_summary }}</span>
+      </summary>
+      <p class="text-soft small" style="margin:0.5rem 0">{{ t.description }}</p>
+      <pre style="background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.6rem;overflow:auto;font-size:0.78rem;margin:0">{{ t.snippet }}</pre>
+    </details>
+    {% endfor %}
+  </div>
+</div>
+
+{# ===== Custom port snippet generator =====
+   No server round-trip, no firewall mutation — pure JS that
+   composes the nft command from the inputs. Operator copy-pastes
+   into SSH. #}
+<div class="card" style="margin-top:1rem">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+    Open a custom port
+  </h2>
+  <p class="text-soft small" style="margin:0 0 1rem">
+    Generates the exact <code>nft add rule</code> command for an
+    arbitrary port. We deliberately don't apply it from the panel —
+    a typo could lock you out of SSH on a remote box. Copy, verify,
+    SSH in, paste.
+  </p>
+  <div style="display:grid;grid-template-columns:1fr 1fr 2fr auto;gap:0.6rem;align-items:end;max-width:48rem">
+    <div class="field" style="margin:0">
+      <label for="fw-port">Port</label>
+      <input id="fw-port" type="number" min="1" max="65535" placeholder="8080" style="margin:0">
+    </div>
+    <div class="field" style="margin:0">
+      <label for="fw-proto">Protocol</label>
+      <select id="fw-proto" style="margin:0">
+        <option value="tcp">tcp</option>
+        <option value="udp">udp</option>
+      </select>
+    </div>
+    <div class="field" style="margin:0">
+      <label for="fw-reason">Reason (comment)</label>
+      <input id="fw-reason" type="text" placeholder="myapp backend" style="margin:0">
+    </div>
+    <button type="button" class="btn primary" id="fw-gen">Generate</button>
+  </div>
+  <div id="fw-snippet-wrap" hidden style="margin-top:1rem">
+    <p class="text-soft small" style="margin:0 0 0.4rem">
+      <strong>Snippet</strong> — SSH to the node and paste:
+    </p>
+    <pre id="fw-snippet" style="background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.75rem;overflow:auto;font-size:0.82rem;margin:0"></pre>
+    <button type="button" class="btn small" id="fw-copy" style="margin-top:0.4rem">Copy to clipboard</button>
+    <span id="fw-copy-status" class="text-soft small" style="margin-left:0.5rem"></span>
+  </div>
+</div>
+
+<script>
+(function () {
+  'use strict';
+  const portEl = document.getElementById('fw-port');
+  const protoEl = document.getElementById('fw-proto');
+  const reasonEl = document.getElementById('fw-reason');
+  const genBtn = document.getElementById('fw-gen');
+  const wrap = document.getElementById('fw-snippet-wrap');
+  const pre = document.getElementById('fw-snippet');
+  const copyBtn = document.getElementById('fw-copy');
+  const copyStatus = document.getElementById('fw-copy-status');
+  if (!portEl || !genBtn) return;
+
+  function buildSnippet() {
+    const port = parseInt(portEl.value, 10);
+    const proto = protoEl.value;
+    const reason = (reasonEl.value || '').trim().replace(/[\r\n]/g, ' ');
+    if (!port || port < 1 || port > 65535) {
+      wrap.hidden = true;
+      portEl.focus();
+      return;
+    }
+    // Detect-or-create a hyperion-managed chain. The first line is
+    // idempotent (-c creates only if absent), the second adds the
+    // single accept rule. The comment carries the operator's
+    // reason so an `nft list ruleset` later answers "why is this
+    // port open?" without grep'ing the audit log.
+    const lines = [
+      '# Apply via SSH on the target node:',
+      'sudo nft -c \'add table inet hyperion { }\'',
+      'sudo nft -c \'add chain inet hyperion input { type filter hook input priority 0 \\; policy accept \\; }\'',
+      `sudo nft add rule inet hyperion input ${proto} dport ${port} accept ${reason ? `comment "${reason.replace(/"/g, '\\"')}"` : ''}`.trim(),
+      '# Persist so the rule survives reboot:',
+      'sudo nft list ruleset > /etc/nftables.conf',
+      'sudo systemctl reload nftables 2>/dev/null || sudo systemctl restart nftables',
+    ];
+    pre.textContent = lines.join('\n');
+    wrap.hidden = false;
+  }
+
+  genBtn.addEventListener('click', buildSnippet);
+  [portEl, protoEl, reasonEl].forEach(el => {
+    el.addEventListener('keydown', ev => {
+      if (ev.key === 'Enter') { ev.preventDefault(); buildSnippet(); }
+    });
+  });
+  copyBtn.addEventListener('click', () => {
+    if (!pre.textContent) return;
+    navigator.clipboard.writeText(pre.textContent).then(() => {
+      copyStatus.textContent = '✓ copied';
+      setTimeout(() => { copyStatus.textContent = ''; }, 1800);
+    }).catch(() => {
+      copyStatus.textContent = 'copy failed — select + cmd-C';
+    });
+  });
+})();
+</script>
 
 {% endblock %}

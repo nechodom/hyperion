@@ -34,6 +34,11 @@ struct FirewallTpl<'a> {
     /// One entry per node — master first, then workers in node_id
     /// order so the page is deterministic.
     nodes: Vec<NodeFirewall>,
+    /// Hardcoded "open these together" port sets. Rendered as
+    /// collapsible cards under the per-node section so an operator
+    /// who needs to "open mail on this box" copies one snippet
+    /// instead of looking up port numbers.
+    templates: Vec<PortTemplate>,
 }
 
 pub struct NodeFirewall {
@@ -43,6 +48,101 @@ pub struct NodeFirewall {
     /// True when the RPC failed entirely — render a "node
     /// unreachable" notice instead of an empty card.
     pub unreachable: bool,
+}
+
+pub struct PortTemplate {
+    pub name: &'static str,
+    pub ports_summary: &'static str,
+    pub description: &'static str,
+    pub snippet: &'static str,
+}
+
+/// Hardcoded "open these together" port sets. Listed in the order
+/// most operators reach for them: web first (every site needs it),
+/// then mail (only sites that handle email), then hyperion (only
+/// the master), then SSH lockdown patterns.
+fn port_templates() -> Vec<PortTemplate> {
+    vec![
+        PortTemplate {
+            name: "Web (HTTP + HTTPS)",
+            ports_summary: "80/tcp, 443/tcp+udp",
+            description: "What nginx needs to serve every hosting. \
+                          UDP/443 covers HTTP/3 (QUIC); skip it if you don't \
+                          run HTTP/3.",
+            snippet: "# Apply via SSH on the target node:\n\
+                      sudo nft -c 'add table inet hyperion { }'\n\
+                      sudo nft -c 'add chain inet hyperion input { type filter hook input priority 0 \\; policy accept \\; }'\n\
+                      sudo nft add rule inet hyperion input tcp dport { 80, 443 } accept comment \\\"web\\\"\n\
+                      sudo nft add rule inet hyperion input udp dport 443 accept comment \\\"http3-quic\\\"\n\
+                      sudo nft list ruleset > /etc/nftables.conf",
+        },
+        PortTemplate {
+            name: "Mail (SMTP + IMAP + POP3 + submission)",
+            ports_summary: "25, 110, 143, 465, 587, 993, 995 / tcp",
+            description: "Open postfix + dovecot. 25 is mandatory for any \
+                          mail-receiving box; 465+587 for submission; \
+                          993+995 are IMAPS/POP3S for clients. Skip 110/143 \
+                          (cleartext) on production setups.",
+            snippet: "# Apply via SSH:\n\
+                      sudo nft -c 'add table inet hyperion { }'\n\
+                      sudo nft -c 'add chain inet hyperion input { type filter hook input priority 0 \\; policy accept \\; }'\n\
+                      sudo nft add rule inet hyperion input tcp dport { 25, 465, 587, 993, 995 } accept comment \\\"mail-secure\\\"\n\
+                      sudo nft list ruleset > /etc/nftables.conf\n\
+                      # Add cleartext if you really need them:\n\
+                      # sudo nft add rule inet hyperion input tcp dport { 110, 143 } accept comment \\\"mail-cleartext\\\"",
+        },
+        PortTemplate {
+            name: "Hyperion (panel + master RPC)",
+            ports_summary: "8443, 9443 / tcp",
+            description: "Open ONLY on the master node. 8443 is the panel \
+                          (operator web UI); 9443 is the master↔worker RPC. \
+                          On workers, 9443 should be open to the master's \
+                          IP only — see the next template.",
+            snippet: "# Master node — both ports open to the world:\n\
+                      sudo nft -c 'add table inet hyperion { }'\n\
+                      sudo nft -c 'add chain inet hyperion input { type filter hook input priority 0 \\; policy accept \\; }'\n\
+                      sudo nft add rule inet hyperion input tcp dport { 8443, 9443 } accept comment \\\"hyperion\\\"\n\
+                      sudo nft list ruleset > /etc/nftables.conf",
+        },
+        PortTemplate {
+            name: "Worker RPC (master-only access)",
+            ports_summary: "9443 / tcp, source-restricted",
+            description: "On a worker node, restrict 9443 to the master's \
+                          public IP. Replace <MASTER_IP> with your master's \
+                          IP. Everyone else gets dropped — the public-facing \
+                          surface is just nginx (80/443).",
+            snippet: "# Replace <MASTER_IP> with your master node's public IP:\n\
+                      sudo nft -c 'add table inet hyperion { }'\n\
+                      sudo nft -c 'add chain inet hyperion input { type filter hook input priority 0 \\; policy accept \\; }'\n\
+                      sudo nft add rule inet hyperion input ip saddr <MASTER_IP> tcp dport 9443 accept comment \\\"hyperion-rpc-from-master\\\"\n\
+                      sudo nft list ruleset > /etc/nftables.conf",
+        },
+        PortTemplate {
+            name: "SSH (open)",
+            ports_summary: "22 / tcp",
+            description: "Standard SSH — open to the world. Pair with \
+                          fail2ban or sshd's PermitRootLogin no + key-only \
+                          auth.",
+            snippet: "sudo nft -c 'add table inet hyperion { }'\n\
+                      sudo nft -c 'add chain inet hyperion input { type filter hook input priority 0 \\; policy accept \\; }'\n\
+                      sudo nft add rule inet hyperion input tcp dport 22 accept comment \\\"ssh\\\"\n\
+                      sudo nft list ruleset > /etc/nftables.conf",
+        },
+        PortTemplate {
+            name: "FTP (vsftpd, passive)",
+            ports_summary: "21/tcp + 40000-50000/tcp",
+            description: "Open vsftpd's control port + the passive data \
+                          port range (configured in vsftpd.conf as \
+                          pasv_min_port / pasv_max_port). Keep the data \
+                          range tight to avoid leaving 30k ports open if \
+                          you can.",
+            snippet: "sudo nft -c 'add table inet hyperion { }'\n\
+                      sudo nft -c 'add chain inet hyperion input { type filter hook input priority 0 \\; policy accept \\; }'\n\
+                      sudo nft add rule inet hyperion input tcp dport 21 accept comment \\\"ftp-control\\\"\n\
+                      sudo nft add rule inet hyperion input tcp dport 40000-50000 accept comment \\\"ftp-passive\\\"\n\
+                      sudo nft list ruleset > /etc/nftables.conf",
+        },
+    ]
 }
 
 pub async fn get_firewall(
@@ -105,6 +205,7 @@ pub async fn get_firewall(
         css_version: super::css_version(),
         htmx_version: super::htmx_version(),
         nodes,
+        templates: port_templates(),
     };
     Ok(Html(tpl.render()?).into_response())
 }

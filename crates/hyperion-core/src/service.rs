@@ -10946,10 +10946,34 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
         }
 
+        // Merge tcp + udp into a single sorted ports list, decorate
+        // each with its well-known-service label + category.
+        let mut ports: Vec<hyperion_types::FirewallPort> = tcp
+            .into_iter()
+            .map(|p| {
+                let (label, category) = well_known_port_label(p, "tcp");
+                hyperion_types::FirewallPort {
+                    port: p,
+                    proto: "tcp".into(),
+                    label,
+                    category,
+                }
+            })
+            .chain(udp.into_iter().map(|p| {
+                let (label, category) = well_known_port_label(p, "udp");
+                hyperion_types::FirewallPort {
+                    port: p,
+                    proto: "udp".into(),
+                    label,
+                    category,
+                }
+            }))
+            .collect();
+        ports.sort_by(|a, b| a.port.cmp(&b.port).then(a.proto.cmp(&b.proto)));
+
         Ok(hyperion_types::FirewallView {
             backend,
-            open_tcp: tcp.into_iter().collect(),
-            open_udp: udp.into_iter().collect(),
+            ports,
             raw,
             error,
         })
@@ -11676,6 +11700,67 @@ async fn du_bytes(path: &std::path::Path) -> Result<i64, std::io::Error> {
 /// Nginx combined format: '$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent ...'.
 /// We only have body_bytes_sent (bw_out) — bw_in is approximated as
 /// `request_length` if available, else 0.
+/// Map a (port, proto) pair to a friendly label + category. Used by
+/// the /firewall page to render each open port as "443 tcp · HTTPS
+/// (nginx)" instead of a bare number. The mapping covers the
+/// services Hyperion provisions itself, plus the standard
+/// well-known ports operators care about most. Unknown ports get
+/// `("Unknown", "unknown")` and the UI renders a neutral pill.
+///
+/// Categories drive the colour of the pill in the UI:
+///   - "infra"     → SSH, DNS, NTP, …            (gray-ish)
+///   - "web"       → HTTP / HTTPS                (blue)
+///   - "mail"      → SMTP/submission/IMAP/POP3   (purple)
+///   - "db"        → MySQL/PG/Redis/Memcached    (amber)
+///   - "hyperion"  → panel + master RPC          (accent)
+///   - "unknown"   → everything else             (neutral)
+fn well_known_port_label(port: u16, proto: &str) -> (String, String) {
+    // proto is checked because e.g. 53 is both tcp + udp (DNS), 25
+    // is only ever tcp. The table below uses tcp by default; udp-
+    // specific mappings live in the explicit match arms.
+    let (label, cat) = match (port, proto) {
+        // --- infra ---
+        (22, "tcp") => ("SSH", "infra"),
+        (53, _) => ("DNS", "infra"),
+        (67 | 68, "udp") => ("DHCP", "infra"),
+        (123, "udp") => ("NTP", "infra"),
+
+        // --- web (nginx) ---
+        (80, "tcp") => ("HTTP (nginx)", "web"),
+        (443, "tcp") => ("HTTPS (nginx)", "web"),
+        (443, "udp") => ("HTTPS / QUIC (nginx)", "web"),
+
+        // --- mail ---
+        (25, "tcp") => ("SMTP (postfix)", "mail"),
+        (110, "tcp") => ("POP3", "mail"),
+        (143, "tcp") => ("IMAP", "mail"),
+        (465, "tcp") => ("SMTPS (submission)", "mail"),
+        (587, "tcp") => ("SMTP submission", "mail"),
+        (993, "tcp") => ("IMAPS", "mail"),
+        (995, "tcp") => ("POP3S", "mail"),
+
+        // --- db ---
+        (3306, "tcp") => ("MySQL / MariaDB", "db"),
+        (5432, "tcp") => ("PostgreSQL", "db"),
+        (6379, "tcp") => ("Redis", "db"),
+        (11211, "tcp" | "udp") => ("Memcached", "db"),
+
+        // --- hyperion ---
+        (8443, "tcp") => ("Hyperion panel (web UI)", "hyperion"),
+        (9443, "tcp") => ("Hyperion RPC (master ↔ worker)", "hyperion"),
+
+        // --- FTP / SFTP (vsftpd) ---
+        (21, "tcp") => ("FTP control (vsftpd)", "infra"),
+        (20, "tcp") => ("FTP data (vsftpd)", "infra"),
+
+        // --- ICMP-ish / common diagnostic ---
+        (3478, _) => ("STUN / TURN", "infra"),
+
+        _ => ("Unknown", "unknown"),
+    };
+    (label.to_string(), cat.to_string())
+}
+
 async fn parse_access_log_window(path: &std::path::Path, since: i64) -> (i64, i64, i64, i64) {
     let Ok(body) = tokio::fs::read_to_string(path).await else {
         return (0, 0, 0, 0);

@@ -178,13 +178,14 @@ pub struct FirewallView {
     /// back, or `"unknown"` when neither command returned a parseable
     /// ruleset (very minimal containers, e.g.).
     pub backend: String,
-    /// TCP listen ports the firewall explicitly accepts on the
-    /// public path (best-effort regex over the dumped ruleset).
-    /// Empty list ⇒ either no explicit rules or a parser miss —
-    /// fall back to the raw blob below.
-    pub open_tcp: Vec<u16>,
-    /// UDP listen ports similarly.
-    pub open_udp: Vec<u16>,
+    /// Structured open-port rows. Each entry is a single accepted
+    /// port + protocol pair plus a human-readable "reason" label
+    /// derived from the well-known port → service map. Sorted by
+    /// port number ascending. Replaces the old `open_tcp` /
+    /// `open_udp` u16 lists — the UI needs the label inline and
+    /// re-grouping by category in the template was clumsy.
+    #[serde(default)]
+    pub ports: Vec<FirewallPort>,
     /// Full raw ruleset output. Always present, even when parsing
     /// failed.
     pub raw: String,
@@ -192,6 +193,23 @@ pub struct FirewallView {
     /// non-empty + `raw` empty, the operator gets context for why
     /// the page shows no rules.
     pub error: String,
+}
+
+/// One row in the firewall's open-ports table. Built best-effort
+/// from the `nft list ruleset` / `iptables -L -n` dump.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct FirewallPort {
+    pub port: u16,
+    /// `"tcp"` or `"udp"`.
+    pub proto: String,
+    /// Human-readable label, e.g. "HTTPS (nginx)", "Hyperion RPC".
+    /// `"Unknown"` when no well-known service maps to this port.
+    pub label: String,
+    /// One of: `"infra"` (SSH, DNS, …), `"web"` (HTTP/S),
+    /// `"mail"` (SMTP, IMAP, POP3, submission), `"db"` (MySQL,
+    /// PostgreSQL, Redis), `"hyperion"` (panel + master RPC),
+    /// `"unknown"`. Drives the pill colour in the UI.
+    pub category: String,
 }
 
 /// Operator-facing view of the agent's effective config — minus

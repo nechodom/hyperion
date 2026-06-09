@@ -918,13 +918,14 @@ fn print_pretty(resp: &Response) {
         }
         Response::FirewallList(v) => {
             println!("firewall backend: {}", v.backend);
-            if !v.open_tcp.is_empty() {
-                let s: Vec<String> = v.open_tcp.iter().map(|p| p.to_string()).collect();
-                println!("open tcp: {}", s.join(", "));
-            }
-            if !v.open_udp.is_empty() {
-                let s: Vec<String> = v.open_udp.iter().map(|p| p.to_string()).collect();
-                println!("open udp: {}", s.join(", "));
+            if !v.ports.is_empty() {
+                println!("{:<8} {:<6} {:<10} {}", "PORT", "PROTO", "CATEGORY", "REASON");
+                for p in &v.ports {
+                    println!(
+                        "{:<8} {:<6} {:<10} {}",
+                        p.port, p.proto, p.category, p.label
+                    );
+                }
             }
             if !v.error.is_empty() {
                 eprintln!("error: {}", v.error);
