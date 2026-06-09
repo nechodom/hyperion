@@ -134,6 +134,10 @@ struct DetailTpl<'a> {
     applied_profile_name: Option<String>,
     profiles: Vec<HostingProfile>,
     spf: Option<SpfCheckResult>,
+    /// Passive DNS preflight result — `None` if the agent couldn't
+    /// reach the resolver, `Some` with matches=true ⇒ green pill,
+    /// matches=false ⇒ red pill explaining the mismatch.
+    dns_preflight: Option<hyperion_types::DnsCheckResult>,
     csrf_ftp_set: String,
     csrf_ftp_disable: String,
     ftp_new_password: Option<String>,
@@ -985,6 +989,7 @@ pub async fn post_create(
                 applied_profile_name: None,
                 profiles: vec![],
                 spf: None,
+                dns_preflight: None,
                 csrf_ftp_set: csrf_token_for(&state, &ctx, "/hostings/ftp/set"),
                 csrf_ftp_disable: csrf_token_for(&state, &ctx, "/hostings/ftp/disable"),
                 ftp_new_password: None,
@@ -1202,6 +1207,35 @@ pub async fn get_detail(
             ),
         }
     };
+    // Passive DNS preflight — every page load runs DnsCheck against
+    // the OWNING node so the operator sees "A → 1.2.3.4 ✓" /
+    // "A → 5.6.7.8 ✗ (we're 1.2.3.4)" without clicking anything.
+    // Cheap (dig + agent's cached public IP probe) and the result
+    // drives a small status pill in the page header. Dispatched to
+    // the hosting's node — checking against the master's public IP
+    // for a worker-resident hosting would be wrong.
+    let dns_fut = {
+        // DnsCheck takes a validated `Domain` newtype. Parsing
+        // the hosting's stored domain shouldn't fail (we wouldn't
+        // have provisioned it otherwise), but `Domain::parse`
+        // returns Result, so on the off chance it does we skip
+        // the check (None) instead of breaking the page render.
+        let domain_opt = Domain::parse(&detail.domain).ok();
+        let state2 = state.clone();
+        async move {
+            let Some(domain) = domain_opt else { return None };
+            match crate::dispatcher::dispatch_to_node(
+                &state2,
+                target,
+                Request::DnsCheck { domain },
+            )
+            .await
+            {
+                Ok(RpcResponse::DnsCheck(r)) => Some(r),
+                _ => None,
+            }
+        }
+    };
     let email_log_fut = async {
         match hyperion_rpc_client::call(
             &state.agent_socket,
@@ -1289,6 +1323,7 @@ pub async fn get_detail(
         site_emails,
         ftp_accounts,
         quota,
+        dns_preflight,
     ) = tokio::join!(
         wp_plugins_fut,
         wp_themes_fut,
@@ -1298,6 +1333,7 @@ pub async fn get_detail(
         site_emails_fut,
         ftp_accounts_fut,
         quota_fut,
+        dns_fut,
     );
     // If THIS hosting's user has a password, probe vsftpd to
     // verify it actually accepts the credential. We don't know
@@ -1377,6 +1413,7 @@ pub async fn get_detail(
         applied_profile_name,
         profiles,
         spf,
+        dns_preflight,
         csrf_ftp_set: csrf_token_for(&state, &ctx, "/hostings/ftp/set"),
         csrf_ftp_disable: csrf_token_for(&state, &ctx, "/hostings/ftp/disable"),
         ftp_new_password: q.ftp_pw,

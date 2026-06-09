@@ -5,10 +5,43 @@
   <div>
     <h1>Certificates</h1>
     <div class="subtitle">
-      Cluster-wide TLS inventory. Expiring soonest first — click any row to jump to its hosting.
+      Cluster-wide TLS inventory. Expiring soonest first — click a domain to jump to its hosting.
     </div>
   </div>
+  <span class="grow"></span>
+  <div class="actions">
+    {# Bulk renew — sweeps every node and runs CertRenewAll. The
+       agent only attempts certs within its renewal window (default
+       <30 d to expiry); the rest are no-ops, so this is safe to
+       click ad-hoc when you want a force-sweep outside the regular
+       scheduler tick (e.g. after fixing a broken ACME setup). #}
+    <form method="post" action="/certs/renew-all" style="display:inline"
+          data-confirm-title="Renew all eligible certs"
+          data-confirm-body="Sweeps every node and runs the renewal logic on every cert currently in the renewal window (default <30 days to expiry). Certs outside the window are skipped — no-op, no API calls to ACME. Output streams to /jobs as cert_renew."
+          data-confirm-confirm-label="Renew now"
+          data-confirm-variant="primary">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <button class="btn primary" type="submit"
+              {% if rows.is_empty() %}disabled title="No certs to renew"{% endif %}>
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+        Renew all eligible
+      </button>
+    </form>
+  </div>
 </div>
+
+{% if let Some(m) = flash %}
+  <div class="flash success">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+    <div class="flash-body">{{ m }}</div>
+  </div>
+{% endif %}
+{% if let Some(m) = flash_error %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">{{ m }}</div>
+  </div>
+{% endif %}
 
 {# Top-line summary cards. Quickly answer "do I have anything
    on fire" without scanning the full table. #}

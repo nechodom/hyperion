@@ -11,8 +11,14 @@ use crate::error::AppError;
 use crate::state::SharedState;
 use askama::Template;
 use axum::extract::State;
-use axum::response::{Html, IntoResponse, Response};
+use axum::response::{Html, IntoResponse, Redirect, Response};
+use axum::Form;
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
+use serde::Deserialize;
+
+fn urlencode(s: &str) -> String {
+    url::form_urlencoded::byte_serialize(s.as_bytes()).collect()
+}
 
 #[derive(Template)]
 #[template(path = "certs.html")]
@@ -28,11 +34,24 @@ struct CertsTpl<'a> {
     critical: usize,
     warning: usize,
     ok: usize,
+    /// Flash banner state (set after redirect from /certs/renew-all).
+    flash: Option<String>,
+    flash_error: Option<String>,
+    csrf_token: String,
+}
+
+#[derive(Deserialize, Default)]
+pub struct CertsQuery {
+    #[serde(default)]
+    pub flash: Option<String>,
+    #[serde(default)]
+    pub flash_error: Option<String>,
 }
 
 pub async fn get_certs(
     State(state): State<SharedState>,
     ctx: AuthCtx,
+    axum::extract::Query(q): axum::extract::Query<CertsQuery>,
 ) -> Result<Response, AppError> {
     if !ctx.is_admin_or_higher() {
         return Ok(axum::response::Redirect::to("/?flash_error=admin+role+required").into_response());
@@ -95,6 +114,85 @@ pub async fn get_certs(
         critical,
         warning,
         ok,
+        flash: q.flash.filter(|s| !s.is_empty()),
+        flash_error: q.flash_error.filter(|s| !s.is_empty()),
+        csrf_token: super::session_csrf_token(&state, &ctx),
     };
     Ok(Html(tpl.render()?).into_response())
+}
+
+/// POST /certs/renew-all — sweep every node and run CertRenewAll.
+/// The agent's renew logic only attempts certs within the renewal
+/// window (default <30 days to expiry) and skips the rest, so this
+/// is safe to mash whenever the operator wants to force a sweep
+/// outside the scheduler's regular tick.
+///
+/// Fans out: master first, then every enrolled node. A node that's
+/// offline / rejects RPC contributes a zero result — best-effort,
+/// the flash message reports per-node totals.
+pub async fn post_renew_all(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+) -> Result<Response, AppError> {
+    if !ctx.is_admin_or_higher() {
+        return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
+    }
+    let mut total_renewed = 0u32;
+    let mut total_skipped = 0u32;
+    let mut total_failed = 0u32;
+    let mut nodes_hit = 0u32;
+    let mut nodes_failed = 0u32;
+    // Master.
+    nodes_hit += 1;
+    match hyperion_rpc_client::call(&state.agent_socket, Request::CertRenewAll).await {
+        Ok(RpcResponse::CertRenewAll(results)) => {
+            for r in &results {
+                match r.outcome {
+                    hyperion_types::CertRenewOutcome::Renewed { .. } => total_renewed += 1,
+                    hyperion_types::CertRenewOutcome::Skipped { .. } => total_skipped += 1,
+                    hyperion_types::CertRenewOutcome::Failed { .. } => total_failed += 1,
+                }
+            }
+        }
+        _ => nodes_failed += 1,
+    }
+    // Workers.
+    if let Ok(RpcResponse::NodesList(nodes)) =
+        hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await
+    {
+        for n in nodes {
+            nodes_hit += 1;
+            match crate::dispatcher::dispatch_to_node(
+                &state,
+                Some(n.node_id.as_str()),
+                Request::CertRenewAll,
+            )
+            .await
+            {
+                Ok(RpcResponse::CertRenewAll(results)) => {
+                    for r in &results {
+                        match r.outcome {
+                            hyperion_types::CertRenewOutcome::Renewed { .. } => total_renewed += 1,
+                            hyperion_types::CertRenewOutcome::Skipped { .. } => total_skipped += 1,
+                            hyperion_types::CertRenewOutcome::Failed { .. } => total_failed += 1,
+                        }
+                    }
+                }
+                _ => nodes_failed += 1,
+            }
+        }
+    }
+    let msg = format!(
+        "Cert renew sweep: {total_renewed} renewed, {total_skipped} skipped (still healthy), {total_failed} failed across {nodes_hit} nodes ({nodes_failed} unreachable)."
+    );
+    let key = if total_failed > 0 || nodes_failed > 0 {
+        "flash_error"
+    } else {
+        "flash"
+    };
+    Ok(Redirect::to(&format!(
+        "/certs?{key}={}",
+        urlencode(&msg)
+    ))
+    .into_response())
 }
