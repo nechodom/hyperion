@@ -37,11 +37,18 @@
 
 {% if rows.is_empty() %}
   <div class="card empty">
-    <div class="empty-title">No certificates yet</div>
-    <p class="text-soft small">
-      As hostings get TLS issued (Let's Encrypt or self-signed bootstrap), they'll appear here.
-      Create a hosting from <a href="/hostings/new">Hostings → New</a>.
+    <div class="empty-illustration">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+    </div>
+    <h3>No certificates yet</h3>
+    <p class="text-soft">
+      As hostings get TLS issued (Let's Encrypt or self-signed bootstrap),
+      they'll show up here with expiry, issuer and node info.
     </p>
+    <div style="margin-top:0.9rem;display:flex;gap:0.5rem;justify-content:center;flex-wrap:wrap">
+      <a class="btn" href="/hostings/new">Create your first hosting</a>
+      <a class="btn ghost" href="/settings#tab-tls">Configure ACME</a>
+    </div>
   </div>
 {% else %}
   <div class="card" style="padding:0">

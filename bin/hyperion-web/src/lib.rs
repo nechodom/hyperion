@@ -329,6 +329,7 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::profiles::post_update),
         )
         .route("/profiles/delete", post(handlers::profiles::post_delete))
+        .route("/profiles/clone", post(handlers::profiles::post_clone))
         .route("/profiles/apply", post(handlers::profiles::post_apply))
         .route("/certs", get(handlers::certs::get_certs))
         .route("/audit", get(handlers::audit::get_audit))

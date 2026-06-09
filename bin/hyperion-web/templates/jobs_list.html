@@ -50,9 +50,29 @@
 
 {% if jobs.is_empty() %}
   <div class="card empty">
-    <div class="empty-icon">📭</div>
-    <div class="empty-title">No jobs match these filters</div>
-    <p class="text-soft small">When you start a migration, install, backup or cert renewal, it'll show up here with a live progress bar.</p>
+    <div class="empty-illustration">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7l9-4 9 4-9 4-9-4z"/><path d="M3 12l9 4 9-4"/><path d="M3 17l9 4 9-4"/></svg>
+    </div>
+    {% if !kind_filter.is_empty() || !state_filter.is_empty() %}
+      <h3>No jobs match these filters</h3>
+      <p class="text-soft">
+        Try widening the filter, or
+        <a href="/jobs">clear all filters</a>
+        to see every recent job.
+      </p>
+    {% else %}
+      <h3>No background jobs yet</h3>
+      <p class="text-soft">
+        Jobs appear here when you start a migration, install a service,
+        run a backup, renew a cert, or trigger anything else that takes
+        more than a few seconds. Each row shows a live progress bar.
+      </p>
+      <div style="margin-top:0.9rem;display:flex;gap:0.5rem;justify-content:center;flex-wrap:wrap">
+        <a class="btn" href="/hostings/new">Create hosting</a>
+        <a class="btn ghost" href="/install">Enrol a worker node</a>
+        <a class="btn ghost" href="/settings/backups">Configure backups</a>
+      </div>
+    {% endif %}
   </div>
 {% else %}
   <div class="card" style="padding:0">

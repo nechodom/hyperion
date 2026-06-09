@@ -23,6 +23,7 @@ struct ProfilesTpl<'a> {
     profiles: Vec<HostingProfile>,
     csrf_create: String,
     csrf_delete: String,
+    csrf_clone: String,
     flash: Option<String>,
     error: Option<String>,
 }
@@ -66,6 +67,7 @@ pub async fn get_profiles(
         profiles,
         csrf_create: csrf_token(&state, &ctx, "/profiles/create"),
         csrf_delete: csrf_token(&state, &ctx, "/profiles/delete"),
+        csrf_clone: csrf_token(&state, &ctx, "/profiles/clone"),
         flash: q.flash,
         error: q.error,
     };
@@ -223,6 +225,84 @@ pub async fn post_create(
 #[derive(Deserialize)]
 pub struct DeleteForm {
     pub id: i64,
+}
+
+#[derive(Deserialize)]
+pub struct CloneForm {
+    pub id: i64,
+}
+
+/// POST /profiles/clone — duplicate an existing profile into a new
+/// row with name "Original (copy)". The user can then edit the
+/// fresh row freely without having to retype the 20+ knobs that
+/// make a profile (PHP limits, DB caps, plugin/theme lists, etc.).
+///
+/// Lands on the new profile's edit page so operators tweak first
+/// and save again, rather than having a "copy" linger if they
+/// abandon mid-edit (we already saved the duplicate — that's
+/// intentional; the alternative of a temp-row that we'd have to
+/// GC is fragile).
+pub async fn post_clone(
+    State(state): State<SharedState>,
+    Form(form): Form<CloneForm>,
+) -> Result<Response, AppError> {
+    // Fetch the source profile.
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::ProfileGet { id: form.id },
+    )
+    .await?;
+    let src = match resp {
+        RpcResponse::ProfileGet(p) => p,
+        RpcResponse::Error(hyperion_rpc::RpcError::NotFound { .. }) => {
+            return Ok(Redirect::to("/profiles?error=Profile+not+found").into_response());
+        }
+        RpcResponse::Error(e) => {
+            return Ok(Redirect::to(&format!("/profiles?error={}", urlencoding(&e.to_string()))).into_response());
+        }
+        _ => return Err(AppError::Internal("unexpected response".into())),
+    };
+    // Build the input from the source. ProfileInput is the "create"
+    // shape — we copy every field 1:1 except the name (suffix "
+    // (copy)" so list-row uniqueness isn't violated; agent enforces
+    // unique name and would refuse a literal duplicate).
+    let input = ProfileInput {
+        name: format!("{} (copy)", src.name),
+        description: src.description.clone(),
+        php_memory_mb: src.php_memory_mb,
+        php_max_exec_secs: src.php_max_exec_secs,
+        php_max_children: src.php_max_children,
+        php_max_requests: src.php_max_requests,
+        db_max_connections: src.db_max_connections,
+        disk_hard_mb: src.disk_hard_mb,
+        bw_monthly_mb: src.bw_monthly_mb,
+        expiry_grace_days: src.expiry_grace_days,
+        expiry_warning_offsets: src.expiry_warning_offsets.clone(),
+        price_minor: src.price_minor,
+        price_currency: src.price_currency.clone(),
+        price_interval: src.price_interval.clone(),
+        slack_webhook: src.slack_webhook.clone(),
+        wp_plugins: src.wp_plugins.clone(),
+        wp_themes: src.wp_themes.clone(),
+        default_php_version: src.default_php_version.clone(),
+        default_db_engine: src.default_db_engine.clone(),
+    };
+    let resp =
+        hyperion_rpc_client::call(&state.agent_socket, Request::ProfileCreate(input)).await?;
+    match resp {
+        RpcResponse::ProfileCreate(p) => Ok(Redirect::to(&format!(
+            "/profiles/{}/edit?flash={}",
+            p.id,
+            urlencoding(&format!("Cloned from \"{}\" — edit the copy and save.", src.name))
+        ))
+        .into_response()),
+        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
+            "/profiles?error={}",
+            urlencoding(&format!("clone failed: {}", e))
+        ))
+        .into_response()),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
 }
 
 pub async fn get_edit(

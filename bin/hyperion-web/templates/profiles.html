@@ -59,6 +59,16 @@
           <td class="right">
             <div class="row-actions">
               <a class="btn small" href="/profiles/{{ p.id }}/edit">Edit</a>
+              {# Clone — duplicates this profile into a new "(copy)" row
+                 and drops the operator straight onto its edit page. #}
+              <form method="post" action="/profiles/clone" style="display:inline">
+                <input type="hidden" name="_csrf" value="{{ csrf_clone }}">
+                <input type="hidden" name="id" value="{{ p.id }}">
+                <button class="btn small" type="submit"
+                        title="Create a new profile pre-filled with these settings — useful when you want a variant.">
+                  Duplicate
+                </button>
+              </form>
               <form method="post" action="/profiles/delete" style="display:inline"
                     data-confirm-title="Delete profile {{ p.name }}"
                     data-confirm-body="Hostings that previously had this profile applied keep their current limits, expiry policy and price — only the profile template is removed."

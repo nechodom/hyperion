@@ -410,6 +410,24 @@ pre code {
 .page-header .grow { flex: 1; }
 .page-header .actions { display: flex; gap: 0.55rem; flex-wrap: wrap; }
 
+/* Sticky page-header — opt-in via `class="page-header sticky"`. The
+   hosting detail page is tall (often 2000+px with all tabs rendered
+   inline) so without sticking the action bar the operator has to
+   scroll all the way back up to hit Suspend / Resume / Files. The
+   background uses surface-0 + a soft blur so the table rows beneath
+   stay legible as they scroll under it. */
+.page-header.sticky {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  background: color-mix(in srgb, var(--surface-0) 92%, transparent);
+  backdrop-filter: saturate(140%) blur(10px);
+  -webkit-backdrop-filter: saturate(140%) blur(10px);
+  padding: 0.85rem 0.25rem;
+  margin: -0.85rem -0.25rem 1.5rem;
+  border-bottom: 1px solid var(--border);
+}
+
 .breadcrumbs {
   display: flex;
   align-items: center;
