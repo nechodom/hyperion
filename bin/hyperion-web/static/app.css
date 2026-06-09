@@ -1411,7 +1411,15 @@ select {
   background: var(--bg);
 }
 .login-aside {
-  background: linear-gradient(135deg, var(--primary) 0%, #1e1b4b 70%, #0a0b0e 100%);
+  /* DARK on the left (where the headline + lede sit) → fades to a
+     softer indigo toward the panel column. The previous gradient
+     was 135deg with the light primary at TOP-LEFT — exactly where
+     the white text sat — so the text washed out. Inverting the
+     stops puts the darkest shade behind the copy and reserves the
+     coloured part for the empty negative space. */
+  background:
+    radial-gradient(circle at 88% 88%, rgba(99, 102, 241, 0.45), transparent 55%),
+    linear-gradient(135deg, #06070a 0%, #0f1019 32%, #1c1a3a 62%, #2a2660 100%);
   padding: 3rem;
   color: white;
   display: flex;
@@ -1421,12 +1429,16 @@ select {
   overflow: hidden;
 }
 .login-aside::before {
+  /* Subtle texture overlay — one soft glow far from the text +
+     a very faint diagonal sheen. Previously two radial gradients
+     bloomed near the headline (20% 30% and 80% 70%) and made the
+     contrast worse; both removed. */
   content: '';
   position: absolute;
   inset: 0;
   background:
-    radial-gradient(circle at 20% 30%, rgba(255, 255, 255, 0.08), transparent 40%),
-    radial-gradient(circle at 80% 70%, rgba(255, 255, 255, 0.05), transparent 50%);
+    radial-gradient(circle at 75% 25%, rgba(52, 211, 153, 0.07), transparent 40%),
+    linear-gradient(160deg, transparent 0%, rgba(255, 255, 255, 0.03) 100%);
   pointer-events: none;
 }
 .login-aside .brand-block { position: relative; }
