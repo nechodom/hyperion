@@ -176,6 +176,16 @@ pub enum Request {
     /// when nftables isn't installed or returns empty. Read-only —
     /// the operator inspects, doesn't mutate, via this RPC.
     FirewallList,
+    /// Apply a hardcoded firewall template (one of the `port_templates()`
+    /// IDs: "web" | "mail" | "hyperion" | "worker_rpc" | "ssh" | "ftp")
+    /// on this node. Rules go into our own `inet hyperion` table —
+    /// any pre-existing operator nft rules in other tables/chains
+    /// stay untouched. Each rule carries a `hyperion:<template_id>`
+    /// comment so the operator can grep them later. Persists to
+    /// `/etc/nftables.conf` so the rules survive reboot.
+    FirewallApplyTemplate {
+        template_id: String,
+    },
     /// `systemctl restart <name>` on a whitelisted unit. Restarts
     /// hyperion-agent itself are refused (would terminate this RPC
     /// session); operator must SSH for self-restart.
@@ -912,6 +922,20 @@ pub enum Response {
     SetHostingAcmeEmail,
     ServicesHealth(hyperion_types::ServicesHealth),
     FirewallList(hyperion_types::FirewallView),
+    /// Result of FirewallApplyTemplate. `applied=true` ⇒ every
+    /// nft command in the template ran successfully + the ruleset
+    /// got persisted. `applied=false` ⇒ the operator should read
+    /// `error` and decide whether to retry / fix manually.
+    FirewallTemplateApplied {
+        applied: bool,
+        /// Joined stdout from every nft command we ran. Operators
+        /// can spot-check what landed by scanning this.
+        output: String,
+        /// First non-empty stderr line that's NOT "already exists"
+        /// (those are benign — re-applying a template is idempotent).
+        /// Empty on full success.
+        error: String,
+    },
     BackupDelete,
     AgentConfigView(hyperion_types::AgentConfigView),
     /// SMTP response code from the relay (e.g. `Code(250)`).

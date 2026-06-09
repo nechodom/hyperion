@@ -935,6 +935,19 @@ fn print_pretty(resp: &Response) {
                 println!("{}", v.raw);
             }
         }
+        Response::FirewallTemplateApplied { applied, output, error } => {
+            if *applied {
+                println!("✓ template applied + persisted to /etc/nftables.conf");
+            } else {
+                eprintln!("✗ template apply failed");
+            }
+            if !output.is_empty() {
+                println!("{output}");
+            }
+            if !error.is_empty() {
+                eprintln!("error: {error}");
+            }
+        }
         Response::AgentConfigView(c) => {
             println!("agent: {} v{} (nginx user: {})",
                 c.hostname, c.agent_version,

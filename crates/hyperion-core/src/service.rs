@@ -10877,6 +10877,103 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// Read-only — never mutates the ruleset. UI surface at
     /// `/firewall` is similarly read-only by design (operators
     /// edit via SSH + nft; we just give them visibility per-node).
+    /// Apply a hardcoded firewall template to this node. We DON'T
+    /// touch the operator's pre-existing nft rules — every Hyperion
+    /// rule lives in our own `inet hyperion` table. Every rule
+    /// carries a `comment "hyperion:<template_id>"` so a future
+    /// "remove template" or audit lookup can find them.
+    ///
+    /// Sequence:
+    ///   1. `add table inet hyperion { }` — idempotent, "exists"
+    ///      errors are filtered.
+    ///   2. `add chain inet hyperion input { type filter hook input
+    ///      priority 0; policy accept; }` — also idempotent.
+    ///   3. The template's add-rule commands.
+    ///   4. `nft list ruleset > /etc/nftables.conf` — persist for
+    ///      reboot survival.
+    ///
+    /// Returns `(applied, output, error)`. `applied=true` iff every
+    /// command ran successfully AND the persist write succeeded.
+    /// `output` is the joined stdout of every command. `error` is
+    /// the first non-empty NON-BENIGN stderr line ("File exists" /
+    /// "already exists" are filtered as expected idempotency noise).
+    pub async fn firewall_apply_template(
+        &self,
+        template_id: &str,
+    ) -> Result<(bool, String, String), RpcError> {
+        let cmds = firewall_template_commands(template_id).ok_or_else(|| {
+            RpcError::Validation {
+                message: format!("unknown firewall template id: {template_id}"),
+            }
+        })?;
+        let mut out = String::new();
+        let mut err = String::new();
+        let mut applied = true;
+        for cmd in &cmds {
+            let res = tokio::process::Command::new("/usr/sbin/nft")
+                .args(cmd)
+                .output()
+                .await;
+            match res {
+                Ok(o) => {
+                    if !o.stdout.is_empty() {
+                        out.push_str(&String::from_utf8_lossy(&o.stdout));
+                    }
+                    let s = String::from_utf8_lossy(&o.stderr);
+                    let benign = s.contains("File exists")
+                        || s.contains("already exists")
+                        || s.trim().is_empty();
+                    if !o.status.success() && !benign {
+                        applied = false;
+                        if err.is_empty() {
+                            err = format!("`nft {}`: {}", cmd.join(" "), s.trim());
+                        }
+                    }
+                }
+                Err(e) => {
+                    applied = false;
+                    if err.is_empty() {
+                        err = format!("spawn nft: {e}");
+                    }
+                }
+            }
+        }
+        // Persist to /etc/nftables.conf — `nft list ruleset` to
+        // stdout then redirect via tokio (shell would need its own
+        // perms). We do it in two steps: list ruleset → capture →
+        // tokio::fs::write.
+        if applied {
+            match tokio::process::Command::new("/usr/sbin/nft")
+                .args(["list", "ruleset"])
+                .output()
+                .await
+            {
+                Ok(o) if o.status.success() => {
+                    if let Err(e) = tokio::fs::write("/etc/nftables.conf", &o.stdout).await {
+                        applied = false;
+                        err = format!("persist /etc/nftables.conf: {e}");
+                    }
+                }
+                Ok(o) => {
+                    applied = false;
+                    err = format!("nft list ruleset for persist: {}", String::from_utf8_lossy(&o.stderr));
+                }
+                Err(e) => {
+                    applied = false;
+                    err = format!("spawn nft for persist: {e}");
+                }
+            }
+        }
+        self.append_audit(
+            "firewall.apply_template",
+            Some(template_id),
+            &serde_json::json!({"applied": applied, "error_first_line": err}).to_string(),
+            if applied { "ok" } else { "failed" },
+        )
+        .await;
+        Ok((applied, out, err))
+    }
+
     pub async fn firewall_list(&self) -> Result<hyperion_types::FirewallView, RpcError> {
         // Try nft first.
         let nft = tokio::process::Command::new("/usr/sbin/nft")
@@ -11815,6 +11912,78 @@ fn well_known_port_label(port: u16, proto: &str) -> (String, String) {
         _ => ("Unknown", "unknown"),
     };
     (label.to_string(), cat.to_string())
+}
+
+/// nft argv sequences for each hardcoded firewall template. Returns
+/// `Some(vec_of_argv_arrays)` when the id is known, `None` otherwise.
+///
+/// Every sequence starts with the same two argv arrays that ensure
+/// our `inet hyperion` table + `input` chain exist (idempotent — nft
+/// reports "File exists" on re-apply, which the apply path filters
+/// as benign). Each rule carries `comment "hyperion:<id>"` so an
+/// auditor can grep them out of `nft list ruleset`.
+///
+/// Keep the ids in lock-step with the `port_templates()` data in
+/// `bin/hyperion-web/src/handlers/firewall.rs` — the template card
+/// passes its id over the wire.
+fn firewall_template_commands(id: &str) -> Option<Vec<Vec<&'static str>>> {
+    // Shared idempotent header: create table + chain.
+    let header: Vec<Vec<&'static str>> = vec![
+        vec!["add", "table", "inet", "hyperion"],
+        vec![
+            "add", "chain", "inet", "hyperion", "input",
+            "{", "type", "filter", "hook", "input", "priority", "0", ";",
+            "policy", "accept", ";", "}",
+        ],
+    ];
+    let body: Vec<Vec<&'static str>> = match id {
+        "web" => vec![
+            vec![
+                "add", "rule", "inet", "hyperion", "input",
+                "tcp", "dport", "{", "80,", "443", "}", "accept",
+                "comment", "hyperion:web",
+            ],
+            vec![
+                "add", "rule", "inet", "hyperion", "input",
+                "udp", "dport", "443", "accept",
+                "comment", "hyperion:web-quic",
+            ],
+        ],
+        "mail" => vec![vec![
+            "add", "rule", "inet", "hyperion", "input",
+            "tcp", "dport",
+            "{", "25,", "465,", "587,", "993,", "995", "}", "accept",
+            "comment", "hyperion:mail",
+        ]],
+        "hyperion" => vec![vec![
+            "add", "rule", "inet", "hyperion", "input",
+            "tcp", "dport", "{", "8443,", "9443", "}", "accept",
+            "comment", "hyperion:hyperion",
+        ]],
+        "ssh" => vec![vec![
+            "add", "rule", "inet", "hyperion", "input",
+            "tcp", "dport", "22", "accept",
+            "comment", "hyperion:ssh",
+        ]],
+        "ftp" => vec![
+            vec![
+                "add", "rule", "inet", "hyperion", "input",
+                "tcp", "dport", "21", "accept",
+                "comment", "hyperion:ftp-control",
+            ],
+            vec![
+                "add", "rule", "inet", "hyperion", "input",
+                "tcp", "dport", "40000-50000", "accept",
+                "comment", "hyperion:ftp-passive",
+            ],
+        ],
+        // "worker_rpc" needs <MASTER_IP> substitution which we
+        // don't have at apply-time without an extra arg. Surface
+        // it as snippet-only in the UI — skipping here returns
+        // `None` and the validation error makes it clear.
+        _ => return None,
+    };
+    Some(header.into_iter().chain(body).collect())
 }
 
 async fn parse_access_log_window(path: &std::path::Path, since: i64) -> (i64, i64, i64, i64) {

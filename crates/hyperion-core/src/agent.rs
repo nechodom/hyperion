@@ -479,6 +479,12 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     async fn firewall_list(&self) -> Result<hyperion_types::FirewallView, RpcError> {
         self.svc.firewall_list().await
     }
+    async fn firewall_apply_template(
+        &self,
+        template_id: String,
+    ) -> Result<(bool, String, String), RpcError> {
+        self.svc.firewall_apply_template(&template_id).await
+    }
     async fn service_restart(&self, name: String) -> Result<(), RpcError> {
         self.svc.service_restart(name).await
     }

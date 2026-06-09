@@ -272,6 +272,13 @@ pub trait AgentApi: Send + Sync + 'static {
     /// Dump the firewall ruleset (nft, with iptables fallback). Read-only.
     async fn firewall_list(&self) -> Result<hyperion_types::FirewallView, RpcError>;
 
+    /// Apply a hardcoded firewall template by id. Returns
+    /// `(applied, output, error_first_line)`.
+    async fn firewall_apply_template(
+        &self,
+        template_id: String,
+    ) -> Result<(bool, String, String), RpcError>;
+
     /// Restart a whitelisted systemd unit.
     async fn service_restart(&self, name: String) -> Result<(), RpcError>;
     /// apt-install + enable a whitelisted unit. Returns immediately;

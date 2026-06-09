@@ -144,25 +144,92 @@
     Port templates
   </h2>
   <p class="text-soft small" style="margin:0 0 1rem">
-    Common port sets you typically open together. Click any
-    template to reveal the <code>nft</code> snippet — copy, SSH to
-    the node, paste, then <code>nft -s list ruleset &gt;
-    /etc/nftables.conf</code> to persist.
+    Common port sets you typically open together. Each template
+    can be <strong>applied directly</strong> on any reachable node
+    (writes to our own <code>inet hyperion</code> nft table — your
+    existing rules stay intact + the change persists to
+    <code>/etc/nftables.conf</code> for reboot survival). Use
+    <em>Show snippet</em> if you prefer to copy-paste over SSH
+    instead.
   </p>
-  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(20rem,1fr));gap:0.8rem">
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(22rem,1fr));gap:0.85rem">
     {% for t in templates %}
-    <details style="background:var(--surface-1);border:1px solid var(--border);border-radius:var(--radius-md);padding:0.75rem 0.9rem">
-      <summary style="cursor:pointer;font-weight:600;display:flex;align-items:center;gap:0.5rem;list-style:none">
-        <span>{{ t.name }}</span>
-        <span class="text-soft small" style="font-weight:400">·</span>
-        <span class="text-soft small" style="font-weight:400">{{ t.ports_summary }}</span>
-      </summary>
+    <article class="fw-template">
+      <header class="fw-template__head">
+        <strong>{{ t.name }}</strong>
+        <span class="text-soft small">· {{ t.ports_summary }}</span>
+      </header>
       <p class="text-soft small" style="margin:0.5rem 0">{{ t.description }}</p>
-      <pre style="background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.6rem;overflow:auto;font-size:0.78rem;margin:0">{{ t.snippet }}</pre>
-    </details>
+
+      {% if t.applyable %}
+        {# Per-node Apply row — buttons disabled for unreachable
+           nodes so the operator sees the option exists but can't
+           run it right now. Each click HTMX-POSTs to /firewall/apply
+           and swaps the result into the adjacent <span>. #}
+        <div class="fw-apply-row">
+          <span class="text-soft small">Apply on:</span>
+          {% for tgt in apply_targets %}
+          <form hx-post="/firewall/apply"
+                hx-target="#fw-apply-result-{{ t.apply_id }}-{{ tgt.node_id }}"
+                hx-swap="innerHTML"
+                hx-indicator="#fw-apply-result-{{ t.apply_id }}-{{ tgt.node_id }}"
+                style="display:inline">
+            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+            <input type="hidden" name="template_id" value="{{ t.apply_id }}">
+            <input type="hidden" name="target_node" value="{{ tgt.node_id }}">
+            <button type="submit" class="btn small"
+                    {% if !tgt.applyable %}disabled title="Node unreachable — Apply skipped"{% endif %}>
+              {{ tgt.label }}
+            </button>
+          </form>
+          <span id="fw-apply-result-{{ t.apply_id }}-{{ tgt.node_id }}" class="fw-apply-result"></span>
+          {% endfor %}
+        </div>
+      {% else %}
+        <p class="text-soft small" style="margin:0.5rem 0;font-style:italic">
+          Snippet-only — needs operator input
+          (e.g. <code>&lt;MASTER_IP&gt;</code> substitution).
+        </p>
+      {% endif %}
+
+      <details style="margin-top:0.6rem">
+        <summary class="text-soft small" style="cursor:pointer">Show snippet</summary>
+        <pre style="background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.6rem;overflow:auto;font-size:0.78rem;margin:0.4rem 0 0">{{ t.snippet }}</pre>
+      </details>
+    </article>
     {% endfor %}
   </div>
 </div>
+
+<style>
+  .fw-template {
+    background: var(--surface-1);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-md);
+    padding: 0.85rem 1rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+  .fw-template__head { display: flex; align-items: center; gap: 0.4rem; flex-wrap: wrap; }
+  .fw-apply-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.5rem 0.65rem;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+  }
+  .fw-apply-result {
+    display: inline-flex;
+    align-items: center;
+    font-size: 0.78rem;
+    min-height: 1.4em;
+  }
+  .fw-apply-result .pill { font-size: 0.68rem; padding: 0.1rem 0.4rem; }
+</style>
 
 {# ===== Custom port snippet generator =====
    No server round-trip, no firewall mutation — pure JS that
