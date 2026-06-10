@@ -32,30 +32,43 @@
        hx-swap="innerHTML">
     <div class="text-soft small">Loading progress…</div>
   </div>
-  {# Appears automatically once the polled fragment lands on a
-     terminal state — the watcher script below flips it visible. #}
-  <div id="wp-install-done-row" hidden style="margin-top:0.7rem">
-    <button type="button" class="btn primary" onclick="location.href=location.pathname + '#wordpress'; location.reload()">
-      Reload page — show the WordPress tab
+  {# Shown only if the job FAILED — a manual reload to inspect the
+     final state. On success we reload automatically (below), so no
+     button is needed for the happy path. #}
+  <div id="wp-install-failed-row" hidden style="margin-top:0.7rem">
+    <button type="button" class="btn" onclick="location.href=location.pathname + '#wordpress'; location.reload()">
+      Reload to inspect
     </button>
   </div>
   <p class="text-soft small" style="margin:0.7rem 0 0;line-height:1.5">
     The credentials below are valid <strong>immediately</strong> — copy them
     while the install runs. Each plugin and theme gets its own ✓/✗ line
-    in the log above.
+    in the log above. The page refreshes itself the moment setup finishes.
   </p>
 </div>
 <script>
   (function () {
     'use strict';
-    // Watch the polled fragment; when the job's pill flips to
-    // done/failed (terminal fragment renders without a spinner),
-    // reveal the reload button. htmx:afterSwap fires on every poll.
+    // Watch the polled fragment for the terminal pill. On SUCCESS,
+    // auto-reload to the WordPress tab so the install/cert state
+    // shows — no manual "reload" click (the credentials survive the
+    // reload via the sessionStorage persistence script below). On
+    // FAILURE, surface a manual reload instead of yanking the page
+    // out from under an operator who needs to read the error.
+    var reloaded = false;
     document.body.addEventListener('htmx:afterSwap', function (ev) {
       if (!ev.target || ev.target.id !== 'wp-install-progress') return;
-      var terminal = ev.target.querySelector('.pill.ok, .pill.err');
-      if (terminal) {
-        var row = document.getElementById('wp-install-done-row');
+      var ok = ev.target.querySelector('.pill.ok');
+      var err = ev.target.querySelector('.pill.err');
+      if (ok && !reloaded) {
+        reloaded = true;
+        // Brief beat so the ✓ is visible, then refresh in place.
+        setTimeout(function () {
+          location.href = location.pathname + '#wordpress';
+          location.reload();
+        }, 1200);
+      } else if (err) {
+        var row = document.getElementById('wp-install-failed-row');
         if (row) row.hidden = false;
       }
     });
@@ -64,7 +77,7 @@
 {% endif %}
 
 {% if let Some(c) = just_created %}
-<div class="creds-panel">
+<div class="creds-panel" id="creds-panel" data-hosting-id="{{ detail.id }}">
   <div class="creds-header">
     <div>
       <div class="creds-eyebrow">
@@ -127,21 +140,13 @@
     </div>
     {% endif %}
 
-    {% if let Some(cert) = c.cert %}
-    {# Certificate #}
-    <div class="creds-section">
-      <div class="creds-section-title">TLS certificate</div>
-      <div class="creds-row">
-        <span class="creds-label">Issuer</span>
-        <code class="creds-value">{{ cert.issuer }}</code>
-        {% if cert.issuer == "self-signed" %}
-          <span class="pill warn small">browsers will warn</span>
-        {% else %}
-          <span class="pill ok small">trusted</span>
-        {% endif %}
-      </div>
-    </div>
-    {% endif %}
+    {# NOTE: the TLS certificate status is deliberately NOT shown here.
+       At create time the only cert on disk is the self-signed
+       bootstrap one; the real Let's Encrypt cert (if requested) is
+       issued asynchronously by the post-create job AFTER this panel
+       renders, so any issuer shown here would be permanently stale
+       ("self-signed" even once the trusted cert is live). The SSL tab
+       is the live source of truth and refreshes on the auto-reload. #}
 
     {% if let Some(wp) = c.wp %}
     {# WordPress — installed at create time. #}
@@ -172,9 +177,15 @@
   </div>
 
   <div class="creds-footnote">
-    <kbd>Tip</kbd> Pin this page or paste these into your password
-    manager before navigating away. The DB password is not
-    recoverable; use the "Reset password" form below if you lose it.
+    <kbd>Tip</kbd> These stay on screen — across the post-install
+    reload too — until you dismiss them. Save them to your password
+    manager, then click below. The DB password is not recoverable;
+    use the "Reset password" form below if you lose it.
+  </div>
+  <div style="margin-top:0.9rem;display:flex;justify-content:flex-end">
+    <button type="button" class="btn small" data-creds-dismiss>
+      I've saved these — hide
+    </button>
   </div>
 </div>
 
@@ -214,7 +225,62 @@
 </script>
 {% endif %}
 
-<div class="page-header sticky">
+<script>
+// Credentials persistence.
+// The create credentials are one-shot: the server renders them only
+// on the create redirect (the just_created panel above). The
+// install-progress card auto-reloads the page the moment setup
+// finishes — which would normally wipe those creds. Stash them in
+// sessionStorage (per-tab, cleared when the tab closes — nothing
+// persisted server-side) so they survive the reload and stay on
+// screen until the operator clicks "I've saved these".
+(function () {
+  'use strict';
+  function init() {
+    var header = document.querySelector('.page-header[data-hosting-id]');
+    var hid = header && header.getAttribute('data-hosting-id');
+    if (!hid) return;
+    var KEY = 'hyperion.creds.' + hid;
+    var main = document.querySelector('main.content') || document.body;
+
+    function wireDismiss(panel) {
+      var btn = panel.querySelector('[data-creds-dismiss]');
+      if (!btn) return;
+      btn.addEventListener('click', function () {
+        try { sessionStorage.removeItem(KEY); } catch (_) {}
+        panel.style.transition = 'opacity .2s';
+        panel.style.opacity = '0';
+        setTimeout(function () { panel.remove(); }, 200);
+      });
+    }
+
+    var rendered = document.getElementById('creds-panel');
+    if (rendered) {
+      // Fresh create: stash for the imminent auto-reload, wire dismiss.
+      try { sessionStorage.setItem(KEY, rendered.outerHTML); } catch (_) {}
+      wireDismiss(rendered);
+      return;
+    }
+    // After the auto-reload (or any later visit): restore if unsaved.
+    var html = null;
+    try { html = sessionStorage.getItem(KEY); } catch (_) {}
+    if (!html) return;
+    var tmp = document.createElement('div');
+    tmp.innerHTML = html;
+    var panel = tmp.firstElementChild;
+    if (!panel) return;
+    main.insertBefore(panel, main.firstChild);
+    wireDismiss(panel);
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();
+</script>
+
+<div class="page-header sticky" data-hosting-id="{{ detail.id }}">
   <div>
     <h1 style="display:flex;align-items:center;gap:0.7rem;flex-wrap:wrap">
       {{ detail.domain }}
