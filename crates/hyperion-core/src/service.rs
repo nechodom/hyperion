@@ -1671,6 +1671,46 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             None => SystemUserName::derive_from_domain(req.domain.as_str())?,
         };
         let domain = req.domain.as_str();
+
+        // Reclaim a trashed slot. A previous delete with trash ENABLED
+        // leaves the row in place (state='trashed') so it can be
+        // restored — but the row still holds the domain under the
+        // UNIQUE(hostings.domain) constraint. The hosting is gone from
+        // the operator's list AND from the create-wizard's preflight
+        // (both filter out trashed rows), so re-creating the exact same
+        // domain blew up with a cryptic "entity already exists … UNIQUE
+        // constraint failed" even though, as far as the operator could
+        // see, the hosting didn't exist. Re-creating the SAME domain is
+        // an unambiguous signal the operator wants it back, so we
+        // hard-purge the trashed row first to free the slot. A row in
+        // any OTHER state is a genuine live conflict and is left for the
+        // INSERT below to reject with AlreadyExists.
+        if let Ok(Some(existing)) = hostings::get_by_domain(&self.pool, domain).await {
+            if existing.state == HostingState::Trashed {
+                let sel = HostingSelector::Id(existing.id.clone());
+                if let Ok(detail) = self.get(sel).await {
+                    tracing::info!(
+                        domain = %domain,
+                        id = %existing.id,
+                        "create: reclaiming domain from a trashed hosting (purging it)"
+                    );
+                    self.append_audit(
+                        "hosting.create.reclaim_trashed",
+                        Some(existing.id.as_str()),
+                        &serde_json::json!({"domain": domain}).to_string(),
+                        "ok",
+                    )
+                    .await;
+                    // Best-effort: on purge failure we fall through and
+                    // let the INSERT surface the original conflict rather
+                    // than masking it.
+                    let _ = self
+                        .hard_delete_internal(detail, DeleteOpts::default())
+                        .await;
+                }
+            }
+        }
+
         let home_dir = format!("{}/{}", self.paths.home_root, system_user);
         let hosting_root = format!("{}/{}", home_dir, domain);
         let htdocs = format!("{}/htdocs", hosting_root);
@@ -1865,9 +1905,21 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         .await
         {
             let _ = stack.rollback_all().await;
+            // The trashed-row case is reclaimed above, so a failure
+            // here is a genuine live conflict. Translate the raw sqlx
+            // UNIQUE message into something an operator can act on
+            // instead of "(error returned from database: (code: 2067)
+            // UNIQUE constraint failed: hostings.domain)".
+            let id = match hostings::get_by_domain(&self.pool, domain).await {
+                Ok(Some(other)) => format!(
+                    "{domain} is already used by a hosting on this node (state: {})",
+                    other.state.as_str()
+                ),
+                _ => format!("{domain} ({e})"),
+            };
             return Err(RpcError::AlreadyExists {
                 kind: "hosting".into(),
-                id: format!("{} ({})", domain, e),
+                id,
             });
         }
         let hosting_id_for_rollback = hosting_id.clone();
@@ -14092,6 +14144,66 @@ mod tests {
             Err(RpcError::AlreadyExists { kind, .. }) => assert_eq!(kind, "hosting"),
             other => panic!("expected AlreadyExists, got {other:?}"),
         }
+    }
+
+    /// Regression: deleting with trash ENABLED leaves the row as
+    /// state='trashed' (still holding the domain under UNIQUE), and
+    /// the create wizard's preflight filters trashed rows out — so
+    /// re-creating the exact same domain used to fail with a cryptic
+    /// "entity already exists … UNIQUE constraint failed" even though
+    /// the hosting was gone from the operator's list. Create must now
+    /// reclaim the slot: purge the trashed row, then provision fresh.
+    #[tokio::test]
+    async fn create_reclaims_trashed_domain() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), happy_mocks());
+        s.create(req("reclaim.cz")).await.expect("first create");
+        // Simulate the trash path without going through delete()'s
+        // config gate: flip the row to trashed in place.
+        let row = hostings::get_by_domain(&pool, "reclaim.cz")
+            .await
+            .expect("query")
+            .expect("row exists");
+        hostings::mark_trashed(&pool, &row.id, now_secs())
+            .await
+            .expect("mark trashed");
+        // Fresh mock covering BOTH the purge teardown of the trashed
+        // row AND a clean re-provision.
+        let mut a = MockAdapterPort::new();
+        a.expect_ensure_user().returning(|_, _| Ok(1042));
+        a.expect_ensure_dirs().returning(|_, _, _, _| Ok(()));
+        a.expect_fpm_ensure().returning(|_, _, _| Ok(()));
+        a.expect_db_create().returning(|_, _, _| Ok(db_creds()));
+        a.expect_acme_issue().returning(|d, _| Ok(cert_for(d)));
+        a.expect_nginx_write_vhost().returning(|_| Ok(()));
+        a.expect_redis_is_available().returning(|| true);
+        // Purge teardown:
+        a.expect_nginx_delete_vhost().returning(|_, _| Ok(()));
+        a.expect_acme_delete().returning(|_| Ok(()));
+        a.expect_db_drop().returning(|_, _, _| Ok(()));
+        a.expect_fpm_delete().returning(|_, _| Ok(()));
+        a.expect_remove_hosting_tree().returning(|_| Ok(()));
+        a.expect_delete_user().returning(|_| Ok(()));
+        let s2 = svc(pool.clone(), a);
+        let created = s2
+            .create(req("reclaim.cz"))
+            .await
+            .expect("reclaim create ok");
+        assert!(created.db.is_some());
+        let detail = s2
+            .get(HostingSelector::Domain(
+                Domain::parse("reclaim.cz").expect("parse"),
+            ))
+            .await
+            .expect("get");
+        assert_eq!(detail.state, HostingState::Active);
+        // Exactly one row for the domain — the old trashed one is gone.
+        let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM hostings WHERE domain = ?")
+            .bind("reclaim.cz")
+            .fetch_one(&pool)
+            .await
+            .expect("count");
+        assert_eq!(count.0, 1);
     }
 
     fn suspend_mocks() -> MockAdapterPort {
