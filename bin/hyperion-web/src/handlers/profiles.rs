@@ -479,31 +479,85 @@ pub struct ApplyForm {
     pub profile_id: i64,
 }
 
+/// POST /profiles/apply — apply a profile to an EXISTING hosting.
+///
+/// Runs as a background job (kind "profile_apply") so plugin- and
+/// theme-heavy profiles get the same per-item progress card the
+/// post-create flow has. Redirects back to the hosting detail with
+/// `?wpjob=<id>` — the detail page renders the polling progress
+/// card whenever that param is present.
+///
+/// Also fixes a multi-node bug: the previous version called the
+/// LOCAL agent socket only, so applying a profile to a worker-
+/// resident hosting failed with "no such hosting".
 pub async fn post_apply(
     State(state): State<SharedState>,
+    ctx: AuthCtx,
     Form(form): Form<ApplyForm>,
 ) -> Result<Response, AppError> {
     let sel = super::hostings::parse_selector_public(&form.selector)?;
     let sel_url = urlencoding(&form.selector);
-    let resp = hyperion_rpc_client::call(
-        &state.agent_socket,
-        Request::ProfileApply {
-            sel,
-            profile_id: form.profile_id,
+    // Resolve the owning node — the job's RPCs must land there.
+    let (detail, owner_node) =
+        match super::hostings::find_hosting_anywhere(&state, sel).await {
+            Ok(v) => v,
+            Err(e) => {
+                return Ok(Redirect::to(&format!(
+                    "/hostings/{}?profile_error={}",
+                    sel_url,
+                    urlencoding(&e.to_string())
+                ))
+                .into_response());
+            }
+        };
+    let actor_label = ctx.username.clone();
+    let actor_uid = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
+    let payload = serde_json::json!({
+        "hosting_id": detail.id.as_str(),
+        "domain": detail.domain,
+        "profile_id": form.profile_id,
+    });
+    let job_state = state.clone();
+    let job_target = owner_node.clone();
+    let job_hosting_id = detail.id.clone();
+    let job_profile_id = form.profile_id;
+    let job_id = crate::handlers::jobs::spawn_job(
+        state.clone(),
+        "profile_apply",
+        Some(&detail.domain),
+        &payload.to_string(),
+        &actor_label,
+        actor_uid,
+        move |reporter| async move {
+            match super::hostings::run_profile_apply_phase(
+                &reporter,
+                &job_state,
+                job_target.as_deref(),
+                &job_hosting_id,
+                job_profile_id,
+                5,
+                90,
+            )
+            .await
+            {
+                Ok(()) => {
+                    reporter
+                        .step("Done", 100, "Profile fully applied.\n")
+                        .await;
+                    reporter.finish(true, None).await;
+                }
+                Err(msg) => {
+                    reporter.finish(false, Some(msg)).await;
+                }
+            }
         },
     )
     .await?;
-    match resp {
-        RpcResponse::ProfileApply(_) => {
-            Ok(Redirect::to(&format!("/hostings/{}?profile=applied", sel_url)).into_response())
-        }
-        RpcResponse::Error(e) => {
-            let msg = urlencoding(&e.to_string());
-            Ok(Redirect::to(&format!("/hostings/{}?profile_error={}", sel_url, msg))
-                .into_response())
-        }
-        _ => Err(AppError::Internal("unexpected response".into())),
-    }
+    Ok(Redirect::to(&format!(
+        "/hostings/{}?wpjob={}#wordpress",
+        sel_url, job_id
+    ))
+    .into_response())
 }
 
 fn parse_opt_i64(s: &str) -> Option<i64> {

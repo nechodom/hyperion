@@ -247,6 +247,7 @@ async fn start_agent() -> (PathBuf, tempfile::TempDir) {
         cert_issue_locks: Arc::new(tokio::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
+        panel_progress: Arc::new(tokio::sync::RwLock::new(None)),
         master_rpc_signer: None,
         node_state_file: None,
         node_update: Arc::new(tokio::sync::Mutex::new(
@@ -301,6 +302,9 @@ fn build_app_with_signer(
         // unset so any handler that wires it in later gets a clean
         // "remote disabled" error rather than a stub signature.
         master_rpc_signer: None,
+        // Empty hostname ⇒ the enforce_panel_hostname middleware is
+        // a no-op, so tests reach handlers regardless of Host header.
+        panel_hostname: Arc::new(tokio::sync::RwLock::new(String::new())),
     });
     (hyperion_web::build_router(state), signer)
 }

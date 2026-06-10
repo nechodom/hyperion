@@ -5598,6 +5598,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         &self,
         sel: HostingSelector,
         profile_id: i64,
+        skip_wp_items: bool,
     ) -> Result<ProfileApply, RpcError> {
         let detail = self.get(sel).await?;
         let p = self.profile_get(profile_id).await?;
@@ -5657,7 +5658,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // entry but doesn't roll back the limits/expiry/price
         // change above. The operator can see what went wrong on
         // the per-hosting WordPress tab.
-        if !p.wp_plugins.trim().is_empty() || !p.wp_themes.trim().is_empty() {
+        //
+        // `skip_wp_items` — the caller (the web layer's WP-install
+        // job) installs items one-by-one via ProfileWpItemInstall so
+        // it can show per-plugin progress; running them here too
+        // would double-install.
+        if !skip_wp_items && (!p.wp_plugins.trim().is_empty() || !p.wp_themes.trim().is_empty()) {
             let wp_outcome = self
                 .apply_profile_wp_items(&detail, &p.wp_plugins, &p.wp_themes)
                 .await;
@@ -5725,51 +5731,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 if line.is_empty() || line.starts_with('#') {
                     continue;
                 }
-                let (item, activate) = if let Some(stripped) = line.strip_suffix('!') {
-                    (stripped.trim(), true)
-                } else {
-                    (line, false)
-                };
-                // Resolve @asset:<id> → on-disk path.
-                let source = if let Some(rest) = item.strip_prefix("@asset:") {
-                    let id: i64 = rest.trim().parse().map_err(|_| RpcError::Validation {
-                        message: format!("profile {kind} line `{line}` has bad asset id"),
-                    })?;
-                    let row = hyperion_state::wp_assets::get_by_id(&self.pool, id)
-                        .await
-                        .map_err(|e| RpcError::Internal_with(format!("wp_asset lookup: {e}")))?
-                        .ok_or_else(|| RpcError::NotFound {
-                            kind: "wp_asset".into(),
-                            id: id.to_string(),
-                        })?;
-                    if row.kind != kind {
-                        return Err(RpcError::Validation {
-                            message: format!(
-                                "profile {kind} line `{line}` references asset id {id} which is a {} (mismatch)",
-                                row.kind
-                            ),
-                        });
-                    }
-                    wp_asset_disk_path(id, &row.stored_filename)
-                } else {
-                    item.to_string()
-                };
-                let res = self
-                    .adapters
-                    .wp_cli(
-                        &detail.system_user,
-                        &format!("/home/{}/{}/htdocs", detail.system_user, detail.domain),
-                        kind,
-                        &source,
-                        activate,
-                    )
-                    .await;
-                match res {
-                    Ok(()) => ok += 1,
+                match self.install_profile_wp_line(detail, kind, line).await {
+                    Ok(_) => ok += 1,
                     Err(e) => {
                         tracing::warn!(
                             kind = kind,
-                            item = %item,
+                            line = %line,
                             error = %e,
                             "profile wp_item install failed"
                         );
@@ -5779,6 +5746,108 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
         }
         Ok((ok, fail))
+    }
+
+    /// Install ONE profile wp_plugins / wp_themes line. Shared by
+    /// the bulk `apply_profile_wp_items` walk above and the
+    /// `ProfileWpItemInstall` RPC (which the web layer's WP-install
+    /// job calls once per item to get per-plugin progress).
+    ///
+    /// Returns `(human_label, activated)` — the asset's
+    /// original_name for `@asset:` lines, the slug otherwise.
+    async fn install_profile_wp_line(
+        &self,
+        detail: &hyperion_types::HostingDetail,
+        kind: &str,
+        line: &str,
+    ) -> Result<(String, bool), RpcError> {
+        let line = line.trim();
+        // Strip an inline `# comment` so picker-generated lines like
+        // `@asset:7    # client plugin` parse cleanly.
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.is_empty() {
+            return Err(RpcError::Validation {
+                message: "empty profile line".into(),
+            });
+        }
+        let (item, activate) = if let Some(stripped) = line.strip_suffix('!') {
+            (stripped.trim(), true)
+        } else {
+            (line, false)
+        };
+        // Resolve @asset:<id> → on-disk path + friendly label.
+        let (source, label) = if let Some(rest) = item.strip_prefix("@asset:") {
+            let id: i64 = rest.trim().parse().map_err(|_| RpcError::Validation {
+                message: format!("profile {kind} line `{line}` has bad asset id"),
+            })?;
+            let row = hyperion_state::wp_assets::get_by_id(&self.pool, id)
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("wp_asset lookup: {e}")))?
+                .ok_or_else(|| RpcError::NotFound {
+                    kind: "wp_asset".into(),
+                    id: id.to_string(),
+                })?;
+            if row.kind != kind {
+                return Err(RpcError::Validation {
+                    message: format!(
+                        "profile {kind} line `{line}` references asset id {id} which is a {} (mismatch)",
+                        row.kind
+                    ),
+                });
+            }
+            (
+                wp_asset_disk_path(id, &row.stored_filename),
+                row.original_name,
+            )
+        } else {
+            (item.to_string(), item.to_string())
+        };
+        self.adapters
+            .wp_cli(
+                &detail.system_user,
+                &format!("/home/{}/{}/htdocs", detail.system_user, detail.domain),
+                kind,
+                &source,
+                activate,
+            )
+            .await
+            .map_err(|e| RpcError::Internal_with(format!(
+                "wp {kind} install {label} failed: {e}"
+            )))?;
+        Ok((label, activate))
+    }
+
+    /// Public entry point for the `ProfileWpItemInstall` RPC.
+    pub async fn profile_wp_item_install(
+        &self,
+        sel: HostingSelector,
+        item_kind: &str,
+        line: &str,
+    ) -> Result<(String, bool), RpcError> {
+        if item_kind != "plugin" && item_kind != "theme" {
+            return Err(RpcError::Validation {
+                message: format!("item_kind must be plugin|theme, got {item_kind:?}"),
+            });
+        }
+        let detail = self.get(sel).await?;
+        let out = self.install_profile_wp_line(&detail, item_kind, line).await;
+        let (state_str, err_str) = match &out {
+            Ok(_) => ("ok", None),
+            Err(e) => ("failed", Some(e.to_string())),
+        };
+        self.append_audit(
+            "profile.wp_item.install",
+            Some(detail.id.as_str()),
+            &serde_json::json!({
+                "kind": item_kind,
+                "line": line,
+                "error": err_str,
+            })
+            .to_string(),
+            state_str,
+        )
+        .await;
+        out
     }
 
     pub async fn profile_get_apply(

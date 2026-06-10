@@ -871,6 +871,12 @@ fn print_pretty(resp: &Response) {
                 println!("  next billing: {ts}");
             }
         }
+        Response::ProfileWpItemInstalled { label, activated } => {
+            println!(
+                "✓ installed {label}{}",
+                if *activated { " (activated)" } else { "" }
+            );
+        }
         Response::ProfileGetApply(maybe) => match maybe {
             Some(a) => {
                 println!("profile_id: {:?}", a.profile_id);

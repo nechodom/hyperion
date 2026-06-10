@@ -17,12 +17,14 @@
    while the install runs. #}
 {% if let Some(job_id) = wp_install_job_id %}
 <div class="card" style="margin-bottom:1rem;border-left:3px solid var(--accent)">
-  <div style="display:flex;align-items:center;gap:0.6rem;margin-bottom:0.6rem">
+  <div style="display:flex;align-items:center;gap:0.6rem;margin-bottom:0.6rem;flex-wrap:wrap">
     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color:var(--accent)">
       <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
     </svg>
     <strong style="font-size:0.95rem">WordPress install + profile apply</strong>
     <span class="text-soft small">running in the background</span>
+    <span class="grow"></span>
+    <a class="btn small ghost" href="/jobs/{{ job_id }}">Full job log →</a>
   </div>
   <div id="wp-install-progress"
        hx-get="/jobs/{{ job_id }}/progress"
@@ -30,13 +32,35 @@
        hx-swap="innerHTML">
     <div class="text-soft small">Loading progress…</div>
   </div>
+  {# Appears automatically once the polled fragment lands on a
+     terminal state — the watcher script below flips it visible. #}
+  <div id="wp-install-done-row" hidden style="margin-top:0.7rem">
+    <button type="button" class="btn primary" onclick="location.href=location.pathname + '#wordpress'; location.reload()">
+      Reload page — show the WordPress tab
+    </button>
+  </div>
   <p class="text-soft small" style="margin:0.7rem 0 0;line-height:1.5">
     The credentials below are valid <strong>immediately</strong> — copy them
-    while the install runs. Watch this card for plugin / theme progress;
-    refresh once it lands on <code>done</code> to see the populated
-    WordPress tab.
+    while the install runs. Each plugin and theme gets its own ✓/✗ line
+    in the log above.
   </p>
 </div>
+<script>
+  (function () {
+    'use strict';
+    // Watch the polled fragment; when the job's pill flips to
+    // done/failed (terminal fragment renders without a spinner),
+    // reveal the reload button. htmx:afterSwap fires on every poll.
+    document.body.addEventListener('htmx:afterSwap', function (ev) {
+      if (!ev.target || ev.target.id !== 'wp-install-progress') return;
+      var terminal = ev.target.querySelector('.pill.ok, .pill.err');
+      if (terminal) {
+        var row = document.getElementById('wp-install-done-row');
+        if (row) row.hidden = false;
+      }
+    });
+  })();
+</script>
 {% endif %}
 
 {% if let Some(c) = just_created %}

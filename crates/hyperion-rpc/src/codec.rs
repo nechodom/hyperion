@@ -873,8 +873,34 @@ pub enum Request {
     ProfileCreate(ProfileInput),
     ProfileUpdate { id: i64, input: ProfileInput },
     ProfileDelete { id: i64 },
-    ProfileApply { sel: HostingSelector, profile_id: i64 },
+    ProfileApply {
+        sel: HostingSelector,
+        profile_id: i64,
+        /// When true, apply limits + expiry + pricing but SKIP the
+        /// profile's wp_plugins / wp_themes installs. The caller is
+        /// doing item-by-item installs itself (via
+        /// `ProfileWpItemInstall`) so it can report per-plugin
+        /// progress. `#[serde(default)]` keeps old callers (and
+        /// old masters talking to new agents) on the original
+        /// everything-in-one behaviour.
+        #[serde(default)]
+        skip_wp_items: bool,
+    },
     ProfileGetApply { sel: HostingSelector },
+    /// Install ONE line of a profile's wp_plugins / wp_themes list
+    /// on a hosting. `line` uses the same syntax as the profile
+    /// fields: `slug`, `@asset:<id>`, trailing `!` = activate,
+    /// `#` comments are rejected (callers filter those). The agent
+    /// resolves `@asset:` to the on-disk ZIP and shells to wp-cli.
+    /// Exists so the post-create WP install job can report
+    /// per-item progress instead of one opaque "applying profile"
+    /// step.
+    ProfileWpItemInstall {
+        sel: HostingSelector,
+        /// "plugin" | "theme" — picks the wp-cli subcommand.
+        item_kind: String,
+        line: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1171,6 +1197,11 @@ pub enum Response {
     ProfileDelete,
     ProfileApply(ProfileApply),
     ProfileGetApply(Option<ProfileApply>),
+    /// Ack for ProfileWpItemInstall. `label` is the human-readable
+    /// name of what got installed (asset original_name for
+    /// `@asset:` lines, the slug otherwise); `activated` echoes
+    /// whether the trailing-`!` activate ran.
+    ProfileWpItemInstalled { label: String, activated: bool },
     Error(RpcError),
 }
 

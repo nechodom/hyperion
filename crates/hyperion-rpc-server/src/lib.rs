@@ -1013,8 +1013,8 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(_) => Response::ProfileDelete,
             Err(e) => Response::Error(e),
         },
-        Request::ProfileApply { sel, profile_id } => {
-            match api.profile_apply(sel, profile_id).await {
+        Request::ProfileApply { sel, profile_id, skip_wp_items } => {
+            match api.profile_apply(sel, profile_id, skip_wp_items).await {
                 Ok(v) => Response::ProfileApply(v),
                 Err(e) => Response::Error(e),
             }
@@ -1023,6 +1023,12 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::ProfileGetApply(v),
             Err(e) => Response::Error(e),
         },
+        Request::ProfileWpItemInstall { sel, item_kind, line } => {
+            match api.profile_wp_item_install(sel, item_kind, line).await {
+                Ok((label, activated)) => Response::ProfileWpItemInstalled { label, activated },
+                Err(e) => Response::Error(e),
+            }
+        }
     }
 }
 
@@ -1951,6 +1957,7 @@ mod tests {
             &self,
             _: HostingSelector,
             _: i64,
+            _: bool,
         ) -> Result<ProfileApply, RpcError> {
             Err(RpcError::Internal)
         }
@@ -1959,6 +1966,14 @@ mod tests {
             _: HostingSelector,
         ) -> Result<Option<ProfileApply>, RpcError> {
             Ok(None)
+        }
+        async fn profile_wp_item_install(
+            &self,
+            _: HostingSelector,
+            _: String,
+            _: String,
+        ) -> Result<(String, bool), RpcError> {
+            Ok(("test".into(), false))
         }
     }
 

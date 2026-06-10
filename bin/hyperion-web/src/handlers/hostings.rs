@@ -989,6 +989,7 @@ pub async fn post_create(
                     Request::ProfileApply {
                         sel: HostingSelector::Id(created.id.clone()),
                         profile_id: form.profile_id,
+                        skip_wp_items: false,
                     },
                 )
                 .await;
@@ -1533,7 +1534,7 @@ pub async fn get_detail(
             }
         }),
         just_created: None,
-        wp_install_job_id: None,
+        wp_install_job_id: q.wpjob.filter(|s| !s.trim().is_empty()),
         is_super_admin: ctx.is_super_admin(),
         access_grants: access_grants_for_detail,
         users_for_access: users_for_access_for_detail,
@@ -1622,6 +1623,12 @@ pub struct DetailQuery {
     /// Set to "installed" via the redirect after a successful WP install.
     #[serde(default)]
     pub wp: Option<String>,
+    /// Job id of a running WP-install / profile-apply job — when
+    /// present the detail page renders the live polling progress
+    /// card. Set by the /profiles/apply redirect (and usable by
+    /// any future flow that wants the same card).
+    #[serde(default)]
+    pub wpjob: Option<String>,
     /// Surface WP install failures back into the detail page.
     #[serde(default)]
     pub wp_error: Option<String>,
@@ -4870,52 +4877,19 @@ async fn run_wp_install_job(
     // on a hosting that actually has wp-cli working. Profile may be
     // 0 ("no profile picked") in which case we skip.
     if profile_id > 0 {
-        reporter
-            .step(
-                "Applying profile (plugins + themes + limits)",
-                75,
-                "Running profile_apply — wp-cli plugin install + theme install for each entry…\n",
-            )
-            .await;
-        let apply = crate::dispatcher::dispatch_to_node(
+        if let Err(msg) = run_profile_apply_phase(
+            &reporter,
             &state,
             target,
-            Request::ProfileApply {
-                sel: HostingSelector::Id(hosting_id.clone()),
-                profile_id,
-            },
+            &hosting_id,
+            profile_id,
+            70,
+            25,
         )
-        .await;
-        match apply {
-            Ok(RpcResponse::ProfileApply(_)) => {
-                reporter
-                    .step("Profile applied", 95, "All plugins + themes installed.\n")
-                    .await;
-            }
-            Ok(RpcResponse::Error(e)) => {
-                reporter
-                    .finish(
-                        false,
-                        Some(format!(
-                            "WordPress is installed but profile apply failed: {e}. Re-run from the Profile tab on /hostings/{}.",
-                            hosting_id.as_str()
-                        )),
-                    )
-                    .await;
-                return;
-            }
-            Ok(_) => {}
-            Err(e) => {
-                reporter
-                    .finish(
-                        false,
-                        Some(format!(
-                            "WordPress installed but profile apply RPC failed: {e}. Re-run from the Profile tab."
-                        )),
-                    )
-                    .await;
-                return;
-            }
+        .await
+        {
+            reporter.finish(false, Some(msg)).await;
+            return;
         }
     }
 
@@ -4927,6 +4901,184 @@ async fn run_wp_install_job(
         )
         .await;
     reporter.finish(true, None).await;
+}
+
+/// The profile-apply phase shared by the post-create WP-install job
+/// and the standalone "apply profile to existing hosting" job:
+///
+///   1. `ProfileApply { skip_wp_items: true }` on the owning node —
+///      limits, expiry policy, pricing snapshot.
+///   2. `ProfileGet` on the master to enumerate the profile's
+///      plugin + theme lines.
+///   3. One `ProfileWpItemInstall` per line, with a progress step +
+///      a ✓/✗ log line each. Per-item failures don't abort the
+///      remaining items; they're collected and reported together.
+///
+/// Progress is mapped onto `pct_base..pct_base+pct_span`. Returns
+/// `Err(finish_message)` when the run should fail the job; the
+/// caller calls `reporter.finish(false, …)`.
+pub(crate) async fn run_profile_apply_phase(
+    reporter: &crate::handlers::jobs::JobReporter,
+    state: &SharedState,
+    target: Option<&str>,
+    hosting_id: &hyperion_types::HostingId,
+    profile_id: i64,
+    pct_base: i64,
+    pct_span: i64,
+) -> Result<(), String> {
+    reporter
+        .step(
+            "Applying profile limits + expiry + pricing",
+            pct_base,
+            "profile_apply — PHP limits, expiry policy, price snapshot…\n",
+        )
+        .await;
+    let apply = crate::dispatcher::dispatch_to_node(
+        state,
+        target,
+        Request::ProfileApply {
+            sel: HostingSelector::Id(hosting_id.clone()),
+            profile_id,
+            skip_wp_items: true,
+        },
+    )
+    .await;
+    match apply {
+        Ok(RpcResponse::ProfileApply(_)) => {}
+        Ok(RpcResponse::Error(e)) => {
+            return Err(format!(
+                "Profile apply failed: {e}. Re-run from the Profile tab on /hostings/{}.",
+                hosting_id.as_str()
+            ));
+        }
+        Ok(_) => {}
+        Err(e) => {
+            return Err(format!(
+                "Profile apply RPC failed (couldn't reach the agent): {e}. Re-run from the Profile tab."
+            ));
+        }
+    }
+
+    // Profiles live in the MASTER's DB — read the line lists from
+    // the local socket regardless of where the hosting lives.
+    let profile = match hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::ProfileGet { id: profile_id },
+    )
+    .await
+    {
+        Ok(RpcResponse::ProfileGet(p)) => p,
+        _ => {
+            return Err(
+                "Limits applied, but reading the profile back failed — plugins/themes were NOT installed. Re-run from the Profile tab.".to_string(),
+            );
+        }
+    };
+    let items = profile_wp_lines(&profile.wp_plugins, &profile.wp_themes);
+    let total = items.len();
+    if total == 0 {
+        reporter
+            .step(
+                "Profile applied",
+                pct_base + pct_span,
+                "Profile has no plugins or themes — limits + expiry + pricing only.\n",
+            )
+            .await;
+        return Ok(());
+    }
+
+    let mut failed: Vec<String> = Vec::new();
+    for (idx, (kind, line)) in items.iter().enumerate() {
+        let pct = pct_base + ((idx as i64) * pct_span / (total as i64));
+        reporter
+            .step(
+                &format!("Installing {kind} {}/{}: {line}", idx + 1, total),
+                pct,
+                "",
+            )
+            .await;
+        let resp = crate::dispatcher::dispatch_to_node(
+            state,
+            target,
+            Request::ProfileWpItemInstall {
+                sel: HostingSelector::Id(hosting_id.clone()),
+                item_kind: kind.to_string(),
+                line: line.clone(),
+            },
+        )
+        .await;
+        match resp {
+            Ok(RpcResponse::ProfileWpItemInstalled { label, activated }) => {
+                reporter
+                    .step(
+                        &format!("Installed {kind} {}/{}: {label}", idx + 1, total),
+                        pct,
+                        &format!(
+                            "✓ {kind} {label}{}\n",
+                            if activated { " (activated)" } else { "" }
+                        ),
+                    )
+                    .await;
+            }
+            Ok(RpcResponse::Error(e)) => {
+                failed.push(format!("{kind} `{line}`: {e}"));
+                reporter
+                    .step(
+                        &format!("Failed {kind} {}/{}: {line}", idx + 1, total),
+                        pct,
+                        &format!("✗ {kind} {line}: {e}\n"),
+                    )
+                    .await;
+            }
+            other => {
+                failed.push(format!("{kind} `{line}`: unexpected response"));
+                reporter
+                    .step(
+                        &format!("Failed {kind} {}/{}: {line}", idx + 1, total),
+                        pct,
+                        &format!("✗ {kind} {line}: unexpected RPC response {other:?}\n"),
+                    )
+                    .await;
+            }
+        }
+    }
+    if !failed.is_empty() {
+        return Err(format!(
+            "{} of {} profile item(s) installed, {} failed:\n{}\nRe-run the failed ones from the WordPress tab or the asset library.",
+            total - failed.len(),
+            total,
+            failed.len(),
+            failed.join("\n")
+        ));
+    }
+    reporter
+        .step(
+            "Profile applied",
+            pct_base + pct_span,
+            &format!("All {total} plugin/theme item(s) installed.\n"),
+        )
+        .await;
+    Ok(())
+}
+
+/// Enumerate a profile's wp_plugins + wp_themes text fields into
+/// `(kind, line)` pairs, skipping blanks and `#` comment lines.
+/// The line content (slug / @asset:N / trailing `!`) is passed
+/// verbatim to the agent — parsing semantics live in ONE place
+/// (Service::install_profile_wp_line); this is just a splitter so
+/// the job runner knows how many items to report progress for.
+fn profile_wp_lines(plugins_text: &str, themes_text: &str) -> Vec<(&'static str, String)> {
+    let mut out = Vec::new();
+    for (kind, text) in [("plugin", plugins_text), ("theme", themes_text)] {
+        for raw in text.lines() {
+            let line = raw.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            out.push((kind, line.to_string()));
+        }
+    }
+    out
 }
 
 async fn probe_agent_version(state: &SharedState, node: Option<&str>) -> String {

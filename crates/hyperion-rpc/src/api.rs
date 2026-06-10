@@ -813,17 +813,30 @@ pub trait AgentApi: Send + Sync + 'static {
         -> Result<HostingProfile, RpcError>;
     async fn profile_delete(&self, id: i64) -> Result<(), RpcError>;
     /// Apply a profile to a hosting — copies limits + expiry policy +
-    /// pricing onto the hosting and links it.
+    /// pricing onto the hosting and links it. `skip_wp_items=true`
+    /// leaves the profile's wp_plugins / wp_themes for the caller to
+    /// install item-by-item via `profile_wp_item_install` (per-plugin
+    /// progress reporting).
     async fn profile_apply(
         &self,
         sel: HostingSelector,
         profile_id: i64,
+        skip_wp_items: bool,
     ) -> Result<ProfileApply, RpcError>;
     /// Return the profile-apply row for a hosting, if any.
     async fn profile_get_apply(
         &self,
         sel: HostingSelector,
     ) -> Result<Option<ProfileApply>, RpcError>;
+    /// Install ONE profile wp_plugins / wp_themes line on a hosting.
+    /// Returns (human label, activated). See codec.rs for the line
+    /// syntax.
+    async fn profile_wp_item_install(
+        &self,
+        sel: HostingSelector,
+        item_kind: String,
+        line: String,
+    ) -> Result<(String, bool), RpcError>;
 
     /// Reset the WordPress admin password (wp user update --user_pass).
     /// Returns the new password (the caller usually shows it to the

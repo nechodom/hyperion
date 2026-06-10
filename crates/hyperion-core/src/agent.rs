@@ -1175,13 +1175,22 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         &self,
         sel: HostingSelector,
         profile_id: i64,
+        skip_wp_items: bool,
     ) -> Result<ProfileApply, RpcError> {
-        self.svc.profile_apply(sel, profile_id).await
+        self.svc.profile_apply(sel, profile_id, skip_wp_items).await
     }
     async fn profile_get_apply(
         &self,
         sel: HostingSelector,
     ) -> Result<Option<ProfileApply>, RpcError> {
         self.svc.profile_get_apply(sel).await
+    }
+    async fn profile_wp_item_install(
+        &self,
+        sel: HostingSelector,
+        item_kind: String,
+        line: String,
+    ) -> Result<(String, bool), RpcError> {
+        self.svc.profile_wp_item_install(sel, &item_kind, &line).await
     }
 }

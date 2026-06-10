@@ -244,6 +244,7 @@ async fn start_agent() -> (std::path::PathBuf, tempfile::TempDir) {
         cert_issue_locks: Arc::new(tokio::sync::Mutex::new(
             std::collections::HashMap::new(),
         )),
+        panel_progress: Arc::new(tokio::sync::RwLock::new(None)),
         master_rpc_signer: None,
         node_state_file: None,
         node_update: Arc::new(tokio::sync::Mutex::new(
