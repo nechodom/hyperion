@@ -549,6 +549,15 @@ pub struct CreateForm {
     /// themes get stamped in.
     #[serde(default)]
     pub profile_id: i64,
+    /// "on" if the operator ticked "issue a Let's Encrypt cert
+    /// right after provisioning". Runs as the first step of the
+    /// post-create background job (before WP install, so WP's
+    /// site_url is served with a trusted cert from the start).
+    /// Requires DNS to already point at the target node — the
+    /// wizard's DNS preflight tells the operator whether that's
+    /// the case.
+    #[serde(default)]
+    pub issue_cert: String,
 }
 
 pub async fn post_create(
@@ -853,8 +862,16 @@ pub async fn post_create(
                 || form.install_wp == "true"
                 || form.install_wp == "1";
             let wp_was_requested = wp_form_checked || profile_forces_wp;
+            let issue_cert_checked = form.issue_cert.eq_ignore_ascii_case("on")
+                || form.issue_cert == "true"
+                || form.issue_cert == "1";
             let mut wp_install_job_id: Option<String> = None;
             let mut wp_install_error: Option<String> = None;
+            // Resolve the WP install request (with auto-filled
+            // credentials) when WP can actually run. The infeasible
+            // combinations surface as a clear flash instead of the
+            // old silent skip.
+            let mut wp_req_opt: Option<hyperion_types::WpInstallRequest> = None;
             if wp_was_requested && req.kind != "php" {
                 wp_install_error = Some(format!(
                     "WordPress install was requested but the hosting kind is `{}` — WP needs a PHP hosting. Recreate with the PHP runtime selected.",
@@ -865,11 +882,10 @@ pub async fn post_create(
                     "WordPress install was requested but no database was provisioned. WP needs MariaDB — recreate with a database selected.".into(),
                 );
             } else if wp_was_requested {
-                // Resolve credentials, auto-filling missing/short
-                // values regardless of whether the profile forced
-                // WP. The operator picked "install WP" — we honor
-                // that intent and fill the blanks rather than
-                // silently dropping the install.
+                // Auto-fill missing/short credentials regardless of
+                // whether the profile forced WP. The operator picked
+                // "install WP" — honor that intent and fill the
+                // blanks rather than silently dropping the install.
                 let admin_user_raw = form.wp_admin_user.trim();
                 let admin_user = if admin_user_raw.is_empty() {
                     "admin".to_string()
@@ -906,7 +922,7 @@ pub async fn post_create(
                     };
                     let site_url = format!("https://{}", req.domain.as_str());
                     let no_index = target_is_test && cluster_cfg.test_wp_no_index;
-                    let wp_req = hyperion_types::WpInstallRequest {
+                    wp_req_opt = Some(hyperion_types::WpInstallRequest {
                         site_url: site_url.clone(),
                         title,
                         admin_user: admin_user.clone(),
@@ -915,68 +931,83 @@ pub async fn post_create(
                         locale,
                         version: "latest".to_string(),
                         no_index,
-                    };
+                    });
                     // Show the credentials immediately on the detail
                     // page, even though the install runs in the
                     // background — the operator must save the
                     // password NOW (it's not stored in plaintext).
                     created.wp = Some(hyperion_rpc::wire::WpCreatedInfo {
-                        admin_user: admin_user.clone(),
-                        admin_email: admin_email.clone(),
-                        admin_password: admin_password.clone(),
+                        admin_user,
+                        admin_email,
+                        admin_password,
                         admin_login_url: format!("{}/wp-login.php", site_url),
                     });
-                    // Spawn the install job. The closure runs in a
-                    // detached tokio task; the handler returns the
-                    // detail page (with creds + a polling progress
-                    // card) within milliseconds.
-                    let job_state = state.clone();
-                    let job_target = target.map(|s| s.to_string());
-                    let job_target_owned = job_target.clone();
-                    let job_hosting_id = created.id.clone();
-                    let job_profile_id = form.profile_id;
-                    let job_payload = serde_json::json!({
-                        "hosting_id": created.id.as_str(),
-                        "domain": req.domain.as_str(),
-                        "admin_user": admin_user,
-                        "site_url": site_url,
-                        "profile_id": job_profile_id,
-                    });
-                    let actor_label = ctx.username.clone();
-                    let actor_uid = ctx
-                        .session
-                        .as_ref()
-                        .map(|s| s.user_id)
-                        .unwrap_or(0);
-                    let spawn_res = crate::handlers::jobs::spawn_job(
-                        state.clone(),
-                        "wp_install",
-                        Some(req.domain.as_str()),
-                        &job_payload.to_string(),
-                        &actor_label,
-                        actor_uid,
-                        move |reporter| async move {
-                            run_wp_install_job(
-                                reporter,
-                                job_state,
-                                job_target_owned,
-                                job_hosting_id,
-                                wp_req,
-                                job_profile_id,
-                            )
-                            .await;
-                        },
-                    )
-                    .await;
-                    match spawn_res {
-                        Ok(id) => wp_install_job_id = Some(id),
-                        Err(e) => {
-                            wp_install_error = Some(format!(
-                                "Could not start the background WP install job: {e}. Run WP install manually from the WordPress tab."
-                            ));
-                        }
+                }
+            }
+            // Spawn the post-create pipeline whenever there's
+            // background work to do: LE cert and/or WP install
+            // (each optional, profile rides along with WP).
+            if wp_req_opt.is_some() || issue_cert_checked {
+                let job_state = state.clone();
+                let job_target_owned = target.map(|s| s.to_string());
+                let job_hosting_id = created.id.clone();
+                let job_profile_id = if wp_req_opt.is_some() {
+                    form.profile_id
+                } else {
+                    // Without WP, the profile (if any) is applied by
+                    // the synchronous branch below — don't double-
+                    // apply it inside the job.
+                    0
+                };
+                let job_payload = serde_json::json!({
+                    "hosting_id": created.id.as_str(),
+                    "domain": req.domain.as_str(),
+                    "issue_cert": issue_cert_checked,
+                    "install_wp": wp_req_opt.is_some(),
+                    "profile_id": job_profile_id,
+                });
+                let actor_label = ctx.username.clone();
+                let actor_uid = ctx
+                    .session
+                    .as_ref()
+                    .map(|s| s.user_id)
+                    .unwrap_or(0);
+                let job_wp_req = wp_req_opt;
+                let job_domain = req.domain.as_str().to_string();
+                let spawn_res = crate::handlers::jobs::spawn_job(
+                    state.clone(),
+                    "post_create_setup",
+                    Some(req.domain.as_str()),
+                    &job_payload.to_string(),
+                    &actor_label,
+                    actor_uid,
+                    move |reporter| async move {
+                        run_post_create_job(
+                            reporter,
+                            job_state,
+                            job_target_owned,
+                            job_hosting_id,
+                            job_domain,
+                            issue_cert_checked,
+                            job_wp_req,
+                            job_profile_id,
+                        )
+                        .await;
+                    },
+                )
+                .await;
+                match spawn_res {
+                    Ok(id) => wp_install_job_id = Some(id),
+                    Err(e) => {
+                        wp_install_error = Some(format!(
+                            "Could not start the post-create setup job: {e}. Issue the cert from the SSL tab / run WP install from the WordPress tab manually."
+                        ));
                     }
                 }
+            }
+            if wp_install_job_id.is_some() {
+                // Background job owns the profile apply — skip the
+                // synchronous fallback below.
             } else if form.profile_id > 0 {
                 // No WP install requested, but a profile WAS chosen
                 // — apply it now (likely just PHP limits / expiry,
@@ -1067,7 +1098,7 @@ pub async fn post_create(
                 wp_error: wp_install_error,
                 wp_flash: wp_install_job_id
                     .as_ref()
-                    .map(|_| "WordPress install kicked off in the background — live status above.".to_string()),
+                    .map(|_| "Post-create setup kicked off in the background — live status above.".to_string()),
                 backup_error: None,
                 backup_flash: None,
                 expiry_error: None,
@@ -4779,125 +4810,192 @@ pub async fn post_migration_move(
 /// readable jumps (Export 25% → Bundle 45% → Import 80% → Suspend
 /// 95% → Done 100%). Always calls `.finish()` exactly once — even
 /// on early bailout — so the row never gets stuck in `running`.
-#[allow(clippy::too_many_arguments)]
-/// Shared helper for migration + clone job preflight. Dispatches
-/// `AgentInfo` against `node` (None = local master) and returns
-/// the agent's version string, or "unknown" on RPC failure.
-/// Cheap (one round-trip) and read-only.
-/// Background runner for the post-create WP install + profile-apply
-/// flow. Lives behind `spawn_job("wp_install", …)` so the handler
-/// can return the hosting detail page (with credentials) within
-/// milliseconds while the agent does the slow wp-cli work.
+/// Background runner for the post-create setup pipeline. Lives
+/// behind `spawn_job("post_create_setup", …)` so the handler can
+/// return the hosting detail page (with credentials) within
+/// milliseconds while the slow work runs here. Every phase is
+/// optional and the progress bands shift accordingly:
 ///
-/// Steps it reports:
-///   2%  — Preparing
-///   10% — WordPress core download + install
-///   75% — Profile apply (plugins + themes if any)
-///   100% — Done
-async fn run_wp_install_job(
+///   5–30%  — Let's Encrypt cert (when the wizard checkbox was on)
+///   35–70% — WordPress core install (when requested + feasible)
+///   70–95% — Profile apply, plugin-by-plugin (when a profile rode
+///            along with the WP install)
+///   100%   — Done
+///
+/// A failed cert does NOT abort the WP install — the site works
+/// on the bootstrap cert; the job still finishes `failed` with the
+/// cert error in the message so the operator knows to fix DNS and
+/// re-issue from the SSL tab.
+#[allow(clippy::too_many_arguments)]
+async fn run_post_create_job(
     reporter: crate::handlers::jobs::JobReporter,
     state: SharedState,
     target_node: Option<String>,
     hosting_id: hyperion_types::HostingId,
-    wp_req: hyperion_types::WpInstallRequest,
+    domain: String,
+    issue_cert: bool,
+    wp_req: Option<hyperion_types::WpInstallRequest>,
     profile_id: i64,
 ) {
     let target = target_node.as_deref();
-    reporter
-        .step(
-            "Preparing WordPress install",
-            2,
-            "Resolving owner node + dispatch path…\n",
-        )
-        .await;
+    let mut deferred_failures: Vec<String> = Vec::new();
 
-    reporter
-        .step(
-            "Installing WordPress core",
-            10,
-            "Running wp-cli core install (download + DB seed + admin user)…\n",
-        )
-        .await;
-    let install_resp = crate::dispatcher::dispatch_to_node(
-        &state,
-        target,
-        Request::WpInstall {
-            sel: HostingSelector::Id(hosting_id.clone()),
-            req: wp_req,
-        },
-    )
-    .await;
-    match install_resp {
-        Ok(RpcResponse::WpInstall(_)) => {
-            reporter
-                .step(
-                    "WordPress installed",
-                    65,
-                    "wp-cli reported success — wp-config.php, wp-content/, admin user all in place.\n",
-                )
-                .await;
-        }
-        Ok(RpcResponse::Error(e)) => {
-            reporter
-                .finish(
-                    false,
-                    Some(format!(
-                        "WordPress install failed: {e}. The hosting itself is alive — re-run from /hostings/{}/wordpress.",
-                        hosting_id.as_str()
-                    )),
-                )
-                .await;
-            return;
-        }
-        Ok(other) => {
-            reporter
-                .finish(
-                    false,
-                    Some(format!(
-                        "WordPress install returned an unexpected RPC variant ({other:?}). Re-run from the WordPress tab."
-                    )),
-                )
-                .await;
-            return;
-        }
-        Err(e) => {
-            reporter
-                .finish(
-                    false,
-                    Some(format!(
-                        "WordPress install RPC failed (couldn't reach the agent): {e}. Re-run from the WordPress tab."
-                    )),
-                )
-                .await;
-            return;
-        }
-    }
-
-    // Profile apply runs AFTER WP install so plugins/themes land
-    // on a hosting that actually has wp-cli working. Profile may be
-    // 0 ("no profile picked") in which case we skip.
-    if profile_id > 0 {
-        if let Err(msg) = run_profile_apply_phase(
-            &reporter,
+    // ── Phase 1: Let's Encrypt cert ──────────────────────────
+    if issue_cert {
+        reporter
+            .step(
+                &format!("Issuing Let's Encrypt certificate for {domain}"),
+                5,
+                "ACME HTTP-01 — ordering cert, serving the challenge, waiting for validation…\n",
+            )
+            .await;
+        let resp = crate::dispatcher::dispatch_to_node(
             &state,
             target,
-            &hosting_id,
-            profile_id,
-            70,
-            25,
+            Request::CertIssueAcme {
+                sel: HostingSelector::Id(hosting_id.clone()),
+                req: hyperion_types::CertIssueRequest {
+                    staging: false,
+                    // DNS readiness was already shown in the wizard's
+                    // preflight; let the agent's own check gate the
+                    // issuance so we fail fast (with a clear message)
+                    // instead of burning a Let's Encrypt attempt.
+                    require_dns_match: true,
+                    extra_sans: vec![],
+                },
+            },
         )
-        .await
-        {
-            reporter.finish(false, Some(msg)).await;
-            return;
+        .await;
+        match resp {
+            Ok(RpcResponse::CertIssueAcme(info)) => {
+                reporter
+                    .step(
+                        "Certificate issued",
+                        30,
+                        &format!(
+                            "✓ Let's Encrypt cert active (issuer: {}) — https://{domain} now serves a trusted cert.\n",
+                            info.issuer
+                        ),
+                    )
+                    .await;
+            }
+            Ok(RpcResponse::Error(e)) => {
+                deferred_failures.push(format!(
+                    "Certificate issuance failed: {e}. The site stays on the self-signed bootstrap cert — fix DNS if needed and re-issue from the SSL tab."
+                ));
+                reporter
+                    .step(
+                        "Certificate issuance failed — continuing",
+                        30,
+                        &format!("✗ cert: {e}\n"),
+                    )
+                    .await;
+            }
+            Ok(other) => {
+                deferred_failures.push(format!(
+                    "Certificate issuance returned an unexpected RPC variant ({other:?}). Re-issue from the SSL tab."
+                ));
+                reporter
+                    .step("Certificate issuance failed — continuing", 30, "✗ cert: unexpected response\n")
+                    .await;
+            }
+            Err(e) => {
+                deferred_failures.push(format!(
+                    "Certificate issuance RPC failed: {e}. Re-issue from the SSL tab."
+                ));
+                reporter
+                    .step(
+                        "Certificate issuance failed — continuing",
+                        30,
+                        &format!("✗ cert: {e}\n"),
+                    )
+                    .await;
+            }
         }
     }
 
+    // ── Phase 2: WordPress core ──────────────────────────────
+    if let Some(wp_req) = wp_req {
+        reporter
+            .step(
+                "Installing WordPress core",
+                35,
+                "Running wp-cli core install (download + DB seed + admin user)…\n",
+            )
+            .await;
+        let install_resp = crate::dispatcher::dispatch_to_node(
+            &state,
+            target,
+            Request::WpInstall {
+                sel: HostingSelector::Id(hosting_id.clone()),
+                req: wp_req,
+            },
+        )
+        .await;
+        match install_resp {
+            Ok(RpcResponse::WpInstall(_)) => {
+                reporter
+                    .step(
+                        "WordPress installed",
+                        65,
+                        "✓ wp-cli reported success — wp-config.php, wp-content/, admin user all in place.\n",
+                    )
+                    .await;
+            }
+            Ok(RpcResponse::Error(e)) => {
+                deferred_failures.push(format!(
+                    "WordPress install failed: {e}. The hosting itself is alive — re-run from the WordPress tab."
+                ));
+                reporter.finish(false, Some(deferred_failures.join("\n"))).await;
+                return;
+            }
+            Ok(other) => {
+                deferred_failures.push(format!(
+                    "WordPress install returned an unexpected RPC variant ({other:?}). Re-run from the WordPress tab."
+                ));
+                reporter.finish(false, Some(deferred_failures.join("\n"))).await;
+                return;
+            }
+            Err(e) => {
+                deferred_failures.push(format!(
+                    "WordPress install RPC failed (couldn't reach the agent): {e}. Re-run from the WordPress tab."
+                ));
+                reporter.finish(false, Some(deferred_failures.join("\n"))).await;
+                return;
+            }
+        }
+
+        // ── Phase 3: profile (plugins/themes ride with WP) ───
+        if profile_id > 0 {
+            if let Err(msg) = run_profile_apply_phase(
+                &reporter,
+                &state,
+                target,
+                &hosting_id,
+                profile_id,
+                70,
+                25,
+            )
+            .await
+            {
+                deferred_failures.push(msg);
+                reporter.finish(false, Some(deferred_failures.join("\n"))).await;
+                return;
+            }
+        }
+    }
+
+    if !deferred_failures.is_empty() {
+        reporter
+            .finish(false, Some(deferred_failures.join("\n")))
+            .await;
+        return;
+    }
     reporter
         .step(
             "Done",
             100,
-            "WordPress + profile (if any) finished — refresh the hosting detail page to see the new WP tab.\n",
+            "Post-create setup finished — refresh the hosting detail page to see the result.\n",
         )
         .await;
     reporter.finish(true, None).await;

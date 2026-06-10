@@ -309,6 +309,26 @@
             hx-vals='{"_csrf": "{{ csrf_token }}"}'></span>
     </div>
 
+    {# Auto-issue the real Let's Encrypt cert right after the hosting
+       is provisioned. Runs as the FIRST phase of the post-create
+       background job (before the optional WP install, so WordPress
+       starts life behind a trusted cert). Off by default — issuance
+       only succeeds when DNS already points at the target node, and
+       operators routinely create hostings ahead of the DNS swap. #}
+    <div class="field" style="margin-top:0.5rem">
+      <label class="field-checkbox" style="font-weight:600">
+        <input type="checkbox" name="issue_cert" value="on">
+        Issue a Let's Encrypt certificate right after provisioning
+      </label>
+      <p class="text-soft small" style="margin:0.4rem 0 0;line-height:1.5">
+        Only tick this when the DNS preflight above shows a match —
+        Let's Encrypt validates over HTTP, so the domain must already
+        resolve to the target node. Until a real cert lands, the site
+        serves a self-signed bootstrap cert (you can issue later from
+        the hosting's SSL tab). Progress shows live on the next page.
+      </p>
+    </div>
+
     <div class="card-section">
       <h2 style="margin-bottom:1rem">
         <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
