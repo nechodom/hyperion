@@ -39,8 +39,15 @@
     </div>
   {% endif %}
 
+  {# Always `open`: this fragment is re-swapped every 2s while the job
+     runs, and a conditionally-open <details> snapped shut on every
+     poll (operators couldn't keep the log expanded). The log pane
+     auto-tails to the bottom after each swap via the htmx:afterSwap
+     hook in base.html — but only when the operator was already at the
+     bottom, so scrolling up to read older lines isn't yanked away.
+     `is_running` kept referenced for the no-op below to stay explicit. #}
   {% if !job.log_tail.is_empty() %}
-    <details style="margin-top:0.9rem" {% if !is_running %}open{% endif %}>
+    <details style="margin-top:0.9rem" open data-running="{{ is_running }}">
       <summary class="text-soft small">Log tail ({{ job.log_tail.len() }} bytes)</summary>
       <pre class="log-tail" style="margin-top:0.4rem;max-height:30rem;overflow:auto">{{ job.log_tail }}</pre>
     </details>

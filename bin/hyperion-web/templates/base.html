@@ -213,6 +213,43 @@ window.addEventListener('unhandledrejection', function (ev) {
 });
 
 // ============================================================
+//  Live-log auto-tail. Progress fragments (.log-tail inside a
+//  job/install card) are re-swapped by HTMX every 2s. A fresh
+//  swap renders the <pre> scrolled to the TOP, so the newest
+//  lines — which is exactly what someone watching an install
+//  wants — scrolled out of view on every poll. Keep the pane
+//  pinned to the bottom across swaps, BUT only when the operator
+//  was already at the bottom: if they scrolled up to read an
+//  earlier line, don't yank them back down.
+// ============================================================
+(function () {
+  const NEAR = 40; // px from the bottom still counts as "tailing"
+  const atBottom = new WeakMap();
+  function isNearBottom(el) {
+    return (el.scrollHeight - el.scrollTop - el.clientHeight) <= NEAR;
+  }
+  // Before HTMX rips out the old fragment, remember whether each
+  // visible log was tailing. Keyed by the card so it survives the
+  // element being replaced (we re-query by selector after swap).
+  document.body.addEventListener('htmx:beforeSwap', function (ev) {
+    const tgt = ev.target;
+    if (!tgt || !tgt.querySelectorAll) return;
+    const el = tgt.querySelector('.log-tail');
+    atBottom.set(tgt, el ? isNearBottom(el) : true);
+  });
+  document.body.addEventListener('htmx:afterSwap', function (ev) {
+    const tgt = ev.target;
+    if (!tgt || !tgt.querySelectorAll) return;
+    // Default to "stick to bottom" the first time we see a card
+    // (no prior record ⇒ initial load ⇒ show newest lines).
+    const stick = atBottom.has(tgt) ? atBottom.get(tgt) : true;
+    if (!stick) return;
+    const el = tgt.querySelector('.log-tail');
+    if (el) el.scrollTop = el.scrollHeight;
+  });
+})();
+
+// ============================================================
 //  Password generator — existing feature, untouched.
 //  Generates a strong password into [data-genpw="<input-id>"].
 // ============================================================
