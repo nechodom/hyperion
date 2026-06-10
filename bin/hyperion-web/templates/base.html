@@ -16,6 +16,12 @@
     <a class="brand" href="/">
       <span class="accent">HY</span><span class="sep">·</span>PERION
     </a>
+    {# Scroll region: the brand stays pinned on top and the user-pill
+       footer stays pinned at the bottom, but the nav links between
+       them scroll when there are more items than the viewport is
+       tall (super_admin sees 16). Without this, items like Trash
+       overflowed below the fold with no way to reach them. #}
+    <div class="sidebar-nav">
     <nav class="nav-section">
       <span class="nav-label">Overview</span>
       <a class="nav-link {% if active == "dashboard" %}active{% endif %}" href="/"
@@ -109,6 +115,7 @@
         Settings
       </a>
     </nav>
+    </div>
     <div class="sidebar-footer">
       <div class="user-pill">
         <div class="user-avatar">

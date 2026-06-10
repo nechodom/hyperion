@@ -211,6 +211,27 @@ pre code {
   color: var(--text);
 }
 
+/* Scroll region between the pinned brand and the pinned user-pill
+   footer. flex:1 + min-height:0 lets it shrink below its content
+   height so overflow-y:auto actually engages — without min-height:0
+   a flex child refuses to shrink past its content and the overflow
+   spills past 100dvh with no scrollbar (the bug that buried Trash
+   and everything below it on short viewports). */
+.sidebar-nav {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* Slim, unobtrusive scrollbar — only noticeable when it's needed. */
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+.sidebar-nav::-webkit-scrollbar { width: 8px; }
+.sidebar-nav::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border-radius: 4px;
+}
+
 .sidebar .nav-section {
   padding: 0.75rem 0.75rem 0;
   display: flex;
@@ -361,6 +382,13 @@ pre code {
     gap: 0.5rem;
     border-right: 0;
     border-bottom: 1px solid var(--border);
+  }
+  /* Dissolve the desktop scroll wrapper so the two nav-sections
+     flow directly in the horizontal top-bar exactly as before —
+     the vertical-overflow fix only matters on the tall desktop
+     sidebar. */
+  .sidebar-nav {
+    display: contents;
   }
   .sidebar .brand { padding: 0; }
   .sidebar .nav-section {
