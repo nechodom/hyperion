@@ -738,13 +738,15 @@ async fn ensure_symlink(target: &Path, link: &Path) -> Result<(), AdapterError> 
 mod tests {
     use super::*;
 
-    /// Regression: nginx ≥ 1.25 deprecated `listen 443 ssl http2;`
-    /// in favour of separate `http2 on;` directive. Every rendered
-    /// vhost variant must use the new form so `nginx -t` doesn't
-    /// emit a stderr warning on every reload (operators read those
-    /// warnings as errors).
+    /// Regression: the standalone `http2 on;` directive only exists
+    /// in nginx ≥ 1.25.1. Debian 12 ships nginx 1.22, where it
+    /// breaks EVERY reload with `unknown directive "http2"` — the
+    /// panel-provision bug Kevin hit in production. Rendered vhosts
+    /// must use the `listen ... ssl http2;` parameter form, which
+    /// works on every nginx ≥ 1.9.5 (it logs a deprecation NOTE on
+    /// 1.25+, which is cosmetic; a hard error on 1.22 is not).
     #[test]
-    fn rendered_vhosts_use_modern_http2_directive() {
+    fn rendered_vhosts_use_debian12_compatible_http2() {
         let aliases: Vec<String> = vec![];
         let opts = hyperion_types::VhostOptions::default();
         let out = render(&VhostInput {
@@ -762,12 +764,12 @@ mod tests {
         })
         .expect("render");
         assert!(
-            !out.contains("ssl http2;"),
-            "vhost still uses the deprecated `listen ... ssl http2;` directive: \n{out}"
+            out.contains("ssl http2;"),
+            "vhost is missing the `listen ... ssl http2;` parameter form: \n{out}"
         );
         assert!(
-            out.contains("http2 on;"),
-            "vhost is missing the modern `http2 on;` directive: \n{out}"
+            !out.contains("\n    http2 on;"),
+            "vhost uses the standalone `http2 on;` directive — that's nginx 1.25.1+ only and breaks Debian 12: \n{out}"
         );
     }
 

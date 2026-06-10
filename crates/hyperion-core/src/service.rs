@@ -3340,7 +3340,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let updated = hyperion_state::scheduler::get_expiry(&self.pool, &detail.id)
             .await
             .map_err(|e| RpcError::Internal_with(format!("get_expiry: {e}")))?
-            .ok_or(RpcError::Internal)?;
+            .ok_or(RpcError::Internal { message: "row vanished after write (concurrent delete?)".into() })?;
         Ok(expiry_row_to_dto(updated))
     }
 
@@ -3798,7 +3798,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let rows = hyperion_state::backups::list_for(&self.pool, &detail.id, 1)
             .await
             .map_err(|e| RpcError::Internal_with(format!("list_for: {e}")))?;
-        let r = rows.into_iter().next().ok_or(RpcError::Internal)?;
+        let r = rows.into_iter().next().ok_or(RpcError::Internal { message: "row vanished after write (concurrent delete?)".into() })?;
         Ok(run_to_wire(r))
     }
 
@@ -5541,7 +5541,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let row = profiles::get(&self.pool, id)
             .await
             .map_err(|e| RpcError::Internal_with(format!("profile re-read: {e}")))?
-            .ok_or(RpcError::Internal)?;
+            .ok_or(RpcError::Internal { message: "row vanished after write (concurrent delete?)".into() })?;
         self.append_audit(
             "profile.create",
             None,
@@ -12809,7 +12809,12 @@ trait InternalWith {
 impl InternalWith for RpcError {
     fn internal_with(msg: String) -> Self {
         tracing::error!(error=%msg, "internal error");
-        RpcError::Internal
+        // Carry the message on the wire too — the operator-facing
+        // 502 page renders it. It used to be log-only, which made
+        // every internal failure show as a context-free "internal
+        // error" (e.g. the trash CHECK-constraint bug took a day
+        // of guessing instead of one glance).
+        RpcError::Internal { message: msg }
     }
 }
 

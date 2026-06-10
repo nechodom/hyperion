@@ -21,8 +21,21 @@ pub enum RpcError {
     },
     #[error("conflict: {message}")]
     Conflict { message: String },
-    #[error("internal error")]
-    Internal,
+    /// Unexpected server-side failure. `message` carries the
+    /// operator-actionable context ("mark trashed: CHECK constraint
+    /// failed", …) — it used to be log-only, which made every
+    /// internal failure render as a bare "internal error" in the
+    /// UI with zero hint of what broke.
+    ///
+    /// Wire-compat: internally-tagged serde + `#[serde(default)]`
+    /// means an old peer's `{"error_type":"internal"}` still
+    /// decodes (empty message), and old peers ignore the extra
+    /// field when decoding ours.
+    #[error("internal error: {message}")]
+    Internal {
+        #[serde(default)]
+        message: String,
+    },
 }
 
 impl From<hyperion_validate::ValidationError> for RpcError {
@@ -63,13 +76,28 @@ mod tests {
             RpcError::Conflict {
                 message: "c".into(),
             },
-            RpcError::Internal,
+            RpcError::Internal {
+                message: "boom".into(),
+            },
         ];
         for c in cases {
             let s = serde_json::to_string(&c).expect("serialize");
             let back: RpcError = serde_json::from_str(&s).expect("deserialize");
             assert_eq!(c, back);
         }
+    }
+
+    #[test]
+    fn legacy_bare_internal_still_decodes() {
+        // Old peers (pre message field) send the tag with no body.
+        let back: RpcError =
+            serde_json::from_str(r#"{"error_type":"internal"}"#).expect("deserialize legacy");
+        assert_eq!(
+            back,
+            RpcError::Internal {
+                message: String::new()
+            }
+        );
     }
 
     #[test]

@@ -397,7 +397,7 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     }
 
     async fn cert_issue(&self, _domain: Domain) -> Result<CertInfo, RpcError> {
-        Err(RpcError::Internal)
+        Err(RpcError::Internal { message: "not supported by this agent".into() })
     }
 
     async fn cert_renew_all(&self) -> Result<Vec<CertRenewResult>, RpcError> {

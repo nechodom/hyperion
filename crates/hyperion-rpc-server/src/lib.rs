@@ -1065,7 +1065,7 @@ mod tests {
             })
         }
         async fn hosting_create(&self, _: HostingCreateReq) -> Result<HostingCreated, RpcError> {
-            Err(RpcError::Internal)
+            Err(RpcError::Internal { message: "not supported by this agent".into() })
         }
         async fn hosting_list(&self) -> Result<Vec<HostingSummary>, RpcError> {
             Ok(vec![])
@@ -1258,7 +1258,7 @@ mod tests {
             Ok(0)
         }
         async fn backup_now(&self, _: HostingSelector) -> Result<BackupRunWire, RpcError> {
-            Err(RpcError::Internal)
+            Err(RpcError::Internal { message: "not supported by this agent".into() })
         }
         async fn backup_list(
             &self,
@@ -1268,7 +1268,7 @@ mod tests {
             Ok(vec![])
         }
         async fn invite_create(&self, _: String, _: i64) -> Result<NodeInviteMint, RpcError> {
-            Err(RpcError::Internal)
+            Err(RpcError::Internal { message: "not supported by this agent".into() })
         }
         async fn invite_list(&self) -> Result<Vec<NodeInviteSummary>, RpcError> {
             Ok(vec![])
@@ -1277,7 +1277,7 @@ mod tests {
             Ok(())
         }
         async fn cert_issue(&self, _: Domain) -> Result<CertInfo, RpcError> {
-            Err(RpcError::Internal)
+            Err(RpcError::Internal { message: "not supported by this agent".into() })
         }
         async fn cert_renew_all(&self) -> Result<Vec<CertRenewResult>, RpcError> {
             Ok(vec![])
@@ -1287,7 +1287,7 @@ mod tests {
             _: HostingSelector,
             _: WpInstallRequest,
         ) -> Result<WpInstallStatus, RpcError> {
-            Err(RpcError::Internal)
+            Err(RpcError::Internal { message: "not supported by this agent".into() })
         }
         async fn wp_status(
             &self,
@@ -1296,29 +1296,29 @@ mod tests {
             Ok(None)
         }
         async fn dns_check(&self, _: Domain) -> Result<DnsCheckResult, RpcError> {
-            Err(RpcError::Internal)
+            Err(RpcError::Internal { message: "not supported by this agent".into() })
         }
         async fn dns_spf_check(
             &self,
             _: Domain,
         ) -> Result<hyperion_types::SpfCheckResult, RpcError> {
-            Err(RpcError::Internal)
+            Err(RpcError::Internal { message: "not supported by this agent".into() })
         }
         async fn cert_issue_acme(
             &self,
             _: HostingSelector,
             _: CertIssueRequest,
         ) -> Result<CertInfo, RpcError> {
-            Err(RpcError::Internal)
+            Err(RpcError::Internal { message: "not supported by this agent".into() })
         }
         async fn hosting_stats(&self, _: HostingSelector) -> Result<HostingStats, RpcError> {
-            Err(RpcError::Internal)
+            Err(RpcError::Internal { message: "not supported by this agent".into() })
         }
         async fn node_stats(&self) -> Result<NodeStats, RpcError> {
-            Err(RpcError::Internal)
+            Err(RpcError::Internal { message: "not supported by this agent".into() })
         }
         async fn cluster_stats(&self) -> Result<ClusterStats, RpcError> {
-            Err(RpcError::Internal)
+            Err(RpcError::Internal { message: "not supported by this agent".into() })
         }
         async fn node_metrics_history(
             &self,
@@ -1938,17 +1938,17 @@ mod tests {
             Ok(vec![])
         }
         async fn profile_get(&self, _: i64) -> Result<HostingProfile, RpcError> {
-            Err(RpcError::Internal)
+            Err(RpcError::Internal { message: "not supported by this agent".into() })
         }
         async fn profile_create(&self, _: ProfileInput) -> Result<HostingProfile, RpcError> {
-            Err(RpcError::Internal)
+            Err(RpcError::Internal { message: "not supported by this agent".into() })
         }
         async fn profile_update(
             &self,
             _: i64,
             _: ProfileInput,
         ) -> Result<HostingProfile, RpcError> {
-            Err(RpcError::Internal)
+            Err(RpcError::Internal { message: "not supported by this agent".into() })
         }
         async fn profile_delete(&self, _: i64) -> Result<(), RpcError> {
             Ok(())
@@ -1959,7 +1959,7 @@ mod tests {
             _: i64,
             _: bool,
         ) -> Result<ProfileApply, RpcError> {
-            Err(RpcError::Internal)
+            Err(RpcError::Internal { message: "not supported by this agent".into() })
         }
         async fn profile_get_apply(
             &self,
