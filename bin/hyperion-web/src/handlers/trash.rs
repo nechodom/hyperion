@@ -63,9 +63,17 @@ pub async fn get_trash(
     {
         let mut rows = rows;
         for r in &mut rows {
-            if r.node_id.is_empty() {
-                r.node_id = crate::dispatcher::LOCAL_NODE_SENTINEL.to_string();
-            }
+            // These came back over the master's LOCAL socket, so they
+            // are local regardless of what node_id the row stored:
+            // pre-migration rows leave it empty, but newer rows stamp
+            // the master's own hostname (e.g. "s4"). If we kept "s4"
+            // the restore/purge form would dispatch to an enrolled
+            // node named "s4" — which doesn't exist (the master isn't
+            // enrolled to itself) — and 400 with "node s4 is not
+            // enrolled". Tag them all with the LOCAL sentinel so the
+            // action dispatches back to the master via None. Mirrors
+            // list_hostings()'s master-row handling exactly.
+            r.node_id = crate::dispatcher::LOCAL_NODE_SENTINEL.to_string();
         }
         entries.extend(rows);
     }
