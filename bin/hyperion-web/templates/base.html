@@ -934,13 +934,12 @@ function isShortcutContext(ev) {
   if (!btn || !dropdown || !list) return;
 
   function position() {
-    // Anchor below the bell, right-aligned to the viewport edge.
+    // Horizontal anchor: right-aligned to the viewport edge.
     // On narrow viewports we ignore the bell position and pin the
     // dropdown to both edges with margin — otherwise on phones
     // (where the sidebar is collapsed to a top bar and the bell
     // sits near right edge), the dropdown would render off-screen.
     const r = btn.getBoundingClientRect();
-    dropdown.style.top = (r.bottom + 8) + 'px';
     if (window.innerWidth <= 520) {
       // Full-width-ish on phones — overrides CSS that already
       // does the same at 480px, but covers the 481–520 range.
@@ -951,6 +950,26 @@ function isShortcutContext(ev) {
       dropdown.style.left = '';
       dropdown.style.width = '';
       dropdown.style.right = Math.max(8, window.innerWidth - r.right) + 'px';
+    }
+    // Vertical anchor: the bell lives in the sidebar FOOTER, so on
+    // desktop it sits near the bottom of the viewport — a downward
+    // dropdown spills off-screen and the operator sees nothing
+    // (the reported bug). Open UPWARD when there isn't enough room
+    // below and there is room above; otherwise fall back to down
+    // (e.g. the mobile top-bar layout where the bell is up high).
+    // Must run AFTER the dropdown is visible so offsetHeight is real
+    // — the caller unhides first.
+    const gap = 8;
+    const h = dropdown.offsetHeight || 0;
+    const roomBelow = window.innerHeight - r.bottom;
+    const roomAbove = r.top;
+    if (roomBelow < h + gap && roomAbove > roomBelow) {
+      // Flip up: pin the dropdown's bottom just above the bell.
+      dropdown.style.top = '';
+      dropdown.style.bottom = (window.innerHeight - r.top + gap) + 'px';
+    } else {
+      dropdown.style.bottom = '';
+      dropdown.style.top = (r.bottom + gap) + 'px';
     }
   }
 
@@ -1014,6 +1033,10 @@ function isShortcutContext(ev) {
       li.appendChild(a);
       list.appendChild(li);
     }
+    // The feed just grew from "Loading…" to its full height; if the
+    // dropdown is open, re-anchor so an upward flip stays pinned
+    // above the bell instead of overflowing once content settles.
+    if (!dropdown.hidden) position();
   }
 
   async function markRead(id) {
@@ -1049,8 +1072,10 @@ function isShortcutContext(ev) {
       dropdown.hidden = true;
       btn.setAttribute('aria-expanded', 'false');
     } else {
-      position();
+      // Unhide BEFORE position() so it can measure the real
+      // offsetHeight and decide whether to open up or down.
       dropdown.hidden = false;
+      position();
       btn.setAttribute('aria-expanded', 'true');
       refresh(true);
     }
