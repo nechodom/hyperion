@@ -217,9 +217,11 @@ pub async fn get_trash_count(
     State(state): State<SharedState>,
     ctx: AuthCtx,
 ) -> axum::response::Response {
-    // Same role gate as the page itself — viewers/customers don't
-    // see the trash link so they don't need the count either.
-    if !ctx.is_admin_or_higher() {
+    // Same role gate as the page itself (get_trash uses is_read_only):
+    // operators CAN see /trash, so they need the badge count too. The
+    // old is_admin_or_higher gate gave operators the page but a silent
+    // 0 badge.
+    if ctx.is_read_only() {
         return axum::Json(serde_json::json!({"count": 0})).into_response();
     }
     let mut total = 0usize;

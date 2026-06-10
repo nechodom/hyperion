@@ -734,7 +734,17 @@ function isShortcutContext(ev) {
         .split(',')
         .map(s => s.trim())
         .filter(Boolean);
-      if (hide.includes(role)) el.style.display = 'none';
+      // ALWAYS set display explicitly — never just SET 'none'.
+      // applyVisibility('viewer') runs first as the in-flight default,
+      // which hides anything listing 'viewer' (the Trash link:
+      // hide-roles="customer,viewer"). The later real-role pass for an
+      // admin/super_admin must then UN-hide it — but the old code only
+      // ever assigned 'none', never reset, so Trash stayed invisible
+      // for everyone even though it's in the DOM and they have access.
+      // '' (not 'block') restores the stylesheet's display value.
+      // Safe because no element carries both data-hide-roles AND
+      // data-role-min (verified), so the two loops never fight.
+      el.style.display = hide.includes(role) ? 'none' : '';
     });
     // Slim down the page header "New hosting" button etc. for
     // customers. Same opt-in pattern.
