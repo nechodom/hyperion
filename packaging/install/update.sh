@@ -435,6 +435,39 @@ until this is fixed manually (apt-get install -y $pkgs)."
   fi
 done
 
+#-------- 4a-ext. PHP extensions required by WordPress / wp-cli -----------
+# The NEEDED_PKGS loop above only fires when the -fpm unit is MISSING, so
+# a server that already has php8.3-fpm but predates the extension bundle
+# (or had it trimmed) never gets the extras. wp-cli `core download` needs
+# ZipArchive (php*-zip) and a bare WordPress needs gd/mbstring/xml/curl/
+# mysql — the symptom is a mid-install "Extracting a zip file requires
+# ZipArchive". For every PHP version whose -fpm unit IS present, ensure
+# the full extension set. apt-get install is idempotent; we only call it
+# when dpkg reports at least one missing, so a healthy box pays nothing.
+PHP_EXT_SUFFIXES=(zip gd mbstring xml curl mysql)
+for ver in 8.1 8.2 8.3 8.4; do
+  unit_installed "php${ver}-fpm.service" || continue
+  missing=0
+  want=""
+  for s in "${PHP_EXT_SUFFIXES[@]}"; do
+    want+=" php${ver}-${s}"
+    dpkg -s "php${ver}-${s}" >/dev/null 2>&1 || missing=1
+  done
+  (( missing )) || continue
+  log "PHP ${ver}: ensuring WordPress/wp-cli extensions ($want ) ..."
+  if (( APT_UPDATED == 0 )); then
+    DEBIAN_FRONTEND=noninteractive apt-get update -qq || true
+    APT_UPDATED=1
+  fi
+  if DEBIAN_FRONTEND=noninteractive apt-get install -y -qq $want; then
+    # Newly-added modules only load after the fpm worker reloads.
+    systemctl try-restart "php${ver}-fpm.service" 2>/dev/null || true
+  else
+    warn "some php${ver} extensions failed to install — WordPress installs \
+on PHP ${ver} hostings may fail (apt-get install -y$want)."
+  fi
+done
+
 #-------- 4b. MTA (so PHP mail() actually delivers) -----------------------
 # PHP's mail() execs $sendmail_path → hyperion's site-mail wrapper →
 # `/usr/sbin/sendmail`. Default Debian installs ship without any MTA,

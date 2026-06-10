@@ -935,22 +935,17 @@ async fn run_service_install(
     }
 
     // Step 1: apt-get install. Hard-cap at 10 min via timeout above
-    // (tokio::spawn'd, so we wrap with timeout here).
+    // (tokio::spawn'd, so we wrap with timeout here). `pkg` may be a
+    // whitespace-separated SET (PHP installs pull -cli + the WordPress
+    // extension bundle), so split it into individual apt args —
+    // otherwise apt-get tries to install one package literally named
+    // "php8.3-fpm php8.3-cli …" and fails.
+    let mut apt_args: Vec<&str> =
+        vec!["install", "-y", "-q", "-o", "Dpkg::Options::=--force-confold"];
+    apt_args.extend(pkg.split_whitespace());
     let install_code = tokio::time::timeout(
         std::time::Duration::from_secs(10 * 60),
-        run_one(
-            &slot,
-            "apt-install",
-            "/usr/bin/apt-get",
-            &[
-                "install",
-                "-y",
-                "-q",
-                "-o",
-                "Dpkg::Options::=--force-confold",
-                &pkg,
-            ],
-        ),
+        run_one(&slot, "apt-install", "/usr/bin/apt-get", &apt_args),
     )
     .await
     .unwrap_or_else(|_| {
@@ -10389,10 +10384,28 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             // update.sh (Internet Site, hostname-derived mailname)
             // — see `run_service_install`.
             "postfix" => Some("postfix"),
-            "php8.1-fpm" => Some("php8.1-fpm"),
-            "php8.2-fpm" => Some("php8.2-fpm"),
-            "php8.3-fpm" => Some("php8.3-fpm"),
-            "php8.4-fpm" => Some("php8.4-fpm"),
+            // PHP installs pull the FULL extension set, not just -fpm:
+            // wp-cli `core download` needs ZipArchive (php*-zip) and a
+            // bare WordPress needs gd/mbstring/xml/curl/mysql. Installing
+            // only -fpm left every fresh PHP version unable to run a WP
+            // install ("Extracting a zip file requires ZipArchive").
+            // run_service_install splits this on whitespace into apt args.
+            "php8.1-fpm" => Some(
+                "php8.1-fpm php8.1-cli php8.1-mysql php8.1-pgsql \
+                 php8.1-curl php8.1-gd php8.1-mbstring php8.1-xml php8.1-zip",
+            ),
+            "php8.2-fpm" => Some(
+                "php8.2-fpm php8.2-cli php8.2-mysql php8.2-pgsql \
+                 php8.2-curl php8.2-gd php8.2-mbstring php8.2-xml php8.2-zip",
+            ),
+            "php8.3-fpm" => Some(
+                "php8.3-fpm php8.3-cli php8.3-mysql php8.3-pgsql \
+                 php8.3-curl php8.3-gd php8.3-mbstring php8.3-xml php8.3-zip",
+            ),
+            "php8.4-fpm" => Some(
+                "php8.4-fpm php8.4-cli php8.4-mysql php8.4-pgsql \
+                 php8.4-curl php8.4-gd php8.4-mbstring php8.4-xml php8.4-zip",
+            ),
             "hyperion-web" => Some("hyperion-web"),
             "hyperion-agent" if allow_self_restart => Some("hyperion-agent"),
             _ => None,

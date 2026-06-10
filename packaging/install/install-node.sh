@@ -71,8 +71,12 @@ if [[ ! -f /etc/apt/keyrings/sury-php.gpg ]]; then
     > /etc/apt/sources.list.d/sury-php.list
   apt-get update -qq
 fi
+# Full extension set, not just -fpm/-cli: wp-cli `core download` needs
+# php8.3-zip (ZipArchive) and WordPress needs gd/mbstring/xml/curl.
+# Matches install-master.sh so a worker can host WordPress too.
 apt-get install -y -qq \
-  php8.3-fpm php8.3-cli php8.3-mysql php8.3-pgsql
+  php8.3-fpm php8.3-cli php8.3-mysql php8.3-pgsql \
+  php8.3-curl php8.3-gd php8.3-mbstring php8.3-xml php8.3-zip
 systemctl enable --now php8.3-fpm
 systemctl enable --now nginx mariadb postgresql || true
 
