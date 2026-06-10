@@ -194,6 +194,25 @@ pub async fn post_job_retry(
             )
             .await
         }
+        "profile_apply" => {
+            // Payload stored by profiles::post_apply — hosting ULID
+            // + profile id are all the spawn needs. The handler
+            // re-resolves the owning node itself, so a hosting that
+            // migrated since the original run still applies to the
+            // right box.
+            let form = crate::handlers::profiles::ApplyForm {
+                selector: payload
+                    .get("hosting_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .to_string(),
+                profile_id: payload
+                    .get("profile_id")
+                    .and_then(|v| v.as_i64())
+                    .unwrap_or_default(),
+            };
+            crate::handlers::profiles::post_apply(State(state), ctx, axum::Form(form)).await
+        }
         other => Ok(axum::response::Redirect::to(&format!(
             "/jobs/{}?flash_error=No+retry+handler+for+kind+'{}'+%E2%80%94+please+re-run+from+the+source+page",
             id, other

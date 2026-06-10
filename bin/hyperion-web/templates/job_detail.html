@@ -20,7 +20,7 @@
        and re-dispatches via spawn_job. Other kinds get a tooltip
        explaining where to re-run. #}
     {% if !is_running %}
-      {% if job.kind == "migration" || job.kind == "hosting_clone" %}
+      {% if job.kind == "migration" || job.kind == "hosting_clone" || job.kind == "profile_apply" %}
         <form method="post" action="/jobs/{{ job.id }}/retry" style="display:inline"
               data-confirm-title="Retry {{ job.kind }} for {% if let Some(t) = job.target %}{{ t }}{% else %}this job{% endif %}?"
               data-confirm-body="Hyperion will re-run the original payload from this job ({{ job.kind }}) as a fresh job. You'll be redirected to the new job's progress page."
