@@ -161,6 +161,14 @@ pub async fn install_wordpress(
         )));
     }
 
+    // Self-heal the doc-root's ancestor traversability before we drop
+    // a working site there. Hostings created before the ensure_dirs
+    // fix have a 0700 home (useradd HOME_MODE on Debian 12), which
+    // makes nginx 404 the freshly-installed site. Re-running WP install
+    // is the most common operator reaction to that 404, so fixing it
+    // here means the existing-hosting case heals itself on retry.
+    crate::fs::ensure_ancestors_traversable(std::path::Path::new(htdocs)).await;
+
     // 1. wp core download
     let locale_arg = format!("--locale={}", req.locale);
     let version_arg = format!("--version={}", req.version);

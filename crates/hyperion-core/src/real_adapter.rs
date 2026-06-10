@@ -106,9 +106,8 @@ impl AdapterPort for RealAdapter {
         // hosting user's group) can serve static files — without the
         // x-for-others bit nginx returns 403. logs + tmp stay tight
         // because only PHP-FPM (running AS the hosting user) writes to
-        // them. Also: every ancestor dir up to /home needs x-for-others
-        // so nginx can traverse — but useradd -m defaults home to 0755
-        // so that's already fine.
+        // them. The ancestor-traversal fix is below (the home dir is
+        // NOT 0755 on Debian 12 — see there).
         for (p, mode) in [(htdocs, 0o755u32), (logs, 0o750), (tmp, 0o750)] {
             hyperion_adapters::fs::ensure_dir(std::path::Path::new(p), mode).await?;
             let res = tokio::process::Command::new("/usr/bin/chown")
@@ -120,17 +119,27 @@ impl AdapterPort for RealAdapter {
                 tracing::warn!(error=%e, path=%p, "chown failed (non-fatal on non-root)");
             }
         }
-        // The hosting-root directory (parent of htdocs/logs/tmp) also
-        // needs world-x so nginx can descend into htdocs. useradd makes
-        // /home/<user> 0755 by default; we only need to tighten / fix
-        // <hosting_root> here. Best-effort: derive it as htdocs's parent.
-        if let Some(host_root) = std::path::Path::new(htdocs).parent() {
-            let _ = tokio::process::Command::new("/usr/bin/chmod")
-                .arg("0755")
-                .arg(host_root)
-                .output()
-                .await;
-        }
+        // Every ancestor dir from htdocs up to / must be traversable
+        // (o+x) so nginx — running as www-data, NOT in the hosting
+        // user's group — can descend to htdocs and stat index.php.
+        //
+        // The old code assumed `useradd -m` leaves /home/<user> at
+        // 0755 and only fixed <hosting_root>. That's WRONG on Debian
+        // 12: useradd honours HOME_MODE in /etc/login.defs, which
+        // defaults to 0700, so /home/<user> is drwx------ and nginx
+        // can't traverse it. The visible symptom is a hard nginx 404
+        // on EVERY request (the `try_files $uri =404` in the vhost's
+        // `location ~ \.php$` can't see index.php through the 0700
+        // home), which looks like "WordPress installed but the site
+        // 404s". OR-ing 0o011 adds the x bit on each ancestor WITHOUT
+        // exposing directory listings (no r) — the standard shared-
+        // hosting 0711 home, consistent with htdocs already being
+        // world-readable. Already-traversable dirs (/, /home, …) are
+        // skipped, so this only touches the per-user homes we own.
+        hyperion_adapters::fs::ensure_ancestors_traversable(
+            std::path::Path::new(htdocs),
+        )
+        .await;
 
         // Drop a placeholder index.html so a fresh site shows a friendly
         // "Hello from Hyperion" page instead of an nginx 403 (which is
@@ -1464,6 +1473,41 @@ mod tests {
 
         let body = std::fs::read_to_string(&idx).expect("read");
         assert_eq!(body, "<h1>my real site</h1>", "existing index was overwritten");
+    }
+
+    /// Regression for the "WordPress installed but the site 404s" bug:
+    /// `useradd -m` leaves /home/<user> at 0700 on Debian 12, which
+    /// nginx (www-data) can't traverse. ensure_dirs must OR the x bit
+    /// into every ancestor of htdocs so the site is reachable.
+    #[tokio::test]
+    async fn ensure_dirs_makes_0700_ancestor_traversable() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().expect("tempdir");
+        // Simulate the 0700 home: <root>/home_user, with the hosting
+        // tree under it.
+        let home = root.path().join("home_user");
+        let htdocs = home.join("site.cz").join("htdocs");
+        std::fs::create_dir_all(&htdocs).unwrap();
+        std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+        // Precondition: not world-traversable.
+        let m0 = std::fs::metadata(&home).unwrap().permissions().mode() & 0o777;
+        assert_eq!(m0 & 0o001, 0, "precondition: 0700 home has no world-x");
+
+        let a = RealAdapter::default();
+        a.ensure_dirs(
+            htdocs.to_str().unwrap(),
+            home.join("site.cz").join("logs").to_str().unwrap(),
+            home.join("site.cz").join("tmp").to_str().unwrap(),
+            nix_uid(),
+        )
+        .await
+        .expect("ensure_dirs");
+
+        // The 0700 home must now be world-traversable (x), but NOT
+        // world-readable (no listings).
+        let m = std::fs::metadata(&home).unwrap().permissions().mode() & 0o777;
+        assert_ne!(m & 0o001, 0, "home must gain world-x, got {:o}", m);
+        assert_eq!(m & 0o004, 0, "home must NOT gain world-r, got {:o}", m);
     }
 
     /// Current process UID — we use it for ensure_dirs so chown becomes
