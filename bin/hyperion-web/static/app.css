@@ -283,6 +283,26 @@ pre code {
   stroke-width: 1.75;
 }
 
+/* Sidebar count badges (Trash, Background jobs). The shared
+   .tab-badge rules only match inside .tab (the detail-page tabs), so
+   these had NO box styling — just an inline background colour — and
+   rendered as a cramped orange sliver flush against the link edge.
+   Give them a proper pill: right-aligned with breathing room, padded,
+   centred, min-width for a single digit. Colour stays inline
+   (warn for Trash, accent for Jobs). */
+.sidebar .nav-link .tab-badge {
+  margin-left: auto;
+  flex-shrink: 0;
+  min-width: 1.1rem;
+  padding: 0.1rem 0.4rem;
+  border-radius: var(--radius-pill);
+  font-size: 0.68rem;
+  font-weight: 700;
+  line-height: 1;
+  text-align: center;
+  color: #fff;
+}
+
 .sidebar-footer {
   margin-top: auto;
   padding: 0.75rem;
