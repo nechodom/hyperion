@@ -5317,17 +5317,23 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         domain: hyperion_validate::Domain,
     ) -> Result<hyperion_types::SpfCheckResult, RpcError> {
         let d = domain.as_str().to_string();
+        // TXT lookup + public-IP probe are independent — join them
+        // so the worst case is one slow probe, not the sum.
+        let (txts_raw, our_ipv4) = tokio::join!(
+            dig_records(&d, "TXT"),
+            fetch_public_ip("https://api.ipify.org"),
+        );
+        let txts_raw = txts_raw.unwrap_or_default();
         // dig may return one TXT split across multiple quoted segments
         // (long TXT values use the `"...""..."` continuation syntax).
         // Join those segments before filtering by prefix.
-        let txts_raw = dig_records(&d, "TXT").await.unwrap_or_default();
         let existing: Vec<String> = txts_raw
             .iter()
             .map(|raw| stitch_dig_txt(raw))
             .filter(|s| s.to_ascii_lowercase().starts_with("v=spf1"))
             .collect();
 
-        let our_ipv4 = fetch_public_ip("https://api.ipify.org").await.ok();
+        let our_ipv4 = our_ipv4.ok();
         let suggested = match our_ipv4.as_deref() {
             Some(ip) => format!("v=spf1 ip4:{ip} a mx ~all"),
             None => "v=spf1 a mx ~all".into(),
@@ -6938,10 +6944,21 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// public IP, and report whether the records point here.
     pub async fn dns_check(&self, domain: Domain) -> Result<DnsCheckResult, RpcError> {
         let d = domain.as_str().to_string();
-        let resolved_a = dig_records(&d, "A").await.unwrap_or_default();
-        let resolved_aaaa = dig_records(&d, "AAAA").await.unwrap_or_default();
-        let our_ipv4 = fetch_public_ip("https://api.ipify.org").await.ok();
-        let our_ipv6 = fetch_public_ip("https://api6.ipify.org").await.ok();
+        // All four lookups are independent — run them concurrently.
+        // Sequential, the worst case was ~20s (2× dig at 3s×2 tries
+        // + 2× curl at 4s; api6.ipify.org reliably burns its full
+        // 4s timeout on IPv4-only boxes). Joined, the worst case is
+        // the single slowest probe.
+        let (resolved_a, resolved_aaaa, our_ipv4, our_ipv6) = tokio::join!(
+            dig_records(&d, "A"),
+            dig_records(&d, "AAAA"),
+            fetch_public_ip("https://api.ipify.org"),
+            fetch_public_ip("https://api6.ipify.org"),
+        );
+        let resolved_a = resolved_a.unwrap_or_default();
+        let resolved_aaaa = resolved_aaaa.unwrap_or_default();
+        let our_ipv4 = our_ipv4.ok();
+        let our_ipv6 = our_ipv6.ok();
 
         let mut matches = false;
         if let Some(ref ip) = our_ipv4 {

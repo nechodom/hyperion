@@ -137,11 +137,6 @@ struct DetailTpl<'a> {
     profile_apply: Option<ProfileApply>,
     applied_profile_name: Option<String>,
     profiles: Vec<HostingProfile>,
-    spf: Option<SpfCheckResult>,
-    /// Passive DNS preflight result — `None` if the agent couldn't
-    /// reach the resolver, `Some` with matches=true ⇒ green pill,
-    /// matches=false ⇒ red pill explaining the mismatch.
-    dns_preflight: Option<hyperion_types::DnsCheckResult>,
     csrf_ftp_set: String,
     csrf_ftp_disable: String,
     ftp_new_password: Option<String>,
@@ -1089,8 +1084,6 @@ pub async fn post_create(
                 profile_apply: None,
                 applied_profile_name: None,
                 profiles: vec![],
-                spf: None,
-                dns_preflight: None,
                 csrf_ftp_set: csrf_token_for(&state, &ctx, "/hostings/ftp/set"),
                 csrf_ftp_disable: csrf_token_for(&state, &ctx, "/hostings/ftp/disable"),
                 ftp_new_password: None,
@@ -1246,8 +1239,6 @@ pub async fn get_detail(
     let profile_apply = profile_apply_res.unwrap_or(None);
     let profiles = profiles_res.unwrap_or_default();
 
-    let domain_for_spf = Domain::parse(&detail.domain).ok();
-
     // Wave 2 — independent of wp_status, and WP plugins/themes
     // only when WP is installed. Wave 1 already finished so we
     // know wp_status now.
@@ -1283,20 +1274,6 @@ pub async fn get_detail(
             hyperion_types::WpThemeListResponse::default()
         }
     };
-    let spf_fut = async {
-        match domain_for_spf {
-            Some(d) => match hyperion_rpc_client::call(
-                &state.agent_socket,
-                Request::DnsSpfCheck { domain: d },
-            )
-            .await
-            {
-                Ok(RpcResponse::DnsSpfCheck(r)) => Some(r),
-                _ => None,
-            },
-            None => None,
-        }
-    };
     let monitor_fut = async {
         match hyperion_rpc_client::call(
             &state.agent_socket,
@@ -1311,35 +1288,11 @@ pub async fn get_detail(
             ),
         }
     };
-    // Passive DNS preflight — every page load runs DnsCheck against
-    // the OWNING node so the operator sees "A → 1.2.3.4 ✓" /
-    // "A → 5.6.7.8 ✗ (we're 1.2.3.4)" without clicking anything.
-    // Cheap (dig + agent's cached public IP probe) and the result
-    // drives a small status pill in the page header. Dispatched to
-    // the hosting's node — checking against the master's public IP
-    // for a worker-resident hosting would be wrong.
-    let dns_fut = {
-        // DnsCheck takes a validated `Domain` newtype. Parsing
-        // the hosting's stored domain shouldn't fail (we wouldn't
-        // have provisioned it otherwise), but `Domain::parse`
-        // returns Result, so on the off chance it does we skip
-        // the check (None) instead of breaking the page render.
-        let domain_opt = Domain::parse(&detail.domain).ok();
-        let state2 = state.clone();
-        async move {
-            let Some(domain) = domain_opt else { return None };
-            match crate::dispatcher::dispatch_to_node(
-                &state2,
-                target,
-                Request::DnsCheck { domain },
-            )
-            .await
-            {
-                Ok(RpcResponse::DnsCheck(r)) => Some(r),
-                _ => None,
-            }
-        }
-    };
+    // NOTE: the passive DNS preflight banner and the SPF card are
+    // NOT part of this join anymore. Both shell out to dig/curl on
+    // the agent (up to ~8s worst case on broken DNS), which used to
+    // gate the whole page render. They now load lazily over HTMX
+    // via /hostings/:sel/dns-panel and /hostings/:sel/spf-panel.
     let email_log_fut = async {
         match hyperion_rpc_client::call(
             &state.agent_socket,
@@ -1421,23 +1374,19 @@ pub async fn get_detail(
     let (
         wp_plugins,
         wp_themes,
-        spf,
         monitor_pair,
         email_log,
         site_emails,
         ftp_accounts,
         quota,
-        dns_preflight,
     ) = tokio::join!(
         wp_plugins_fut,
         wp_themes_fut,
-        spf_fut,
         monitor_fut,
         email_log_fut,
         site_emails_fut,
         ftp_accounts_fut,
         quota_fut,
-        dns_fut,
     );
     // If THIS hosting's user has a password, probe vsftpd to
     // verify it actually accepts the credential. We don't know
@@ -1516,8 +1465,6 @@ pub async fn get_detail(
         profile_apply,
         applied_profile_name,
         profiles,
-        spf,
-        dns_preflight,
         csrf_ftp_set: csrf_token_for(&state, &ctx, "/hostings/ftp/set"),
         csrf_ftp_disable: csrf_token_for(&state, &ctx, "/hostings/ftp/disable"),
         ftp_new_password: q.ftp_pw,
@@ -2040,22 +1987,73 @@ pub async fn post_delete(
         keep_user: form.keep_user.as_deref() == Some("on"),
         keep_database: form.keep_db.as_deref() == Some("on"),
     };
-    // Dispatch to the node that actually owns the hosting. Without
-    // this, deletes always hit the master and silently do nothing
-    // for hostings provisioned on a worker (the very bug that left
-    // orphan rows blocking the UNIQUE(domain) constraint on retry).
-    let target = node_target(&form.target_node);
-    let resp = crate::dispatcher::dispatch_to_node(
-        &state,
-        target,
-        Request::HostingDelete { sel, opts },
+    // Deleting is the slowest mutation we have — nginx reload, acme
+    // cleanup, DROP DATABASE, rm -rf of the whole tree, userdel. On
+    // a big site that's tens of seconds, which used to leave the
+    // operator staring at a hung POST (and the browser console full
+    // of aborted-fetch noise). Run it as a background job and land
+    // on the job page with a live progress bar instead.
+    //
+    // Dispatch goes to the node that actually owns the hosting.
+    // Without this, deletes always hit the master and silently do
+    // nothing for hostings provisioned on a worker (the very bug
+    // that left orphan rows blocking the UNIQUE(domain) constraint
+    // on retry).
+    let target_owned: Option<String> = node_target(&form.target_node).map(String::from);
+    let payload = serde_json::json!({
+        "selector": form.selector,
+        "keep_user": opts.keep_user,
+        "keep_database": opts.keep_database,
+        "target_node": form.target_node,
+    });
+    let actor_label = ctx.username.clone();
+    let actor_uid = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
+    let job_state = state.clone();
+    let job_selector = form.selector.clone();
+    let job_id = crate::handlers::jobs::spawn_job(
+        state.clone(),
+        "hosting_delete",
+        Some(&form.selector),
+        &payload.to_string(),
+        &actor_label,
+        actor_uid,
+        move |reporter| async move {
+            reporter
+                .step(
+                    &format!("Deleting {job_selector} — vhost, certificate, database, files…"),
+                    20,
+                    "",
+                )
+                .await;
+            let resp = crate::dispatcher::dispatch_to_node(
+                &job_state,
+                target_owned.as_deref(),
+                Request::HostingDelete { sel, opts },
+            )
+            .await;
+            match resp {
+                Ok(RpcResponse::HostingDelete) => {
+                    reporter
+                        .step("Hosting deleted.", 100, "✓ hosting removed")
+                        .await;
+                    reporter.finish(true, None).await;
+                }
+                Ok(RpcResponse::Error(e)) => {
+                    reporter.finish(false, Some(e.to_string())).await;
+                }
+                Ok(_) => {
+                    reporter
+                        .finish(false, Some("unexpected agent response".into()))
+                        .await;
+                }
+                Err(e) => {
+                    reporter.finish(false, Some(e.to_string())).await;
+                }
+            }
+        },
     )
     .await?;
-    match resp {
-        RpcResponse::HostingDelete => Ok(Redirect::to("/hostings?deleted=1").into_response()),
-        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
-        _ => Err(AppError::Internal("unexpected response".into())),
-    }
+    Ok(Redirect::to(&format!("/jobs/{job_id}")).into_response())
 }
 
 /// Resolve a per-form `target_node` field to the Option<&str>
@@ -3790,6 +3788,87 @@ fn render_dns_fragment(r: &DnsCheckResult) -> String {
         ipv6 = esc(our_v6),
         note = esc(&r.note),
     )
+}
+
+/// Lazily-loaded DNS preflight banner on the hosting detail page.
+/// The page shell renders immediately; this fragment swaps in once
+/// dig/curl on the owning node come back (sub-second on healthy DNS,
+/// multiple seconds when resolvers time out — exactly the case that
+/// used to freeze the whole page render).
+#[derive(Template)]
+#[template(path = "_hosting_dns_banner.html")]
+struct DnsBannerTpl {
+    dns: hyperion_types::DnsCheckResult,
+}
+
+pub async fn get_dns_panel(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Path(selector): Path<String>,
+) -> Result<Response, AppError> {
+    let sel = parse_selector(&selector)?;
+    let (detail, owner_node) = find_hosting_anywhere(&state, sel).await?;
+    if let Err(r) = require_hosting_access(&state, &ctx, detail.id.as_str(), false).await {
+        return Ok(r);
+    }
+    // On any failure return an empty fragment — the placeholder just
+    // disappears. A missing advisory banner beats a broken page corner.
+    let Ok(domain) = Domain::parse(&detail.domain) else {
+        return Ok(Html(String::new()).into_response());
+    };
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        owner_node.as_deref(),
+        Request::DnsCheck { domain },
+    )
+    .await;
+    let html = match resp {
+        Ok(RpcResponse::DnsCheck(r)) => DnsBannerTpl { dns: r }.render()?,
+        _ => String::new(),
+    };
+    Ok(Html(html).into_response())
+}
+
+/// Lazily-loaded SPF card (Email DNS) — same reasoning as the DNS
+/// banner above. Dispatched to the OWNING node: the site's outbound
+/// mail egresses from the node where its PHP runs, so the suggested
+/// `ip4:` mechanism must quote that node's public IP, not the
+/// master's.
+#[derive(Template)]
+#[template(path = "_hosting_spf_card.html")]
+struct SpfCardTpl {
+    sp: SpfCheckResult,
+    domain: String,
+}
+
+pub async fn get_spf_panel(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Path(selector): Path<String>,
+) -> Result<Response, AppError> {
+    let sel = parse_selector(&selector)?;
+    let (detail, owner_node) = find_hosting_anywhere(&state, sel).await?;
+    if let Err(r) = require_hosting_access(&state, &ctx, detail.id.as_str(), false).await {
+        return Ok(r);
+    }
+    let Ok(domain) = Domain::parse(&detail.domain) else {
+        return Ok(Html(String::new()).into_response());
+    };
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        owner_node.as_deref(),
+        Request::DnsSpfCheck { domain },
+    )
+    .await;
+    let html = match resp {
+        Ok(RpcResponse::DnsSpfCheck(r)) => SpfCardTpl {
+            sp: r,
+            domain: detail.domain.clone(),
+        }
+        .render()?,
+        _ => String::new(),
+    };
+    Ok(Html(html).into_response())
 }
 
 #[derive(Deserialize)]

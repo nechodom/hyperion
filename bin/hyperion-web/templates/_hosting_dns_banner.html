@@ -1,0 +1,34 @@
+{# Passive DNS preflight banner — lazily swapped into the hosting
+   detail page via hx-get="/hostings/:sel/dns-panel". Runs DnsCheck
+   on the OWNING node so the operator never has to wonder "does this
+   domain actually point here?" The agent compares resolved A/AAAA
+   against the node's public IP. #}
+{% if dns.matches %}
+  <div class="flash success" style="margin-bottom:0.8rem;padding:0.55rem 0.85rem;font-size:0.88rem">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+    <div class="flash-body">
+      <strong>DNS OK</strong> ·
+      {% if !dns.resolved_a.is_empty() %}A → <code>{{ dns.resolved_a.join(", ") }}</code>{% endif %}
+      {% if !dns.resolved_aaaa.is_empty() %}{% if !dns.resolved_a.is_empty() %} · {% endif %}AAAA → <code>{{ dns.resolved_aaaa.join(", ") }}</code>{% endif %}
+      <span class="text-soft small">— resolves here, cert issuance should succeed</span>
+    </div>
+  </div>
+{% else %}
+  <div class="flash warn" style="margin-bottom:0.8rem;padding:0.55rem 0.85rem;font-size:0.88rem">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">
+      <strong>DNS mismatch</strong> ·
+      {% if dns.resolved_a.is_empty() && dns.resolved_aaaa.is_empty() %}
+        <code>{{ dns.domain }}</code> doesn't resolve at all (NXDOMAIN or resolver error).
+      {% else %}
+        DNS points to
+        {% if !dns.resolved_a.is_empty() %}A=<code>{{ dns.resolved_a.join(", ") }}</code>{% endif %}
+        {% if !dns.resolved_aaaa.is_empty() %}{% if !dns.resolved_a.is_empty() %}, {% endif %}AAAA=<code>{{ dns.resolved_aaaa.join(", ") }}</code>{% endif %}
+        but we're
+        {% if let Some(ip) = dns.our_public_ipv4.as_ref() %}<code>{{ ip }}</code>{% endif %}
+        {% if let Some(ip6) = dns.our_public_ipv6.as_ref() %} / <code>{{ ip6 }}</code>{% endif %}.
+      {% endif %}
+      <span class="text-soft small">— ACME issuance will fail until this is fixed.</span>
+    </div>
+  </div>
+{% endif %}

@@ -283,41 +283,12 @@
   </div>
 </div>
 
-{% if let Some(dns) = dns_preflight %}
-  {# Passive DNS preflight banner — runs DnsCheck on every page
-     load against the OWNING node so the operator never has to
-     wonder "does this domain actually point here?" The agent
-     compares resolved A/AAAA against the node's public IP. #}
-  {% if dns.matches %}
-    <div class="flash success" style="margin-bottom:0.8rem;padding:0.55rem 0.85rem;font-size:0.88rem">
-      <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
-      <div class="flash-body">
-        <strong>DNS OK</strong> ·
-        {% if !dns.resolved_a.is_empty() %}A → <code>{{ dns.resolved_a.join(", ") }}</code>{% endif %}
-        {% if !dns.resolved_aaaa.is_empty() %}{% if !dns.resolved_a.is_empty() %} · {% endif %}AAAA → <code>{{ dns.resolved_aaaa.join(", ") }}</code>{% endif %}
-        <span class="text-soft small">— resolves here, cert issuance should succeed</span>
-      </div>
-    </div>
-  {% else %}
-    <div class="flash warn" style="margin-bottom:0.8rem;padding:0.55rem 0.85rem;font-size:0.88rem">
-      <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-      <div class="flash-body">
-        <strong>DNS mismatch</strong> ·
-        {% if dns.resolved_a.is_empty() && dns.resolved_aaaa.is_empty() %}
-          <code>{{ dns.domain }}</code> doesn't resolve at all (NXDOMAIN or resolver error).
-        {% else %}
-          DNS points to
-          {% if !dns.resolved_a.is_empty() %}A=<code>{{ dns.resolved_a.join(", ") }}</code>{% endif %}
-          {% if !dns.resolved_aaaa.is_empty() %}{% if !dns.resolved_a.is_empty() %}, {% endif %}AAAA=<code>{{ dns.resolved_aaaa.join(", ") }}</code>{% endif %}
-          but we're
-          {% if let Some(ip) = dns.our_public_ipv4.as_ref() %}<code>{{ ip }}</code>{% endif %}
-          {% if let Some(ip6) = dns.our_public_ipv6.as_ref() %} / <code>{{ ip6 }}</code>{% endif %}.
-        {% endif %}
-        <span class="text-soft small">— ACME issuance will fail until this is fixed.</span>
-      </div>
-    </div>
-  {% endif %}
-{% endif %}
+{# Passive DNS preflight banner — loads lazily so the dig/curl
+   round-trips on the agent (seconds when resolvers are slow) never
+   block the initial page render. Empty response ⇒ placeholder just
+   vanishes. Markup lives in _hosting_dns_banner.html. #}
+<div hx-get="/hostings/{{ detail.id.as_str() }}/dns-panel"
+     hx-trigger="load" hx-swap="outerHTML"></div>
 
 {% if let Some(e) = error %}
   <div class="flash error">
@@ -606,46 +577,22 @@
 </div>
 {% endif %}
 
-{% if let Some(sp) = spf %}
-<div class="card hover">
-  <h2>
-    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
-    Email DNS (SPF)
-    {% if sp.status == "matches" %}<span class="pill ok" style="margin-left:0.4rem;font-size:0.65rem">authorized</span>
-    {% else if sp.status == "differs" %}<span class="pill warn" style="margin-left:0.4rem;font-size:0.65rem">not authorized</span>
-    {% else if sp.status == "multiple" %}<span class="pill err" style="margin-left:0.4rem;font-size:0.65rem">multiple records</span>
-    {% else %}<span class="pill err" style="margin-left:0.4rem;font-size:0.65rem">missing</span>{% endif %}
-  </h2>
-  {% if !sp.reason.is_empty() %}
-    <p class="muted" style="margin:-0.3rem 0 0.75rem;font-size:0.85rem">{{ sp.reason }}</p>
-  {% endif %}
-  <dl class="kv">
-    <dt>Existing TXT</dt>
-    <dd>
-      {% if sp.existing.is_empty() %}<span class="text-soft">none — emails from this hosting will be flagged as spam</span>
-      {% else %}{% for e in sp.existing %}<code style="font-size:0.78rem;display:block;margin-bottom:0.2rem;word-break:break-all">{{ e }}</code>{% endfor %}{% endif %}
-    </dd>
-    {% if sp.status != "matches" %}
-      <dt>Suggested</dt>
-      <dd>
-        <code style="font-size:0.82rem;display:block;padding:0.5rem;background:var(--bg-2);border-radius:var(--radius-xs);word-break:break-all">{{ sp.suggested }}</code>
-        <div class="muted" style="font-size:0.78rem;margin-top:0.4rem">
-          {% if sp.status == "missing" %}
-            Add this as a <code>TXT</code> record on the apex of <code>{{ detail.domain }}</code> in your DNS provider, then re-check.
-          {% else if sp.status == "multiple" %}
-            <strong>RFC 7208 §3.2 forbids more than one SPF record.</strong> Receivers fall back to <em>permerror</em> and refuse mail. Merge the existing records into one (combine their mechanisms), then re-check.
-          {% else %}
-            Your existing SPF doesn't list our IP. Either replace it with the suggested record, or add <code>{% if let Some(ip) = sp.our_public_ipv4 %}ip4:{{ ip }}{% else %}ip4:&lt;our IPv4&gt;{% endif %}</code> as an extra mechanism before the trailing <code>~all</code>.
-          {% endif %}
-        </div>
-      </dd>
-    {% endif %}
-    {% if let Some(ip) = sp.our_public_ipv4 %}
-    <dt>Our IPv4</dt><dd><code>{{ ip }}</code></dd>
-    {% endif %}
-  </dl>
+{# SPF card — loads lazily (dig TXT + public-IP probe on the owning
+   node). The skeleton below is replaced by _hosting_spf_card.html;
+   on check failure the response is empty and the skeleton vanishes. #}
+<div hx-get="/hostings/{{ detail.id.as_str() }}/spf-panel"
+     hx-trigger="load" hx-swap="outerHTML">
+  <div class="card hover">
+    <h2>
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+      Email DNS (SPF)
+    </h2>
+    <p class="muted" style="margin:0;font-size:0.85rem">
+      <span class="spinner-inline"></span>
+      Checking SPF records…
+    </p>
+  </div>
 </div>
-{% endif %}
 
 {% if let Some(s) = stats %}
 <div class="card hover">

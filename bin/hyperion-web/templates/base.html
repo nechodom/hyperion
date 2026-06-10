@@ -191,6 +191,21 @@
 'use strict';
 
 // ============================================================
+//  Silence AbortError unhandled-rejection noise. When a form
+//  POST navigates away (delete, suspend, …) the browser aborts
+//  every in-flight fetch from HTMX polling fragments; those
+//  fetches reject with AbortError AFTER the page teardown
+//  started, so nothing awaits them and the console logs
+//  "Uncaught (in promise)". Navigation-aborted requests are
+//  expected, not errors — swallow exactly that class, let every
+//  real rejection through.
+// ============================================================
+window.addEventListener('unhandledrejection', function (ev) {
+  const r = ev.reason;
+  if (r && (r.name === 'AbortError' || r.code === 20)) ev.preventDefault();
+});
+
+// ============================================================
 //  Password generator — existing feature, untouched.
 //  Generates a strong password into [data-genpw="<input-id>"].
 // ============================================================

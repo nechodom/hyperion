@@ -410,6 +410,17 @@ pub fn build_router(state: SharedState) -> Router {
             get(handlers::install::get_update_node_status),
         )
         .route("/hostings/:selector", get(handlers::hostings::get_detail))
+        // Lazy HTMX fragments for the detail page — both shell out
+        // to dig/curl on the agent and would otherwise gate the
+        // whole page render behind DNS-resolver latency.
+        .route(
+            "/hostings/:selector/dns-panel",
+            get(handlers::hostings::get_dns_panel),
+        )
+        .route(
+            "/hostings/:selector/spf-panel",
+            get(handlers::hostings::get_spf_panel),
+        )
         .route("/logout", post(handlers::login::post_logout))
         // Tiny role echo for the nav-hiding shim in base.html.
         // Returns "super_admin" | "admin" | "operator" | "viewer".
