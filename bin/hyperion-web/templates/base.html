@@ -954,9 +954,18 @@ function isShortcutContext(ev) {
       dropdown.style.right = '8px';
       dropdown.style.width = 'auto';
     } else {
-      dropdown.style.left = '';
+      // Left-anchor to the bell, then CLAMP so the whole dropdown
+      // stays on-screen. The bell lives in the LEFT sidebar, so the
+      // old right-anchor (right = innerWidth - bell.right) pushed a
+      // 22rem-wide dropdown off the LEFT edge — its left half was
+      // clipped by the viewport. Align the dropdown's left with the
+      // bell and slide it right only as far as needed to fit.
+      dropdown.style.right = '';
       dropdown.style.width = '';
-      dropdown.style.right = Math.max(8, window.innerWidth - r.right) + 'px';
+      const width = dropdown.offsetWidth || 352;
+      let left = Math.min(r.left, window.innerWidth - width - 8);
+      left = Math.max(8, left);
+      dropdown.style.left = left + 'px';
     }
     // Vertical anchor: the bell lives in the sidebar FOOTER, so on
     // desktop it sits near the bottom of the viewport — a downward
