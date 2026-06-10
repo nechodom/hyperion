@@ -62,10 +62,21 @@
       var err = ev.target.querySelector('.pill.err');
       if (ok && !reloaded) {
         reloaded = true;
-        // Brief beat so the ✓ is visible, then refresh in place.
+        // Brief beat so the ✓ is visible, then refresh. Navigate to
+        // the real detail GET URL by id — NOT location.reload() of the
+        // create POST, which would re-submit and fail "already
+        // exists". (The persistence script also replaceState's the URL
+        // to this same path; this is the belt to that suspenders.)
         setTimeout(function () {
-          location.href = location.pathname + '#wordpress';
-          location.reload();
+          var header = document.querySelector('.page-header[data-hosting-id]');
+          var id = header && header.getAttribute('data-hosting-id');
+          var dest = id ? ('/hostings/' + encodeURIComponent(id)) : location.pathname;
+          if (location.pathname === dest) {
+            location.hash = 'wordpress';
+            location.reload();
+          } else {
+            location.href = dest + '#wordpress';
+          }
         }, 1200);
       } else if (err) {
         var row = document.getElementById('wp-install-failed-row');
@@ -259,6 +270,16 @@
       // Fresh create: stash for the imminent auto-reload, wire dismiss.
       try { sessionStorage.setItem(KEY, rendered.outerHTML); } catch (_) {}
       wireDismiss(rendered);
+      // The create POST renders THIS detail page in place, so the URL
+      // is still the POST target (/hostings). Any reload — the
+      // automatic post-install one OR a manual F5/back — would
+      // RE-SUBMIT the create, which fails "already exists" and dumps
+      // the operator back on the wizard. Rewrite the address to the
+      // real detail GET URL so every reload is a safe GET.
+      var dest = '/hostings/' + encodeURIComponent(hid);
+      if (location.pathname !== dest) {
+        try { history.replaceState(null, '', dest + location.hash); } catch (_) {}
+      }
       return;
     }
     // After the auto-reload (or any later visit): restore if unsaved.
