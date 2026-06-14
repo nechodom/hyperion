@@ -320,13 +320,25 @@ pub async fn get_job_progress(
         }
     };
     let is_running = !job.is_terminal();
+    let terminal = job.is_terminal();
     let elapsed = format_elapsed(&job);
     let frag = JobProgressFragment {
         job,
         elapsed,
         is_running,
     };
-    Ok(Html(frag.render()?).into_response())
+    let mut resp = Html(frag.render()?).into_response();
+    if terminal {
+        // HTTP 286 is htmx's "stop polling" signal: the body is still
+        // swapped (the card shows its final done/failed state) but the
+        // every-2s poller on the embedding div stops. Without it the
+        // poll ran forever after the job finished — and if the agent
+        // later restarted, every tick 502'd and fired a red error toast
+        // every 2 seconds.
+        *resp.status_mut() =
+            axum::http::StatusCode::from_u16(286).unwrap_or(axum::http::StatusCode::OK);
+    }
+    Ok(resp)
 }
 
 async fn fetch_job(state: &SharedState, id: &str) -> Result<Option<hyperion_types::JobView>, AppError> {
