@@ -1714,6 +1714,22 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
         let mut stack = RollbackStack::new();
 
+        // Is the system user already known to Hyperion (i.e. shared with
+        // another hosting)? If so, THIS create did not create it, and the
+        // rollback must NOT `userdel -r` it or drop its system_users row
+        // — that would delete the OTHER hosting's entire /home tree and
+        // orphan its UID. The original code pushed both destructive
+        // steps unconditionally, so any later create failure (most
+        // commonly ACME on un-pointed DNS) wiped a shared user. Only push
+        // them when WE are the user's creator. (Checked before
+        // ensure_user; the reclaim-trashed purge above already ran, so a
+        // reclaimed name correctly reads as absent here.)
+        let user_pre_existed = system_users::get_by_name(&self.pool, system_user.as_str())
+            .await
+            .ok()
+            .flatten()
+            .is_some();
+
         // 2. ensure_user
         let uid = match self
             .adapters
@@ -1723,10 +1739,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             Ok(u) => u,
             Err(e) => return Err(e.into()),
         };
-        stack.push(Box::new(DeleteUser {
-            adapters: self.adapters.clone(),
-            name: system_user.as_str().to_string(),
-        }));
+        if !user_pre_existed {
+            stack.push(Box::new(DeleteUser {
+                adapters: self.adapters.clone(),
+                name: system_user.as_str().to_string(),
+            }));
+        }
 
         // 3. ensure_dirs
         if let Err(e) = self.adapters.ensure_dirs(&htdocs, &logs, &tmp, uid).await {
@@ -1862,22 +1880,38 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // DeleteUser rollback (Linux user) runs but the DB row keeps
         // the UID, claiming it permanently. The next create's
         // useradd reuses the freed UID and trips UNIQUE(uid).
-        stack.push(Box::new(DeleteSystemUsersRow {
-            pool: self.pool.clone(),
-            row_id: suid_row,
-        }));
-        // For reverse_proxy validate upstream URL is present + parseable
-        // before we touch system_users / DB / nginx. Bail clean.
+        // Only register the system_users-row rollback when WE inserted
+        // it (see user_pre_existed above) — never drop a row shared with
+        // another hosting.
+        if !user_pre_existed {
+            stack.push(Box::new(DeleteSystemUsersRow {
+                pool: self.pool.clone(),
+                row_id: suid_row,
+            }));
+        }
+        // For reverse_proxy validate upstream URL is present + parseable.
+        // NOTE: this runs after user/dirs/system_users are already
+        // created, so both early returns MUST roll back — otherwise an
+        // invalid/missing upstream URL leaks a Linux user + /home tree +
+        // DB row (the web form only checks the URL is non-empty, not the
+        // scheme).
         if req.kind == "reverse_proxy" {
-            let upstream = req
+            let upstream = match req
                 .proxy_upstream_url
                 .as_deref()
                 .map(|s| s.trim())
                 .filter(|s| !s.is_empty())
-                .ok_or_else(|| RpcError::Validation {
-                    message: "reverse_proxy requires proxy_upstream_url".into(),
-                })?;
+            {
+                Some(u) => u,
+                None => {
+                    let _ = stack.rollback_all().await;
+                    return Err(RpcError::Validation {
+                        message: "reverse_proxy requires proxy_upstream_url".into(),
+                    });
+                }
+            };
             if !(upstream.starts_with("http://") || upstream.starts_with("https://")) {
+                let _ = stack.rollback_all().await;
                 return Err(RpcError::Validation {
                     message: "proxy_upstream_url must start with http:// or https://".into(),
                 });
@@ -2266,12 +2300,31 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     pub async fn delete(&self, sel: HostingSelector, opts: DeleteOpts) -> Result<(), RpcError> {
         let detail = self.get(sel.clone()).await?;
 
-        // Soft-delete branch: when cluster.trash_enabled = true,
-        // route to trash() which preserves files / DB / user and
-        // flips the row to state=trashed. The scheduler GCs it
-        // to a hard delete after retention_days.
+        // Refuse to "delete" an already-trashed row. trash_hosting would
+        // re-stamp trashed_at (resetting the GC retention countdown) and
+        // fire a duplicate "moved to trash" notification. Trashed rows
+        // are managed via restore / purge, not delete (a stale tab,
+        // double-submitted delete job, or `hctl delete <domain>` could
+        // otherwise hit this).
+        if detail.state == HostingState::Trashed {
+            return Err(RpcError::Conflict {
+                message: "hosting is already in trash — restore or purge it instead".into(),
+            });
+        }
+
+        // Soft-delete branch: when cluster.trash_enabled = true, route to
+        // trash() which preserves files / DB / user and flips the row to
+        // state=trashed, GC'd to a hard delete after retention_days.
+        //
+        // BUT honour an explicit keep_user / keep_database: those flags
+        // are a deliberate "delete the hosting, preserve this resource"
+        // choice, and trash() takes no opts — the eventual GC/purge runs
+        // with DeleteOpts::default() (keep=false) and would silently
+        // destroy the DB/user the operator asked to keep, weeks later.
+        // When either keep flag is set we hard-delete now (honouring
+        // opts) instead of trashing.
         let cluster_cfg = read_cluster_section(self.agent_config_path.as_deref());
-        if cluster_cfg.trash_enabled {
+        if cluster_cfg.trash_enabled && !opts.keep_user && !opts.keep_database {
             return self.trash_hosting(detail).await;
         }
 
@@ -2790,6 +2843,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         if detail.state == HostingState::Deleting {
             return Err(RpcError::Conflict {
                 message: "hosting is being deleted".into(),
+            });
+        }
+        // A trashed row is still loadable via get() (no state filter),
+        // so suspend on its detail page / `hctl suspend <domain>` would
+        // flip it to Suspended WITHOUT clearing trashed_at — yanking it
+        // out of the trash list and the GC (both filter state='trashed')
+        // and resurrecting it into the main hostings list. Refuse.
+        if detail.state == HostingState::Trashed {
+            return Err(RpcError::Conflict {
+                message: "hosting is in trash — restore it first".into(),
             });
         }
         hostings::set_state(&self.pool, &detail.id, HostingState::Suspended, now_secs())
@@ -8802,6 +8865,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .map_err(|e| RpcError::Validation {
                 message: e.to_string(),
             })?;
+        // The agent runs as root, so the file just written is root-owned
+        // — chown it to the hosting's system user so PHP/WordPress and
+        // FTP (running as that user) can rewrite/delete it. Best-effort.
+        let _ = hyperion_adapters::files::chown_in_jail(&jail, &rel_path, &detail.system_user)
+            .await;
         self.append_audit(
             "hosting.file.write",
             Some(detail.id.as_str()),
@@ -8855,6 +8923,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .map_err(|e| RpcError::Validation {
                 message: e.to_string(),
             })?;
+        // Root-owned otherwise — chown to the hosting user so WP plugin/
+        // theme installs into this dir (and FTP) work. Best-effort.
+        let _ = hyperion_adapters::files::chown_in_jail(&jail, &rel_path, &detail.system_user)
+            .await;
         self.append_audit(
             "hosting.file.mkdir",
             Some(detail.id.as_str()),

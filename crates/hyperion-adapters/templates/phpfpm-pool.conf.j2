@@ -18,6 +18,14 @@ php_admin_value[max_execution_time] = {{ max_exec_secs }}
 php_admin_value[upload_max_filesize] = 64M
 php_admin_value[post_max_size] = 64M
 php_admin_value[open_basedir] = /home/{{ system_user }}/{{ domain }}:/tmp
+; Debian's default session.save_path (/var/lib/php/sessions) sits
+; OUTSIDE open_basedir, so any hosted app calling session_start()
+; (Joomla, PrestaShop, most non-WP PHP, many WP plugins) fails with
+; "open_basedir restriction in effect". Point sessions at the
+; per-hosting tmp dir (created by ensure_dirs, owned by the user,
+; inside open_basedir) — private per site, so no cross-tenant
+; session-file reads.
+php_admin_value[session.save_path] = /home/{{ system_user }}/{{ domain }}/tmp
 
 ; Capture outbound mail for the per-hosting Emails log. The
 ; wrapper script writes a JSONL line per send to

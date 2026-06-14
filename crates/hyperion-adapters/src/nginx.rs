@@ -415,7 +415,24 @@ pub async fn write_htpasswd(
     }
     let body = format!("{user}:{bcrypt_hash}\n");
     let path = htpasswd_file(hosting_id);
-    crate::fs::atomic_write(&path, body.as_bytes(), 0o640).await
+    crate::fs::atomic_write(&path, body.as_bytes(), 0o640).await?;
+    // atomic_write only sets the MODE — the agent runs as root, so the
+    // file lands root:root. nginx workers run as the nginx user
+    // (www-data) and open auth_basic_user_file in the worker process at
+    // request time; with root:root 0640 that is EACCES and nginx returns
+    // 500 for EVERY request to the protected vhost. chgrp to the nginx
+    // user's group so the 0640 group-read bit actually lets nginx read
+    // it (while keeping it unreadable by other local users).
+    let nginx_user = detect_user().await;
+    let _ = crate::cmd::run(
+        "/usr/bin/chown",
+        &[
+            &format!("root:{nginx_user}"),
+            path.to_string_lossy().as_ref(),
+        ],
+    )
+    .await;
+    Ok(())
 }
 
 pub async fn delete_htpasswd(hosting_id: &str) -> Result<(), AdapterError> {

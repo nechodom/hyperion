@@ -444,6 +444,21 @@ async fn main() -> anyhow::Result<()> {
     {
         let tick_svc = svc.clone();
         tokio::spawn(async move {
+            // Reap orphaned jobs ONCE at startup: background-job closures
+            // run in the hyperion-web process, so a web restart/redeploy
+            // (or a panicking closure / failed JobFinish) leaves the row
+            // stuck in `running` forever — the /jobs card spins, the
+            // sidebar badge over-counts, and retry is permanently blocked
+            // ("job is still running"). The reaper marks rows whose
+            // updated_at is older than the stale threshold as failed.
+            // JobReporter::step bumps updated_at, so a genuinely-live job
+            // is never reaped.
+            const JOB_STALE_SECS: i64 = 3600; // 1h with no progress update
+            if let Ok(n) = tick_svc.jobs_reap_stale(JOB_STALE_SECS).await {
+                if n > 0 {
+                    tracing::warn!(rows = n, "startup: reaped stale jobs");
+                }
+            }
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(5 * 60));
             interval.tick().await; // skip the immediate first tick
             loop {
@@ -452,6 +467,12 @@ async fn main() -> anyhow::Result<()> {
                     Ok(n) if n > 0 => tracing::info!(processed = n, "scheduler tick"),
                     Ok(_) => tracing::debug!("scheduler tick: nothing due"),
                     Err(e) => tracing::warn!(error=%e, "scheduler tick failed"),
+                }
+                // Also sweep stale jobs each tick (cheap UPDATE).
+                if let Ok(n) = tick_svc.jobs_reap_stale(JOB_STALE_SECS).await {
+                    if n > 0 {
+                        tracing::warn!(rows = n, "reaped stale jobs");
+                    }
                 }
             }
         });

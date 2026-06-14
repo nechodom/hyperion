@@ -486,7 +486,13 @@ pub async fn plugin_list(
     let argv = build_argv(user, htdocs, &args);
     let stdout = cmd::run("/usr/bin/sudo", &argv_as_refs(&argv)).await?;
     let rows: Vec<RawPluginRow> = serde_json::from_str(stdout.trim()).map_err(|e| {
-        AdapterError::Other(format!("wp plugin list returned non-JSON: {e} — body: {}", &stdout[..stdout.len().min(200)]))
+        // `chars().take(200)`, NOT byte-slicing `[..200]`: a PHP
+        // notice/deprecation prefixing the JSON can contain multi-byte
+        // UTF-8, and slicing on a non-char-boundary panics (the crate
+        // denies unwrap/expect but slicing bypasses that). Matches
+        // theme_list's handling.
+        let preview: String = stdout.chars().take(200).collect();
+        AdapterError::Other(format!("wp plugin list returned non-JSON: {e} — body: {preview}"))
     })?;
     let plugins: Vec<hyperion_types::WpPlugin> = rows
         .into_iter()

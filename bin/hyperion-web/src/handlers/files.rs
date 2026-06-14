@@ -372,18 +372,32 @@ pub async fn post_upload(
     let mut dir = String::new();
     let mut filename: Option<String> = None;
     let mut bytes: Vec<u8> = Vec::new();
-    while let Some(field) = mp
-        .next_field()
-        .await
-        .map_err(|e| AppError::Internal(format!("multipart: {e}")))?
-    {
+    // Multipart errors here are almost always "body too large" (the
+    // route caps the body at 100 MB via DefaultBodyLimit). That is an
+    // operator/client mistake, not a server fault — surface it as a
+    // friendly redirect-back, NOT AppError::Internal (which renders the
+    // scary "Something went wrong on our side" 500 page). Mirrors the
+    // empty-upload handling below and the avatar/restore upload paths.
+    let too_large = |dir: &str, e: &dyn std::fmt::Display| {
+        redirect_back(
+            &selector,
+            dir,
+            &format!("Upload failed — file too large (max 100 MB) or malformed: {e}"),
+        )
+    };
+    loop {
+        let field = match mp.next_field().await {
+            Ok(Some(f)) => f,
+            Ok(None) => break,
+            Err(e) => return Ok(too_large(&dir, &e)),
+        };
         let name = field.name().unwrap_or("").to_string();
         match name.as_str() {
             "dir" => {
-                dir = field
-                    .text()
-                    .await
-                    .map_err(|e| AppError::Internal(format!("text: {e}")))?;
+                dir = match field.text().await {
+                    Ok(t) => t,
+                    Err(e) => return Ok(too_large(&dir, &e)),
+                };
             }
             "file" => {
                 let fname = field.file_name().unwrap_or("upload.bin").to_string();
@@ -394,11 +408,10 @@ pub async fn post_upload(
                     .unwrap_or("upload.bin")
                     .to_string();
                 filename = Some(clean);
-                bytes = field
-                    .bytes()
-                    .await
-                    .map_err(|e| AppError::Internal(format!("bytes: {e}")))?
-                    .to_vec();
+                bytes = match field.bytes().await {
+                    Ok(b) => b.to_vec(),
+                    Err(e) => return Ok(too_large(&dir, &e)),
+                };
             }
             _ => {} // ignore unknown fields
         }

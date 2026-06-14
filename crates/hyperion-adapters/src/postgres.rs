@@ -61,8 +61,15 @@ pub async fn create_db_and_role(
         ],
     )
     .await?;
+    // The DB script uses the `\gexec` meta-command (to CREATE DATABASE
+    // only when absent — CREATE DATABASE can't run inside a DO block).
+    // psql's `-c` CANNOT mix SQL with backslash meta-commands ("you
+    // cannot mix SQL and psql meta-commands within a -c option"), so
+    // passing this via -c made EVERY postgres hosting creation fail
+    // with `syntax error at or near "\"`. Feed it on stdin instead,
+    // where psql processes `\gexec` correctly.
     let db_sql = build_db_sql(&db, &user);
-    cmd::run(
+    cmd::run_with_stdin(
         "/usr/bin/sudo",
         &[
             "-u",
@@ -70,9 +77,8 @@ pub async fn create_db_and_role(
             "/usr/bin/psql",
             "-v",
             "ON_ERROR_STOP=1",
-            "-c",
-            &db_sql,
         ],
+        db_sql.as_bytes(),
     )
     .await?;
     Ok(CreateResult {

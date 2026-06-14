@@ -215,6 +215,24 @@ pub async fn write_file_in_jail(
     Ok(())
 }
 
+/// Chown a path inside the jail to `owner:owner`. Called after the
+/// panel File Manager creates or overwrites a file/dir: the agent runs
+/// as root, so the new inode is root-owned, and the hosting's PHP /
+/// WordPress and its FTP account (both running AS the system user) can
+/// then no longer modify or delete it (e.g. editing wp-config.php via
+/// the panel would lock WordPress out of rewriting it). Best-effort at
+/// the call site.
+pub async fn chown_in_jail(
+    jail: &std::path::Path,
+    rel_path: &str,
+    owner: &str,
+) -> Result<(), AdapterError> {
+    let abs = resolve_inside_jail(jail, rel_path).await?;
+    let spec = format!("{owner}:{owner}");
+    crate::cmd::run("/usr/bin/chown", &[&spec, abs.to_string_lossy().as_ref()]).await?;
+    Ok(())
+}
+
 /// Delete one file OR one empty directory inside the jail.
 /// Refuses non-empty directories — operator must clear contents first.
 /// (Operators expecting `rm -rf` semantics get a clean error instead
