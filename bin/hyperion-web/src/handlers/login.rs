@@ -184,7 +184,13 @@ async fn post_login_via_rpc(
                 // Stash user_id in a short-lived signed pending cookie
                 // (reuses the session signer but with a 5-minute TTL).
                 // Redirect to /login/2fa to enter the code.
-                clear_throttle(ip);
+                //
+                // Do NOT clear the throttle here. The 2FA step shares this
+                // per-IP bucket to cap TOTP guesses; clearing it on a
+                // correct password let an attacker who already knows the
+                // password reset the bucket at will (resubmit password →
+                // 5 fresh code guesses, repeat) and brute-force the second
+                // factor. The bucket is cleared only after 2FA succeeds.
                 mint_pending_2fa_cookie(&state, user_id, &form.next)
             }
             hyperion_types::WebLoginResult::Locked { reason: _ } => {
@@ -403,6 +409,9 @@ pub async fn post_login_2fa(
             role,
             ..
         }) => {
+            // Second factor succeeded — NOW clear the per-IP throttle
+            // (the password step deliberately no longer does).
+            clear_throttle(&ip);
             // Clear the pending cookie + mint the real session.
             let mut headers = HeaderMap::new();
             let clear = format!(

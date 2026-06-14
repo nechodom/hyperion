@@ -585,8 +585,13 @@
                binding (same pattern as the access / acme-email forms). #}
             <input type="hidden" name="_csrf" value="{{ csrf_token }}">
             <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
-            <input type="hidden" name="target_node"
-                   value="{% if let Some(n) = detail.node_id %}{{ n }}{% endif %}">
+            {# Use the handler-computed `target_node` (the LOCAL sentinel
+               for master rows, the enrolled id for workers) — NOT the raw
+               detail.node_id, which is the agent's hostname ("s4") and is
+               not an enrolled node, so node_target() → dispatch_to_node →
+               400 "node s4 is not enrolled" on every master-hosted site.
+               Matches every other action form on this page. #}
+            <input type="hidden" name="target_node" value="{{ target_node }}">
             <select name="php_version" aria-label="New PHP version"
                     style="padding:0.25rem 0.5rem;font-size:0.85rem">
               {%- for opt in php_options %}

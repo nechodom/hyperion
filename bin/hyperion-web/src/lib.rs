@@ -522,6 +522,22 @@ async fn enforce_panel_hostname(
     if panel.trim().is_empty() {
         return next.run(req).await;
     }
+    // Never canonicalise machine-to-machine endpoints. They are reached
+    // by Host: <raw-ip> (load-balancer health probes; worker
+    // heartbeat/enroll POSTs whose master_url is an IP). A 308 to the
+    // panel hostname makes an LB probe see a redirect instead of
+    // 200/503 (marks the replica unhealthy), and the agent's heartbeat
+    // curl has no -L, so it silently drops the POST and the node never
+    // re-registers. Only browser admin routes get canonicalised.
+    {
+        let path = req.uri().path();
+        if path.starts_with("/healthz")
+            || path.starts_with("/readyz")
+            || path.starts_with("/api/")
+        {
+            return next.run(req).await;
+        }
+    }
     // Read the Host header. Some HTTP clients send :authority
     // instead (HTTP/2); axum normalises both into the host header
     // when the request reaches us, so a single lookup is enough.

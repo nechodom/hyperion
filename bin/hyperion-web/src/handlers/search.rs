@@ -103,7 +103,7 @@ fn score(haystack: &str, needle_lc: &str) -> i64 {
 
 pub async fn get_search(
     State(state): State<SharedState>,
-    _ctx: AuthCtx,
+    ctx: AuthCtx,
     Query(q): Query<SearchQuery>,
 ) -> Result<Response, AppError> {
     let needle = q.q.trim().to_ascii_lowercase();
@@ -125,6 +125,12 @@ pub async fn get_search(
     // suspended / failed sites of the same name don't outrank the
     // live one the operator is most likely after.
     if let Ok(RpcResponse::HostingList(rows)) = hostings_res {
+        // Tenant-scoped roles (operator/viewer/customer) must only see
+        // domains they hold an access grant for — otherwise the command
+        // palette enumerates every domain in the cluster, bypassing the
+        // per-user filtering the /hostings list applies. Admin+ pass
+        // through.
+        let rows = crate::handlers::hostings::filter_by_access(&state, &ctx, rows).await;
         let mut scored: Vec<(i64, HostingHit)> = rows
             .into_iter()
             .filter_map(|r| {
@@ -147,23 +153,29 @@ pub async fn get_search(
             .collect();
     }
 
-    if let Ok(RpcResponse::WebUserList(rows)) = users_res {
-        let mut scored: Vec<(i64, UserHit)> = rows
-            .into_iter()
-            .filter_map(|u| {
-                let s = score(&u.username, &needle);
-                if s == 0 {
-                    return None;
-                }
-                Some((s, UserHit { username: u.username, role: u.role }))
-            })
-            .collect();
-        scored.sort_by(|a, b| b.0.cmp(&a.0));
-        out.users = scored
-            .into_iter()
-            .take(MAX_HITS_PER_KIND)
-            .map(|(_, h)| h)
-            .collect();
+    // The user roster (username + role) is super_admin-only — the same
+    // gate as /admin/users. Without this, any authenticated viewer/
+    // customer/operator could enumerate every account + role via the
+    // command palette.
+    if ctx.is_super_admin() {
+        if let Ok(RpcResponse::WebUserList(rows)) = users_res {
+            let mut scored: Vec<(i64, UserHit)> = rows
+                .into_iter()
+                .filter_map(|u| {
+                    let s = score(&u.username, &needle);
+                    if s == 0 {
+                        return None;
+                    }
+                    Some((s, UserHit { username: u.username, role: u.role }))
+                })
+                .collect();
+            scored.sort_by(|a, b| b.0.cmp(&a.0));
+            out.users = scored
+                .into_iter()
+                .take(MAX_HITS_PER_KIND)
+                .map(|(_, h)| h)
+                .collect();
+        }
     }
 
     Ok(Json(out).into_response())

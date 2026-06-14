@@ -121,7 +121,23 @@ pub async fn get_stats(
         let cluster_res =
             crate::dispatcher::dispatch_to_node(&state, target, Request::ClusterStats).await;
         match cluster_res {
-            Ok(RpcResponse::ClusterStats(c)) => (Some(c), None),
+            Ok(RpcResponse::ClusterStats(mut c)) => {
+                // The agent fills NodeStats.node_id with its own hostname.
+                // Rewrite it to the dispatch target (LOCAL sentinel for
+                // master, else the enrolled id) — mirrors
+                // aggregate_cluster_stats. Without this the node-switcher
+                // tabs link to ?node=<hostname>, which 400s with "node
+                // <hostname> is not enrolled", and selected_node (compared
+                // against query.node = "local"/enrolled id) never matches,
+                // so the master view loses its load/memory cards.
+                let id = target
+                    .unwrap_or(crate::dispatcher::LOCAL_NODE_SENTINEL)
+                    .to_string();
+                for n in &mut c.nodes {
+                    n.node_id = id.clone();
+                }
+                (Some(c), None)
+            }
             Ok(RpcResponse::Error(e)) => (None, Some(e.to_string())),
             Ok(_) => (None, Some("unexpected agent response".into())),
             Err(e) => (None, Some(e.to_string())),

@@ -46,9 +46,13 @@ pub async fn get_monitoring(
     {
         let mut rows = rows;
         for r in &mut rows {
-            if r.node_id.is_empty() {
-                r.node_id = crate::dispatcher::LOCAL_NODE_SENTINEL.to_string();
-            }
+            // Rows from the master local socket are local regardless of
+            // the node_id they stored — master rows stamp the hostname
+            // (e.g. "s4"), not empty. Tag them all with the LOCAL
+            // sentinel unconditionally (the old is_empty() guard left
+            // "s4" in place, which becomes the 400 "node s4 is not
+            // enrolled" the moment a monitor action form reuses it).
+            r.node_id = crate::dispatcher::LOCAL_NODE_SENTINEL.to_string();
         }
         items.extend(rows);
     }

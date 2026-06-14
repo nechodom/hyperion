@@ -1275,8 +1275,13 @@ pub async fn get_detail(
         }
     };
     let monitor_fut = async {
-        match hyperion_rpc_client::call(
-            &state.agent_socket,
+        // Monitor config/history live on the OWNING node (post_monitor_set
+        // writes there) — read from the same node, not the master local
+        // socket, or a worker-hosted site's Monitor tab always shows
+        // "disabled / no history" even after the operator enabled it.
+        match crate::dispatcher::dispatch_to_node(
+            &state,
+            target,
             Request::MonitorGet { sel: sel_id.clone() },
         )
         .await
@@ -1294,8 +1299,10 @@ pub async fn get_detail(
     // gate the whole page render. They now load lazily over HTMX
     // via /hostings/:sel/dns-panel and /hostings/:sel/spf-panel.
     let email_log_fut = async {
-        match hyperion_rpc_client::call(
-            &state.agent_socket,
+        // Per-hosting Hyperion mail log lives on the owning node too.
+        match crate::dispatcher::dispatch_to_node(
+            &state,
+            target,
             Request::EmailLogList {
                 hosting_id: Some(detail.id.as_str().to_string()),
                 limit: 50,
@@ -1809,8 +1816,17 @@ pub async fn post_set_expiry(
             .unwrap_or("30,7,1")
             .to_string(),
     };
-    let resp = hyperion_rpc_client::call(
-        &state.agent_socket,
+    // Expiry lives on the owner node (the detail page reads it from
+    // there); dispatch the write to the same node, mirroring
+    // post_clear_expiry. Master-local-only made Set fail on every
+    // worker-hosted site while Clear worked.
+    let target_owned: Option<String> = find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target_owned.as_deref(),
         Request::HostingSetExpiry { sel, expiry },
     )
     .await?;
@@ -2450,16 +2466,26 @@ pub async fn post_backup_delete(
     ctx: AuthCtx,
     Form(form): Form<BackupDeleteForm>,
 ) -> Result<Response, AppError> {
-    // form.selector controls the redirect target, not the action — the
-    // RPC operates on backup_id directly. We still gate via the
+    // form.selector controls the redirect target AND the owner node —
+    // backup_id is the OWNER node's per-node autoincrement id, so this
+    // MUST dispatch to the owner. Sending it to the master could delete
+    // an unrelated master backup that happens to share the numeric id
+    // (both start at 1), or NotFound → a 502. We still gate via the
     // selector because non-admins can only see the backup list for
     // hostings they have access to; a viewer probing arbitrary
     // backup_ids without a matching access grant gets 403 here.
-    if let Err(r) = require_manage_for_selector(&state, &ctx, &form.selector).await {
-        return Ok(r);
-    }
-    let resp = hyperion_rpc_client::call(
-        &state.agent_socket,
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let sel_url = urlencoding(&form.selector);
+    let target_owned: Option<String> = find_hosting_anywhere(&state, sel)
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target_owned.as_deref(),
         Request::BackupDelete {
             backup_id: form.backup_id,
         },
@@ -2467,10 +2493,16 @@ pub async fn post_backup_delete(
     .await?;
     match resp {
         RpcResponse::BackupDelete => {
-            Ok(Redirect::to(&format!("/hostings/{}#backups", urlencoding(&form.selector)))
-                .into_response())
+            Ok(Redirect::to(&format!("/hostings/{sel_url}#backups")).into_response())
         }
-        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        // The agent deliberately refuses to delete a still-running
+        // backup — surface that as a flash, not a full 502 page.
+        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
+            "/hostings/{}?backup_error={}#backups",
+            sel_url,
+            urlencoding(&e.to_string())
+        ))
+        .into_response()),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }
@@ -2500,16 +2532,31 @@ pub async fn post_set_acme_email(
     } else {
         Some(trimmed.to_string())
     };
-    let resp = hyperion_rpc_client::call(
-        &state.agent_socket,
+    let sel_url = urlencoding(&form.selector);
+    // The acme_contact_email override lives on the hosting's row on its
+    // owning node — dispatch there, not the master local socket (which
+    // would NotFound for a worker-hosted site). Agent errors (e.g.
+    // malformed email) become a flash, not a 502 page.
+    let target_owned: Option<String> = find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target_owned.as_deref(),
         Request::SetHostingAcmeEmail { sel, email },
     )
     .await?;
     match resp {
         RpcResponse::SetHostingAcmeEmail => {
-            Ok(Redirect::to(&format!("/hostings/{}", urlencoding(&form.selector))).into_response())
+            Ok(Redirect::to(&format!("/hostings/{sel_url}")).into_response())
         }
-        RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
+        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
+            "/hostings/{}?cert_error={}#ssl",
+            sel_url,
+            urlencoding(&e.to_string())
+        ))
+        .into_response()),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }
@@ -2806,7 +2853,7 @@ pub async fn post_monitor_probe(
 ///
 /// Failures (RPC error, missing user_id) are conservative: we filter
 /// to empty rather than risk over-disclosure.
-async fn filter_by_access(
+pub(crate) async fn filter_by_access(
     state: &SharedState,
     ctx: &AuthCtx,
     rows: Vec<HostingSummary>,
@@ -3951,8 +3998,18 @@ pub async fn post_logs(
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
-    let resp = hyperion_rpc_client::call(
-        &state.agent_socket,
+    // Per-site nginx/php logs live on the OWNING node's disk — dispatch
+    // there, not the master local socket (which NotFounds for a
+    // worker-hosted site). This is an HTMX target (#logs-output), so on
+    // error render an inline fragment, NOT AppError::Rpc — a 5xx makes
+    // htmx drop the swap and the button look dead.
+    let target_owned: Option<String> = find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target_owned.as_deref(),
         Request::HostingLogs {
             sel,
             log_kind: form.kind.clone(),
@@ -3962,7 +4019,14 @@ pub async fn post_logs(
     .await?;
     let body = match resp {
         RpcResponse::HostingLogs(s) => s,
-        RpcResponse::Error(e) => return Err(AppError::Rpc(e.to_string())),
+        RpcResponse::Error(e) => {
+            let msg = e.to_string();
+            let esc = askama_escape::escape(&msg, askama_escape::Html);
+            return Ok(Html(format!(
+                r#"<div class="flash error" style="margin:0"><div class="flash-body">Could not read logs: {esc}</div></div>"#
+            ))
+            .into_response());
+        }
         _ => return Err(AppError::Internal("unexpected response".into())),
     };
     let kind = askama_escape::escape(&form.kind, askama_escape::Html).to_string();
@@ -4001,8 +4065,15 @@ pub async fn post_cron_save(
         Err(r) => return Ok(r),
     };
     let sel_url = urlencoding(&form.selector);
-    let resp = hyperion_rpc_client::call(
-        &state.agent_socket,
+    // The crontab lives on the owning node (the editor reads it from
+    // there) — write to the same node, not the master local socket.
+    let target_owned: Option<String> = find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target_owned.as_deref(),
         Request::CronReplace {
             sel,
             body: form.body,
@@ -4188,19 +4259,15 @@ pub async fn post_bulk(
                 continue;
             }
         };
-        // For multi-node correctness: actions like suspend/resume/
-        // delete/install_asset have to land on the node that
-        // actually owns the hosting. Look it up first (best-effort —
-        // single-node setups treat all hostings as local). The
-        // backup action stays master-local because backups are
-        // currently a master-side operation only.
-        let target_owned: Option<String> = match form.action.as_str() {
-            "backup" => None,
-            _ => find_hosting_anywhere(&state, sel.clone())
-                .await
-                .ok()
-                .and_then(|(_d, n)| n),
-        };
+        // For multi-node correctness: every per-hosting action —
+        // including backup — has to land on the node that actually owns
+        // the hosting (backups are stored per node, and BackupNow on the
+        // master NotFounds for a worker-hosted row). Look it up first
+        // (best-effort — single-node setups treat all hostings as local).
+        let target_owned: Option<String> = find_hosting_anywhere(&state, sel.clone())
+            .await
+            .ok()
+            .and_then(|(_d, n)| n);
         let target = target_owned.as_deref();
         let req = match form.action.as_str() {
             "suspend" => Request::HostingSuspend {
@@ -4762,8 +4829,16 @@ pub async fn post_quota_set(
     // — setquota wants 1024-byte blocks.
     let disk_soft_kib = form.disk_soft_mib.saturating_mul(1024);
     let disk_hard_kib = form.disk_hard_mib.saturating_mul(1024);
-    let resp = hyperion_rpc_client::call(
-        &state.agent_socket,
+    // setquota runs against the filesystem on the node that holds
+    // /home/<user> — dispatch to the owner, not the master local socket
+    // (the Quota tab already READS from the owner).
+    let target_owned: Option<String> = find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target_owned.as_deref(),
         Request::QuotaSet {
             hosting: sel,
             disk_soft_kib,
@@ -5589,8 +5664,17 @@ pub async fn post_wp_plugin_action(
             s
         }
     };
-    let resp = hyperion_rpc_client::call(
-        &state.agent_socket,
+    // WordPress lives on the owning node — dispatch there (the plugin
+    // LIST is already read from the owner). Master-local made every
+    // plugin install/activate/update fail on worker-hosted sites, while
+    // the sibling theme action worked.
+    let target_owned: Option<String> = find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target_owned.as_deref(),
         Request::WpPluginAction { hosting: sel, slug, action },
     )
     .await?;
@@ -5632,8 +5716,15 @@ pub async fn post_wp_reset(
         Err(r) => return Ok(r),
     };
     let sel_url = urlencoding(&form.selector);
-    let resp = hyperion_rpc_client::call(
-        &state.agent_socket,
+    // WordPress lives on the owning node — dispatch there, not the
+    // master local socket (NotFound for a worker-hosted site).
+    let target_owned: Option<String> = find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target_owned.as_deref(),
         Request::WpResetPassword {
             sel,
             wp_user: form.wp_user.trim().to_string(),
@@ -5669,8 +5760,14 @@ pub async fn post_db_reset(
         Err(r) => return Ok(r),
     };
     let sel_url = urlencoding(&form.selector);
-    let resp = hyperion_rpc_client::call(
-        &state.agent_socket,
+    // The database lives on the owning node — dispatch there.
+    let target_owned: Option<String> = find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target_owned.as_deref(),
         Request::DbResetPassword {
             sel,
             new_password: form.new_password,
@@ -5707,8 +5804,15 @@ pub async fn post_ftp_set(
         Err(r) => return Ok(r),
     };
     let sel_url = urlencoding(&form.selector);
-    let resp = hyperion_rpc_client::call(
-        &state.agent_socket,
+    // FTP account lives on the owning node — find it (mirrors
+    // post_ftp_disable just below).
+    let target_owned: Option<String> = find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target_owned.as_deref(),
         Request::FtpSetPassword {
             sel,
             new_password: form.new_password,
@@ -5783,8 +5887,15 @@ pub async fn post_restore(
         Err(r) => return Ok(r),
     };
     let sel_url = urlencoding(&form.selector);
-    let resp = hyperion_rpc_client::call(
-        &state.agent_socket,
+    // The backup archive + the hosting tree live on the owning node —
+    // dispatch there (archive_path is the worker's local path).
+    let target_owned: Option<String> = find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target_owned.as_deref(),
         Request::BackupRestore {
             sel,
             archive_path: form.archive_path.trim().to_string(),

@@ -185,8 +185,16 @@ fn default_offsets() -> String {
 
 pub async fn post_create(
     State(state): State<SharedState>,
+    ctx: AuthCtx,
     Form(form): Form<CreateForm>,
 ) -> Result<Response, AppError> {
+    // Profiles are an admin construct (PHP limits, pricing, plugin/theme
+    // bundles). The route only enforces auth+CSRF, so without this gate
+    // any authenticated viewer could create/edit/delete them — matching
+    // the asset handlers below which all gate on is_admin_or_higher.
+    if !ctx.is_admin_or_higher() {
+        return Err(AppError::Forbidden);
+    }
     let price_minor = parse_price_major(&form.price_major)?;
     let currency = form.price_currency.trim().to_string();
     let interval = form.price_interval.trim().to_string();
@@ -269,8 +277,12 @@ pub struct CloneForm {
 /// GC is fragile).
 pub async fn post_clone(
     State(state): State<SharedState>,
+    ctx: AuthCtx,
     Form(form): Form<CloneForm>,
 ) -> Result<Response, AppError> {
+    if !ctx.is_admin_or_higher() {
+        return Err(AppError::Forbidden);
+    }
     // Fetch the source profile.
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
@@ -388,9 +400,13 @@ pub struct EditQuery {
 
 pub async fn post_update(
     State(state): State<SharedState>,
+    ctx: AuthCtx,
     axum::extract::Path(id): axum::extract::Path<i64>,
     Form(form): Form<CreateForm>,
 ) -> Result<Response, AppError> {
+    if !ctx.is_admin_or_higher() {
+        return Err(AppError::Forbidden);
+    }
     let price_minor = parse_price_major(&form.price_major)?;
     let currency = form.price_currency.trim().to_string();
     let interval = form.price_interval.trim().to_string();
@@ -458,8 +474,12 @@ pub async fn post_update(
 
 pub async fn post_delete(
     State(state): State<SharedState>,
+    ctx: AuthCtx,
     Form(form): Form<DeleteForm>,
 ) -> Result<Response, AppError> {
+    if !ctx.is_admin_or_higher() {
+        return Err(AppError::Forbidden);
+    }
     let resp =
         hyperion_rpc_client::call(&state.agent_socket, Request::ProfileDelete { id: form.id })
             .await?;
@@ -495,7 +515,16 @@ pub async fn post_apply(
     ctx: AuthCtx,
     Form(form): Form<ApplyForm>,
 ) -> Result<Response, AppError> {
-    let sel = super::hostings::parse_selector_public(&form.selector)?;
+    // Applying a profile mutates a specific hosting (PHP limits, expiry,
+    // pricing, and installs plugins/themes). Gate it exactly like every
+    // other per-hosting mutation: manage-level access to THAT hosting.
+    // Previously this had no authz at all — any authenticated user could
+    // apply any profile to any hosting cluster-wide.
+    let sel = match super::hostings::require_manage_for_selector(&state, &ctx, &form.selector).await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
     let sel_url = urlencoding(&form.selector);
     // Resolve the owning node — the job's RPCs must land there.
     let (detail, owner_node) =
