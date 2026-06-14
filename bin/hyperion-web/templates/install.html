@@ -540,7 +540,7 @@
         <tr>
           <td><strong>{{ i.label }}</strong></td>
           <td class="muted numeric" title="{{ i.created_at }}">{{ crate::handlers::stats::fmt_ago(i.created_at) }}</td>
-          <td class="muted numeric" title="{{ i.expires_at }}">{{ crate::handlers::stats::fmt_ago(i.expires_at) }}</td>
+          <td class="muted numeric" title="{{ i.expires_at }}">{{ crate::handlers::stats::fmt_future(i.expires_at) }}</td>
           <td><code style="font-size:0.74rem">{{ i.token_hash }}</code></td>
           <td class="right">
             <form method="post" action="/install/invite/revoke" style="display:inline"

@@ -641,6 +641,34 @@ pub fn fmt_ago(ts: &i64) -> String {
         .unwrap_or_else(|| format!("{ts}"))
 }
 
+/// Render a FUTURE timestamp (e.g. `next_billing_at`). `fmt_ago` clamps
+/// negative deltas to 0, so it renders every future date as "just now";
+/// this one shows the calendar date, with an "in Nd" hint when it's
+/// close. `due now` / `overdue` when the date has passed.
+pub fn fmt_future(ts: &i64) -> String {
+    if *ts <= 0 {
+        return "—".into();
+    }
+    use chrono::{TimeZone, Utc};
+    let date = Utc
+        .timestamp_opt(*ts, 0)
+        .single()
+        .map(|dt| dt.format("%d %b %Y").to_string())
+        .unwrap_or_else(|| format!("{ts}"));
+    let delta = *ts - hyperion_types::now_secs();
+    if delta <= 0 {
+        return format!("overdue ({date})");
+    }
+    let days = delta / 86400;
+    if days == 0 {
+        format!("today ({date})")
+    } else if days < 45 {
+        format!("in {days}d · {date}")
+    } else {
+        date
+    }
+}
+
 /// Truncate a long opaque ID to the first 10 chars + ellipsis. Used for
 /// hosting IDs in the activity feed where a full ULID/UUIDv7 line-wraps
 /// ugly. Caller is expected to put the full ID in a `title="…"`.

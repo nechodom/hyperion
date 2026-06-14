@@ -624,7 +624,7 @@
         </dd>
       {% endif %}
       {% if let Some(ts) = pa.next_billing_at %}
-        <dt>Next billing</dt><dd class="muted numeric" title="{{ ts }}">{{ crate::handlers::stats::fmt_ago(ts) }}</dd>
+        <dt>Next billing</dt><dd class="muted numeric" title="{{ ts }}">{{ crate::handlers::stats::fmt_future(ts) }}</dd>
       {% endif %}
     {% endif %}
   </dl>
@@ -762,7 +762,7 @@
     {% if !cert.sans.is_empty() %}
     <dt>SANs</dt><dd>{{ cert.sans.join(", ") }}</dd>
     {% endif %}
-    <dt>Not after</dt><dd class="muted numeric" title="{{ cert.not_after }}">{{ crate::handlers::stats::fmt_ago(cert.not_after) }}</dd>
+    <dt>Not after</dt><dd class="muted numeric" title="{{ cert.not_after }}">{{ crate::handlers::stats::fmt_future(cert.not_after) }}</dd>
     <dt>Fingerprint</dt><dd><code style="font-size:0.74rem">{{ cert.fingerprint_sha256 }}</code></dd>
   </dl>
 
