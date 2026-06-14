@@ -113,6 +113,19 @@ pub fn render_redirect(input: &RedirectVhostInput<'_>) -> Result<String, Adapter
             input.redirect_url
         )));
     }
+    // The target lands verbatim in `return <code> <target>;`. Reject
+    // anything that could break out of that directive and brick nginx
+    // (write_redirect_vhost has no `nginx -t` gate). A real URL contains
+    // none of these.
+    if input.redirect_url.chars().any(|c| {
+        c.is_whitespace()
+            || c.is_control()
+            || matches!(c, '\'' | '"' | '$' | '\\' | '`' | '{' | '}' | ';' | '<' | '>')
+    }) {
+        return Err(AdapterError::Other(
+            "redirect_url contains characters that aren't valid in a URL".into(),
+        ));
+    }
     let target = input.redirect_url.trim_end_matches('/').to_string();
     let (http_t, https_t) = if input.redirect_preserve_path {
         (format!("{target}$request_uri"), format!("{target}$request_uri"))
@@ -193,7 +206,13 @@ pub async fn write_panel_vhost(
     ensure_symlink(&vhost, &symlink).await?;
     if let Err(e) = cmd::run("/usr/sbin/nginx", &["-t"]).await {
         restore_or_remove(&vhost, backup.as_deref()).await;
-        let _ = tokio::fs::remove_file(&symlink).await;
+        // Only drop the sites-enabled symlink on a FRESH create (no
+        // backup). When we just restored a previously-working vhost,
+        // removing its symlink would take the live site offline at the
+        // next reload.
+        if backup.is_none() {
+            let _ = tokio::fs::remove_file(&symlink).await;
+        }
         return Err(e);
     }
     reload().await
@@ -253,7 +272,13 @@ pub async fn write_vhost_proxy(
     ensure_symlink(&vhost, &symlink).await?;
     if let Err(e) = cmd::run("/usr/sbin/nginx", &["-t"]).await {
         restore_or_remove(&vhost, backup.as_deref()).await;
-        let _ = tokio::fs::remove_file(&symlink).await;
+        // Only drop the sites-enabled symlink on a FRESH create (no
+        // backup). When we just restored a previously-working vhost,
+        // removing its symlink would take the live site offline at the
+        // next reload.
+        if backup.is_none() {
+            let _ = tokio::fs::remove_file(&symlink).await;
+        }
         return Err(e);
     }
     reload().await
@@ -261,11 +286,26 @@ pub async fn write_vhost_proxy(
 
 /// Render the suspended-state vhost.
 pub fn render_suspended(input: &SuspendedInput<'_>) -> Result<String, AdapterError> {
+    // The reason is operator free text, interpolated UNESCAPED into a
+    // single-quoted nginx `return 503 '...'` string AND into the HTML
+    // body — and apply_suspended has no `nginx -t` gate. A lone `'`
+    // (terminates the nginx string), `$` (nginx variable), `;`/`{`/`}`
+    // or a newline would render an invalid vhost that, once symlinked,
+    // makes EVERY nginx -t / reload on the node fail until fixed by
+    // hand. Strip the nginx-string-breaking + HTML-injection chars and
+    // neutralise control chars; cap the length.
+    let safe_reason: String = input
+        .reason_message
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .filter(|c| !matches!(c, '\'' | '"' | '$' | '\\' | '`' | '{' | '}' | ';' | '<' | '>'))
+        .take(300)
+        .collect();
     let tpl = SuspendedTpl {
         domain: input.domain,
         cert_path: input.cert_path,
         key_path: input.key_path,
-        reason_message: input.reason_message,
+        reason_message: &safe_reason,
     };
     Ok(tpl.render()?)
 }
@@ -353,12 +393,16 @@ pub async fn write_vhost(paths: &Paths, input: &VhostInput<'_>) -> Result<(), Ad
         let _ = tokio::fs::remove_file(&cache_path).await;
     }
     if let Err(e) = cmd::run("/usr/sbin/nginx", &["-t"]).await {
-        // Restore previous state.
+        // Restore previous state. Only drop the sites-enabled symlink on
+        // a FRESH create (no backup) — when we restored a previously-
+        // working vhost, removing its symlink would take the live site
+        // offline at the next reload (e.g. a rejected
+        // custom_nginx_snippet edit). Same for the cache sidecar.
         restore_or_remove(&vhost, backup.as_deref()).await;
-        let _ = tokio::fs::remove_file(&symlink).await;
-        // Pull the cache sidecar too — bad vhost + sidecar would
-        // half-survive an aborted apply otherwise.
-        let _ = tokio::fs::remove_file(&cache_path).await;
+        if backup.is_none() {
+            let _ = tokio::fs::remove_file(&symlink).await;
+            let _ = tokio::fs::remove_file(&cache_path).await;
+        }
         return Err(e);
     }
     reload().await

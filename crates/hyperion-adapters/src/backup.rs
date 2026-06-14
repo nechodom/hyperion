@@ -193,7 +193,11 @@ pub async fn upload_remote(
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| AdapterError::Other("file has no name".into()))?;
-    let dir = upload.remote_dir.trim_end_matches('/');
+    // Normalise to a single leading slash + no trailing slash. Operator
+    // config may give a base_path without a leading '/' (e.g. "backups"),
+    // which would otherwise produce "ftp://host:21backups/..." — curl
+    // reads "21backups" as the port and every push fails.
+    let dir = format!("/{}", upload.remote_dir.trim_matches('/'));
     let url = format!(
         "{scheme}://{host}:{port}{dir}/{filename}",
         host = upload.host,

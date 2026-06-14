@@ -7304,6 +7304,26 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let mut out = Vec::with_capacity(due.len());
         for cert in due {
             let domain_str = cert.domain.clone();
+            // Skip hostings that aren't actively serving: a suspended /
+            // trashed / deleting vhost returns 503 (or 404) on the ACME
+            // HTTP-01 challenge path, so the renewal fails every tick and
+            // burns Let's Encrypt's per-hostname failed-validation rate
+            // limit (5/hour). The cert just expires while suspended and
+            // is re-issued on resume. A None row (e.g. the panel cert,
+            // which isn't a hosting) falls through and still renews.
+            if let Ok(Some(row)) = hostings::get_by_domain(&self.pool, &domain_str).await {
+                if matches!(
+                    row.state,
+                    HostingState::Suspended | HostingState::Trashed | HostingState::Deleting
+                ) {
+                    tracing::debug!(
+                        domain = %domain_str,
+                        state = %row.state.as_str(),
+                        "cert renew: skipping non-serving hosting"
+                    );
+                    continue;
+                }
+            }
             self.append_audit(
                 "cert.renew.attempt",
                 None,
