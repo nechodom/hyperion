@@ -2144,7 +2144,15 @@
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
     Logs
   </h2>
-  <p class="muted" style="font-size:0.85rem;margin-top:-0.4rem;margin-bottom:1rem">Tail the hosting's nginx logs without SSHing into the box.</p>
+  <p class="muted" style="font-size:0.85rem;margin-top:-0.4rem;margin-bottom:0.7rem">Tail the hosting's nginx logs without SSHing into the box.</p>
+  <div class="row" style="margin:0 0 0.7rem;gap:0.5rem;align-items:center;flex-wrap:wrap">
+    <input id="log-filter" class="input" type="search" placeholder="Filter lines… (instant, client-side)"
+           style="flex:1;min-width:12rem;font-size:0.85rem" autocomplete="off">
+    <label style="display:flex;align-items:center;gap:0.35rem;font-size:0.85rem" class="text-soft">
+      <input id="log-follow" type="checkbox"> Follow (live, 3s)
+    </label>
+    <span id="log-filter-count" class="text-soft small"></span>
+  </div>
   <div id="logs-output" style="background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.85rem 1rem">
     <span class="muted">Click a button below to fetch.</span>
   </div>
@@ -2176,6 +2184,63 @@
     <span id="log-spinner" class="muted htmx-indicator" style="font-size:0.85rem">fetching…</span>
   </div>
 </div>
+
+<script>
+(function () {
+  'use strict';
+  var out = document.getElementById('logs-output');
+  var filterInput = document.getElementById('log-filter');
+  var follow = document.getElementById('log-follow');
+  var countEl = document.getElementById('log-filter-count');
+  if (!out) return;
+  var lastForm = null;       // which log to re-fetch while following
+  var followTimer = null;
+
+  // Remember the last log button submitted, so Follow re-fetches THAT log.
+  document.querySelectorAll('#tab-logs form[hx-post="/hostings/logs"]').forEach(function (f) {
+    f.addEventListener('submit', function () { lastForm = f; });
+  });
+
+  function applyFilter() {
+    var pre = out.querySelector('pre');
+    if (!pre) { if (countEl) countEl.textContent = ''; return; }
+    if (pre.dataset.raw === undefined) pre.dataset.raw = pre.textContent;
+    var raw = pre.dataset.raw;
+    var needle = ((filterInput && filterInput.value) || '').toLowerCase();
+    if (!needle) {
+      pre.textContent = raw;
+      if (countEl) countEl.textContent = '';
+    } else {
+      var lines = raw.split('\n');
+      var kept = lines.filter(function (l) { return l.toLowerCase().indexOf(needle) !== -1; });
+      pre.textContent = kept.join('\n');
+      if (countEl) countEl.textContent = kept.length + ' / ' + lines.length + ' lines';
+    }
+    pre.scrollTop = pre.scrollHeight; // keep tailing the newest lines
+  }
+
+  if (filterInput) filterInput.addEventListener('input', applyFilter);
+
+  document.body.addEventListener('htmx:afterSwap', function (ev) {
+    if (!ev.target || ev.target.id !== 'logs-output') return;
+    applyFilter();
+    if (follow && follow.checked && lastForm) {
+      clearTimeout(followTimer);
+      followTimer = setTimeout(function () {
+        if (follow.checked && typeof htmx !== 'undefined') htmx.trigger(lastForm, 'submit');
+      }, 3000);
+    }
+  });
+
+  if (follow) follow.addEventListener('change', function () {
+    if (follow.checked && lastForm && typeof htmx !== 'undefined') {
+      htmx.trigger(lastForm, 'submit'); // immediate refresh, then the loop continues
+    } else {
+      clearTimeout(followTimer);
+    }
+  });
+})();
+</script>
 
 </div><!-- /tab-logs -->
 
