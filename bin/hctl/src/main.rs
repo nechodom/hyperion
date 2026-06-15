@@ -657,6 +657,12 @@ fn print_pretty(resp: &Response) {
             println!("  warnings    = {}", e.warning_offsets_days);
         }
         Response::HostingClearExpiry => println!("✓ cleared"),
+        Response::HostingKvSet => println!("✓ saved"),
+        Response::HostingKvList(pairs) => {
+            for (k, v) in pairs {
+                println!("{k} = {v}");
+            }
+        }
         Response::UpcomingExpiries(rows) => {
             println!("{:<24} {:>14} {:<25}", "DOMAIN", "EXPIRES AT", "OWNER");
             for r in rows {

@@ -188,6 +188,16 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(_) => Response::HostingClearExpiry,
             Err(e) => Response::Error(e),
         },
+        Request::HostingKvSet { hosting_id, key, value } => {
+            match api.hosting_kv_set(hosting_id, key, value).await {
+                Ok(_) => Response::HostingKvSet,
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::HostingKvList { hosting_id } => match api.hosting_kv_list(hosting_id).await {
+            Ok(v) => Response::HostingKvList(v),
+            Err(e) => Response::Error(e),
+        },
         Request::UpcomingExpiries { within_seconds } => {
             match api.upcoming_expiries(within_seconds).await {
                 Ok(v) => Response::UpcomingExpiries(v),
@@ -1247,6 +1257,20 @@ mod tests {
         }
         async fn hosting_get_expiry(&self, _: HostingSelector) -> Result<HostingExpiry, RpcError> {
             Ok(HostingExpiry::defaults())
+        }
+        async fn hosting_kv_set(
+            &self,
+            _: String,
+            _: String,
+            _: String,
+        ) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn hosting_kv_list(
+            &self,
+            _: String,
+        ) -> Result<Vec<(String, String)>, RpcError> {
+            Ok(vec![])
         }
         async fn hosting_clear_expiry(&self, _: HostingSelector) -> Result<(), RpcError> {
             Ok(())

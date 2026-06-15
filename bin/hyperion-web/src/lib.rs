@@ -60,6 +60,10 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::hostings::post_set_acme_email),
         )
         .route(
+            "/hostings/notes",
+            post(handlers::hostings::post_set_notes),
+        )
+        .route(
             "/hostings/wp/install",
             post(handlers::hostings::post_wp_install),
         )

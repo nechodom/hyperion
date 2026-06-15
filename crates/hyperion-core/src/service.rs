@@ -2584,6 +2584,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 }
             }
         }
+        // Drop generic per-hosting KV (notes/tags/etc.) so a future
+        // hosting reusing this ULID doesn't inherit stale metadata.
+        let _ = hyperion_state::hosting_kv::delete_all(&self.pool, detail.id.as_str()).await;
         hostings::delete(&self.pool, &detail.id)
             .await
             .map_err(|e| RpcError::Internal_with(format!("delete row: {e}")))?;
@@ -3488,6 +3491,38 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         self.append_audit("hosting.clear_expiry", Some(detail.id.as_str()), "{}", "ok")
             .await;
         Ok(())
+    }
+
+    /// Generic per-hosting key/value store (notes, tags, …). Operates on
+    /// the local `hosting_kv` table keyed by the hosting's ULID — no
+    /// existence check (panel-side metadata; a stray id is harmless and
+    /// cleaned up with delete_all on hard delete).
+    pub async fn hosting_kv_set(
+        &self,
+        hosting_id: String,
+        key: String,
+        value: String,
+    ) -> Result<(), RpcError> {
+        hyperion_state::hosting_kv::set(&self.pool, &hosting_id, &key, &value, now_secs())
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("kv set: {e}")))?;
+        self.append_audit(
+            "hosting.kv.set",
+            Some(&hosting_id),
+            &serde_json::json!({ "key": key }).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
+    pub async fn hosting_kv_list(
+        &self,
+        hosting_id: String,
+    ) -> Result<Vec<(String, String)>, RpcError> {
+        hyperion_state::hosting_kv::list(&self.pool, &hosting_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("kv list: {e}")))
     }
 
     pub async fn upcoming_expiries(

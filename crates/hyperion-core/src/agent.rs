@@ -357,6 +357,22 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.clear_expiry(sel).await
     }
 
+    async fn hosting_kv_set(
+        &self,
+        hosting_id: String,
+        key: String,
+        value: String,
+    ) -> Result<(), RpcError> {
+        self.svc.hosting_kv_set(hosting_id, key, value).await
+    }
+
+    async fn hosting_kv_list(
+        &self,
+        hosting_id: String,
+    ) -> Result<Vec<(String, String)>, RpcError> {
+        self.svc.hosting_kv_list(hosting_id).await
+    }
+
     async fn upcoming_expiries(
         &self,
         within_seconds: i64,

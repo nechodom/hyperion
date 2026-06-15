@@ -12,6 +12,7 @@ pub mod certificates;
 pub mod databases;
 pub mod db;
 pub mod email_log;
+pub mod hosting_kv;
 pub mod hosting_quotas;
 pub mod hostings;
 pub mod invites;

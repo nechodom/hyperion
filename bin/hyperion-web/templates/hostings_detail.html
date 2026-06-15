@@ -765,6 +765,37 @@
 </div>
 {% endif %}
 
+{# Operator notes + tags — panel-side metadata, free-text reminder +
+   labels for filtering. #}
+<div class="card hover">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+    Notes &amp; tags
+  </h2>
+  {% if !tags.is_empty() %}
+  <div style="display:flex;gap:0.35rem;flex-wrap:wrap;margin:-0.3rem 0 0.8rem">
+    {% for t in tags %}<span class="tag" style="font-size:0.72rem">{{ t }}</span>{% endfor %}
+  </div>
+  {% endif %}
+  <form method="post" action="/hostings/notes">
+    <input type="hidden" name="_csrf" value="{{ csrf_notes }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+    <label class="text-soft small" style="display:block;margin-bottom:0.25rem">Note (private to operators)</label>
+    <textarea name="notes" rows="3" spellcheck="false" placeholder="e.g. client contact, renewal quirks, gotchas…"
+              style="width:100%;font-size:0.88rem">{{ notes }}</textarea>
+    <label class="text-soft small" style="display:block;margin:0.7rem 0 0.25rem">Tags (comma-separated)</label>
+    <input class="input" name="tags" value="{{ tags.join(", ") }}" autocomplete="off"
+           placeholder="prod, client-acme, php83" style="width:100%;font-size:0.88rem">
+    <div class="row" style="margin-top:0.7rem">
+      <button class="btn primary" type="submit">
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+        Save notes &amp; tags
+      </button>
+      <span class="muted hint">tags: ≤12, lowercased, a-z0-9 - _</span>
+    </div>
+  </form>
+</div>
+
 </div><!-- /tab-overview -->
 
 <div class="tab-panel" id="tab-ssl">

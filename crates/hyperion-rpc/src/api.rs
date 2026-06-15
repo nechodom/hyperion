@@ -196,6 +196,17 @@ pub trait AgentApi: Send + Sync + 'static {
     ) -> Result<HostingExpiry, RpcError>;
     async fn hosting_get_expiry(&self, sel: HostingSelector) -> Result<HostingExpiry, RpcError>;
     async fn hosting_clear_expiry(&self, sel: HostingSelector) -> Result<(), RpcError>;
+    /// Generic per-hosting key/value store (notes, tags, …).
+    async fn hosting_kv_set(
+        &self,
+        hosting_id: String,
+        key: String,
+        value: String,
+    ) -> Result<(), RpcError>;
+    async fn hosting_kv_list(
+        &self,
+        hosting_id: String,
+    ) -> Result<Vec<(String, String)>, RpcError>;
     async fn upcoming_expiries(
         &self,
         within_seconds: i64,

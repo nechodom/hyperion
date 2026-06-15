@@ -265,6 +265,11 @@ struct DetailTpl<'a> {
     /// post-create in-place render (the auto-reload lands on the full
     /// detail GET which computes it).
     health: Option<HostingHealth>,
+    /// Free-text operator note for this hosting (panel-side metadata).
+    notes: String,
+    /// Operator tags (already split + cleaned) for filtering/labelling.
+    tags: Vec<String>,
+    csrf_notes: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -1147,6 +1152,9 @@ pub async fn post_create(
                 wp_extras_error: None,
                 php_options: PHP_VERSION_OPTIONS.iter().map(|s| s.to_string()).collect(),
                 health: None,
+                notes: String::new(),
+                tags: vec![],
+                csrf_notes: csrf_token_for(&state, &ctx, "/hostings/notes"),
             };
             Ok(Html(tpl.render()?).into_response())
         }
@@ -1623,6 +1631,35 @@ pub async fn get_detail(
         &quota,
         hyperion_types::now_secs(),
     );
+    // Operator notes + tags (panel-side metadata on the master's
+    // hosting_kv, keyed by ULID — same regardless of which node hosts
+    // the site).
+    let kv_pairs = match hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::HostingKvList {
+            hosting_id: detail.id.as_str().to_string(),
+        },
+    )
+    .await
+    {
+        Ok(RpcResponse::HostingKvList(v)) => v,
+        _ => vec![],
+    };
+    let notes = kv_pairs
+        .iter()
+        .find(|(k, _)| k == "notes")
+        .map(|(_, v)| v.clone())
+        .unwrap_or_default();
+    let tags: Vec<String> = kv_pairs
+        .iter()
+        .find(|(k, _)| k == "tags")
+        .map(|(_, v)| {
+            v.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default();
     let tpl = DetailTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -1732,6 +1769,9 @@ pub async fn get_detail(
         wp_extras_error: q.wp_extras_error,
         php_options: PHP_VERSION_OPTIONS.iter().map(|s| s.to_string()).collect(),
         health: Some(hosting_health),
+        notes,
+        tags,
+        csrf_notes: csrf_token_for(&state, &ctx, "/hostings/notes"),
     };
     Ok(Html(tpl.render()?).into_response())
 }
@@ -2254,6 +2294,86 @@ pub async fn post_delete(
     )
     .await?;
     Ok(Redirect::to(&format!("/jobs/{job_id}")).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct NotesForm {
+    pub selector: String,
+    #[serde(default)]
+    pub notes: String,
+    #[serde(default)]
+    pub tags: String,
+}
+
+/// Normalise a comma-separated tag string into trimmed, lowercased,
+/// deduped, charset-limited tokens (≤12 tags, ≤24 chars each).
+fn normalize_tags(raw: &str) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<String> = Vec::new();
+    for t in raw.split(',') {
+        let cleaned: String = t
+            .trim()
+            .to_lowercase()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | ' '))
+            .take(24)
+            .collect();
+        let cleaned = cleaned.trim().to_string();
+        if cleaned.is_empty() {
+            continue;
+        }
+        if seen.insert(cleaned.clone()) {
+            out.push(cleaned);
+        }
+        if out.len() >= 12 {
+            break;
+        }
+    }
+    out
+}
+
+/// POST /hostings/notes — save the operator note + tags. Panel-side
+/// metadata stored in the master's hosting_kv (keyed by ULID), so it
+/// is the same regardless of which node hosts the site.
+pub async fn post_set_notes(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<NotesForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let sel_url = urlencoding(&form.selector);
+    // Resolve the ULID (the selector may be a domain) for the KV key.
+    let hosting_id = match find_hosting_anywhere(&state, sel).await {
+        Ok((d, _)) => d.id.as_str().to_string(),
+        Err(_) => {
+            return Ok(Redirect::to(&format!("/hostings/{sel_url}")).into_response());
+        }
+    };
+    let notes: String = form.notes.replace('\r', "").chars().take(2000).collect();
+    let tags = normalize_tags(&form.tags).join(",");
+    // Master-side metadata → local socket.
+    let _ = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::HostingKvSet {
+            hosting_id: hosting_id.clone(),
+            key: "notes".into(),
+            value: notes,
+        },
+    )
+    .await;
+    let _ = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::HostingKvSet {
+            hosting_id,
+            key: "tags".into(),
+            value: tags,
+        },
+    )
+    .await;
+    Ok(Redirect::to(&format!("/hostings/{sel_url}?flash_saved=notes#overview")).into_response())
 }
 
 /// Resolve a per-form `target_node` field to the Option<&str>

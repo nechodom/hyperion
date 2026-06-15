@@ -108,6 +108,17 @@ pub enum Request {
     },
     HostingGetExpiry(HostingSelector),
     HostingClearExpiry(HostingSelector),
+    /// Generic per-hosting key/value store (notes, tags, …). Keyed by
+    /// the hosting's ULID string directly (panel-side metadata, not
+    /// node-specific) so no selector resolution is needed.
+    HostingKvSet {
+        hosting_id: String,
+        key: String,
+        value: String,
+    },
+    HostingKvList {
+        hosting_id: String,
+    },
     UpcomingExpiries {
         within_seconds: i64,
     },
@@ -930,6 +941,8 @@ pub enum Response {
     HostingSetExpiry(HostingExpiry),
     HostingGetExpiry(HostingExpiry),
     HostingClearExpiry,
+    HostingKvSet,
+    HostingKvList(Vec<(String, String)>),
     UpcomingExpiries(Vec<ExpiringHosting>),
     SchedulerTick { actions_processed: i64 },
     BackupNow(BackupRunWire),
