@@ -270,6 +270,9 @@ struct DetailTpl<'a> {
     /// Operator tags (already split + cleaned) for filtering/labelling.
     tags: Vec<String>,
     csrf_notes: String,
+    /// Operator php.ini overrides (applied via .user.ini).
+    php_ini: PhpIniSettings,
+    csrf_php_ini: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -1155,6 +1158,8 @@ pub async fn post_create(
                 notes: String::new(),
                 tags: vec![],
                 csrf_notes: csrf_token_for(&state, &ctx, "/hostings/notes"),
+                php_ini: PhpIniSettings::default(),
+                csrf_php_ini: csrf_token_for(&state, &ctx, "/hostings/php-ini"),
             };
             Ok(Html(tpl.render()?).into_response())
         }
@@ -1337,6 +1342,52 @@ pub(crate) fn compute_hosting_health(
         grade: health_grade(score),
         checks,
         todo,
+    }
+}
+
+/// Operator-tunable php.ini settings, applied via a per-hosting
+/// `.user.ini` in htdocs (PHP_INI_PERDIR — no FPM pool change, so a bad
+/// value can never stop the pool from starting). Empty string = leave
+/// the pool/global default. Values are validated before they're written.
+#[derive(Default)]
+pub struct PhpIniSettings {
+    pub memory_limit: String,
+    pub upload_max_filesize: String,
+    pub post_max_size: String,
+    pub max_execution_time: String,
+    pub max_input_vars: String,
+    pub display_errors: String,
+}
+
+impl PhpIniSettings {
+    /// Build from a hosting's KV map (keys prefixed `php.`).
+    fn from_kv(pairs: &[(String, String)]) -> Self {
+        let get = |k: &str| {
+            pairs
+                .iter()
+                .find(|(key, _)| key == k)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default()
+        };
+        PhpIniSettings {
+            memory_limit: get("php.memory_limit"),
+            upload_max_filesize: get("php.upload_max_filesize"),
+            post_max_size: get("php.post_max_size"),
+            max_execution_time: get("php.max_execution_time"),
+            max_input_vars: get("php.max_input_vars"),
+            display_errors: get("php.display_errors"),
+        }
+    }
+
+    /// True when at least one override is set (drives "managed by
+    /// Hyperion" note in the UI).
+    pub fn any(&self) -> bool {
+        !(self.memory_limit.is_empty()
+            && self.upload_max_filesize.is_empty()
+            && self.post_max_size.is_empty()
+            && self.max_execution_time.is_empty()
+            && self.max_input_vars.is_empty()
+            && self.display_errors.is_empty())
     }
 }
 
@@ -1772,6 +1823,8 @@ pub async fn get_detail(
         notes,
         tags,
         csrf_notes: csrf_token_for(&state, &ctx, "/hostings/notes"),
+        php_ini: PhpIniSettings::from_kv(&kv_pairs),
+        csrf_php_ini: csrf_token_for(&state, &ctx, "/hostings/php-ini"),
     };
     Ok(Html(tpl.render()?).into_response())
 }
@@ -2374,6 +2427,143 @@ pub async fn post_set_notes(
     )
     .await;
     Ok(Redirect::to(&format!("/hostings/{sel_url}?flash_saved=notes#overview")).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct PhpIniForm {
+    pub selector: String,
+    #[serde(default)]
+    pub memory_limit: String,
+    #[serde(default)]
+    pub upload_max_filesize: String,
+    #[serde(default)]
+    pub post_max_size: String,
+    #[serde(default)]
+    pub max_execution_time: String,
+    #[serde(default)]
+    pub max_input_vars: String,
+    #[serde(default)]
+    pub display_errors: String,
+}
+
+/// `256M`, `1G`, `512` or empty. Bounded so a pasted novel can't get in.
+fn valid_php_size(s: &str) -> bool {
+    if s.is_empty() {
+        return true;
+    }
+    let (digits, suffix) = if s.as_bytes().last().map(u8::is_ascii_alphabetic).unwrap_or(false) {
+        (&s[..s.len() - 1], &s[s.len() - 1..])
+    } else {
+        (s, "")
+    };
+    !digits.is_empty()
+        && digits.len() <= 6
+        && digits.bytes().all(|b| b.is_ascii_digit())
+        && matches!(suffix, "" | "K" | "M" | "G" | "k" | "m" | "g")
+}
+
+fn valid_php_int(s: &str, lo: i64, hi: i64) -> bool {
+    s.is_empty() || s.parse::<i64>().map(|n| (lo..=hi).contains(&n)).unwrap_or(false)
+}
+
+/// POST /hostings/php-ini — write operator php.ini overrides as a
+/// per-hosting `.user.ini` in htdocs (PHP_INI_PERDIR; FPM re-reads it
+/// within user_ini.cache_ttl, default 5 min — no restart, and a bad
+/// value can never stop the pool starting). Values are validated and
+/// also kept in the master KV for re-display.
+pub async fn post_set_php_ini(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<PhpIniForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let sel_url = urlencoding(&form.selector);
+    let dr = |k: &str| -> String {
+        match k {
+            "On" | "Off" | "" => k.to_string(),
+            _ => String::new(),
+        }
+    };
+    let display = dr(form.display_errors.trim());
+    // Validate; on any bad value bounce back with a flash.
+    if !valid_php_size(form.memory_limit.trim())
+        || !valid_php_size(form.upload_max_filesize.trim())
+        || !valid_php_size(form.post_max_size.trim())
+        || !valid_php_int(form.max_execution_time.trim(), 0, 3600)
+        || !valid_php_int(form.max_input_vars.trim(), 100, 200_000)
+        || (!form.display_errors.trim().is_empty() && display.is_empty())
+    {
+        return Ok(Redirect::to(&format!(
+            "/hostings/{sel_url}?flash_error=Invalid+PHP+value+%E2%80%94+sizes+like+256M%2F1G%2C+numbers+in+range%2C+display_errors+On%2FOff#settings"
+        ))
+        .into_response());
+    }
+    // Resolve owner — the .user.ini lives on the node hosting the site.
+    let (detail, owner_node) = match find_hosting_anywhere(&state, sel).await {
+        Ok(v) => v,
+        Err(e) => return Err(AppError::from(e)),
+    };
+    let hosting_id = detail.id.as_str().to_string();
+
+    // Build the .user.ini (only set lines).
+    let mut body = String::from("; Managed by Hyperion — edit via the panel (Settings → PHP).\n");
+    let mut line = |k: &str, v: &str| {
+        let v = v.trim();
+        if !v.is_empty() {
+            body.push_str(&format!("{k} = {v}\n"));
+        }
+    };
+    line("memory_limit", &form.memory_limit);
+    line("upload_max_filesize", &form.upload_max_filesize);
+    line("post_max_size", &form.post_max_size);
+    line("max_execution_time", &form.max_execution_time);
+    line("max_input_vars", &form.max_input_vars);
+    if !display.is_empty() {
+        body.push_str(&format!("display_errors = {display}\n"));
+    }
+    let bytes_b64 = base64_encode(body.as_bytes());
+    // Write the file on the owning node (jailed write chowns to the
+    // hosting user, so PHP can read it).
+    let _ = crate::dispatcher::dispatch_to_node(
+        &state,
+        owner_node.as_deref(),
+        Request::HostingFileWrite {
+            sel: HostingSelector::Id(detail.id.clone()),
+            rel_path: ".user.ini".into(),
+            bytes_b64,
+        },
+    )
+    .await;
+    // Persist values for re-display (master KV, keyed by ULID).
+    for (k, v) in [
+        ("php.memory_limit", form.memory_limit.trim()),
+        ("php.upload_max_filesize", form.upload_max_filesize.trim()),
+        ("php.post_max_size", form.post_max_size.trim()),
+        ("php.max_execution_time", form.max_execution_time.trim()),
+        ("php.max_input_vars", form.max_input_vars.trim()),
+        ("php.display_errors", display.as_str()),
+    ] {
+        let _ = hyperion_rpc_client::call(
+            &state.agent_socket,
+            Request::HostingKvSet {
+                hosting_id: hosting_id.clone(),
+                key: k.to_string(),
+                value: v.to_string(),
+            },
+        )
+        .await;
+    }
+    Ok(Redirect::to(&format!("/hostings/{sel_url}?flash_saved=php#settings")).into_response())
+}
+
+/// Base64-encode (STANDARD) — small local helper to avoid threading the
+/// engine import through every call site.
+fn base64_encode(bytes: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
 /// Resolve a per-form `target_node` field to the Option<&str>

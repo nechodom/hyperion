@@ -1910,6 +1910,55 @@
   {% endif %}
 </div>
 
+{# Operator php.ini overrides, applied via a per-hosting .user.ini
+   (no FPM restart; takes effect within ~5 min). Leave a field blank to
+   fall back to the pool/global default. #}
+<div class="card hover">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17l6-6-6-6"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+    PHP settings
+  </h2>
+  <p class="muted" style="font-size:0.85rem;margin-top:-0.4rem;margin-bottom:0.9rem">
+    Per-hosting <code>.user.ini</code> overrides. Blank = pool default. Sizes like <code>256M</code> / <code>1G</code>.
+    {% if php_ini.any() %}<span class="pill ok small" style="margin-left:0.3rem">active</span>{% endif %}
+  </p>
+  <form method="post" action="/hostings/php-ini">
+    <input type="hidden" name="_csrf" value="{{ csrf_php_ini }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:0.8rem">
+      <label style="font-size:0.85rem">memory_limit
+        <input class="input" name="memory_limit" value="{{ php_ini.memory_limit }}" placeholder="256M" autocomplete="off" style="width:100%">
+      </label>
+      <label style="font-size:0.85rem">upload_max_filesize
+        <input class="input" name="upload_max_filesize" value="{{ php_ini.upload_max_filesize }}" placeholder="64M" autocomplete="off" style="width:100%">
+      </label>
+      <label style="font-size:0.85rem">post_max_size
+        <input class="input" name="post_max_size" value="{{ php_ini.post_max_size }}" placeholder="64M" autocomplete="off" style="width:100%">
+      </label>
+      <label style="font-size:0.85rem">max_execution_time
+        <input class="input" name="max_execution_time" value="{{ php_ini.max_execution_time }}" placeholder="120" autocomplete="off" style="width:100%">
+      </label>
+      <label style="font-size:0.85rem">max_input_vars
+        <input class="input" name="max_input_vars" value="{{ php_ini.max_input_vars }}" placeholder="3000" autocomplete="off" style="width:100%">
+      </label>
+      <label style="font-size:0.85rem">display_errors
+        <select class="input" name="display_errors" style="width:100%">
+          <option value="" {% if php_ini.display_errors.is_empty() %}selected{% endif %}>(default)</option>
+          <option value="Off" {% if php_ini.display_errors == "Off" %}selected{% endif %}>Off</option>
+          <option value="On" {% if php_ini.display_errors == "On" %}selected{% endif %}>On</option>
+        </select>
+      </label>
+    </div>
+    <div class="row" style="margin-top:0.9rem">
+      <button class="btn primary" type="submit">
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+        Save PHP settings
+      </button>
+      <span class="muted hint">writes .user.ini in htdocs</span>
+    </div>
+  </form>
+</div>
+
 </div><!-- /tab-settings -->
 
 <div class="tab-panel" id="tab-ftp">
