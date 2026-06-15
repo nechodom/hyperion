@@ -261,6 +261,10 @@ struct DetailTpl<'a> {
     /// `String` (not `&str`) so the askama template can compare
     /// directly against `v.as_str()` without a deref dance.
     php_options: Vec<String>,
+    /// Composite health snapshot + onboarding checklist. `None` on the
+    /// post-create in-place render (the auto-reload lands on the full
+    /// detail GET which computes it).
+    health: Option<HostingHealth>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1142,6 +1146,7 @@ pub async fn post_create(
                 wp_extras_flash: false,
                 wp_extras_error: None,
                 php_options: PHP_VERSION_OPTIONS.iter().map(|s| s.to_string()).collect(),
+                health: None,
             };
             Ok(Html(tpl.render()?).into_response())
         }
@@ -1160,6 +1165,172 @@ pub async fn post_create(
 /// (not in hyperion-types::PhpVersion::all()) so the UI list can
 /// be reordered / filtered without touching the type definition.
 const PHP_VERSION_OPTIONS: &[&str] = &["8.1", "8.2", "8.3", "8.4"];
+
+/// One row in the per-hosting Health card. `severity` drives the dot
+/// colour: good=green, warn=amber, bad=red, info=grey.
+pub struct HealthCheck {
+    pub severity: &'static str,
+    pub ok: bool,
+    pub label: String,
+    pub detail: String,
+}
+
+/// Composite "is this hosting healthy?" snapshot, computed purely from
+/// data the detail page already fetches (no extra RPC). The non-green
+/// rows double as an onboarding checklist for a freshly-created site.
+pub struct HostingHealth {
+    pub score: i64,
+    pub grade: &'static str,
+    pub checks: Vec<HealthCheck>,
+    /// Count of checks that aren't green — drives the "N things to fix".
+    pub todo: i64,
+}
+
+fn health_grade(score: i64) -> &'static str {
+    match score {
+        90..=100 => "A",
+        75..=89 => "B",
+        60..=74 => "C",
+        40..=59 => "D",
+        _ => "F",
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compute_hosting_health(
+    detail: &HostingDetail,
+    backups: &[hyperion_types::BackupRunWire],
+    monitor_enabled: bool,
+    wp_installed: bool,
+    wp_updates_pending: i64,
+    quota: &hyperion_types::HostingQuotaReport,
+    now: i64,
+) -> HostingHealth {
+    let mut checks: Vec<HealthCheck> = Vec::new();
+    let mut score: i64 = 100;
+
+    // 1. State
+    let active = detail.state == hyperion_types::HostingState::Active;
+    checks.push(HealthCheck {
+        severity: if active { "good" } else { "bad" },
+        ok: active,
+        label: "Hosting active".into(),
+        detail: if active {
+            "Serving normally.".into()
+        } else {
+            format!("State is {}.", detail.state.as_str())
+        },
+    });
+    if !active {
+        score -= 40;
+    }
+
+    // 2. Trusted TLS
+    let trusted = detail
+        .cert
+        .as_ref()
+        .map(|c| c.issuer != "self-signed")
+        .unwrap_or(false);
+    checks.push(HealthCheck {
+        severity: if trusted { "good" } else { "warn" },
+        ok: trusted,
+        label: "Trusted HTTPS certificate".into(),
+        detail: if trusted {
+            "A trusted cert is active.".into()
+        } else {
+            "Self-signed / none — issue a Let's Encrypt cert from the SSL tab.".into()
+        },
+    });
+    if !trusted {
+        score -= 20;
+    }
+
+    // 3. Recent backup
+    let last_ok = backups
+        .iter()
+        .filter(|b| b.state == "done")
+        .filter_map(|b| b.finished_at)
+        .max();
+    let backup_ok = last_ok.map(|t| now - t < 7 * 86400).unwrap_or(false);
+    checks.push(HealthCheck {
+        severity: if backup_ok { "good" } else { "warn" },
+        ok: backup_ok,
+        label: "Recent backup".into(),
+        detail: match last_ok {
+            Some(t) if backup_ok => format!("Last backup {}.", crate::handlers::stats::fmt_ago(&t)),
+            Some(t) => format!(
+                "Last backup {} — older than 7 days.",
+                crate::handlers::stats::fmt_ago(&t)
+            ),
+            None => "No successful backup yet — run one from the Backups tab.".into(),
+        },
+    });
+    if !backup_ok {
+        score -= 15;
+    }
+
+    // 4. Uptime monitoring
+    checks.push(HealthCheck {
+        severity: if monitor_enabled { "good" } else { "info" },
+        ok: monitor_enabled,
+        label: "Uptime monitoring".into(),
+        detail: if monitor_enabled {
+            "Enabled.".into()
+        } else {
+            "Off — turn it on in the Monitor tab.".into()
+        },
+    });
+    if !monitor_enabled {
+        score -= 5;
+    }
+
+    // 5. WordPress up to date (only when WP is installed)
+    if wp_installed {
+        let current = wp_updates_pending == 0;
+        checks.push(HealthCheck {
+            severity: if current { "good" } else { "warn" },
+            ok: current,
+            label: "WordPress up to date".into(),
+            detail: if current {
+                "All plugins current.".into()
+            } else {
+                format!("{wp_updates_pending} plugin update(s) pending.")
+            },
+        });
+        if !current {
+            score -= 10;
+        }
+    }
+
+    // 6. Disk headroom (only when quotas are actually enforced)
+    if quota.quotas_enabled_on_fs && quota.policy.disk_hard_kib > 0 {
+        let pct =
+            ((quota.current_disk_kib as f64 / quota.policy.disk_hard_kib as f64) * 100.0) as i64;
+        let (sev, ok, penalty) = if pct >= 90 {
+            ("bad", false, 15)
+        } else if pct >= 75 {
+            ("warn", false, 5)
+        } else {
+            ("good", true, 0)
+        };
+        checks.push(HealthCheck {
+            severity: sev,
+            ok,
+            label: "Disk headroom".into(),
+            detail: format!("{pct}% of the disk quota used."),
+        });
+        score -= penalty;
+    }
+
+    let score = score.clamp(0, 100);
+    let todo = checks.iter().filter(|c| !c.ok).count() as i64;
+    HostingHealth {
+        score,
+        grade: health_grade(score),
+        checks,
+        todo,
+    }
+}
 
 pub async fn get_detail(
     State(state): State<SharedState>,
@@ -1440,6 +1611,18 @@ pub async fn get_detail(
     } else {
         (vec![], vec![])
     };
+    // Composite health snapshot — computed from data already fetched
+    // above (no extra RPC). Borrows `detail` before it's moved into the
+    // template below.
+    let hosting_health = compute_hosting_health(
+        &detail,
+        &backups,
+        monitor_config.enabled,
+        wp_status.is_some(),
+        wp_plugins.updates_pending,
+        &quota,
+        hyperion_types::now_secs(),
+    );
     let tpl = DetailTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -1548,6 +1731,7 @@ pub async fn get_detail(
         wp_extras_flash: q.wp_extras_saved.as_deref() == Some("1"),
         wp_extras_error: q.wp_extras_error,
         php_options: PHP_VERSION_OPTIONS.iter().map(|s| s.to_string()).collect(),
+        health: Some(hosting_health),
     };
     Ok(Html(tpl.render()?).into_response())
 }

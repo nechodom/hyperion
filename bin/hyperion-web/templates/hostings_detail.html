@@ -468,6 +468,30 @@
   </div>
 {% endif %}
 
+{% if let Some(h) = health %}
+{# Composite health snapshot. The amber/red rows double as an
+   onboarding to-do list for a fresh hosting. Computed server-side
+   from data already on the page (no extra RPC). #}
+<div class="card hover" style="border-left:3px solid {% if h.grade == "A" %}#22c55e{% else if h.grade == "B" %}#84cc16{% else if h.grade == "C" %}var(--warn){% else %}#ef4444{% endif %}">
+  <div style="display:flex;align-items:center;gap:0.8rem;flex-wrap:wrap;margin-bottom:0.7rem">
+    <div style="display:flex;align-items:baseline;gap:0.4rem">
+      <span style="font-size:1.7rem;font-weight:800;line-height:1">{{ h.grade }}</span>
+      <span class="text-soft" style="font-size:0.85rem">{{ h.score }}/100</span>
+    </div>
+    <h2 style="margin:0;font-size:1.05rem">Health</h2>
+    {% if h.todo > 0 %}<span class="pill warn" style="font-size:0.65rem">{{ h.todo }} to fix</span>{% else %}<span class="pill ok" style="font-size:0.65rem">all good</span>{% endif %}
+  </div>
+  <ul style="list-style:none;margin:0;padding:0;display:grid;gap:0.4rem">
+    {% for c in h.checks %}
+    <li style="display:flex;align-items:flex-start;gap:0.55rem;font-size:0.88rem">
+      <span style="flex-shrink:0;width:0.6rem;height:0.6rem;border-radius:50%;margin-top:0.32rem;background:{% if c.severity == "good" %}#22c55e{% else if c.severity == "warn" %}var(--warn,#f59e0b){% else if c.severity == "bad" %}#ef4444{% else %}var(--text-soft,#888){% endif %}"></span>
+      <span><strong style="font-weight:600">{{ c.label }}</strong> <span class="text-soft">— {{ c.detail }}</span></span>
+    </li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
+
 <nav class="tabs" role="tablist">
   <a class="tab" data-tab="overview" href="#overview" role="tab">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
