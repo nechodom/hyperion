@@ -1,0 +1,50 @@
+name: CI
+
+# Gate every PR (and pushes to main) on the same checks contributors are
+# expected to run locally: tests, formatting, and clippy. release.yml only
+# builds the binaries — this catches regressions (incl. the forbid(unsafe) /
+# deny(unwrap) core guarantees) before they ship to the rolling release.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Newer PR commits supersede older runs.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+jobs:
+  check:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cargo cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Format check
+        run: cargo fmt --all --check
+
+      - name: Clippy (warnings as errors)
+        # Core's own crate-level deny(unwrap_used/expect_used) already fails
+        # the build on a violation; -D warnings extends that to the rest.
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Tests
+        # Excludes #[ignore]'d integration tests (those need a real Debian
+        # host with quotas/nginx); they run on the node, not in CI.
+        run: cargo test --workspace

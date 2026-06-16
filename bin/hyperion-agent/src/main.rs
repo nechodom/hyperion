@@ -25,6 +25,50 @@ struct Cli {
     /// Path to the agent.toml config file.
     #[arg(long, default_value = "/etc/hyperion/agent.toml")]
     config: PathBuf,
+
+    /// Validate that all embedded DB migrations apply cleanly to a COPY of the
+    /// current state DB, then exit (0 = ok, 1 = failure). Never touches the
+    /// real database — used by update.sh as a pre-restart safety gate so a
+    /// migration that fails on the production schema is caught before the
+    /// agent is restarted into a crash-loop.
+    #[arg(long)]
+    dry_run_migrations: bool,
+}
+
+/// Apply the embedded migrations to a throwaway copy of the real state DB and
+/// report whether they succeed. Exits the process (0 ok / 1 fail).
+async fn dry_run_migrations(real_db: &std::path::Path) -> anyhow::Result<()> {
+    let dir = std::env::temp_dir().join(format!("hyperion-migcheck-{}", std::process::id()));
+    tokio::fs::create_dir_all(&dir).await?;
+    let temp_db = dir.join("state.db");
+    if real_db.exists() {
+        // Copy the main DB plus any WAL/SHM sidecars so we validate against the
+        // real, current schema rather than an empty one.
+        for suffix in ["", "-wal", "-shm"] {
+            let src = std::path::PathBuf::from(format!("{}{}", real_db.display(), suffix));
+            if src.exists() {
+                let dst = dir.join(format!("state.db{suffix}"));
+                if let Err(e) = tokio::fs::copy(&src, &dst).await {
+                    tracing::warn!(error=%e, ?src, "could not copy DB sidecar for dry-run");
+                }
+            }
+        }
+        tracing::info!(db = %real_db.display(), "validating migrations against a copy of the live DB");
+    } else {
+        tracing::info!(db = %real_db.display(), "no existing state DB — validating migrations on a fresh DB");
+    }
+    let result = hyperion_state::open(&temp_db).await;
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+    match result {
+        Ok(_) => {
+            println!("migrations OK");
+            Ok(())
+        }
+        Err(e) => {
+            eprintln!("migration dry-run FAILED: {e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 #[tokio::main]
@@ -38,6 +82,10 @@ async fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
     let cfg = config::Config::load_from_path(&cli.config)?;
+
+    if cli.dry_run_migrations {
+        return dry_run_migrations(&cfg.agent.state_db).await;
+    }
 
     tracing::info!(socket=%cfg.agent.socket_path.display(), "starting hyperion-agent");
 

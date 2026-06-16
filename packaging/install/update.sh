@@ -636,6 +636,24 @@ if (( REPAIR )); then
   fi
 fi
 
+#-------- 6b. Migration dry-run (pre-restart safety gate) ------------------
+# The new agent binary is installed but not yet running. Validate that the
+# embedded migrations apply cleanly to a COPY of the live DB *before* we
+# restart — otherwise a migration that fails on the production schema sends
+# the agent into a systemd crash-loop that `is-active` happily reports as
+# "active", hiding the real error.
+if (( HAVE_AGENT )) && [[ -x /usr/sbin/hyperion-agent ]]; then
+  log "Validating DB migrations against the live schema (dry-run) ..."
+  if /usr/sbin/hyperion-agent --dry-run-migrations; then
+    log "Migrations validate cleanly."
+  else
+    warn "DB migration dry-run FAILED — refusing to restart the agent into a crash-loop."
+    warn "The new binary is installed but services were NOT started; your data is untouched."
+    warn "Fix the migration (or roll back the binary) and re-run this script."
+    exit 1
+  fi
+fi
+
 #-------- 7. Start + health check -----------------------------------------
 (( HAVE_AGENT )) && { log "Starting hyperion-agent ..."; systemctl start hyperion-agent || true; }
 (( HAVE_WEB   )) && { log "Starting hyperion-web ...";   systemctl start hyperion-web   || true; }
@@ -649,7 +667,25 @@ check_active() {
     HEALTHY=0
   fi
 }
+# `is-active` can read "active" while the agent is mid-restart in a crash-loop
+# (Restart=on-failure). Confirm it's genuinely SERVING by talking to its socket
+# via `hctl info`, retrying briefly to allow for a slow first start.
+check_agent_serving() {
+  [[ -x /usr/bin/hctl ]] || return 0
+  local i
+  for i in 1 2 3 4 5; do
+    if hctl info >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+  warn "hyperion-agent unit is up but its socket is NOT answering (hctl info failed)."
+  warn "This usually means a startup error (schema mismatch, bad config). Journal tail:"
+  journalctl -u hyperion-agent -n 20 --no-pager | sed 's/^/    /'
+  HEALTHY=0
+}
 (( HAVE_AGENT )) && check_active hyperion-agent
+(( HAVE_AGENT )) && check_agent_serving
 (( HAVE_WEB   )) && check_active hyperion-web
 
 echo
