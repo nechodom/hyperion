@@ -134,6 +134,30 @@ fn request_kind_label(req: &Request) -> &'static str {
     }
 }
 
+/// Per-RPC wall-clock timeout (seconds). The default 30s covers info/list/CRUD,
+/// but operations that legitimately run for minutes (backup, restore, export,
+/// import, WP install) would otherwise be killed at 30s and *misreported as
+/// "node unreachable"* (curl exit 28). Give those a generous ceiling so a slow
+/// worker finishes rather than looking dead.
+fn timeout_for_request(req: &Request) -> u64 {
+    match req {
+        // Pull a whole site tree back from disk/S3 — can be very large.
+        Request::BackupRestore { .. }
+        | Request::BackupRestoreAsNew { .. }
+        | Request::HostingImport { .. }
+        | Request::HostingImportFromUrl { .. } => 3600,
+        // Create the archive / move a bundle / install WordPress.
+        Request::BackupNow { .. }
+        | Request::BackupFetchChunk { .. }
+        | Request::HostingExport { .. }
+        | Request::HostingCreate(_)
+        | Request::HostingDelete { .. }
+        | Request::WpInstall { .. }
+        | Request::WpInstallFromAsset { .. } => 600,
+        _ => 30,
+    }
+}
+
 async fn dispatch_remote(
     state: &SharedState,
     node_id: &str,
@@ -144,7 +168,11 @@ async fn dispatch_remote(
         .as_ref()
         .ok_or(DispatchError::NoSigner)?;
     let endpoint = resolve_node_endpoint(state, node_id).await?;
-    match call_remote(&endpoint, signer, node_id, req, RemoteCallOpts::default()).await {
+    let opts = RemoteCallOpts {
+        timeout_secs: timeout_for_request(&req),
+        ..RemoteCallOpts::default()
+    };
+    match call_remote(&endpoint, signer, node_id, req, opts).await {
         Ok(resp) => Ok(resp),
         Err(RemoteClientError::HttpError { code, stderr }) => {
             // Upgrade TCP-layer failures to NodeUnreachable so the
