@@ -7849,6 +7849,22 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     ),
                 });
             }
+        } else {
+            // Issuing without the DNS-ownership pre-check is a privileged
+            // override — it lets a cert be requested for a domain that doesn't
+            // (yet) resolve to this node. Record it loudly so the audit trail
+            // shows the bypass instead of it being silent.
+            tracing::warn!(
+                domain = %detail.domain,
+                "issuing certificate with DNS pre-check DISABLED (require_dns_match=false)"
+            );
+            self.append_audit(
+                "cert.dns_check_skipped",
+                Some(detail.id.as_str()),
+                &serde_json::json!({ "domain": detail.domain }).to_string(),
+                "warn",
+            )
+            .await;
         }
 
         // SANs = aliases + any extras

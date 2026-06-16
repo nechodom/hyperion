@@ -277,12 +277,52 @@ pub fn validate_plugin_slug(s: &str) -> Result<(), AdapterError> {
     Ok(())
 }
 
-/// Validate an install URL.
+/// Validate an install URL. Requires HTTPS (plugin/theme code must not arrive
+/// over plaintext, where it could be MITM-replaced) and blocks loopback /
+/// link-local / private-range hosts so this privileged action can't be turned
+/// into an SSRF probe of internal services or cloud-metadata endpoints.
 pub fn validate_plugin_url(s: &str) -> Result<(), AdapterError> {
     if !URL_RX.is_match(s) {
         return Err(AdapterError::Other(format!(
             "plugin install URL refused: {s}"
         )));
+    }
+    let refused = |why: &str| {
+        Err(AdapterError::Other(format!(
+            "plugin install URL refused ({why}): {s}"
+        )))
+    };
+    // HTTPS only.
+    let Some(rest) = s.strip_prefix("https://") else {
+        return refused("must be https://");
+    };
+    // Host = everything up to the first '/', ':' or '?'.
+    let host = rest.split(['/', ':', '?']).next().unwrap_or("").to_ascii_lowercase();
+    if host.is_empty() {
+        return refused("empty host");
+    }
+    // 172.16.0.0/12 → second octet 16..=31.
+    let is_172_private = host
+        .strip_prefix("172.")
+        .and_then(|r| r.split('.').next())
+        .and_then(|o| o.parse::<u8>().ok())
+        .map(|second| (16..=31).contains(&second))
+        .unwrap_or(false);
+    let blocked = host == "localhost"
+        || host.ends_with(".localhost")
+        || host == "metadata"
+        || host == "metadata.google.internal"
+        || host.ends_with(".internal")
+        || host == "0.0.0.0"
+        || host == "::1"
+        || host == "[::1]"
+        || host.starts_with("127.")
+        || host.starts_with("169.254.")
+        || host.starts_with("10.")
+        || host.starts_with("192.168.")
+        || is_172_private;
+    if blocked {
+        return refused("internal/loopback/link-local host not allowed");
     }
     Ok(())
 }
@@ -788,5 +828,40 @@ mod tests {
         for bad in ["", "6.5;rm", "v6.5", "6.5-rc1", "$VERSION"] {
             assert!(!VERSION_RX.is_match(bad), "should refuse {bad}");
         }
+    }
+
+    #[test]
+    fn plugin_url_accepts_public_https() {
+        for ok in [
+            "https://downloads.wordpress.org/plugin/akismet.zip",
+            "https://example.com/my-plugin.zip",
+            "https://cdn.vendor.io/builds/x.zip?v=2",
+        ] {
+            assert!(validate_plugin_url(ok).is_ok(), "should accept {ok}");
+        }
+    }
+
+    #[test]
+    fn plugin_url_refuses_plaintext_and_ssrf_targets() {
+        for bad in [
+            "http://example.com/p.zip",            // not https
+            "https://localhost/p.zip",             // loopback
+            "https://127.0.0.1/p.zip",             // loopback
+            "https://169.254.169.254/latest/meta", // cloud metadata
+            "https://10.0.0.5/p.zip",              // private
+            "https://192.168.1.10/p.zip",          // private
+            "https://172.16.0.1/p.zip",            // private /12
+            "https://172.31.255.1/p.zip",          // private /12 upper
+            "https://metadata.google.internal/x",  // metadata host
+        ] {
+            assert!(validate_plugin_url(bad).is_err(), "should refuse {bad}");
+        }
+    }
+
+    #[test]
+    fn plugin_url_allows_public_172_outside_private_range() {
+        // 172.32+ and 172.15 are public, must not be caught by the /12 rule.
+        assert!(validate_plugin_url("https://172.32.0.1/p.zip").is_ok());
+        assert!(validate_plugin_url("https://172.15.0.1/p.zip").is_ok());
     }
 }
