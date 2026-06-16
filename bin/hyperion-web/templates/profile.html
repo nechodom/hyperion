@@ -1,6 +1,16 @@
 {% extends "base.html" %}
 {% block title %}Profile · hyperion{% endblock %}
 {% block main %}
+{% if require_2fa %}
+<div class="flash error" role="alert" style="margin-bottom:1rem">
+  <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+  <div class="flash-body">
+    <strong>Two-factor authentication is required for your role.</strong>
+    Set it up below to unlock the rest of the panel — the other pages stay
+    locked until you enrol.
+  </div>
+</div>
+{% endif %}
 <div class="page-header">
   <div>
     <h1>Profile</h1>

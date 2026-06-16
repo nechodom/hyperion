@@ -64,6 +64,14 @@ fn default_purpose() -> String {
 /// Canonical purpose strings used in [`Session::purpose`].
 pub const PURPOSE_SESSION: &str = "session";
 pub const PURPOSE_PENDING_2FA: &str = "pending_2fa";
+/// A full session for an admin+ user who must still enrol in 2FA before
+/// using the panel. Authenticates (so they can reach the enrolment
+/// flow) but the `enforce_2fa_gate` middleware redirects every other
+/// page to the setup card until they enrol.
+pub const PURPOSE_SESSION_2FA_PENDING: &str = "session_2fa_pending";
+/// A 30-day "remember this device" token that lets a returning user
+/// skip the TOTP challenge. Never authenticates a request on its own.
+pub const PURPOSE_REMEMBER_DEVICE: &str = "remember_device";
 
 impl Session {
     pub fn role_is(&self, role: &str) -> bool {
@@ -95,10 +103,18 @@ impl Session {
     /// middleware MUST gate on this — see security audit
     /// "pending-2FA cookie shares SessionSigner with real sessions".
     pub fn is_real_session(&self) -> bool {
-        self.purpose == PURPOSE_SESSION
+        self.purpose == PURPOSE_SESSION || self.purpose == PURPOSE_SESSION_2FA_PENDING
     }
     pub fn is_pending_2fa(&self) -> bool {
         self.purpose == PURPOSE_PENDING_2FA
+    }
+    /// True for an authenticated admin+ session that still has to enrol
+    /// in 2FA — the `enforce_2fa_gate` redirects these to /profile.
+    pub fn needs_2fa_enrollment(&self) -> bool {
+        self.purpose == PURPOSE_SESSION_2FA_PENDING
+    }
+    pub fn is_remember_device(&self) -> bool {
+        self.purpose == PURPOSE_REMEMBER_DEVICE
     }
 }
 
@@ -196,6 +212,28 @@ mod tests {
         let token = s.sign(&sess(10_000)).expect("sign");
         let got = s.verify(&token, 9_000).expect("verify");
         assert_eq!(got.user_id, 1);
+    }
+
+    #[test]
+    fn purpose_gating() {
+        let mut s = sess(10_000);
+        // Full session: authenticates, not gated, not a remember token.
+        assert!(s.is_real_session());
+        assert!(!s.needs_2fa_enrollment());
+        assert!(!s.is_remember_device());
+        // 2fa-pending: still authenticates (so they can reach enrolment)
+        // but is flagged for the gate.
+        s.purpose = PURPOSE_SESSION_2FA_PENDING.into();
+        assert!(s.is_real_session());
+        assert!(s.needs_2fa_enrollment());
+        // pending-2fa (pre-password-second-factor) must NOT authenticate.
+        s.purpose = PURPOSE_PENDING_2FA.into();
+        assert!(!s.is_real_session());
+        assert!(s.is_pending_2fa());
+        // remember-device never authenticates a request on its own.
+        s.purpose = PURPOSE_REMEMBER_DEVICE.into();
+        assert!(!s.is_real_session());
+        assert!(s.is_remember_device());
     }
 
     #[test]

@@ -7,7 +7,10 @@ use axum::extract::{Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Form;
-use hyperion_auth::{Session, PURPOSE_PENDING_2FA, PURPOSE_SESSION};
+use hyperion_auth::{
+    Session, PURPOSE_PENDING_2FA, PURPOSE_REMEMBER_DEVICE, PURPOSE_SESSION,
+    PURPOSE_SESSION_2FA_PENDING,
+};
 use serde::Deserialize;
 use std::sync::Mutex;
 
@@ -178,9 +181,35 @@ async fn post_login_via_rpc(
         hyperion_rpc::codec::Response::WebLogin(result) => match result {
             hyperion_types::WebLoginResult::Ok { user_id, username, role, .. } => {
                 clear_throttle(ip);
-                mint_session_redirect(&state, user_id, username, role, &form.next, &headers).await
+                // Admin+ without 2FA enrolled → gate them into enrolment
+                // before they can use the panel (purpose marks the
+                // session; the enforce_2fa_gate handles the redirects).
+                let purpose = if enforce_2fa_for(&role) {
+                    PURPOSE_SESSION_2FA_PENDING
+                } else {
+                    PURPOSE_SESSION
+                };
+                mint_session_redirect(&state, user_id, username, role, &form.next, &headers, purpose)
+                    .await
             }
             hyperion_types::WebLoginResult::NeedsTotp { user_id, .. } => {
+                // Remembered device? Skip the second factor and mint a
+                // full session straight away (role + username come from
+                // the signed remember-device cookie, which was issued at
+                // a prior fully-authenticated login).
+                if let Some(rd) = read_remember_device(&state, &headers, user_id) {
+                    clear_throttle(ip);
+                    return mint_session_redirect(
+                        &state,
+                        user_id,
+                        rd.username,
+                        rd.role,
+                        &form.next,
+                        &headers,
+                        PURPOSE_SESSION,
+                    )
+                    .await;
+                }
                 // Stash user_id in a short-lived signed pending cookie
                 // (reuses the session signer but with a 5-minute TTL).
                 // Redirect to /login/2fa to enter the code.
@@ -246,6 +275,7 @@ async fn post_login_bootstrap(
             "super_admin".into(),
             &form.next,
             &headers,
+            PURPOSE_SESSION_2FA_PENDING,
         )
         .await;
     }
@@ -257,6 +287,7 @@ async fn post_login_bootstrap(
         "super_admin".into(),
         &form.next,
         &headers,
+        PURPOSE_SESSION_2FA_PENDING,
     )
     .await
 }
@@ -316,6 +347,9 @@ pub struct Login2faForm {
     code: String,
     #[serde(default)]
     next: String,
+    /// "on" when the user ticked "remember this device for 30 days".
+    #[serde(default)]
+    remember: Option<String>,
 }
 
 #[derive(askama::Template)]
@@ -412,25 +446,32 @@ pub async fn post_login_2fa(
             // Second factor succeeded — NOW clear the per-IP throttle
             // (the password step deliberately no longer does).
             clear_throttle(&ip);
-            // Clear the pending cookie + mint the real session.
-            let mut headers = HeaderMap::new();
-            let clear = format!(
-                "{}=; Path=/; HttpOnly; Max-Age=0; SameSite=Lax",
-                cookie_name
-            );
-            if let Ok(v) = HeaderValue::from_str(&clear) {
-                headers.insert(header::SET_COOKIE, v);
-            }
-            let r = mint_session_redirect(&state, user_id, username, role, &form.next, &headers_in).await?;
+            // A user who just passed 2FA gets a full session (purpose
+            // session) — never a 2fa-pending one, even for admins.
+            let want_remember = form.remember.as_deref() == Some("on");
+            let r = mint_session_redirect(
+                &state,
+                user_id,
+                username.clone(),
+                role.clone(),
+                &form.next,
+                &headers_in,
+                PURPOSE_SESSION,
+            )
+            .await?;
             let mut combined = r;
-            // Append the cookie-clear header.
-            if let Some(v) = HeaderValue::from_str(&format!(
+            // Clear the pending-2fa cookie.
+            if let Ok(v) = HeaderValue::from_str(&format!(
                 "{}=; Path=/; HttpOnly; Max-Age=0; SameSite=Lax",
                 cookie_name
-            ))
-            .ok()
-            {
+            )) {
                 combined.headers_mut().append(header::SET_COOKIE, v);
+            }
+            // Optionally remember this device for 30 days.
+            if want_remember {
+                if let Some(v) = remember_device_cookie(&state, user_id, &username, &role) {
+                    combined.headers_mut().append(header::SET_COOKIE, v);
+                }
             }
             Ok(combined)
         }
@@ -447,6 +488,11 @@ pub async fn post_login_2fa(
     }
 }
 
+/// True when 2FA enrolment is enforced for the given role (admin+).
+fn enforce_2fa_for(role: &str) -> bool {
+    matches!(role, "super_admin" | "admin")
+}
+
 async fn mint_session_redirect(
     state: &SharedState,
     user_id: i64,
@@ -454,6 +500,7 @@ async fn mint_session_redirect(
     role: String,
     next: &str,
     req_headers: &HeaderMap,
+    purpose: &str,
 ) -> Result<Response, AppError> {
     let now = hyperion_types::now_secs();
     let sid = ulid::Ulid::new().to_string();
@@ -464,7 +511,7 @@ async fn mint_session_redirect(
         expires_at: now + state.session_ttl(),
         username,
         role,
-        purpose: PURPOSE_SESSION.to_string(),
+        purpose: purpose.to_string(),
     };
     let token = state
         .session
@@ -499,10 +546,73 @@ async fn mint_session_redirect(
 
     let mut headers = HeaderMap::new();
     headers.insert(header::SET_COOKIE, set_cookie(state, &token));
-    let dest = redirect_target(next);
-    let mut resp = Redirect::to(dest).into_response();
+    // A 2FA-pending admin must enrol before anything else — send them
+    // straight to the setup card regardless of where they were headed.
+    let mut resp = if purpose == PURPOSE_SESSION_2FA_PENDING {
+        Redirect::to("/profile?require_2fa=1").into_response()
+    } else {
+        Redirect::to(redirect_target(next)).into_response()
+    };
     resp.headers_mut().extend(headers);
     Ok(resp)
+}
+
+/// Build a 30-day "remember this device" Set-Cookie. Carries a signed
+/// session with `purpose = remember_device` so it can never authenticate
+/// a request on its own — it only lets a returning user skip the TOTP
+/// prompt at login.
+fn remember_device_cookie(
+    state: &SharedState,
+    user_id: i64,
+    username: &str,
+    role: &str,
+) -> Option<HeaderValue> {
+    const RD_TTL: i64 = 30 * 24 * 3600;
+    let now = hyperion_types::now_secs();
+    let rd = Session {
+        sid: format!("rd-{}", ulid::Ulid::new()),
+        user_id,
+        created_at: now,
+        expires_at: now + RD_TTL,
+        username: username.to_string(),
+        role: role.to_string(),
+        purpose: PURPOSE_REMEMBER_DEVICE.to_string(),
+    };
+    let token = state.session.sign(&rd).ok()?;
+    let cookie = format!(
+        "{}_rd={}; Path=/; HttpOnly; SameSite=Lax; Max-Age={}{}",
+        state.cookie_name(),
+        token,
+        RD_TTL,
+        if state.secure_cookies() { "; Secure" } else { "" }
+    );
+    HeaderValue::from_str(&cookie).ok()
+}
+
+/// Read + verify the remember-device cookie for `user_id`. Returns the
+/// trusted session (role + username come from it) when valid + unexpired
+/// + bound to the same user.
+fn read_remember_device(
+    state: &SharedState,
+    headers: &HeaderMap,
+    user_id: i64,
+) -> Option<Session> {
+    let cookie_name = format!("{}_rd", state.cookie_name());
+    let token = headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|s| s.split(';'))
+        .map(|s| s.trim())
+        .find_map(|kv| {
+            let (k, v) = kv.split_once('=')?;
+            (k == cookie_name).then(|| v.to_string())
+        })?;
+    let now = hyperion_types::now_secs();
+    match state.session.verify(&token, now) {
+        Ok(s) if s.is_remember_device() && s.user_id == user_id => Some(s),
+        _ => None,
+    }
 }
 
 pub async fn post_logout(

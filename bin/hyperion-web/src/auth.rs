@@ -80,6 +80,29 @@ pub async fn require_auth(
         let next_param = url::form_urlencoded::byte_serialize(uri.as_bytes()).collect::<String>();
         return Redirect::to(&format!("/login?next={next_param}")).into_response();
     }
+    // 2FA enforcement gate: an admin+ session that hasn't enrolled in 2FA
+    // is authenticated but corralled to the enrolment card. Exempt the
+    // profile pages (where enrolment lives), logout, static assets and
+    // the role-echo shim so they can actually complete it. The session
+    // upgrades to a full one the moment they confirm enrolment.
+    if ctx
+        .session
+        .as_ref()
+        .map(|s| s.needs_2fa_enrollment())
+        .unwrap_or(false)
+    {
+        let path = parts.uri.path();
+        let exempt = path.starts_with("/profile")
+            || path == "/logout"
+            || path.starts_with("/static")
+            || path.starts_with("/assets")
+            || path.starts_with("/api/")
+            || path == "/healthz"
+            || path == "/readyz";
+        if !exempt {
+            return Redirect::to("/profile?require_2fa=1").into_response();
+        }
+    }
     let req = Request::from_parts(parts, body);
     next.run(req).await
 }

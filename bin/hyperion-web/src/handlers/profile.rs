@@ -28,6 +28,9 @@ struct ProfileTpl<'a> {
     enrollment: Option<Web2faEnrollmentView>,
     error: Option<String>,
     flash: Option<String>,
+    /// True when the session is gated into 2FA enrolment (admin+ without
+    /// 2FA) — renders a blocking banner above the enrolment card.
+    require_2fa: bool,
     csrf_token: String,
 }
 
@@ -77,6 +80,7 @@ pub async fn get_profile(
         enrollment: None,
         error: q.error,
         flash: q.flash,
+        require_2fa: session.needs_2fa_enrollment(),
         csrf_token,
     };
     Ok(Html(tpl.render()?).into_response())
@@ -149,6 +153,7 @@ pub async fn post_2fa_start(
         enrollment: Some(view),
         error: None,
         flash: None,
+        require_2fa: session.needs_2fa_enrollment(),
         csrf_token,
     };
     Ok(Html(tpl.render()?).into_response())
@@ -180,6 +185,29 @@ pub async fn post_2fa_confirm(
     .map_err(AppError::from)?;
     match resp {
         RpcResponse::Web2faConfirmEnroll { ok: true } => {
+            // If this session was gated into 2FA enrolment, upgrade it to
+            // a full session now that they've enrolled so the gate lifts.
+            if session.needs_2fa_enrollment() {
+                let now = hyperion_types::now_secs();
+                let full = hyperion_auth::Session {
+                    sid: session.sid.clone(),
+                    user_id: session.user_id,
+                    created_at: now,
+                    expires_at: now + state.session_ttl(),
+                    username: session.username.clone(),
+                    role: session.role.clone(),
+                    purpose: hyperion_auth::PURPOSE_SESSION.to_string(),
+                };
+                if let Ok(token) = state.session.sign(&full) {
+                    let mut resp =
+                        Redirect::to("/profile?flash=2FA+enrolled+successfully").into_response();
+                    resp.headers_mut().insert(
+                        axum::http::header::SET_COOKIE,
+                        crate::auth::set_cookie(&state, &token),
+                    );
+                    return Ok(resp);
+                }
+            }
             Ok(Redirect::to("/profile?flash=2FA+enrolled+successfully").into_response())
         }
         RpcResponse::Web2faConfirmEnroll { ok: false } => Ok(Redirect::to(

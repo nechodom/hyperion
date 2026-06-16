@@ -16,7 +16,10 @@ pub mod session;
 pub mod totp;
 
 pub use password::{hash_password, verify_password, PasswordError};
-pub use session::{Session, SessionError, SessionSigner, PURPOSE_PENDING_2FA, PURPOSE_SESSION};
+pub use session::{
+    Session, SessionError, SessionSigner, PURPOSE_PENDING_2FA, PURPOSE_REMEMBER_DEVICE,
+    PURPOSE_SESSION, PURPOSE_SESSION_2FA_PENDING,
+};
 pub use totp::{
     code_at, generate_backup_codes, generate_secret_base32, hash_backup_code, otpauth_url,
     verify_code, verify_code_at, TotpError,
