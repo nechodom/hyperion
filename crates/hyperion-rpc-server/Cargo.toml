@@ -20,6 +20,12 @@ hyperion-validate = { path = "../hyperion-validate" }
 hyperion-state = { path = "../hyperion-state" }
 hyperion-core = { path = "../hyperion-core" }
 hyperion-adapters = { path = "../hyperion-adapters" }
-tokio = { workspace = true, features = ["macros", "rt"] }
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "net", "time"] }
 tempfile.workspace = true
 async-trait.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+axum.workspace = true
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
+rcgen.workspace = true

@@ -1465,7 +1465,10 @@ name = "hyperion-rpc-server"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "axum",
+ "axum-server",
  "base64",
+ "chrono",
  "hyperion-adapters",
  "hyperion-core",
  "hyperion-rpc",
@@ -1473,6 +1476,9 @@ dependencies = [
  "hyperion-state",
  "hyperion-types",
  "hyperion-validate",
+ "rcgen 0.13.2",
+ "rustls",
+ "serde_json",
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
