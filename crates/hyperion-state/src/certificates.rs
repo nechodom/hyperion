@@ -46,6 +46,29 @@ pub async fn upsert(
     Ok(row.0)
 }
 
+/// Flag (or clear) a cert as a DNS-01 wildcard. The renewal sweep reads
+/// this to pick HTTP-01 vs DNS-01. Kept as a separate column so plain
+/// `upsert` callers don't have to thread it through.
+pub async fn set_wildcard(pool: &SqlitePool, domain: &str, wildcard: bool) -> Result<(), StateError> {
+    sqlx::query("UPDATE certificates SET is_wildcard = ? WHERE domain = ?")
+        .bind(wildcard as i64)
+        .bind(domain)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// True when the cert for `domain` was issued as a DNS-01 wildcard.
+/// Unknown domain ⇒ false (treated as a normal HTTP-01 cert).
+pub async fn is_wildcard(pool: &SqlitePool, domain: &str) -> Result<bool, StateError> {
+    let row: Option<(i64,)> =
+        sqlx::query_as("SELECT is_wildcard FROM certificates WHERE domain = ?")
+            .bind(domain)
+            .fetch_optional(pool)
+            .await?;
+    Ok(row.map(|(w,)| w != 0).unwrap_or(false))
+}
+
 pub async fn get(pool: &SqlitePool, domain: &str) -> Result<Option<CertRow>, StateError> {
     let row: Option<(i64, String, i64, i64, String, String, String)> = sqlx::query_as(
         "SELECT id, domain, issued_at, not_after, cert_path, key_path, issuer
@@ -134,6 +157,27 @@ pub async fn find_expiring_within(
 mod tests {
     use super::*;
     use crate::db::open_memory;
+
+    #[tokio::test]
+    async fn wildcard_flag_roundtrip() {
+        let pool = open_memory().await.expect("open");
+        // Unknown domain ⇒ false.
+        assert!(!is_wildcard(&pool, "nope.cz").await.unwrap());
+        upsert(&pool, "example.cz", 1, 1000, "/c/f.pem", "/c/p.pem", "letsencrypt")
+            .await
+            .expect("upsert");
+        // Default after a plain upsert is false (HTTP-01).
+        assert!(!is_wildcard(&pool, "example.cz").await.unwrap());
+        set_wildcard(&pool, "example.cz", true).await.expect("set");
+        assert!(is_wildcard(&pool, "example.cz").await.unwrap());
+        // A renewal upsert preserves the flag (not in the update set).
+        upsert(&pool, "example.cz", 2, 2000, "/c/f.pem", "/c/p.pem", "letsencrypt")
+            .await
+            .expect("re-upsert");
+        assert!(is_wildcard(&pool, "example.cz").await.unwrap());
+        set_wildcard(&pool, "example.cz", false).await.expect("clear");
+        assert!(!is_wildcard(&pool, "example.cz").await.unwrap());
+    }
 
     #[tokio::test]
     async fn upsert_inserts_then_updates() {

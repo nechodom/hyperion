@@ -7763,6 +7763,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             &cert.issuer,
         )
         .await;
+        // Mark it wildcard so the renewal sweep uses DNS-01, not HTTP-01.
+        let _ = certificates::set_wildcard(&self.pool, &detail.domain, true).await;
 
         let new_detail = HostingDetail {
             cert: Some(cert.clone()),
@@ -7854,10 +7856,50 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             )
             .await;
 
+            // Wildcard certs (`*.domain`) can only be validated via
+            // DNS-01 — HTTP-01 would fail every tick and burn the LE
+            // failed-validation rate limit. Renew via Cloudflare when a
+            // token is configured; otherwise skip + notify the operator
+            // to re-run the manual DNS-01 flow before expiry.
+            let is_wild = certificates::is_wildcard(&self.pool, &domain_str)
+                .await
+                .unwrap_or(false);
             let outcome = match Domain::parse(&domain_str) {
                 Err(e) => CertRenewOutcome::Failed {
                     error: format!("invalid stored domain {domain_str}: {e}"),
                 },
+                Ok(d) if is_wild => {
+                    if hyperion_adapters::cloudflare::token().is_some() {
+                        match self
+                            .cert_dns01_begin(
+                                HostingSelector::Domain(d),
+                                false,
+                                "cloudflare".into(),
+                            )
+                            .await
+                        {
+                            Ok((true, _, _)) => {
+                                let na = certificates::get(&self.pool, &domain_str)
+                                    .await
+                                    .ok()
+                                    .flatten()
+                                    .map(|r| r.not_after)
+                                    .unwrap_or(cert.not_after);
+                                CertRenewOutcome::Renewed { new_not_after: na }
+                            }
+                            Ok(_) => CertRenewOutcome::Failed {
+                                error: "Cloudflare DNS-01 renewal did not complete".into(),
+                            },
+                            Err(e) => CertRenewOutcome::Failed { error: e.to_string() },
+                        }
+                    } else {
+                        CertRenewOutcome::Skipped {
+                            reason: "wildcard cert — no Cloudflare token configured; \
+                                     re-run DNS-01 from the SSL tab"
+                                .into(),
+                        }
+                    }
+                }
                 Ok(d) => {
                     let req = CertIssueRequest {
                         staging: false,
@@ -7877,6 +7919,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
             let status = match &outcome {
                 CertRenewOutcome::Renewed { .. } => "ok",
+                CertRenewOutcome::Skipped { .. } => "skipped",
                 _ => "failed",
             };
             self.append_audit(
@@ -7934,6 +7977,19 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                         ),
                         &format!("/hostings/{}", domain_str),
                         &format!("cert.renewed_late:{domain_str}"),
+                    )
+                    .await;
+                }
+                CertRenewOutcome::Skipped { reason } => {
+                    // Wildcard cert we couldn't auto-renew (no Cloudflare
+                    // token) — nag the operator to re-run DNS-01 before it
+                    // expires. Per-domain kind → one bell row per cert.
+                    self.notify_admins(
+                        if days_left < 7 { "error" } else { "warn" },
+                        "Wildcard cert needs manual renewal",
+                        &format!("{domain_str} — {reason} ({days_left} day(s) until expiry)"),
+                        &format!("/hostings/{}", domain_str),
+                        &format!("cert.wildcard_manual:{domain_str}"),
                     )
                     .await;
                 }
