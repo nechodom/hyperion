@@ -7632,6 +7632,159 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(cert)
     }
 
+    /// Resolve the effective ACME contact email for a hosting (per-hosting
+    /// override → agent default), rejecting placeholders.
+    fn effective_acme_email<'a>(
+        &'a self,
+        row_email: Option<&'a str>,
+    ) -> Result<&'a str, RpcError> {
+        let email = row_email
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or(self.acme_contact_email.as_str())
+            .trim();
+        if email.is_empty()
+            || email.ends_with("@example.com")
+            || email.ends_with("@example.org")
+            || email.ends_with("@example.net")
+            || email.ends_with("@hyperion.invalid")
+            || !email.contains('@')
+        {
+            return Err(RpcError::Validation {
+                message: format!(
+                    "acme contact email \"{email}\" is invalid or a placeholder. \
+                     Edit /etc/hyperion/agent.toml [acme] contact_email and \
+                     restart hyperion-agent."
+                ),
+            });
+        }
+        Ok(email)
+    }
+
+    /// DNS-01 phase 1 for a wildcard cert (`<domain>` + `*.<domain>`).
+    /// Manual provider: returns the TXT records to publish. Cloudflare
+    /// provider: publishes them via the API, finishes issuance, and
+    /// returns `completed = true`.
+    pub async fn cert_dns01_begin(
+        &self,
+        sel: HostingSelector,
+        staging: bool,
+        provider: String,
+    ) -> Result<(bool, String, Vec<String>), RpcError> {
+        let detail = self.get(sel).await?;
+        let row = hostings::get_by_id(&self.pool, &detail.id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("get hosting: {e}")))?
+            .ok_or_else(|| RpcError::NotFound {
+                kind: "hosting".into(),
+                id: detail.id.as_str().to_string(),
+            })?;
+        let email = self
+            .effective_acme_email(row.acme_contact_email.as_deref())?
+            .to_string();
+        let wildcard = format!("*.{}", detail.domain);
+        let sans = vec![wildcard];
+
+        let pending = hyperion_adapters::acme::dns01_begin(
+            &detail.domain,
+            &sans,
+            &email,
+            staging,
+        )
+        .await
+        .map_err(|e| RpcError::ProvisioningFailed {
+            stage: "acme_dns01_begin".into(),
+            reason: e.to_string(),
+        })?;
+
+        if provider == "cloudflare" {
+            let token = hyperion_adapters::cloudflare::token().ok_or_else(|| {
+                RpcError::Validation {
+                    message: "no Cloudflare token configured — drop one in \
+                              /etc/hyperion/cloudflare.token (Zone:Read + DNS:Edit) \
+                              or use the manual flow"
+                        .into(),
+                }
+            })?;
+            let ids = hyperion_adapters::cloudflare::publish_txt(
+                &token,
+                &pending.record_name,
+                &pending.values,
+            )
+            .await
+            .map_err(|e| RpcError::ProvisioningFailed {
+                stage: "cloudflare_publish".into(),
+                reason: e.to_string(),
+            })?;
+            // Give the records a moment to propagate, then finish.
+            tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+            let finish = self
+                .cert_dns01_finish(HostingSelector::Id(detail.id.clone()))
+                .await;
+            hyperion_adapters::cloudflare::cleanup_txt(&token, &ids).await;
+            finish?;
+            return Ok((true, pending.record_name, pending.values));
+        }
+
+        self.append_audit(
+            "cert.dns01.begin",
+            Some(detail.id.as_str()),
+            &serde_json::json!({"domain": detail.domain, "provider": provider, "staging": staging})
+                .to_string(),
+            "ok",
+        )
+        .await;
+        Ok((false, pending.record_name, pending.values))
+    }
+
+    /// DNS-01 phase 2: validate the published TXT, install the wildcard
+    /// cert, persist it, and reload nginx. Mirrors the HTTP-01 post-issue
+    /// path.
+    pub async fn cert_dns01_finish(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::CertInfo, RpcError> {
+        let detail = self.get(sel).await?;
+        let cert = hyperion_adapters::acme::dns01_finish(&detail.domain, "/etc/hyperion/certs")
+            .await
+            .map_err(|e| RpcError::ProvisioningFailed {
+                stage: "acme_dns01_finish".into(),
+                reason: e.to_string(),
+            })?;
+
+        let cert_path = format!("/etc/hyperion/certs/{}/fullchain.pem", detail.domain);
+        let key_path = format!("/etc/hyperion/certs/{}/privkey.pem", detail.domain);
+        let _ = certificates::upsert(
+            &self.pool,
+            &detail.domain,
+            now_secs(),
+            cert.not_after,
+            &cert_path,
+            &key_path,
+            &cert.issuer,
+        )
+        .await;
+
+        let new_detail = HostingDetail {
+            cert: Some(cert.clone()),
+            ..detail.clone()
+        };
+        if let Err(e) = self.adapters.nginx_write_vhost(&new_detail).await {
+            return Err(RpcError::ProvisioningFailed {
+                stage: "nginx_reload".into(),
+                reason: e.to_string(),
+            });
+        }
+
+        self.append_audit(
+            "cert.dns01.finish",
+            Some(detail.id.as_str()),
+            &serde_json::json!({"domain": detail.domain, "issuer": cert.issuer}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(cert)
+    }
+
     /// Sweep `certificates` for LE certs whose `not_after - now` is
     /// below `threshold_days*86400` and re-issue each via
     /// `issue_real_cert` with `require_dns_match=false`. The cert is

@@ -4747,6 +4747,120 @@ pub async fn post_cert_issue(
 }
 
 #[derive(Deserialize)]
+pub struct Dns01BeginForm {
+    pub selector: String,
+    #[serde(default)]
+    pub staging: Option<String>,
+    /// "manual" (default) | "cloudflare".
+    #[serde(default)]
+    pub provider: String,
+}
+
+/// Interstitial page that shows the TXT records to publish for a manual
+/// DNS-01 wildcard issuance, with a "I've published them, continue" form.
+#[derive(Template)]
+#[template(path = "cert_dns01.html")]
+struct Dns01Tpl {
+    username: String,
+    user_initial: char,
+    active: &'static str,
+    css_version: &'static str,
+    htmx_version: &'static str,
+    domain: String,
+    selector: String,
+    record_name: String,
+    values: Vec<String>,
+    csrf_finish: String,
+}
+
+pub async fn post_cert_dns01_begin(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<Dns01BeginForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let sel_url = urlencoding(&form.selector);
+    let (detail, owner_node) = find_hosting_anywhere(&state, sel.clone()).await?;
+    let staging = form.staging.as_deref() == Some("on");
+    let provider = if form.provider == "cloudflare" {
+        "cloudflare".to_string()
+    } else {
+        "manual".to_string()
+    };
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        owner_node.as_deref(),
+        Request::CertDns01Begin { sel, staging, provider },
+    )
+    .await?;
+    match resp {
+        RpcResponse::CertDns01Begin { completed: true, .. } => {
+            Ok(Redirect::to(&format!("/hostings/{}?cert=wildcard", sel_url)).into_response())
+        }
+        RpcResponse::CertDns01Begin { completed: false, record_name, values } => {
+            let tpl = Dns01Tpl {
+                username: ctx.username.clone(),
+                user_initial: super::user_initial(&ctx.username),
+                active: "hostings",
+                css_version: super::css_version(),
+                htmx_version: super::htmx_version(),
+                domain: detail.domain.clone(),
+                selector: detail.id.as_str().to_string(),
+                record_name,
+                values,
+                csrf_finish: csrf_token_for(&state, &ctx, "/hostings/cert/dns01/finish"),
+            };
+            Ok(Html(tpl.render()?).into_response())
+        }
+        RpcResponse::Error(e) => {
+            let msg = urlencoding(&e.to_string());
+            Ok(Redirect::to(&format!("/hostings/{}?cert_error={}", sel_url, msg)).into_response())
+        }
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct Dns01FinishForm {
+    pub selector: String,
+}
+
+pub async fn post_cert_dns01_finish(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<Dns01FinishForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let sel_url = urlencoding(&form.selector);
+    let target_owned: Option<String> = find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target_owned.as_deref(),
+        Request::CertDns01Finish { sel },
+    )
+    .await?;
+    match resp {
+        RpcResponse::CertDns01Finish(_) => {
+            Ok(Redirect::to(&format!("/hostings/{}?cert=wildcard", sel_url)).into_response())
+        }
+        RpcResponse::Error(e) => {
+            let msg = urlencoding(&e.to_string());
+            Ok(Redirect::to(&format!("/hostings/{}?cert_error={}", sel_url, msg)).into_response())
+        }
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+#[derive(Deserialize)]
 pub struct RestoreForm {
     pub selector: String,
     pub archive_path: String,

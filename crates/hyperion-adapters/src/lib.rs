@@ -10,6 +10,7 @@
 
 pub mod acme;
 pub mod backup;
+pub mod cloudflare;
 pub mod cmd;
 pub mod email;
 pub mod fs;

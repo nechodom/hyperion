@@ -864,6 +864,35 @@
         Issue HTTPS certificate
       </button>
     </form>
+
+    <hr style="border:none;border-top:1px solid var(--border);margin:1rem 0">
+
+    <h2 style="font-size:0.95rem;margin:0 0 0.35rem">Wildcard certificate (DNS-01)</h2>
+    <p class="text-soft" style="margin:0 0 0.7rem;font-size:0.85rem">
+      Issue <code>{{ detail.domain }}</code> + <code>*.{{ detail.domain }}</code>
+      via a DNS challenge. You'll be shown <code>TXT</code> records to publish,
+      then click continue to validate. Requires control of the domain's DNS.
+    </p>
+    <form method="post" action="/hostings/cert/dns01/begin">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+      <label class="field-checkbox">
+        <input type="checkbox" name="staging" value="on">
+        Use Let's Encrypt <strong>staging</strong> first
+        <span class="muted" style="margin-left:0.4rem;font-size:0.82rem">— untrusted but no rate limits</span>
+      </label>
+      <div class="field" style="margin:0.5rem 0">
+        <label for="dns01_provider">DNS provider</label>
+        <select id="dns01_provider" name="provider">
+          <option value="manual">Manual (show me the TXT records)</option>
+          <option value="cloudflare">Cloudflare (automatic — needs API token)</option>
+        </select>
+      </div>
+      <button class="btn" type="submit" style="margin-top:0.4rem">
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15 15 0 0 1 0 20 15 15 0 0 1 0-20z"/></svg>
+        Start wildcard issuance
+      </button>
+    </form>
   </div>
 </div>
 

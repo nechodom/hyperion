@@ -162,6 +162,19 @@ pub enum Request {
         sel: HostingSelector,
         req: CertIssueRequest,
     },
+    /// Phase 1 of a DNS-01 wildcard issuance. `provider` is "manual"
+    /// (default) or "cloudflare". Manual returns the TXT records to
+    /// publish; cloudflare publishes them + finishes in one shot.
+    CertDns01Begin {
+        sel: HostingSelector,
+        staging: bool,
+        provider: String,
+    },
+    /// Phase 2 of a manual DNS-01 issuance — the TXT is live, validate
+    /// + install the cert.
+    CertDns01Finish {
+        sel: HostingSelector,
+    },
     HostingStats {
         sel: HostingSelector,
     },
@@ -1013,6 +1026,15 @@ pub enum Response {
     DnsCheck(DnsCheckResult),
     DnsSpfCheck(hyperion_types::SpfCheckResult),
     CertIssueAcme(CertInfo),
+    /// `completed = true` ⇒ the cert was issued (cloudflare path);
+    /// otherwise `record_name` + `values` must be published as TXT and
+    /// the caller follows up with `CertDns01Finish`.
+    CertDns01Begin {
+        completed: bool,
+        record_name: String,
+        values: Vec<String>,
+    },
+    CertDns01Finish(CertInfo),
     HostingStats(HostingStats),
     NodeStats(NodeStats),
     ClusterStats(ClusterStats),

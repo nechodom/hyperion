@@ -772,11 +772,21 @@ fn print_pretty(resp: &Response) {
             );
             println!("note:     {}", c.note);
         }
-        Response::CertIssueAcme(c) => {
+        Response::CertIssueAcme(c) | Response::CertDns01Finish(c) => {
             println!("✓ certificate issued");
             println!("  issuer:    {}", c.issuer);
             println!("  not_after: {}", c.not_after);
             println!("  fp:        {}", c.fingerprint_sha256);
+        }
+        Response::CertDns01Begin { completed, record_name, values } => {
+            if *completed {
+                println!("✓ DNS-01 completed (cloudflare)");
+            } else {
+                println!("Publish these TXT records, then run cert dns01-finish:");
+                for v in values {
+                    println!("  {record_name}  IN TXT  \"{v}\"");
+                }
+            }
         }
         Response::HostingStats(s) => {
             println!("{}", s.domain);

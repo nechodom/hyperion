@@ -117,6 +117,14 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::hostings::post_cert_issue),
         )
         .route(
+            "/hostings/cert/dns01/begin",
+            post(handlers::hostings::post_cert_dns01_begin),
+        )
+        .route(
+            "/hostings/cert/dns01/finish",
+            post(handlers::hostings::post_cert_dns01_finish),
+        )
+        .route(
             "/hostings/restore",
             post(handlers::hostings::post_restore),
         )

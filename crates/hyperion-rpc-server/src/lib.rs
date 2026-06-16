@@ -367,6 +367,20 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::CertIssueAcme(v),
             Err(e) => Response::Error(e),
         },
+        Request::CertDns01Begin { sel, staging, provider } => {
+            match api.cert_dns01_begin(sel, staging, provider).await {
+                Ok((completed, record_name, values)) => Response::CertDns01Begin {
+                    completed,
+                    record_name,
+                    values,
+                },
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::CertDns01Finish { sel } => match api.cert_dns01_finish(sel).await {
+            Ok(v) => Response::CertDns01Finish(v),
+            Err(e) => Response::Error(e),
+        },
         Request::HostingStats { sel } => match api.hosting_stats(sel).await {
             Ok(v) => Response::HostingStats(v),
             Err(e) => Response::Error(e),
@@ -1377,6 +1391,20 @@ mod tests {
             &self,
             _: HostingSelector,
             _: CertIssueRequest,
+        ) -> Result<CertInfo, RpcError> {
+            Err(RpcError::Internal { message: "not supported by this agent".into() })
+        }
+        async fn cert_dns01_begin(
+            &self,
+            _: HostingSelector,
+            _: bool,
+            _: String,
+        ) -> Result<(bool, String, Vec<String>), RpcError> {
+            Err(RpcError::Internal { message: "not supported by this agent".into() })
+        }
+        async fn cert_dns01_finish(
+            &self,
+            _: HostingSelector,
         ) -> Result<CertInfo, RpcError> {
             Err(RpcError::Internal { message: "not supported by this agent".into() })
         }

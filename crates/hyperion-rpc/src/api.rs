@@ -247,6 +247,18 @@ pub trait AgentApi: Send + Sync + 'static {
         sel: crate::wire::HostingSelector,
         req: CertIssueRequest,
     ) -> Result<CertInfo, RpcError>;
+    /// DNS-01 phase 1. Returns (completed, record_name, values).
+    async fn cert_dns01_begin(
+        &self,
+        sel: crate::wire::HostingSelector,
+        staging: bool,
+        provider: String,
+    ) -> Result<(bool, String, Vec<String>), RpcError>;
+    /// DNS-01 phase 2 — validate + install after the TXT is live.
+    async fn cert_dns01_finish(
+        &self,
+        sel: crate::wire::HostingSelector,
+    ) -> Result<CertInfo, RpcError>;
 
     /// Latest stats snapshot for a hosting (disk, bw, reqs).
     async fn hosting_stats(

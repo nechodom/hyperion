@@ -462,6 +462,22 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.issue_real_cert(sel, req).await
     }
 
+    async fn cert_dns01_begin(
+        &self,
+        sel: HostingSelector,
+        staging: bool,
+        provider: String,
+    ) -> Result<(bool, String, Vec<String>), RpcError> {
+        self.svc.cert_dns01_begin(sel, staging, provider).await
+    }
+
+    async fn cert_dns01_finish(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<CertInfo, RpcError> {
+        self.svc.cert_dns01_finish(sel).await
+    }
+
     async fn hosting_stats(&self, sel: HostingSelector) -> Result<HostingStats, RpcError> {
         self.svc.hosting_stats(sel).await
     }

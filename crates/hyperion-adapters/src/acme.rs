@@ -361,6 +361,265 @@ async fn cleanup_challenges(paths: &[PathBuf]) {
     }
 }
 
+// ───────────────────────── DNS-01 (wildcard) ─────────────────────────
+//
+// Wildcard certs (`*.example.com`) can only be validated via DNS-01.
+// Unlike HTTP-01 this is inherently two-phase: the operator (or a DNS
+// provider API) has to publish a TXT record before we can tell Let's
+// Encrypt to validate. We persist the ACME account credentials + order
+// URL to disk between the two phases so the resume survives across RPCs.
+
+const DNS01_SESSION_DIR: &str = "/var/lib/hyperion/acme-dns01";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct Dns01Session {
+    account_credentials: serde_json::Value,
+    order_url: String,
+    staging: bool,
+    names: Vec<String>,
+}
+
+/// What the operator must publish to DNS before finishing. `record_name`
+/// is the same for every value (apex + wildcard authorizations share
+/// `_acme-challenge.<domain>`), so all `values` go on that one name as
+/// multiple TXT records.
+#[derive(Debug, Clone)]
+pub struct Dns01Pending {
+    pub record_name: String,
+    pub values: Vec<String>,
+}
+
+fn install_crypto_provider() {
+    static PROVIDER_INSTALLED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+    PROVIDER_INSTALLED.get_or_init(|| {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+    });
+}
+
+fn session_path(domain: &str) -> PathBuf {
+    // domain is already validated upstream (hyperion-validate). Strip a
+    // leading wildcard just in case and keep the path inside our dir.
+    let safe: String = domain
+        .trim_start_matches("*.")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-')
+        .collect();
+    PathBuf::from(DNS01_SESSION_DIR).join(format!("{safe}.json"))
+}
+
+/// Phase 1: create the ACME account + order for `domain` + sans (the
+/// caller adds `*.domain` for a wildcard), collect the DNS-01 TXT values,
+/// persist the resumable session, and return the records to publish.
+/// Does NOT tell LE we're ready — the TXT isn't live yet.
+pub async fn dns01_begin(
+    domain: &str,
+    sans: &[String],
+    contact_email: &str,
+    staging: bool,
+) -> Result<Dns01Pending, AdapterError> {
+    use instant_acme::{
+        Account, AuthorizationStatus, ChallengeType, Identifier, NewAccount, NewOrder,
+    };
+    install_crypto_provider();
+    let directory_url = if staging {
+        "https://acme-staging-v02.api.letsencrypt.org/directory"
+    } else {
+        "https://acme-v02.api.letsencrypt.org/directory"
+    };
+    let contact_uri = format!("mailto:{contact_email}");
+    let (account, creds) = Account::builder()
+        .map_err(|e| AdapterError::Acme(format!("account builder: {e}")))?
+        .create(
+            &NewAccount {
+                contact: &[&contact_uri],
+                terms_of_service_agreed: true,
+                only_return_existing: false,
+            },
+            directory_url.to_string(),
+            None,
+        )
+        .await
+        .map_err(|e| AdapterError::Acme(format!("acme account: {e}")))?;
+
+    let mut names: Vec<String> = std::iter::once(domain.to_string())
+        .chain(sans.iter().cloned())
+        .collect();
+    names.sort();
+    names.dedup();
+    let identifiers: Vec<Identifier> =
+        names.iter().map(|n| Identifier::Dns(n.clone())).collect();
+
+    let mut order = {
+        let new_order = NewOrder::new(identifiers.as_slice());
+        let mut attempt: u32 = 0;
+        loop {
+            match account.new_order(&new_order).await {
+                Ok(o) => break o,
+                Err(e) if is_transient_rate_limit(&e) && attempt < 3 => {
+                    attempt += 1;
+                    tokio::time::sleep(backoff_for(attempt)).await;
+                }
+                Err(e) => return Err(AdapterError::Acme(rate_limit_message("new_order", &e))),
+            }
+        }
+    };
+
+    let mut values = Vec::new();
+    {
+        let mut authorizations = order.authorizations();
+        while let Some(result) = authorizations.next().await {
+            let mut authz =
+                result.map_err(|e| AdapterError::Acme(format!("authorization: {e}")))?;
+            match authz.status {
+                AuthorizationStatus::Pending => {}
+                AuthorizationStatus::Valid => continue,
+                other => {
+                    return Err(AdapterError::Acme(format!(
+                        "authorization in unexpected state {other:?}"
+                    )));
+                }
+            }
+            let challenge = authz
+                .challenge(ChallengeType::Dns01)
+                .ok_or_else(|| AdapterError::Acme("no DNS-01 challenge offered".into()))?;
+            values.push(challenge.key_authorization().dns_value());
+        }
+    }
+    if values.is_empty() {
+        return Err(AdapterError::Acme(
+            "every authorization was already valid — nothing to validate".into(),
+        ));
+    }
+
+    // Persist the resumable session (0600 — contains the account key).
+    crate::fs::ensure_dir(Path::new(DNS01_SESSION_DIR), 0o700).await?;
+    let session = Dns01Session {
+        account_credentials: serde_json::to_value(&creds)
+            .map_err(|e| AdapterError::Acme(format!("serialize creds: {e}")))?,
+        order_url: order.url().to_string(),
+        staging,
+        names,
+    };
+    let body = serde_json::to_vec(&session)
+        .map_err(|e| AdapterError::Acme(format!("serialize session: {e}")))?;
+    crate::fs::atomic_write(&session_path(domain), &body, 0o600).await?;
+
+    let base = domain.trim_start_matches("*.");
+    Ok(Dns01Pending {
+        record_name: format!("_acme-challenge.{base}"),
+        values,
+    })
+}
+
+/// Phase 2: resume the saved order, tell LE the TXT records are live,
+/// poll, finalize and write the cert to `<certs_root>/<domain>/`.
+/// The session file is removed on success.
+pub async fn dns01_finish(domain: &str, certs_root: &str) -> Result<CertInfo, AdapterError> {
+    use instant_acme::{Account, AuthorizationStatus, ChallengeType, OrderStatus, RetryPolicy};
+    install_crypto_provider();
+
+    let path = session_path(domain);
+    let raw = tokio::fs::read(&path).await.map_err(|e| {
+        AdapterError::Acme(format!(
+            "no pending DNS-01 session for {domain} (start one first): {e}"
+        ))
+    })?;
+    let session: Dns01Session = serde_json::from_slice(&raw)
+        .map_err(|e| AdapterError::Acme(format!("parse session: {e}")))?;
+    let creds: instant_acme::AccountCredentials =
+        serde_json::from_value(session.account_credentials)
+            .map_err(|e| AdapterError::Acme(format!("parse creds: {e}")))?;
+    let account = Account::builder()
+        .map_err(|e| AdapterError::Acme(format!("account builder: {e}")))?
+        .from_credentials(creds)
+        .await
+        .map_err(|e| AdapterError::Acme(format!("resume account: {e}")))?;
+    let mut order = account
+        .order(session.order_url.clone())
+        .await
+        .map_err(|e| AdapterError::Acme(format!("resume order: {e}")))?;
+
+    {
+        let mut authorizations = order.authorizations();
+        while let Some(result) = authorizations.next().await {
+            let mut authz =
+                result.map_err(|e| AdapterError::Acme(format!("authorization: {e}")))?;
+            match authz.status {
+                AuthorizationStatus::Pending => {}
+                AuthorizationStatus::Valid => continue,
+                other => {
+                    return Err(AdapterError::Acme(format!(
+                        "authorization in unexpected state {other:?}"
+                    )));
+                }
+            }
+            let mut challenge = authz
+                .challenge(ChallengeType::Dns01)
+                .ok_or_else(|| AdapterError::Acme("no DNS-01 challenge offered".into()))?;
+            let mut attempt: u32 = 0;
+            loop {
+                match challenge.set_ready().await {
+                    Ok(()) => break,
+                    Err(e) if is_transient_rate_limit(&e) && attempt < 3 => {
+                        attempt += 1;
+                        tokio::time::sleep(backoff_for(attempt)).await;
+                    }
+                    Err(e) => {
+                        return Err(AdapterError::Acme(rate_limit_message("set_ready", &e)))
+                    }
+                }
+            }
+        }
+    }
+
+    let status = order
+        .poll_ready(&RetryPolicy::default())
+        .await
+        .map_err(|e| AdapterError::Acme(format!("poll_ready: {e}")))?;
+    if !matches!(status, OrderStatus::Ready | OrderStatus::Valid) {
+        let details = collect_authz_errors(&mut order).await;
+        return Err(AdapterError::Acme(format!(
+            "ACME order status={status:?}: {details} \
+             (is the TXT record published + propagated?)"
+        )));
+    }
+
+    let key_pem = order
+        .finalize()
+        .await
+        .map_err(|e| AdapterError::Acme(rate_limit_message("finalize", &e)))?;
+    let cert_chain_pem = order
+        .poll_certificate(&RetryPolicy::default())
+        .await
+        .map_err(|e| AdapterError::Acme(rate_limit_message("poll_certificate", &e)))?;
+
+    let domain_dir = PathBuf::from(certs_root).join(domain);
+    crate::fs::ensure_dir(&domain_dir, 0o700).await?;
+    crate::fs::atomic_write(
+        &domain_dir.join("fullchain.pem"),
+        cert_chain_pem.as_bytes(),
+        0o644,
+    )
+    .await?;
+    crate::fs::atomic_write(&domain_dir.join("privkey.pem"), key_pem.as_bytes(), 0o600).await?;
+    let _ = tokio::fs::remove_file(&path).await;
+
+    let not_after = parse_not_after(&cert_chain_pem)
+        .unwrap_or_else(|| hyperion_types::now_secs() + 90 * 24 * 3600);
+    let sans: Vec<String> = session.names.iter().filter(|n| *n != domain).cloned().collect();
+    Ok(CertInfo {
+        domain: domain.to_string(),
+        sans,
+        issuer: if session.staging {
+            "letsencrypt-staging".into()
+        } else {
+            "letsencrypt".into()
+        },
+        not_after,
+        fingerprint_sha256: fingerprint_sha256_der(cert_chain_pem.as_bytes()),
+    })
+}
+
 /// True if the ACME error is a *transient* rate-limit / load-shed
 /// (Boulder's "Service busy; retry later" or any urn:...:rateLimited
 /// with HTTP 503). False for durable limits like

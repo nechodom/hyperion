@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Wildcard cert · {{ domain }} · hyperion{% endblock %}
+{% block main %}
+
+<div class="page-header">
+  <div>
+    <h1>Wildcard certificate — DNS-01</h1>
+    <div class="subtitle">{{ domain }} + *.{{ domain }}</div>
+  </div>
+</div>
+
+<div class="card" style="max-width:760px">
+  <h2>Step 1 — publish these DNS records</h2>
+  <p class="muted">
+    Add the following <code>TXT</code> record(s) at your DNS provider, then
+    wait a minute or two for them to propagate. Both values go on the
+    <strong>same name</strong> (two separate TXT records).
+  </p>
+  <div class="table-wrap" style="margin:0.75rem 0">
+    <table>
+      <thead><tr><th>Type</th><th>Name</th><th>Value</th></tr></thead>
+      <tbody>
+        {% for v in values %}
+        <tr>
+          <td><code>TXT</code></td>
+          <td><code style="word-break:break-all">{{ record_name }}</code></td>
+          <td><code style="word-break:break-all">{{ v }}</code></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="muted small">
+    Verify with <code>dig +short TXT {{ record_name }}</code> — both values
+    should appear before continuing. The pending order is held server-side;
+    you can come back to this within the hour.
+  </p>
+
+  <h2 style="margin-top:1.25rem">Step 2 — validate &amp; issue</h2>
+  <p class="muted">
+    Once the records resolve, Let's Encrypt will check them and issue the
+    wildcard certificate.
+  </p>
+  <form method="post" action="/hostings/cert/dns01/finish">
+    <input type="hidden" name="_csrf" value="{{ csrf_finish }}">
+    <input type="hidden" name="selector" value="{{ selector }}">
+    <div class="row" style="gap:0.5rem;align-items:center;margin-top:0.5rem">
+      <button class="btn primary" type="submit">I've published the records — validate now</button>
+      <a class="btn" href="/hostings/{{ selector }}">Cancel</a>
+    </div>
+  </form>
+</div>
+
+{% endblock %}
