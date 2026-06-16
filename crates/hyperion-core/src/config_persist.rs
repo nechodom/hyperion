@@ -6,7 +6,8 @@
 //! through an atomic rename + creates a `.bak` of the previous
 //! contents.
 
-use std::os::unix::fs::PermissionsExt;
+use std::io::Write;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use thiserror::Error;
 use toml_edit::{value, DocumentMut, Item};
@@ -33,11 +34,31 @@ pub fn save(path: &Path, doc: &DocumentMut) -> Result<(), ConfigPersistError> {
     let serialised = doc.to_string();
     if path.exists() {
         let bak = path.with_extension("toml.bak");
-        let _ = std::fs::copy(path, &bak);
+        if let Err(e) = std::fs::copy(path, &bak) {
+            // The backup is a convenience, not a correctness requirement —
+            // continue, but don't let the failure vanish.
+            tracing::warn!(error = %e, ?bak, "could not write agent.toml backup (continuing)");
+        }
     }
     let tmp = sibling_tmp(path);
-    std::fs::write(&tmp, serialised.as_bytes())?;
-    let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    // Create the temp 0600 from the start: agent.toml carries the master-RPC
+    // key, so it must never be even momentarily world-readable (which a
+    // write-then-chmod sequence allows under the default umask).
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(&tmp)?;
+    f.write_all(serialised.as_bytes())?;
+    f.sync_all()?;
+    drop(f);
+    // Belt-and-suspenders if the tmp pre-existed with looser perms. This is a
+    // HARD error: refusing to publish a secret at 0644 beats best-effort.
+    if let Err(e) = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
     std::fs::rename(&tmp, path)?;
     Ok(())
 }

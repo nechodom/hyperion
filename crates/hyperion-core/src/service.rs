@@ -1438,10 +1438,18 @@ async fn ahead_of_remote(latest: &str) -> AheadResult {
         // shallow clone or after a force-push. Try `git fetch` once
         // to make the SHA reachable, then retry.
         Ok(o) if o.status.code() == Some(128) => {
-            let _ = tokio::process::Command::new("/usr/bin/git")
+            match tokio::process::Command::new("/usr/bin/git")
                 .args(["-C", "/opt/hyperion", "fetch", "--tags", "origin"])
                 .output()
-                .await;
+                .await
+            {
+                Ok(f) if !f.status.success() => tracing::debug!(
+                    stderr = %String::from_utf8_lossy(&f.stderr).trim(),
+                    "git fetch during version check failed — version may read Unknown"
+                ),
+                Err(e) => tracing::debug!(error = %e, "git fetch during version check could not spawn"),
+                _ => {}
+            }
             let retry = tokio::process::Command::new("/usr/bin/git")
                 .args(["-C", "/opt/hyperion", "merge-base", "--is-ancestor", latest, "HEAD"])
                 .output()
@@ -1748,7 +1756,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
         // 3. ensure_dirs
         if let Err(e) = self.adapters.ensure_dirs(&htdocs, &logs, &tmp, uid).await {
-            let _ = stack.rollback_all().await;
+            rollback_and_log(&mut stack).await;
             return Err(e.into());
         }
         stack.push(Box::new(RemoveTree {
@@ -1841,7 +1849,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                         {
                             Ok(id) => id,
                             Err(e2) => {
-                                let _ = stack.rollback_all().await;
+                                rollback_and_log(&mut stack).await;
                                 return Err(RpcError::Internal_with(format!(
                                     "system_users insert (retry after orphan cleanup): {e2}"
                                 )));
@@ -1867,7 +1875,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                                 row_id = by_uid_row.id
                             );
                         }
-                        let _ = stack.rollback_all().await;
+                        rollback_and_log(&mut stack).await;
                         return Err(RpcError::Internal_with(format!(
                             "system_users insert: {e}"
                         )));
@@ -1904,14 +1912,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             {
                 Some(u) => u,
                 None => {
-                    let _ = stack.rollback_all().await;
+                    rollback_and_log(&mut stack).await;
                     return Err(RpcError::Validation {
                         message: "reverse_proxy requires proxy_upstream_url".into(),
                     });
                 }
             };
             if !(upstream.starts_with("http://") || upstream.starts_with("https://")) {
-                let _ = stack.rollback_all().await;
+                rollback_and_log(&mut stack).await;
                 return Err(RpcError::Validation {
                     message: "proxy_upstream_url must start with http:// or https://".into(),
                 });
@@ -1933,7 +1941,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         )
         .await
         {
-            let _ = stack.rollback_all().await;
+            rollback_and_log(&mut stack).await;
             // The trashed-row case is reclaimed above, so a failure
             // here is a genuine live conflict. Translate the raw sqlx
             // UNIQUE message into something an operator can act on
@@ -1960,7 +1968,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // 4b. aliases
         for alias in &req.aliases {
             if let Err(e) = hostings::insert_alias(&self.pool, &hosting_id, alias.as_str()).await {
-                let _ = stack.rollback_all().await;
+                rollback_and_log(&mut stack).await;
                 return Err(RpcError::AlreadyExists {
                     kind: "alias".into(),
                     id: format!("{} ({})", alias, e),
@@ -1976,7 +1984,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     .fpm_ensure(system_user.as_str(), domain, ver)
                     .await
                 {
-                    let _ = stack.rollback_all().await;
+                    rollback_and_log(&mut stack).await;
                     return Err(e.into());
                 }
                 stack.push(Box::new(FpmDelete {
@@ -1993,7 +2001,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             let creds = match self.adapters.db_create(engine, &hosting_id, domain).await {
                 Ok(c) => c,
                 Err(e) => {
-                    let _ = stack.rollback_all().await;
+                    rollback_and_log(&mut stack).await;
                     return Err(e.into());
                 }
             };
@@ -2011,7 +2019,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 )
                 .await
             {
-                let _ = stack.rollback_all().await;
+                rollback_and_log(&mut stack).await;
                 return Err(RpcError::Internal_with(format!("secret write: {e}")));
             }
             if let Err(e) = databases::insert(
@@ -2025,7 +2033,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             )
             .await
             {
-                let _ = stack.rollback_all().await;
+                rollback_and_log(&mut stack).await;
                 return Err(RpcError::Internal_with(format!("databases row: {e}")));
             }
             let db_name_for_rb = creds.db_name.clone();
@@ -2087,7 +2095,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             let cert = match self.adapters.acme_issue(domain, &sans).await {
                 Ok(c) => c,
                 Err(e) => {
-                    let _ = stack.rollback_all().await;
+                    rollback_and_log(&mut stack).await;
                     return Err(e.into());
                 }
             };
@@ -2137,7 +2145,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             cert_key_path: detail_cert_key_path,
         };
         if let Err(e) = self.adapters.nginx_write_vhost(&detail).await {
-            let _ = stack.rollback_all().await;
+            rollback_and_log(&mut stack).await;
             return Err(e.into());
         }
 
@@ -2146,7 +2154,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             hostings::set_state(&self.pool, &hosting_id, HostingState::Active, now_secs()).await
         {
             // We were so close.
-            let _ = stack.rollback_all().await;
+            rollback_and_log(&mut stack).await;
             return Err(RpcError::Internal_with(format!("set_state: {e}")));
         }
 
@@ -13759,12 +13767,37 @@ fn period_key(now: i64) -> String {
     dt.format("%Y-%m-%d-%H").to_string()
 }
 
+/// Run a provisioning rollback stack and surface any *incomplete* cleanup.
+/// `rollback_all` already logs each step; this logs the AGGREGATE at error
+/// level so a leaked user/dir/db is visible even though the caller then
+/// returns the original provisioning error (which would otherwise hide it).
+async fn rollback_and_log(stack: &mut RollbackStack) {
+    let errs = stack.rollback_all().await;
+    if !errs.is_empty() {
+        tracing::error!(
+            failures = ?errs,
+            "rollback incomplete after provisioning failure — manual cleanup may be required"
+        );
+    }
+}
+
 async fn dig_records(domain: &str, kind: &str) -> Result<Vec<String>, std::io::Error> {
     let out = tokio::process::Command::new("/usr/bin/dig")
         .args(["+short", "+time=3", "+tries=2", kind, domain])
         .output()
         .await?;
     if !out.status.success() {
+        // A non-zero dig exit (SERVFAIL, timeout, network down) is a
+        // *transient* failure, not "no records". Callers `unwrap_or_default`
+        // and can't tell the two apart, so at least make it visible here —
+        // otherwise an operator sees "SPF doesn't authorize us" when the real
+        // cause is DNS being unreachable.
+        tracing::warn!(
+            domain = %domain,
+            kind = %kind,
+            stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+            "dig lookup failed (transient) — treating as no records"
+        );
         return Ok(vec![]);
     }
     let body = String::from_utf8_lossy(&out.stdout);
@@ -13794,6 +13827,14 @@ async fn du_bytes(path: &std::path::Path) -> Result<i64, std::io::Error> {
         .output()
         .await?;
     if !out.status.success() {
+        // du failing (permission denied, vanished path) currently surfaces as
+        // "0 B used", which masks a real filesystem problem. Keep the 0 return
+        // (callers expect i64) but log so it doesn't fail silently.
+        tracing::warn!(
+            path = %path.display(),
+            stderr = %String::from_utf8_lossy(&out.stderr).trim(),
+            "du failed — reporting 0 bytes (disk usage may be inaccurate)"
+        );
         return Ok(0);
     }
     let s = String::from_utf8_lossy(&out.stdout);

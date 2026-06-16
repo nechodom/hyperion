@@ -33,6 +33,23 @@ code { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; backgro
 </div></div></body></html>
 "##;
 
+/// Run a best-effort command (chown/chmod/etc.) whose failure shouldn't abort
+/// the caller but MUST NOT vanish: a silent chown failure leaves a file with
+/// the wrong owner and nginx/FPM then fail confusingly downstream. Logs a
+/// warning with the exit code + stderr instead of swallowing it.
+async fn best_effort_cmd(mut cmd: tokio::process::Command, ctx: &str) {
+    match cmd.output().await {
+        Ok(o) if o.status.success() => {}
+        Ok(o) => tracing::warn!(
+            ctx = %ctx,
+            code = o.status.code().unwrap_or(-1),
+            stderr = %String::from_utf8_lossy(&o.stderr).trim(),
+            "best-effort command failed"
+        ),
+        Err(e) => tracing::warn!(ctx = %ctx, error = %e, "best-effort command could not spawn"),
+    }
+}
+
 pub struct RealAdapter {
     pub nginx_paths: hyperion_adapters::nginx::Paths,
     pub certs_root: PathBuf,
@@ -151,16 +168,12 @@ impl AdapterPort for RealAdapter {
             if let Err(e) = tokio::fs::write(&index_path, body).await {
                 tracing::warn!(error=%e, "could not write placeholder index.html");
             } else {
-                let _ = tokio::process::Command::new("/usr/bin/chown")
-                    .arg(format!("{}:{}", owner_uid, owner_uid))
-                    .arg(&index_path)
-                    .output()
-                    .await;
-                let _ = tokio::process::Command::new("/usr/bin/chmod")
-                    .arg("0644")
-                    .arg(&index_path)
-                    .output()
-                    .await;
+                let mut chown = tokio::process::Command::new("/usr/bin/chown");
+                chown.arg(format!("{}:{}", owner_uid, owner_uid)).arg(&index_path);
+                best_effort_cmd(chown, "chown placeholder index.html").await;
+                let mut chmod = tokio::process::Command::new("/usr/bin/chmod");
+                chmod.arg("0644").arg(&index_path);
+                best_effort_cmd(chmod, "chmod 0644 placeholder index.html").await;
             }
         }
         Ok(())
@@ -565,10 +578,9 @@ impl AdapterPort for RealAdapter {
                 // we can derive it from the path. Path shape:
                 // /home/<user>/<domain>/logs → owner = <user>.
                 if let Some(user) = derive_system_user_from_log_path(parent) {
-                    let _ = tokio::process::Command::new("/usr/bin/chown")
-                        .args(["-R", &format!("{user}:{user}"), &parent.display().to_string()])
-                        .status()
-                        .await;
+                    let mut chown = tokio::process::Command::new("/usr/bin/chown");
+                    chown.args(["-R", &format!("{user}:{user}"), &parent.display().to_string()]);
+                    best_effort_cmd(chown, "chown vhost log dir").await;
                 }
                 created += 1;
             }
@@ -1145,8 +1157,11 @@ impl AdapterPort for RealAdapter {
             return Ok(());
         }
         // ACL DELUSER returns 1 if deleted, 0 if didn't exist — both fine.
-        let _ = hyperion_adapters::cmd::run("/usr/bin/redis-cli", &["ACL", "DELUSER", username])
-            .await;
+        // A *failure* (redis down, auth error), though, can leave a stale
+        // credential active and reusable, so log it instead of swallowing.
+        if let Err(e) = hyperion_adapters::cmd::run("/usr/bin/redis-cli", &["ACL", "DELUSER", username]).await {
+            tracing::warn!(user = %username, error = %e, "redis ACL DELUSER failed — credential may persist");
+        }
         Ok(())
     }
 }
