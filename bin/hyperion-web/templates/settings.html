@@ -86,13 +86,17 @@
   </a>
   <a class="tab" data-tab="backups" href="#backups" role="tab">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-    Backups <span class="text-soft small" style="font-weight:400">(legacy FTP)</span>
+    Backups
     {% if config.backup_remote.enabled %}<span class="tab-badge" style="background:var(--success);color:white">●</span>
     {% else %}<span class="tab-badge" style="background:var(--surface-2)">local</span>{% endif %}
   </a>
   <a class="tab" data-tab="cluster" href="#cluster" role="tab">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
     Cluster
+  </a>
+  <a class="tab" data-tab="testnodes" href="#testnodes" role="tab">
+    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
+    Test nodes
   </a>
   <a class="tab" data-tab="retention" href="#retention" role="tab">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
@@ -568,18 +572,18 @@
    ========================================================== #}
 <div class="tab-panel" id="tab-backups">
 
-  {# NEW S3/age multi-target page lives at /settings/backups —
-     this older single-target FTP/FTPS/SFTP card stays here as
-     the LEGACY path for ops that already have it wired. Point
-     operators at the new page first. #}
+  {# Two off-site destination types: the FTP/FTPS/SFTP single-target push
+     (below) is the path that runs TODAY; the S3 multi-target page is the
+     config layer for the upcoming scheduler. Frame them as complementary,
+     not legacy-vs-new. #}
   <div class="flash info" style="margin-bottom:1rem">
     <div class="flash-body">
-      <strong>S3-compatible multi-target backups</strong> with
-      age client-side encryption + per-target retention policy
-      live at <a href="/settings/backups">Settings → Backups
-      (S3 + age)</a>. The FTP/FTPS/SFTP single-target form
-      below is the legacy path — leave it as-is if it's already
-      wired, otherwise prefer the S3 page.
+      Backups always land on local disk first. For an off-site copy you have
+      two destination types: the <strong>FTP/FTPS/SFTP</strong> push below
+      (runs today, immediately after each backup), or
+      <strong>S3-compatible multi-target</strong> storage with age encryption
+      at <a href="/settings/backups">Settings → Backup targets</a> (the upload
+      scheduler for those ships next).
     </div>
   </div>
 
@@ -587,7 +591,7 @@
     <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.5rem">
       <h2 style="margin:0">
         <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
-        Off-site backup target (legacy FTP/FTPS/SFTP)
+        Off-site backup target (FTP/FTPS/SFTP)
       </h2>
       {% if config.backup_remote.enabled %}<span class="pill ok">pushing</span>
       {% else %}<span class="pill warn">local only</span>{% endif %}
@@ -807,8 +811,14 @@
       <button type="submit" class="btn primary">Save security settings</button>
     </form>
   </div>
+</div>{# /tab-cluster #}
 
-  <div class="card" style="margin-top:1rem">
+{# Test nodes split into their own tab — the test-node feature (auto
+   subdomains, staging, wildcard certs) is a distinct concern from core
+   cluster topology, so it no longer crowds the Cluster tab. #}
+<div class="tab-panel" id="tab-testnodes">
+
+  <div class="card">
     <h2 style="font-size:0.95rem;margin:0 0 0.6rem">
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
       Test nodes &amp; staging sites
@@ -829,6 +839,9 @@
     <form method="post" action="/settings/config" autocomplete="off">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <input type="hidden" name="section" value="cluster">
+      {# This card lives on the Test nodes tab — return there after save,
+         not the Cluster tab that section=cluster maps to by default. #}
+      <input type="hidden" name="_return_tab" value="testnodes">
       <input type="hidden" name="_checkboxes" value="test_wp_no_index">
 
       <div class="field">

@@ -588,6 +588,38 @@
 </div>
 {% endif %}
 
+{# Security at a glance — the controls are spread across tabs (WAF on
+   Settings, bans on Settings, updates on WordPress); this card is the
+   single entry point. Status comes from the hosting's own vhost options;
+   the rest are jump-offs to the right tab. #}
+<div class="card hover">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+    Security
+  </h2>
+  <p class="text-soft small" style="margin:-0.3rem 0 0.8rem">Everything that protects this site, in one place.</p>
+  <div class="grid cols-3" style="gap:0.7rem">
+    <div style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.7rem">
+      <div class="text-soft small" style="margin-bottom:0.35rem">WAF &amp; wp-admin lock</div>
+      <div style="display:flex;gap:0.3rem;flex-wrap:wrap;margin-bottom:0.45rem">
+        {% if detail.vhost_options.waf_enabled %}<span class="pill ok">WAF on</span>{% else %}<span class="pill warn">WAF off</span>{% endif %}
+        {% if !detail.vhost_options.wp_admin_allowlist.trim().is_empty() %}<span class="pill ok">admin lock</span>{% endif %}
+      </div>
+      <a class="text-soft small" href="#settings">Configure →</a>
+    </div>
+    <div style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.7rem">
+      <div class="text-soft small" style="margin-bottom:0.35rem">WordPress updates</div>
+      <div class="text-soft small" style="margin-bottom:0.45rem">Outdated plugins / themes, auto-patched</div>
+      <a class="text-soft small" href="#wordpress">Open →</a>
+    </div>
+    <div style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.7rem">
+      <div class="text-soft small" style="margin-bottom:0.35rem">Brute-force bans</div>
+      <div class="text-soft small" style="margin-bottom:0.45rem">Auto wp-login / xmlrpc / SSH bans</div>
+      <a class="text-soft small" href="#settings">Manage →</a>
+    </div>
+  </div>
+</div>
+
 <div class="card hover">
   <h2>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
@@ -896,7 +928,7 @@
     </p>
     <p class="text-soft small" style="margin:-0.3rem 0 0.7rem;padding:0.5rem 0.7rem;background:var(--surface-1);border-radius:6px">
       On a <strong>test node</strong>? Issue one <code>*.&lt;base&gt;</code> wildcard for the
-      whole node in <a href="/settings#cluster">Settings → Cluster</a> instead — every
+      whole node in <a href="/settings#testnodes">Settings → Test nodes</a> instead — every
       auto-subdomain reuses it (this per-site cert isn't needed there).
     </p>
     <form method="post" action="/hostings/cert/dns01/begin">
@@ -3077,6 +3109,12 @@
   }));
   const hashId = (location.hash || '').replace(/^#/, '');
   if (!activate(hashId)) activate('overview');
+  // In-page deep links (e.g. the Overview "Security" card → Settings tab)
+  // change the hash; activate the matching tab when they do.
+  window.addEventListener('hashchange', () => {
+    const h = (location.hash || '').replace(/^#/, '');
+    if (h) activate(h);
+  });
 
   // Persist the current tab across POST submits. Server-issued
   // redirects drop fragments, so we stash the tab in sessionStorage

@@ -470,6 +470,7 @@ fn sanitize_return_tab(v: &str) -> Option<&'static str> {
         "notifications" => Some("notifications"),
         "backups" => Some("backups"),
         "cluster" => Some("cluster"),
+        "testnodes" => Some("testnodes"),
         "retention" => Some("retention"),
         "raw" => Some("raw"),
         _ => None,
@@ -1033,7 +1034,7 @@ pub async fn post_node_wildcard_begin(
         Some(v) => v,
         None => {
             return Ok(Redirect::to(
-                "/settings?flash_error=node+is+not+a+test+node+or+has+no+wildcard+base#cluster",
+                "/settings?flash_error=node+is+not+a+test+node+or+has+no+wildcard+base#testnodes",
             )
             .into_response());
         }
@@ -1063,7 +1064,7 @@ pub async fn post_node_wildcard_begin(
     .await?;
     match resp {
         RpcResponse::CertDns01BeginDomain { completed: true, .. } => Ok(Redirect::to(&format!(
-            "/settings?flash={}#cluster",
+            "/settings?flash={}#testnodes",
             urlencode(&format!("wildcard *.{base} issued on {}", form.node_id))
         ))
         .into_response()),
@@ -1125,7 +1126,7 @@ pub async fn post_node_wildcard_finish(
     .await?;
     match resp {
         RpcResponse::CertDns01FinishDomain(_) => Ok(Redirect::to(&format!(
-            "/settings?flash={}#cluster",
+            "/settings?flash={}#testnodes",
             urlencode(&format!("wildcard *.{} issued + applied to test sites", form.base))
         ))
         .into_response()),
