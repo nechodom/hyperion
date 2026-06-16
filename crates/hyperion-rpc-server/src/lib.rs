@@ -310,6 +310,12 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::QuotaGet(v),
             Err(e) => Response::Error(e),
         },
+        Request::QuotaEnableKernel { hosting } => {
+            match api.quota_enable_kernel(hosting).await {
+                Ok(v) => Response::QuotaEnableKernel(v),
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::QuotaSet {
             hosting,
             disk_soft_kib,
@@ -1310,6 +1316,12 @@ mod tests {
             _: i64,
         ) -> Result<hyperion_types::HostingQuotaView, RpcError> {
             Ok(hyperion_types::HostingQuotaView::default())
+        }
+        async fn quota_enable_kernel(
+            &self,
+            _: hyperion_rpc::HostingSelector,
+        ) -> Result<hyperion_types::QuotaEnableSummary, RpcError> {
+            Ok(hyperion_types::QuotaEnableSummary::default())
         }
         async fn web_session_insert(
             &self,

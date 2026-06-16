@@ -29,7 +29,7 @@ pub use hosting::{
 pub use ids::{AgentId, HostingId, SecretId};
 pub use jobs::{
     BackupTargetProbe, BackupTargetView, HostingQuotaReport, HostingQuotaView, JobView,
-    WebSessionView,
+    QuotaEnableSummary, WebSessionView,
 };
 pub use limits::{
     BackupRestoreMode, BackupRunWire, ExpiringHosting, HostingExpiry, HostingLimits,

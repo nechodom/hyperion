@@ -573,6 +573,10 @@ pub enum Request {
         bw_soft_mib: i64,
         bw_hard_mib: i64,
     },
+    /// Automatically enable Linux kernel disk quotas on the filesystem
+    /// carrying this hosting's home tree (edits /etc/fstab + remount +
+    /// quotacheck + quotaon where possible).
+    QuotaEnableKernel { hosting: HostingSelector },
     /// Walk the entire audit_log hash chain and verify each row's
     /// `row_hash = BLAKE3(prev_hash || canonical_fields)`. Returns
     /// `Response::AuditVerifyChain { ok, broken_at_id, message }`
@@ -1208,6 +1212,8 @@ pub enum Response {
     /// Ack for QuotaSet — returns the persisted (and possibly
     /// kernel-applied) row.
     QuotaApplied(hyperion_types::HostingQuotaView),
+    /// Outcome of an automatic kernel-quota enablement attempt.
+    QuotaEnableKernel(hyperion_types::QuotaEnableSummary),
     /// Plain ack for write operations on web_sessions.
     WebSessionAck,
     /// Liveness probe response. `true` ⇒ session is live and

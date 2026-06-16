@@ -1902,12 +1902,22 @@
   {% if !quota.quotas_enabled_on_fs %}
     <div class="flash warn" style="margin-bottom:0.8rem">
       <div class="flash-body">
-        <strong>Kernel quotas aren't enabled.</strong>
-        Disk usage shown below comes from <code>du</code>, but
-        <code>setquota</code> won't enforce caps until you enable
-        them on the filesystem.
-        <details style="margin-top:0.4rem">
-          <summary style="cursor:pointer">How to enable</summary>
+        <strong>Kernel quotas aren't enabled on this node's filesystem.</strong>
+        Disk usage below comes from <code>du</code>; <code>setquota</code> won't
+        enforce caps until the kernel quota subsystem is on.
+        <div style="margin-top:0.6rem" data-role-min="admin">
+          <form method="post" action="/hostings/quota/enable-kernel" style="display:inline"
+                data-confirm-title="Enable kernel quotas"
+                data-confirm-body="Hyperion will add usrquota,grpquota to /etc/fstab on this node, try to remount the filesystem, then run quotacheck + quotaon. If the filesystem is busy (or it's the root filesystem) it can't remount live — you'll be told a reboot is needed. This is a node-wide change affecting every hosting on the node."
+                data-confirm-confirm-label="Enable quotas">
+            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+            <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+            <button class="btn small primary" type="submit">Enable kernel quotas automatically</button>
+          </form>
+          <span class="text-soft small" style="margin-left:0.5rem">Edits <code>/etc/fstab</code> + remounts; a reboot may be needed if the filesystem is busy.</span>
+        </div>
+        <details style="margin-top:0.5rem">
+          <summary style="cursor:pointer" class="text-soft small">Or enable it manually</summary>
           <pre class="log-tail" style="margin-top:0.4rem">{{ quota.setup_hint }}</pre>
         </details>
       </div>

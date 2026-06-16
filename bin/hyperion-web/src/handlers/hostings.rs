@@ -5837,6 +5837,47 @@ pub async fn post_quota_set(
     .into_response())
 }
 
+#[derive(Deserialize)]
+pub struct QuotaEnableForm {
+    pub selector: String,
+}
+
+/// POST /hostings/quota/enable-kernel — turn on Linux kernel disk quotas on
+/// the OWNING node's filesystem (edits /etc/fstab + remount + quotacheck +
+/// quotaon). Admin-only: this is a node-wide filesystem change, not a
+/// per-hosting tweak, so per-hosting "manage" isn't enough.
+pub async fn post_quota_enable_kernel(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<QuotaEnableForm>,
+) -> Result<Response, AppError> {
+    let sel_url = urlencoding(&form.selector);
+    if !ctx.is_admin_or_higher() {
+        return Ok(Redirect::to(&format!(
+            "/hostings/{}?flash_error=admin+role+required+to+enable+kernel+quotas#quota",
+            sel_url
+        ))
+        .into_response());
+    }
+    let sel = parse_selector(&form.selector)?;
+    let target_owned: Option<String> = find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target_owned.as_deref(),
+        Request::QuotaEnableKernel { hosting: sel },
+    )
+    .await?;
+    let flash = match resp {
+        RpcResponse::QuotaEnableKernel(s) => s.message,
+        RpcResponse::Error(e) => format!("Couldn't enable kernel quotas: {e}"),
+        _ => "Enable kernel quotas: unexpected response".into(),
+    };
+    Ok(Redirect::to(&format!("/hostings/{}?flash={}#quota", sel_url, urlencoding(&flash))).into_response())
+}
+
 pub async fn post_migration_move(
     State(state): State<SharedState>,
     ctx: AuthCtx,

@@ -289,6 +289,13 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.quota_get(sel).await
     }
 
+    async fn quota_enable_kernel(
+        &self,
+        sel: hyperion_rpc::HostingSelector,
+    ) -> Result<hyperion_types::QuotaEnableSummary, RpcError> {
+        self.svc.quota_enable_kernel(sel).await
+    }
+
     async fn quota_set(
         &self,
         sel: hyperion_rpc::HostingSelector,

@@ -91,6 +91,10 @@ pub fn build_router(state: SharedState) -> Router {
             "/hostings/quota/set",
             post(handlers::hostings::post_quota_set),
         )
+        .route(
+            "/hostings/quota/enable-kernel",
+            post(handlers::hostings::post_quota_enable_kernel),
+        )
         .route("/hostings/import", get(handlers::migration::get_import))
         .route(
             "/hostings/migration/import-from-url",

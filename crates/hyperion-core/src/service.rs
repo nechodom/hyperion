@@ -7469,6 +7469,39 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         })
     }
 
+    /// Automatically enable Linux kernel disk quotas on the filesystem
+    /// carrying this hosting's home tree: edit `/etc/fstab`, remount, and
+    /// run quotacheck + quotaon where the filesystem type allows it.
+    /// Returns a summary the UI shows (incl. "reboot required" when the
+    /// filesystem couldn't be remounted live).
+    pub async fn quota_enable_kernel(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::QuotaEnableSummary, RpcError> {
+        let detail = self.get(sel).await?;
+        let summary = enable_kernel_quotas(&detail.root_dir).await;
+        self.append_audit(
+            "quota.enable_kernel",
+            Some(detail.id.as_str()),
+            &serde_json::json!({
+                "mount_point": summary.mount_point,
+                "fs_type": summary.fs_type,
+                "ok": summary.ok,
+                "requires_reboot": summary.requires_reboot,
+            })
+            .to_string(),
+            if summary.ok {
+                "ok"
+            } else if summary.requires_reboot {
+                "pending"
+            } else {
+                "failed"
+            },
+        )
+        .await;
+        Ok(summary)
+    }
+
     pub async fn quota_set(
         &self,
         sel: HostingSelector,
@@ -14900,8 +14933,338 @@ async fn quota_probe_current(
                 .and_then(|n| n.parse::<i64>().ok())
         })
         .unwrap_or(0);
-    let hint = "Kernel quotas aren't enabled on this filesystem. Disk usage is shown from `du`, but `setquota` won't enforce caps. Edit /etc/fstab to add `usrquota,grpquota` and run `mount -o remount /` + `quotaon -v /` to enable.".to_string();
+    let hint = "Kernel quotas aren't enabled on this filesystem. Disk usage is shown from `du`, but `setquota` won't enforce caps. Use the \"Enable kernel quotas\" button to set this up automatically.".to_string();
     (used, false, hint)
+}
+
+/// Run a command, returning trimmed stdout (+ stderr) for status messages.
+/// Run a quota-related command. Returns `(success, text)` where `success`
+/// reflects the process **exit status** (not whether it printed anything) and
+/// `text` is the merged stdout+stderr for diagnostics/messages. Callers that
+/// need to know "did it work?" must look at `success` — parsing English out of
+/// `text` is fragile (a command can exit 0 yet print an advisory to stderr,
+/// e.g. systemd's "fstab modified, run daemon-reload" hint after a remount).
+async fn quota_run_cmd(bin: &str, args: &[&str]) -> (bool, String) {
+    match tokio::process::Command::new(bin).args(args).output().await {
+        Ok(o) => {
+            let mut s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+            let e = String::from_utf8_lossy(&o.stderr);
+            if !e.trim().is_empty() {
+                if !s.is_empty() {
+                    s.push_str("; ");
+                }
+                s.push_str(e.trim());
+            }
+            if s.is_empty() {
+                s = format!("exit {}", o.status.code().unwrap_or(-1));
+            }
+            (o.status.success(), s)
+        }
+        Err(e) => (false, format!("spawn {bin}: {e}")),
+    }
+}
+
+/// `/proc/self/mounts` escapes spaces (and a few others) octally.
+fn unescape_mount_field(s: &str) -> String {
+    s.replace("\\040", " ").replace("\\011", "\t").replace("\\134", "\\")
+}
+
+/// Byte ranges (start, end) of each whitespace-delimited field in an fstab
+/// line. fstab separates fields with spaces and/or tabs only, so we split on
+/// exactly those — preserving the original separators between fields lets a
+/// caller splice one field without disturbing the rest of the line (comments,
+/// alignment, an inline `# ...` tail).
+fn fstab_field_ranges(line: &str) -> Vec<(usize, usize)> {
+    let bytes = line.as_bytes();
+    let mut ranges = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        while i < bytes.len() && (bytes[i] == b' ' || bytes[i] == b'\t') {
+            i += 1;
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        let start = i;
+        while i < bytes.len() && bytes[i] != b' ' && bytes[i] != b'\t' {
+            i += 1;
+        }
+        ranges.push((start, i));
+    }
+    ranges
+}
+
+/// Pure core of the fstab edit: given the file `content`, return the rewritten
+/// content with `to_add` options appended to the options column of the line for
+/// `mount_point`. `Ok(Some(new))` = a change is needed, `Ok(None)` = the
+/// options were already present (no write), `Err` = no matching mount line.
+///
+/// Only the options column (field 4) of the one matching line is touched —
+/// every other byte (leading whitespace, separators, an inline `# ...` tail,
+/// blank/comment lines, the trailing-newline style) is preserved verbatim so
+/// the rewrite is a minimal, safe diff that can never break boot.
+fn fstab_with_quota_options(
+    content: &str,
+    mount_point: &str,
+    to_add: &[&str],
+) -> Result<Option<String>, String> {
+    let mut found = false;
+    let mut added_any = false;
+    let mut out: Vec<String> = Vec::new();
+    let had_trailing_nl = content.ends_with('\n');
+    for line in content.lines() {
+        let t = line.trim_start();
+        if t.is_empty() || t.starts_with('#') {
+            out.push(line.to_string());
+            continue;
+        }
+        let ranges = fstab_field_ranges(line);
+        // Field 1 = mountpoint, field 3 = options. Both fstab and
+        // /proc/self/mounts octal-escape spaces/tabs/backslashes, so compare
+        // after unescaping — otherwise a mountpoint with a space (escaped in
+        // fstab, literal in our `mount_point`) would never match.
+        let is_match = ranges.len() >= 4
+            && unescape_mount_field(&line[ranges[1].0..ranges[1].1]) == mount_point;
+        if is_match {
+            found = true;
+            let (opt_start, opt_end) = ranges[3];
+            let mut opts: Vec<String> = line[opt_start..opt_end]
+                .split(',')
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .collect();
+            for o in to_add {
+                if !opts.iter().any(|x| x == o) {
+                    opts.push((*o).to_string());
+                    added_any = true;
+                }
+            }
+            // Splice ONLY the options column; everything else stays byte-for-byte.
+            let spliced = format!("{}{}{}", &line[..opt_start], opts.join(","), &line[opt_end..]);
+            out.push(spliced);
+        } else {
+            out.push(line.to_string());
+        }
+    }
+    if !found {
+        return Err(format!("no /etc/fstab entry for {mount_point}"));
+    }
+    if !added_any {
+        return Ok(None);
+    }
+    let mut new_content = out.join("\n");
+    if had_trailing_nl {
+        new_content.push('\n');
+    }
+    Ok(Some(new_content))
+}
+
+/// Ensure `/etc/fstab` carries the quota mount option(s) on the line for
+/// `mount_point`. Returns Ok(true) if a change was written, Ok(false) if
+/// the option was already present, Err if there's no matching fstab line.
+/// Writes atomically (tmp + rename) and only ever appends to field 4 of
+/// the one matching line — never restructures the file.
+async fn ensure_fstab_quota_option(mount_point: &str, is_xfs: bool) -> Result<bool, String> {
+    let path = "/etc/fstab";
+    let content = tokio::fs::read_to_string(path)
+        .await
+        .map_err(|e| format!("read {path}: {e}"))?;
+    let to_add: &[&str] = if is_xfs {
+        &["prjquota"]
+    } else {
+        &["usrquota", "grpquota"]
+    };
+    let new_content = match fstab_with_quota_options(&content, mount_point, to_add)? {
+        Some(c) => c,
+        None => return Ok(false),
+    };
+    let tmp = format!("{path}.hyperion.tmp");
+    tokio::fs::write(&tmp, new_content.as_bytes())
+        .await
+        .map_err(|e| format!("write {tmp}: {e}"))?;
+    // Carry the original fstab's permission bits onto the replacement so a
+    // hardened mode (e.g. 0600) survives the atomic swap instead of being
+    // reset to the umask default. Owner stays root:root — the agent is root.
+    if let Ok(meta) = tokio::fs::metadata(path).await {
+        let _ = tokio::fs::set_permissions(&tmp, meta.permissions()).await;
+    }
+    tokio::fs::rename(&tmp, path)
+        .await
+        .map_err(|e| format!("rename {tmp}: {e}"))?;
+    Ok(true)
+}
+
+/// True when ext-family quotas report active on `mount_point`.
+///
+/// `quotaon -p` always exits 0 (it's a query), so we have to read its text.
+/// Modern quota-tools print one line per type, e.g.
+///   `user quota on /home (/dev/sda3) is on`
+///   `group quota on /home (/dev/sda3) is off`
+/// older builds print `... user quotas turned on`. We treat the fs as enabled
+/// when any line ends in the "on" state (`is on` / `turned on`); crucially
+/// `is on` is NOT a substring of `is off`, so an off line never false-matches.
+async fn ext_quota_on(mount_point: &str) -> bool {
+    let (_ok, out) = quota_run_cmd("/usr/sbin/quotaon", &["-p", mount_point]).await;
+    quota_report_shows_on(&out)
+}
+
+/// Parse `quotaon -p` output and report whether any quota type is active.
+/// `is on` / `turned on` mean active; `is off` does NOT contain `is on`, so
+/// an off-only report correctly reads as inactive.
+fn quota_report_shows_on(out: &str) -> bool {
+    out.lines().any(|l| {
+        let l = l.to_lowercase();
+        l.contains("is on") || l.contains("turned on")
+    })
+}
+
+/// Enable Linux kernel disk quotas on the filesystem carrying `home_path`.
+/// Steps assume root (the agent runs as root); a non-root run surfaces as
+/// a clear message, not a panic. ext-family filesystems get the full
+/// remount + quotacheck + quotaon; XFS quotas only come up at mount time,
+/// so there we update fstab and ask for a reboot.
+async fn enable_kernel_quotas(home_path: &str) -> hyperion_types::QuotaEnableSummary {
+    use hyperion_types::QuotaEnableSummary as Summary;
+    let fail = |message: String, mount_point: String, fs_type: String| Summary {
+        ok: false,
+        requires_reboot: false,
+        fs_type,
+        mount_point,
+        message,
+    };
+
+    // 0. Root check — mount / quotacheck / quotaon all need it.
+    let uid = tokio::process::Command::new("/usr/bin/id")
+        .arg("-u")
+        .output()
+        .await
+        .ok()
+        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u32>().ok());
+    if uid != Some(0) {
+        return fail(
+            "the agent isn't running as root, so it can't change mount options or enable quotas".into(),
+            String::new(),
+            String::new(),
+        );
+    }
+
+    // 1. Discover the mount carrying home_path (longest matching mountpoint).
+    let mounts = match tokio::fs::read_to_string("/proc/self/mounts").await {
+        Ok(s) => s,
+        Err(e) => return fail(format!("couldn't read /proc/self/mounts: {e}"), String::new(), String::new()),
+    };
+    let mut best: Option<(String, String, String)> = None; // (mount, fstype, options)
+    for line in mounts.lines() {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() < 4 {
+            continue;
+        }
+        let mp = unescape_mount_field(f[1]);
+        let covers = home_path == mp
+            || mp == "/"
+            || home_path.starts_with(&format!("{}/", mp.trim_end_matches('/')));
+        if covers {
+            let better = best.as_ref().map(|(m, _, _)| mp.len() > m.len()).unwrap_or(true);
+            if better {
+                best = Some((mp, f[2].to_string(), f[3].to_string()));
+            }
+        }
+    }
+    let (mount_point, fs_type, cur_opts) = match best {
+        Some(v) => v,
+        None => return fail(format!("couldn't find the mount for {home_path}"), String::new(), String::new()),
+    };
+
+    let is_xfs = fs_type == "xfs";
+    let already_mounted = cur_opts
+        .split(',')
+        .any(|o| matches!(o, "usrquota" | "grpquota" | "prjquota" | "quota" | "uquota"));
+
+    // 2. Make sure /etc/fstab carries the quota option for next boot.
+    let fstab_added = match ensure_fstab_quota_option(&mount_point, is_xfs).await {
+        Ok(added) => added,
+        Err(e) => return fail(format!("couldn't update /etc/fstab: {e}"), mount_point, fs_type),
+    };
+    let fstab_note = if fstab_added { "/etc/fstab updated" } else { "/etc/fstab already had it" };
+
+    // 3. XFS: quotas only initialise at mount, never on a live fs.
+    if is_xfs {
+        return Summary {
+            ok: false,
+            requires_reboot: true,
+            fs_type,
+            mount_point: mount_point.clone(),
+            message: format!(
+                "{fstab_note}. XFS project quotas can only initialise at mount time — reboot the node (or remount {mount_point} while it's idle) to activate them."
+            ),
+        };
+    }
+
+    // 4. ext-family: remount to load the quota option, then build + turn on.
+    if !already_mounted {
+        let (remount_ok, remount_msg) = quota_run_cmd(
+            "/usr/bin/mount",
+            &["-o", "remount,usrquota,grpquota", &mount_point],
+        )
+        .await;
+        // Success is the process EXIT STATUS, not the text: a clean remount can
+        // still print an advisory to stderr (e.g. systemd's "fstab modified,
+        // run daemon-reload" hint after we edited fstab above). Only a non-zero
+        // exit is a real failure.
+        if !remount_ok {
+            let lower = remount_msg.to_lowercase();
+            let busy = lower.contains("busy") || lower.contains("in use");
+            if busy {
+                // Filesystem is live and held open — only a reboot (or freeing
+                // it) can remount it. fstab is already set, so the reboot sticks.
+                return Summary {
+                    ok: false,
+                    requires_reboot: true,
+                    fs_type,
+                    mount_point: mount_point.clone(),
+                    message: format!(
+                        "{fstab_note}, but {mount_point} is busy and couldn't be remounted live ({remount_msg}). Reboot the node (or free the filesystem and retry) to activate quotas."
+                    ),
+                };
+            }
+            // A hard error (bad option, read-only fs, unsupported option, …).
+            // Surface the actual error instead of silently proceeding to
+            // quotacheck/quotaon on an fs that never got the quota option. A
+            // reboot only helps for `/` (re-reads fstab); for any other mount
+            // the error needs operator attention, not a reboot.
+            return Summary {
+                ok: false,
+                requires_reboot: mount_point == "/",
+                fs_type,
+                mount_point: mount_point.clone(),
+                message: format!(
+                    "{fstab_note}, but remounting {mount_point} with quota options failed: {remount_msg}."
+                ),
+            };
+        }
+    }
+    // quotacheck builds aquota.user/.group; -m allows it while mounted.
+    let (_check_ok, check_msg) = quota_run_cmd("/usr/sbin/quotacheck", &["-ugm", &mount_point]).await;
+    let (_qon_ok, qon) = quota_run_cmd("/usr/sbin/quotaon", &["-v", &mount_point]).await;
+    if ext_quota_on(&mount_point).await {
+        Summary {
+            ok: true,
+            requires_reboot: false,
+            fs_type,
+            mount_point,
+            message: "Kernel quotas are now active — disk caps will be enforced.".into(),
+        }
+    } else {
+        Summary {
+            ok: false,
+            requires_reboot: true,
+            fs_type,
+            mount_point: mount_point.clone(),
+            message: format!(
+                "{fstab_note} + quotacheck/quotaon ran, but quotas don't report active yet (quotacheck: {check_msg}; quotaon: {qon}). A reboot usually finishes the setup."
+            ),
+        }
+    }
 }
 
 /// Snapshot of one filesystem's usage, parsed from `df -P -B1`.
@@ -15318,6 +15681,105 @@ mod tests {
     use hyperion_types::{CertInfo, DbProvision};
     use hyperion_validate::Domain;
     use mockall::predicate::*;
+
+    // ============================================================
+    //  Kernel-quota enablement: pure fstab-splice + quotaon parse.
+    //  These guard the highest-risk code in the feature (editing
+    //  /etc/fstab on production + deciding "did quotas come up?").
+    // ============================================================
+
+    #[test]
+    fn fstab_field_ranges_basic_and_inline_comment() {
+        let line = "UUID=abc /home ext4 defaults 0 2 # bind to /home";
+        let r = fstab_field_ranges(line);
+        // 6 real fields + 4 comment tokens (#, bind, to, /home).
+        assert_eq!(&line[r[1].0..r[1].1], "/home");
+        assert_eq!(&line[r[3].0..r[3].1], "defaults");
+    }
+
+    #[test]
+    fn fstab_splice_appends_options_and_preserves_comment_byte_for_byte() {
+        let content = "UUID=abc /home ext4 defaults 0 2 # keep this comment\n";
+        let out = fstab_with_quota_options(content, "/home", &["usrquota", "grpquota"])
+            .expect("match")
+            .expect("changed");
+        assert_eq!(
+            out,
+            "UUID=abc /home ext4 defaults,usrquota,grpquota 0 2 # keep this comment\n"
+        );
+    }
+
+    #[test]
+    fn fstab_splice_idempotent_when_already_present() {
+        let content = "UUID=abc /home ext4 defaults,usrquota,grpquota 0 2\n";
+        let out = fstab_with_quota_options(content, "/home", &["usrquota", "grpquota"]).expect("match");
+        assert!(out.is_none(), "no change needed → Ok(None)");
+    }
+
+    #[test]
+    fn fstab_splice_adds_only_missing_option() {
+        let content = "UUID=abc /home ext4 defaults,usrquota 0 2\n";
+        let out = fstab_with_quota_options(content, "/home", &["usrquota", "grpquota"])
+            .expect("match")
+            .expect("changed");
+        assert_eq!(out, "UUID=abc /home ext4 defaults,usrquota,grpquota 0 2\n");
+    }
+
+    #[test]
+    fn fstab_splice_errors_when_mount_absent() {
+        let content = "UUID=abc / ext4 defaults 0 1\n";
+        let err = fstab_with_quota_options(content, "/home", &["usrquota"]).unwrap_err();
+        assert!(err.contains("/home"), "error names the missing mount: {err}");
+    }
+
+    #[test]
+    fn fstab_splice_matches_mountpoint_with_escaped_space() {
+        // fstab stores spaces octal-escaped; our mount_point is unescaped.
+        let content = "UUID=abc /mnt/my\\040disk ext4 defaults 0 2\n";
+        let out = fstab_with_quota_options(content, "/mnt/my disk", &["usrquota"])
+            .expect("should match via unescape")
+            .expect("changed");
+        // The escaped mountpoint token is preserved verbatim; only opts change.
+        assert_eq!(out, "UUID=abc /mnt/my\\040disk ext4 defaults,usrquota 0 2\n");
+    }
+
+    #[test]
+    fn fstab_splice_leaves_other_lines_and_no_trailing_newline_untouched() {
+        // No trailing newline, a comment line, and a non-matching line all survive.
+        let content = "# header\nUUID=root / ext4 defaults 0 1\nUUID=h /home ext4 defaults 0 2";
+        let out = fstab_with_quota_options(content, "/home", &["usrquota", "grpquota"])
+            .expect("match")
+            .expect("changed");
+        assert_eq!(
+            out,
+            "# header\nUUID=root / ext4 defaults 0 1\nUUID=h /home ext4 defaults,usrquota,grpquota 0 2"
+        );
+        assert!(!out.ends_with('\n'), "trailing-newline style preserved");
+    }
+
+    #[test]
+    fn fstab_splice_xfs_prjquota() {
+        let content = "UUID=x /srv xfs defaults 0 2\n";
+        let out = fstab_with_quota_options(content, "/srv", &["prjquota"])
+            .expect("match")
+            .expect("changed");
+        assert_eq!(out, "UUID=x /srv xfs defaults,prjquota 0 2\n");
+    }
+
+    #[test]
+    fn quotaon_report_parsing() {
+        // Modern quota-tools, user on / group off.
+        assert!(quota_report_shows_on(
+            "user quota on /home (/dev/sda3) is on\ngroup quota on /home (/dev/sda3) is off"
+        ));
+        // Older format.
+        assert!(quota_report_shows_on("/dev/sda1 [/home]: user quotas turned on"));
+        // Everything off must read inactive (no `is on` substring in `is off`).
+        assert!(!quota_report_shows_on(
+            "user quota on /home (/dev/sda3) is off\ngroup quota on /home (/dev/sda3) is off"
+        ));
+        assert!(!quota_report_shows_on(""));
+    }
 
     // ============================================================
     //  SPF parser unit tests (no DNS — pure CIDR / string logic).

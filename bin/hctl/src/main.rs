@@ -1477,6 +1477,11 @@ fn print_pretty(resp: &Response) {
                 }
             }
         }
+        Response::QuotaEnableKernel(s) => {
+            println!("quota enable: ok={} requires_reboot={}", s.ok, s.requires_reboot);
+            println!("  fs={} mount={}", s.fs_type, s.mount_point);
+            println!("  {}", s.message);
+        }
         Response::QuotaApplied(v) => {
             println!("quota saved:");
             println!(

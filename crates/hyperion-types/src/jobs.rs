@@ -146,3 +146,21 @@ pub struct HostingQuotaReport {
     pub setup_hint: String,
 }
 
+/// Outcome of an automatic "enable kernel quotas on the filesystem"
+/// attempt (the `QuotaEnableKernel` RPC). The action edits `/etc/fstab`,
+/// remounts, and runs quotacheck + quotaon where possible.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct QuotaEnableSummary {
+    /// True when quotas are active on the filesystem after the attempt.
+    pub ok: bool,
+    /// True when fstab was updated but the filesystem couldn't be
+    /// remounted live (busy, or rootfs) — a reboot will activate it.
+    pub requires_reboot: bool,
+    /// Filesystem type of the target mount (ext4, xfs, …).
+    pub fs_type: String,
+    /// Mount point quotas were enabled on (e.g. `/home` or `/`).
+    pub mount_point: String,
+    /// Human-readable result / next-step message.
+    pub message: String,
+}
+

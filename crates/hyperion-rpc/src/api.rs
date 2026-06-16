@@ -162,6 +162,12 @@ pub trait AgentApi: Send + Sync + 'static {
         bw_hard_mib: i64,
     ) -> Result<hyperion_types::HostingQuotaView, RpcError>;
 
+    /// Automatically enable kernel disk quotas on the hosting's filesystem.
+    async fn quota_enable_kernel(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::QuotaEnableSummary, RpcError>;
+
     /// Track a freshly-minted Session in the `web_sessions` ledger.
     async fn web_session_insert(
         &self,
