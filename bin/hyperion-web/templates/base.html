@@ -43,11 +43,6 @@
         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
         Monitoring
       </a>
-      <a class="nav-link {% if active == "profiles" %}active{% endif %}" href="/profiles"
-         data-hide-roles="customer">
-        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7h-9"/><path d="M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></svg>
-        Profiles
-      </a>
     </nav>
     <nav class="nav-section" data-hide-roles="customer">
       <span class="nav-label">Cluster</span>
@@ -79,6 +74,14 @@
            Hidden when 0 so a quiet cluster doesn't draw the eye. #}
         <span id="nav-jobs-badge" class="tab-badge" hidden
               style="margin-left:auto;background:var(--accent);color:white">0</span>
+      </a>
+      {# Profiles = reusable templates of limits/expiry/pricing/WP plugins,
+         applied at create time. It's configuration, not a dashboard, so it
+         lives with the cluster infrastructure rather than under Overview. #}
+      <a class="nav-link {% if active == "profiles" %}active{% endif %}" href="/profiles"
+         data-hide-roles="customer">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7h-9"/><path d="M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></svg>
+        Profiles &amp; limits
       </a>
     </nav>
     <nav class="nav-section" data-hide-roles="customer,viewer">

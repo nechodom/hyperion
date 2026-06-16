@@ -501,9 +501,9 @@
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
     Cron
   </a>
-  <a class="tab" data-tab="monitor" href="#monitor" role="tab">
+  <a class="tab" data-tab="monitor" href="#monitor" role="tab" title="HTTP availability monitoring, alerts + access/error logs">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
-    Observability
+    Monitor &amp; logs
     {% if monitor_config.enabled %}
       {% if monitor_config.alert_state == "alerting" %}
         <span class="tab-badge" style="background:var(--danger);color:white">!</span>
@@ -611,18 +611,28 @@
         {% if detail.vhost_options.waf_enabled %}<span class="pill ok">WAF on</span>{% else %}<span class="pill warn">WAF off</span>{% endif %}
         {% if !detail.vhost_options.wp_admin_allowlist.trim().is_empty() %}<span class="pill ok">admin lock</span>{% endif %}
       </div>
-      <a class="text-soft small" href="#settings">Configure →</a>
+      <a class="text-soft small" href="#settings">Configure on Settings →</a>
     </div>
     <div style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.7rem">
       <div class="text-soft small" style="margin-bottom:0.35rem">WordPress updates</div>
       <div class="text-soft small" style="margin-bottom:0.45rem">Outdated plugins / themes, auto-patched</div>
-      <a class="text-soft small" href="#wordpress">Open →</a>
+      <a class="text-soft small" href="#wordpress">Open WordPress tab →</a>
     </div>
     <div style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.7rem">
       <div class="text-soft small" style="margin-bottom:0.35rem">Brute-force bans</div>
       <div class="text-soft small" style="margin-bottom:0.45rem">Auto wp-login / xmlrpc / SSH bans</div>
-      <a class="text-soft small" href="#settings">Manage →</a>
+      <a class="text-soft small" href="#settings">Manage on Settings →</a>
     </div>
+  </div>
+  {# Cluster-wide context: the cards above act on THIS site; these jump to the
+     all-sites views so the operator isn't stranded on one hosting. #}
+  <div class="text-soft small" style="margin-top:0.85rem;display:flex;flex-wrap:wrap;gap:0.35rem 1rem;align-items:center">
+    <span style="opacity:0.7">Across the cluster:</span>
+    <a href="/vulns">All sites' WP updates →</a>
+    <a href="/bans">All node bans →</a>
+    <a href="/firewall">Firewall posture →</a>
+    <a href="/audit?q={{ detail.domain }}">This site's audit trail →</a>
+    <a href="/emails?hosting={{ detail.id.as_str() }}">Email log →</a>
   </div>
 </div>
 
@@ -2891,7 +2901,7 @@
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
     Email log
   </h2>
-  <p class="muted">Last 50 emails the agent sent on behalf of this hosting (alerts, cert reminders, monitor down/up, billing notifications). Cluster-wide notifications aren't shown here — see <a href="/settings#email">Settings → Email</a>.</p>
+  <p class="muted">Last 50 emails the agent sent on behalf of this hosting (alerts, cert reminders, monitor down/up, billing notifications). See the <a href="/emails?hosting={{ detail.id.as_str() }}">full cluster email log filtered to this site →</a>, or configure delivery in <a href="/settings#email">Settings → Email</a>.</p>
 
   {% if email_log.is_empty() %}
     <div class="empty" style="padding:1.5rem 1rem">
