@@ -13964,12 +13964,15 @@ async fn nft_ensure_ban_infra() -> Result<(), RpcError> {
             reason: e.to_string(),
         })?;
     }
-    if !listing.contains("hyperion:ban-drop6") {
+    // NB: the v6 marker must NOT contain the v4 marker as a substring, or
+    // `contains("hyperion:ban-drop")` would also match the v6 rule and skip
+    // (re-)creating the v4 rule. "ban6-drop" keeps the two disjoint.
+    if !listing.contains("hyperion:ban6-drop") {
         hyperion_adapters::cmd::run(
             NFT,
             &[
                 "insert", "rule", "inet", "hyperion", "input", "ip6", "saddr", "@banned6", "drop",
-                "comment", "hyperion:ban-drop6",
+                "comment", "hyperion:ban6-drop",
             ],
         )
         .await
@@ -13981,8 +13984,11 @@ async fn nft_ensure_ban_infra() -> Result<(), RpcError> {
     Ok(())
 }
 
-/// nft set holding bans for `ip`'s family: `banned6` for IPv6 (contains a
-/// colon), else the IPv4 `banned` set.
+/// nft set holding bans for `ip`'s family: `banned6` for IPv6, else the
+/// IPv4 `banned` set. `ip` is always the normalized output of
+/// `std::net::IpAddr::to_string()` (every caller parses + re-serializes
+/// first), so a colon unambiguously means IPv6 — IPv4 never contains one
+/// and there's no port suffix to confuse it.
 fn nft_ban_set(ip: &str) -> &'static str {
     if ip.contains(':') { "banned6" } else { "banned" }
 }
