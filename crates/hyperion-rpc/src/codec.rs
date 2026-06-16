@@ -905,6 +905,17 @@ pub enum Request {
     FtpDisable {
         sel: HostingSelector,
     },
+    /// Current key-only SFTP status for a hosting's system user.
+    SftpStatus {
+        sel: HostingSelector,
+    },
+    /// Enable/disable key-only chrooted SFTP + replace the authorized
+    /// public keys. `enabled=false` clears keys and drops group access.
+    SftpSet {
+        sel: HostingSelector,
+        enabled: bool,
+        public_keys: Vec<String>,
+    },
     DashboardAlerts,
     ProfileList,
     ProfileGet { id: i64 },
@@ -1240,6 +1251,8 @@ pub enum Response {
     DbResetPassword,
     FtpSetPassword { password: String },
     FtpDisable,
+    SftpStatus(hyperion_types::SftpStatus),
+    SftpSet(hyperion_types::SftpStatus),
     DashboardAlerts(Vec<DashboardAlert>),
     ProfileList(Vec<HostingProfile>),
     ProfileGet(HostingProfile),

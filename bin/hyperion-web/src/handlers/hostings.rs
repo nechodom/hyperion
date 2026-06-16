@@ -4480,6 +4480,120 @@ pub async fn get_vuln_panel(
     Ok(Html(html).into_response())
 }
 
+/// Lazily-loaded SFTP panel (FTP tab). Dispatched to the OWNING node —
+/// the system user, home dir and authorized_keys all live there.
+#[derive(Template)]
+#[template(path = "_hosting_sftp_panel.html")]
+struct SftpPanelTpl {
+    sftp: hyperion_types::SftpStatus,
+    selector: String,
+    csrf_sftp: String,
+    /// "" on success; an error string when the status probe failed.
+    error: String,
+}
+
+pub async fn get_sftp_panel(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Path(selector): Path<String>,
+) -> Result<Response, AppError> {
+    let sel = parse_selector(&selector)?;
+    let (detail, owner_node) = find_hosting_anywhere(&state, sel.clone()).await?;
+    if let Err(r) = require_hosting_access(&state, &ctx, detail.id.as_str(), false).await {
+        return Ok(r);
+    }
+    let csrf_sftp = csrf_token_for(&state, &ctx, "/hostings/sftp");
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        owner_node.as_deref(),
+        Request::SftpStatus { sel },
+    )
+    .await;
+    let tpl = match resp {
+        Ok(RpcResponse::SftpStatus(sftp)) => SftpPanelTpl {
+            sftp,
+            selector: detail.id.as_str().to_string(),
+            csrf_sftp,
+            error: String::new(),
+        },
+        Ok(RpcResponse::Error(e)) => SftpPanelTpl {
+            sftp: hyperion_types::SftpStatus {
+                system_user: detail.system_user.clone(),
+                host_hint: detail.domain.clone(),
+                ..Default::default()
+            },
+            selector: detail.id.as_str().to_string(),
+            csrf_sftp,
+            error: e.to_string(),
+        },
+        _ => SftpPanelTpl {
+            sftp: hyperion_types::SftpStatus {
+                system_user: detail.system_user.clone(),
+                host_hint: detail.domain.clone(),
+                ..Default::default()
+            },
+            selector: detail.id.as_str().to_string(),
+            csrf_sftp,
+            error: "could not reach the owning node".into(),
+        },
+    };
+    Ok(Html(tpl.render()?).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct SftpForm {
+    pub selector: String,
+    #[serde(default)]
+    pub enabled: Option<String>,
+    #[serde(default)]
+    pub public_keys: String,
+}
+
+pub async fn post_sftp(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<SftpForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let sel_url = urlencoding(&form.selector);
+    let enabled = checkbox_on(&form.enabled);
+    // Split the textarea into one key per non-blank line. The node
+    // re-validates each key before writing authorized_keys.
+    let keys: Vec<String> = form
+        .public_keys
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect();
+    let target_owned: Option<String> = find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target_owned.as_deref(),
+        Request::SftpSet { sel, enabled, public_keys: keys },
+    )
+    .await?;
+    match resp {
+        RpcResponse::SftpSet(_) => {
+            Ok(Redirect::to(&format!("/hostings/{}?sftp=ok#ftp", sel_url)).into_response())
+        }
+        RpcResponse::Error(e) => {
+            let msg = urlencoding(&e.to_string());
+            Ok(
+                Redirect::to(&format!("/hostings/{}?sftp_error={}#ftp", sel_url, msg))
+                    .into_response(),
+            )
+        }
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
 #[derive(Deserialize)]
 pub struct CertIssueForm {
     pub selector: String,

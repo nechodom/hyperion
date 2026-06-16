@@ -1,0 +1,53 @@
+{# SFTP panel — lazily swapped into the hosting detail FTP tab via
+   hx-get="/hostings/:sel/sftp-panel". Key-only, chrooted SFTP for the
+   hosting's system user. #}
+<div class="card hover">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+    SFTP (SSH keys)
+    {% if sftp.enabled %}<span class="pill ok" style="margin-left:0.4rem;font-size:0.65rem">enabled</span>
+    {% else %}<span class="pill" style="margin-left:0.4rem;font-size:0.65rem">disabled</span>{% endif %}
+  </h2>
+  <p class="muted" style="margin:-0.3rem 0 0.75rem;font-size:0.85rem">
+    Key-only, chrooted SFTP — no password, no shell. The customer lands in
+    their site root and can upload to <code>htdocs</code>. Safer than FTP:
+    nothing crosses the wire in clear text.
+  </p>
+
+  {% if !error.is_empty() %}
+    <div class="flash err" style="margin-bottom:0.75rem"><div class="flash-body">{{ error }}</div></div>
+  {% endif %}
+
+  {% if sftp.enabled %}
+  <dl class="kv" style="margin-bottom:0.75rem">
+    <dt>Connect</dt>
+    <dd><code style="font-size:0.82rem">sftp {{ sftp.system_user }}@{{ sftp.host_hint }}</code> <span class="text-soft">(port 22)</span></dd>
+    <dt>Lands in</dt>
+    <dd><span class="text-soft">site root — <code>cd htdocs</code> to reach the web files</span></dd>
+  </dl>
+  {% endif %}
+
+  <form method="post" action="/hostings/sftp">
+    <input type="hidden" name="_csrf" value="{{ csrf_sftp }}">
+    <input type="hidden" name="selector" value="{{ selector }}">
+    <div class="field">
+      <label>
+        <input type="checkbox" name="enabled" value="on" {% if sftp.enabled %}checked{% endif %}>
+        Enable key-only SFTP for <code>{{ sftp.system_user }}</code>
+      </label>
+    </div>
+    <div class="field">
+      <label for="sftp_keys">Authorized public keys <span class="hint">one per line — ssh-ed25519 / ssh-rsa / ecdsa</span></label>
+      <textarea id="sftp_keys" name="public_keys" rows="4" maxlength="16384"
+                style="font-family:ui-monospace,Menlo,Consolas,monospace;font-size:12px"
+                placeholder="ssh-ed25519 AAAAC3Nza... alice@laptop&#10;ssh-rsa AAAAB3Nza... bob@desktop">{% for k in sftp.keys %}{{ k }}
+{% endfor %}</textarea>
+    </div>
+    <p class="muted small" style="margin:0 0 0.6rem">
+      Paste the customer's <strong>public</strong> key(s) (the
+      <code>.pub</code> file). Invalid lines are rejected with an error.
+      Disabling removes them from the server and drops SSH group access.
+    </p>
+    <button class="btn primary" type="submit">Save SFTP settings</button>
+  </form>
+</div>

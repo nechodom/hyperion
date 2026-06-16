@@ -152,6 +152,11 @@ pub fn build_router(state: SharedState) -> Router {
             "/hostings/ftp/disable",
             post(handlers::hostings::post_ftp_disable),
         )
+        .route("/hostings/sftp", post(handlers::hostings::post_sftp))
+        .route(
+            "/hostings/:selector/sftp-panel",
+            get(handlers::hostings::get_sftp_panel),
+        )
         .route(
             "/hostings/restore-upload",
             post(handlers::hostings::post_restore_upload)

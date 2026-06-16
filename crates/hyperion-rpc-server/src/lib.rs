@@ -1020,6 +1020,16 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(_) => Response::FtpDisable,
             Err(e) => Response::Error(e),
         },
+        Request::SftpStatus { sel } => match api.sftp_status(sel).await {
+            Ok(s) => Response::SftpStatus(s),
+            Err(e) => Response::Error(e),
+        },
+        Request::SftpSet { sel, enabled, public_keys } => {
+            match api.sftp_set(sel, enabled, public_keys).await {
+                Ok(s) => Response::SftpSet(s),
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::DashboardAlerts => match api.dashboard_alerts().await {
             Ok(v) => Response::DashboardAlerts(v),
             Err(e) => Response::Error(e),
@@ -1998,6 +2008,20 @@ mod tests {
         }
         async fn ftp_disable(&self, _: HostingSelector) -> Result<(), RpcError> {
             Ok(())
+        }
+        async fn sftp_status(
+            &self,
+            _: HostingSelector,
+        ) -> Result<hyperion_types::SftpStatus, RpcError> {
+            Ok(hyperion_types::SftpStatus::default())
+        }
+        async fn sftp_set(
+            &self,
+            _: HostingSelector,
+            _: bool,
+            _: Vec<String>,
+        ) -> Result<hyperion_types::SftpStatus, RpcError> {
+            Ok(hyperion_types::SftpStatus::default())
         }
         async fn dashboard_alerts(&self) -> Result<Vec<DashboardAlert>, RpcError> {
             Ok(vec![])

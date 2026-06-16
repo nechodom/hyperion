@@ -1191,6 +1191,22 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.ftp_disable(sel).await
     }
 
+    async fn sftp_status(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::SftpStatus, RpcError> {
+        self.svc.sftp_status(sel).await
+    }
+
+    async fn sftp_set(
+        &self,
+        sel: HostingSelector,
+        enabled: bool,
+        public_keys: Vec<String>,
+    ) -> Result<hyperion_types::SftpStatus, RpcError> {
+        self.svc.sftp_set(sel, enabled, public_keys).await
+    }
+
     async fn dashboard_alerts(&self) -> Result<Vec<DashboardAlert>, RpcError> {
         self.svc.dashboard_alerts().await
     }

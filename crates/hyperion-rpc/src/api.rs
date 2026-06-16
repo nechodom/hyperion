@@ -883,6 +883,18 @@ pub trait AgentApi: Send + Sync + 'static {
     ) -> Result<String, RpcError>;
     /// Disable FTP (passwd -d <user>).
     async fn ftp_disable(&self, sel: HostingSelector) -> Result<(), RpcError>;
+    /// Read current key-only SFTP status for a hosting.
+    async fn sftp_status(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::SftpStatus, RpcError>;
+    /// Enable/disable key-only chrooted SFTP and replace the keys.
+    async fn sftp_set(
+        &self,
+        sel: HostingSelector,
+        enabled: bool,
+        public_keys: Vec<String>,
+    ) -> Result<hyperion_types::SftpStatus, RpcError>;
 
     /// Restore a hosting from a previously-taken backup archive. The path
     /// must point at one of OUR archives (under /var/lib/hyperion/backups

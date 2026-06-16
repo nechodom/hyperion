@@ -23,7 +23,8 @@ pub use cert::{CertInfo, CertOverviewItem, CertRenewOutcome, CertRenewResult, Pa
 pub use db::{DbProvision, DbSummary};
 pub use dns::{CertIssueRequest, DnsCheckResult};
 pub use hosting::{
-    HostingDetail, HostingState, HostingSummary, VhostOptions, WpExtras, WpRedisConfig,
+    HostingDetail, HostingState, HostingSummary, SftpStatus, VhostOptions, WpExtras,
+    WpRedisConfig,
 };
 pub use ids::{AgentId, HostingId, SecretId};
 pub use jobs::{

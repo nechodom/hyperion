@@ -198,6 +198,20 @@ fn default_kind() -> String {
     "php".to_string()
 }
 
+/// Current key-only SFTP status for a hosting's system user.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SftpStatus {
+    /// True when the user is in the `hyperion-sftp` group.
+    pub enabled: bool,
+    /// The Linux system user SFTP authenticates as.
+    pub system_user: String,
+    /// Installed authorized public keys (one per entry).
+    pub keys: Vec<String>,
+    /// Host the customer should point their SFTP client at (the site's
+    /// own domain, which resolves to this node). Port is always 22.
+    pub host_hint: String,
+}
+
 /// Redis connection config written into wp-config.php as the
 /// `WP_REDIS_*` constants. Generated agent-side from the local
 /// Redis listener address + the per-hosting ACL user.

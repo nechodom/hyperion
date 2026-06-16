@@ -861,6 +861,18 @@ fn print_pretty(resp: &Response) {
             println!("  password (shown once): {password}");
         }
         Response::FtpDisable => println!("✓ FTP disabled (password cleared)"),
+        Response::SftpStatus(s) | Response::SftpSet(s) => {
+            println!(
+                "SFTP {} for {} ({} key(s))",
+                if s.enabled { "enabled" } else { "disabled" },
+                s.system_user,
+                s.keys.len()
+            );
+            for k in &s.keys {
+                let short: String = k.chars().take(50).collect();
+                println!("  {short}…");
+            }
+        }
         Response::ProfileList(rows) => {
             for p in rows {
                 println!(

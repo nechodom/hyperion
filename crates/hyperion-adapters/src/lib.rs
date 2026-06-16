@@ -21,6 +21,7 @@ pub mod phpfpm;
 pub mod postfix;
 pub mod postgres;
 pub mod rollback;
+pub mod ssh;
 pub mod users;
 pub mod wpcli;
 

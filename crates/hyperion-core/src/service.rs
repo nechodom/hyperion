@@ -4294,6 +4294,89 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(())
     }
 
+    fn home_dir_for(&self, system_user: &str) -> String {
+        format!("{}/{}", self.paths.home_root, system_user)
+    }
+
+    /// Current key-only SFTP status for a hosting.
+    pub async fn sftp_status(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::SftpStatus, RpcError> {
+        let detail = self.get(sel).await?;
+        let home = self.home_dir_for(&detail.system_user);
+        let (enabled, keys) =
+            hyperion_adapters::ssh::read_status(&detail.system_user, &home)
+                .await
+                .map_err(|e| RpcError::ProvisioningFailed {
+                    stage: "sftp_status".into(),
+                    reason: e.to_string(),
+                })?;
+        Ok(hyperion_types::SftpStatus {
+            enabled,
+            system_user: detail.system_user.clone(),
+            keys,
+            host_hint: detail.domain.clone(),
+        })
+    }
+
+    /// Enable/disable key-only chrooted SFTP for a hosting and replace
+    /// the authorized public keys. Validates every key at the boundary.
+    pub async fn sftp_set(
+        &self,
+        sel: HostingSelector,
+        enabled: bool,
+        public_keys: Vec<String>,
+    ) -> Result<hyperion_types::SftpStatus, RpcError> {
+        let detail = self.get(sel).await?;
+        if detail.state == HostingState::Deleting {
+            return Err(RpcError::Conflict {
+                message: "cannot change SFTP on a deleting hosting".into(),
+            });
+        }
+        let home = self.home_dir_for(&detail.system_user);
+        if enabled {
+            // Validate every key before touching the system. An empty
+            // list with enabled=true is allowed (group access set up,
+            // operator pastes keys next) but warned in the UI.
+            let mut keys = Vec::with_capacity(public_keys.len());
+            for k in &public_keys {
+                let v = hyperion_adapters::ssh::validate_public_key(k).map_err(|e| {
+                    RpcError::Validation {
+                        message: format!("invalid SSH key: {e}"),
+                    }
+                })?;
+                keys.push(v);
+            }
+            hyperion_adapters::ssh::enable_sftp(&detail.system_user, &home, &keys)
+                .await
+                .map_err(|e| RpcError::ProvisioningFailed {
+                    stage: "sftp_enable".into(),
+                    reason: e.to_string(),
+                })?;
+        } else {
+            hyperion_adapters::ssh::disable_sftp(&detail.system_user, &home)
+                .await
+                .map_err(|e| RpcError::ProvisioningFailed {
+                    stage: "sftp_disable".into(),
+                    reason: e.to_string(),
+                })?;
+        }
+        self.append_audit(
+            "hosting.sftp.set",
+            Some(detail.id.as_str()),
+            &serde_json::json!({
+                "user": detail.system_user,
+                "enabled": enabled,
+                "keys": public_keys.len(),
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+        self.sftp_status(HostingSelector::Id(detail.id.clone())).await
+    }
+
     /// Reset the DB password for a hosting, persisting the new secret.
     pub async fn db_reset_password(
         &self,
