@@ -892,6 +892,11 @@
       via a DNS challenge. You'll be shown <code>TXT</code> records to publish,
       then click continue to validate. Requires control of the domain's DNS.
     </p>
+    <p class="text-soft small" style="margin:-0.3rem 0 0.7rem;padding:0.5rem 0.7rem;background:var(--surface-1);border-radius:6px">
+      On a <strong>test node</strong>? Issue one <code>*.&lt;base&gt;</code> wildcard for the
+      whole node in <a href="/settings#cluster">Settings → Cluster</a> instead — every
+      auto-subdomain reuses it (this per-site cert isn't needed there).
+    </p>
     <form method="post" action="/hostings/cert/dns01/begin">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">

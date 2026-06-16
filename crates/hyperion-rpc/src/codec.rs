@@ -175,6 +175,21 @@ pub enum Request {
     CertDns01Finish {
         sel: HostingSelector,
     },
+    /// DNS-01 phase 1 for a bare domain NOT tied to a hosting — a test
+    /// node's `*.<base>` wildcard, issued once and reused by every
+    /// auto-subdomain. `email` falls back to the agent `[acme]` default
+    /// when `None`.
+    CertDns01BeginDomain {
+        domain: Domain,
+        #[serde(default)]
+        email: Option<String>,
+        staging: bool,
+        provider: String,
+    },
+    /// DNS-01 phase 2 for a bare (hosting-less) domain.
+    CertDns01FinishDomain {
+        domain: Domain,
+    },
     HostingStats {
         sel: HostingSelector,
     },
@@ -1054,6 +1069,12 @@ pub enum Response {
         values: Vec<String>,
     },
     CertDns01Finish(CertInfo),
+    CertDns01BeginDomain {
+        completed: bool,
+        record_name: String,
+        values: Vec<String>,
+    },
+    CertDns01FinishDomain(CertInfo),
     HostingStats(HostingStats),
     NodeStats(NodeStats),
     ClusterStats(ClusterStats),

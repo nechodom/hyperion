@@ -38,6 +38,10 @@ struct SettingsTpl<'a> {
     /// Enrolled remote nodes — drives the "From: <node>" dropdown
     /// in the Send-test-email form. Empty on single-node setups.
     nodes: Vec<hyperion_types::NodeSummary>,
+    /// Test nodes that can carry a node-wide `*.<base>` wildcard cert,
+    /// each with its computed base domain. Drives the per-node wildcard
+    /// issuance rows in the "Test nodes & staging sites" card.
+    wildcard_nodes: Vec<NodeWildcardRow>,
     /// Read-only snapshot of agent.toml with secrets masked, for
     /// the "Raw TOML" tab. Failing to read shows "(could not
     /// read /etc/hyperion/agent.toml: …)".
@@ -57,6 +61,16 @@ struct SettingsTpl<'a> {
 
 fn short_sha(s: &str) -> String {
     s.chars().take(12).collect()
+}
+
+/// One test node's wildcard-cert row in the Settings card.
+pub struct NodeWildcardRow {
+    pub node_id: String,
+    pub label: String,
+    /// Base domain a `*.<base>` cert would cover (e.g. `four.example.cz`).
+    pub base: String,
+    /// The wildcard subject shown to the operator (`*.<base>`).
+    pub wildcard: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -123,6 +137,24 @@ pub async fn get_settings(
     };
     let update_current_short = short_sha(&update_status.current_sha);
     let update_latest_short = short_sha(&update_status.latest_sha);
+    // Per-test-node wildcard rows: a `*.<base>` cert issued once covers
+    // every auto-subdomain the node spins up. Only test nodes with a
+    // derivable base domain qualify.
+    let wildcard_nodes: Vec<NodeWildcardRow> = nodes
+        .iter()
+        .filter(|n| config.cluster.is_test_node(&n.node_id))
+        .filter_map(|n| {
+            config
+                .cluster
+                .node_wildcard_base(&n.node_id, &n.label)
+                .map(|base| NodeWildcardRow {
+                    node_id: n.node_id.clone(),
+                    label: n.label.clone(),
+                    wildcard: format!("*.{base}"),
+                    base,
+                })
+        })
+        .collect();
     let csrf_token = super::session_csrf_token(&state, &ctx);
     let tpl = SettingsTpl {
         username: &ctx.username,
@@ -136,6 +168,7 @@ pub async fn get_settings(
         update_latest_short,
         recent_emails,
         nodes,
+        wildcard_nodes,
         raw_toml,
         mta,
         error,
@@ -919,6 +952,185 @@ pub async fn post_mta_test(
         }
         RpcResponse::Error(e) => Ok(Redirect::to(&format!(
             "/settings?flash_error={}#mail",
+            urlencode(&e.to_string())
+        ))
+        .into_response()),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+// ── Node-level wildcard certs for test nodes ──────────────────────────
+//
+// A test node auto-creates `<name>.<base>` subdomains; rather than a
+// per-site ACME cert each time, the operator issues ONE `*.<base>`
+// wildcard here and every auto-subdomain reuses it. Manual DNS-01 shows
+// the TXT records on an interstitial; Cloudflare publishes + finishes in
+// one shot. The cert lives on the chosen node (shared-nothing), so the
+// flow is dispatched there.
+
+#[derive(Template)]
+#[template(path = "node_wildcard_dns01.html")]
+struct NodeWildcardDns01Tpl<'a> {
+    username: &'a str,
+    user_initial: char,
+    active: &'static str,
+    css_version: &'static str,
+    htmx_version: &'static str,
+    node_id: String,
+    base: String,
+    record_name: String,
+    values: Vec<String>,
+    csrf_finish: String,
+}
+
+/// Resolve a test node's wildcard base domain (+ display label). `None`
+/// when the node isn't a test node or no safe base can be derived.
+async fn resolve_node_wildcard_base(
+    state: &SharedState,
+    node_id: &str,
+) -> Option<(String, String)> {
+    let config =
+        match hyperion_rpc_client::call(&state.agent_socket, Request::AgentConfigView).await {
+            Ok(RpcResponse::AgentConfigView(c)) => c,
+            _ => return None,
+        };
+    if !config.cluster.is_test_node(node_id) {
+        return None;
+    }
+    let label = match hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await {
+        Ok(RpcResponse::NodesList(ns)) => ns
+            .into_iter()
+            .find(|n| n.node_id == node_id)
+            .map(|n| n.label)
+            .unwrap_or_else(|| node_id.to_string()),
+        _ => node_id.to_string(),
+    };
+    config
+        .cluster
+        .node_wildcard_base(node_id, &label)
+        .map(|base| (label, base))
+}
+
+#[derive(Deserialize)]
+pub struct NodeWildcardBeginForm {
+    pub node_id: String,
+    pub provider: String,
+    #[serde(default)]
+    pub staging: Option<String>,
+}
+
+/// POST /settings/node-wildcard/begin — issue (or renew) a test node's
+/// `*.<base>` wildcard via the domain-only DNS-01 flow on that node.
+pub async fn post_node_wildcard_begin(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<NodeWildcardBeginForm>,
+) -> Result<Response, AppError> {
+    if !ctx.is_super_admin() {
+        return Ok(Redirect::to("/").into_response());
+    }
+    let (_, base) = match resolve_node_wildcard_base(&state, &form.node_id).await {
+        Some(v) => v,
+        None => {
+            return Ok(Redirect::to(
+                "/settings?flash_error=node+is+not+a+test+node+or+has+no+wildcard+base#cluster",
+            )
+            .into_response());
+        }
+    };
+    let domain = match hyperion_validate::Domain::parse(&base) {
+        Ok(d) => d,
+        Err(e) => {
+            return Ok(Redirect::to(&format!(
+                "/settings?flash_error={}#cluster",
+                urlencode(&format!("invalid wildcard base {base}: {e}"))
+            ))
+            .into_response());
+        }
+    };
+    let provider = if form.provider == "cloudflare" { "cloudflare" } else { "manual" };
+    let staging = form.staging.as_deref() == Some("on");
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        Some(&form.node_id),
+        Request::CertDns01BeginDomain {
+            domain,
+            email: None,
+            staging,
+            provider: provider.to_string(),
+        },
+    )
+    .await?;
+    match resp {
+        RpcResponse::CertDns01BeginDomain { completed: true, .. } => Ok(Redirect::to(&format!(
+            "/settings?flash={}#cluster",
+            urlencode(&format!("wildcard *.{base} issued on {}", form.node_id))
+        ))
+        .into_response()),
+        RpcResponse::CertDns01BeginDomain { completed: false, record_name, values } => {
+            let tpl = NodeWildcardDns01Tpl {
+                username: &ctx.username,
+                user_initial: super::user_initial(&ctx.username),
+                active: "settings",
+                css_version: super::css_version(),
+                htmx_version: super::htmx_version(),
+                node_id: form.node_id.clone(),
+                base,
+                record_name,
+                values,
+                csrf_finish: super::session_csrf_token(&state, &ctx),
+            };
+            Ok(Html(tpl.render()?).into_response())
+        }
+        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
+            "/settings?flash_error={}#cluster",
+            urlencode(&e.to_string())
+        ))
+        .into_response()),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+#[derive(Deserialize)]
+pub struct NodeWildcardFinishForm {
+    pub node_id: String,
+    pub base: String,
+}
+
+/// POST /settings/node-wildcard/finish — validate the published TXT,
+/// install the wildcard on the node, then re-point its auto-subdomains.
+pub async fn post_node_wildcard_finish(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<NodeWildcardFinishForm>,
+) -> Result<Response, AppError> {
+    if !ctx.is_super_admin() {
+        return Ok(Redirect::to("/").into_response());
+    }
+    let domain = match hyperion_validate::Domain::parse(form.base.trim()) {
+        Ok(d) => d,
+        Err(e) => {
+            return Ok(Redirect::to(&format!(
+                "/settings?flash_error={}#cluster",
+                urlencode(&format!("invalid wildcard base: {e}"))
+            ))
+            .into_response());
+        }
+    };
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        Some(&form.node_id),
+        Request::CertDns01FinishDomain { domain },
+    )
+    .await?;
+    match resp {
+        RpcResponse::CertDns01FinishDomain(_) => Ok(Redirect::to(&format!(
+            "/settings?flash={}#cluster",
+            urlencode(&format!("wildcard *.{} issued + applied to test sites", form.base))
+        ))
+        .into_response()),
+        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
+            "/settings?flash_error={}#cluster",
             urlencode(&e.to_string())
         ))
         .into_response()),

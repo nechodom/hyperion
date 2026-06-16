@@ -2039,31 +2039,69 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             db_creds = Some(creds);
         }
 
-        // 7. ACME cert
+        // 7. TLS cert. If this hosting's PARENT domain already carries a
+        // wildcard cert on this node — e.g. a test node's `*.<base>`
+        // issued once in Settings — reuse it instead of burning a
+        // per-site ACME issuance. New auto-subdomains get HTTPS instantly
+        // and never touch the Let's Encrypt per-domain rate limit.
         let sans: Vec<String> = req.aliases.iter().map(|d| d.to_string()).collect();
-        let cert = match self.adapters.acme_issue(domain, &sans).await {
-            Ok(c) => c,
-            Err(e) => {
-                let _ = stack.rollback_all().await;
-                return Err(e.into());
+        let parent_base = domain.split_once('.').map(|(_, rest)| rest.to_string());
+        let shared_wildcard = match parent_base.as_deref() {
+            Some(base) if certificates::is_wildcard(&self.pool, base).await.unwrap_or(false) => {
+                certificates::get(&self.pool, base).await.ok().flatten()
             }
+            _ => None,
         };
-        let cert_path = format!("/etc/hyperion/certs/{}/fullchain.pem", domain);
-        let key_path = format!("/etc/hyperion/certs/{}/privkey.pem", domain);
-        let _ = certificates::upsert(
-            &self.pool,
-            domain,
-            now_secs(),
-            cert.not_after,
-            &cert_path,
-            &key_path,
-            &cert.issuer,
-        )
-        .await;
-        stack.push(Box::new(AcmeDelete {
-            adapters: self.adapters.clone(),
-            domain: domain.to_string(),
-        }));
+        let (cert, detail_cert_path, detail_cert_key_path) = if let Some(wc) = shared_wildcard {
+            // Reference the shared wildcard: record a cert row pointing at
+            // the wildcard's files (so the SSL tab shows a valid cert) and
+            // point the vhost at them. No ACME order, no rollback step —
+            // the cert is owned by the node wildcard, not this hosting, so
+            // the renewal sweep skips this reference row.
+            let _ = certificates::upsert(
+                &self.pool,
+                domain,
+                wc.issued_at,
+                wc.not_after,
+                &wc.cert_path,
+                &wc.key_path,
+                &wc.issuer,
+            )
+            .await;
+            let info = CertInfo {
+                domain: domain.to_string(),
+                sans: sans.clone(),
+                issuer: wc.issuer.clone(),
+                not_after: wc.not_after,
+                fingerprint_sha256: String::new(),
+            };
+            (info, Some(wc.cert_path), Some(wc.key_path))
+        } else {
+            let cert = match self.adapters.acme_issue(domain, &sans).await {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = stack.rollback_all().await;
+                    return Err(e.into());
+                }
+            };
+            let cert_path = format!("/etc/hyperion/certs/{}/fullchain.pem", domain);
+            let key_path = format!("/etc/hyperion/certs/{}/privkey.pem", domain);
+            let _ = certificates::upsert(
+                &self.pool,
+                domain,
+                now_secs(),
+                cert.not_after,
+                &cert_path,
+                &key_path,
+                &cert.issuer,
+            )
+            .await;
+            stack.push(Box::new(AcmeDelete {
+                adapters: self.adapters.clone(),
+                domain: domain.to_string(),
+            }));
+            (cert, None, None)
+        };
 
         // 8. nginx vhost
         let detail = HostingDetail {
@@ -2088,6 +2126,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             node_id: Some(node_id_str.clone()),
             vhost_options: hyperion_types::VhostOptions::default(),
             wp_extras: hyperion_types::WpExtras::default(),
+            cert_path: detail_cert_path,
+            cert_key_path: detail_cert_key_path,
         };
         if let Err(e) = self.adapters.nginx_write_vhost(&detail).await {
             let _ = stack.rollback_all().await;
@@ -2252,6 +2292,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let cert_row = certificates::get(&self.pool, &row.domain)
             .await
             .map_err(|e| RpcError::Internal_with(format!("cert: {e}")))?;
+        // Carry the stored cert paths through so the vhost serves the
+        // right files — for a reused shared wildcard these point at a
+        // different domain's cert dir than this hosting's default.
+        let (cert_path, cert_key_path) = match cert_row.as_ref() {
+            Some(c) => (Some(c.cert_path.clone()), Some(c.key_path.clone())),
+            None => (None, None),
+        };
         let cert = cert_row.map(|c| CertInfo {
             domain: c.domain,
             sans: aliases.clone(),
@@ -2294,6 +2341,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             node_id: row.node_id,
             vhost_options: row.vhost_options,
             wp_extras: row.wp_extras,
+            cert_path,
+            cert_key_path,
         })
     }
 
@@ -7750,6 +7799,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // reload triggers fresh load + cert chain pickup).
         let new_detail = HostingDetail {
             cert: Some(cert.clone()),
+            // Freshly-issued per-site cert lives at the per-domain default
+            // path; clear any inherited shared-wildcard override.
+            cert_path: None,
+            cert_key_path: None,
             ..detail.clone()
         };
         if let Err(e) = self.adapters.nginx_write_vhost(&new_detail).await {
@@ -7911,6 +7964,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
         let new_detail = HostingDetail {
             cert: Some(cert.clone()),
+            // Per-hosting wildcard cert lives at the per-domain default
+            // path; clear any inherited shared-cert override.
+            cert_path: None,
+            cert_key_path: None,
             ..detail.clone()
         };
         if let Err(e) = self.adapters.nginx_write_vhost(&new_detail).await {
@@ -7928,6 +7985,166 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         )
         .await;
         Ok(cert)
+    }
+
+    /// DNS-01 issuance for a bare domain that is NOT tied to a hosting —
+    /// e.g. a test node's `*.<base>` wildcard, issued once in Settings and
+    /// reused by every auto-subdomain on the node. Mirrors
+    /// [`Self::cert_dns01_begin`] but resolves the ACME contact email from
+    /// the agent-wide default (no per-hosting override) and writes no vhost
+    /// (there's no site to serve — sibling hostings' vhosts reference it).
+    pub async fn cert_dns01_begin_domain(
+        &self,
+        domain: &str,
+        email: Option<&str>,
+        staging: bool,
+        provider: String,
+    ) -> Result<(bool, String, Vec<String>), RpcError> {
+        let base = Domain::parse(domain).map_err(|e| RpcError::Validation {
+            message: format!("invalid domain {domain}: {e}"),
+        })?;
+        let email = self.effective_acme_email(email)?.to_string();
+        let sans = vec![format!("*.{}", base.as_str())];
+
+        let pending =
+            hyperion_adapters::acme::dns01_begin(base.as_str(), &sans, &email, staging)
+                .await
+                .map_err(|e| RpcError::ProvisioningFailed {
+                    stage: "acme_dns01_begin".into(),
+                    reason: e.to_string(),
+                })?;
+
+        if provider == "cloudflare" {
+            let token = hyperion_adapters::cloudflare::token().ok_or_else(|| {
+                RpcError::Validation {
+                    message: "no Cloudflare token configured — drop one in \
+                              /etc/hyperion/cloudflare.token (Zone:Read + DNS:Edit) \
+                              or use the manual flow"
+                        .into(),
+                }
+            })?;
+            let ids = hyperion_adapters::cloudflare::publish_txt(
+                &token,
+                &pending.record_name,
+                &pending.values,
+            )
+            .await
+            .map_err(|e| RpcError::ProvisioningFailed {
+                stage: "cloudflare_publish".into(),
+                reason: e.to_string(),
+            })?;
+            tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+            let finish = self.cert_dns01_finish_domain(base.as_str()).await;
+            hyperion_adapters::cloudflare::cleanup_txt(&token, &ids).await;
+            finish?;
+            return Ok((true, pending.record_name, pending.values));
+        }
+
+        self.append_audit(
+            "cert.dns01.begin_domain",
+            None,
+            &serde_json::json!({"domain": base.as_str(), "provider": provider, "staging": staging})
+                .to_string(),
+            "ok",
+        )
+        .await;
+        Ok((false, pending.record_name, pending.values))
+    }
+
+    /// DNS-01 phase 2 for a bare (hosting-less) domain. Installs + persists
+    /// the wildcard cert, flags it wildcard for the renewal sweep, then
+    /// re-points every existing auto-subdomain hosting under this base at
+    /// the freshly-issued shared cert.
+    pub async fn cert_dns01_finish_domain(
+        &self,
+        domain: &str,
+    ) -> Result<hyperion_types::CertInfo, RpcError> {
+        let base = Domain::parse(domain).map_err(|e| RpcError::Validation {
+            message: format!("invalid domain {domain}: {e}"),
+        })?;
+        let cert = hyperion_adapters::acme::dns01_finish(base.as_str(), "/etc/hyperion/certs")
+            .await
+            .map_err(|e| RpcError::ProvisioningFailed {
+                stage: "acme_dns01_finish".into(),
+                reason: e.to_string(),
+            })?;
+        let cert_path = format!("/etc/hyperion/certs/{}/fullchain.pem", base.as_str());
+        let key_path = format!("/etc/hyperion/certs/{}/privkey.pem", base.as_str());
+        let _ = certificates::upsert(
+            &self.pool,
+            base.as_str(),
+            now_secs(),
+            cert.not_after,
+            &cert_path,
+            &key_path,
+            &cert.issuer,
+        )
+        .await;
+        let _ = certificates::set_wildcard(&self.pool, base.as_str(), true).await;
+
+        self.append_audit(
+            "cert.dns01.finish_domain",
+            None,
+            &serde_json::json!({"domain": base.as_str(), "issuer": cert.issuer}).to_string(),
+            "ok",
+        )
+        .await;
+
+        // Best-effort: route existing auto-subdomains through the shared cert.
+        let _ = self.repoint_hostings_to_wildcard(base.as_str()).await;
+        Ok(cert)
+    }
+
+    /// Point every active hosting whose domain is a direct subdomain of
+    /// `base` (covered by `*.<base>`) at the shared wildcard cert: rewrite
+    /// its `certificates` row to the wildcard's files + re-render its
+    /// vhost. Best-effort; returns how many vhosts were re-pointed.
+    pub async fn repoint_hostings_to_wildcard(&self, base: &str) -> Result<usize, RpcError> {
+        let wc = match certificates::get(&self.pool, base).await.ok().flatten() {
+            Some(c) => c,
+            None => return Ok(0),
+        };
+        let suffix = format!(".{base}");
+        let summaries = self.list().await?;
+        let mut repointed = 0usize;
+        for s in summaries {
+            if s.state != HostingState::Active || !s.domain.ends_with(&suffix) {
+                continue;
+            }
+            // Only DIRECT subdomains — `*.base` covers one label, so
+            // `a.b.base` is out of scope.
+            let label = &s.domain[..s.domain.len() - suffix.len()];
+            if label.is_empty() || label.contains('.') {
+                continue;
+            }
+            let _ = certificates::upsert(
+                &self.pool,
+                &s.domain,
+                wc.issued_at,
+                wc.not_after,
+                &wc.cert_path,
+                &wc.key_path,
+                &wc.issuer,
+            )
+            .await;
+            match self.get(HostingSelector::Id(s.id.clone())).await {
+                Ok(detail) => {
+                    if let Err(e) = self.adapters.nginx_write_vhost(&detail).await {
+                        tracing::error!(domain = %s.domain, error = %e, "repoint: vhost re-render failed");
+                        continue;
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(domain = %s.domain, error = %e, "repoint: load detail failed");
+                    continue;
+                }
+            }
+            repointed += 1;
+        }
+        if repointed > 0 {
+            tracing::info!(base = %base, repointed, "re-pointed auto-subdomains at node wildcard");
+        }
+        Ok(repointed)
     }
 
     /// Sweep `certificates` for LE certs whose `not_after - now` is
@@ -7965,14 +8182,36 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let mut out = Vec::with_capacity(due.len());
         for cert in due {
             let domain_str = cert.domain.clone();
+            // A subdomain that REUSES a parent wildcard carries a cert row
+            // whose files ARE the parent wildcard's (re-pointed at create /
+            // issuance time). The parent renews itself; skip the reference
+            // so we never attempt a doomed per-site issuance for a
+            // wildcard-only name. Matching on the shared cert path means a
+            // subdomain with its OWN distinct cert still renews normally.
+            if let Some((_, parent)) = domain_str.split_once('.') {
+                if let Ok(Some(parent_cert)) = certificates::get(&self.pool, parent).await {
+                    if parent_cert.cert_path == cert.cert_path
+                        && certificates::is_wildcard(&self.pool, parent)
+                            .await
+                            .unwrap_or(false)
+                    {
+                        continue;
+                    }
+                }
+            }
             // Skip hostings that aren't actively serving: a suspended /
             // trashed / deleting vhost returns 503 (or 404) on the ACME
             // HTTP-01 challenge path, so the renewal fails every tick and
             // burns Let's Encrypt's per-hostname failed-validation rate
             // limit (5/hour). The cert just expires while suspended and
-            // is re-issued on resume. A None row (e.g. the panel cert,
-            // which isn't a hosting) falls through and still renews.
-            if let Ok(Some(row)) = hostings::get_by_domain(&self.pool, &domain_str).await {
+            // is re-issued on resume. A None row (e.g. the panel cert or a
+            // test node's wildcard base, which aren't hostings) falls
+            // through and still renews.
+            let hosting_row = hostings::get_by_domain(&self.pool, &domain_str)
+                .await
+                .ok()
+                .flatten();
+            if let Some(row) = &hosting_row {
                 if matches!(
                     row.state,
                     HostingState::Suspended | HostingState::Trashed | HostingState::Deleting
@@ -8013,14 +8252,28 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 },
                 Ok(d) if is_wild => {
                     if hyperion_adapters::cloudflare::token().is_some() {
-                        match self
-                            .cert_dns01_begin(
+                        // A hosting-backed wildcard renews via the
+                        // per-hosting flow; a bare node-base wildcard (no
+                        // hosting row — a test node's `*.<base>`) renews via
+                        // the domain-only flow, which also re-points the
+                        // covered auto-subdomains.
+                        let res = if hosting_row.is_some() {
+                            self.cert_dns01_begin(
                                 HostingSelector::Domain(d),
                                 false,
                                 "cloudflare".into(),
                             )
                             .await
-                        {
+                        } else {
+                            self.cert_dns01_begin_domain(
+                                &domain_str,
+                                None,
+                                false,
+                                "cloudflare".into(),
+                            )
+                            .await
+                        };
+                        match res {
                             Ok((true, _, _)) => {
                                 let na = certificates::get(&self.pool, &domain_str)
                                     .await
@@ -8038,7 +8291,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     } else {
                         CertRenewOutcome::Skipped {
                             reason: "wildcard cert — no Cloudflare token configured; \
-                                     re-run DNS-01 from the SSL tab"
+                                     re-run DNS-01 from the SSL tab or test-node settings"
                                 .into(),
                         }
                     }
@@ -16108,6 +16361,55 @@ mod tests {
             "expected Failed renewal in test env (no real ACME), got {:?}",
             results[0].outcome
         );
+    }
+
+    /// A subdomain that REUSES a parent wildcard (its cert row shares the
+    /// wildcard's files) must be skipped by the renewal sweep — the parent
+    /// renews itself. A sibling with its OWN distinct cert still renews.
+    #[tokio::test]
+    async fn cert_renew_tick_skips_wildcard_reference_rows() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), happy_mocks());
+        let now = now_secs();
+        let later = now + 80 * 86_400;
+        let exp = later + 10 * 86_400; // inside the renewal window
+
+        // The node wildcard base — flagged wildcard, owns its files.
+        certificates::upsert(&pool, "base.cz", now, exp, "/c/base/f.pem", "/c/base/k.pem", "letsencrypt")
+            .await
+            .expect("upsert base");
+        certificates::set_wildcard(&pool, "base.cz", true).await.expect("flag");
+        // A reuse subdomain — same cert files as the parent wildcard.
+        certificates::upsert(&pool, "a.base.cz", now, exp, "/c/base/f.pem", "/c/base/k.pem", "letsencrypt")
+            .await
+            .expect("upsert ref");
+        // A sibling with its OWN distinct cert — must still renew.
+        certificates::upsert(&pool, "b.base.cz", now, exp, "/c/b.base.cz/f.pem", "/c/b.base.cz/k.pem", "letsencrypt")
+            .await
+            .expect("upsert own");
+
+        let results = s
+            .cert_renew_tick(later, CERT_RENEWAL_WINDOW_DAYS)
+            .await
+            .expect("tick");
+        let domains: Vec<&str> = results.iter().map(|r| r.domain.as_str()).collect();
+        assert!(domains.contains(&"base.cz"), "wildcard base renews: {domains:?}");
+        assert!(domains.contains(&"b.base.cz"), "own-cert sibling renews: {domains:?}");
+        assert!(
+            !domains.contains(&"a.base.cz"),
+            "reuse reference must be skipped: {domains:?}"
+        );
+    }
+
+    #[test]
+    fn effective_staging_domain_prefers_override() {
+        type S = HostingService<MockAdapterPort>;
+        // No override ⇒ default prefix.
+        assert_eq!(S::effective_staging_domain(None, "example.cz"), "staging.example.cz");
+        // Blank / whitespace override ⇒ default.
+        assert_eq!(S::effective_staging_domain(Some("  "), "example.cz"), "staging.example.cz");
+        // Real override wins, trimmed + lower-cased.
+        assert_eq!(S::effective_staging_domain(Some(" Dev.Example.CZ "), "example.cz"), "dev.example.cz");
     }
 
     /// Empty-DB sanity check: the renewal tick on a fresh agent

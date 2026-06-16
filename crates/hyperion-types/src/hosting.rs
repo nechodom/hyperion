@@ -115,6 +115,15 @@ pub struct HostingDetail {
     /// Empty/default for non-WP hostings.
     #[serde(default)]
     pub wp_extras: WpExtras,
+    /// Explicit TLS cert paths for the nginx vhost. `None` ⇒ the
+    /// adapter derives the per-domain default
+    /// `/etc/hyperion/certs/<domain>/{fullchain,privkey}.pem`. `Some`
+    /// lets a hosting point at a SHARED cert — e.g. a test node's
+    /// `*.<base>` wildcard reused by every auto-subdomain on that node.
+    #[serde(default)]
+    pub cert_path: Option<String>,
+    #[serde(default)]
+    pub cert_key_path: Option<String>,
 }
 
 /// Per-hosting nginx vhost configuration the operator flips from
@@ -316,6 +325,8 @@ mod tests {
             node_id: Some("test-node".into()),
             vhost_options: VhostOptions::default(),
             wp_extras: WpExtras::default(),
+            cert_path: None,
+            cert_key_path: None,
         };
         let j = serde_json::to_string(&d).expect("serialize");
         let back: HostingDetail = serde_json::from_str(&j).expect("deserialize");

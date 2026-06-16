@@ -372,6 +372,21 @@ impl ClusterConfigView {
             .replace("{hostname}", node_hostname.trim())
             .to_ascii_lowercase()
     }
+
+    /// The wildcard BASE domain for a test node — everything below an
+    /// auto-subdomain's first label. A single `*.<base>` cert covers
+    /// every `<name>.<base>` the node spins up, so it's issued once in
+    /// Settings instead of per site. `None` when the template isn't
+    /// configured or yields no safe parent (a bare TLD / single label).
+    pub fn node_wildcard_base(&self, node_id: &str, node_hostname: &str) -> Option<String> {
+        let sample = self.render_test_domain("wildcard", node_id, node_hostname);
+        let (_, rest) = sample.split_once('.')?;
+        // Refuse `*.tld` — a single-label parent is never a safe wildcard.
+        if rest.is_empty() || !rest.contains('.') {
+            return None;
+        }
+        Some(rest.to_string())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -973,6 +988,38 @@ impl Default for UpdateStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn node_wildcard_base_strips_first_label() {
+        let mut c = ClusterConfigView::default();
+        c.test_domain_template = "{name}.{node}.testovaciverze.cz".into();
+        assert_eq!(
+            c.node_wildcard_base("s4", "four").as_deref(),
+            Some("four.testovaciverze.cz")
+        );
+    }
+
+    #[test]
+    fn node_wildcard_base_refuses_bare_tld_and_unconfigured() {
+        // Single-label parent (`*.cz`) is never a safe wildcard.
+        let mut c = ClusterConfigView::default();
+        c.test_domain_template = "{name}.cz".into();
+        assert_eq!(c.node_wildcard_base("s4", "four"), None);
+        // No template configured ⇒ no base.
+        let empty = ClusterConfigView::default();
+        assert_eq!(empty.node_wildcard_base("s4", "four"), None);
+    }
+
+    #[test]
+    fn node_wildcard_base_uses_hostname_token() {
+        let mut c = ClusterConfigView::default();
+        c.test_domain_template = "{name}.{node}.lab.example.com".into();
+        // {node} resolves to the hostname (label), lower-cased.
+        assert_eq!(
+            c.node_wildcard_base("node-xyz", "Lab01").as_deref(),
+            Some("lab01.lab.example.com")
+        );
+    }
 
     #[test]
     fn hosting_stats_round_trips() {

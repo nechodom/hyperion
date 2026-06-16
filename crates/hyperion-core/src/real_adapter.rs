@@ -654,16 +654,15 @@ impl AdapterPort for RealAdapter {
     }
 
     async fn nginx_write_vhost(&self, detail: &HostingDetail) -> Result<(), AdapterError> {
-        let cert_path = format!(
-            "{}/{}/fullchain.pem",
-            self.certs_root.display(),
-            detail.domain
-        );
-        let key_path = format!(
-            "{}/{}/privkey.pem",
-            self.certs_root.display(),
-            detail.domain
-        );
+        // Explicit shared-cert paths (e.g. a test node's *.<base> wildcard
+        // reused by every auto-subdomain) win; otherwise derive the
+        // per-domain default.
+        let cert_path = detail.cert_path.clone().unwrap_or_else(|| {
+            format!("{}/{}/fullchain.pem", self.certs_root.display(), detail.domain)
+        });
+        let key_path = detail.cert_key_path.clone().unwrap_or_else(|| {
+            format!("{}/{}/privkey.pem", self.certs_root.display(), detail.domain)
+        });
         // Self-heal: if the cert files have gone missing (operator
         // manually deleted /etc/hyperion/certs/<domain>, partial
         // failure from an earlier panel version, mid-restore state),

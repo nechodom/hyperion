@@ -905,6 +905,56 @@
     </form>
   </div>
 
+  {# Node-level wildcard certs — one *.<base> per test node, reused by
+     every auto-subdomain it spins up. Issued here, not per site. #}
+  <div class="card" style="margin-top:1rem">
+    <h2 style="font-size:0.95rem;margin:0 0 0.35rem">Test-node wildcard certificates</h2>
+    <p class="text-soft small" style="margin:0 0 0.8rem">
+      Issue ONE <code>*.&lt;base&gt;</code> cert per test node and every auto-subdomain it
+      creates reuses it — instant HTTPS, no per-site Let's Encrypt rate-limit hits.
+      Renews automatically via Cloudflare. Status &amp; expiry live on the
+      <a href="/certs">Certificates page</a>.
+    </p>
+    {% if wildcard_nodes.is_empty() %}
+      <p class="text-soft small empty" style="margin:0">
+        No test nodes yet — tick a node above and set an auto-domain template first.
+      </p>
+    {% else %}
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Node</th><th>Wildcard</th><th class="right">Issue / renew</th></tr></thead>
+          <tbody>
+          {% for n in wildcard_nodes %}
+            <tr>
+              <td>
+                <strong>{{ n.label }}</strong><br>
+                <span class="text-soft small"><code>{{ n.node_id }}</code></span>
+              </td>
+              <td><code style="word-break:break-all">{{ n.wildcard }}</code></td>
+              <td class="right">
+                <form method="post" action="/settings/node-wildcard/begin"
+                      style="display:inline-flex;gap:0.4rem;flex-wrap:wrap;justify-content:flex-end">
+                  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                  <input type="hidden" name="node_id" value="{{ n.node_id }}">
+                  <button class="btn small" type="submit" name="provider" value="manual"
+                          title="Show the TXT records to publish, then validate">Manual DNS</button>
+                  <button class="btn small primary" type="submit" name="provider" value="cloudflare"
+                          title="Publish + validate via the node's Cloudflare token">Cloudflare</button>
+                </form>
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <p class="text-soft small" style="margin:0.6rem 0 0">
+        Requires control of the base domain's DNS. Cloudflare needs a token on the node
+        (<code>/etc/hyperion/cloudflare.token</code>, Zone:Read + DNS:Edit); Manual walks
+        you through the TXT records.
+      </p>
+    {% endif %}
+  </div>
+
   <div class="card muted" style="margin-top:1rem">
     <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Multi-node tips</h2>
     <ul class="text-soft small" style="margin:0;padding-left:1.2rem;line-height:1.7">

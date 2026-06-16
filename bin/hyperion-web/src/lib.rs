@@ -245,6 +245,14 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::settings::post_config),
         )
         .route(
+            "/settings/node-wildcard/begin",
+            post(handlers::settings::post_node_wildcard_begin),
+        )
+        .route(
+            "/settings/node-wildcard/finish",
+            post(handlers::settings::post_node_wildcard_finish),
+        )
+        .route(
             "/settings/panel-provision",
             post(handlers::settings::post_panel_provision),
         )
