@@ -545,6 +545,33 @@
 <!-- ============== OVERVIEW TAB ============== -->
 <div class="tab-panel" id="tab-overview">
 
+{# Quick actions — the handful of things an operator reaches for most,
+   one click away instead of hunting through tabs. #}
+<div class="row" style="gap:0.5rem;flex-wrap:wrap;margin-bottom:1rem">
+  <a class="btn" href="https://{{ detail.domain }}" target="_blank" rel="noopener noreferrer">
+    <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
+    Open site
+  </a>
+  <a class="btn" href="/hostings/{{ detail.id.as_str() }}/files">
+    <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
+    File manager
+  </a>
+  {% if let Some(_) = wp_status %}
+  <a class="btn" href="https://{{ detail.domain }}/wp-admin" target="_blank" rel="noopener noreferrer">
+    <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+    WP admin
+  </a>
+  {% endif %}
+  <form method="post" action="/hostings/backup-now" style="display:inline">
+    <input type="hidden" name="_csrf" value="{{ csrf_backup_now }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+    <button class="btn" type="submit">
+      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+      Backup now
+    </button>
+  </form>
+</div>
+
 {% if let Some(h) = health %}
 {# Composite health snapshot. The amber/red rows double as an
    onboarding to-do list for a fresh hosting. Computed server-side
