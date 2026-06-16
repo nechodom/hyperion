@@ -5322,7 +5322,7 @@ pub async fn post_wp_theme_action(
         RpcResponse::WpThemeAction(r) => {
             let msg = format!("Theme {}: {}", r.state, r.message);
             Ok(Redirect::to(&format!(
-                "/hostings/{}?{}={}#themes",
+                "/hostings/{}?{}={}#wordpress",
                 sel_url,
                 if r.state == "failed" { "wp_error" } else { "wp_flash" },
                 urlencoding(&msg)
@@ -5330,7 +5330,7 @@ pub async fn post_wp_theme_action(
             .into_response())
         }
         RpcResponse::Error(e) => Ok(Redirect::to(&format!(
-            "/hostings/{}?wp_error={}#themes",
+            "/hostings/{}?wp_error={}#wordpress",
             sel_url,
             urlencoding(&e.to_string())
         ))

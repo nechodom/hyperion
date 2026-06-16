@@ -480,10 +480,6 @@
   <a class="tab" data-tab="wordpress" href="#wordpress" role="tab">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20l9-5-9-5-9 5 9 5z"/><path d="M12 12l9-5-9-5-9 5 9 5z"/></svg>
     WordPress
-  </a>
-  <a class="tab" data-tab="themes" href="#themes" role="tab">
-    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r=".5"/><circle cx="17.5" cy="10.5" r=".5"/><circle cx="8.5" cy="7.5" r=".5"/><circle cx="6.5" cy="12.5" r=".5"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.926 0 1.648-.746 1.648-1.688 0-.437-.18-.835-.437-1.125-.29-.289-.438-.652-.438-1.125a1.64 1.64 0 0 1 1.668-1.668h1.996c3.051 0 5.555-2.503 5.555-5.554C21.965 6.012 17.461 2 12 2z"/></svg>
-    Themes
     {% if wp_themes.updates_pending > 0 %}<span class="tab-badge" style="background:var(--warn);color:white">{{ wp_themes.updates_pending }}</span>{% endif %}
   </a>
   <a class="tab" data-tab="ssl" href="#ssl" role="tab">
@@ -495,17 +491,13 @@
     Backups
     {% if !backups.is_empty() %}<span class="tab-badge">{{ backups.len() }}</span>{% endif %}
   </a>
-  <a class="tab" data-tab="logs" href="#logs" role="tab">
-    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
-    Logs
-  </a>
   <a class="tab" data-tab="cron" href="#cron" role="tab">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
     Cron
   </a>
   <a class="tab" data-tab="monitor" href="#monitor" role="tab">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
-    Monitor
+    Observability
     {% if monitor_config.enabled %}
       {% if monitor_config.alert_state == "alerting" %}
         <span class="tab-badge" style="background:var(--danger);color:white">!</span>
@@ -1430,19 +1422,9 @@
 </div>
 {% endif %}
 
-</div><!-- /tab-wordpress -->
-
-<!-- ============== THEMES TAB ============== -->
-<div class="tab-panel" id="tab-themes">
-{% if wp_status.is_none() %}
-<div class="card">
-  <h2>
-    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r=".5"/></svg>
-    Themes
-  </h2>
-  <p class="muted">WordPress isn't installed yet. Install it from the WordPress tab first; the theme manager appears here once core is on disk.</p>
-</div>
-{% else %}
+{# ── Themes — folded into the WordPress tab ── #}
+{% if wp_status.is_some() %}
+<hr class="divider" style="margin:2rem 0 1.5rem">
 <div class="card hover">
   <h2>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="13.5" cy="6.5" r=".5"/></svg>
@@ -1591,7 +1573,7 @@
   {% endif %}
 </div>
 {% endif %}
-</div><!-- /tab-themes -->
+</div><!-- /tab-wordpress (incl. themes) -->
 
 <div class="tab-panel" id="tab-settings">
 
@@ -2417,8 +2399,40 @@
 
 </div><!-- /tab-backups -->
 
-<div class="tab-panel" id="tab-logs">
+<div class="tab-panel" id="tab-cron">
 
+<div class="card hover">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+    Cron jobs
+  </h2>
+  <p class="muted" style="font-size:0.85rem;margin-top:-0.4rem;margin-bottom:0.8rem">
+    Crontab for system user <code>{{ detail.system_user }}</code>. Standard cron syntax. Lines with backticks are refused for safety.
+  </p>
+  <form method="post" action="/hostings/cron"
+        data-confirm-title="Replace crontab"
+        data-confirm-body="The crontab for {{ detail.system_user }} will be overwritten with the contents below."
+        data-confirm-confirm-label="Save crontab"
+        data-confirm-variant="primary">
+    <input type="hidden" name="_csrf" value="{{ csrf_cron }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+    <textarea name="body" rows="10" spellcheck="false" style="font-family:var(--font-mono);font-size:12.5px"
+              placeholder="# m h dom mon dow command&#10;0 3 * * * /usr/bin/php /home/{{ detail.system_user }}/{{ detail.domain }}/htdocs/wp-cron.php >/dev/null 2>&amp;1">{{ cron_body }}</textarea>
+    <div class="row" style="margin-top:0.7rem">
+      <button class="btn primary" type="submit">
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+        Save crontab
+      </button>
+      <span class="muted hint">empty body removes the crontab</span>
+    </div>
+  </form>
+</div>
+
+</div><!-- /tab-cron -->
+
+<div class="tab-panel" id="tab-monitor">
+
+{# ── Logs — folded into the Observability tab ── #}
 <div class="card hover">
   <h2>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
@@ -2477,7 +2491,7 @@
   var followTimer = null;
 
   // Remember the last log button submitted, so Follow re-fetches THAT log.
-  document.querySelectorAll('#tab-logs form[hx-post="/hostings/logs"]').forEach(function (f) {
+  document.querySelectorAll('#tab-monitor form[hx-post="/hostings/logs"]').forEach(function (f) {
     f.addEventListener('submit', function () { lastForm = f; });
   });
 
@@ -2522,40 +2536,8 @@
 })();
 </script>
 
-</div><!-- /tab-logs -->
+<hr class="divider" style="margin:2rem 0 1.5rem">
 
-<div class="tab-panel" id="tab-cron">
-
-<div class="card hover">
-  <h2>
-    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-    Cron jobs
-  </h2>
-  <p class="muted" style="font-size:0.85rem;margin-top:-0.4rem;margin-bottom:0.8rem">
-    Crontab for system user <code>{{ detail.system_user }}</code>. Standard cron syntax. Lines with backticks are refused for safety.
-  </p>
-  <form method="post" action="/hostings/cron"
-        data-confirm-title="Replace crontab"
-        data-confirm-body="The crontab for {{ detail.system_user }} will be overwritten with the contents below."
-        data-confirm-confirm-label="Save crontab"
-        data-confirm-variant="primary">
-    <input type="hidden" name="_csrf" value="{{ csrf_cron }}">
-    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
-    <textarea name="body" rows="10" spellcheck="false" style="font-family:var(--font-mono);font-size:12.5px"
-              placeholder="# m h dom mon dow command&#10;0 3 * * * /usr/bin/php /home/{{ detail.system_user }}/{{ detail.domain }}/htdocs/wp-cron.php >/dev/null 2>&amp;1">{{ cron_body }}</textarea>
-    <div class="row" style="margin-top:0.7rem">
-      <button class="btn primary" type="submit">
-        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
-        Save crontab
-      </button>
-      <span class="muted hint">empty body removes the crontab</span>
-    </div>
-  </form>
-</div>
-
-</div><!-- /tab-cron -->
-
-<div class="tab-panel" id="tab-monitor">
 <div class="card">
   <div class="spread" style="margin-bottom:0.8rem">
     <h2 style="margin:0">
