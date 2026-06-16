@@ -1639,6 +1639,42 @@
     </fieldset>
 
     <fieldset style="border:1px solid var(--border);border-radius:6px;padding:1rem;margin-bottom:1rem">
+      <legend><strong>Security (WAF-lite)</strong></legend>
+      <div class="field">
+        <label>
+          <input type="checkbox" name="waf_enabled" value="on"
+                 {% if detail.vhost_options.waf_enabled %}checked{% endif %}>
+          Enable WAF-lite request filtering
+        </label>
+      </div>
+      <p class="muted small">
+        Conservative nginx rules: deny direct access to
+        <code>wp-config.php</code>, <code>xmlrpc.php</code>, database
+        dumps and backups; block PHP execution under
+        <code>wp-content/uploads</code> and <code>cache</code>; and
+        <code>403</code> obvious probe query-strings and scanner
+        user-agents. Lighter than ModSecurity to avoid false positives.
+      </p>
+      <div class="field" style="margin-top:0.75rem">
+        <label for="wp_admin_allowlist">
+          Restrict <code>/wp-admin</code> + <code>/wp-login.php</code> to these IPs
+          <span class="hint">one IP or CIDR per line — empty = open to everyone</span>
+        </label>
+        <textarea id="wp_admin_allowlist" name="wp_admin_allowlist"
+                  rows="3" maxlength="2048"
+                  style="font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px"
+                  placeholder="203.0.113.5&#10;198.51.100.0/24&#10;2001:db8::/32">{{ detail.vhost_options.wp_admin_allowlist }}</textarea>
+      </div>
+      <p class="muted small">
+        <code>admin-ajax.php</code> stays public so themes/plugins that
+        use front-end AJAX keep working. Invalid entries are ignored.
+        Double-check your own IP is listed before saving — locking
+        yourself out of <code>/wp-admin</code> only requires clearing
+        this box and re-saving from the panel.
+      </p>
+    </fieldset>
+
+    <fieldset style="border:1px solid var(--border);border-radius:6px;padding:1rem;margin-bottom:1rem">
       <legend><strong>Custom nginx snippet</strong></legend>
       <div class="field">
         <label for="custom_nginx_snippet">

@@ -179,6 +179,19 @@ pub struct VhostOptions {
     /// `/` for every request.
     #[serde(default)]
     pub redirect_preserve_path: bool,
+
+    /// WAF-lite (migration 036). When true the vhost gets a
+    /// conservative set of nginx rules: deny direct access to
+    /// sensitive files, block PHP execution under wp-content/uploads
+    /// + cache, and 403 obvious probe query-strings / scanner
+    /// user-agents. Lighter than ModSecurity to avoid false positives.
+    #[serde(default)]
+    pub waf_enabled: bool,
+    /// Comma/newline-separated IPs or CIDRs allowed to reach
+    /// /wp-admin and /wp-login.php (migration 036). Empty = open.
+    /// admin-ajax.php is never gated so front-end AJAX keeps working.
+    #[serde(default)]
+    pub wp_admin_allowlist: String,
 }
 
 fn default_kind() -> String {

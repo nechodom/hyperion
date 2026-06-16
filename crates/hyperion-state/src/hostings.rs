@@ -300,6 +300,8 @@ type RawHostingVhost = (
     String, // redirect_url
     i64,    // redirect_code
     i64,    // redirect_preserve_path
+    i64,    // waf_enabled
+    String, // wp_admin_allowlist
 );
 
 const QUERY_BASE: &str =
@@ -313,7 +315,7 @@ const QUERY_DOMAIN: &str =
 const QUERY_VHOST_BY_ID: &str =
     "SELECT basic_auth_enabled, basic_auth_user, basic_auth_hash, force_https, hsts_max_age, \
             custom_nginx_snippet, maintenance_mode, fastcgi_cache_enabled, fastcgi_cache_ttl, \
-            redirect_url, redirect_code, redirect_preserve_path \
+            redirect_url, redirect_code, redirect_preserve_path, waf_enabled, wp_admin_allowlist \
      FROM hostings WHERE id = ?";
 
 // Third row tuple for the WP/Redis extras (migration 021). Same PK
@@ -377,6 +379,8 @@ async fn fetch_one<'a>(
             redirect_url,
             redirect_code,
             redirect_preserve_path,
+            waf_enabled,
+            wp_admin_allowlist,
         )) => hyperion_types::VhostOptions {
             basic_auth_enabled: basic_auth_enabled != 0,
             basic_auth_user,
@@ -390,6 +394,8 @@ async fn fetch_one<'a>(
             redirect_url,
             redirect_code,
             redirect_preserve_path: redirect_preserve_path != 0,
+            waf_enabled: waf_enabled != 0,
+            wp_admin_allowlist,
         },
         None => hyperion_types::VhostOptions::default(),
     };
@@ -476,7 +482,8 @@ pub async fn set_vhost_options(
             "UPDATE hostings SET basic_auth_enabled=?, basic_auth_user=?, basic_auth_hash=?, \
                 force_https=?, hsts_max_age=?, custom_nginx_snippet=?, \
                 maintenance_mode=?, fastcgi_cache_enabled=?, fastcgi_cache_ttl=?, \
-                redirect_url=?, redirect_code=?, redirect_preserve_path=?, updated_at=? \
+                redirect_url=?, redirect_code=?, redirect_preserve_path=?, \
+                waf_enabled=?, wp_admin_allowlist=?, updated_at=? \
              WHERE id = ?",
         )
         .bind(opts.basic_auth_enabled as i64)
@@ -491,6 +498,8 @@ pub async fn set_vhost_options(
         .bind(&opts.redirect_url)
         .bind(opts.redirect_code)
         .bind(opts.redirect_preserve_path as i64)
+        .bind(opts.waf_enabled as i64)
+        .bind(&opts.wp_admin_allowlist)
         .bind(now)
         .bind(id.as_str())
         .execute(pool)
@@ -500,7 +509,8 @@ pub async fn set_vhost_options(
             "UPDATE hostings SET basic_auth_enabled=?, basic_auth_user=?, \
                 force_https=?, hsts_max_age=?, custom_nginx_snippet=?, \
                 maintenance_mode=?, fastcgi_cache_enabled=?, fastcgi_cache_ttl=?, \
-                redirect_url=?, redirect_code=?, redirect_preserve_path=?, updated_at=? \
+                redirect_url=?, redirect_code=?, redirect_preserve_path=?, \
+                waf_enabled=?, wp_admin_allowlist=?, updated_at=? \
              WHERE id = ?",
         )
         .bind(opts.basic_auth_enabled as i64)
@@ -514,6 +524,8 @@ pub async fn set_vhost_options(
         .bind(&opts.redirect_url)
         .bind(opts.redirect_code)
         .bind(opts.redirect_preserve_path as i64)
+        .bind(opts.waf_enabled as i64)
+        .bind(&opts.wp_admin_allowlist)
         .bind(now)
         .bind(id.as_str())
         .execute(pool)

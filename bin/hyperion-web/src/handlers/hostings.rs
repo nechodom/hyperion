@@ -2685,6 +2685,10 @@ pub struct VhostOptionsForm {
     redirect_code: i64,
     #[serde(default)]
     redirect_preserve_path: Option<String>,
+    #[serde(default)]
+    waf_enabled: Option<String>,
+    #[serde(default)]
+    wp_admin_allowlist: String,
 }
 
 fn checkbox_on(v: &Option<String>) -> bool {
@@ -2715,6 +2719,8 @@ pub async fn post_vhost_options(
         redirect_url: form.redirect_url.trim().to_string(),
         redirect_code: form.redirect_code,
         redirect_preserve_path: checkbox_on(&form.redirect_preserve_path),
+        waf_enabled: checkbox_on(&form.waf_enabled),
+        wp_admin_allowlist: form.wp_admin_allowlist.trim().to_string(),
     };
     let pw_opt = if form.basic_auth_password.is_empty() {
         None

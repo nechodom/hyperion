@@ -91,6 +91,22 @@ server {
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
     server_tokens off;
 
+    {%- if waf_enabled %}
+    # ─── WAF-lite (operator-enabled, Settings → Security) ───
+    # `if` + `return` is one of the two officially-safe uses of `if`
+    # inside a server block. Conservative patterns only — no attempt to
+    # be a full ModSecurity ruleset, which would false-positive on
+    # legitimate WP traffic.
+    # 1. 403 obvious probe query-strings (path traversal, SQLi, RFI).
+    if ($args ~* "(\.\./|\.\.%2f|union(\s|\+|%20)+select|base64_(en|de)code\s*\(|/etc/passwd|\beval\s*\(|<script)") {
+        return 403;
+    }
+    # 2. 403 known scanner / vulnerability-probe user-agents.
+    if ($http_user_agent ~* "(nikto|sqlmap|nmap|masscan|jorgee|zgrab|wpscan|libredtail|fuzz)") {
+        return 403;
+    }
+    {%- endif %}
+
     access_log {{ logs_dir }}/access.log;
     error_log  {{ logs_dir }}/error.log;
 
@@ -112,6 +128,76 @@ server {
         default_type "text/plain";
         autoindex off;
     }
+
+    {%- if waf_enabled %}
+    # WAF-lite: deny direct access to sensitive files + dumps. These
+    # are regex locations, so they're declared before `location ~ \.php$`
+    # to win the first-match.
+    location = /xmlrpc.php { deny all; }
+    location = /wp-config.php { deny all; }
+    location = /readme.html { deny all; }
+    location = /license.txt { deny all; }
+    location ~* \.(sql|bak|old|orig|save|swp|tar|gz|tgz|zip|log|ini|sh)$ { deny all; }
+    {%- if has_php %}
+    # WAF-lite: block PHP execution under upload + cache dirs (the most
+    # common WordPress malware-drop vector).
+    location ~* /wp-content/(uploads|cache)/.*\.php$ { deny all; }
+    {%- endif %}
+    {%- endif %}
+
+    {%- if !wp_admin_allow.is_empty() %}
+    # ─── wp-admin IP allowlist (operator-enabled, Settings → Security) ───
+    # admin-ajax.php stays public: themes/plugins use it for
+    # unauthenticated front-end AJAX (carts, search, contact forms).
+    location = /wp-admin/admin-ajax.php {
+        {%- if has_php %}
+        try_files $uri =404;
+        fastcgi_split_path_info ^(.+\.php)(/.+)$;
+        fastcgi_pass unix:/run/php/{{ php_version }}/{{ system_user }}.sock;
+        fastcgi_index index.php;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_read_timeout 60s;
+        {%- endif %}
+    }
+    location = /wp-login.php {
+        {%- for cidr in wp_admin_allow %}
+        allow {{ cidr }};
+        {%- endfor %}
+        deny all;
+        {%- if has_php %}
+        try_files $uri =404;
+        fastcgi_split_path_info ^(.+\.php)(/.+)$;
+        fastcgi_pass unix:/run/php/{{ php_version }}/{{ system_user }}.sock;
+        fastcgi_index index.php;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_read_timeout 60s;
+        {%- endif %}
+    }
+    location ^~ /wp-admin/ {
+        {%- for cidr in wp_admin_allow %}
+        allow {{ cidr }};
+        {%- endfor %}
+        deny all;
+        {%- if has_php %}
+        location ~ \.php$ {
+            {%- for cidr in wp_admin_allow %}
+            allow {{ cidr }};
+            {%- endfor %}
+            deny all;
+            try_files $uri =404;
+            fastcgi_split_path_info ^(.+\.php)(/.+)$;
+            fastcgi_pass unix:/run/php/{{ php_version }}/{{ system_user }}.sock;
+            fastcgi_index index.php;
+            include fastcgi_params;
+            fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+            fastcgi_read_timeout 60s;
+        }
+        {%- endif %}
+    }
+    # ─── end wp-admin allowlist ───
+    {%- endif %}
 
     {%- if has_php %}
     location ~ \.php$ {

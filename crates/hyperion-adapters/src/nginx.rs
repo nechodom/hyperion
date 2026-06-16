@@ -46,6 +46,47 @@ struct VhostTpl<'a> {
     maintenance_mode: bool,
     fastcgi_cache_enabled: bool,
     fastcgi_cache_ttl: i64,
+    waf_enabled: bool,
+    /// Validated IP/CIDR entries allowed to reach /wp-admin. Empty =
+    /// allowlist disabled (every entry has already been checked to
+    /// parse as an IpAddr or addr/prefix, so they're safe to inline).
+    wp_admin_allow: Vec<String>,
+}
+
+/// Parse the operator's comma/newline-separated wp-admin allowlist into
+/// a list of canonical, injection-safe nginx `allow` arguments. Every
+/// entry is validated to parse as an `IpAddr` (optionally with a `/N`
+/// prefix) — anything else (including the `;{}` characters an attacker
+/// would need to break out of the directive) is dropped silently.
+pub(crate) fn parse_admin_allowlist(raw: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for tok in raw.split([',', ';', ' ', '\t', '\n', '\r']) {
+        let tok = tok.trim();
+        if tok.is_empty() {
+            continue;
+        }
+        let (addr, prefix) = match tok.split_once('/') {
+            Some((a, p)) => (a, Some(p)),
+            None => (tok, None),
+        };
+        let Ok(ip) = addr.parse::<std::net::IpAddr>() else {
+            continue;
+        };
+        match prefix {
+            None => out.push(ip.to_string()),
+            Some(p) => {
+                let Ok(bits) = p.parse::<u8>() else { continue };
+                let max = if ip.is_ipv4() { 32 } else { 128 };
+                if bits <= max {
+                    out.push(format!("{ip}/{bits}"));
+                }
+            }
+        }
+        if out.len() >= 64 {
+            break; // sanity cap — no legitimate allowlist is this long
+        }
+    }
+    out
 }
 
 /// Render the vhost file's contents without writing.
@@ -343,6 +384,8 @@ pub fn render(input: &VhostInput<'_>) -> Result<String, AdapterError> {
         maintenance_mode: input.options.maintenance_mode,
         fastcgi_cache_enabled: input.options.fastcgi_cache_enabled,
         fastcgi_cache_ttl: input.options.fastcgi_cache_ttl,
+        waf_enabled: input.options.waf_enabled,
+        wp_admin_allow: parse_admin_allowlist(&input.options.wp_admin_allowlist),
     };
     Ok(tpl.render()?)
 }
@@ -995,6 +1038,56 @@ mod tests {
         assert!(out.contains("fastcgi_cache hyperion_01HCACHE;"));
         assert!(out.contains("fastcgi_cache_valid 200 301 302 300s;"));
         assert!(out.contains("fastcgi_no_cache $cookie_wordpress_logged_in"));
+    }
+
+    #[test]
+    fn admin_allowlist_parser_rejects_injection() {
+        // Valid entries kept and canonicalised.
+        let v = parse_admin_allowlist("1.2.3.4, 10.0.0.0/8\n2001:db8::1");
+        assert_eq!(v, vec!["1.2.3.4", "10.0.0.0/8", "2001:db8::1"]);
+        // Injection attempts + garbage dropped entirely.
+        let bad = parse_admin_allowlist("1.2.3.4; } location / { deny all; }");
+        assert_eq!(bad, vec!["1.2.3.4"]);
+        assert!(parse_admin_allowlist("not-an-ip").is_empty());
+        assert!(parse_admin_allowlist("10.0.0.0/99").is_empty()); // prefix out of range
+        assert!(parse_admin_allowlist("").is_empty());
+    }
+
+    #[test]
+    fn render_waf_and_admin_allowlist() {
+        let aliases: Vec<String> = vec![];
+        let opts = hyperion_types::VhostOptions {
+            waf_enabled: true,
+            wp_admin_allowlist: "203.0.113.5, 198.51.100.0/24".into(),
+            ..Default::default()
+        };
+        let out = render(&VhostInput {
+            domain: "example.cz",
+            aliases: &aliases,
+            root_dir: "/home/example_cz/example.cz/htdocs",
+            logs_dir: "/home/example_cz/example.cz/logs",
+            system_user: "example_cz",
+            php_version: Some("8.3"),
+            cert_path: "/etc/lm/certs/example.cz/fullchain.pem",
+            key_path: "/etc/lm/certs/example.cz/privkey.pem",
+            acme_challenge_root: "/var/lib/lm/acme-challenges",
+            hosting_id: "01HWAF",
+            options: &opts,
+        })
+        .expect("render");
+        // WAF rules present.
+        assert!(out.contains("location = /xmlrpc.php { deny all; }"));
+        assert!(out.contains("/wp-content/(uploads|cache)/.*\\.php$"));
+        assert!(out.contains("nikto|sqlmap"));
+        // admin-ajax stays public (no allow/deny in its block).
+        assert!(out.contains("location = /wp-admin/admin-ajax.php {"));
+        // Allowlist applied to wp-admin + wp-login.
+        assert!(out.contains("location ^~ /wp-admin/ {"));
+        assert!(out.contains("allow 203.0.113.5;"));
+        assert!(out.contains("allow 198.51.100.0/24;"));
+        assert!(out.contains("deny all;"));
+        // The main php location still exists (general PHP still served).
+        assert!(out.contains("location ~ \\.php$ {"));
     }
 
     #[test]
