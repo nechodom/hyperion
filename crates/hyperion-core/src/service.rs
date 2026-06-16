@@ -4611,6 +4611,68 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(out)
     }
 
+    /// Scan a hosting's installed plugins + themes against the Wordfence
+    /// Intelligence feed (cached daily on the owning node) and return
+    /// the matched vulnerabilities. Best-effort: when the feed can't be
+    /// fetched the result carries `feed_unavailable = true` rather than
+    /// a misleading "all clear".
+    pub async fn wp_vuln_scan(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::WpVulnScanResult, RpcError> {
+        let detail = self.get(sel).await?;
+        if detail.state != HostingState::Active {
+            return Err(RpcError::Conflict {
+                message: "hosting must be active to scan".into(),
+            });
+        }
+        let mut items: Vec<crate::wordfence::InstalledItem> = Vec::new();
+        // Plugins.
+        if let Ok((plugins, _v)) = self
+            .adapters
+            .wp_plugin_list(&detail.system_user, &detail.root_dir)
+            .await
+        {
+            for p in plugins {
+                items.push(crate::wordfence::InstalledItem {
+                    slug: p.slug,
+                    name: p.name,
+                    version: p.version,
+                    kind: "plugin".into(),
+                });
+            }
+        }
+        // Themes.
+        if let Ok((themes, _v)) = self
+            .adapters
+            .wp_theme_list(&detail.system_user, &detail.root_dir)
+            .await
+        {
+            for t in themes {
+                items.push(crate::wordfence::InstalledItem {
+                    slug: t.slug,
+                    name: t.name,
+                    version: t.version,
+                    kind: "theme".into(),
+                });
+            }
+        }
+        let result = crate::wordfence::scan(&items).await;
+        self.append_audit(
+            "wp.vuln.scan",
+            Some(detail.id.as_str()),
+            &serde_json::json!({
+                "checked": result.checked,
+                "findings": result.findings.len(),
+                "feed_unavailable": result.feed_unavailable,
+            })
+            .to_string(),
+            if result.feed_unavailable { "failed" } else { "ok" },
+        )
+        .await;
+        Ok(result)
+    }
+
     /// Export a hosting as a self-contained migration bundle: an
     /// archive (tar+gz of htdocs + optional DB dump) plus a JSON
     /// manifest describing how to recreate the hosting on a different

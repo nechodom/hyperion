@@ -571,6 +571,12 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     ) -> Result<hyperion_types::WpThemeActionResult, RpcError> {
         self.svc.wp_theme_action(sel, slug, action).await
     }
+    async fn wp_vuln_scan(
+        &self,
+        hosting: hyperion_rpc::HostingSelector,
+    ) -> Result<hyperion_types::WpVulnScanResult, RpcError> {
+        self.svc.wp_vuln_scan(hosting).await
+    }
     async fn node_update_run(
         &self,
         do_apt: bool,

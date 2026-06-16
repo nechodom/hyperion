@@ -12,7 +12,6 @@ use crate::state::SharedState;
 use askama::Template;
 use axum::extract::State;
 use axum::response::{Html, IntoResponse, Redirect, Response};
-use axum::Form;
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
 use serde::Deserialize;
 

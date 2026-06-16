@@ -4412,6 +4412,65 @@ pub async fn get_spf_panel(
     Ok(Html(html).into_response())
 }
 
+/// Lazily-loaded WordPress vulnerability panel (Wordfence feed match).
+/// Dispatched to the OWNING node — the feed cache + wp-cli both live
+/// where the site's files are.
+#[derive(Template)]
+#[template(path = "_hosting_vuln_panel.html")]
+struct VulnPanelTpl {
+    scan: hyperion_types::WpVulnScanResult,
+    feed_age_human: String,
+}
+
+/// Render a coarse "N ago" for the feed age (seconds → human).
+fn human_age(secs: i64) -> String {
+    if secs <= 0 {
+        return "just now".into();
+    }
+    if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86_400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86_400)
+    }
+}
+
+pub async fn get_vuln_panel(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Path(selector): Path<String>,
+) -> Result<Response, AppError> {
+    let sel = parse_selector(&selector)?;
+    let (detail, owner_node) = find_hosting_anywhere(&state, sel.clone()).await?;
+    if let Err(r) = require_hosting_access(&state, &ctx, detail.id.as_str(), false).await {
+        return Ok(r);
+    }
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        owner_node.as_deref(),
+        Request::WpVulnScan { hosting: sel },
+    )
+    .await;
+    let html = match resp {
+        Ok(RpcResponse::WpVulnScan(scan)) => {
+            let feed_age_human = human_age(scan.feed_age_secs);
+            VulnPanelTpl { scan, feed_age_human }.render()?
+        }
+        // On any failure render the "couldn't check" state rather than
+        // a blank corner — the operator should know the scan didn't run.
+        _ => VulnPanelTpl {
+            scan: hyperion_types::WpVulnScanResult {
+                feed_unavailable: true,
+                ..Default::default()
+            },
+            feed_age_human: String::new(),
+        }
+        .render()?,
+    };
+    Ok(Html(html).into_response())
+}
+
 #[derive(Deserialize)]
 pub struct CertIssueForm {
     pub selector: String,

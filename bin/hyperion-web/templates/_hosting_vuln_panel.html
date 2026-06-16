@@ -1,0 +1,56 @@
+{# WordPress vulnerability panel — lazily swapped into the hosting
+   detail page via hx-get="/hostings/:sel/vuln-panel". Matches installed
+   plugins + themes against the Wordfence Intelligence feed (cached on
+   the owning node). #}
+<div class="card hover">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+    Vulnerability scan
+    {% if scan.feed_unavailable %}<span class="pill warn" style="margin-left:0.4rem;font-size:0.65rem">feed unavailable</span>
+    {% else if scan.findings.is_empty() %}<span class="pill ok" style="margin-left:0.4rem;font-size:0.65rem">no known issues</span>
+    {% else %}<span class="pill err" style="margin-left:0.4rem;font-size:0.65rem">{{ scan.findings.len() }} found</span>{% endif %}
+  </h2>
+  {% if scan.feed_unavailable %}
+    <p class="muted" style="margin:-0.3rem 0 0.5rem;font-size:0.85rem">
+      Couldn't reach the Wordfence vulnerability feed from this node, so the
+      scan didn't run. This is a network/firewall issue, not a clean result —
+      re-run once the node can reach <code>wordfence.com</code>.
+    </p>
+    <button class="btn btn-sm" hx-get="vuln-panel" hx-target="closest .card" hx-swap="outerHTML">Retry scan</button>
+  {% else %}
+    <p class="muted" style="margin:-0.3rem 0 0.75rem;font-size:0.82rem">
+      Checked {{ scan.checked }} plugin(s) + theme(s) against the Wordfence feed
+      (updated {{ feed_age_human }}).
+    </p>
+    {% if scan.findings.is_empty() %}
+      <p class="text-soft" style="font-size:0.9rem">
+        No known vulnerabilities match the installed versions. Keep plugins and
+        themes updated — new advisories appear daily.
+      </p>
+    {% else %}
+      <div style="display:flex;flex-direction:column;gap:0.6rem">
+        {% for f in scan.findings %}
+        <div style="border:1px solid var(--border);border-radius:var(--radius-xs);padding:0.6rem 0.75rem;background:var(--bg-2)">
+          <div style="display:flex;align-items:center;gap:0.4rem;flex-wrap:wrap">
+            {% if f.severity == "critical" %}<span class="pill err" style="font-size:0.62rem">CRITICAL</span>
+            {% else if f.severity == "high" %}<span class="pill err" style="font-size:0.62rem">HIGH</span>
+            {% else if f.severity == "medium" %}<span class="pill warn" style="font-size:0.62rem">MEDIUM</span>
+            {% else if f.severity == "low" %}<span class="pill" style="font-size:0.62rem">LOW</span>
+            {% else %}<span class="pill" style="font-size:0.62rem">UNKNOWN</span>{% endif %}
+            <strong style="font-size:0.9rem">{{ f.name }}</strong>
+            <span class="text-soft" style="font-size:0.78rem">({{ f.kind }} <code>{{ f.slug }}</code> {{ f.installed_version }})</span>
+          </div>
+          <div style="font-size:0.85rem;margin-top:0.3rem">{{ f.title }}</div>
+          <div class="muted" style="font-size:0.78rem;margin-top:0.3rem">
+            {% if !f.patched_version.is_empty() %}Fixed in <strong>{{ f.patched_version }}</strong> — update now.{% else %}No fixed version published yet — consider deactivating until patched.{% endif %}
+            {% if !f.cve.is_empty() %} · <a href="https://nvd.nist.gov/vuln/detail/{{ f.cve }}" target="_blank" rel="noopener noreferrer">{{ f.cve }}</a>{% endif %}
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+    {% endif %}
+    <div style="margin-top:0.75rem">
+      <button class="btn btn-sm" hx-get="vuln-panel" hx-target="closest .card" hx-swap="outerHTML">Re-scan</button>
+    </div>
+  {% endif %}
+</div>

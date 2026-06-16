@@ -348,6 +348,11 @@ pub trait AgentApi: Send + Sync + 'static {
         slug: String,
         action: hyperion_types::WpThemeAction,
     ) -> Result<hyperion_types::WpThemeActionResult, RpcError>;
+    /// Scan installed plugins + themes against the Wordfence feed.
+    async fn wp_vuln_scan(
+        &self,
+        hosting: HostingSelector,
+    ) -> Result<hyperion_types::WpVulnScanResult, RpcError>;
     /// Start a background node-update job. Returns the unix
     /// timestamp the job started at. `NodeUpdateStatus` polls the
     /// log tail + state.

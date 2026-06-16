@@ -95,6 +95,37 @@ pub struct WpPluginListResponse {
     pub bulk_auto_update: bool,
 }
 
+/// One known vulnerability affecting an installed plugin/theme,
+/// matched against the Wordfence Intelligence feed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct WpVulnFinding {
+    pub slug: String,
+    pub name: String,
+    pub installed_version: String,
+    pub title: String,
+    /// "critical" | "high" | "medium" | "low" | "unknown".
+    pub severity: String,
+    /// CVE id, or "" when none is assigned.
+    pub cve: String,
+    /// First patched version, or "" when unknown.
+    pub patched_version: String,
+    /// "plugin" | "theme".
+    pub kind: String,
+}
+
+/// Result of a WordPress vulnerability scan against the Wordfence feed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct WpVulnScanResult {
+    pub findings: Vec<WpVulnFinding>,
+    /// True when the feed couldn't be fetched/parsed (offline, etc.) —
+    /// the UI shows "couldn't check" rather than a false "all clear".
+    pub feed_unavailable: bool,
+    /// Age of the cached feed in seconds (for a "checked N ago" note).
+    pub feed_age_secs: i64,
+    /// Plugins/themes actually checked.
+    pub checked: i64,
+}
+
 /// Whitelisted plugin actions exposed via the web UI. Anything not
 /// in this enum cannot be invoked from a form — the wp-cli surface
 /// is large and we'd rather grow it deliberately than expose

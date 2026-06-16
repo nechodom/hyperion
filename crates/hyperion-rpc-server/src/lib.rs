@@ -504,6 +504,10 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::WpVulnScan { hosting } => match api.wp_vuln_scan(hosting).await {
+            Ok(r) => Response::WpVulnScan(r),
+            Err(e) => Response::Error(e),
+        },
         Request::NodeUpdateRun { do_apt, do_hyperion } => {
             match api.node_update_run(do_apt, do_hyperion).await {
                 Ok(started_at) => Response::NodeUpdateRun { started_at },
@@ -1441,6 +1445,12 @@ mod tests {
                 message: "stub".into(),
                 output_tail: String::new(),
             })
+        }
+        async fn wp_vuln_scan(
+            &self,
+            _: HostingSelector,
+        ) -> Result<hyperion_types::WpVulnScanResult, RpcError> {
+            Ok(hyperion_types::WpVulnScanResult::default())
         }
         async fn service_install(&self, _: String) -> Result<(), RpcError> {
             Ok(())

@@ -429,6 +429,10 @@ pub fn build_router(state: SharedState) -> Router {
             "/hostings/:selector/spf-panel",
             get(handlers::hostings::get_spf_panel),
         )
+        .route(
+            "/hostings/:selector/vuln-panel",
+            get(handlers::hostings::get_vuln_panel),
+        )
         .route("/logout", post(handlers::login::post_logout))
         // Tiny role echo for the nav-hiding shim in base.html.
         // Returns "super_admin" | "admin" | "operator" | "viewer".

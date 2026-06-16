@@ -293,6 +293,11 @@ pub enum Request {
         slug: String,
         action: hyperion_types::WpThemeAction,
     },
+    /// Scan a hosting's installed plugins + themes against the
+    /// Wordfence Intelligence feed (cached on the owning node).
+    WpVulnScan {
+        hosting: HostingSelector,
+    },
     /// Run system + hyperion updates on the target node. Both jobs
     /// run in the background; the call returns immediately with a
     /// "started" marker. Operator polls `NodeUpdateStatus` (see
@@ -1016,6 +1021,7 @@ pub enum Response {
     },
     WpThemeList(hyperion_types::WpThemeListResponse),
     WpThemeAction(hyperion_types::WpThemeActionResult),
+    WpVulnScan(hyperion_types::WpVulnScanResult),
     /// Acknowledgement that the background update task spawned.
     /// Failures during the actual update show up in the log tail,
     /// not here.

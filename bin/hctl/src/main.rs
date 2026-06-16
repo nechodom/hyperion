@@ -1237,6 +1237,32 @@ fn print_pretty(resp: &Response) {
             println!("theme action: {}", r.state);
             println!("  {}", r.message);
         }
+        Response::WpVulnScan(r) => {
+            if r.feed_unavailable {
+                println!("vuln scan: feed unavailable (checked {})", r.checked);
+            } else {
+                println!(
+                    "vuln scan: {} finding(s) across {} item(s)",
+                    r.findings.len(),
+                    r.checked
+                );
+                for f in &r.findings {
+                    println!(
+                        "  [{}] {} {} ({}) — {}{}",
+                        f.severity,
+                        f.kind,
+                        f.slug,
+                        f.installed_version,
+                        f.title,
+                        if f.patched_version.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" → fixed in {}", f.patched_version)
+                        }
+                    );
+                }
+            }
+        }
         Response::ServiceInstallStatus(s) => {
             if s.started_at == 0 {
                 println!("no service install has run on this node");
