@@ -210,10 +210,6 @@ struct DetailTpl<'a> {
     /// safe default for backwards compatibility with single-node
     /// setups.
     target_node: String,
-    /// Enrolled remote nodes — drives the one-click "Migrate to…"
-    /// dropdown on the Migration tab. Empty on single-node setups
-    /// (the dropdown hides itself in that case).
-    all_nodes: Vec<hyperion_types::NodeSummary>,
     /// Uploaded plugin/theme ZIPs from the master's library —
     /// drives the "Install from library" dropdown on the WP tab.
     /// Library lives on the MASTER (the master web is what
@@ -1199,7 +1195,6 @@ pub async fn post_create(
                 ftp_login_ok: None,
                 csrf_token: super::session_csrf_token(&state, &ctx),
                 target_node: target.unwrap_or("").to_string(),
-                all_nodes: fetch_remote_nodes(&state).await.unwrap_or_default(),
                 wp_assets: fetch_wp_assets(&state).await.unwrap_or_default(),
                 wp_themes: hyperion_types::WpThemeListResponse::default(),
                 csrf_vhost_options: csrf_token_for(&state, &ctx, "/hostings/vhost-options"),
@@ -1876,7 +1871,6 @@ pub async fn get_detail(
         ftp_login_ok,
         csrf_token: super::session_csrf_token(&state, &ctx),
         target_node: owner_node.clone().unwrap_or_default(),
-        all_nodes: fetch_remote_nodes(&state).await.unwrap_or_default(),
         wp_assets: fetch_wp_assets(&state).await.unwrap_or_default(),
         wp_themes,
         csrf_vhost_options: csrf_token_for(&state, &ctx, "/hostings/vhost-options"),
