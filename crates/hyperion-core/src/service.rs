@@ -4556,6 +4556,32 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 }
             }
         }
+
+        // Node-wide source: sshd auth-failure floods. Banned with
+        // hosting_id = None since SSH isn't tied to one site.
+        const SSH_THRESHOLD: u32 = 8;
+        for ip in scan_sshd_journal_for_bruteforce(WINDOW_SECS, SSH_THRESHOLD).await {
+            if hyperion_state::bans::is_active(&self.pool, &ip, now)
+                .await
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            if self
+                .ban_add(
+                    ip.clone(),
+                    None,
+                    "auto: ssh brute force".into(),
+                    BAN_TTL_SECS,
+                    "auto".into(),
+                )
+                .await
+                .is_ok()
+            {
+                new_bans += 1;
+                tracing::info!(ip = %ip, "fail2ban: auto-banned (ssh)");
+            }
+        }
         Ok(new_bans)
     }
 
@@ -13398,6 +13424,56 @@ async fn nft_unban(ip: &str) {
         &["delete", "element", "inet", "hyperion", "banned", "{", ip, "}"],
     )
     .await;
+}
+
+/// Scan the recent sshd journal for auth-failure floods. Runs
+/// `journalctl` over the ssh unit for the last `window_secs` and counts
+/// failed-auth lines per source IPv4. Returns IPs at/over `threshold`.
+/// Empty on any error (no journalctl / no systemd) — SSH banning is
+/// then simply a no-op, never a hard failure of the tick.
+async fn scan_sshd_journal_for_bruteforce(window_secs: i64, threshold: u32) -> Vec<String> {
+    let mins = (window_secs / 60).max(1);
+    let since = format!("{mins} min ago");
+    let out = match hyperion_adapters::cmd::run(
+        "/usr/bin/journalctl",
+        &[
+            "-u", "ssh", "-u", "sshd", "--since", &since, "--no-pager", "-q", "-o", "cat",
+        ],
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    use std::collections::HashMap;
+    let mut counts: HashMap<String, u32> = HashMap::new();
+    for line in out.lines() {
+        let is_fail = line.contains("Failed password")
+            || line.contains("Failed publickey")
+            || line.contains("Invalid user")
+            || line.contains("authentication failure")
+            || line.contains("Connection closed by authenticating user");
+        if !is_fail {
+            continue;
+        }
+        // sshd writes "… from <ip> port …" for most lines and
+        // "rhost=<ip>" for PAM "authentication failure" lines.
+        let ip = if let Some(p) = line.find(" from ") {
+            line[p + 6..].split_whitespace().next().unwrap_or("")
+        } else if let Some(p) = line.find("rhost=") {
+            line[p + 6..].split_whitespace().next().unwrap_or("")
+        } else {
+            ""
+        };
+        if ip.parse::<std::net::Ipv4Addr>().is_ok() {
+            *counts.entry(ip.to_string()).or_insert(0) += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .filter(|(_, c)| *c >= threshold)
+        .map(|(ip, _)| ip)
+        .collect()
 }
 
 /// Scan an nginx access.log (combined format) for brute-force probes:

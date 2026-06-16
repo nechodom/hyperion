@@ -18,13 +18,24 @@ use std::sync::Mutex;
 /// a 5-minute window. Resets on successful login.
 struct ThrottleState {
     by_ip: std::collections::HashMap<String, (u32, i64)>,
+    /// Per-IP count of requests that arrived while ALREADY rate-limited
+    /// (i.e. got a 429). A human stops after the "wait 15 min" page; a
+    /// bot keeps hammering — so crossing `FIREWALL_BAN_AFTER_BLOCKS`
+    /// here is a strong attacker signal and triggers a firewall ban.
+    blocked: std::collections::HashMap<String, (u32, i64)>,
 }
 static THROTTLE: once_cell::sync::Lazy<Mutex<ThrottleState>> =
     once_cell::sync::Lazy::new(|| {
         Mutex::new(ThrottleState {
             by_ip: std::collections::HashMap::new(),
+            blocked: std::collections::HashMap::new(),
         })
     });
+
+/// Number of post-rate-limit (429) hits from one IP within the window
+/// before we escalate to a network-level firewall ban. Set high so only
+/// automated hammering — never a frustrated human — trips it.
+const FIREWALL_BAN_AFTER_BLOCKS: u32 = 20;
 
 // Sliding window — 5 failed attempts per IP within 15 minutes. Bumped
 // from 5min to 15min after staging-env brute-force tests showed an
@@ -76,6 +87,22 @@ fn record_failure(ip: &str) {
 fn clear_throttle(ip: &str) {
     let mut s = THROTTLE.lock().expect("login throttle mutex poisoned");
     s.by_ip.remove(ip);
+    s.blocked.remove(ip);
+}
+
+/// Record one request that hit the rate limit (429) and return the
+/// running count within the window. The caller fires a firewall ban
+/// when the count reaches `FIREWALL_BAN_AFTER_BLOCKS`.
+fn register_block(ip: &str) -> u32 {
+    let now = hyperion_types::now_secs();
+    let mut s = THROTTLE.lock().expect("login throttle mutex poisoned");
+    s.blocked.retain(|_, (_, ts)| now - *ts < THROTTLE_WINDOW_SECS);
+    let entry = s.blocked.entry(ip.to_string()).or_insert((0, now));
+    if now - entry.1 >= THROTTLE_WINDOW_SECS {
+        *entry = (0, now);
+    }
+    entry.0 += 1;
+    entry.0
 }
 
 #[derive(Template)]
@@ -132,6 +159,24 @@ pub async fn post_login(
     let ip = caller_ip(&headers);
     if !check_throttle(&ip) {
         tracing::warn!(ip = %ip, "login throttled");
+        // Defense in depth: an IP that keeps hammering AFTER the 429 is a
+        // bot, not a human — drop it at the firewall (nftables) so it
+        // can't keep hitting the panel. Fire exactly once at the
+        // threshold; ban_add is idempotent + auto-expires in an hour.
+        if ip != "unknown" && register_block(&ip) == FIREWALL_BAN_AFTER_BLOCKS {
+            let _ = hyperion_rpc_client::call(
+                &state.agent_socket,
+                hyperion_rpc::codec::Request::BanAdd {
+                    ip: ip.clone(),
+                    hosting_id: None,
+                    reason: "auto: panel login brute force".into(),
+                    ttl_secs: 3600,
+                    source: "auto".into(),
+                },
+            )
+            .await;
+            tracing::warn!(ip = %ip, "fail2ban: firewall-banned persistent panel attacker");
+        }
         return Ok((
             StatusCode::TOO_MANY_REQUESTS,
             [("retry-after", "300")],
