@@ -6965,3 +6965,79 @@ pub async fn post_restore_as_new(
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }
+
+#[derive(Deserialize)]
+pub struct StagingForm {
+    pub selector: String,
+}
+
+/// Create a staging.<domain> copy of a WordPress site.
+pub async fn post_wp_staging_create(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<StagingForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let sel_url = urlencoding(&form.selector);
+    let target: Option<String> = find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target.as_deref(),
+        Request::WpStagingCreate { sel },
+    )
+    .await?;
+    match resp {
+        RpcResponse::WpStagingCreate { staging_domain } => Ok(Redirect::to(&format!(
+            "/hostings/{}?created=1",
+            urlencoding(&staging_domain)
+        ))
+        .into_response()),
+        RpcResponse::Error(e) => {
+            let msg = urlencoding(&e.to_string());
+            Ok(Redirect::to(&format!("/hostings/{}?staging_error={}#wordpress", sel_url, msg))
+                .into_response())
+        }
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+/// Push the staging copy back over production.
+pub async fn post_wp_staging_push(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<StagingForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let sel_url = urlencoding(&form.selector);
+    let target: Option<String> = find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target.as_deref(),
+        Request::WpStagingPush { sel },
+    )
+    .await?;
+    match resp {
+        RpcResponse::WpStagingPush => {
+            Ok(Redirect::to(&format!("/hostings/{}?staging=pushed#wordpress", sel_url))
+                .into_response())
+        }
+        RpcResponse::Error(e) => {
+            let msg = urlencoding(&e.to_string());
+            Ok(Redirect::to(&format!("/hostings/{}?staging_error={}#wordpress", sel_url, msg))
+                .into_response())
+        }
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}

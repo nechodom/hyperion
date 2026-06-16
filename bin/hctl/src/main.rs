@@ -1308,6 +1308,10 @@ fn print_pretty(resp: &Response) {
                 }
             }
         }
+        Response::WpStagingCreate { staging_domain } => {
+            println!("✓ staging site created: {staging_domain}");
+        }
+        Response::WpStagingPush => println!("✓ staging pushed to production"),
         Response::ServiceInstallStatus(s) => {
             if s.started_at == 0 {
                 println!("no service install has run on this node");

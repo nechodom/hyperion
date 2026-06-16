@@ -12723,6 +12723,177 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
         Ok((created.id.as_str().to_string(), new_dom.as_str().to_string()))
     }
+
+    /// Best-effort `wp search-replace //from //to` + cache flush on a
+    /// WordPress install. Runs wp-cli directly (same path as
+    /// wp_reset_password). A non-WP site or wp-cli hiccup is logged, not
+    /// fatal — the caller has already moved the files + DB.
+    async fn wp_rewrite_domain(&self, system_user: &str, root_dir: &str, from: &str, to: &str) {
+        let old_url = format!("//{from}");
+        let new_url = format!("//{to}");
+        let sr = [
+            "search-replace",
+            old_url.as_str(),
+            new_url.as_str(),
+            "--all-tables",
+            "--skip-columns=guid",
+            "--report-changed-only",
+        ];
+        let argv = hyperion_adapters::wpcli::build_argv(system_user, root_dir, &sr);
+        let refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+        match hyperion_adapters::cmd::run("/usr/bin/sudo", &refs).await {
+            Ok(_) => {
+                let flush = hyperion_adapters::wpcli::build_argv(
+                    system_user,
+                    root_dir,
+                    &["cache", "flush"],
+                );
+                let frefs: Vec<&str> = flush.iter().map(String::as_str).collect();
+                let _ = hyperion_adapters::cmd::run("/usr/bin/sudo", &frefs).await;
+            }
+            Err(e) => tracing::info!(error = %e, "wp_rewrite_domain skipped (non-WP or wp-cli error)"),
+        }
+    }
+
+    /// Recursively chown a hosting's home tree to its system user — needed
+    /// after restoring an archive that belonged to a *different* user
+    /// (staging ↔ prod), where tar preserves the source uid.
+    async fn chown_home_tree(&self, system_user: &str, domain: &str) -> Result<(), RpcError> {
+        let host_root = format!("{}/{}/{}", self.paths.home_root, system_user, domain);
+        let owner = format!("{system_user}:{system_user}");
+        hyperion_adapters::cmd::run("/usr/bin/chown", &["-R", &owner, &host_root])
+            .await
+            .map_err(|e| RpcError::ProvisioningFailed {
+                stage: "chown".into(),
+                reason: e.to_string(),
+            })?;
+        Ok(())
+    }
+
+    fn staging_domain_for(domain: &str) -> String {
+        format!("staging.{domain}")
+    }
+
+    /// Create a `staging.<domain>` copy of a WordPress (or any) hosting:
+    /// provision a sibling hosting, copy prod's files + DB into it, fix
+    /// ownership, and rewrite the WP URL to the staging domain. The
+    /// staging site is flagged no-index. Same-node only.
+    pub async fn wp_staging_create(&self, sel: HostingSelector) -> Result<String, RpcError> {
+        let prod = self.get(sel).await?;
+        let staging_domain = Self::staging_domain_for(&prod.domain);
+        let staging_dom =
+            hyperion_validate::Domain::parse(&staging_domain).map_err(|e| RpcError::Validation {
+                message: format!("staging domain invalid: {e}"),
+            })?;
+        // Refuse if a staging site already exists — push/refresh is a
+        // separate, explicit action.
+        if self
+            .get(HostingSelector::Domain(staging_dom.clone()))
+            .await
+            .is_ok()
+        {
+            return Err(RpcError::Conflict {
+                message: format!("{staging_domain} already exists — push or delete it first"),
+            });
+        }
+
+        // 1. Snapshot prod (also our restore source).
+        let run = self.backup_now(HostingSelector::Id(prod.id.clone())).await?;
+        let archive = run.archive_path.ok_or_else(|| RpcError::ProvisioningFailed {
+            stage: "staging_backup".into(),
+            reason: "prod backup produced no archive".into(),
+        })?;
+
+        // 2. Provision the staging hosting mirroring prod.
+        let create = HostingCreateReq {
+            domain: staging_dom.clone(),
+            aliases: vec![],
+            php_version: prod.php_version,
+            database: prod.database.as_ref().map(|d| d.engine),
+            system_user: None,
+            kind: prod.kind.clone(),
+            proxy_upstream_url: prod.proxy_upstream_url.clone(),
+        };
+        let created = self.create(create).await?;
+
+        // 3. Restore prod's snapshot into staging, fix ownership, rewrite.
+        if let Err(e) = self
+            .backup_restore(
+                HostingSelector::Id(created.id.clone()),
+                archive,
+                hyperion_types::BackupRestoreMode::FilesAndDb,
+            )
+            .await
+        {
+            let _ = self
+                .delete(
+                    HostingSelector::Id(created.id.clone()),
+                    DeleteOpts { keep_user: false, keep_database: false },
+                )
+                .await;
+            return Err(e);
+        }
+        let staging = self.get(HostingSelector::Id(created.id.clone())).await?;
+        self.chown_home_tree(&staging.system_user, &staging.domain).await?;
+        self.wp_rewrite_domain(&staging.system_user, &staging.root_dir, &prod.domain, &staging_domain)
+            .await;
+
+        self.append_audit(
+            "wp.staging.create",
+            Some(prod.id.as_str()),
+            &serde_json::json!({"prod": prod.domain, "staging": staging_domain}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(staging_domain)
+    }
+
+    /// Push a `staging.<domain>` site back over production: take a
+    /// pre-push safety backup of prod, copy staging's files + DB onto
+    /// prod, fix ownership, and rewrite the WP URL back to the prod
+    /// domain. Same-node only.
+    pub async fn wp_staging_push(&self, sel: HostingSelector) -> Result<(), RpcError> {
+        let prod = self.get(sel).await?;
+        let staging_domain = Self::staging_domain_for(&prod.domain);
+        let staging_dom =
+            hyperion_validate::Domain::parse(&staging_domain).map_err(|e| RpcError::Validation {
+                message: format!("staging domain invalid: {e}"),
+            })?;
+        let staging = self
+            .get(HostingSelector::Domain(staging_dom))
+            .await
+            .map_err(|_| RpcError::Conflict {
+                message: format!("no {staging_domain} to push — create a staging site first"),
+            })?;
+
+        // 1. Pre-push safety backup of prod (so a bad push is recoverable).
+        let _ = self.backup_now(HostingSelector::Id(prod.id.clone())).await?;
+        // 2. Snapshot staging — our push source.
+        let run = self.backup_now(HostingSelector::Id(staging.id.clone())).await?;
+        let archive = run.archive_path.ok_or_else(|| RpcError::ProvisioningFailed {
+            stage: "staging_backup".into(),
+            reason: "staging backup produced no archive".into(),
+        })?;
+        // 3. Restore staging's snapshot over prod, fix ownership, rewrite.
+        self.backup_restore(
+            HostingSelector::Id(prod.id.clone()),
+            archive,
+            hyperion_types::BackupRestoreMode::FilesAndDb,
+        )
+        .await?;
+        self.chown_home_tree(&prod.system_user, &prod.domain).await?;
+        self.wp_rewrite_domain(&prod.system_user, &prod.root_dir, &staging_domain, &prod.domain)
+            .await;
+
+        self.append_audit(
+            "wp.staging.push",
+            Some(prod.id.as_str()),
+            &serde_json::json!({"prod": prod.domain, "staging": staging_domain}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
 }
 
 fn node_stats_from(

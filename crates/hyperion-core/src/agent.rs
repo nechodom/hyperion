@@ -593,6 +593,17 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     ) -> Result<hyperion_types::WpVulnScanResult, RpcError> {
         self.svc.wp_vuln_scan(hosting).await
     }
+
+    async fn wp_staging_create(
+        &self,
+        sel: hyperion_rpc::HostingSelector,
+    ) -> Result<String, RpcError> {
+        self.svc.wp_staging_create(sel).await
+    }
+
+    async fn wp_staging_push(&self, sel: hyperion_rpc::HostingSelector) -> Result<(), RpcError> {
+        self.svc.wp_staging_push(sel).await
+    }
     async fn node_update_run(
         &self,
         do_apt: bool,

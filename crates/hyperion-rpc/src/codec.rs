@@ -311,6 +311,16 @@ pub enum Request {
     WpVulnScan {
         hosting: HostingSelector,
     },
+    /// Create a `staging.<domain>` copy of a hosting (files + DB + WP
+    /// URL rewrite). Same-node only.
+    WpStagingCreate {
+        sel: HostingSelector,
+    },
+    /// Push the `staging.<domain>` site back over production, after a
+    /// pre-push safety backup of prod.
+    WpStagingPush {
+        sel: HostingSelector,
+    },
     /// Run system + hyperion updates on the target node. Both jobs
     /// run in the background; the call returns immediately with a
     /// "started" marker. Operator polls `NodeUpdateStatus` (see
@@ -1094,6 +1104,8 @@ pub enum Response {
     WpThemeList(hyperion_types::WpThemeListResponse),
     WpThemeAction(hyperion_types::WpThemeActionResult),
     WpVulnScan(hyperion_types::WpVulnScanResult),
+    WpStagingCreate { staging_domain: String },
+    WpStagingPush,
     /// Acknowledgement that the background update task spawned.
     /// Failures during the actual update show up in the log tail,
     /// not here.

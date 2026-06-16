@@ -165,6 +165,14 @@ pub fn build_router(state: SharedState) -> Router {
             "/hostings/:selector/sftp-panel",
             get(handlers::hostings::get_sftp_panel),
         )
+        .route(
+            "/hostings/wp/staging/create",
+            post(handlers::hostings::post_wp_staging_create),
+        )
+        .route(
+            "/hostings/wp/staging/push",
+            post(handlers::hostings::post_wp_staging_push),
+        )
         .route("/hostings/ban", post(handlers::hostings::post_ban))
         .route(
             "/hostings/:selector/bans-panel",

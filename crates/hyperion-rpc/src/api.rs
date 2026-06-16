@@ -365,6 +365,10 @@ pub trait AgentApi: Send + Sync + 'static {
         &self,
         hosting: HostingSelector,
     ) -> Result<hyperion_types::WpVulnScanResult, RpcError>;
+    /// Create a staging.<domain> copy of a hosting. Returns the domain.
+    async fn wp_staging_create(&self, sel: HostingSelector) -> Result<String, RpcError>;
+    /// Push the staging copy back over production.
+    async fn wp_staging_push(&self, sel: HostingSelector) -> Result<(), RpcError>;
     /// Start a background node-update job. Returns the unix
     /// timestamp the job started at. `NodeUpdateStatus` polls the
     /// log tail + state.
