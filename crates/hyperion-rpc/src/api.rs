@@ -891,7 +891,25 @@ pub trait AgentApi: Send + Sync + 'static {
         &self,
         sel: HostingSelector,
         archive_path: String,
+        mode: hyperion_types::BackupRestoreMode,
     ) -> Result<(), RpcError>;
+    /// Stream one slice of a backup archive for download. Returns
+    /// (base64 data, total size, filename, eof). `len == 0` ⇒ metadata
+    /// only (empty data).
+    async fn backup_fetch_chunk(
+        &self,
+        backup_id: i64,
+        offset: u64,
+        len: u32,
+    ) -> Result<(String, u64, String, bool), RpcError>;
+    /// Restore an archive into a new hosting at `new_domain`. Returns
+    /// (hosting_id, domain) of the created hosting.
+    async fn backup_restore_as_new(
+        &self,
+        sel: HostingSelector,
+        archive_path: String,
+        new_domain: String,
+    ) -> Result<(String, String), RpcError>;
 
     // ── Bell-icon notification feed (in-app) ──────────────────────
     /// Recent N notifications + unread total for the given user.

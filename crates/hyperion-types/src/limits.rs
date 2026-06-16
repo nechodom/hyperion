@@ -145,6 +145,67 @@ pub struct BackupRunWire {
     pub error_message: Option<String>,
 }
 
+/// What a `BackupRestore` should put back. Lets the operator restore
+/// just the database (e.g. after a bad plugin update mangled options)
+/// without clobbering files they've changed since, or just the files
+/// without rolling back the DB.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BackupRestoreMode {
+    /// Full restore — extract the archive over htdocs AND import the
+    /// sibling SQL dump. The historical behaviour.
+    #[default]
+    FilesAndDb,
+    /// Import the SQL dump only; leave htdocs untouched.
+    DbOnly,
+    /// Extract the archive over htdocs only; leave the database alone.
+    FilesOnly,
+}
+
+impl BackupRestoreMode {
+    pub fn restores_files(self) -> bool {
+        matches!(self, Self::FilesAndDb | Self::FilesOnly)
+    }
+    pub fn restores_db(self) -> bool {
+        matches!(self, Self::FilesAndDb | Self::DbOnly)
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FilesAndDb => "files_and_db",
+            Self::DbOnly => "db_only",
+            Self::FilesOnly => "files_only",
+        }
+    }
+}
+
+#[cfg(test)]
+mod restore_mode_tests {
+    use super::BackupRestoreMode;
+
+    #[test]
+    fn mode_gates() {
+        assert!(BackupRestoreMode::FilesAndDb.restores_files());
+        assert!(BackupRestoreMode::FilesAndDb.restores_db());
+        assert!(BackupRestoreMode::DbOnly.restores_db());
+        assert!(!BackupRestoreMode::DbOnly.restores_files());
+        assert!(BackupRestoreMode::FilesOnly.restores_files());
+        assert!(!BackupRestoreMode::FilesOnly.restores_db());
+    }
+
+    #[test]
+    fn default_is_full() {
+        assert_eq!(BackupRestoreMode::default(), BackupRestoreMode::FilesAndDb);
+    }
+
+    #[test]
+    fn round_trips_snake_case() {
+        let j = serde_json::to_string(&BackupRestoreMode::DbOnly).unwrap();
+        assert_eq!(j, "\"db_only\"");
+        let back: BackupRestoreMode = serde_json::from_str(&j).unwrap();
+        assert_eq!(back, BackupRestoreMode::DbOnly);
+    }
+}
+
 /// One pending node enrollment invite — what the operator sees in /install.
 /// The plaintext token is NEVER persisted; it's returned only once when
 /// the invite is minted.

@@ -4964,6 +4964,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         if let Err(restore_err) = self.backup_restore(
             HostingSelector::Id(created.id.clone()),
             restore_path,
+            hyperion_types::BackupRestoreMode::FilesAndDb,
         )
         .await
         {
@@ -11998,6 +11999,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         &self,
         sel: HostingSelector,
         archive_path: String,
+        mode: hyperion_types::BackupRestoreMode,
     ) -> Result<(), RpcError> {
         let detail = self.get(sel).await?;
         // Whitelist the path — must live under one of OUR backup roots.
@@ -12031,64 +12033,277 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             });
         }
 
-        // 1. Extract tar.gz over the hosting root.
+        // 1. Extract tar.gz over the hosting root (unless db-only).
         let host_root = std::path::PathBuf::from(&self.paths.home_root)
             .join(&detail.system_user)
             .join(&detail.domain);
-        tracing::info!(domain = %detail.domain, archive = %canonical.display(),
-            "restoring backup");
-        let restore_result =
-            hyperion_adapters::backup::restore_archive(&canonical, &host_root).await;
-        if let Err(e) = restore_result {
-            return Err(RpcError::ProvisioningFailed {
-                stage: "tar_extract".into(),
-                reason: e.to_string(),
-            });
+        if mode.restores_files() {
+            tracing::info!(domain = %detail.domain, archive = %canonical.display(),
+                mode = mode.as_str(), "restoring backup files");
+            let restore_result =
+                hyperion_adapters::backup::restore_archive(&canonical, &host_root).await;
+            if let Err(e) = restore_result {
+                return Err(RpcError::ProvisioningFailed {
+                    stage: "tar_extract".into(),
+                    reason: e.to_string(),
+                });
+            }
         }
 
-        // 2. Look for sibling .sql dump and restore it if hosting has a DB.
-        let archive_dir = canonical.parent().unwrap_or(std::path::Path::new("/"));
-        if let Some(stem) = canonical.file_stem().and_then(|s| s.to_str()) {
-            // strip the trailing ".tar" if present from .tar.gz double-ext
-            let trim = stem.strip_suffix(".tar").unwrap_or(stem);
-            let sibling = archive_dir.join(format!("{trim}.sql"));
-            if sibling.exists() {
-                if let Some(db) = &detail.database {
-                    let restore = match db.engine {
-                        hyperion_types::DbProvision::MariaDB => {
-                            hyperion_adapters::backup::restore_mariadb_dump(
-                                &db.db_name,
-                                &sibling,
-                            )
-                            .await
+        // 2. Look for sibling .sql dump and restore it if hosting has a DB
+        //    (unless files-only). For db-only restores a missing dump is
+        //    an error — the operator explicitly asked to put a DB back.
+        if mode.restores_db() {
+            let archive_dir = canonical.parent().unwrap_or(std::path::Path::new("/"));
+            let mut dump_found = false;
+            if let Some(stem) = canonical.file_stem().and_then(|s| s.to_str()) {
+                // strip the trailing ".tar" if present from .tar.gz double-ext
+                let trim = stem.strip_suffix(".tar").unwrap_or(stem);
+                let sibling = archive_dir.join(format!("{trim}.sql"));
+                if sibling.exists() {
+                    dump_found = true;
+                    if let Some(db) = &detail.database {
+                        let restore = match db.engine {
+                            hyperion_types::DbProvision::MariaDB => {
+                                hyperion_adapters::backup::restore_mariadb_dump(
+                                    &db.db_name,
+                                    &sibling,
+                                )
+                                .await
+                            }
+                            hyperion_types::DbProvision::Postgres => {
+                                hyperion_adapters::backup::restore_postgres_dump(
+                                    &db.db_name,
+                                    &sibling,
+                                )
+                                .await
+                            }
+                        };
+                        if let Err(e) = restore {
+                            return Err(RpcError::ProvisioningFailed {
+                                stage: "db_restore".into(),
+                                reason: e.to_string(),
+                            });
                         }
-                        hyperion_types::DbProvision::Postgres => {
-                            hyperion_adapters::backup::restore_postgres_dump(
-                                &db.db_name,
-                                &sibling,
-                            )
-                            .await
-                        }
-                    };
-                    if let Err(e) = restore {
-                        return Err(RpcError::ProvisioningFailed {
-                            stage: "db_restore".into(),
-                            reason: e.to_string(),
-                        });
                     }
                 }
+            }
+            if mode == hyperion_types::BackupRestoreMode::DbOnly && !dump_found {
+                return Err(RpcError::Validation {
+                    message: "db-only restore requested but this backup has no .sql dump \
+                              (the hosting may have had no database when it was taken)"
+                        .into(),
+                });
             }
         }
 
         self.append_audit(
             "hosting.restore",
             Some(detail.id.as_str()),
-            &serde_json::json!({"archive": canonical.display().to_string()}).to_string(),
+            &serde_json::json!({
+                "archive": canonical.display().to_string(),
+                "mode": mode.as_str(),
+            })
+            .to_string(),
             "ok",
         )
         .await;
 
         Ok(())
+    }
+
+    /// Stream one slice of a backup archive for download. Validates the
+    /// backup belongs to a real hosting and its path is under a backup
+    /// root, then reads up to `len` bytes from `offset`. `len == 0`
+    /// returns metadata only.
+    pub async fn backup_fetch_chunk(
+        &self,
+        backup_id: i64,
+        offset: u64,
+        len: u32,
+    ) -> Result<(String, u64, String, bool), RpcError> {
+        use base64::Engine;
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+        // Resolve the backup run → archive path. get_by_id returns the
+        // row regardless of hosting; we re-validate the path is ours.
+        let run = hyperion_state::backups::get_by_id(&self.pool, backup_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("backup lookup: {e}")))?
+            .ok_or_else(|| RpcError::NotFound {
+                kind: "backup".into(),
+                id: backup_id.to_string(),
+            })?;
+        let archive_path = run.archive_path.ok_or_else(|| RpcError::Validation {
+            message: "backup has no archive file to download".into(),
+        })?;
+        let canonical = std::path::PathBuf::from(&archive_path)
+            .canonicalize()
+            .map_err(|e| RpcError::Validation {
+                message: format!("archive not readable: {e}"),
+            })?;
+        let allowed_roots = [
+            std::path::PathBuf::from(&self.paths.backup_root),
+            std::path::PathBuf::from("/var/lib/hyperion/backups"),
+        ];
+        if !allowed_roots.iter().any(|r| canonical.starts_with(r)) {
+            return Err(RpcError::Validation {
+                message: "archive is not under an allowed backup root".into(),
+            });
+        }
+        let filename = canonical
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or("backup.tar.gz")
+            .to_string();
+        let total_size = tokio::fs::metadata(&canonical)
+            .await
+            .map(|m| m.len())
+            .map_err(|e| RpcError::Internal_with(format!("stat archive: {e}")))?;
+        if len == 0 {
+            return Ok((String::new(), total_size, filename, offset >= total_size));
+        }
+        let mut file = tokio::fs::File::open(&canonical)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("open archive: {e}")))?;
+        file.seek(std::io::SeekFrom::Start(offset))
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("seek archive: {e}")))?;
+        let mut buf = vec![0u8; len as usize];
+        let mut filled = 0usize;
+        while filled < buf.len() {
+            let n = file
+                .read(&mut buf[filled..])
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("read archive: {e}")))?;
+            if n == 0 {
+                break;
+            }
+            filled += n;
+        }
+        buf.truncate(filled);
+        let eof = offset + filled as u64 >= total_size;
+        let data_b64 = base64::engine::general_purpose::STANDARD.encode(&buf);
+        Ok((data_b64, total_size, filename, eof))
+    }
+
+    /// Restore a backup archive into a BRAND-NEW hosting at `new_domain`,
+    /// mirroring the source hosting's php/db/kind config. Runs
+    /// `wp search-replace` afterwards when the snapshot is WordPress so
+    /// the cloned site serves under its new URL. Rolls back the new
+    /// hosting if any step fails. Same-node only (the web layer dispatches
+    /// to the source's owning node).
+    pub async fn backup_restore_as_new(
+        &self,
+        sel: HostingSelector,
+        archive_path: String,
+        new_domain: String,
+    ) -> Result<(String, String), RpcError> {
+        let source = self.get(sel).await?;
+        let new_dom = hyperion_validate::Domain::parse(&new_domain).map_err(|e| {
+            RpcError::Validation {
+                message: format!("new domain invalid: {e}"),
+            }
+        })?;
+        if new_dom.as_str() == source.domain {
+            return Err(RpcError::Validation {
+                message: "new domain must differ from the source domain".into(),
+            });
+        }
+        // Provision the new hosting mirroring the source's config. cert
+        // is re-issued later by the operator (same as a fresh create).
+        let create = HostingCreateReq {
+            domain: new_dom.clone(),
+            aliases: vec![],
+            php_version: source.php_version,
+            database: source.database.as_ref().map(|d| d.engine),
+            system_user: None,
+            kind: source.kind.clone(),
+            proxy_upstream_url: source.proxy_upstream_url.clone(),
+        };
+        let created = self.create(create).await?;
+
+        // Restore files + DB into the new hosting. On failure, roll back
+        // the half-created hosting so the operator can retry cleanly.
+        if let Err(e) = self
+            .backup_restore(
+                HostingSelector::Id(created.id.clone()),
+                archive_path,
+                hyperion_types::BackupRestoreMode::FilesAndDb,
+            )
+            .await
+        {
+            tracing::warn!(
+                hosting = %created.id.as_str(),
+                error = %e,
+                "restore-as-new: restore failed — rolling back new hosting"
+            );
+            let _ = self
+                .delete(
+                    HostingSelector::Id(created.id.clone()),
+                    DeleteOpts { keep_user: false, keep_database: false },
+                )
+                .await;
+            return Err(e);
+        }
+
+        // WordPress URL rewrite: if the restored tree is a WP install,
+        // point it at the new domain. Best-effort — a non-WP site or a
+        // wp-cli hiccup shouldn't fail the whole restore (files + DB are
+        // already in place). Runs wp-cli directly (same path as
+        // wp_reset_password) since the AdapterPort surface doesn't carry
+        // a generic search-replace.
+        if let Ok(new_detail) = self.get(HostingSelector::Id(created.id.clone())).await {
+            let old_url = format!("//{}", source.domain);
+            let new_url = format!("//{}", new_dom.as_str());
+            let sr_args = [
+                "search-replace",
+                old_url.as_str(),
+                new_url.as_str(),
+                "--all-tables",
+                "--skip-columns=guid",
+                "--report-changed-only",
+            ];
+            let argv = hyperion_adapters::wpcli::build_argv(
+                &new_detail.system_user,
+                &new_detail.root_dir,
+                &sr_args,
+            );
+            let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+            match hyperion_adapters::cmd::run("/usr/bin/sudo", &argv_refs).await {
+                Ok(_) => {
+                    // Flush caches so the new host's pages render fresh.
+                    let flush = hyperion_adapters::wpcli::build_argv(
+                        &new_detail.system_user,
+                        &new_detail.root_dir,
+                        &["cache", "flush"],
+                    );
+                    let flush_refs: Vec<&str> = flush.iter().map(String::as_str).collect();
+                    let _ = hyperion_adapters::cmd::run("/usr/bin/sudo", &flush_refs).await;
+                }
+                Err(e) => {
+                    tracing::info!(
+                        hosting = %created.id.as_str(),
+                        error = %e,
+                        "restore-as-new: wp search-replace skipped (not a WP site or wp-cli error)"
+                    );
+                }
+            }
+        }
+
+        self.append_audit(
+            "hosting.restore_as_new",
+            Some(created.id.as_str()),
+            &serde_json::json!({
+                "source": source.domain,
+                "new_domain": new_dom.as_str(),
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+
+        Ok((created.id.as_str().to_string(), new_dom.as_str().to_string()))
     }
 }
 

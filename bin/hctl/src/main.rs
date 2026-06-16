@@ -820,6 +820,12 @@ fn print_pretty(resp: &Response) {
             println!("✓ {} hostings sampled", hostings_sampled);
         }
         Response::BackupRestore => println!("✓ backup restored"),
+        Response::BackupFetchChunk { total_size, filename, eof, .. } => {
+            println!("chunk of {filename} ({total_size} bytes total, eof={eof})");
+        }
+        Response::BackupRestoreAsNew { hosting_id, domain } => {
+            println!("✓ restored as new hosting {domain} ({hosting_id})");
+        }
         Response::HostingLogs(s) => print!("{s}"),
         Response::CronList(s) => print!("{s}"),
         Response::CronReplace => println!("✓ crontab updated"),

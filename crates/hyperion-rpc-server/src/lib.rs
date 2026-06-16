@@ -878,9 +878,26 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             },
             Err(e) => Response::Error(e),
         },
-        Request::BackupRestore { sel, archive_path } => {
-            match api.backup_restore(sel, archive_path).await {
+        Request::BackupRestore { sel, archive_path, mode } => {
+            match api.backup_restore(sel, archive_path, mode).await {
                 Ok(_) => Response::BackupRestore,
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::BackupFetchChunk { backup_id, offset, len } => {
+            match api.backup_fetch_chunk(backup_id, offset, len).await {
+                Ok((data_b64, total_size, filename, eof)) => Response::BackupFetchChunk {
+                    data_b64,
+                    total_size,
+                    filename,
+                    eof,
+                },
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::BackupRestoreAsNew { sel, archive_path, new_domain } => {
+            match api.backup_restore_as_new(sel, archive_path, new_domain).await {
+                Ok((hosting_id, domain)) => Response::BackupRestoreAsNew { hosting_id, domain },
                 Err(e) => Response::Error(e),
             }
         }
@@ -1859,8 +1876,25 @@ mod tests {
             &self,
             _: HostingSelector,
             _: String,
+            _: hyperion_types::BackupRestoreMode,
         ) -> Result<(), RpcError> {
             Ok(())
+        }
+        async fn backup_fetch_chunk(
+            &self,
+            _: i64,
+            _: u64,
+            _: u32,
+        ) -> Result<(String, u64, String, bool), RpcError> {
+            Ok((String::new(), 0, String::new(), true))
+        }
+        async fn backup_restore_as_new(
+            &self,
+            _: HostingSelector,
+            _: String,
+            _: String,
+        ) -> Result<(String, String), RpcError> {
+            Ok((String::new(), String::new()))
         }
         async fn notifications_feed(
             &self,

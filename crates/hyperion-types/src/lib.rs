@@ -31,8 +31,8 @@ pub use jobs::{
     WebSessionView,
 };
 pub use limits::{
-    BackupRunWire, ExpiringHosting, HostingExpiry, HostingLimits, HostingUsageBucket,
-    NodeInviteMint, NodeInviteSummary, OverBwPolicy, SuspendReason,
+    BackupRestoreMode, BackupRunWire, ExpiringHosting, HostingExpiry, HostingLimits,
+    HostingUsageBucket, NodeInviteMint, NodeInviteSummary, OverBwPolicy, SuspendReason,
 };
 pub use migration::{HostingImportResult, HostingMigrationBundle, HostingMigrationManifest};
 pub use php::PhpVersion;

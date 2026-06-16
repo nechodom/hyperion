@@ -1035,8 +1035,29 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         &self,
         sel: HostingSelector,
         archive_path: String,
+        mode: hyperion_types::BackupRestoreMode,
     ) -> Result<(), RpcError> {
-        self.svc.backup_restore(sel, archive_path).await
+        self.svc.backup_restore(sel, archive_path, mode).await
+    }
+
+    async fn backup_fetch_chunk(
+        &self,
+        backup_id: i64,
+        offset: u64,
+        len: u32,
+    ) -> Result<(String, u64, String, bool), RpcError> {
+        self.svc.backup_fetch_chunk(backup_id, offset, len).await
+    }
+
+    async fn backup_restore_as_new(
+        &self,
+        sel: HostingSelector,
+        archive_path: String,
+        new_domain: String,
+    ) -> Result<(String, String), RpcError> {
+        self.svc
+            .backup_restore_as_new(sel, archive_path, new_domain)
+            .await
     }
 
     async fn notifications_feed(

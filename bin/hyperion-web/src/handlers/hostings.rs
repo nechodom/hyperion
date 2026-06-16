@@ -128,6 +128,7 @@ struct DetailTpl<'a> {
     csrf_dns_check: String,
     csrf_cert_issue: String,
     csrf_restore: String,
+    csrf_restore_as_new: String,
     csrf_logs: String,
     csrf_cron: String,
     cron_body: String,
@@ -1087,6 +1088,7 @@ pub async fn post_create(
                 csrf_dns_check: csrf_token_for(&state, &ctx, "/hostings/dns-check"),
                 csrf_cert_issue: csrf_token_for(&state, &ctx, "/hostings/cert/issue"),
                 csrf_restore: csrf_token_for(&state, &ctx, "/hostings/restore"),
+                csrf_restore_as_new: csrf_token_for(&state, &ctx, "/hostings/restore-as-new"),
                 csrf_logs: csrf_token_for(&state, &ctx, "/hostings/logs"),
                 csrf_cron: csrf_token_for(&state, &ctx, "/hostings/cron"),
                 cron_body: String::new(),
@@ -1734,6 +1736,7 @@ pub async fn get_detail(
         csrf_dns_check: csrf_token_for(&state, &ctx, "/hostings/dns-check"),
         csrf_cert_issue: csrf_token_for(&state, &ctx, "/hostings/cert/issue"),
         csrf_restore: csrf_token_for(&state, &ctx, "/hostings/restore"),
+        csrf_restore_as_new: csrf_token_for(&state, &ctx, "/hostings/restore-as-new"),
         csrf_logs: csrf_token_for(&state, &ctx, "/hostings/logs"),
         csrf_cron: csrf_token_for(&state, &ctx, "/hostings/cron"),
         cron_body,
@@ -4533,6 +4536,19 @@ pub async fn post_cert_issue(
 pub struct RestoreForm {
     pub selector: String,
     pub archive_path: String,
+    /// "files_and_db" (default) | "db_only" | "files_only".
+    #[serde(default)]
+    pub mode: String,
+}
+
+/// Map the restore-form's string into the typed enum. Unknown / empty
+/// ⇒ full files+DB restore (the safe historical default).
+fn parse_restore_mode(s: &str) -> hyperion_types::BackupRestoreMode {
+    match s {
+        "db_only" => hyperion_types::BackupRestoreMode::DbOnly,
+        "files_only" => hyperion_types::BackupRestoreMode::FilesOnly,
+        _ => hyperion_types::BackupRestoreMode::FilesAndDb,
+    }
 }
 
 #[derive(Deserialize)]
@@ -4733,6 +4749,7 @@ pub async fn post_restore_upload(
         Request::BackupRestore {
             sel,
             archive_path: dest.display().to_string(),
+            mode: hyperion_types::BackupRestoreMode::FilesAndDb,
         },
     )
     .await?;
@@ -6458,6 +6475,7 @@ pub async fn post_restore(
         Request::BackupRestore {
             sel,
             archive_path: form.archive_path.trim().to_string(),
+            mode: parse_restore_mode(&form.mode),
         },
     )
     .await?;
@@ -6469,6 +6487,150 @@ pub async fn post_restore(
             let msg = urlencoding(&e.to_string());
             Ok(
                 Redirect::to(&format!("/hostings/{}?restore_error={}", sel_url, msg))
+                    .into_response(),
+            )
+        }
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+/// Stream a backup archive to the operator's browser as a download.
+/// Pulls the file off the owning node in bounded chunks (so an archive
+/// larger than MAX_FRAME still works) and pipes them straight to the
+/// HTTP body via a tokio duplex pipe — never buffering the whole file
+/// in the master's memory.
+pub async fn get_backup_download(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Path((selector, backup_id)): Path<(String, i64)>,
+) -> Result<Response, AppError> {
+    use base64::Engine;
+    let sel = parse_selector(&selector)?;
+    let (detail, owner_node) = find_hosting_anywhere(&state, sel).await?;
+    if let Err(r) = require_hosting_access(&state, &ctx, detail.id.as_str(), false).await {
+        return Ok(r);
+    }
+    // Metadata probe (len=0): total size + filename, and it validates
+    // the backup belongs to a hosting + the path is under a backup root.
+    let meta = crate::dispatcher::dispatch_to_node(
+        &state,
+        owner_node.as_deref(),
+        Request::BackupFetchChunk { backup_id, offset: 0, len: 0 },
+    )
+    .await?;
+    let (total_size, filename) = match meta {
+        RpcResponse::BackupFetchChunk { total_size, filename, .. } => (total_size, filename),
+        RpcResponse::Error(e) => return Err(AppError::Rpc(e.to_string())),
+        _ => return Err(AppError::Internal("unexpected response".into())),
+    };
+
+    const CHUNK: u32 = 8 * 1024 * 1024;
+    let (mut writer, reader) = tokio::io::duplex(CHUNK as usize);
+    let task_state = state.clone();
+    let task_owner = owner_node.clone();
+    tokio::spawn(async move {
+        use tokio::io::AsyncWriteExt;
+        let mut offset: u64 = 0;
+        loop {
+            let resp = crate::dispatcher::dispatch_to_node(
+                &task_state,
+                task_owner.as_deref(),
+                Request::BackupFetchChunk { backup_id, offset, len: CHUNK },
+            )
+            .await;
+            let (data_b64, eof) = match resp {
+                Ok(RpcResponse::BackupFetchChunk { data_b64, eof, .. }) => (data_b64, eof),
+                // Error/abort → drop the writer; the client sees a
+                // truncated download rather than a hung connection.
+                _ => break,
+            };
+            let bytes = match base64::engine::general_purpose::STANDARD.decode(data_b64.as_bytes())
+            {
+                Ok(b) => b,
+                Err(_) => break,
+            };
+            if !bytes.is_empty() && writer.write_all(&bytes).await.is_err() {
+                break; // client disconnected
+            }
+            offset += bytes.len() as u64;
+            if eof || bytes.is_empty() {
+                break;
+            }
+        }
+        // writer dropped here → reader observes EOF
+    });
+
+    let stream = tokio_util::io::ReaderStream::new(reader);
+    let body = axum::body::Body::from_stream(stream);
+    let safe_name = filename.replace(['"', '\\', '\n', '\r'], "");
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, "application/gzip".to_string()),
+            (
+                axum::http::header::CONTENT_DISPOSITION,
+                format!("attachment; filename=\"{safe_name}\""),
+            ),
+            (axum::http::header::CONTENT_LENGTH, total_size.to_string()),
+        ],
+        body,
+    )
+        .into_response())
+}
+
+#[derive(Deserialize)]
+pub struct RestoreAsNewForm {
+    pub selector: String,
+    pub archive_path: String,
+    pub new_domain: String,
+}
+
+/// Restore a backup archive into a brand-new hosting at a new domain.
+/// Dispatched to the source's owning node (the new hosting is created
+/// there). Long-running, but bounded — runs synchronously and redirects
+/// to the new hosting on success.
+pub async fn post_restore_as_new(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<RestoreAsNewForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let sel_url = urlencoding(&form.selector);
+    let new_domain = form.new_domain.trim().to_string();
+    if new_domain.is_empty() {
+        return Ok(Redirect::to(&format!(
+            "/hostings/{}?restore_error={}#backups",
+            sel_url,
+            urlencoding("Enter a new domain for the restored copy.")
+        ))
+        .into_response());
+    }
+    let target_owned: Option<String> = find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target_owned.as_deref(),
+        Request::BackupRestoreAsNew {
+            sel,
+            archive_path: form.archive_path.trim().to_string(),
+            new_domain,
+        },
+    )
+    .await?;
+    match resp {
+        RpcResponse::BackupRestoreAsNew { domain, .. } => Ok(Redirect::to(&format!(
+            "/hostings/{}?created=1",
+            urlencoding(&domain)
+        ))
+        .into_response()),
+        RpcResponse::Error(e) => {
+            let msg = urlencoding(&e.to_string());
+            Ok(
+                Redirect::to(&format!("/hostings/{}?restore_error={}#backups", sel_url, msg))
                     .into_response(),
             )
         }

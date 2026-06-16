@@ -121,6 +121,14 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::hostings::post_restore),
         )
         .route(
+            "/hostings/restore-as-new",
+            post(handlers::hostings::post_restore_as_new),
+        )
+        .route(
+            "/hostings/:selector/backup-download/:backup_id",
+            get(handlers::hostings::get_backup_download),
+        )
+        .route(
             "/hostings/logs",
             post(handlers::hostings::post_logs),
         )

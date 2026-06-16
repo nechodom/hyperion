@@ -801,6 +801,28 @@ pub enum Request {
     BackupRestore {
         sel: HostingSelector,
         archive_path: String,
+        /// Which parts of the snapshot to put back. Defaults to a full
+        /// files+DB restore for older callers that omit it.
+        #[serde(default)]
+        mode: hyperion_types::BackupRestoreMode,
+    },
+    /// Stream one slice of a backup archive off the owning node for
+    /// download. `len == 0` returns metadata only (total_size +
+    /// filename) so the web layer can set Content-Length before the
+    /// first byte. Chunked so arbitrarily-large archives never hit
+    /// MAX_FRAME.
+    BackupFetchChunk {
+        backup_id: i64,
+        offset: u64,
+        len: u32,
+    },
+    /// Restore a backup archive into a BRAND-NEW hosting at `new_domain`
+    /// (mirroring the source's php/db/kind), running `wp search-replace`
+    /// afterwards when the snapshot is a WordPress site. Same-node only.
+    BackupRestoreAsNew {
+        sel: HostingSelector,
+        archive_path: String,
+        new_domain: String,
     },
     // ── Bell-icon notification feed ──
     NotificationsFeed {
@@ -1166,6 +1188,16 @@ pub enum Response {
     MonitorTick { sampled: i64 },
     StatsTick { hostings_sampled: i64 },
     BackupRestore,
+    BackupFetchChunk {
+        data_b64: String,
+        total_size: u64,
+        filename: String,
+        eof: bool,
+    },
+    BackupRestoreAsNew {
+        hosting_id: String,
+        domain: String,
+    },
     NotificationsFeed(hyperion_types::NotificationFeed),
     NotificationsMarkRead,
     NotificationsMarkAllRead { marked: i64 },

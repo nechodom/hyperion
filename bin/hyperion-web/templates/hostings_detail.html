@@ -2182,6 +2182,8 @@
               <div style="display:inline-flex;gap:0.3rem;align-items:center;justify-content:flex-end;flex-wrap:wrap">
                 {% if b.state == "ok" %}
                   {% if let Some(p) = b.archive_path %}
+                  <a class="btn small" href="/hostings/{{ detail.id.as_str() }}/backup-download/{{ b.id }}"
+                     title="Download this archive">Download</a>
                   <form method="post" action="/hostings/restore" style="display:inline"
                         data-confirm-title="Restore from backup"
                         data-confirm-body="Files and database for {{ detail.domain }} will be overwritten with the snapshot from this backup. Current state cannot be recovered without another backup."
@@ -2190,7 +2192,19 @@
                     <input type="hidden" name="_csrf" value="{{ csrf_restore }}">
                     <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
                     <input type="hidden" name="archive_path" value="{{ p }}">
+                    <input type="hidden" name="mode" value="files_and_db">
                     <button class="btn small" type="submit">Restore</button>
+                  </form>
+                  <form method="post" action="/hostings/restore" style="display:inline"
+                        data-confirm-title="Restore database only"
+                        data-confirm-body="ONLY the database for {{ detail.domain }} will be rolled back to this snapshot. Files on disk are left untouched."
+                        data-confirm-confirm-label="Restore DB"
+                        data-confirm-variant="danger">
+                    <input type="hidden" name="_csrf" value="{{ csrf_restore }}">
+                    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+                    <input type="hidden" name="archive_path" value="{{ p }}">
+                    <input type="hidden" name="mode" value="db_only">
+                    <button class="btn small" type="submit" title="Restore the database only">DB only</button>
                   </form>
                   {% endif %}
                 {% endif %}
@@ -2260,6 +2274,39 @@
                  placeholder="/var/lib/hyperion/backups/incoming/{{ detail.domain }}-XXXX.tar.gz">
         </div>
         <button class="btn" type="submit">Restore</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="card-section">
+    <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Restore into a new domain</h2>
+    <p class="muted" style="margin:0 0 1rem;font-size:0.85rem">
+      Spin up a <strong>brand-new hosting</strong> from a backup archive
+      (mirroring this site's PHP version, database engine and kind). For
+      WordPress sites the URL is rewritten to the new domain
+      automatically (<code>wp search-replace</code>). The original is left
+      untouched — handy for staging copies or recovering a single site
+      under a different name. Issue a certificate on the new hosting once
+      its DNS resolves.
+    </p>
+    <form method="post" action="/hostings/restore-as-new"
+          data-confirm-title="Restore into a new domain"
+          data-confirm-body="A new hosting will be created and the selected archive restored into it. The source hosting is not modified."
+          data-confirm-confirm-label="Create &amp; restore">
+      <input type="hidden" name="_csrf" value="{{ csrf_restore_as_new }}">
+      <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+      <div class="row" style="gap:0.5rem;align-items:flex-end;flex-wrap:wrap">
+        <div class="field" style="flex:2;margin:0;min-width:16rem">
+          <label for="ran_path">Archive path</label>
+          <input id="ran_path" name="archive_path" type="text" required
+                 placeholder="/var/lib/hyperion/backups/local/{{ detail.system_user }}/{{ detail.domain }}-XXXX.tar.gz">
+        </div>
+        <div class="field" style="flex:1;margin:0;min-width:12rem">
+          <label for="ran_domain">New domain</label>
+          <input id="ran_domain" name="new_domain" type="text" required
+                 placeholder="copy.example.com">
+        </div>
+        <button class="btn primary" type="submit">Create &amp; restore</button>
       </div>
     </form>
   </div>
