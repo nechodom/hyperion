@@ -160,6 +160,7 @@ minimal `agent.toml` + `web.toml` for a rootless local instance.
 - **Hosting clone** to a new domain on the same or different node — staging mirror in two clicks.
 - **Expiration + grace** with scheduled notifications and auto-suspend.
 - **Quota enforcement** — kernel-level disk quota via `setquota`, PHP `memory_limit` per FPM pool, monthly bandwidth alerts.
+- **Let's Encrypt certs** — HTTP-01 one-click, automatic renewal, and **DNS-01 wildcard** (`*.domain`) issuance with a guided manual TXT-record flow or automatic publishing via a Cloudflare API token.
 
 ### Per-hosting controls
 
@@ -174,7 +175,17 @@ directly to nginx, FPM, and the WordPress install. Every save runs
 - **Per-hosting FastCGI page cache** — per-id zone, bypasses logged-in / `PHPSESSID` cookies.
 - **WP debug toggle** (`WP_DEBUG` / `_LOG` / `_DISPLAY`) plus a "rotate debug.log" button.
 - **Per-hosting Redis object cache** — auto-allocated DB slot, dedicated ACL user, written to `wp-config.php`.
+- **Per-hosting `php.ini` override** via `.user.ini` (`memory_limit`, `upload_max_filesize`, …) — no FPM restart, can't break pool startup.
+- **WAF-lite + wp-admin IP allowlist** — see Security.
+- **Live log tail + search** — follow `access` / `error` logs in the browser, instant client-side filter, no SSH.
+- **Health score + notes / tags** — at-a-glance hosting health checklist plus free-form notes and tags.
 - **Vhost auto-heal** — missing cert files get a fresh self-signed bootstrap so `nginx -t` never breaks during renewal.
+
+### WordPress
+
+- **Plugin + theme manager** — list / install / activate / update / delete via `wp-cli`, bulk "update all", per-plugin auto-update toggle, upload a `.zip`.
+- **Vulnerability scan** — matches installed plugins + themes against the free **Wordfence Intelligence** feed (cached daily on the node), severity-sorted, with CVE links and the first patched version. "Couldn't check" is never reported as "all clear".
+- **Staging → push-to-prod** — one click spins up a `staging.<domain>` copy (files + DB, WP URL rewritten); another pushes it back over production after taking a **pre-push safety backup** of prod first.
 
 ### File manager
 
@@ -189,13 +200,19 @@ directly to nginx, FPM, and the WordPress install. Every save runs
 - **Off-site S3 + age encryption** — multi-target (Wasabi / Backblaze B2 / Minio / AWS), per-target retention policy (daily / weekly / monthly). Client-side age encryption: operator keeps the private key off the node.
 - **Legacy FTP/FTPS/SFTP** off-site push still supported for existing deployments.
 - **Retention** — max age + minimum N per hosting, auto-pruned hourly.
+- **Granular restore** — full, **database-only** (roll back the DB after a bad plugin update without touching uploaded media) or **files-only**.
+- **Download** any archive from the browser — streamed off the owning node in chunks, so backups larger than the RPC frame limit work without buffering in master RAM.
+- **Restore as a new domain** — spin up a brand-new hosting from any archive (mirrors PHP / DB / kind; WordPress URLs auto-rewritten with `wp search-replace`).
 
 ### Security
 
 - **`#![forbid(unsafe_code)]`** in every crate.
 - **Argon2id passwords** at OWASP-recommended parameters.
 - **Ed25519-signed session cookies** with a DB-backed revocation ledger — kill a stolen cookie immediately from `/settings/sessions`.
-- **TOTP 2FA** with one-time backup codes.
+- **TOTP 2FA** with one-time backup codes — **enforced for admin+** roles (an admin without 2FA is corralled to the enrolment card before anything else) and a **"remember this device for 30 days"** option to skip the prompt on trusted machines.
+- **Native brute-force protection (fail2ban)** — the agent scans each site's access log for `wp-login.php` / `xmlrpc.php` floods and auto-bans offending IPs via an `nftables` set (node-wide, auto-expiring). Manual ban / unban from the hosting Settings tab; bans survive reboots.
+- **WAF-lite + wp-admin IP allowlist** per hosting — conservative nginx rules (deny dumps, block PHP in `wp-content/uploads`, 403 scanner UAs) and an optional CIDR allowlist gating `/wp-admin` + `/wp-login.php` (admin-ajax stays public).
+- **Key-only chrooted SFTP** per hosting — opt a system user into `internal-sftp` with a public-key allowlist, no shell, no password; the sshd drop-in is gated by `sshd -t` so a bad config can't wedge the daemon.
 - **Per-IP rate limit** on login + 2FA verify (sliding 15-min window).
 - **CSP + HSTS + X-Frame-Options + Permissions-Policy + Referrer-Policy** set on every response.
 - **Per-form CSRF tokens** with session-wide wildcard fallback for HTMX swaps.
@@ -405,14 +422,23 @@ hyperion/
 | Off-site backups (S3 + age encryption, multi-target)      | UI · CLI · RPC  |
 | Off-site backups (legacy FTP / FTPS / SFTP)               | UI · RPC        |
 | Let's Encrypt HTTP-01 issuing + auto-renewal              | UI · CLI · RPC  |
+| Let's Encrypt DNS-01 wildcard (manual + Cloudflare)       | UI · CLI · RPC  |
 | Per-hosting cron editing                                  | UI · RPC        |
-| Per-hosting log tail (access + error)                     | UI · RPC        |
+| Per-hosting log tail + live follow + search (access/error)| UI · RPC        |
 | Monitor probes (HTTP / TCP) with alerts                   | UI · RPC        |
-| WordPress install + plugin manage + admin reset           | UI · RPC        |
+| WordPress install + plugin/theme manage + admin reset     | UI · RPC        |
+| WordPress vulnerability scan (Wordfence feed)             | UI · CLI · RPC  |
+| WordPress staging → push-to-prod                          | UI · CLI · RPC  |
 | Per-hosting Redis object cache                            | UI · RPC        |
+| Per-hosting php.ini override (.user.ini)                  | UI · RPC        |
+| Granular backup restore (full / DB-only / files-only)     | UI · CLI · RPC  |
+| Backup download (chunked stream) + restore-as-new-domain  | UI · CLI · RPC  |
 | FTP per-hosting (vsftpd, chroot to home)                  | UI · RPC        |
+| Key-only chrooted SFTP per hosting                        | UI · CLI · RPC  |
+| WAF-lite + wp-admin IP allowlist per hosting              | UI · RPC        |
+| Native brute-force protection (fail2ban via nftables)     | UI · CLI · RPC  |
 | Audit log with BLAKE3 hash chain + verify button          | UI · CLI · RPC  |
-| TOTP 2FA + backup codes                                   | UI              |
+| TOTP 2FA + backup codes (enforced admin+, remember-device)| UI              |
 | Per-session revocation ledger                             | UI · CLI · RPC  |
 | Per-IP rate limit on login + 2FA verify                   | (middleware)    |
 | CSP + HSTS + XFO + permissions-policy headers             | (middleware)    |
@@ -441,9 +467,8 @@ hyperion/
 ### Roadmap
 
 - **Restic / borg backup targets** alongside S3.
-- **Scheduled S3 backup runner + retention pruner** (target config + curl probe + manual run are shipped; cron loop is the next commit).
 - **Per-node secret rotation** — operator-triggered, agent re-keys on next heartbeat.
-- **fail2ban / ModSecurity integration** behind a feature flag.
+- **Full ModSecurity / OWASP CRS** as an optional upgrade over the built-in WAF-lite.
 - **SSO / OIDC** for the panel login (TOTP + sessions are in core; OIDC slots in).
 - **Hosting templates beyond profiles** — "blank Laravel", "static HTML", "Nextcloud-ready" stamps.
 
