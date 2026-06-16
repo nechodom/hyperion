@@ -1,0 +1,227 @@
+{% extends "base.html" %}
+{% block title %}Move or copy {{ detail.domain }} · hyperion{% endblock %}
+{% block main %}
+
+<nav class="breadcrumbs" aria-label="Breadcrumb">
+  <a href="/hostings">Hostings</a>
+  <span class="sep">›</span>
+  <a href="/hostings/{{ detail.id.as_str() }}">{{ detail.domain }}</a>
+  <span class="sep">›</span>
+  <span>Move or copy</span>
+</nav>
+
+<div class="page-header">
+  <div>
+    <h1>Move or copy {{ detail.domain }}</h1>
+    <div class="subtitle">One place for every way to relocate or duplicate this
+      site. Pick what you want to do — each option explains exactly what happens
+      to the original.</div>
+  </div>
+</div>
+
+{% if detail.state.as_str() != "active" %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">This site is <code>{{ detail.state.as_str() }}</code>.
+      It must be <strong>active</strong> before it can be moved or copied —
+      <a href="/hostings/{{ detail.id.as_str() }}">resume it first</a>.</div>
+  </div>
+{% else %}
+
+{# ── Step 1: choose what to do ───────────────────────────────────────── #}
+<div class="card">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
+    What do you want to do?
+  </h2>
+  <div class="transfer-choices" role="radiogroup">
+    <label class="choice-card" data-choice="move">
+      <input type="radio" name="transfer_mode" value="move">
+      <div class="choice-body">
+        <div class="choice-title">Move to another node</div>
+        <p class="choice-desc">Recreate this exact site on a different node. When it
+          lands, the original here is <strong>suspended</strong> (kept as a
+          fallback, not deleted). Use this to rebalance load or retire a node.</p>
+      </div>
+    </label>
+    <label class="choice-card" data-choice="copy">
+      <input type="radio" name="transfer_mode" value="copy">
+      <div class="choice-body">
+        <div class="choice-title">Copy to a new domain or node</div>
+        <p class="choice-desc">Make an independent duplicate under a new domain
+          (e.g. a staging copy). The original keeps running, <strong>untouched</strong>.</p>
+      </div>
+    </label>
+    <label class="choice-card" data-choice="export">
+      <input type="radio" name="transfer_mode" value="export">
+      <div class="choice-body">
+        <div class="choice-title">Export a transfer file <span class="hint">advanced</span></div>
+        <p class="choice-desc">Produce a downloadable bundle to move this site to an
+          off-cluster server (or SSH-only target) by hand. The original is untouched.</p>
+      </div>
+    </label>
+  </div>
+</div>
+
+{# ── Step 2: the chosen mode's details ───────────────────────────────── #}
+
+{# MOVE #}
+<div class="card transfer-panel" data-mode="move" style="display:none">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="5 9 2 12 5 15"/><polyline points="9 5 12 2 15 5"/><polyline points="15 19 12 22 9 19"/><polyline points="19 9 22 12 19 15"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="12" y1="2" x2="12" y2="22"/></svg>
+    Move {{ detail.domain }} to another node
+  </h2>
+  <form method="post" action="/hostings/migration/move"
+        data-confirm-title="Move {{ detail.domain }}"
+        data-confirm-body="A full snapshot is taken on the source, the target recreates the site from it, and the source is SUSPENDED (not deleted). You can watch progress live and roll back by resuming the source."
+        data-confirm-confirm-label="Move"
+        data-confirm-variant="primary">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+    <input type="hidden" name="source_node" value="{{ target_node }}">
+    <div class="field">
+      <label for="move_to">Target node</label>
+      <select id="move_to" name="target_node" required>
+        <option value="" disabled selected>— pick a node —</option>
+        {% if !target_node.is_empty() %}
+        <option value="local">master (this node)</option>
+        {% endif %}
+        {% for n in all_nodes %}
+          {% if n.node_id != target_node %}
+          <option value="{{ n.node_id }}">{{ n.label }}{% if let Some(ip) = n.public_ip %} — {{ ip }}{% endif %}</option>
+          {% endif %}
+        {% endfor %}
+      </select>
+    </div>
+    <button class="btn primary" type="submit">Move site →</button>
+  </form>
+  <div class="card-section next-steps">
+    <strong>What happens</strong>
+    <ol>
+      <li>Snapshot taken on the source, transferred to the target, restored there.</li>
+      <li>You're taken to a <strong>live progress</strong> page (step-by-step).</li>
+      <li>The source is suspended once the target is up.</li>
+    </ol>
+    <strong>Then it's up to you</strong>
+    <ol>
+      <li>Point the domain's DNS at the target node's IP.</li>
+      <li>On the target, re-issue the TLS certificate (SSL tab) — keys never travel.</li>
+      <li>Once you've confirmed the site works, delete the suspended original from its <em>Danger</em> tab.</li>
+    </ol>
+  </div>
+</div>
+
+{# COPY #}
+<div class="card transfer-panel" data-mode="copy" style="display:none">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+    Copy {{ detail.domain }} to a new domain
+  </h2>
+  <form method="post" action="/hostings/clone"
+        data-confirm-title="Copy {{ detail.domain }}"
+        data-confirm-body="A duplicate is created under the new domain on the chosen node. The original is not touched."
+        data-confirm-confirm-label="Copy"
+        data-confirm-variant="primary">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+    <input type="hidden" name="source_node" value="{{ target_node }}">
+    <div class="field">
+      <label for="copy_domain">New domain</label>
+      <input id="copy_domain" name="new_domain" type="text" required
+             placeholder="staging.{{ detail.domain }}">
+    </div>
+    <div class="field">
+      <label for="copy_to">Target node</label>
+      <select id="copy_to" name="target_node">
+        <option value="">Same node ({{ target_node|e }})</option>
+        {% if !target_node.is_empty() %}
+        <option value="local">master (this node)</option>
+        {% endif %}
+        {% for n in all_nodes %}
+          {% if n.node_id != target_node %}
+          <option value="{{ n.node_id }}">{{ n.label }}{% if let Some(ip) = n.public_ip %} — {{ ip }}{% endif %}</option>
+          {% endif %}
+        {% endfor %}
+      </select>
+    </div>
+    <button class="btn primary" type="submit">Copy site →</button>
+  </form>
+  <div class="card-section next-steps">
+    <strong>What happens</strong>
+    <ol>
+      <li>A duplicate is created at the new domain (its own files + database).</li>
+      <li>You're taken to a <strong>live progress</strong> page.</li>
+      <li>For WordPress sites the URLs are rewritten to the new domain automatically.</li>
+      <li>The original keeps running, completely untouched.</li>
+    </ol>
+  </div>
+</div>
+
+{# EXPORT #}
+<div class="card transfer-panel" data-mode="export" style="display:none">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+    Export a transfer file
+  </h2>
+  <p class="text-soft">Use this when the destination isn't in this cluster (an
+    off-cluster server, or one you only reach over SSH). Hyperion makes a single
+    bundle (site files + database + a manifest); you move it across and import it
+    on the other side.</p>
+  <form method="post" action="/hostings/migration/export"
+        data-confirm-title="Export transfer file"
+        data-confirm-body="A full snapshot is taken and stored as a downloadable bundle on this node. The original is not affected.">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+    <button class="btn primary" type="submit">Create transfer file →</button>
+  </form>
+  <div class="card-section next-steps">
+    <strong>Then, on the destination</strong>
+    <ol>
+      <li>The result page gives you a one-click import link + token, or an <code>scp</code> + <code>hctl</code> one-liner.</li>
+      <li>To pull it into another Hyperion node, use <a href="/hostings/import">Hostings → Import a site</a> there.</li>
+      <li>Re-point DNS and re-issue the certificate on the destination — private keys never travel.</li>
+    </ol>
+  </div>
+</div>
+
+{% endif %}{# /active #}
+
+<style>
+.transfer-choices { display:grid; gap:0.6rem; margin-top:0.4rem; }
+.choice-card {
+  display:flex; gap:0.75rem; align-items:flex-start; cursor:pointer;
+  border:1.5px solid var(--border); border-radius:12px; padding:0.85rem 1rem;
+  transition:border-color .12s, background .12s;
+}
+.choice-card:hover { border-color:var(--accent); background:var(--surface-2); }
+.choice-card input { margin-top:0.25rem; accent-color:var(--accent); }
+.choice-card.selected { border-color:var(--accent); background:color-mix(in oklab, var(--accent) 8%, transparent); }
+.choice-title { font-weight:650; font-size:0.98rem; }
+.choice-desc { margin:0.25rem 0 0; color:var(--text-soft); font-size:0.88rem; line-height:1.5; }
+.next-steps { margin-top:1.1rem; font-size:0.9rem; }
+.next-steps strong { display:block; margin:0.6rem 0 0.3rem; }
+.next-steps ol { margin:0; padding-left:1.25rem; line-height:1.65; color:var(--text-soft); }
+</style>
+<script>
+(function () {
+  var radios = document.querySelectorAll('input[name="transfer_mode"]');
+  var panels = document.querySelectorAll('.transfer-panel');
+  function sync() {
+    var chosen = null;
+    radios.forEach(function (r) {
+      var card = r.closest('.choice-card');
+      if (card) card.classList.toggle('selected', r.checked);
+      if (r.checked) chosen = r.value;
+    });
+    panels.forEach(function (p) {
+      p.style.display = (p.getAttribute('data-mode') === chosen) ? '' : 'none';
+    });
+    if (chosen) {
+      var active = document.querySelector('.transfer-panel[data-mode="' + chosen + '"]');
+      if (active) active.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  }
+  radios.forEach(function (r) { r.addEventListener('change', sync); });
+})();
+</script>
+{% endblock %}

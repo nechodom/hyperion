@@ -5612,6 +5612,54 @@ pub async fn post_wp_theme_action(
     }
 }
 
+#[derive(Template)]
+#[template(path = "hosting_transfer.html")]
+struct TransferTpl<'a> {
+    username: &'a str,
+    user_initial: char,
+    active: &'static str,
+    css_version: &'static str,
+    htmx_version: &'static str,
+    detail: hyperion_types::HostingDetail,
+    /// node_id the hosting currently lives on ("" = master).
+    target_node: String,
+    all_nodes: Vec<hyperion_types::NodeSummary>,
+    csrf_token: String,
+}
+
+/// GET /hostings/transfer/<selector>
+///
+/// The unified "Move or copy a site" wizard. One guided page that replaces the
+/// three scattered cards (one-click migrate / clone / manual export) that used
+/// to live in the detail Migration tab. The three modes still POST to the same
+/// existing endpoints (`/hostings/migration/move`, `/hostings/clone`,
+/// `/hostings/migration/export`) — this is a front-end unification only.
+pub async fn get_transfer(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Path(selector): Path<String>,
+) -> Result<Response, AppError> {
+    let sel = parse_selector(&selector)?;
+    let (detail, owner_node) = find_hosting_anywhere(&state, sel).await?;
+    // Moving/copying is a manage action — read-only users don't get the wizard.
+    if let Err(r) = require_hosting_access(&state, &ctx, detail.id.as_str(), true).await {
+        return Ok(r);
+    }
+    let all_nodes = fetch_remote_nodes(&state).await.unwrap_or_default();
+    let tpl = TransferTpl {
+        username: &ctx.username,
+        user_initial: super::user_initial(&ctx.username),
+        active: "hostings",
+        css_version: super::css_version(),
+        htmx_version: super::htmx_version(),
+        target_node: owner_node.unwrap_or_default(),
+        all_nodes,
+        detail,
+        csrf_token: super::session_csrf_token(&state, &ctx),
+    };
+    Ok(Html(tpl.render()?).into_response())
+}
+
 /// POST /hostings/migration/export
 ///
 /// Trigger a migration-bundle export on the source node. Returns a
@@ -6759,13 +6807,18 @@ async fn run_migration_job(
 
     reporter
         .step(
-            &format!(
-                "Done — new hosting id {} on {}",
-                new_id.as_str(),
-                target_node
-            ),
+            &format!("Moved to {target_node} — now finish the cutover"),
             100,
-            "all phases ok\n",
+            &format!(
+                "Move complete. New hosting id {} on {target_node}.\n\
+                 The original is now SUSPENDED here as a fallback.\n\n\
+                 Next steps to go live:\n\
+                 1. Point this domain's DNS at {target_node}'s IP.\n\
+                 2. On the target, re-issue the TLS certificate (SSL tab) — keys never travel.\n\
+                 3. Once you've confirmed the moved site serves correctly, delete the\n\
+                 \x20  suspended original from its Danger tab.\n",
+                new_id.as_str()
+            ),
         )
         .await;
     reporter.finish(true, None).await;

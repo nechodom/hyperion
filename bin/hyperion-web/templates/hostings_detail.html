@@ -344,6 +344,12 @@
       <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
       Files
     </a>
+    {% if detail.state.as_str() == "active" %}
+    <a href="/hostings/transfer/{{ detail.id.as_str() }}" class="btn ghost">
+      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="5 9 2 12 5 15"/><polyline points="9 5 12 2 15 5"/><polyline points="15 19 12 22 9 19"/><polyline points="19 9 22 12 19 15"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="12" y1="2" x2="12" y2="22"/></svg>
+      Move / copy
+    </a>
+    {% endif %}
     {% if detail.state.as_str() == "suspended" %}
       <form method="post" action="/hostings/resume" style="display:inline">
         <input type="hidden" name="_csrf" value="{{ csrf_resume }}">
@@ -523,8 +529,8 @@
     {% if !email_log.is_empty() %}<span class="tab-badge">{{ email_log.len() }}</span>{% endif %}
   </a>
   <a class="tab" data-tab="migration" href="#migration" role="tab">
-    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12l18-9-3 18-7-7-8-2z"/><path d="M11 14l7-7"/></svg>
-    Migration
+    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polyline points="5 9 2 12 5 15"/><polyline points="9 5 12 2 15 5"/><polyline points="15 19 12 22 9 19"/><polyline points="19 9 22 12 19 15"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="12" y1="2" x2="12" y2="22"/></svg>
+    Move / copy
   </a>
   <a class="tab" data-tab="danger" href="#danger" role="tab" style="margin-left:auto;color:var(--danger)">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
@@ -2997,143 +3003,26 @@
 
 <!-- ============== MIGRATION TAB ============== -->
 <div class="tab-panel" id="tab-migration">
-
-{# One-click migration — offered when there's at least one other
-   node to migrate TO. Master-to-worker and worker-to-X both work:
-   the master proxies bundle bytes from the source via signed RPC
-   when the source is a worker. #}
-{% if !all_nodes.is_empty() && detail.state.as_str() == "active" %}
-<div class="card hover">
+<div class="card">
   <h2>
-    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
-    One-click migrate
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="5 9 2 12 5 15"/><polyline points="9 5 12 2 15 5"/><polyline points="15 19 12 22 9 19"/><polyline points="19 9 22 12 19 15"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="12" y1="2" x2="12" y2="22"/></svg>
+    Move or copy this site
   </h2>
-  <p class="text-soft small" style="margin:0 0 0.8rem">
-    Pick a target node — Hyperion exports {{ detail.domain }} on the source, the master proxies the bundle (when source is a worker), the target fetches + restores, and the source is suspended so you can verify the new copy before deleting the original.
+  <p class="text-soft" style="margin:0 0 1rem">
+    Moving this site to another node, making a copy under a new domain, or
+    exporting it to an off-cluster server all live in one guided place now —
+    each option spells out exactly what happens to the original and what to do
+    next.
   </p>
-  <form method="post" action="/hostings/migration/move"
-        data-confirm-title="Migrate {{ detail.domain }}"
-        data-confirm-body="A full backup will be taken on the source node, the target will fetch + restore it, and the source will be SUSPENDED (not deleted). DNS still points at the source — update it manually once you've verified the target works. This can take a few minutes for large sites."
-        data-confirm-confirm-label="Migrate now"
-        data-confirm-variant="primary"
-        style="display:flex;gap:0.5rem;align-items:flex-end;flex-wrap:wrap">
-    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
-    {# source_node carries WHERE the hosting currently lives so the
-       handler dispatches Export + Suspend to the right agent. #}
-    <input type="hidden" name="source_node" value="{{ target_node }}">
-    <div class="field" style="margin:0;flex:1;min-width:15rem">
-      <label for="migrate_to">Target node</label>
-      <select id="migrate_to" name="target_node" style="margin:0" required>
-        {# Master option only if hosting doesn't already live there. #}
-        {% if !target_node.is_empty() %}
-        <option value="local">master (this node)</option>
-        {% endif %}
-        {% for n in all_nodes %}
-        {% if n.node_id != target_node %}
-        <option value="{{ n.node_id }}">{{ n.label }}{% if let Some(ip) = n.public_ip.as_ref() %} — {{ ip }}{% endif %}</option>
-        {% endif %}
-        {% endfor %}
-      </select>
-    </div>
-    <button class="btn primary" type="submit">Migrate</button>
-  </form>
-  <p class="text-soft small" style="margin:0.6rem 0 0">
-    <strong>After migration:</strong> update DNS to point at the target's IP. Once you've confirmed the new copy serves correctly, delete the suspended source from its Danger tab.
+  <a class="btn primary" href="/hostings/transfer/{{ detail.id.as_str() }}">
+    <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+    Open move / copy
+  </a>
+  <p class="text-soft small" style="margin:0.9rem 0 0">
+    Receiving a site <em>from</em> another server? Use
+    <a href="/hostings/import">Hostings → Import a site</a>.
   </p>
 </div>
-
-{# Hosting clone — additive copy under a new domain. Same export
-   pipeline as migration but no source-suspend; importer rewrites
-   manifest.domain so the new hosting comes up under the chosen
-   `staging.example.cz` / `test.example.cz` / whatever. Useful for
-   staging deploys + test-node mirrors. Lands the operator on
-   /jobs/<id> for the live progress card. #}
-<div id="clone" class="card hover" style="margin-top:1rem">
-  <h2>
-    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
-    Clone hosting
-  </h2>
-  <p class="text-soft small" style="margin:0 0 0.8rem">
-    Duplicate {{ detail.domain }} under a new domain (e.g. <code>staging.{{ detail.domain }}</code>) — same PHP version, DB engine, files + dump are restored. The source stays live; nothing is suspended.
-  </p>
-  <form method="post" action="/hostings/clone"
-        data-confirm-title="Clone {{ detail.domain }}"
-        data-confirm-body="A full export of {{ detail.domain }} will be taken (same as migrate), then re-imported as the new domain on the chosen node. The source is NOT touched. Cert + WP admin URL on the clone will need separate setup — the clone is a STAGING site by default."
-        data-confirm-confirm-label="Clone now"
-        data-confirm-variant="primary"
-        style="display:grid;grid-template-columns:1fr 1fr auto;gap:0.5rem;align-items:flex-end">
-    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
-    <input type="hidden" name="source_node" value="{{ target_node }}">
-    <div class="field" style="margin:0">
-      <label for="clone_to_domain">New domain</label>
-      <input id="clone_to_domain" name="new_domain" type="text"
-             placeholder="staging.{{ detail.domain }}"
-             pattern="[a-zA-Z0-9.\-]+" required style="margin:0">
-    </div>
-    <div class="field" style="margin:0">
-      <label for="clone_target_node">Target node</label>
-      <select id="clone_target_node" name="target_node" style="margin:0">
-        <option value="">Same node ({{ target_node|e }})</option>
-        {% if !target_node.is_empty() %}
-        <option value="local">master (this node)</option>
-        {% endif %}
-        {% for n in all_nodes %}
-        {% if n.node_id != target_node %}
-        <option value="{{ n.node_id }}">{{ n.label }}{% if let Some(ip) = n.public_ip.as_ref() %} — {{ ip }}{% endif %}</option>
-        {% endif %}
-        {% endfor %}
-      </select>
-    </div>
-    <button class="btn primary" type="submit" style="margin:0">Clone</button>
-  </form>
-  <p class="text-soft small" style="margin:0.6rem 0 0">
-    Progress lives at <a href="/jobs?kind=hosting_clone">Background jobs → hosting_clone</a> — you'll be redirected to the live progress page after submit.
-  </p>
-</div>
-{% endif %}
-
-<div class="card hover" style="margin-top:1rem">
-  <h2>
-    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12l18-9-3 18-7-7-8-2z"/><path d="M11 14l7-7"/></svg>
-    Manual export
-  </h2>
-  <p class="muted">
-    Use this when you want full control over the transfer (SSH-only target, off-cluster destination, regulatory hand-over). Click <strong>Export</strong> — the result page shows a signed URL + token (1h validity) you can paste into any target's
-    <a href="/hostings/import">Hostings → Import from another node</a>.
-  </p>
-
-  {% if detail.state.as_str() == "active" %}
-  <form method="post" action="/hostings/migration/export"
-        data-confirm-title="Snapshot for migration"
-        data-confirm-body="A full backup (htdocs tar + DB dump) of {{ detail.domain }} will be taken and stored as a migration bundle on disk. The bundle's download URL is shown after."
-        data-confirm-confirm-label="Create bundle"
-        data-confirm-variant="primary">
-    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
-    <button class="btn primary" type="submit">
-      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-      Export migration bundle
-    </button>
-  </form>
-  {% else %}
-  <p class="muted"><strong>Hosting must be active</strong> before it can be exported.
-    Current state: <code>{{ detail.state.as_str() }}</code>.</p>
-  {% endif %}
-
-  <div class="card-section" style="margin-top:1.2rem">
-    <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Operator transfer cheatsheet</h2>
-    <ol class="muted" style="font-size:0.85rem;line-height:1.7;padding-left:1.2rem;margin:0">
-      <li>Click <strong>Export</strong> above on the source node.</li>
-      <li>On your workstation: <code>scp -r root@source:/var/lib/hyperion/migration/&lt;bundle_id&gt; root@target:/var/lib/hyperion/migration/</code></li>
-      <li>On the target node: <code>sudo hctl hosting import --manifest /var/lib/hyperion/migration/&lt;bundle_id&gt;/manifest.json</code></li>
-      <li>Update DNS to point at the target's IP. The importer logs say "click Issue Cert" when LE-ready.</li>
-      <li>Once the migration is verified live: <code>hctl hosting delete &lt;domain&gt;</code> on the source.</li>
-    </ol>
-  </div>
-</div>
-
 </div><!-- /tab-migration -->
 
 <div class="tab-panel" id="tab-danger">

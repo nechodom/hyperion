@@ -1430,3 +1430,76 @@ fn extract_csrf(html: &str) -> String {
     let end = html[start..].find('"').expect("quote") + start;
     html[start..end].to_string()
 }
+
+/// The unified "Move or copy" wizard renders for an active hosting and offers
+/// all three modes (move / copy / export) on one page.
+#[tokio::test]
+async fn transfer_wizard_renders_three_modes() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock, admin);
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/login")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(b"username=kevin&password=good-pw&next=/".to_vec()))
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    let cookie = extract_cookie(&resp);
+
+    // Create an active hosting to move/copy.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/hostings/new")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    let csrf = extract_csrf(&body_string(resp).await);
+    let body = format!("_csrf={csrf}&domain=move-test.cz&aliases=&php=8.3&db=mariadb&system_user=");
+    let _ = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/hostings")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, &cookie)
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+
+    // The wizard page renders with all three modes.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/hostings/transfer/move-test.cz")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert_eq!(resp.status(), StatusCode::OK, "wizard should render 200");
+    let html = body_string(resp).await;
+    assert!(html.contains("Move or copy move-test.cz"), "page heading");
+    assert!(html.contains("Move to another node"), "move mode");
+    assert!(html.contains("Copy to a new domain or node"), "copy mode");
+    assert!(html.contains("Export a transfer file"), "export mode");
+    // The three modes post to the existing, unchanged endpoints.
+    assert!(html.contains("/hostings/migration/move"), "move action");
+    assert!(html.contains("/hostings/clone"), "copy action");
+    assert!(html.contains("/hostings/migration/export"), "export action");
+}

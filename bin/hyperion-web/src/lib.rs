@@ -101,6 +101,10 @@ pub fn build_router(state: SharedState) -> Router {
         )
         .route("/hostings/import", get(handlers::migration::get_import))
         .route(
+            "/hostings/transfer/:selector",
+            get(handlers::hostings::get_transfer),
+        )
+        .route(
             "/hostings/migration/import-from-url",
             post(handlers::migration::post_import_from_url),
         )
