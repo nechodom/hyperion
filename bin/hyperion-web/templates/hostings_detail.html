@@ -954,6 +954,52 @@
   </div>
 </div>
 
+{# Upload a custom certificate — non-ACME: private CA, pre-purchased
+   multi-year cert, or a self-signed bootstrap. The agent validates the
+   key↔cert match + domain coverage, then disables auto-renewal so the
+   ACME sweep can't overwrite it. #}
+<div class="card" style="margin-top:1rem">
+  <h2 style="font-size:0.95rem;margin:0 0 0.35rem">Upload a custom certificate</h2>
+  <p class="text-soft" style="margin:0 0 0.85rem;font-size:0.88rem">
+    Paste a PEM certificate and its private key — for a private CA, a
+    pre-purchased cert, or a self-signed bootstrap. Hyperion verifies the
+    key matches the certificate and that it covers
+    <code>{{ detail.domain }}</code>{% if !detail.aliases.is_empty() %} and its aliases{% endif %},
+    then installs it and <strong>disables automatic renewal</strong> for
+    this hosting so Let's Encrypt won't overwrite it.
+  </p>
+  <form method="post" action="/hostings/cert/upload?_csrf={{ csrf_token }}"
+        enctype="multipart/form-data"
+        data-confirm-title="Install custom certificate"
+        data-confirm-body="Replace the certificate for {{ detail.domain }} with the uploaded one and disable automatic renewal."
+        data-confirm-confirm-label="Install certificate"
+        data-confirm-variant="primary">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+    <div class="field">
+      <label for="cert_pem">Certificate (PEM)</label>
+      <textarea id="cert_pem" name="cert_pem" rows="7" required spellcheck="false"
+                placeholder="-----BEGIN CERTIFICATE-----&#10;…&#10;-----END CERTIFICATE-----"
+                style="width:100%;font-family:var(--mono,monospace);font-size:0.8rem"></textarea>
+    </div>
+    <div class="field">
+      <label for="key_pem">Private key (PEM)</label>
+      <textarea id="key_pem" name="key_pem" rows="7" required spellcheck="false" autocomplete="off"
+                placeholder="-----BEGIN PRIVATE KEY-----&#10;…&#10;-----END PRIVATE KEY-----"
+                style="width:100%;font-family:var(--mono,monospace);font-size:0.8rem"></textarea>
+    </div>
+    <div class="field">
+      <label for="ca_bundle_pem">CA bundle / intermediates (PEM, optional)</label>
+      <textarea id="ca_bundle_pem" name="ca_bundle_pem" rows="4" spellcheck="false"
+                placeholder="Intermediate / chain certificates, if your CA ships them separately"
+                style="width:100%;font-family:var(--mono,monospace);font-size:0.8rem"></textarea>
+    </div>
+    <button class="btn primary" type="submit" style="margin-top:0.4rem">
+      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+      Upload &amp; install certificate
+    </button>
+  </form>
+</div>
+
 {# ACME contact email override — per-hosting, falls back to agent-wide default. #}
 <div class="card" style="margin-top:1rem">
   <h2 style="font-size:0.95rem;margin:0 0 0.35rem">ACME contact email</h2>

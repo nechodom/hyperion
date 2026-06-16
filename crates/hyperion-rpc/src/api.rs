@@ -282,6 +282,16 @@ pub trait AgentApi: Send + Sync + 'static {
     ) -> Result<(bool, String, Vec<String>), RpcError>;
     /// DNS-01 phase 2 for a bare (hosting-less) domain.
     async fn cert_dns01_finish_domain(&self, domain: Domain) -> Result<CertInfo, RpcError>;
+    /// Install an operator-supplied certificate (non-ACME). Validates the
+    /// PEM, that the key matches the cert, and that the cert covers the
+    /// hosting's domain + aliases; marks it `renewal_type = "manual"`.
+    async fn cert_upload(
+        &self,
+        sel: crate::wire::HostingSelector,
+        cert_pem: String,
+        key_pem: String,
+        ca_bundle_pem: Option<String>,
+    ) -> Result<CertInfo, RpcError>;
 
     /// Latest stats snapshot for a hosting (disk, bw, reqs).
     async fn hosting_stats(

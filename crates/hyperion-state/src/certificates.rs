@@ -12,6 +12,9 @@ pub struct CertRow {
     pub cert_path: String,
     pub key_path: String,
     pub issuer: String,
+    /// `"auto"` (ACME-managed, eligible for the renewal sweep) or
+    /// `"manual"` (operator-uploaded — the sweep must not touch it).
+    pub renewal_type: String,
 }
 
 pub async fn upsert(
@@ -58,6 +61,23 @@ pub async fn set_wildcard(pool: &SqlitePool, domain: &str, wildcard: bool) -> Re
     Ok(())
 }
 
+/// Set a cert's renewal type — `"auto"` (ACME-managed) or `"manual"`
+/// (operator-uploaded; the renewal sweep skips it so it's never
+/// overwritten). Kept separate from `upsert` so the renewal-method flag
+/// survives an ACME re-issue the same way `is_wildcard` does.
+pub async fn set_renewal_type(
+    pool: &SqlitePool,
+    domain: &str,
+    renewal_type: &str,
+) -> Result<(), StateError> {
+    sqlx::query("UPDATE certificates SET renewal_type = ? WHERE domain = ?")
+        .bind(renewal_type)
+        .bind(domain)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 /// True when the cert for `domain` was issued as a DNS-01 wildcard.
 /// Unknown domain ⇒ false (treated as a normal HTTP-01 cert).
 pub async fn is_wildcard(pool: &SqlitePool, domain: &str) -> Result<bool, StateError> {
@@ -70,15 +90,15 @@ pub async fn is_wildcard(pool: &SqlitePool, domain: &str) -> Result<bool, StateE
 }
 
 pub async fn get(pool: &SqlitePool, domain: &str) -> Result<Option<CertRow>, StateError> {
-    let row: Option<(i64, String, i64, i64, String, String, String)> = sqlx::query_as(
-        "SELECT id, domain, issued_at, not_after, cert_path, key_path, issuer
+    let row: Option<(i64, String, i64, i64, String, String, String, String)> = sqlx::query_as(
+        "SELECT id, domain, issued_at, not_after, cert_path, key_path, issuer, renewal_type
          FROM certificates WHERE domain = ?",
     )
     .bind(domain)
     .fetch_optional(pool)
     .await?;
     Ok(row.map(
-        |(id, domain, issued_at, not_after, cert_path, key_path, issuer)| CertRow {
+        |(id, domain, issued_at, not_after, cert_path, key_path, issuer, renewal_type)| CertRow {
             id,
             domain,
             issued_at,
@@ -86,6 +106,7 @@ pub async fn get(pool: &SqlitePool, domain: &str) -> Result<Option<CertRow>, Sta
             cert_path,
             key_path,
             issuer,
+            renewal_type,
         },
     ))
 }
@@ -103,8 +124,8 @@ pub async fn delete(pool: &SqlitePool, domain: &str) -> Result<(), StateError> {
 /// screen with "everything that's signed by us, when does each
 /// expire, who's at risk".
 pub async fn list_all(pool: &SqlitePool) -> Result<Vec<CertRow>, StateError> {
-    let rows: Vec<(i64, String, i64, i64, String, String, String)> = sqlx::query_as(
-        r#"SELECT id, domain, issued_at, not_after, cert_path, key_path, issuer
+    let rows: Vec<(i64, String, i64, i64, String, String, String, String)> = sqlx::query_as(
+        r#"SELECT id, domain, issued_at, not_after, cert_path, key_path, issuer, renewal_type
              FROM certificates
             ORDER BY not_after ASC"#,
     )
@@ -112,15 +133,20 @@ pub async fn list_all(pool: &SqlitePool) -> Result<Vec<CertRow>, StateError> {
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(id, domain, issued_at, not_after, cert_path, key_path, issuer)| CertRow {
-            id,
-            domain,
-            issued_at,
-            not_after,
-            cert_path,
-            key_path,
-            issuer,
-        })
+        .map(
+            |(id, domain, issued_at, not_after, cert_path, key_path, issuer, renewal_type)| {
+                CertRow {
+                    id,
+                    domain,
+                    issued_at,
+                    not_after,
+                    cert_path,
+                    key_path,
+                    issuer,
+                    renewal_type,
+                }
+            },
+        )
         .collect())
 }
 
@@ -130,8 +156,8 @@ pub async fn find_expiring_within(
     horizon_secs: i64,
 ) -> Result<Vec<CertRow>, StateError> {
     let cutoff = now + horizon_secs;
-    let rows: Vec<(i64, String, i64, i64, String, String, String)> = sqlx::query_as(
-        "SELECT id, domain, issued_at, not_after, cert_path, key_path, issuer
+    let rows: Vec<(i64, String, i64, i64, String, String, String, String)> = sqlx::query_as(
+        "SELECT id, domain, issued_at, not_after, cert_path, key_path, issuer, renewal_type
          FROM certificates WHERE not_after <= ? ORDER BY not_after",
     )
     .bind(cutoff)
@@ -140,14 +166,17 @@ pub async fn find_expiring_within(
     Ok(rows
         .into_iter()
         .map(
-            |(id, domain, issued_at, not_after, cert_path, key_path, issuer)| CertRow {
-                id,
-                domain,
-                issued_at,
-                not_after,
-                cert_path,
-                key_path,
-                issuer,
+            |(id, domain, issued_at, not_after, cert_path, key_path, issuer, renewal_type)| {
+                CertRow {
+                    id,
+                    domain,
+                    issued_at,
+                    not_after,
+                    cert_path,
+                    key_path,
+                    issuer,
+                    renewal_type,
+                }
             },
         )
         .collect())
@@ -234,9 +263,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn issuer_check_constraint() {
+    async fn issuer_is_free_text_after_renewal_type_migration() {
+        // Migration 039 dropped the issuer CHECK so a real CA's name (or a
+        // self-signed bootstrap) can be stored verbatim.
         let pool = open_memory().await.expect("open");
-        let r = upsert(&pool, "x.cz", 1, 1, "/a", "/b", "bogus").await;
-        assert!(r.is_err());
+        upsert(&pool, "x.cz", 1, 1, "/a", "/b", "DigiCert Inc")
+            .await
+            .expect("free-form issuer now allowed");
+        let got = get(&pool, "x.cz").await.expect("get").expect("present");
+        assert_eq!(got.issuer, "DigiCert Inc");
+    }
+
+    #[tokio::test]
+    async fn renewal_type_roundtrip() {
+        let pool = open_memory().await.expect("open");
+        upsert(&pool, "example.cz", 1, 1000, "/c/f.pem", "/c/p.pem", "letsencrypt")
+            .await
+            .expect("upsert");
+        // Default after a plain upsert is "auto" (ACME-managed).
+        let got = get(&pool, "example.cz").await.unwrap().unwrap();
+        assert_eq!(got.renewal_type, "auto");
+        // Mark it manual (operator upload).
+        set_renewal_type(&pool, "example.cz", "manual")
+            .await
+            .expect("set");
+        assert_eq!(
+            get(&pool, "example.cz").await.unwrap().unwrap().renewal_type,
+            "manual"
+        );
+        // A later ACME-style re-upsert must NOT reset it back to "auto"
+        // (preserved like is_wildcard).
+        upsert(&pool, "example.cz", 2, 2000, "/c/f.pem", "/c/p.pem", "letsencrypt")
+            .await
+            .expect("re-upsert");
+        assert_eq!(
+            get(&pool, "example.cz").await.unwrap().unwrap().renewal_type,
+            "manual"
+        );
+    }
+
+    #[tokio::test]
+    async fn renewal_type_check_rejects_bogus() {
+        let pool = open_memory().await.expect("open");
+        upsert(&pool, "x.cz", 1, 1, "/a", "/b", "letsencrypt")
+            .await
+            .expect("upsert");
+        let r = set_renewal_type(&pool, "x.cz", "weekly").await;
+        assert!(r.is_err(), "renewal_type CHECK should reject unknown values");
     }
 }

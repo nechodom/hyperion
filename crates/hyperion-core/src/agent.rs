@@ -509,6 +509,18 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.cert_dns01_finish_domain(domain.as_str()).await
     }
 
+    async fn cert_upload(
+        &self,
+        sel: HostingSelector,
+        cert_pem: String,
+        key_pem: String,
+        ca_bundle_pem: Option<String>,
+    ) -> Result<CertInfo, RpcError> {
+        self.svc
+            .upload_cert(sel, cert_pem, key_pem, ca_bundle_pem)
+            .await
+    }
+
     async fn hosting_stats(&self, sel: HostingSelector) -> Result<HostingStats, RpcError> {
         self.svc.hosting_stats(sel).await
     }

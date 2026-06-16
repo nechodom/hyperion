@@ -8053,6 +8053,152 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(cert)
     }
 
+    /// Install an operator-supplied certificate for the hosting at `sel`,
+    /// for the non-ACME cases (private CA, pre-purchased multi-year cert,
+    /// self-signed bootstrap). The PEM is validated before anything touches
+    /// disk: the cert + key must parse, the key must match the leaf's public
+    /// key, and the leaf's CN/SANs must cover the hosting's domain + every
+    /// alias. The cert is then marked `renewal_type = "manual"` so the ACME
+    /// renewal sweep never overwrites it.
+    pub async fn upload_cert(
+        &self,
+        sel: HostingSelector,
+        cert_pem: String,
+        key_pem: String,
+        ca_bundle_pem: Option<String>,
+    ) -> Result<CertInfo, RpcError> {
+        let detail = self.get(sel).await?;
+
+        // Serialize per domain against a concurrent ACME issuance so we
+        // can't interleave writes and leave a mismatched cert+key pair on
+        // disk (same lock issue_real_cert takes).
+        let lock = {
+            let mut map = self.cert_issue_locks.lock().await;
+            map.entry(detail.domain.clone())
+                .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        };
+        let _guard = lock.lock().await;
+
+        // The cert must cover the primary domain AND every alias the vhost
+        // serves — a cert that doesn't is a misconfiguration we refuse
+        // rather than silently install (it would produce name-mismatch
+        // warnings on the uncovered names).
+        let mut required: Vec<String> = Vec::with_capacity(1 + detail.aliases.len());
+        required.push(detail.domain.clone());
+        required.extend(detail.aliases.iter().cloned());
+
+        // Validate. CertError Display is safe to surface and never carries
+        // key material; we likewise never log the key below.
+        let validated = hyperion_adapters::cert::validate_upload(
+            &cert_pem,
+            &key_pem,
+            ca_bundle_pem.as_deref(),
+            &required,
+        )
+        .map_err(|e| RpcError::Validation {
+            message: e.to_string(),
+        })?;
+
+        // Write fullchain (leaf + CA bundle) world-readable and the private
+        // key 0600 to the per-domain default location the vhost points at.
+        let domain_dir = std::path::PathBuf::from("/etc/hyperion/certs").join(&detail.domain);
+        let cert_path = domain_dir.join("fullchain.pem");
+        let key_path = domain_dir.join("privkey.pem");
+        hyperion_adapters::fs::ensure_dir(&domain_dir, 0o700)
+            .await
+            .map_err(|e| RpcError::ProvisioningFailed {
+                stage: "cert_write".into(),
+                reason: e.to_string(),
+            })?;
+        hyperion_adapters::fs::atomic_write(
+            &cert_path,
+            validated.fullchain_pem.as_bytes(),
+            0o644,
+        )
+        .await
+        .map_err(|e| RpcError::ProvisioningFailed {
+            stage: "cert_write".into(),
+            reason: e.to_string(),
+        })?;
+        hyperion_adapters::fs::atomic_write(&key_path, key_pem.as_bytes(), 0o600)
+            .await
+            .map_err(|e| RpcError::ProvisioningFailed {
+                stage: "key_write".into(),
+                reason: e.to_string(),
+            })?;
+
+        // Persist metadata. issuer is the cert's real issuer (never
+        // "letsencrypt" for a real CA), and we flag it manual so the
+        // renewal sweep skips it. Clear any stale wildcard flag — an
+        // uploaded cert is not a DNS-01 wildcard reference.
+        let cert_path_str = cert_path.to_string_lossy().to_string();
+        let key_path_str = key_path.to_string_lossy().to_string();
+        let _ = certificates::upsert(
+            &self.pool,
+            &detail.domain,
+            now_secs(),
+            validated.not_after,
+            &cert_path_str,
+            &key_path_str,
+            &validated.issuer,
+        )
+        .await;
+        let _ = certificates::set_wildcard(&self.pool, &detail.domain, false).await;
+        if let Err(e) = certificates::set_renewal_type(&self.pool, &detail.domain, "manual").await {
+            return Err(RpcError::Internal_with(format!(
+                "mark cert renewal_type=manual: {e}"
+            )));
+        }
+
+        // Build the CertInfo we return + hand to the vhost render. SANs for
+        // display exclude the primary domain (mirrors the ACME path).
+        let sans: Vec<String> = validated
+            .covered_names
+            .iter()
+            .filter(|n| *n != &detail.domain)
+            .cloned()
+            .collect();
+        let cert = CertInfo {
+            domain: detail.domain.clone(),
+            sans,
+            issuer: validated.issuer.clone(),
+            not_after: validated.not_after,
+            fingerprint_sha256: validated.fingerprint.clone(),
+        };
+
+        // Re-render the vhost at the per-domain default path (clearing any
+        // inherited shared-wildcard override) and reload nginx.
+        let new_detail = HostingDetail {
+            cert: Some(cert.clone()),
+            cert_path: None,
+            cert_key_path: None,
+            ..detail.clone()
+        };
+        if let Err(e) = self.adapters.nginx_write_vhost(&new_detail).await {
+            return Err(RpcError::ProvisioningFailed {
+                stage: "nginx_reload".into(),
+                reason: e.to_string(),
+            });
+        }
+
+        self.append_audit(
+            "cert.upload",
+            Some(detail.id.as_str()),
+            &serde_json::json!({
+                "domain": detail.domain,
+                "issuer": validated.issuer,
+                "not_after": validated.not_after,
+                "covered_names": validated.covered_names,
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+
+        Ok(cert)
+    }
+
     /// Resolve the effective ACME contact email for a hosting (per-hosting
     /// override → agent default), rejecting placeholders.
     fn effective_acme_email<'a>(
@@ -8393,15 +8539,19 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let rows = certificates::find_expiring_within(&self.pool, now, horizon)
             .await
             .map_err(|e| RpcError::Internal_with(format!("query expiring certs: {e}")))?;
-        // The certificates CHECK constraint already restricts issuer
-        // to {letsencrypt, self-signed}. Skip self-signed (those are
-        // bootstrap certs awaiting a first real issuance — re-issuing
-        // them would also be self-signed; the dashboard nags the
-        // operator separately). starts_with lets a future provider
-        // string like "letsencrypt-staging" still get renewed here.
+        // Only auto-renew ACME-issued certs. Two independent guards:
+        //   - `renewal_type == "manual"` ⇒ an operator-uploaded cert
+        //     (private CA / pre-purchased / self-signed bootstrap). The
+        //     sweep must NEVER overwrite it with an ACME issuance, even if
+        //     its issuer string happened to start with "letsencrypt".
+        //   - issuer must start with "letsencrypt" — skips self-signed
+        //     bootstrap certs (re-issuing them would also be self-signed;
+        //     the dashboard nags the operator separately) and any uploaded
+        //     real-CA cert (issuer e.g. "DigiCert Inc"). `starts_with` lets
+        //     "letsencrypt-staging" still get renewed.
         let due: Vec<_> = rows
             .into_iter()
-            .filter(|r| r.issuer.starts_with("letsencrypt"))
+            .filter(|r| r.renewal_type != "manual" && r.issuer.starts_with("letsencrypt"))
             .collect();
 
         let mut out = Vec::with_capacity(due.len());

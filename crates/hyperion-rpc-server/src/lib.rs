@@ -409,6 +409,23 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::CertUpload {
+            sel,
+            cert_pem,
+            key_pem,
+            ca_bundle_pem,
+        } => match api
+            .cert_upload(
+                sel,
+                cert_pem.into_inner(),
+                key_pem.into_inner(),
+                ca_bundle_pem.map(|p| p.into_inner()),
+            )
+            .await
+        {
+            Ok(v) => Response::CertUpload(v),
+            Err(e) => Response::Error(e),
+        },
         Request::HostingStats { sel } => match api.hosting_stats(sel).await {
             Ok(v) => Response::HostingStats(v),
             Err(e) => Response::Error(e),
@@ -1478,6 +1495,15 @@ mod tests {
             Err(RpcError::Internal { message: "not supported by this agent".into() })
         }
         async fn cert_dns01_finish_domain(&self, _: Domain) -> Result<CertInfo, RpcError> {
+            Err(RpcError::Internal { message: "not supported by this agent".into() })
+        }
+        async fn cert_upload(
+            &self,
+            _: HostingSelector,
+            _: String,
+            _: String,
+            _: Option<String>,
+        ) -> Result<CertInfo, RpcError> {
             Err(RpcError::Internal { message: "not supported by this agent".into() })
         }
         async fn hosting_stats(&self, _: HostingSelector) -> Result<HostingStats, RpcError> {

@@ -41,6 +41,34 @@ fn default_job_limit() -> i64 {
     50
 }
 
+/// A PEM blob carried inside an RPC request. On the wire it is just its
+/// inner string (`#[serde(transparent)]`), but its `Debug` deliberately
+/// prints nothing — so the `debug!(?req, "received request")` at the
+/// socket boundary can't spill an uploaded **private key** (or a wall of
+/// cert text) into the agent log. Use [`RedactedPem::into_inner`] to get
+/// the bytes; `String` converts in via `Into`.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(transparent)]
+pub struct RedactedPem(pub String);
+
+impl RedactedPem {
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl From<String> for RedactedPem {
+    fn from(s: String) -> Self {
+        RedactedPem(s)
+    }
+}
+
+impl std::fmt::Debug for RedactedPem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RedactedPem(<redacted>)")
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
 pub enum Request {
@@ -195,6 +223,18 @@ pub enum Request {
     /// DNS-01 phase 2 for a bare (hosting-less) domain.
     CertDns01FinishDomain {
         domain: Domain,
+    },
+    /// Install an operator-supplied certificate (non-ACME: private CA,
+    /// pre-purchased, or self-signed bootstrap). The service validates the
+    /// PEM, confirms the key matches the cert and the cert covers the
+    /// hosting's domain + aliases, then marks it `renewal_type = "manual"`
+    /// so the ACME sweep never overwrites it.
+    CertUpload {
+        sel: HostingSelector,
+        cert_pem: RedactedPem,
+        key_pem: RedactedPem,
+        #[serde(default)]
+        ca_bundle_pem: Option<RedactedPem>,
     },
     HostingStats {
         sel: HostingSelector,
@@ -1086,6 +1126,7 @@ pub enum Response {
         values: Vec<String>,
     },
     CertDns01FinishDomain(CertInfo),
+    CertUpload(CertInfo),
     HostingStats(HostingStats),
     NodeStats(NodeStats),
     ClusterStats(ClusterStats),
@@ -1458,6 +1499,36 @@ mod tests {
         write_frame(&mut a, &resp).await.expect("write");
         let got: Response = read_frame(&mut b).await.expect("read");
         assert_eq!(resp, got);
+    }
+
+    #[test]
+    fn cert_upload_debug_redacts_key_but_serde_preserves_it() {
+        // The socket handler logs `debug!(?req)`, so Debug of an upload
+        // request must never contain the private key — while the wire form
+        // must still carry the real bytes to the node.
+        let secret = "-----BEGIN PRIVATE KEY-----\nSUPERSECRETKEYMATERIAL\n-----END PRIVATE KEY-----";
+        let req = Request::CertUpload {
+            sel: HostingSelector::Domain(Domain::parse("example.com").expect("domain")),
+            cert_pem: "-----BEGIN CERTIFICATE-----\nCERTDATA\n-----END CERTIFICATE-----"
+                .to_string()
+                .into(),
+            key_pem: secret.to_string().into(),
+            ca_bundle_pem: None,
+        };
+        let dbg = format!("{req:?}");
+        assert!(
+            !dbg.contains("SUPERSECRETKEYMATERIAL"),
+            "private key leaked into Debug: {dbg}"
+        );
+        assert!(dbg.contains("redacted"), "Debug should mark the field redacted");
+
+        let json = serde_json::to_string(&req).expect("serialize");
+        assert!(
+            json.contains("SUPERSECRETKEYMATERIAL"),
+            "wire form must preserve the key bytes"
+        );
+        let back: Request = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(req, back, "CertUpload must round-trip through serde");
     }
 
     #[tokio::test]

@@ -784,7 +784,8 @@ fn print_pretty(resp: &Response) {
         }
         Response::CertIssueAcme(c)
         | Response::CertDns01Finish(c)
-        | Response::CertDns01FinishDomain(c) => {
+        | Response::CertDns01FinishDomain(c)
+        | Response::CertUpload(c) => {
             println!("✓ certificate issued");
             println!("  issuer:    {}", c.issuer);
             println!("  not_after: {}", c.not_after);

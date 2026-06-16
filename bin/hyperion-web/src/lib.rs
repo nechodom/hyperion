@@ -133,6 +133,13 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::hostings::post_cert_dns01_finish),
         )
         .route(
+            // multipart/form-data upload of a custom PEM cert; 1 MiB is
+            // ample for a leaf + chain + key.
+            "/hostings/cert/upload",
+            post(handlers::hostings::post_cert_upload)
+                .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024)),
+        )
+        .route(
             "/hostings/restore",
             post(handlers::hostings::post_restore),
         )

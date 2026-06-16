@@ -1840,12 +1840,11 @@ pub async fn get_detail(
             }
         }),
         cert_error: q.cert_error,
-        cert_flash: q.cert.map(|s| {
-            if s == "staging" {
-                "Staging certificate issued — issuer 'letsencrypt-staging'.".into()
-            } else {
-                "Production HTTPS certificate issued.".into()
-            }
+        cert_flash: q.cert.map(|s| match s.as_str() {
+            "staging" => "Staging certificate issued — issuer 'letsencrypt-staging'.".into(),
+            "custom" => "Custom certificate uploaded — auto-renewal disabled for it.".into(),
+            "wildcard" => "Wildcard certificate issued.".into(),
+            _ => "Production HTTPS certificate issued.".into(),
         }),
         restore_error: q.restore_error,
         restore_flash: q.restore.map(|_| "Backup restored.".into()),
@@ -4915,6 +4914,106 @@ pub async fn post_cert_issue(
         RpcResponse::Error(e) => {
             let msg = urlencoding(&e.to_string());
             Ok(Redirect::to(&format!("/hostings/{}?cert_error={}", sel_url, msg)).into_response())
+        }
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+/// Upload a custom PEM certificate for a hosting (non-ACME). multipart so
+/// operators can paste large PEM blobs without urlencoded-form size limits;
+/// mirrors `post_restore_upload`'s field-by-field parsing. The cert + key
+/// travel inside the RPC to the owning node — nothing is written locally.
+pub async fn post_cert_upload(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    mut multipart: axum::extract::Multipart,
+) -> Result<Response, AppError> {
+    let mut selector: Option<String> = None;
+    let mut cert_pem: Option<String> = None;
+    let mut key_pem: Option<String> = None;
+    let mut ca_bundle_pem: Option<String> = None;
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| AppError::BadRequest(format!("multipart: {e}")))?
+    {
+        match field.name() {
+            Some("selector") => {
+                selector = Some(
+                    field
+                        .text()
+                        .await
+                        .map_err(|e| AppError::BadRequest(format!("selector: {e}")))?,
+                );
+            }
+            Some("cert_pem") => {
+                cert_pem = Some(
+                    field
+                        .text()
+                        .await
+                        .map_err(|e| AppError::BadRequest(format!("cert_pem: {e}")))?,
+                );
+            }
+            Some("key_pem") => {
+                key_pem = Some(
+                    field
+                        .text()
+                        .await
+                        .map_err(|e| AppError::BadRequest(format!("key_pem: {e}")))?,
+                );
+            }
+            Some("ca_bundle_pem") => {
+                ca_bundle_pem = Some(
+                    field
+                        .text()
+                        .await
+                        .map_err(|e| AppError::BadRequest(format!("ca_bundle_pem: {e}")))?,
+                );
+            }
+            _ => {}
+        }
+    }
+    let selector = selector.ok_or_else(|| AppError::BadRequest("missing selector".into()))?;
+    // Authorize before doing anything with the (sensitive) key material.
+    let sel = match require_manage_for_selector(&state, &ctx, &selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let cert_pem = cert_pem
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| AppError::BadRequest("missing certificate PEM".into()))?;
+    let key_pem = key_pem
+        .filter(|s| !s.trim().is_empty())
+        .ok_or_else(|| AppError::BadRequest("missing private key PEM".into()))?;
+    let ca_bundle_pem = ca_bundle_pem.filter(|s| !s.trim().is_empty());
+
+    let sel_url = urlencoding(&selector);
+    // The cert + nginx vhost live on the node that owns the hosting.
+    let target_owned: Option<String> = find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target_owned.as_deref(),
+        Request::CertUpload {
+            sel,
+            cert_pem: cert_pem.into(),
+            key_pem: key_pem.into(),
+            ca_bundle_pem: ca_bundle_pem.map(Into::into),
+        },
+    )
+    .await?;
+    match resp {
+        RpcResponse::CertUpload(_) => {
+            Ok(Redirect::to(&format!("/hostings/{}?cert=custom#ssl", sel_url)).into_response())
+        }
+        RpcResponse::Error(e) => {
+            let msg = urlencoding(&e.to_string());
+            Ok(
+                Redirect::to(&format!("/hostings/{}?cert_error={}#ssl", sel_url, msg))
+                    .into_response(),
+            )
         }
         _ => Err(AppError::Internal("unexpected response".into())),
     }
