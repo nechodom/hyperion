@@ -306,6 +306,17 @@ pub struct ClusterConfigView {
     /// there. Verifier transparently honours the anchor.
     #[serde(default)]
     pub audit_retention_days: i64,
+
+    /// When true, admin+ users who log in without 2FA enrolled are
+    /// corralled to the enrolment card before they can use the panel.
+    /// Defaults to on. Operators can turn it off from /settings (e.g.
+    /// during a migration) without rebuilding.
+    #[serde(default = "default_true")]
+    pub enforce_admin_2fa: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for ClusterConfigView {
@@ -321,6 +332,7 @@ impl Default for ClusterConfigView {
             trash_enabled: false,
             trash_retention_days: 30,
             audit_retention_days: 0, // 0 = keep forever
+            enforce_admin_2fa: true,
         }
     }
 }

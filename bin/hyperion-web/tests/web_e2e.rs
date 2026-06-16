@@ -307,7 +307,7 @@ fn build_app_with_signer(
         panel_hostname: Arc::new(tokio::sync::RwLock::new(String::new())),
         // Fixtures log in as admins without enrolling 2FA — keep the
         // enforcement gate off so the existing flows render as before.
-        enforce_admin_2fa: false,
+        enforce_admin_2fa: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     });
     (hyperion_web::build_router(state), signer)
 }

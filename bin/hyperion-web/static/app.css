@@ -1379,6 +1379,38 @@ select {
 .flash.info .flash-icon { color: var(--info); }
 .flash .flash-body { flex: 1; min-width: 0; }
 .flash .flash-body strong { color: var(--text); }
+
+/* Lightweight text banner (no icon/body structure — that's .flash).
+   Variants accept both the -ok/-err and -success/-error spellings. */
+.alert {
+  padding: 0.8rem 1rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  margin-bottom: 1rem;
+  font-size: 0.9rem;
+  background: var(--surface);
+}
+.alert strong { color: var(--text); }
+.alert-ok, .alert-success {
+  background: color-mix(in oklab, var(--success) 8%, var(--surface));
+  border-color: color-mix(in oklab, var(--success) 35%, var(--border));
+  color: var(--success);
+}
+.alert-err, .alert-error {
+  background: color-mix(in oklab, var(--danger) 8%, var(--surface));
+  border-color: color-mix(in oklab, var(--danger) 35%, var(--border));
+  color: var(--danger);
+}
+.alert-warn {
+  background: color-mix(in oklab, var(--warn) 8%, var(--surface));
+  border-color: color-mix(in oklab, var(--warn) 35%, var(--border));
+  color: var(--warn);
+}
+.alert-info {
+  background: color-mix(in oklab, var(--info) 8%, var(--surface));
+  border-color: color-mix(in oklab, var(--info) 35%, var(--border));
+  color: var(--info);
+}
 .flash .secret {
   font-family: var(--font-mono);
   background: var(--surface);

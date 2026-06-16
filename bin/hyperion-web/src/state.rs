@@ -32,8 +32,11 @@ pub struct AppState {
     pub panel_hostname: Arc<RwLock<String>>,
     /// When true, an admin/super_admin who logs in without 2FA enrolled
     /// is corralled to the enrolment card before they can use the panel.
-    /// On in production; off in the test harness (fixtures don't enrol).
-    pub enforce_admin_2fa: bool,
+    /// Backed by the `cluster.enforce_admin_2fa` setting and refreshed
+    /// live by the background poller (mirrors `panel_hostname`), so the
+    /// operator can flip it from /settings without restarting by hand.
+    /// In the test harness it's seeded to `false` (fixtures don't enrol).
+    pub enforce_admin_2fa: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl AppState {
@@ -51,6 +54,7 @@ impl AppState {
 
     pub fn enforce_admin_2fa(&self) -> bool {
         self.enforce_admin_2fa
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 

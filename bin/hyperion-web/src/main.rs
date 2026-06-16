@@ -86,8 +86,9 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
         ratelimit: Arc::new(hyperion_web::ratelimit::RateLimiter::new()),
         master_rpc_signer,
         panel_hostname: Arc::new(tokio::sync::RwLock::new(String::new())),
-        // 2FA is mandatory for admin+ in production.
-        enforce_admin_2fa: true,
+        // Seed on = mandatory for admin+. The poller below replaces this
+        // with the live `cluster.enforce_admin_2fa` setting within 30 s.
+        enforce_admin_2fa: Arc::new(std::sync::atomic::AtomicBool::new(true)),
     });
     // Spawn a background refresher that polls the agent for the
     // current `cluster.panel_hostname` every 30 s. The host-enforce
@@ -108,6 +109,10 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
                 )
                 .await;
                 if let Ok(hyperion_rpc::codec::Response::AgentConfigView(cfg)) = resp {
+                    state_for_refresh.enforce_admin_2fa.store(
+                        cfg.cluster.enforce_admin_2fa,
+                        std::sync::atomic::Ordering::Relaxed,
+                    );
                     let mut g = state_for_refresh.panel_hostname.write().await;
                     *g = cfg.cluster.panel_hostname;
                 }

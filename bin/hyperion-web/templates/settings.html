@@ -786,6 +786,30 @@
 
   <div class="card" style="margin-top:1rem">
     <h2 style="font-size:0.95rem;margin:0 0 0.6rem">
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+      Security
+    </h2>
+    <form method="post" action="/settings/config" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="cluster">
+      <input type="hidden" name="_checkboxes" value="enforce_admin_2fa">
+      <label class="field-checkbox" style="font-weight:600">
+        <input type="checkbox" name="enforce_admin_2fa" value="true"
+               {% if config.cluster.enforce_admin_2fa %}checked{% endif %}>
+        Require 2FA for admin &amp; super-admin accounts
+      </label>
+      <p class="text-soft small" style="margin:0.4rem 0 0.8rem;line-height:1.55">
+        When on, an admin who signs in without 2FA enrolled is sent straight to
+        the enrolment card and can't use the rest of the panel until they set it
+        up. Operators and viewers are unaffected. Turn it off only temporarily
+        (e.g. during a migration) — applies within ~30 s, no restart needed.
+      </p>
+      <button type="submit" class="btn primary">Save security settings</button>
+    </form>
+  </div>
+
+  <div class="card" style="margin-top:1rem">
+    <h2 style="font-size:0.95rem;margin:0 0 0.6rem">
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
       Test nodes &amp; staging sites
     </h2>

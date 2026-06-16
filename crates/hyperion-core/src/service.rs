@@ -13633,6 +13633,10 @@ fn read_cluster_section(
         .and_then(|v| v.as_integer())
         .unwrap_or(0)
         .clamp(0, 3650);
+    let enforce_admin_2fa = section
+        .and_then(|s| s.get("enforce_admin_2fa"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
     hyperion_types::ClusterConfigView {
         master_accepts_hostings: accept,
         test_node_ids,
@@ -13642,6 +13646,7 @@ fn read_cluster_section(
         trash_enabled,
         trash_retention_days,
         audit_retention_days,
+        enforce_admin_2fa,
     }
 }
 
@@ -13699,7 +13704,8 @@ fn parse_agent_section_fields(
             // [cluster] — master web UI placement preferences
             ("cluster", "master_accepts_hostings")
             | ("cluster", "test_wp_no_index")
-            | ("cluster", "trash_enabled") => {
+            | ("cluster", "trash_enabled")
+            | ("cluster", "enforce_admin_2fa") => {
                 crate::config_persist::FieldValue::Bool(parse_bool(v)?)
             }
             ("cluster", "test_node_ids")
