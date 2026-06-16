@@ -819,6 +819,8 @@
 
 <div class="tab-panel" id="tab-ssl">
 
+<p class="text-soft small" style="text-align:right;margin:0 0 0.6rem" data-role-min="admin"><a href="/certs">All certificates across the cluster →</a></p>
+
 {% if let Some(cert) = detail.cert %}
 <div class="card hover">
   <h2>
@@ -2241,6 +2243,8 @@
 
 <div class="tab-panel" id="tab-backups">
 
+<p class="text-soft small" style="margin:0 0 0.6rem" data-role-min="admin">Backups land on local disk; off-site targets (S3 + age) are configured cluster-wide in <a href="/settings/backups">Settings → Backups</a>.</p>
+
 <div class="card hover">
   <h2>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
@@ -2446,6 +2450,8 @@
 </div><!-- /tab-cron -->
 
 <div class="tab-panel" id="tab-monitor">
+
+<p class="text-soft small" style="text-align:right;margin:0 0 0.6rem"><a href="/monitoring">Cluster monitoring overview →</a></p>
 
 {# ── Logs — folded into the Observability tab ── #}
 <div class="card hover">

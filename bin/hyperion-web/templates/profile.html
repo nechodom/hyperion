@@ -168,7 +168,7 @@
       <p>You don't have 2FA enabled. Set it up to protect your account with a 6-digit code from an authenticator app.</p>
       <form method="post" action="/profile/2fa/start">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-        <button class="btn primary small" type="submit">Set up 2FA</button>
+        <button class="btn small primary" type="submit">Set up 2FA</button>
       </form>
     {% endif %}
   {% endif %}
@@ -181,7 +181,7 @@
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <input type="password" name="new_password" placeholder="new password" minlength="8" required>
     <input type="password" name="new_password_confirm" placeholder="repeat password" minlength="8" required>
-    <button type="submit" class="btn primary small" style="align-self:flex-start">Change password</button>
+    <button type="submit" class="btn small primary" style="align-self:flex-start">Change password</button>
   </form>
   <p class="text-soft small" style="margin-top:0.4rem">Min 8 characters. You'll stay logged in — no need to re-authenticate.</p>
 </div>
@@ -206,7 +206,7 @@
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <input type="email" name="new_email" placeholder="new@example.com" required maxlength="254">
     <input type="password" name="current_password" placeholder="current password" required>
-    <button type="submit" class="btn primary small" style="align-self:flex-start">Send verification code</button>
+    <button type="submit" class="btn small primary" style="align-self:flex-start">Send verification code</button>
   </form>
 
   <details style="margin-top:0.8rem">
@@ -222,7 +222,7 @@
         <input type="text" name="code" placeholder="123456"
                inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required autocomplete="off"
                style="font-size:1.1rem;letter-spacing:0.2em;width:8rem">
-        <button type="submit" class="btn primary small">Confirm</button>
+        <button type="submit" class="btn small primary">Confirm</button>
       </form>
       <form method="post" action="/profile/email/cancel" style="display:inline;margin:0">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">

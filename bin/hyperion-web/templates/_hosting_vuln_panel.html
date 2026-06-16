@@ -62,8 +62,9 @@
         {% endfor %}
       </div>
     {% endif %}
-    <div style="margin-top:0.7rem">
+    <div style="margin-top:0.7rem;display:flex;gap:0.7rem;align-items:center;flex-wrap:wrap">
       <button class="btn small" hx-get="vuln-panel" hx-target="closest .card" hx-swap="outerHTML">Re-scan</button>
+      <a class="text-soft small" href="/vulns" data-role-min="admin">All WordPress updates across the cluster →</a>
     </div>
   {% endif %}
 </div>

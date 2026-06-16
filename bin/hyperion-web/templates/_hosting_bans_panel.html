@@ -8,14 +8,15 @@
     Banned IPs
     {% if !bans.is_empty() %}<span class="pill warn" style="margin-left:0.4rem;font-size:0.65rem">{{ bans.len() }} active</span>{% endif %}
   </h2>
-  <p class="muted" style="margin:-0.3rem 0 0.75rem;font-size:0.85rem">
+  <p class="muted" style="margin:-0.3rem 0 0.5rem;font-size:0.85rem">
     Repeated <code>wp-login.php</code> / <code>xmlrpc.php</code> floods are
     auto-banned for an hour. Bans apply node-wide via nftables. Add or lift
     bans manually below.
   </p>
+  <p class="text-soft small" style="margin:0 0 0.75rem" data-role-min="admin"><a href="/bans">All banned IPs across the cluster →</a></p>
 
   {% if !error.is_empty() %}
-    <div class="flash err" style="margin-bottom:0.75rem"><div class="flash-body">{{ error }}</div></div>
+    <div class="flash error" style="margin-bottom:0.75rem"><div class="flash-body">{{ error }}</div></div>
   {% endif %}
 
   {% if bans.is_empty() %}
@@ -59,9 +60,8 @@
     <input type="hidden" name="op" value="add">
     <div class="row" style="gap:0.5rem;align-items:flex-end;flex-wrap:wrap">
       <div class="field" style="margin:0;min-width:11rem">
-        <label for="ban_ip">Ban an IPv4 address</label>
-        <input id="ban_ip" name="ip" type="text" required placeholder="203.0.113.5"
-               pattern="^(\d{1,3}\.){3}\d{1,3}$">
+        <label for="ban_ip">Ban an IP address <span class="hint">v4 or v6</span></label>
+        <input id="ban_ip" name="ip" type="text" required placeholder="203.0.113.5 or 2001:db8::1">
       </div>
       <div class="field" style="flex:1;margin:0;min-width:10rem">
         <label for="ban_reason">Reason <span class="hint">optional</span></label>
