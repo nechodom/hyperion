@@ -2068,6 +2068,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 &wc.issuer,
             )
             .await;
+            // Roll back the reference row (NOT the shared files) if a later
+            // provisioning step fails, so it can't orphan once the
+            // half-created hosting row is deleted.
+            stack.push(Box::new(CertRowDelete {
+                pool: self.pool.clone(),
+                domain: domain.to_string(),
+            }));
             let info = CertInfo {
                 domain: domain.to_string(),
                 sans: sans.clone(),
@@ -13232,6 +13239,29 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
     }
 
+    /// Resolve the staging hostname for create/push: an explicit override
+    /// (from the form) wins; else the value THIS node persisted at create
+    /// time (so push-back works regardless of the master-side metadata
+    /// write); else the default `staging.<domain>`.
+    async fn resolve_staging_domain(
+        &self,
+        prod_id: &str,
+        prod_domain: &str,
+        override_in: Option<&str>,
+    ) -> String {
+        if let Some(s) = override_in.map(str::trim).filter(|s| !s.is_empty()) {
+            return s.to_ascii_lowercase();
+        }
+        if let Ok(Some(v)) =
+            hyperion_state::hosting_kv::get(&self.pool, prod_id, "staging_domain").await
+        {
+            if !v.trim().is_empty() {
+                return v.trim().to_ascii_lowercase();
+            }
+        }
+        Self::effective_staging_domain(None, prod_domain)
+    }
+
     /// Create a `staging.<domain>` copy of a WordPress (or any) hosting:
     /// provision a sibling hosting, copy prod's files + DB into it, fix
     /// ownership, and rewrite the WP URL to the staging domain. The
@@ -13243,7 +13273,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         staging_domain: Option<String>,
     ) -> Result<String, RpcError> {
         let prod = self.get(sel).await?;
-        let staging_domain = Self::effective_staging_domain(staging_domain.as_deref(), &prod.domain);
+        let staging_domain = self
+            .resolve_staging_domain(prod.id.as_str(), &prod.domain, staging_domain.as_deref())
+            .await;
         let staging_dom =
             hyperion_validate::Domain::parse(&staging_domain).map_err(|e| RpcError::Validation {
                 message: format!("staging domain invalid: {e}"),
@@ -13324,6 +13356,18 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         self.wp_rewrite_domain(&staging.system_user, &staging.root_dir, &prod.domain, &staging_domain)
             .await;
 
+        // Record the hostname THIS node actually used so push-back +
+        // "Open staging" resolve it even if the master-side metadata write
+        // didn't land (shared-nothing: the node owns the source of truth).
+        let _ = hyperion_state::hosting_kv::set(
+            &self.pool,
+            prod.id.as_str(),
+            "staging_domain",
+            &staging_domain,
+            now_secs(),
+        )
+        .await;
+
         self.append_audit(
             "wp.staging.create",
             Some(prod.id.as_str()),
@@ -13344,7 +13388,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         staging_domain: Option<String>,
     ) -> Result<(), RpcError> {
         let prod = self.get(sel).await?;
-        let staging_domain = Self::effective_staging_domain(staging_domain.as_deref(), &prod.domain);
+        let staging_domain = self
+            .resolve_staging_domain(prod.id.as_str(), &prod.domain, staging_domain.as_deref())
+            .await;
         let staging_dom =
             hyperion_validate::Domain::parse(&staging_domain).map_err(|e| RpcError::Validation {
                 message: format!("staging domain invalid: {e}"),
@@ -15095,6 +15141,27 @@ impl<A: AdapterPort + 'static> Rollback for AcmeDelete<A> {
     }
     fn label(&self) -> &str {
         "acme_delete"
+    }
+}
+
+/// Rollback for a hosting that REFERENCES a shared wildcard cert: drop
+/// only its `certificates` row (the cert FILES belong to the wildcard and
+/// must be left untouched). Used when create() reuses a node wildcard and
+/// a later step fails — without this the reference row would orphan once
+/// the half-created hosting row is rolled back.
+struct CertRowDelete {
+    pool: SqlitePool,
+    domain: String,
+}
+#[async_trait]
+impl Rollback for CertRowDelete {
+    async fn run(&self) -> Result<(), String> {
+        certificates::delete(&self.pool, &self.domain)
+            .await
+            .map_err(|e| e.to_string())
+    }
+    fn label(&self) -> &str {
+        "delete_cert_reference_row"
     }
 }
 
