@@ -305,6 +305,9 @@ fn build_app_with_signer(
         // Empty hostname ⇒ the enforce_panel_hostname middleware is
         // a no-op, so tests reach handlers regardless of Host header.
         panel_hostname: Arc::new(tokio::sync::RwLock::new(String::new())),
+        // Fixtures log in as admins without enrolling 2FA — keep the
+        // enforcement gate off so the existing flows render as before.
+        enforce_admin_2fa: false,
     });
     (hyperion_web::build_router(state), signer)
 }

@@ -184,7 +184,7 @@ async fn post_login_via_rpc(
                 // Admin+ without 2FA enrolled → gate them into enrolment
                 // before they can use the panel (purpose marks the
                 // session; the enforce_2fa_gate handles the redirects).
-                let purpose = if enforce_2fa_for(&role) {
+                let purpose = if state.enforce_admin_2fa() && enforce_2fa_for(&role) {
                     PURPOSE_SESSION_2FA_PENDING
                 } else {
                     PURPOSE_SESSION
@@ -254,6 +254,13 @@ async fn post_login_bootstrap(
         return Ok(login_failed(&form.next));
     }
     clear_throttle(ip);
+    // Bootstrap user is super_admin — gate into 2FA enrolment when
+    // enforcement is on (off in the test harness).
+    let bootstrap_purpose = if state.enforce_admin_2fa() {
+        PURPOSE_SESSION_2FA_PENDING
+    } else {
+        PURPOSE_SESSION
+    };
     // Seed the DB with this bootstrap user as super_admin. If the seed
     // fails we still let them log in (so they're not locked out) — the
     // next login attempt will try again.
@@ -287,7 +294,7 @@ async fn post_login_bootstrap(
         "super_admin".into(),
         &form.next,
         &headers,
-        PURPOSE_SESSION_2FA_PENDING,
+        bootstrap_purpose,
     )
     .await
 }

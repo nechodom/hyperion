@@ -86,6 +86,8 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
         ratelimit: Arc::new(hyperion_web::ratelimit::RateLimiter::new()),
         master_rpc_signer,
         panel_hostname: Arc::new(tokio::sync::RwLock::new(String::new())),
+        // 2FA is mandatory for admin+ in production.
+        enforce_admin_2fa: true,
     });
     // Spawn a background refresher that polls the agent for the
     // current `cluster.panel_hostname` every 30 s. The host-enforce

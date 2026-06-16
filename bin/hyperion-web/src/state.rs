@@ -30,6 +30,10 @@ pub struct AppState {
     /// finished the panel-domain setup. Empty string = no panel
     /// hostname set yet (middleware is a no-op).
     pub panel_hostname: Arc<RwLock<String>>,
+    /// When true, an admin/super_admin who logs in without 2FA enrolled
+    /// is corralled to the enrolment card before they can use the panel.
+    /// On in production; off in the test harness (fixtures don't enrol).
+    pub enforce_admin_2fa: bool,
 }
 
 impl AppState {
@@ -43,6 +47,10 @@ impl AppState {
 
     pub fn secure_cookies(&self) -> bool {
         self.cfg.web.secure_cookies
+    }
+
+    pub fn enforce_admin_2fa(&self) -> bool {
+        self.enforce_admin_2fa
     }
 }
 
