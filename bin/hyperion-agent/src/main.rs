@@ -459,6 +459,13 @@ async fn main() -> anyhow::Result<()> {
                     tracing::warn!(rows = n, "startup: reaped stale jobs");
                 }
             }
+            // Re-apply persisted IP bans to nftables ONCE at startup —
+            // nft sets are in-memory and lost across reboots.
+            match tick_svc.bans_reapply_on_boot().await {
+                Ok(n) if n > 0 => tracing::info!(bans = n, "startup: re-applied IP bans"),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error=%e, "startup: ban re-apply failed"),
+            }
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(5 * 60));
             interval.tick().await; // skip the immediate first tick
             loop {
@@ -473,6 +480,12 @@ async fn main() -> anyhow::Result<()> {
                     if n > 0 {
                         tracing::warn!(rows = n, "reaped stale jobs");
                     }
+                }
+                // Brute-force scan + auto-ban each tick.
+                match tick_svc.fail2ban_tick().await {
+                    Ok(n) if n > 0 => tracing::info!(banned = n, "fail2ban: new bans"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error=%e, "fail2ban tick failed"),
                 }
             }
         });

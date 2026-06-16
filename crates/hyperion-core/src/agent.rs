@@ -1207,6 +1207,28 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.sftp_set(sel, enabled, public_keys).await
     }
 
+    async fn ban_list(
+        &self,
+        hosting_id: Option<String>,
+    ) -> Result<Vec<hyperion_types::IpBanWire>, RpcError> {
+        self.svc.ban_list(hosting_id).await
+    }
+
+    async fn ban_add(
+        &self,
+        ip: String,
+        hosting_id: Option<String>,
+        reason: String,
+        ttl_secs: i64,
+        source: String,
+    ) -> Result<(), RpcError> {
+        self.svc.ban_add(ip, hosting_id, reason, ttl_secs, source).await
+    }
+
+    async fn ban_remove(&self, ip: String) -> Result<(), RpcError> {
+        self.svc.ban_remove(ip).await
+    }
+
     async fn dashboard_alerts(&self) -> Result<Vec<DashboardAlert>, RpcError> {
         self.svc.dashboard_alerts().await
     }

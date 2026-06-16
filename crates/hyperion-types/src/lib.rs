@@ -33,7 +33,7 @@ pub use jobs::{
 };
 pub use limits::{
     BackupRestoreMode, BackupRunWire, ExpiringHosting, HostingExpiry, HostingLimits,
-    HostingUsageBucket, NodeInviteMint, NodeInviteSummary, OverBwPolicy, SuspendReason,
+    HostingUsageBucket, IpBanWire, NodeInviteMint, NodeInviteSummary, OverBwPolicy, SuspendReason,
 };
 pub use migration::{HostingImportResult, HostingMigrationBundle, HostingMigrationManifest};
 pub use php::PhpVersion;

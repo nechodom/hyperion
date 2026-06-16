@@ -916,6 +916,23 @@ pub enum Request {
         enabled: bool,
         public_keys: Vec<String>,
     },
+    /// List active IP bans. `hosting_id = Some` filters to that hosting
+    /// plus node-wide manual bans.
+    BanList {
+        hosting_id: Option<String>,
+    },
+    /// Add an IP ban. `ttl_secs = 0` ⇒ permanent.
+    BanAdd {
+        ip: String,
+        hosting_id: Option<String>,
+        reason: String,
+        ttl_secs: i64,
+        source: String,
+    },
+    /// Lift an IP ban.
+    BanRemove {
+        ip: String,
+    },
     DashboardAlerts,
     ProfileList,
     ProfileGet { id: i64 },
@@ -1253,6 +1270,9 @@ pub enum Response {
     FtpDisable,
     SftpStatus(hyperion_types::SftpStatus),
     SftpSet(hyperion_types::SftpStatus),
+    BanList(Vec<hyperion_types::IpBanWire>),
+    BanAdd,
+    BanRemove,
     DashboardAlerts(Vec<DashboardAlert>),
     ProfileList(Vec<HostingProfile>),
     ProfileGet(HostingProfile),

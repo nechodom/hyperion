@@ -4377,6 +4377,188 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         self.sftp_status(HostingSelector::Id(detail.id.clone())).await
     }
 
+    /// Add an IP ban (manual or auto). IPv4 only — validated at the
+    /// boundary. `ttl_secs == 0` ⇒ permanent (manual bans only).
+    pub async fn ban_add(
+        &self,
+        ip: String,
+        hosting_id: Option<String>,
+        reason: String,
+        ttl_secs: i64,
+        source: String,
+    ) -> Result<(), RpcError> {
+        let parsed: std::net::Ipv4Addr =
+            ip.trim().parse().map_err(|_| RpcError::Validation {
+                message: "only IPv4 addresses can be banned".into(),
+            })?;
+        // Never let the operator ban a private/loopback range and lock
+        // themselves (or the master↔worker link) out by accident.
+        if parsed.is_loopback() || parsed.is_unspecified() {
+            return Err(RpcError::Validation {
+                message: "refusing to ban loopback / 0.0.0.0".into(),
+            });
+        }
+        let ip = parsed.to_string();
+        nft_ensure_ban_infra().await?;
+        nft_ban(&ip, ttl_secs).await?;
+        let now = now_secs();
+        let expires = if ttl_secs > 0 { now + ttl_secs } else { 0 };
+        hyperion_state::bans::add_or_refresh(
+            &self.pool,
+            &ip,
+            hosting_id.as_deref(),
+            &reason,
+            &source,
+            now,
+            expires,
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("ban persist: {e}")))?;
+        self.append_audit(
+            "hosting.ban.add",
+            hosting_id.as_deref(),
+            &serde_json::json!({"ip": ip, "reason": reason, "source": source, "ttl": ttl_secs})
+                .to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
+    /// Lift an IP ban.
+    pub async fn ban_remove(&self, ip: String) -> Result<(), RpcError> {
+        let parsed: std::net::Ipv4Addr =
+            ip.trim().parse().map_err(|_| RpcError::Validation {
+                message: "not a valid IPv4 address".into(),
+            })?;
+        let ip = parsed.to_string();
+        nft_unban(&ip).await;
+        hyperion_state::bans::deactivate(&self.pool, &ip)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("ban remove: {e}")))?;
+        self.append_audit(
+            "hosting.ban.remove",
+            None,
+            &serde_json::json!({"ip": ip}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
+    /// List active bans. `hosting_id = Some` ⇒ bans attributed to that
+    /// hosting plus node-wide manual bans; `None` ⇒ every active ban.
+    pub async fn ban_list(
+        &self,
+        hosting_id: Option<String>,
+    ) -> Result<Vec<hyperion_types::IpBanWire>, RpcError> {
+        let now = now_secs();
+        // Opportunistic sweep so the list never shows a lapsed ban.
+        if let Ok(expired) = hyperion_state::bans::reap_expired(&self.pool, now).await {
+            for ip in &expired {
+                nft_unban(ip).await;
+            }
+        }
+        let bans = match hosting_id {
+            Some(h) => hyperion_state::bans::list_for_hosting(&self.pool, &h, now).await,
+            None => hyperion_state::bans::list_active(&self.pool, now).await,
+        }
+        .map_err(|e| RpcError::Internal_with(format!("ban list: {e}")))?;
+        Ok(bans
+            .into_iter()
+            .map(|b| hyperion_types::IpBanWire {
+                id: b.id,
+                ip: b.ip,
+                hosting_id: b.hosting_id,
+                reason: b.reason,
+                source: b.source,
+                banned_at: b.banned_at,
+                expires_at: b.expires_at,
+            })
+            .collect())
+    }
+
+    /// Re-apply persisted, unexpired bans to nftables (whose sets are
+    /// in-memory and lost on reboot). Called once at agent start.
+    pub async fn bans_reapply_on_boot(&self) -> Result<i64, RpcError> {
+        let now = now_secs();
+        let bans = hyperion_state::bans::list_active(&self.pool, now)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("ban list: {e}")))?;
+        if bans.is_empty() {
+            return Ok(0);
+        }
+        nft_ensure_ban_infra().await?;
+        let mut n = 0i64;
+        for b in bans {
+            let ttl = if b.expires_at > 0 {
+                (b.expires_at - now).max(1)
+            } else {
+                0
+            };
+            if nft_ban(&b.ip, ttl).await.is_ok() {
+                n += 1;
+            }
+        }
+        Ok(n)
+    }
+
+    /// One tick of the brute-force scanner: sweep expired bans, then scan
+    /// every active hosting's access log for wp-login / xmlrpc floods and
+    /// auto-ban offenders. Returns the number of new bans applied.
+    pub async fn fail2ban_tick(&self) -> Result<i64, RpcError> {
+        const WINDOW_SECS: i64 = 600;
+        const THRESHOLD: u32 = 12;
+        const BAN_TTL_SECS: i64 = 3600;
+
+        let now = now_secs();
+        if let Ok(expired) = hyperion_state::bans::reap_expired(&self.pool, now).await {
+            for ip in &expired {
+                nft_unban(ip).await;
+            }
+        }
+        let summaries = self.list().await?;
+        let mut new_bans = 0i64;
+        for s in &summaries {
+            if s.state != HostingState::Active {
+                continue;
+            }
+            let Some(user) = derive_user_from_summary(s) else {
+                continue;
+            };
+            let access = std::path::PathBuf::from(&self.paths.home_root)
+                .join(&user)
+                .join(&s.domain)
+                .join("logs")
+                .join("access.log");
+            let offenders =
+                scan_access_log_for_bruteforce(&access, now - WINDOW_SECS, THRESHOLD).await;
+            for ip in offenders {
+                if hyperion_state::bans::is_active(&self.pool, &ip, now)
+                    .await
+                    .unwrap_or(false)
+                {
+                    continue;
+                }
+                if self
+                    .ban_add(
+                        ip.clone(),
+                        Some(s.id.as_str().to_string()),
+                        "auto: wp-login / xmlrpc brute force".into(),
+                        BAN_TTL_SECS,
+                        "auto".into(),
+                    )
+                    .await
+                    .is_ok()
+                {
+                    new_bans += 1;
+                    tracing::info!(ip = %ip, domain = %s.domain, "fail2ban: auto-banned");
+                }
+            }
+        }
+        Ok(new_bans)
+    }
+
     /// Reset the DB password for a hosting, persisting the new secret.
     pub async fn db_reset_password(
         &self,
@@ -12758,6 +12940,130 @@ fn firewall_template_commands(id: &str) -> Option<Vec<Vec<&'static str>>> {
         _ => return None,
     };
     Some(header.into_iter().chain(body).collect())
+}
+
+/// nftables binary + our reused `inet hyperion` table (shared with the
+/// firewall feature). The ban set auto-expires entries via its `timeout`
+/// flag, so a missed sweep still can't keep an IP banned forever.
+const NFT: &str = "/usr/sbin/nft";
+
+/// Ensure the `banned` set + the drop rule exist in the `inet hyperion`
+/// input chain. Idempotent — table/chain/set creation errors ("File
+/// exists") are benign and ignored; the drop rule is only inserted when
+/// absent.
+async fn nft_ensure_ban_infra() -> Result<(), RpcError> {
+    let _ = hyperion_adapters::cmd::run(NFT, &["add", "table", "inet", "hyperion"]).await;
+    let _ = hyperion_adapters::cmd::run(
+        NFT,
+        &[
+            "add", "chain", "inet", "hyperion", "input", "{", "type", "filter", "hook", "input",
+            "priority", "0", ";", "policy", "accept", ";", "}",
+        ],
+    )
+    .await;
+    let _ = hyperion_adapters::cmd::run(
+        NFT,
+        &[
+            "add", "set", "inet", "hyperion", "banned", "{", "type", "ipv4_addr", ";", "flags",
+            "timeout", ";", "}",
+        ],
+    )
+    .await;
+    let listing = hyperion_adapters::cmd::run(NFT, &["list", "chain", "inet", "hyperion", "input"])
+        .await
+        .unwrap_or_default();
+    if !listing.contains("hyperion:ban-drop") {
+        // `insert` prepends, so the drop precedes any accept rules.
+        hyperion_adapters::cmd::run(
+            NFT,
+            &[
+                "insert", "rule", "inet", "hyperion", "input", "ip", "saddr", "@banned", "drop",
+                "comment", "hyperion:ban-drop",
+            ],
+        )
+        .await
+        .map_err(|e| RpcError::ProvisioningFailed {
+            stage: "nft_ban_infra".into(),
+            reason: e.to_string(),
+        })?;
+    }
+    Ok(())
+}
+
+/// Add an IP to the nft `banned` set with an optional timeout (0 = no
+/// timeout / permanent).
+async fn nft_ban(ip: &str, ttl_secs: i64) -> Result<(), RpcError> {
+    let ttl = format!("{ttl_secs}s");
+    let argv: Vec<&str> = if ttl_secs > 0 {
+        vec![
+            "add", "element", "inet", "hyperion", "banned", "{", ip, "timeout", &ttl, "}",
+        ]
+    } else {
+        vec!["add", "element", "inet", "hyperion", "banned", "{", ip, "}"]
+    };
+    hyperion_adapters::cmd::run(NFT, &argv)
+        .await
+        .map_err(|e| RpcError::ProvisioningFailed {
+            stage: "nft_ban".into(),
+            reason: e.to_string(),
+        })?;
+    Ok(())
+}
+
+/// Remove an IP from the nft `banned` set. Best-effort — a missing
+/// element (already expired by nft's own timeout) is not an error.
+async fn nft_unban(ip: &str) {
+    let _ = hyperion_adapters::cmd::run(
+        NFT,
+        &["delete", "element", "inet", "hyperion", "banned", "{", ip, "}"],
+    )
+    .await;
+}
+
+/// Scan an nginx access.log (combined format) for brute-force probes:
+/// repeated POSTs to wp-login.php / xmlrpc.php from one IPv4 address
+/// inside the `since` window. Returns IPs at/over `threshold`.
+async fn scan_access_log_for_bruteforce(
+    path: &std::path::Path,
+    since: i64,
+    threshold: u32,
+) -> Vec<String> {
+    let Ok(body) = tokio::fs::read_to_string(path).await else {
+        return Vec::new();
+    };
+    use chrono::{DateTime, FixedOffset};
+    use std::collections::HashMap;
+    let mut counts: HashMap<String, u32> = HashMap::new();
+    for line in body.lines() {
+        let ip = line.split_whitespace().next().unwrap_or("");
+        // Only IPv4 — the nft ban set is ipv4_addr.
+        if ip.parse::<std::net::Ipv4Addr>().is_err() {
+            continue;
+        }
+        let Some(start) = line.find('[') else { continue };
+        let Some(end_rel) = line[start..].find(']') else { continue };
+        let ts_str = &line[start + 1..start + end_rel];
+        let Ok(dt) = DateTime::<FixedOffset>::parse_from_str(ts_str, "%d/%b/%Y:%H:%M:%S %z") else {
+            continue;
+        };
+        if dt.timestamp() < since {
+            continue;
+        }
+        // The request line is the first quoted field: "METHOD path proto".
+        let Some(q1) = line.find('"') else { continue };
+        let Some(q2_rel) = line[q1 + 1..].find('"') else { continue };
+        let req = &line[q1 + 1..q1 + 1 + q2_rel];
+        let is_probe = req.starts_with("POST ")
+            && (req.contains("/wp-login.php") || req.contains("/xmlrpc.php"));
+        if is_probe {
+            *counts.entry(ip.to_string()).or_insert(0) += 1;
+        }
+    }
+    counts
+        .into_iter()
+        .filter(|(_, c)| *c >= threshold)
+        .map(|(ip, _)| ip)
+        .collect()
 }
 
 async fn parse_access_log_window(path: &std::path::Path, since: i64) -> (i64, i64, i64, i64) {

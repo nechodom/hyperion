@@ -178,6 +178,20 @@ impl BackupRestoreMode {
     }
 }
 
+/// One IP ban as shown in the UI / returned over the wire.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct IpBanWire {
+    pub id: i64,
+    pub ip: String,
+    pub hosting_id: Option<String>,
+    pub reason: String,
+    /// "auto" | "manual".
+    pub source: String,
+    pub banned_at: i64,
+    /// 0 = permanent.
+    pub expires_at: i64,
+}
+
 #[cfg(test)]
 mod restore_mode_tests {
     use super::BackupRestoreMode;

@@ -8,6 +8,7 @@
 pub mod audit;
 pub mod backup_targets;
 pub mod backups;
+pub mod bans;
 pub mod certificates;
 pub mod databases;
 pub mod db;

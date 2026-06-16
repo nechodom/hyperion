@@ -4594,6 +4594,106 @@ pub async fn post_sftp(
     }
 }
 
+/// Lazily-loaded "Banned IPs" panel (Settings tab). Dispatched to the
+/// OWNING node — bans are enforced node-wide by nftables there.
+#[derive(Template)]
+#[template(path = "_hosting_bans_panel.html")]
+struct BansPanelTpl {
+    bans: Vec<hyperion_types::IpBanWire>,
+    selector: String,
+    csrf_ban: String,
+    error: String,
+}
+
+pub async fn get_bans_panel(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Path(selector): Path<String>,
+) -> Result<Response, AppError> {
+    let sel = parse_selector(&selector)?;
+    let (detail, owner_node) = find_hosting_anywhere(&state, sel).await?;
+    if let Err(r) = require_hosting_access(&state, &ctx, detail.id.as_str(), false).await {
+        return Ok(r);
+    }
+    let csrf_ban = csrf_token_for(&state, &ctx, "/hostings/ban");
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        owner_node.as_deref(),
+        Request::BanList { hosting_id: Some(detail.id.as_str().to_string()) },
+    )
+    .await;
+    let (bans, error) = match resp {
+        Ok(RpcResponse::BanList(b)) => (b, String::new()),
+        Ok(RpcResponse::Error(e)) => (vec![], e.to_string()),
+        _ => (vec![], "could not reach the owning node".into()),
+    };
+    let tpl = BansPanelTpl {
+        bans,
+        selector: detail.id.as_str().to_string(),
+        csrf_ban,
+        error,
+    };
+    Ok(Html(tpl.render()?).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct BanForm {
+    pub selector: String,
+    /// "add" | "remove".
+    pub op: String,
+    pub ip: String,
+    #[serde(default)]
+    pub reason: String,
+}
+
+pub async fn post_ban(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<BanForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let sel_url = urlencoding(&form.selector);
+    let hosting_id = match find_hosting_anywhere(&state, sel.clone()).await {
+        Ok((d, _)) => Some(d.id.as_str().to_string()),
+        Err(_) => None,
+    };
+    let target_owned: Option<String> = find_hosting_anywhere(&state, sel)
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
+    let req = if form.op == "remove" {
+        Request::BanRemove { ip: form.ip.trim().to_string() }
+    } else {
+        let reason = if form.reason.trim().is_empty() {
+            "manual ban".to_string()
+        } else {
+            form.reason.trim().chars().take(200).collect()
+        };
+        Request::BanAdd {
+            ip: form.ip.trim().to_string(),
+            hosting_id,
+            reason,
+            ttl_secs: 0, // manual bans are permanent until lifted
+            source: "manual".into(),
+        }
+    };
+    let resp = crate::dispatcher::dispatch_to_node(&state, target_owned.as_deref(), req).await?;
+    match resp {
+        RpcResponse::BanAdd | RpcResponse::BanRemove => {
+            Ok(Redirect::to(&format!("/hostings/{}?ban=ok#settings", sel_url)).into_response())
+        }
+        RpcResponse::Error(e) => {
+            let msg = urlencoding(&e.to_string());
+            Ok(Redirect::to(&format!("/hostings/{}?ban_error={}#settings", sel_url, msg))
+                .into_response())
+        }
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
 #[derive(Deserialize)]
 pub struct CertIssueForm {
     pub selector: String,

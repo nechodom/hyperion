@@ -861,6 +861,23 @@ fn print_pretty(resp: &Response) {
             println!("  password (shown once): {password}");
         }
         Response::FtpDisable => println!("✓ FTP disabled (password cleared)"),
+        Response::BanList(bans) => {
+            if bans.is_empty() {
+                println!("no active bans");
+            } else {
+                println!("{:<18} {:<8} {:<12} REASON", "IP", "SOURCE", "EXPIRES");
+                for b in bans {
+                    let exp = if b.expires_at == 0 {
+                        "permanent".to_string()
+                    } else {
+                        b.expires_at.to_string()
+                    };
+                    println!("{:<18} {:<8} {:<12} {}", b.ip, b.source, exp, b.reason);
+                }
+            }
+        }
+        Response::BanAdd => println!("✓ IP banned"),
+        Response::BanRemove => println!("✓ ban lifted"),
         Response::SftpStatus(s) | Response::SftpSet(s) => {
             println!(
                 "SFTP {} for {} ({} key(s))",

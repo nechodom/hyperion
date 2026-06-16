@@ -1030,6 +1030,20 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::BanList { hosting_id } => match api.ban_list(hosting_id).await {
+            Ok(v) => Response::BanList(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::BanAdd { ip, hosting_id, reason, ttl_secs, source } => {
+            match api.ban_add(ip, hosting_id, reason, ttl_secs, source).await {
+                Ok(_) => Response::BanAdd,
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::BanRemove { ip } => match api.ban_remove(ip).await {
+            Ok(_) => Response::BanRemove,
+            Err(e) => Response::Error(e),
+        },
         Request::DashboardAlerts => match api.dashboard_alerts().await {
             Ok(v) => Response::DashboardAlerts(v),
             Err(e) => Response::Error(e),
@@ -2022,6 +2036,25 @@ mod tests {
             _: Vec<String>,
         ) -> Result<hyperion_types::SftpStatus, RpcError> {
             Ok(hyperion_types::SftpStatus::default())
+        }
+        async fn ban_list(
+            &self,
+            _: Option<String>,
+        ) -> Result<Vec<hyperion_types::IpBanWire>, RpcError> {
+            Ok(vec![])
+        }
+        async fn ban_add(
+            &self,
+            _: String,
+            _: Option<String>,
+            _: String,
+            _: i64,
+            _: String,
+        ) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn ban_remove(&self, _: String) -> Result<(), RpcError> {
+            Ok(())
         }
         async fn dashboard_alerts(&self) -> Result<Vec<DashboardAlert>, RpcError> {
             Ok(vec![])

@@ -895,6 +895,22 @@ pub trait AgentApi: Send + Sync + 'static {
         enabled: bool,
         public_keys: Vec<String>,
     ) -> Result<hyperion_types::SftpStatus, RpcError>;
+    /// List active IP bans, optionally scoped to a hosting.
+    async fn ban_list(
+        &self,
+        hosting_id: Option<String>,
+    ) -> Result<Vec<hyperion_types::IpBanWire>, RpcError>;
+    /// Add an IP ban.
+    async fn ban_add(
+        &self,
+        ip: String,
+        hosting_id: Option<String>,
+        reason: String,
+        ttl_secs: i64,
+        source: String,
+    ) -> Result<(), RpcError>;
+    /// Lift an IP ban.
+    async fn ban_remove(&self, ip: String) -> Result<(), RpcError>;
 
     /// Restore a hosting from a previously-taken backup archive. The path
     /// must point at one of OUR archives (under /var/lib/hyperion/backups
