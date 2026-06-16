@@ -1070,30 +1070,40 @@
     Staging site
   </h2>
   <p class="muted" style="margin:-0.3rem 0 0.85rem;font-size:0.85rem">
-    Spin up a <code>staging.{{ detail.domain }}</code> copy to test plugin /
+    Spin up a <code>{{ staging_domain }}</code> copy to test plugin /
     theme updates safely, then push it back over production. Push takes a
     <strong>pre-push backup of production first</strong>, so a bad push is
     always recoverable from the Backups tab.
   </p>
-  <div class="row" style="gap:0.5rem;flex-wrap:wrap">
-    <form method="post" action="/hostings/wp/staging/create" style="display:inline"
-          data-confirm-title="Create staging copy"
-          data-confirm-body="A staging.{{ detail.domain }} hosting will be created with a copy of this site's files + database. WordPress URLs are rewritten to the staging domain."
-          data-confirm-confirm-label="Create staging">
-      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-      <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+  <form method="post" action="/hostings/wp/staging/create"
+        data-confirm-title="Create staging copy"
+        data-confirm-body="A staging copy ({{ staging_domain }}) will be created with a copy of this site's files + database. WordPress URLs are rewritten to the staging hostname."
+        data-confirm-confirm-label="Create staging">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+    <div class="field" style="max-width:26rem;margin-bottom:0.7rem">
+      <label for="staging_domain">Staging hostname</label>
+      <input id="staging_domain" class="input" type="text" name="staging_domain"
+             value="{{ staging_domain }}" placeholder="staging.{{ detail.domain }}"
+             autocapitalize="off" autocomplete="off" spellcheck="false">
+      <span class="muted hint">Must already resolve to this server — its own DNS
+        record, or a <code>*.{{ detail.domain }}</code> wildcard. Leave as-is for the default.</span>
+    </div>
+    <div class="row" style="gap:0.5rem;flex-wrap:wrap">
       <button class="btn" type="submit">Create / refresh staging</button>
-    </form>
+    </div>
+  </form>
+  <div class="row" style="gap:0.5rem;flex-wrap:wrap;margin-top:0.7rem">
     <form method="post" action="/hostings/wp/staging/push" style="display:inline"
           data-confirm-title="Push staging to production"
-          data-confirm-body="staging.{{ detail.domain }}'s files + database will OVERWRITE production {{ detail.domain }}. A pre-push backup of production is taken first. This cannot be undone except by restoring that backup."
+          data-confirm-body="{{ staging_domain }}'s files + database will OVERWRITE production {{ detail.domain }}. A pre-push backup of production is taken first. This cannot be undone except by restoring that backup."
           data-confirm-confirm-label="Push to production"
           data-confirm-variant="danger">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
       <button class="btn danger" type="submit">Push staging → production</button>
     </form>
-    <a class="btn ghost" href="https://staging.{{ detail.domain }}" target="_blank" rel="noopener noreferrer">Open staging ↗</a>
+    <a class="btn ghost" href="https://{{ staging_domain }}" target="_blank" rel="noopener noreferrer">Open staging ↗</a>
   </div>
 </div>
 {% endif %}

@@ -271,6 +271,10 @@ struct DetailTpl<'a> {
     /// Operator tags (already split + cleaned) for filtering/labelling.
     tags: Vec<String>,
     csrf_notes: String,
+    /// Effective staging hostname for this hosting — the saved per-hosting
+    /// override (master hosting_kv) or the default `staging.<domain>`.
+    /// Drives the staging card's input prefill, confirm text + "Open" link.
+    staging_domain: String,
     /// Operator php.ini overrides (applied via .user.ini).
     php_ini: PhpIniSettings,
     csrf_php_ini: String,
@@ -1065,6 +1069,7 @@ pub async fn post_create(
             let limits = fetch_limits(&state, target, HostingSelector::Id(created.id.clone()))
                 .await
                 .unwrap_or_else(|_| hyperion_types::HostingLimits::defaults());
+            let staging_domain_default = format!("staging.{}", detail.domain);
             let tpl = DetailTpl {
                 username: &ctx.username,
                 user_initial: super::user_initial(&ctx.username),
@@ -1160,6 +1165,7 @@ pub async fn post_create(
                 notes: String::new(),
                 tags: vec![],
                 csrf_notes: csrf_token_for(&state, &ctx, "/hostings/notes"),
+                staging_domain: staging_domain_default,
                 php_ini: PhpIniSettings::default(),
                 csrf_php_ini: csrf_token_for(&state, &ctx, "/hostings/php-ini"),
             };
@@ -1713,6 +1719,13 @@ pub async fn get_detail(
                 .collect()
         })
         .unwrap_or_default();
+    // Effective staging hostname: saved per-hosting override or default.
+    let staging_domain = kv_pairs
+        .iter()
+        .find(|(k, _)| k == "staging_domain")
+        .map(|(_, v)| v.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("staging.{}", detail.domain));
     let tpl = DetailTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -1826,6 +1839,7 @@ pub async fn get_detail(
         notes,
         tags,
         csrf_notes: csrf_token_for(&state, &ctx, "/hostings/notes"),
+        staging_domain,
         php_ini: PhpIniSettings::from_kv(&kv_pairs),
         csrf_php_ini: csrf_token_for(&state, &ctx, "/hostings/php-ini"),
     };
@@ -6969,6 +6983,28 @@ pub async fn post_restore_as_new(
 #[derive(Deserialize)]
 pub struct StagingForm {
     pub selector: String,
+    /// Optional custom staging hostname typed on the create form.
+    /// Empty/absent ⇒ fall back to the saved override or `staging.<domain>`.
+    #[serde(default)]
+    pub staging_domain: Option<String>,
+}
+
+/// Read a single panel-side metadata value from the master's hosting_kv
+/// (keyed by ULID), returning `None` for missing or blank values.
+async fn read_master_kv(state: &SharedState, hosting_id: &str, key: &str) -> Option<String> {
+    match hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::HostingKvList { hosting_id: hosting_id.to_string() },
+    )
+    .await
+    {
+        Ok(RpcResponse::HostingKvList(v)) => v
+            .into_iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v)
+            .filter(|s| !s.trim().is_empty()),
+        _ => None,
+    }
 }
 
 /// Create a staging.<domain> copy of a WordPress site.
@@ -6982,6 +7018,13 @@ pub async fn post_wp_staging_create(
         Err(r) => return Ok(r),
     };
     let sel_url = urlencoding(&form.selector);
+    // Effective staging hostname: the freshly-typed value wins; else the
+    // saved per-hosting override; else None (the node uses staging.<domain>).
+    let staging_override: Option<String> =
+        match form.staging_domain.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(s) => Some(s.to_ascii_lowercase()),
+            None => read_master_kv(&state, &form.selector, "staging_domain").await,
+        };
     let target: Option<String> = find_hosting_anywhere(&state, sel.clone())
         .await
         .ok()
@@ -6989,15 +7032,25 @@ pub async fn post_wp_staging_create(
     let resp = crate::dispatcher::dispatch_to_node(
         &state,
         target.as_deref(),
-        Request::WpStagingCreate { sel },
+        Request::WpStagingCreate { sel, staging_domain: staging_override },
     )
     .await?;
     match resp {
-        RpcResponse::WpStagingCreate { staging_domain } => Ok(Redirect::to(&format!(
-            "/hostings/{}?created=1",
-            urlencoding(&staging_domain)
-        ))
-        .into_response()),
+        RpcResponse::WpStagingCreate { staging_domain } => {
+            // Persist the hostname actually used so push + "Open staging"
+            // stay consistent (panel-side metadata, master's hosting_kv).
+            let _ = hyperion_rpc_client::call(
+                &state.agent_socket,
+                Request::HostingKvSet {
+                    hosting_id: form.selector.clone(),
+                    key: "staging_domain".into(),
+                    value: staging_domain.clone(),
+                },
+            )
+            .await;
+            Ok(Redirect::to(&format!("/hostings/{}?created=1", urlencoding(&staging_domain)))
+                .into_response())
+        }
         RpcResponse::Error(e) => {
             let msg = urlencoding(&e.to_string());
             Ok(Redirect::to(&format!("/hostings/{}?staging_error={}#wordpress", sel_url, msg))
@@ -7018,6 +7071,8 @@ pub async fn post_wp_staging_push(
         Err(r) => return Ok(r),
     };
     let sel_url = urlencoding(&form.selector);
+    // Push must target the same staging hostname create used.
+    let staging_override = read_master_kv(&state, &form.selector, "staging_domain").await;
     let target: Option<String> = find_hosting_anywhere(&state, sel.clone())
         .await
         .ok()
@@ -7025,7 +7080,7 @@ pub async fn post_wp_staging_push(
     let resp = crate::dispatcher::dispatch_to_node(
         &state,
         target.as_deref(),
-        Request::WpStagingPush { sel },
+        Request::WpStagingPush { sel, staging_domain: staging_override },
     )
     .await?;
     match resp {

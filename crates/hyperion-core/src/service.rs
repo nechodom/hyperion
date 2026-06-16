@@ -12969,21 +12969,39 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(())
     }
 
-    fn staging_domain_for(domain: &str) -> String {
-        format!("staging.{domain}")
+    /// Effective staging hostname for a hosting: the operator's
+    /// per-hosting override (trimmed, lowercased) when supplied +
+    /// non-empty, else the default `staging.<domain>`.
+    fn effective_staging_domain(override_in: Option<&str>, prod_domain: &str) -> String {
+        match override_in.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(custom) => custom.to_ascii_lowercase(),
+            None => format!("staging.{prod_domain}"),
+        }
     }
 
     /// Create a `staging.<domain>` copy of a WordPress (or any) hosting:
     /// provision a sibling hosting, copy prod's files + DB into it, fix
     /// ownership, and rewrite the WP URL to the staging domain. The
-    /// staging site is flagged no-index. Same-node only.
-    pub async fn wp_staging_create(&self, sel: HostingSelector) -> Result<String, RpcError> {
+    /// staging site is flagged no-index. Same-node only. `staging_domain`
+    /// overrides the default `staging.<domain>` hostname when supplied.
+    pub async fn wp_staging_create(
+        &self,
+        sel: HostingSelector,
+        staging_domain: Option<String>,
+    ) -> Result<String, RpcError> {
         let prod = self.get(sel).await?;
-        let staging_domain = Self::staging_domain_for(&prod.domain);
+        let staging_domain = Self::effective_staging_domain(staging_domain.as_deref(), &prod.domain);
         let staging_dom =
             hyperion_validate::Domain::parse(&staging_domain).map_err(|e| RpcError::Validation {
                 message: format!("staging domain invalid: {e}"),
             })?;
+        // A custom hostname must differ from production, or the push-back
+        // would overwrite the site it came from.
+        if staging_domain == prod.domain {
+            return Err(RpcError::Validation {
+                message: "staging hostname must differ from the production domain".into(),
+            });
+        }
         // Refuse if a staging site already exists — push/refresh is a
         // separate, explicit action.
         if self
@@ -12994,6 +13012,22 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             return Err(RpcError::Conflict {
                 message: format!("{staging_domain} already exists — push or delete it first"),
             });
+        }
+
+        // DNS preflight: the staging hostname must already resolve to
+        // this server, or the cert issuance inside create() will fail.
+        // Block on a definite mismatch with a clear, actionable message;
+        // tolerate a probe error (network hiccup) and let create() try.
+        if let Ok(dns) = self.dns_check(staging_dom.clone()).await {
+            if !dns.matches {
+                return Err(RpcError::Conflict {
+                    message: format!(
+                        "{staging_domain} doesn't resolve to this server yet — point its DNS \
+                         (an A/AAAA record, or a *.{} wildcard) here first, then retry. {}",
+                        prod.domain, dns.note
+                    ),
+                });
+            }
         }
 
         // 1. Snapshot prod (also our restore source).
@@ -13051,9 +13085,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// pre-push safety backup of prod, copy staging's files + DB onto
     /// prod, fix ownership, and rewrite the WP URL back to the prod
     /// domain. Same-node only.
-    pub async fn wp_staging_push(&self, sel: HostingSelector) -> Result<(), RpcError> {
+    pub async fn wp_staging_push(
+        &self,
+        sel: HostingSelector,
+        staging_domain: Option<String>,
+    ) -> Result<(), RpcError> {
         let prod = self.get(sel).await?;
-        let staging_domain = Self::staging_domain_for(&prod.domain);
+        let staging_domain = Self::effective_staging_domain(staging_domain.as_deref(), &prod.domain);
         let staging_dom =
             hyperion_validate::Domain::parse(&staging_domain).map_err(|e| RpcError::Validation {
                 message: format!("staging domain invalid: {e}"),

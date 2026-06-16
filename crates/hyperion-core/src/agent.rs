@@ -603,12 +603,17 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     async fn wp_staging_create(
         &self,
         sel: hyperion_rpc::HostingSelector,
+        staging_domain: Option<String>,
     ) -> Result<String, RpcError> {
-        self.svc.wp_staging_create(sel).await
+        self.svc.wp_staging_create(sel, staging_domain).await
     }
 
-    async fn wp_staging_push(&self, sel: hyperion_rpc::HostingSelector) -> Result<(), RpcError> {
-        self.svc.wp_staging_push(sel).await
+    async fn wp_staging_push(
+        &self,
+        sel: hyperion_rpc::HostingSelector,
+        staging_domain: Option<String>,
+    ) -> Result<(), RpcError> {
+        self.svc.wp_staging_push(sel, staging_domain).await
     }
     async fn node_update_run(
         &self,

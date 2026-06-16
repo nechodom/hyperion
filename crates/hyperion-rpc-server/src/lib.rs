@@ -526,14 +526,18 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::VulnFindingsList(v),
             Err(e) => Response::Error(e),
         },
-        Request::WpStagingCreate { sel } => match api.wp_staging_create(sel).await {
-            Ok(staging_domain) => Response::WpStagingCreate { staging_domain },
-            Err(e) => Response::Error(e),
-        },
-        Request::WpStagingPush { sel } => match api.wp_staging_push(sel).await {
-            Ok(_) => Response::WpStagingPush,
-            Err(e) => Response::Error(e),
-        },
+        Request::WpStagingCreate { sel, staging_domain } => {
+            match api.wp_staging_create(sel, staging_domain).await {
+                Ok(staging_domain) => Response::WpStagingCreate { staging_domain },
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::WpStagingPush { sel, staging_domain } => {
+            match api.wp_staging_push(sel, staging_domain).await {
+                Ok(_) => Response::WpStagingPush,
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::NodeUpdateRun { do_apt, do_hyperion } => {
             match api.node_update_run(do_apt, do_hyperion).await {
                 Ok(started_at) => Response::NodeUpdateRun { started_at },
@@ -1538,10 +1542,18 @@ mod tests {
         ) -> Result<Vec<hyperion_types::HostingVulnSummary>, RpcError> {
             Ok(vec![])
         }
-        async fn wp_staging_create(&self, _: HostingSelector) -> Result<String, RpcError> {
+        async fn wp_staging_create(
+            &self,
+            _: HostingSelector,
+            _: Option<String>,
+        ) -> Result<String, RpcError> {
             Ok(String::new())
         }
-        async fn wp_staging_push(&self, _: HostingSelector) -> Result<(), RpcError> {
+        async fn wp_staging_push(
+            &self,
+            _: HostingSelector,
+            _: Option<String>,
+        ) -> Result<(), RpcError> {
             Ok(())
         }
         async fn service_install(&self, _: String) -> Result<(), RpcError> {

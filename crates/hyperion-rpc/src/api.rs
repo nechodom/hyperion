@@ -370,9 +370,19 @@ pub trait AgentApi: Send + Sync + 'static {
         &self,
     ) -> Result<Vec<hyperion_types::HostingVulnSummary>, RpcError>;
     /// Create a staging.<domain> copy of a hosting. Returns the domain.
-    async fn wp_staging_create(&self, sel: HostingSelector) -> Result<String, RpcError>;
-    /// Push the staging copy back over production.
-    async fn wp_staging_push(&self, sel: HostingSelector) -> Result<(), RpcError>;
+    /// `staging_domain` overrides the default hostname when Some + non-empty.
+    async fn wp_staging_create(
+        &self,
+        sel: HostingSelector,
+        staging_domain: Option<String>,
+    ) -> Result<String, RpcError>;
+    /// Push the staging copy back over production. `staging_domain`
+    /// selects the custom staging hostname (matches what create used).
+    async fn wp_staging_push(
+        &self,
+        sel: HostingSelector,
+        staging_domain: Option<String>,
+    ) -> Result<(), RpcError>;
     /// Start a background node-update job. Returns the unix
     /// timestamp the job started at. `NodeUpdateStatus` polls the
     /// log tail + state.

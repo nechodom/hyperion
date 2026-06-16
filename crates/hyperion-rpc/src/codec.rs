@@ -315,14 +315,20 @@ pub enum Request {
     /// cluster-wide vulnerability dashboard.
     VulnFindingsList,
     /// Create a `staging.<domain>` copy of a hosting (files + DB + WP
-    /// URL rewrite). Same-node only.
+    /// URL rewrite). Same-node only. `staging_domain` overrides the
+    /// default `staging.<domain>` hostname when `Some` + non-empty.
     WpStagingCreate {
         sel: HostingSelector,
+        #[serde(default)]
+        staging_domain: Option<String>,
     },
     /// Push the `staging.<domain>` site back over production, after a
-    /// pre-push safety backup of prod.
+    /// pre-push safety backup of prod. `staging_domain` selects the
+    /// custom staging hostname (must match what create used).
     WpStagingPush {
         sel: HostingSelector,
+        #[serde(default)]
+        staging_domain: Option<String>,
     },
     /// Run system + hyperion updates on the target node. Both jobs
     /// run in the background; the call returns immediately with a
