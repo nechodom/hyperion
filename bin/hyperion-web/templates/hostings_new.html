@@ -217,11 +217,13 @@
       <label for="kind">What kind of site is this?</label>
       <select id="kind" name="kind"
               onchange="document.getElementById('proxy-row').style.display=this.value==='reverse_proxy'?'block':'none';
+                       document.getElementById('redirect-row').style.display=this.value==='redirect'?'block':'none';
                        document.getElementById('php-row').style.display=this.value==='php'?'block':'none';
                        document.getElementById('db-row').style.display=this.value==='php'?'block':'none';">
         <option value="php" selected>PHP site (nginx + PHP-FPM + optional DB)</option>
         <option value="static">Static HTML/CSS/JS only (nginx serves files)</option>
         <option value="reverse_proxy">Reverse proxy to upstream URL (Node, Python, container, etc.)</option>
+        <option value="redirect">Permanent / temporary redirect to another URL</option>
       </select>
     </div>
     <div class="field" id="proxy-row" style="display:none">
@@ -234,6 +236,32 @@
         WebSocket upgrade is enabled by default. Standard headers
         (<code>X-Real-IP</code>, <code>X-Forwarded-For</code>, <code>Host</code>) are set.
       </p>
+    </div>
+    <div id="redirect-row" style="display:none">
+      <div class="field">
+        <label for="redirect_url">Redirect target URL <span class="hint">required for a redirect</span></label>
+        <input id="redirect_url" name="redirect_url" type="url"
+               placeholder="https://www.example.com">
+        <p class="text-soft small" style="margin:0.3rem 0 0">
+          Every request to this domain is sent to the target URL. No files, PHP,
+          or database are provisioned.
+        </p>
+      </div>
+      <div class="field-row">
+        <div class="field" style="width:12rem">
+          <label for="redirect_code">Type</label>
+          <select id="redirect_code" name="redirect_code">
+            <option value="301" selected>301 — permanent</option>
+            <option value="302">302 — temporary</option>
+          </select>
+        </div>
+        <div class="field" style="flex:1">
+          <label class="field-checkbox" style="margin-top:1.7rem">
+            <input type="checkbox" name="redirect_preserve_path" value="on">
+            Preserve the request path (append <code>/foo?bar</code> to the target)
+          </label>
+        </div>
+      </div>
     </div>
 
     </div><!-- /wizard-step 2 -->

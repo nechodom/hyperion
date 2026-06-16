@@ -516,12 +516,23 @@ pub struct CreateForm {
     db: String,
     #[serde(default)]
     system_user: String,
-    /// "php" | "static" | "reverse_proxy" — defaults to "php".
+    /// "php" | "static" | "reverse_proxy" | "redirect" — defaults to "php".
+    /// "redirect" is provisioned as a static hosting whose vhost is then set
+    /// to a 301/302 redirect (no distinct backend kind exists).
     #[serde(default)]
     pub kind: String,
     /// Upstream URL when kind=reverse_proxy.
     #[serde(default)]
     pub proxy_upstream_url: String,
+    /// Target URL when kind=redirect.
+    #[serde(default)]
+    pub redirect_url: String,
+    /// 301 (permanent) or 302 (temporary); used when kind=redirect.
+    #[serde(default)]
+    pub redirect_code: i64,
+    /// "on" to append the original request path to the redirect target.
+    #[serde(default)]
+    pub redirect_preserve_path: String,
     /// Target node for provisioning. "" / "local" → master itself;
     /// anything else is a node_id from /install / NodesList.
     #[serde(default)]
@@ -711,9 +722,13 @@ pub async fn post_create(
             Err(e) => return Ok(render_new_error(&ctx, &csrf_token, &form, &e.to_string())),
         }
     };
+    // A "redirect" hosting has no distinct backend kind — it is provisioned
+    // as a plain static site whose vhost we then switch to a 301/302 (applied
+    // right after HostingCreate succeeds, below).
+    let is_redirect = form.kind == "redirect";
     let kind = if form.kind == "reverse_proxy" {
         "reverse_proxy".to_string()
-    } else if form.kind == "static" {
+    } else if form.kind == "static" || is_redirect {
         "static".to_string()
     } else {
         "php".to_string()
@@ -732,6 +747,17 @@ pub async fn post_create(
     } else {
         None
     };
+    if is_redirect {
+        let u = form.redirect_url.trim();
+        if !(u.starts_with("http://") || u.starts_with("https://")) {
+            return Ok(render_new_error(
+                &ctx,
+                &csrf_token,
+                &form,
+                "Redirect requires a target URL starting with http:// or https://.",
+            ));
+        }
+    }
     let req = HostingCreateReq {
         domain,
         aliases,
@@ -814,6 +840,38 @@ pub async fn post_create(
     .await?;
     match resp {
         RpcResponse::HostingCreate(mut created) => {
+            // A "redirect" hosting was provisioned as a static site; switch
+            // its vhost to the requested 301/302 now that it exists. Applied
+            // synchronously so the operator lands on a working redirect, not a
+            // bare placeholder. A failure here is non-fatal (the hosting still
+            // exists) — surface it as a flash rather than aborting.
+            if is_redirect {
+                let options = hyperion_types::VhostOptions {
+                    redirect_url: form.redirect_url.trim().to_string(),
+                    redirect_code: if form.redirect_code == 302 { 302 } else { 301 },
+                    redirect_preserve_path: form.redirect_preserve_path.eq_ignore_ascii_case("on"),
+                    ..Default::default()
+                };
+                match crate::dispatcher::dispatch_to_node(
+                    &state,
+                    target,
+                    Request::HostingSetVhostOptions {
+                        sel: HostingSelector::Id(created.id.clone()),
+                        options,
+                        basic_auth_password: None,
+                    },
+                )
+                .await
+                {
+                    Ok(RpcResponse::HostingSetVhostOptions(_)) => {}
+                    Ok(RpcResponse::Error(e)) => {
+                        tracing::warn!(error = %e, "applying redirect vhost after create failed");
+                    }
+                    other => {
+                        tracing::warn!(?other, "unexpected response applying redirect vhost after create");
+                    }
+                }
+            }
             // ──────────────────────────────────────────────────────
             //  Profile-driven WP install detection.
             //
