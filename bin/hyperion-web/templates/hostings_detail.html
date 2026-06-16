@@ -2723,10 +2723,9 @@
     Per-user access
   </h2>
   <p class="text-soft" style="margin:0 0 0.85rem">
-    super_admin + admin already see every hosting. This grants
-    <strong>operator</strong> (manage = full CRUD) or <strong>viewer</strong>
-    (read = view only) access for specific users to this hosting. Other
-    hostings are unaffected.
+    Owner + Administrator already see every hosting. This grants
+    <strong>manage</strong> (full CRUD) or <strong>read-only</strong>
+    access for specific users to this hosting. Other hostings are unaffected.
   </p>
 
   <form method="post" action="/hostings/access/grant" autocomplete="off"
@@ -2738,7 +2737,7 @@
       <select id="grant_user" name="user_id" required>
         <option value="">— pick a user —</option>
         {% for u in users_for_access %}
-          <option value="{{ u.id }}">{{ u.username }} ({{ u.role }})</option>
+          <option value="{{ u.id }}">{{ u.username }} ({{ crate::handlers::role_label(u.role.as_str()) }})</option>
         {% endfor %}
       </select>
     </div>

@@ -6,14 +6,30 @@
   <div>
     <h1>Firewall</h1>
     <div class="subtitle">
-      Per-node open-port inventory with the "why" attached — each
-      row labels its port against a known service (SSH, nginx,
-      Hyperion panel, etc.) so you don't have to remember <code>9443</code>
-      from <code>8443</code>. Templates below cover the common
-      "open these together" sets; the custom-port snippet generator
-      hands you a copy-pasteable <code>nft</code> command for
-      anything else.
+      Each node's firewall posture at a glance — <strong>open ports</strong>
+      (with the "why" attached, so you don't have to remember <code>9443</code>
+      from <code>8443</code>), <strong>active brute-force bans</strong>, and
+      node health. Port templates + a custom <code>nft</code> generator are
+      at the bottom.
     </div>
+  </div>
+</div>
+
+{# Cluster posture roll-up — the headline numbers, so you can tell
+   "quiet" from "under attack" without reading every node card. #}
+<div class="grid cols-3" style="margin-bottom:1.2rem">
+  <div class="kpi-card">
+    <div class="kpi-label">Nodes reachable</div>
+    <div class="kpi-value">{{ summary.nodes_reachable }}<span class="text-soft" style="font-size:0.55em"> / {{ summary.nodes_total }}</span></div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-label">IPs banned (cluster)</div>
+    <div class="kpi-value">{{ summary.ban_total }}</div>
+    <div class="text-soft small">{{ summary.ban_auto }} auto · {{ summary.ban_manual }} manual · <a href="/bans">view all →</a></div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-label">Open ports (cluster)</div>
+    <div class="kpi-value">{{ summary.open_ports_total }}</div>
   </div>
 </div>
 
@@ -39,8 +55,29 @@
         {% else %}
           <span class="tag" title="Backend used to read the ruleset on this node">{{ n.view.backend }}</span>
           <span class="text-soft small">· {{ n.view.ports.len() }} open port{% if n.view.ports.len() != 1 %}s{% endif %}</span>
+          {% if n.ban_total > 0 %}<span class="pill err" title="IPs currently dropped by nftables">{{ n.ban_total }} banned</span>{% else %}<span class="pill ok">0 banned</span>{% endif %}
+          {% if n.drained %}<span class="pill warn" title="Drained — intentionally quiet, not offline">drained</span>{% endif %}
         {% endif %}
       </h2>
+
+      {% if !n.unreachable %}
+      {# Brute-force ban posture — the active nftables drops, which the
+         old page hid entirely. Counts + the newest few IPs, with a jump
+         to the full /bans table. #}
+      <div style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center;margin:0 0 0.7rem;font-size:0.85rem">
+        <span class="text-soft">Brute-force bans:</span>
+        <strong>{{ n.ban_total }}</strong>
+        <span class="text-soft small">({{ n.ban_v4 }} IPv4 · {{ n.ban_v6 }} IPv6 · {{ n.ban_auto }} auto / {{ n.ban_manual }} manual)</span>
+        {% if !n.recent_bans.is_empty() %}
+          <span class="text-soft">— recent:</span>
+          {% for b in n.recent_bans %}<code class="text-soft small" title="{{ b.reason }} ({{ b.source }})">{{ b.ip }}</code>{% if !loop.last %} {% endif %}{% endfor %}
+        {% endif %}
+        <a class="text-soft small" href="/bans" style="margin-left:auto">View all bans →</a>
+      </div>
+      {% if n.drained && !n.drain_reason.is_empty() %}
+        <p class="text-soft small" style="margin:-0.4rem 0 0.6rem">Drain reason: {{ n.drain_reason }}</p>
+      {% endif %}
+      {% endif %}
 
       {% if n.unreachable %}
         <p class="text-soft">

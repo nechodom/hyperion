@@ -769,9 +769,11 @@ function isShortcutContext(ev) {
       role = (role || 'viewer').trim();
       if (!(role in RANK)) role = 'viewer';
       document.body.dataset.role = role;
-      // Pretty-print for the user-pill.
+      // Friendly label for the user-pill — keep in sync with role_label()
+      // in handlers/mod.rs.
+      const ROLE_LABELS = { super_admin: 'Owner', admin: 'Administrator', operator: 'Operator', customer: 'Customer', viewer: 'Read-only' };
       const pill = document.getElementById('sidebar-role');
-      if (pill) pill.textContent = role.replace('_', ' ');
+      if (pill) pill.textContent = ROLE_LABELS[role] || role;
       applyVisibility(role);
     })
     .catch(() => applyVisibility('viewer'));

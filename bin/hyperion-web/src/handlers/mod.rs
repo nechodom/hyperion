@@ -39,6 +39,20 @@ pub fn user_initial(username: &str) -> char {
         .unwrap_or('?')
 }
 
+/// Friendly display label for an internal role id. The stored strings
+/// (`super_admin`, …) stay as-is for permission checks + the DB; only the
+/// UI shows these clearer names. Keep in sync with ROLE_LABELS in base.html.
+pub fn role_label(role: &str) -> &'static str {
+    match role {
+        "super_admin" => "Owner",
+        "admin" => "Administrator",
+        "operator" => "Operator",
+        "customer" => "Customer",
+        "viewer" => "Read-only",
+        _ => "Unknown",
+    }
+}
+
 /// Short content hash of the bundled CSS. Goes into `?v=…` on the
 /// `<link>` tag so a redeploy invalidates the browser cache cleanly.
 pub fn css_version() -> &'static str {

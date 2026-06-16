@@ -47,6 +47,8 @@ struct FirewallTpl<'a> {
     /// button greyed out so they know the option exists but isn't
     /// runnable right now.
     apply_targets: Vec<ApplyTarget>,
+    /// Cluster-wide posture roll-up rendered at the top of the page.
+    summary: FwSummary,
     csrf_token: String,
 }
 
@@ -56,6 +58,24 @@ pub struct ApplyTarget {
     pub applyable: bool,
 }
 
+/// One recent ban shown inline on a node card.
+pub struct BanLine {
+    pub ip: String,
+    pub reason: String,
+    pub source: String,
+    pub expires_at: i64,
+}
+
+/// Cluster-wide firewall posture summary (top-of-page KPIs).
+pub struct FwSummary {
+    pub nodes_total: usize,
+    pub nodes_reachable: usize,
+    pub ban_total: usize,
+    pub ban_auto: usize,
+    pub ban_manual: usize,
+    pub open_ports_total: usize,
+}
+
 pub struct NodeFirewall {
     pub node_id: String,
     pub label: String,
@@ -63,6 +83,38 @@ pub struct NodeFirewall {
     /// True when the RPC failed entirely — render a "node
     /// unreachable" notice instead of an empty card.
     pub unreachable: bool,
+    /// Drained nodes are intentionally quiet, not broken.
+    pub drained: bool,
+    pub drain_reason: String,
+    /// Active nftables bans on this node (from BanList).
+    pub ban_total: usize,
+    pub ban_auto: usize,
+    pub ban_manual: usize,
+    pub ban_v4: usize,
+    pub ban_v6: usize,
+    /// Newest few bans, for an at-a-glance "who's being dropped".
+    pub recent_bans: Vec<BanLine>,
+}
+
+/// Fold a node's ban list into counts + the newest 3 for display.
+fn summarize_bans(
+    mut bans: Vec<hyperion_types::IpBanWire>,
+) -> (usize, usize, usize, usize, usize, Vec<BanLine>) {
+    let total = bans.len();
+    let auto = bans.iter().filter(|b| b.source == "auto").count();
+    let v6 = bans.iter().filter(|b| b.ip.contains(':')).count();
+    bans.sort_by(|a, b| b.banned_at.cmp(&a.banned_at));
+    let recent = bans
+        .into_iter()
+        .take(3)
+        .map(|b| BanLine {
+            ip: b.ip,
+            reason: b.reason,
+            source: b.source,
+            expires_at: b.expires_at,
+        })
+        .collect();
+    (total, auto, total - auto, total - v6, v6, recent)
 }
 
 pub struct PortTemplate {
@@ -197,28 +249,44 @@ pub async fn get_firewall(
         );
     }
     let mut nodes: Vec<NodeFirewall> = Vec::new();
-    // Master.
-    let master = match hyperion_rpc_client::call(&state.agent_socket, Request::FirewallList).await {
-        Ok(RpcResponse::FirewallList(v)) => NodeFirewall {
+    // Master — firewall ruleset + active bans from the local agent.
+    {
+        let (view, unreachable) =
+            match hyperion_rpc_client::call(&state.agent_socket, Request::FirewallList).await {
+                Ok(RpcResponse::FirewallList(v)) => (v, false),
+                _ => (hyperion_types::FirewallView::default(), true),
+            };
+        let bans = match hyperion_rpc_client::call(
+            &state.agent_socket,
+            Request::BanList { hosting_id: None },
+        )
+        .await
+        {
+            Ok(RpcResponse::BanList(b)) => b,
+            _ => Vec::new(),
+        };
+        let (ban_total, ban_auto, ban_manual, ban_v4, ban_v6, recent_bans) = summarize_bans(bans);
+        nodes.push(NodeFirewall {
             node_id: "master".to_string(),
             label: "master".to_string(),
-            view: v,
-            unreachable: false,
-        },
-        _ => NodeFirewall {
-            node_id: "master".to_string(),
-            label: "master".to_string(),
-            view: hyperion_types::FirewallView::default(),
-            unreachable: true,
-        },
-    };
-    nodes.push(master);
-    // Workers — fan out via dispatcher.
+            view,
+            unreachable,
+            drained: false,
+            drain_reason: String::new(),
+            ban_total,
+            ban_auto,
+            ban_manual,
+            ban_v4,
+            ban_v6,
+            recent_bans,
+        });
+    }
+    // Workers — fan out firewall + bans via dispatcher.
     if let Ok(RpcResponse::NodesList(workers)) =
         hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await
     {
         for w in workers {
-            let v = match crate::dispatcher::dispatch_to_node(
+            let view = match crate::dispatcher::dispatch_to_node(
                 &state,
                 Some(w.node_id.as_str()),
                 Request::FirewallList,
@@ -228,15 +296,44 @@ pub async fn get_firewall(
                 Ok(RpcResponse::FirewallList(v)) => Some(v),
                 _ => None,
             };
-            let unreachable = v.is_none();
+            let unreachable = view.is_none();
+            let bans = match crate::dispatcher::dispatch_to_node(
+                &state,
+                Some(w.node_id.as_str()),
+                Request::BanList { hosting_id: None },
+            )
+            .await
+            {
+                Ok(RpcResponse::BanList(b)) => b,
+                _ => Vec::new(),
+            };
+            let (ban_total, ban_auto, ban_manual, ban_v4, ban_v6, recent_bans) =
+                summarize_bans(bans);
             nodes.push(NodeFirewall {
                 node_id: w.node_id.clone(),
                 label: w.label.clone(),
-                view: v.unwrap_or_default(),
+                view: view.unwrap_or_default(),
                 unreachable,
+                drained: w.is_drained,
+                drain_reason: w.drain_reason.clone(),
+                ban_total,
+                ban_auto,
+                ban_manual,
+                ban_v4,
+                ban_v6,
+                recent_bans,
             });
         }
     }
+    // Cluster posture roll-up for the top-of-page summary.
+    let summary = FwSummary {
+        nodes_total: nodes.len(),
+        nodes_reachable: nodes.iter().filter(|n| !n.unreachable).count(),
+        ban_total: nodes.iter().map(|n| n.ban_total).sum(),
+        ban_auto: nodes.iter().map(|n| n.ban_auto).sum(),
+        ban_manual: nodes.iter().map(|n| n.ban_manual).sum(),
+        open_ports_total: nodes.iter().map(|n| n.view.ports.len()).sum(),
+    };
     // Apply-target list mirrors `nodes` but with each entry tagged
     // by reachability so the template can grey-out Apply buttons on
     // unreachable nodes. "master" is a sentinel; the post_apply
@@ -258,6 +355,7 @@ pub async fn get_firewall(
         nodes,
         templates: port_templates(),
         apply_targets,
+        summary,
         csrf_token: super::session_csrf_token(&state, &ctx),
     };
     Ok(Html(tpl.render()?).into_response())

@@ -47,7 +47,7 @@
   </div>
   <div class="kpi-card disk">
     <div class="kpi-label">Role</div>
-    <div class="kpi-value" style="font-size:1.1rem">{{ u.role }}</div>
+    <div class="kpi-value" style="font-size:1.1rem">{{ crate::handlers::role_label(u.role.as_str()) }}</div>
     <div class="kpi-meta">access scope</div>
   </div>
   <div class="kpi-card bw">
