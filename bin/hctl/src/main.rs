@@ -1308,6 +1308,18 @@ fn print_pretty(resp: &Response) {
                 }
             }
         }
+        Response::VulnFindingsList(list) => {
+            if list.is_empty() {
+                println!("no stored vulnerabilities");
+            } else {
+                for h in list {
+                    println!("{} — {} finding(s)", h.domain, h.findings.len());
+                    for f in &h.findings {
+                        println!("  [{}] {} {} ({})", f.severity, f.kind, f.slug, f.installed_version);
+                    }
+                }
+            }
+        }
         Response::WpStagingCreate { staging_domain } => {
             println!("✓ staging site created: {staging_domain}");
         }

@@ -1,0 +1,74 @@
+{% extends "base.html" %}
+{% block title %}Banned IPs · hyperion{% endblock %}
+{% block main %}
+
+<div class="page-header">
+  <div>
+    <h1>Banned IPs</h1>
+    <div class="subtitle">Active nftables bans across the cluster — auto from the brute-force scanner, plus manual bans.</div>
+  </div>
+</div>
+
+{% if let Some(f) = flash %}
+<div class="flash success"><svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg><div class="flash-body">{{ f }}</div></div>
+{% endif %}
+{% if let Some(e) = flash_error %}
+<div class="flash error"><svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg><div class="flash-body">{{ e }}</div></div>
+{% endif %}
+
+<div class="grid cols-3" style="margin-bottom:1rem">
+  <div class="kpi-card">
+    <div class="kpi-label">Active bans</div>
+    <div class="kpi-value">{{ rows.len() }}</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-label">Auto (fail2ban)</div>
+    <div class="kpi-value">{{ auto }}</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-label">Manual</div>
+    <div class="kpi-value">{{ manual }}</div>
+  </div>
+</div>
+
+<div class="card no-pad-table">
+  {% if rows.is_empty() %}
+    <div class="empty" style="padding:2.5rem">
+      <p class="muted">No active bans across the fleet.</p>
+      <p class="text-soft small">Repeated wp-login / xmlrpc / sshd auth floods are auto-banned for an hour. Manual bans live on each hosting's Settings tab.</p>
+    </div>
+  {% else %}
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>IP</th><th>Node</th><th>Source</th><th>Reason</th><th>Expires</th><th class="right">Action</th>
+        </tr></thead>
+        <tbody>
+        {% for r in rows %}
+          <tr>
+            <td><code>{{ r.ip }}</code></td>
+            <td><span class="tag">{{ r.node_label }}</span></td>
+            <td>
+              {% if r.source == "auto" %}<span class="pill">auto</span>{% else %}<span class="pill ok">manual</span>{% endif %}
+            </td>
+            <td class="muted small">{{ r.reason }}</td>
+            <td class="muted numeric small">
+              {% if r.expires_at == 0 %}permanent{% else %}{{ crate::handlers::stats::fmt_future(r.expires_at) }}{% endif %}
+            </td>
+            <td class="right">
+              <form method="post" action="/bans/unban" style="display:inline">
+                <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                <input type="hidden" name="ip" value="{{ r.ip }}">
+                <input type="hidden" name="node_id" value="{{ r.node_id }}">
+                <button class="btn small" type="submit">Unban</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% endif %}
+</div>
+
+{% endblock %}

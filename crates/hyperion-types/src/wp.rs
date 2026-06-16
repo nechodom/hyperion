@@ -126,6 +126,27 @@ pub struct WpVulnScanResult {
     pub checked: i64,
 }
 
+/// One hosting's last stored vuln-scan result, for the cluster-wide
+/// vulnerability dashboard. Findings are pre-sorted highest-severity
+/// first by the scanner.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct HostingVulnSummary {
+    pub hosting_id: String,
+    pub domain: String,
+    /// Node the hosting lives on (filled by the web aggregator).
+    pub node_id: String,
+    /// Unix seconds of the scan. 0 = never scanned.
+    pub scanned_at: i64,
+    pub findings: Vec<WpVulnFinding>,
+}
+
+impl HostingVulnSummary {
+    /// Count of findings at the given severity.
+    pub fn count_severity(&self, sev: &str) -> usize {
+        self.findings.iter().filter(|f| f.severity == sev).count()
+    }
+}
+
 /// Whitelisted plugin actions exposed via the web UI. Anything not
 /// in this enum cannot be invoked from a form — the wp-cli surface
 /// is large and we'd rather grow it deliberately than expose

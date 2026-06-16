@@ -365,6 +365,10 @@ pub trait AgentApi: Send + Sync + 'static {
         &self,
         hosting: HostingSelector,
     ) -> Result<hyperion_types::WpVulnScanResult, RpcError>;
+    /// Every hosting's last stored vuln scan on this node.
+    async fn vuln_findings_list(
+        &self,
+    ) -> Result<Vec<hyperion_types::HostingVulnSummary>, RpcError>;
     /// Create a staging.<domain> copy of a hosting. Returns the domain.
     async fn wp_staging_create(&self, sel: HostingSelector) -> Result<String, RpcError>;
     /// Push the staging copy back over production.

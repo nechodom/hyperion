@@ -4964,6 +4964,123 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(result)
     }
 
+    /// Daily sweep: scan every active WordPress hosting, store the result
+    /// (for the cluster vuln dashboard) and notify admins about each
+    /// **newly-appeared** critical (diffed against the prior scan so a
+    /// standing vuln doesn't re-alert every day). Returns the number of
+    /// new criticals seen this run.
+    pub async fn wp_vuln_scan_tick(&self) -> Result<i64, RpcError> {
+        let now = now_secs();
+        let summaries = self.list().await?;
+        let mut new_criticals = 0i64;
+        for s in &summaries {
+            if s.state != HostingState::Active {
+                continue;
+            }
+            // Only WordPress hostings — skip static / proxy sites.
+            let has_wp = wordpress::get_install(&self.pool, &s.id)
+                .await
+                .ok()
+                .flatten()
+                .is_some();
+            if !has_wp {
+                continue;
+            }
+            let scan = match self.wp_vuln_scan(HostingSelector::Id(s.id.clone())).await {
+                Ok(r) if !r.feed_unavailable => r,
+                _ => continue, // feed down / not active — leave prior data
+            };
+            // Critical keys from the prior stored scan.
+            let prior: std::collections::HashSet<String> =
+                hyperion_state::hosting_kv::get(&self.pool, s.id.as_str(), "vuln_scan")
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|j| serde_json::from_str::<StoredVulnScan>(&j).ok())
+                    .map(|st| {
+                        st.result
+                            .findings
+                            .iter()
+                            .filter(|f| f.severity == "critical")
+                            .map(|f| format!("{}:{}", f.slug, f.cve))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+            for f in scan.findings.iter().filter(|f| f.severity == "critical") {
+                let key = format!("{}:{}", f.slug, f.cve);
+                if prior.contains(&key) {
+                    continue;
+                }
+                new_criticals += 1;
+                self.notify_admins(
+                    "error",
+                    "Critical WordPress vulnerability",
+                    &format!(
+                        "{} — {} {} {}: {}",
+                        s.domain, f.kind, f.name, f.installed_version, f.title
+                    ),
+                    &format!("/hostings/{}", s.domain),
+                    &format!("wp.vuln.critical:{}:{}", s.domain, key),
+                )
+                .await;
+            }
+            let stored = StoredVulnScan {
+                scanned_at: now,
+                result: scan,
+            };
+            if let Ok(json) = serde_json::to_string(&stored) {
+                let _ = hyperion_state::hosting_kv::set(
+                    &self.pool,
+                    s.id.as_str(),
+                    "vuln_scan",
+                    &json,
+                    now,
+                )
+                .await;
+            }
+        }
+        Ok(new_criticals)
+    }
+
+    /// Read every hosting's last stored vuln scan (this node only) for the
+    /// cluster dashboard. Only hostings WITH findings are returned.
+    pub async fn vuln_findings_list(
+        &self,
+    ) -> Result<Vec<hyperion_types::HostingVulnSummary>, RpcError> {
+        let pairs = hyperion_state::hosting_kv::list_by_key(&self.pool, "vuln_scan")
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("vuln list: {e}")))?;
+        let summaries = self.list().await.unwrap_or_default();
+        let mut out = Vec::new();
+        for (hid, json) in pairs {
+            let Ok(st) = serde_json::from_str::<StoredVulnScan>(&json) else {
+                continue;
+            };
+            if st.result.findings.is_empty() {
+                continue;
+            }
+            let domain = summaries
+                .iter()
+                .find(|s| s.id.as_str() == hid)
+                .map(|s| s.domain.clone())
+                .unwrap_or_default();
+            out.push(hyperion_types::HostingVulnSummary {
+                hosting_id: hid,
+                domain,
+                node_id: String::new(),
+                scanned_at: st.scanned_at,
+                findings: st.result.findings,
+            });
+        }
+        // Most criticals first.
+        out.sort_by(|a, b| {
+            b.count_severity("critical")
+                .cmp(&a.count_severity("critical"))
+                .then(b.findings.len().cmp(&a.findings.len()))
+        });
+        Ok(out)
+    }
+
     /// Export a hosting as a self-contained migration bundle: an
     /// archive (tar+gz of htdocs + optional DB dump) plus a JSON
     /// manifest describing how to recreate the hosting on a different
@@ -13424,6 +13541,15 @@ async fn nft_unban(ip: &str) {
         &["delete", "element", "inet", "hyperion", "banned", "{", ip, "}"],
     )
     .await;
+}
+
+/// What we persist per hosting under the `vuln_scan` KV key: the last
+/// scan result plus when it ran (the KV layer's own updated_at isn't
+/// read back by `list_by_key`, so the timestamp rides inside the value).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StoredVulnScan {
+    scanned_at: i64,
+    result: hyperion_types::WpVulnScanResult,
 }
 
 /// Scan the recent sshd journal for auth-failure floods. Runs

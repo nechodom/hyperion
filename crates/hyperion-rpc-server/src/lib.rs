@@ -522,6 +522,10 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(r) => Response::WpVulnScan(r),
             Err(e) => Response::Error(e),
         },
+        Request::VulnFindingsList => match api.vuln_findings_list().await {
+            Ok(v) => Response::VulnFindingsList(v),
+            Err(e) => Response::Error(e),
+        },
         Request::WpStagingCreate { sel } => match api.wp_staging_create(sel).await {
             Ok(staging_domain) => Response::WpStagingCreate { staging_domain },
             Err(e) => Response::Error(e),
@@ -1528,6 +1532,11 @@ mod tests {
             _: HostingSelector,
         ) -> Result<hyperion_types::WpVulnScanResult, RpcError> {
             Ok(hyperion_types::WpVulnScanResult::default())
+        }
+        async fn vuln_findings_list(
+            &self,
+        ) -> Result<Vec<hyperion_types::HostingVulnSummary>, RpcError> {
+            Ok(vec![])
         }
         async fn wp_staging_create(&self, _: HostingSelector) -> Result<String, RpcError> {
             Ok(String::new())

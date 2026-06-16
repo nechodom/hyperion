@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block title %}Vulnerabilities · hyperion{% endblock %}
+{% block main %}
+
+<div class="page-header">
+  <div>
+    <h1>WordPress vulnerabilities</h1>
+    <div class="subtitle">Every site with a known plugin/theme vuln from the last daily Wordfence scan, across the cluster.</div>
+  </div>
+</div>
+
+<div class="grid cols-3" style="margin-bottom:1rem">
+  <div class="kpi-card">
+    <div class="kpi-label">Critical findings</div>
+    <div class="kpi-value">{{ critical }}</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-label">High findings</div>
+    <div class="kpi-value">{{ high }}</div>
+  </div>
+  <div class="kpi-card">
+    <div class="kpi-label">Affected sites</div>
+    <div class="kpi-value">{{ sites }}</div>
+  </div>
+</div>
+
+<div class="card no-pad-table">
+  {% if rows.is_empty() %}
+    <div class="empty" style="padding:2.5rem">
+      <p class="muted">No known vulnerabilities across the fleet. 🎉</p>
+      <p class="text-soft small">Sites are scanned daily against the Wordfence Intelligence feed. New findings show up here and notify admins.</p>
+    </div>
+  {% else %}
+    <div class="table-wrap">
+      <table>
+        <thead><tr>
+          <th>Site</th><th>Node</th><th>Severity</th><th>Affected</th><th class="right">Scanned</th>
+        </tr></thead>
+        <tbody>
+        {% for r in rows %}
+          <tr>
+            <td><a href="/hostings/{{ r.domain }}#wordpress">{{ r.domain }}</a></td>
+            <td><span class="tag">{{ r.node_id }}</span></td>
+            <td>
+              {% if r.count_severity("critical") > 0 %}<span class="pill err">{{ r.count_severity("critical") }} critical</span> {% endif %}
+              {% if r.count_severity("high") > 0 %}<span class="pill warn">{{ r.count_severity("high") }} high</span> {% endif %}
+              {% if r.count_severity("medium") > 0 %}<span class="pill">{{ r.count_severity("medium") }} medium</span> {% endif %}
+              {% if r.count_severity("low") > 0 %}<span class="pill">{{ r.count_severity("low") }} low</span>{% endif %}
+            </td>
+            <td class="muted small" style="max-width:28rem">
+              {% for f in r.findings %}<code style="font-size:0.74rem">{{ f.kind }}:{{ f.slug }}</code>{% if !f.cve.is_empty() %} <a href="https://nvd.nist.gov/vuln/detail/{{ f.cve }}" target="_blank" rel="noopener noreferrer">{{ f.cve }}</a>{% endif %}{% if !loop.last %} · {% endif %}{% endfor %}
+            </td>
+            <td class="right muted numeric" title="{{ r.scanned_at }}">{{ crate::handlers::stats::fmt_ago(r.scanned_at) }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  {% endif %}
+</div>
+
+{% endblock %}

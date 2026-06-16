@@ -594,6 +594,12 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.wp_vuln_scan(hosting).await
     }
 
+    async fn vuln_findings_list(
+        &self,
+    ) -> Result<Vec<hyperion_types::HostingVulnSummary>, RpcError> {
+        self.svc.vuln_findings_list().await
+    }
+
     async fn wp_staging_create(
         &self,
         sel: hyperion_rpc::HostingSelector,

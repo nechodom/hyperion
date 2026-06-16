@@ -582,6 +582,27 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
+    // WordPress vulnerability sweep — once per day. Scans every active WP
+    // hosting against the Wordfence feed, stores the result for the
+    // cluster dashboard, and notifies admins about NEW criticals.
+    {
+        let vuln_svc = svc.clone();
+        tokio::spawn(async move {
+            // 4-minute offset so it doesn't collide with the cert-renew
+            // tick (3 min) or the boot ticks.
+            tokio::time::sleep(std::time::Duration::from_secs(240)).await;
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 3600));
+            interval.tick().await; // immediate-first-tick consumption
+            loop {
+                match vuln_svc.wp_vuln_scan_tick().await {
+                    Ok(n) if n > 0 => tracing::info!(new_criticals = n, "wp vuln scan tick"),
+                    Ok(_) => tracing::debug!("wp vuln scan tick: no new criticals"),
+                    Err(e) => tracing::warn!(error=%e, "wp vuln scan tick failed"),
+                }
+                interval.tick().await;
+            }
+        });
+    }
     // Billing sweep — once per hour. Sends Slack reminders for hostings
     // with next_billing_at <= now + 3d.
     {

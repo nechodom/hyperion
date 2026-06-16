@@ -57,6 +57,21 @@ pub async fn list(
     Ok(rows)
 }
 
+/// Every (hosting_id, value) pair stored under one key across ALL
+/// hostings. Used by cluster-wide views (e.g. the vuln dashboard reads
+/// each hosting's stored scan result without N per-hosting lookups).
+pub async fn list_by_key(
+    pool: &SqlitePool,
+    key: &str,
+) -> Result<Vec<(String, String)>, StateError> {
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT hosting_id, value FROM hosting_kv WHERE key = ? ORDER BY hosting_id")
+            .bind(key)
+            .fetch_all(pool)
+            .await?;
+    Ok(rows)
+}
+
 /// Delete one key (idempotent).
 pub async fn delete(pool: &SqlitePool, hosting_id: &str, key: &str) -> Result<(), StateError> {
     sqlx::query("DELETE FROM hosting_kv WHERE hosting_id = ? AND key = ?")

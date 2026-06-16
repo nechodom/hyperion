@@ -311,6 +311,9 @@ pub enum Request {
     WpVulnScan {
         hosting: HostingSelector,
     },
+    /// Every hosting's last stored vuln scan on this node — drives the
+    /// cluster-wide vulnerability dashboard.
+    VulnFindingsList,
     /// Create a `staging.<domain>` copy of a hosting (files + DB + WP
     /// URL rewrite). Same-node only.
     WpStagingCreate {
@@ -1104,6 +1107,7 @@ pub enum Response {
     WpThemeList(hyperion_types::WpThemeListResponse),
     WpThemeAction(hyperion_types::WpThemeActionResult),
     WpVulnScan(hyperion_types::WpVulnScanResult),
+    VulnFindingsList(Vec<hyperion_types::HostingVulnSummary>),
     WpStagingCreate { staging_domain: String },
     WpStagingPush,
     /// Acknowledgement that the background update task spawned.

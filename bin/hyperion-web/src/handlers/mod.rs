@@ -1,6 +1,8 @@
 pub mod audit;
 pub mod backups;
+pub mod bans;
 pub mod certs;
+pub mod vulns;
 pub mod avatar;
 pub mod dashboard;
 pub mod enroll;
