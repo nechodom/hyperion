@@ -532,6 +532,16 @@ fn print_pretty(resp: &Response) {
             println!("  redirect_code       = {}", o.redirect_code);
             println!("  redirect_preserve   = {}", o.redirect_preserve_path);
         }
+        Response::HostingSetAliases(d) => {
+            println!("✓ aliases updated for {}", d.domain);
+            if d.aliases.is_empty() {
+                println!("  (no aliases)");
+            } else {
+                for a in &d.aliases {
+                    println!("  - {a}");
+                }
+            }
+        }
         Response::HostingSetWpDebug(e)
         | Response::HostingSetRedis(e)
         | Response::HostingRotateRedisPassword(e) => {

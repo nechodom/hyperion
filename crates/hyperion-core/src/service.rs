@@ -3200,6 +3200,59 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(options)
     }
 
+    /// Replace a hosting's alias domains (SANs) after creation. Rewrites the
+    /// nginx `server_name` and reloads. Newly-added aliases are NOT yet covered
+    /// by the existing certificate — the operator re-issues from the SSL tab to
+    /// extend coverage. nginx -t runs inside `nginx_write_vhost`; on rejection
+    /// the DB alias set is rolled back so persisted state matches what nginx
+    /// actually serves.
+    pub async fn hosting_set_aliases(
+        &self,
+        sel: HostingSelector,
+        aliases: Vec<hyperion_validate::Domain>,
+    ) -> Result<HostingDetail, RpcError> {
+        let detail = self.get(sel).await?;
+        // Normalize: drop any alias equal to the primary domain (redundant),
+        // dedupe, and sort for a stable server_name ordering.
+        let mut seen = std::collections::BTreeSet::new();
+        let mut norm: Vec<String> = Vec::new();
+        for a in &aliases {
+            let s = a.as_str().to_string();
+            if s == detail.domain {
+                continue;
+            }
+            if seen.insert(s.clone()) {
+                norm.push(s);
+            }
+        }
+        norm.sort();
+
+        let old_aliases = detail.aliases.clone();
+        hyperion_state::hostings::replace_aliases(&self.pool, &detail.id, &norm)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("replace aliases: {e}")))?;
+
+        // Re-render the vhost with the new server_name. On nginx -t failure,
+        // roll the alias set back to what nginx is still serving.
+        let new_detail = self.get(HostingSelector::Id(detail.id.clone())).await?;
+        if let Err(e) = self.adapters.nginx_write_vhost(&new_detail).await {
+            let _ =
+                hyperion_state::hostings::replace_aliases(&self.pool, &detail.id, &old_aliases).await;
+            return Err(RpcError::Validation {
+                message: format!("nginx config rejected: {e}. Aliases reverted."),
+            });
+        }
+
+        self.append_audit(
+            "hosting.set_aliases",
+            Some(detail.id.as_str()),
+            &serde_json::json!({ "aliases": norm }).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(new_detail)
+    }
+
     // ───────────── WP debug + Redis ─────────────
 
     pub async fn set_wp_debug(

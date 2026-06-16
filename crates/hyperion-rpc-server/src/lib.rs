@@ -146,6 +146,12 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::HostingSetVhostOptions(v),
             Err(e) => Response::Error(e),
         },
+        Request::HostingSetAliases { sel, aliases } => {
+            match api.hosting_set_aliases(sel, aliases).await {
+                Ok(v) => Response::HostingSetAliases(v),
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::HostingSetWpDebug { sel, enabled, log, display } => {
             match api.hosting_set_wp_debug(sel, enabled, log, display).await {
                 Ok(v) => Response::HostingSetWpDebug(v),
@@ -1229,6 +1235,16 @@ mod tests {
             _: Option<String>,
         ) -> Result<hyperion_types::VhostOptions, RpcError> {
             Ok(options)
+        }
+        async fn hosting_set_aliases(
+            &self,
+            _: HostingSelector,
+            _: Vec<hyperion_validate::Domain>,
+        ) -> Result<hyperion_types::HostingDetail, RpcError> {
+            Err(RpcError::NotFound {
+                kind: "hosting".into(),
+                id: "x".into(),
+            })
         }
         async fn hosting_set_wp_debug(
             &self,

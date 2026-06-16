@@ -2834,6 +2834,57 @@ pub async fn post_vhost_options(
     }
 }
 
+#[derive(Deserialize)]
+pub struct AliasesForm {
+    pub selector: String,
+    /// Comma / space / newline separated alias domains. Empty clears all.
+    #[serde(default)]
+    pub aliases: String,
+    #[serde(default)]
+    pub target_node: String,
+}
+
+/// POST /hostings/aliases — replace a hosting's alias domains (SANs) after
+/// creation. Rewrites the nginx vhost server_name + reloads on the owning node.
+/// Newly-added aliases need a cert re-issue (SSL tab) to be covered by HTTPS.
+pub async fn post_set_aliases(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<AliasesForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let sel_url = urlencoding(&form.selector);
+    let aliases = match parse_aliases(&form.aliases) {
+        Ok(a) => a,
+        Err(e) => {
+            return Ok(Redirect::to(&format!(
+                "/hostings/{}?flash_error={}#access",
+                sel_url,
+                urlencoding(&format!("Invalid alias: {e}"))
+            ))
+            .into_response());
+        }
+    };
+    let target = node_target(&form.target_node);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target,
+        Request::HostingSetAliases { sel, aliases },
+    )
+    .await?;
+    let flash = match resp {
+        RpcResponse::HostingSetAliases(_) => {
+            "Aliases updated. Re-issue the certificate (SSL tab) to cover any new names.".to_string()
+        }
+        RpcResponse::Error(e) => format!("Couldn't update aliases: {e}"),
+        _ => "Aliases: unexpected response".into(),
+    };
+    Ok(Redirect::to(&format!("/hostings/{}?flash={}#access", sel_url, urlencoding(&flash))).into_response())
+}
+
 // ──────────── WP debug + Redis handlers ────────────
 
 #[derive(Deserialize)]

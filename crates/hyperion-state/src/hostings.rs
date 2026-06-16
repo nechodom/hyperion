@@ -82,6 +82,31 @@ pub async fn insert_alias(
     Ok(())
 }
 
+/// Replace the full alias set for a hosting atomically (delete all, then
+/// insert the new list). Used by HostingSetAliases. The UNIQUE constraint on
+/// alias_domain still applies — a duplicate surfaces as an error and the
+/// transaction rolls back, leaving the old aliases intact.
+pub async fn replace_aliases(
+    pool: &SqlitePool,
+    hosting_id: &HostingId,
+    new_aliases: &[String],
+) -> Result<(), StateError> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM hosting_aliases WHERE hosting_id = ?")
+        .bind(hosting_id.as_str())
+        .execute(&mut *tx)
+        .await?;
+    for alias in new_aliases {
+        sqlx::query("INSERT INTO hosting_aliases (hosting_id, alias_domain) VALUES (?, ?)")
+            .bind(hosting_id.as_str())
+            .bind(alias)
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
 pub async fn aliases(pool: &SqlitePool, hosting_id: &HostingId) -> Result<Vec<String>, StateError> {
     let rows: Vec<(String,)> = sqlx::query_as(
         "SELECT alias_domain FROM hosting_aliases WHERE hosting_id = ? ORDER BY alias_domain",

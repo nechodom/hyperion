@@ -72,6 +72,13 @@ pub trait AgentApi: Send + Sync + 'static {
         basic_auth_password: Option<String>,
     ) -> Result<hyperion_types::VhostOptions, RpcError>;
 
+    /// Replace a hosting's alias domains (SANs) and rewrite its nginx vhost.
+    async fn hosting_set_aliases(
+        &self,
+        sel: HostingSelector,
+        aliases: Vec<hyperion_validate::Domain>,
+    ) -> Result<hyperion_types::HostingDetail, RpcError>;
+
     /// Toggle WordPress debug flags (WP_DEBUG / WP_DEBUG_LOG /
     /// WP_DEBUG_DISPLAY) for this hosting. Requires WP to be installed.
     async fn hosting_set_wp_debug(

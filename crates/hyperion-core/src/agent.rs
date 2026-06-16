@@ -182,6 +182,14 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
             .await
     }
 
+    async fn hosting_set_aliases(
+        &self,
+        sel: HostingSelector,
+        aliases: Vec<hyperion_validate::Domain>,
+    ) -> Result<hyperion_types::HostingDetail, RpcError> {
+        self.svc.hosting_set_aliases(sel, aliases).await
+    }
+
     async fn hosting_set_wp_debug(
         &self,
         sel: HostingSelector,

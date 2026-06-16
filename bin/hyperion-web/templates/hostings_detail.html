@@ -2729,6 +2729,33 @@
 <div class="tab-panel" id="tab-access">
 <div class="card">
   <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+    Domains &amp; aliases
+  </h2>
+  <p class="text-soft" style="margin:0 0 0.75rem">
+    Primary domain <code>{{ detail.domain }}</code> is fixed (recreate the
+    hosting to change it). Aliases are additional names served by this site.
+  </p>
+  <form method="post" action="/hostings/aliases" autocomplete="off"
+        data-role-min="operator">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+    <input type="hidden" name="target_node" value="{{ target_node }}">
+    <div class="field">
+      <label for="aliases_edit">Alias domains <span class="hint">comma / space / newline separated — leave empty to remove all</span></label>
+      <textarea id="aliases_edit" name="aliases" rows="2"
+                placeholder="www.example.com, m.example.com">{{ detail.aliases.join(", ") }}</textarea>
+    </div>
+    <p class="text-soft small" style="margin:0 0 0.6rem">
+      Saving rewrites the nginx <code>server_name</code> and reloads. New aliases
+      are not covered by HTTPS until you re-issue the certificate from the
+      <a href="#ssl">SSL tab</a>.
+    </p>
+    <button class="btn small primary" type="submit">Save aliases</button>
+  </form>
+</div>
+<div class="card">
+  <h2>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="7" r="4"/><path d="M3 21v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2"/></svg>
     Per-user access
   </h2>

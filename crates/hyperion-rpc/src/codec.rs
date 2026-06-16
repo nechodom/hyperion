@@ -82,6 +82,12 @@ pub enum Request {
         /// treated as "leave alone" by the agent.
         basic_auth_password: Option<String>,
     },
+    /// Replace a hosting's alias domains (SANs). Rewrites nginx server_name +
+    /// reloads. New aliases are not covered by the existing cert until re-issued.
+    HostingSetAliases {
+        sel: HostingSelector,
+        aliases: Vec<hyperion_validate::Domain>,
+    },
     HostingSetWpDebug {
         sel: HostingSelector,
         enabled: bool,
@@ -1039,6 +1045,7 @@ pub enum Response {
     TrashRestore,
     TrashPurge,
     HostingSetVhostOptions(hyperion_types::VhostOptions),
+    HostingSetAliases(hyperion_types::HostingDetail),
     HostingSetWpDebug(hyperion_types::WpExtras),
     HostingSetRedis(hyperion_types::WpExtras),
     HostingRotateRedisPassword(hyperion_types::WpExtras),

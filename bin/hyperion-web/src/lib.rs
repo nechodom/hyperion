@@ -32,6 +32,10 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::hostings::post_vhost_options),
         )
         .route(
+            "/hostings/aliases",
+            post(handlers::hostings::post_set_aliases),
+        )
+        .route(
             "/hostings/wp/debug",
             post(handlers::hostings::post_wp_debug),
         )
