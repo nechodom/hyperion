@@ -2153,6 +2153,26 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // success — discard rollback
         stack.forget();
 
+        // Auto-enable uptime monitoring with sane defaults so a new site
+        // is watched from the moment it goes live (HTTP probe of `/` every
+        // 60s, alert after 3 consecutive fails). Best-effort + no alert
+        // destination yet — it populates the monitoring dashboard
+        // immediately; the operator adds an email/Slack target and tunes
+        // or disables it on the Monitor tab.
+        let _ = hyperion_state::monitors::set_config(
+            &self.pool,
+            &hosting_id,
+            true,
+            Some("/"),
+            Some(60),
+            Some(3),
+            None,
+            None,
+            None,
+            now_secs(),
+        )
+        .await;
+
         Ok(HostingCreated {
             id: hosting_id,
             system_user: system_user.as_str().to_string(),
@@ -4443,15 +4463,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         ttl_secs: i64,
         source: String,
     ) -> Result<(), RpcError> {
-        let parsed: std::net::Ipv4Addr =
-            ip.trim().parse().map_err(|_| RpcError::Validation {
-                message: "only IPv4 addresses can be banned".into(),
-            })?;
-        // Never let the operator ban a private/loopback range and lock
-        // themselves (or the master↔worker link) out by accident.
+        let parsed: std::net::IpAddr = ip.trim().parse().map_err(|_| RpcError::Validation {
+            message: "not a valid IP address".into(),
+        })?;
+        // Never let the operator ban a loopback / unspecified address and
+        // lock themselves (or the master↔worker link) out by accident.
         if parsed.is_loopback() || parsed.is_unspecified() {
             return Err(RpcError::Validation {
-                message: "refusing to ban loopback / 0.0.0.0".into(),
+                message: "refusing to ban loopback / unspecified address".into(),
             });
         }
         let ip = parsed.to_string();
@@ -4483,10 +4502,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
     /// Lift an IP ban.
     pub async fn ban_remove(&self, ip: String) -> Result<(), RpcError> {
-        let parsed: std::net::Ipv4Addr =
-            ip.trim().parse().map_err(|_| RpcError::Validation {
-                message: "not a valid IPv4 address".into(),
-            })?;
+        let parsed: std::net::IpAddr = ip.trim().parse().map_err(|_| RpcError::Validation {
+            message: "not a valid IP address".into(),
+        })?;
         let ip = parsed.to_string();
         nft_unban(&ip).await;
         hyperion_state::bans::deactivate(&self.pool, &ip)
@@ -13919,6 +13937,15 @@ async fn nft_ensure_ban_infra() -> Result<(), RpcError> {
         ],
     )
     .await;
+    // Parallel IPv6 set — an IPv6 attacker must be bannable too.
+    let _ = hyperion_adapters::cmd::run(
+        NFT,
+        &[
+            "add", "set", "inet", "hyperion", "banned6", "{", "type", "ipv6_addr", ";", "flags",
+            "timeout", ";", "}",
+        ],
+    )
+    .await;
     let listing = hyperion_adapters::cmd::run(NFT, &["list", "chain", "inet", "hyperion", "input"])
         .await
         .unwrap_or_default();
@@ -13937,19 +13964,40 @@ async fn nft_ensure_ban_infra() -> Result<(), RpcError> {
             reason: e.to_string(),
         })?;
     }
+    if !listing.contains("hyperion:ban-drop6") {
+        hyperion_adapters::cmd::run(
+            NFT,
+            &[
+                "insert", "rule", "inet", "hyperion", "input", "ip6", "saddr", "@banned6", "drop",
+                "comment", "hyperion:ban-drop6",
+            ],
+        )
+        .await
+        .map_err(|e| RpcError::ProvisioningFailed {
+            stage: "nft_ban_infra".into(),
+            reason: e.to_string(),
+        })?;
+    }
     Ok(())
+}
+
+/// nft set holding bans for `ip`'s family: `banned6` for IPv6 (contains a
+/// colon), else the IPv4 `banned` set.
+fn nft_ban_set(ip: &str) -> &'static str {
+    if ip.contains(':') { "banned6" } else { "banned" }
 }
 
 /// Add an IP to the nft `banned` set with an optional timeout (0 = no
 /// timeout / permanent).
 async fn nft_ban(ip: &str, ttl_secs: i64) -> Result<(), RpcError> {
+    let set = nft_ban_set(ip);
     let ttl = format!("{ttl_secs}s");
     let argv: Vec<&str> = if ttl_secs > 0 {
         vec![
-            "add", "element", "inet", "hyperion", "banned", "{", ip, "timeout", &ttl, "}",
+            "add", "element", "inet", "hyperion", set, "{", ip, "timeout", &ttl, "}",
         ]
     } else {
-        vec!["add", "element", "inet", "hyperion", "banned", "{", ip, "}"]
+        vec!["add", "element", "inet", "hyperion", set, "{", ip, "}"]
     };
     hyperion_adapters::cmd::run(NFT, &argv)
         .await
@@ -13960,12 +14008,13 @@ async fn nft_ban(ip: &str, ttl_secs: i64) -> Result<(), RpcError> {
     Ok(())
 }
 
-/// Remove an IP from the nft `banned` set. Best-effort — a missing
+/// Remove an IP from its nft ban set (v4 or v6). Best-effort — a missing
 /// element (already expired by nft's own timeout) is not an error.
 async fn nft_unban(ip: &str) {
+    let set = nft_ban_set(ip);
     let _ = hyperion_adapters::cmd::run(
         NFT,
-        &["delete", "element", "inet", "hyperion", "banned", "{", ip, "}"],
+        &["delete", "element", "inet", "hyperion", set, "{", ip, "}"],
     )
     .await;
 }
@@ -14018,7 +14067,7 @@ async fn scan_sshd_journal_for_bruteforce(window_secs: i64, threshold: u32) -> V
         } else {
             ""
         };
-        if ip.parse::<std::net::Ipv4Addr>().is_ok() {
+        if ip.parse::<std::net::IpAddr>().is_ok() {
             *counts.entry(ip.to_string()).or_insert(0) += 1;
         }
     }
@@ -14045,8 +14094,8 @@ async fn scan_access_log_for_bruteforce(
     let mut counts: HashMap<String, u32> = HashMap::new();
     for line in body.lines() {
         let ip = line.split_whitespace().next().unwrap_or("");
-        // Only IPv4 — the nft ban set is ipv4_addr.
-        if ip.parse::<std::net::Ipv4Addr>().is_err() {
+        // IPv4 or IPv6 — both have their own nft ban set.
+        if ip.parse::<std::net::IpAddr>().is_err() {
             continue;
         }
         let Some(start) = line.find('[') else { continue };
