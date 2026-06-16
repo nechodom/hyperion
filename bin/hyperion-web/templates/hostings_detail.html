@@ -468,30 +468,6 @@
   </div>
 {% endif %}
 
-{% if let Some(h) = health %}
-{# Composite health snapshot. The amber/red rows double as an
-   onboarding to-do list for a fresh hosting. Computed server-side
-   from data already on the page (no extra RPC). #}
-<div class="card hover" style="border-left:3px solid {% if h.grade == "A" %}#22c55e{% else if h.grade == "B" %}#84cc16{% else if h.grade == "C" %}var(--warn){% else %}#ef4444{% endif %}">
-  <div style="display:flex;align-items:center;gap:0.8rem;flex-wrap:wrap;margin-bottom:0.7rem">
-    <div style="display:flex;align-items:baseline;gap:0.4rem">
-      <span style="font-size:1.7rem;font-weight:800;line-height:1">{{ h.grade }}</span>
-      <span class="text-soft" style="font-size:0.85rem">{{ h.score }}/100</span>
-    </div>
-    <h2 style="margin:0;font-size:1.05rem">Health</h2>
-    {% if h.todo > 0 %}<span class="pill warn" style="font-size:0.65rem">{{ h.todo }} to fix</span>{% else %}<span class="pill ok" style="font-size:0.65rem">all good</span>{% endif %}
-  </div>
-  <ul style="list-style:none;margin:0;padding:0;display:grid;gap:0.4rem">
-    {% for c in h.checks %}
-    <li style="display:flex;align-items:flex-start;gap:0.55rem;font-size:0.88rem">
-      <span style="flex-shrink:0;width:0.6rem;height:0.6rem;border-radius:50%;margin-top:0.32rem;background:{% if c.severity == "good" %}#22c55e{% else if c.severity == "warn" %}var(--warn,#f59e0b){% else if c.severity == "bad" %}#ef4444{% else %}var(--text-soft,#888){% endif %}"></span>
-      <span><strong style="font-weight:600">{{ c.label }}</strong> <span class="text-soft">— {{ c.detail }}</span></span>
-    </li>
-    {% endfor %}
-  </ul>
-</div>
-{% endif %}
-
 <nav class="tabs" role="tablist">
   <a class="tab" data-tab="overview" href="#overview" role="tab">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
@@ -568,6 +544,30 @@
 
 <!-- ============== OVERVIEW TAB ============== -->
 <div class="tab-panel" id="tab-overview">
+
+{% if let Some(h) = health %}
+{# Composite health snapshot. The amber/red rows double as an
+   onboarding to-do list for a fresh hosting. Computed server-side
+   from data already on the page (no extra RPC). #}
+<div class="card hover" style="border-left:3px solid {% if h.grade == "A" %}var(--success){% else if h.grade == "B" %}#84cc16{% else if h.grade == "C" %}var(--warn){% else %}var(--danger){% endif %}">
+  <div style="display:flex;align-items:center;gap:0.8rem;flex-wrap:wrap;margin-bottom:0.7rem">
+    <div style="display:flex;align-items:baseline;gap:0.4rem">
+      <span style="font-size:1.7rem;font-weight:800;line-height:1">{{ h.grade }}</span>
+      <span class="text-soft" style="font-size:0.85rem">{{ h.score }}/100</span>
+    </div>
+    <h2 style="margin:0;font-size:1.05rem">Health</h2>
+    {% if h.todo > 0 %}<span class="pill warn" style="font-size:0.65rem">{{ h.todo }} to fix</span>{% else %}<span class="pill ok" style="font-size:0.65rem">all good</span>{% endif %}
+  </div>
+  <ul style="list-style:none;margin:0;padding:0;display:grid;gap:0.4rem">
+    {% for c in h.checks %}
+    <li style="display:flex;align-items:flex-start;gap:0.55rem;font-size:0.88rem">
+      <span style="flex-shrink:0;width:0.6rem;height:0.6rem;border-radius:50%;margin-top:0.32rem;background:{% if c.severity == "good" %}var(--success){% else if c.severity == "warn" %}var(--warn){% else if c.severity == "bad" %}var(--danger){% else %}var(--text-soft){% endif %}"></span>
+      <span><strong style="font-weight:600">{{ c.label }}</strong> <span class="text-soft">— {{ c.detail }}</span></span>
+    </li>
+    {% endfor %}
+  </ul>
+</div>
+{% endif %}
 
 <div class="card hover">
   <h2>
@@ -1286,10 +1286,10 @@
     paths and SQL to visitors.
   </p>
   {% if wp_extras_flash %}
-  <div class="alert alert-ok" role="status">✓ WP settings applied.</div>
+  <div class="flash success" role="status"><svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg><div class="flash-body">WP settings applied.</div></div>
   {% endif %}
   {% if let Some(e) = wp_extras_error %}
-  <div class="alert alert-err" role="alert">{{ e }}</div>
+  <div class="flash error" role="alert"><svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg><div class="flash-body">{{ e }}</div></div>
   {% endif %}
   <form method="post" action="/hostings/wp/debug">
     <input type="hidden" name="_csrf" value="{{ csrf_wp_debug }}">
@@ -1318,7 +1318,7 @@
         Display errors on the page (NEVER on production)
       </label>
     </div>
-    <button class="btn btn-primary" type="submit">Apply debug settings</button>
+    <button class="btn primary" type="submit">Apply debug settings</button>
   </form>
 
   {% if detail.wp_extras.wp_debug_log_size_bytes > 0 %}
@@ -1348,12 +1348,10 @@
      here AND emit a top-of-page toast via `flash_error` for
      visibility regardless of which tab they're on. #}
   {% if let Some(e) = wp_extras_error %}
-  <div class="alert alert-err" role="alert" style="margin-bottom:0.9rem">
-    <strong>Couldn't apply Redis change:</strong> {{ e }}
-  </div>
+  <div class="flash error" role="alert" style="margin-bottom:0.9rem"><svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg><div class="flash-body"><strong>Couldn't apply Redis change:</strong> {{ e }}</div></div>
   {% endif %}
   {% if wp_extras_flash %}
-  <div class="alert alert-ok" role="status" style="margin-bottom:0.9rem">✓ Redis settings saved.</div>
+  <div class="flash success" role="status" style="margin-bottom:0.9rem"><svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg><div class="flash-body">Redis settings saved.</div></div>
   {% endif %}
   <p class="muted small">
     Per-hosting Redis ACL on the local <code>redis-server</code>.
@@ -1399,7 +1397,7 @@
     {% if !target_node.is_empty() %}
     <input type="hidden" name="target_node" value="{{ target_node }}">
     {% endif %}
-    <button class="btn btn-primary" type="submit">Enable Redis</button>
+    <button class="btn primary" type="submit">Enable Redis</button>
   </form>
   {% endif %}
 </div>
@@ -1571,15 +1569,19 @@
 <div class="tab-panel" id="tab-settings">
 
 {% if vhost_saved %}
-<div class="alert alert-ok" role="status">
-  ✓ Vhost options saved. New configuration is live.
+<div class="flash success" role="status">
+  <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+  <div class="flash-body">Vhost options saved. New configuration is live.</div>
 </div>
 {% endif %}
 {% if let Some(e) = vhost_error %}
-<div class="alert alert-err" role="alert">
-  <strong>nginx refused the new config:</strong><br>
-  <code style="white-space:pre-wrap">{{ e }}</code><br>
-  No changes were applied — the previous vhost is still active.
+<div class="flash error" role="alert">
+  <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+  <div class="flash-body">
+    <strong>nginx refused the new config:</strong><br>
+    <code style="white-space:pre-wrap">{{ e }}</code><br>
+    No changes were applied — the previous vhost is still active.
+  </div>
 </div>
 {% endif %}
 
@@ -1601,209 +1603,180 @@
     <input type="hidden" name="target_node" value="{{ target_node }}">
     {% endif %}
 
-    <fieldset style="border:1px solid var(--border);border-radius:6px;padding:1rem;margin-bottom:1rem">
-      <legend><strong>HTTP basic auth</strong></legend>
+    <h3 class="section-title" style="margin-top:1rem">Access · HTTP basic auth</h3>
+    <label class="field-checkbox">
+      <input type="checkbox" name="basic_auth_enabled" value="on"
+             {% if detail.vhost_options.basic_auth_enabled %}checked{% endif %}>
+      Require HTTP basic auth for every request <span class="hint">staging / preview</span>
+    </label>
+    <div class="field-row" style="margin-top:0.7rem">
       <div class="field">
-        <label>
-          <input type="checkbox" name="basic_auth_enabled" value="on"
-                 {% if detail.vhost_options.basic_auth_enabled %}checked{% endif %}>
-          Require HTTP basic auth for every request (staging / preview)
+        <label for="basic_auth_user">Username</label>
+        <input type="text" id="basic_auth_user" name="basic_auth_user"
+               value="{{ detail.vhost_options.basic_auth_user }}"
+               autocomplete="off" pattern="[A-Za-z0-9_.-]{1,64}"
+               maxlength="64">
+      </div>
+      <div class="field">
+        <label for="basic_auth_password">
+          Password
+          {% if detail.vhost_options.basic_auth_set %}
+            <span class="hint">leave blank to keep current</span>
+          {% else %}
+            <span class="hint">required to enable</span>
+          {% endif %}
         </label>
+        <input type="password" id="basic_auth_password" name="basic_auth_password"
+               autocomplete="new-password" minlength="0" maxlength="200">
       </div>
-      <div class="field-row">
-        <div class="field">
-          <label for="basic_auth_user">Username</label>
-          <input type="text" id="basic_auth_user" name="basic_auth_user"
-                 value="{{ detail.vhost_options.basic_auth_user }}"
-                 autocomplete="off" pattern="[A-Za-z0-9_.-]{1,64}"
-                 maxlength="64">
-        </div>
-        <div class="field">
-          <label for="basic_auth_password">
-            Password
-            {% if detail.vhost_options.basic_auth_set %}
-              <span class="hint">(leave blank to keep current)</span>
-            {% else %}
-              <span class="hint">(required to enable)</span>
-            {% endif %}
-          </label>
-          <input type="password" id="basic_auth_password" name="basic_auth_password"
-                 autocomplete="new-password" minlength="0" maxlength="200">
-        </div>
-      </div>
-    </fieldset>
+    </div>
 
-    <fieldset style="border:1px solid var(--border);border-radius:6px;padding:1rem;margin-bottom:1rem">
-      <legend><strong>HTTPS &amp; HSTS</strong></legend>
-      <div class="field">
-        <label>
-          <input type="checkbox" name="force_https" value="on"
-                 {% if detail.vhost_options.force_https %}checked{% endif %}>
-          Force HTTP → HTTPS redirect
-        </label>
-      </div>
-      <div class="field">
-        <label for="hsts_max_age">HSTS <code>max-age</code> <span class="hint">seconds (0 = off)</span></label>
-        <select id="hsts_max_age" name="hsts_max_age">
-          <option value="0" {% if detail.vhost_options.hsts_max_age == 0 %}selected{% endif %}>Off (0)</option>
-          <option value="3600" {% if detail.vhost_options.hsts_max_age == 3600 %}selected{% endif %}>1 hour (testing)</option>
-          <option value="86400" {% if detail.vhost_options.hsts_max_age == 86400 %}selected{% endif %}>1 day</option>
-          <option value="2592000" {% if detail.vhost_options.hsts_max_age == 2592000 %}selected{% endif %}>30 days</option>
-          <option value="15768000" {% if detail.vhost_options.hsts_max_age == 15768000 %}selected{% endif %}>6 months</option>
-          <option value="31536000" {% if detail.vhost_options.hsts_max_age == 31536000 %}selected{% endif %}>1 year (recommended)</option>
-          <option value="63072000" {% if detail.vhost_options.hsts_max_age == 63072000 %}selected{% endif %}>2 years</option>
-        </select>
-        <p class="muted small">
-          HSTS tells browsers to refuse plain HTTP for this domain.
-          Once a browser sees the header it remembers for max-age
-          seconds, so values above 1 day are essentially permanent —
-          turn it off ONLY by leaving HSTS at 0 for max-age seconds
-          (browsers won't forget any sooner).
-        </p>
-      </div>
-    </fieldset>
+    <h3 class="section-title">HTTPS &amp; HSTS</h3>
+    <label class="field-checkbox">
+      <input type="checkbox" name="force_https" value="on"
+             {% if detail.vhost_options.force_https %}checked{% endif %}>
+      Force HTTP → HTTPS redirect
+    </label>
+    <div class="field" style="margin-top:0.7rem">
+      <label for="hsts_max_age">HSTS <code>max-age</code> <span class="hint">seconds (0 = off)</span></label>
+      <select id="hsts_max_age" name="hsts_max_age">
+        <option value="0" {% if detail.vhost_options.hsts_max_age == 0 %}selected{% endif %}>Off (0)</option>
+        <option value="3600" {% if detail.vhost_options.hsts_max_age == 3600 %}selected{% endif %}>1 hour (testing)</option>
+        <option value="86400" {% if detail.vhost_options.hsts_max_age == 86400 %}selected{% endif %}>1 day</option>
+        <option value="2592000" {% if detail.vhost_options.hsts_max_age == 2592000 %}selected{% endif %}>30 days</option>
+        <option value="15768000" {% if detail.vhost_options.hsts_max_age == 15768000 %}selected{% endif %}>6 months</option>
+        <option value="31536000" {% if detail.vhost_options.hsts_max_age == 31536000 %}selected{% endif %}>1 year (recommended)</option>
+        <option value="63072000" {% if detail.vhost_options.hsts_max_age == 63072000 %}selected{% endif %}>2 years</option>
+      </select>
+      <p class="muted small">
+        HSTS tells browsers to refuse plain HTTP for this domain. Once a browser
+        sees the header it remembers for max-age seconds, so values above 1 day
+        are essentially permanent — to undo, leave HSTS at 0 for that long.
+      </p>
+    </div>
 
-    <fieldset style="border:1px solid var(--border);border-radius:6px;padding:1rem;margin-bottom:1rem">
-      <legend><strong>Maintenance mode</strong></legend>
-      <div class="field">
-        <label>
-          <input type="checkbox" name="maintenance_mode" value="on"
-                 {% if detail.vhost_options.maintenance_mode %}checked{% endif %}>
-          Return 503 for every request (ACME challenges still work)
-        </label>
-      </div>
-      <p class="muted small">
-        Use during deploys or DB restores. Browsers see a generic
-        "we'll be back" page; Let's Encrypt renewals continue to work
-        because the <code>/.well-known/acme-challenge/</code> path
-        bypasses the 503.
-      </p>
-    </fieldset>
+    <h3 class="section-title">Maintenance mode</h3>
+    <label class="field-checkbox">
+      <input type="checkbox" name="maintenance_mode" value="on"
+             {% if detail.vhost_options.maintenance_mode %}checked{% endif %}>
+      Return 503 for every request <span class="hint">ACME challenges still work</span>
+    </label>
+    <p class="muted small">
+      Use during deploys or DB restores. Browsers see a generic "we'll be back"
+      page; Let's Encrypt renewals continue because the
+      <code>/.well-known/acme-challenge/</code> path bypasses the 503.
+    </p>
 
-    <fieldset style="border:1px solid var(--border);border-radius:6px;padding:1rem;margin-bottom:1rem">
-      <legend><strong>FastCGI page cache</strong></legend>
-      <div class="field">
-        <label>
-          <input type="checkbox" name="fastcgi_cache_enabled" value="on"
-                 {% if detail.vhost_options.fastcgi_cache_enabled %}checked{% endif %}>
-          Cache rendered PHP responses for anonymous visitors
-        </label>
-      </div>
-      <div class="field">
-        <label for="fastcgi_cache_ttl">Cache TTL <span class="hint">seconds (max 86400)</span></label>
-        <input type="number" id="fastcgi_cache_ttl" name="fastcgi_cache_ttl"
-               min="0" max="86400" step="60"
-               value="{% if detail.vhost_options.fastcgi_cache_ttl > 0 %}{{ detail.vhost_options.fastcgi_cache_ttl }}{% else %}300{% endif %}">
-      </div>
-      <p class="muted small">
-        Bypassed automatically for logged-in WordPress / PHP-session
-        visitors (checks <code>wordpress_logged_in_*</code> and
-        <code>PHPSESSID</code> cookies). The cache zone is
-        per-hosting — purge one site without touching others.
-      </p>
-    </fieldset>
+    <h3 class="section-title">FastCGI page cache</h3>
+    <label class="field-checkbox">
+      <input type="checkbox" name="fastcgi_cache_enabled" value="on"
+             {% if detail.vhost_options.fastcgi_cache_enabled %}checked{% endif %}>
+      Cache rendered PHP responses for anonymous visitors
+    </label>
+    <div class="field" style="margin-top:0.7rem">
+      <label for="fastcgi_cache_ttl">Cache TTL <span class="hint">seconds (max 86400)</span></label>
+      <input type="number" id="fastcgi_cache_ttl" name="fastcgi_cache_ttl"
+             min="0" max="86400" step="60"
+             value="{% if detail.vhost_options.fastcgi_cache_ttl > 0 %}{{ detail.vhost_options.fastcgi_cache_ttl }}{% else %}300{% endif %}">
+    </div>
+    <p class="muted small">
+      Bypassed automatically for logged-in WordPress / PHP-session visitors
+      (checks <code>wordpress_logged_in_*</code> and <code>PHPSESSID</code>
+      cookies). The cache zone is per-hosting.
+    </p>
 
-    <fieldset style="border:1px solid var(--border);border-radius:6px;padding:1rem;margin-bottom:1rem">
-      <legend><strong>Security (WAF-lite)</strong></legend>
-      <div class="field">
-        <label>
-          <input type="checkbox" name="waf_enabled" value="on"
-                 {% if detail.vhost_options.waf_enabled %}checked{% endif %}>
-          Enable WAF-lite request filtering
-        </label>
-      </div>
+    <h3 class="section-title">Security · WAF-lite</h3>
+    <label class="field-checkbox">
+      <input type="checkbox" name="waf_enabled" value="on"
+             {% if detail.vhost_options.waf_enabled %}checked{% endif %}>
+      Enable WAF-lite request filtering
+    </label>
+    <p class="muted small">
+      Conservative nginx rules: deny direct access to <code>wp-config.php</code>,
+      <code>xmlrpc.php</code>, dumps and backups; block PHP execution under
+      <code>wp-content/uploads</code> and <code>cache</code>; and <code>403</code>
+      obvious probe query-strings and scanner user-agents.
+    </p>
+    <div class="field" style="margin-top:0.75rem">
+      <label for="wp_admin_allowlist">
+        Restrict <code>/wp-admin</code> + <code>/wp-login.php</code> to these IPs
+        <span class="hint">one IP or CIDR per line — empty = open</span>
+      </label>
+      <textarea id="wp_admin_allowlist" name="wp_admin_allowlist"
+                rows="3" maxlength="2048"
+                style="font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px"
+                placeholder="203.0.113.5&#10;198.51.100.0/24&#10;2001:db8::/32">{{ detail.vhost_options.wp_admin_allowlist }}</textarea>
       <p class="muted small">
-        Conservative nginx rules: deny direct access to
-        <code>wp-config.php</code>, <code>xmlrpc.php</code>, database
-        dumps and backups; block PHP execution under
-        <code>wp-content/uploads</code> and <code>cache</code>; and
-        <code>403</code> obvious probe query-strings and scanner
-        user-agents. Lighter than ModSecurity to avoid false positives.
+        <code>admin-ajax.php</code> stays public so front-end AJAX keeps working.
+        Double-check your own IP is listed before saving.
       </p>
-      <div class="field" style="margin-top:0.75rem">
-        <label for="wp_admin_allowlist">
-          Restrict <code>/wp-admin</code> + <code>/wp-login.php</code> to these IPs
-          <span class="hint">one IP or CIDR per line — empty = open to everyone</span>
-        </label>
-        <textarea id="wp_admin_allowlist" name="wp_admin_allowlist"
-                  rows="3" maxlength="2048"
-                  style="font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px"
-                  placeholder="203.0.113.5&#10;198.51.100.0/24&#10;2001:db8::/32">{{ detail.vhost_options.wp_admin_allowlist }}</textarea>
-      </div>
-      <p class="muted small">
-        <code>admin-ajax.php</code> stays public so themes/plugins that
-        use front-end AJAX keep working. Invalid entries are ignored.
-        Double-check your own IP is listed before saving — locking
-        yourself out of <code>/wp-admin</code> only requires clearing
-        this box and re-saving from the panel.
-      </p>
-    </fieldset>
+    </div>
 
-    <fieldset style="border:1px solid var(--border);border-radius:6px;padding:1rem;margin-bottom:1rem">
-      <legend><strong>Custom nginx snippet</strong></legend>
-      <div class="field">
-        <label for="custom_nginx_snippet">
-          Appended inside the HTTPS <code>server { }</code> block
-          <span class="hint">max 32 KiB</span>
-        </label>
-        <textarea id="custom_nginx_snippet" name="custom_nginx_snippet"
-                  rows="6" maxlength="32768"
-                  style="font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px"
-                  placeholder="# e.g. raise upload size\nclient_max_body_size 64M;\n\n# e.g. extra security header\nadd_header Permissions-Policy &quot;geolocation=()&quot; always;">{{ detail.vhost_options.custom_nginx_snippet }}</textarea>
-      </div>
-      <p class="muted small">
-        Validated with <code>nginx -t</code> before save — invalid
-        config is rejected with the verbatim error.
-      </p>
-    </fieldset>
+    <h3 class="section-title">Custom nginx snippet</h3>
+    <div class="field">
+      <label for="custom_nginx_snippet">
+        Appended inside the HTTPS <code>server { }</code> block
+        <span class="hint">max 32 KiB · validated with nginx -t</span>
+      </label>
+      <textarea id="custom_nginx_snippet" name="custom_nginx_snippet"
+                rows="6" maxlength="32768"
+                style="font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px"
+                placeholder="# e.g. raise upload size\nclient_max_body_size 64M;\n\n# e.g. extra security header\nadd_header Permissions-Policy &quot;geolocation=()&quot; always;">{{ detail.vhost_options.custom_nginx_snippet }}</textarea>
+    </div>
 
     {% if detail.kind == "redirect" %}
-    <fieldset style="border:1px solid var(--border);border-radius:6px;padding:1rem;margin-bottom:1rem">
-      <legend><strong>Redirect target</strong></legend>
-      <p class="muted small">
-        This hosting is a redirect-only vhost — no PHP, no htdocs.
-        Every request is forwarded to the URL below.
-      </p>
+    <h3 class="section-title">Redirect target</h3>
+    <p class="muted small">
+      This hosting is a redirect-only vhost — no PHP, no htdocs. Every request is
+      forwarded to the URL below.
+    </p>
+    <div class="field">
+      <label for="redirect_url">Target URL <span class="hint">must start with http(s)://</span></label>
+      <input type="url" id="redirect_url" name="redirect_url"
+             value="{{ detail.vhost_options.redirect_url }}"
+             placeholder="https://new.example.com" maxlength="500">
+    </div>
+    <div class="field-row">
       <div class="field">
-        <label for="redirect_url">Target URL <span class="hint">must start with http(s)://</span></label>
-        <input type="url" id="redirect_url" name="redirect_url"
-               value="{{ detail.vhost_options.redirect_url }}"
-               placeholder="https://new.example.com" maxlength="500">
+        <label for="redirect_code">Redirect code</label>
+        <select id="redirect_code" name="redirect_code">
+          <option value="301" {% if detail.vhost_options.redirect_code == 301 %}selected{% endif %}>301 Moved Permanently (cached by browsers)</option>
+          <option value="302" {% if detail.vhost_options.redirect_code == 302 || detail.vhost_options.redirect_code == 0 %}selected{% endif %}>302 Found (temporary, default)</option>
+          <option value="307" {% if detail.vhost_options.redirect_code == 307 %}selected{% endif %}>307 Temporary Redirect (preserves method)</option>
+          <option value="308" {% if detail.vhost_options.redirect_code == 308 %}selected{% endif %}>308 Permanent Redirect (preserves method)</option>
+        </select>
       </div>
-      <div class="field-row">
-        <div class="field">
-          <label for="redirect_code">Redirect code</label>
-          <select id="redirect_code" name="redirect_code">
-            <option value="301" {% if detail.vhost_options.redirect_code == 301 %}selected{% endif %}>301 Moved Permanently (cached by browsers)</option>
-            <option value="302" {% if detail.vhost_options.redirect_code == 302 || detail.vhost_options.redirect_code == 0 %}selected{% endif %}>302 Found (temporary, default)</option>
-            <option value="307" {% if detail.vhost_options.redirect_code == 307 %}selected{% endif %}>307 Temporary Redirect (preserves method)</option>
-            <option value="308" {% if detail.vhost_options.redirect_code == 308 %}selected{% endif %}>308 Permanent Redirect (preserves method)</option>
-          </select>
-        </div>
-        <div class="field">
-          <label>
-            <input type="checkbox" name="redirect_preserve_path" value="on"
-                   {% if detail.vhost_options.redirect_preserve_path %}checked{% endif %}>
-            Preserve request path
-          </label>
-          <p class="hint">
-            On: <code>/foo/bar</code> → <code>&lt;target&gt;/foo/bar</code>.
-            Off: every URL collapses to <code>&lt;target&gt;/</code>.
-          </p>
-        </div>
+      <div class="field">
+        <label class="field-checkbox" style="margin-top:1.7rem">
+          <input type="checkbox" name="redirect_preserve_path" value="on"
+                 {% if detail.vhost_options.redirect_preserve_path %}checked{% endif %}>
+          Preserve request path
+        </label>
+        <p class="muted small" style="margin-top:0.3rem">
+          On: <code>/foo/bar</code> → <code>&lt;target&gt;/foo/bar</code>.
+          Off: collapses to <code>&lt;target&gt;/</code>.
+        </p>
       </div>
-    </fieldset>
+    </div>
     {% endif %}
 
-    <button class="btn btn-primary" type="submit">Save vhost options</button>
+    <button class="btn primary" type="submit" style="margin-top:1.3rem">
+      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+      Save vhost options
+    </button>
   </form>
 </div>
 
 <div class="card hover">
   <h2>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="9" y1="9" x2="15" y2="9"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
-    Limits
+    PHP-FPM &amp; DB limits
   </h2>
+  <p class="muted small" style="margin-top:-0.4rem;margin-bottom:0.9rem">
+    Per-hosting PHP-FPM pool tuning + advisory caps (surfaced as alerts).
+    Kernel-enforced disk quota lives in the <strong>Disk &amp; bandwidth quota</strong>
+    card below.
+  </p>
   <form method="post" action="/hostings/set-limits">
     <input type="hidden" name="_csrf" value="{{ csrf_limits }}">
     <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
@@ -1862,8 +1835,12 @@
 <div id="quota" class="card hover" style="margin-top:1rem">
   <h2>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
-    Quota
+    Disk &amp; bandwidth quota
   </h2>
+  <p class="muted small" style="margin-top:-0.4rem;margin-bottom:0.9rem">
+    Hard disk caps pushed into the kernel via <code>setquota</code> (blocks writes
+    at the limit). Bandwidth here is informational + alert-driven.
+  </p>
   {% if !quota.quotas_enabled_on_fs %}
     <div class="flash warn" style="margin-bottom:0.8rem">
       <div class="flash-body">
@@ -2040,29 +2017,35 @@
   <form method="post" action="/hostings/php-ini">
     <input type="hidden" name="_csrf" value="{{ csrf_php_ini }}">
     <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:0.8rem">
-      <label style="font-size:0.85rem">memory_limit
-        <input class="input" name="memory_limit" value="{{ php_ini.memory_limit }}" placeholder="256M" autocomplete="off" style="width:100%">
-      </label>
-      <label style="font-size:0.85rem">upload_max_filesize
-        <input class="input" name="upload_max_filesize" value="{{ php_ini.upload_max_filesize }}" placeholder="64M" autocomplete="off" style="width:100%">
-      </label>
-      <label style="font-size:0.85rem">post_max_size
-        <input class="input" name="post_max_size" value="{{ php_ini.post_max_size }}" placeholder="64M" autocomplete="off" style="width:100%">
-      </label>
-      <label style="font-size:0.85rem">max_execution_time
-        <input class="input" name="max_execution_time" value="{{ php_ini.max_execution_time }}" placeholder="120" autocomplete="off" style="width:100%">
-      </label>
-      <label style="font-size:0.85rem">max_input_vars
-        <input class="input" name="max_input_vars" value="{{ php_ini.max_input_vars }}" placeholder="3000" autocomplete="off" style="width:100%">
-      </label>
-      <label style="font-size:0.85rem">display_errors
-        <select class="input" name="display_errors" style="width:100%">
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:1rem">
+      <div class="field" style="margin:0">
+        <label for="pi_memory_limit"><code>memory_limit</code></label>
+        <input id="pi_memory_limit" name="memory_limit" value="{{ php_ini.memory_limit }}" placeholder="256M" autocomplete="off">
+      </div>
+      <div class="field" style="margin:0">
+        <label for="pi_upload"><code>upload_max_filesize</code></label>
+        <input id="pi_upload" name="upload_max_filesize" value="{{ php_ini.upload_max_filesize }}" placeholder="64M" autocomplete="off">
+      </div>
+      <div class="field" style="margin:0">
+        <label for="pi_post"><code>post_max_size</code></label>
+        <input id="pi_post" name="post_max_size" value="{{ php_ini.post_max_size }}" placeholder="64M" autocomplete="off">
+      </div>
+      <div class="field" style="margin:0">
+        <label for="pi_exec"><code>max_execution_time</code></label>
+        <input id="pi_exec" name="max_execution_time" value="{{ php_ini.max_execution_time }}" placeholder="120" autocomplete="off">
+      </div>
+      <div class="field" style="margin:0">
+        <label for="pi_vars"><code>max_input_vars</code></label>
+        <input id="pi_vars" name="max_input_vars" value="{{ php_ini.max_input_vars }}" placeholder="3000" autocomplete="off">
+      </div>
+      <div class="field" style="margin:0">
+        <label for="pi_display"><code>display_errors</code></label>
+        <select id="pi_display" name="display_errors">
           <option value="" {% if php_ini.display_errors.is_empty() %}selected{% endif %}>(default)</option>
           <option value="Off" {% if php_ini.display_errors == "Off" %}selected{% endif %}>Off</option>
           <option value="On" {% if php_ini.display_errors == "On" %}selected{% endif %}>On</option>
         </select>
-      </label>
+      </div>
     </div>
     <div class="row" style="margin-top:0.9rem">
       <button class="btn primary" type="submit">
