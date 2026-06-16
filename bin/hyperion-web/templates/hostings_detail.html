@@ -1053,8 +1053,8 @@
    --format=json`. The action endpoint dispatches install / activate
    / deactivate / update / delete via one POST. #}
 {% if let Some(_) = wp_status %}
-{# Vulnerability scan — lazily loaded so the page render isn't blocked
-   on a wp-cli plugin/theme enumeration + feed match. #}
+{# WordPress updates ("defender") — lazily loaded so the page render
+   isn't blocked on a wp-cli plugin/theme enumeration. #}
 <div hx-get="/hostings/{{ detail.id.as_str() }}/vuln-panel"
      hx-trigger="load"
      hx-swap="outerHTML"
@@ -1062,7 +1062,7 @@
   <div class="card">
     <h2 style="opacity:0.6">
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-      Vulnerability scan <span class="text-soft small">— checking…</span>
+      WordPress updates <span class="text-soft small">— checking…</span>
     </h2>
   </div>
 </div>

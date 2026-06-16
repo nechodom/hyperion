@@ -582,9 +582,11 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
-    // WordPress vulnerability sweep — once per day. Scans every active WP
-    // hosting against the Wordfence feed, stores the result for the
-    // cluster dashboard, and notifies admins about NEW criticals.
+    // WordPress defender sweep — once per day. Scans every active WP
+    // hosting for outdated plugins/themes (keyless — via wp-cli's own
+    // update status), auto-applies safe minor/patch updates when enabled,
+    // stores the result for the cluster dashboard, and notifies admins
+    // about NEW major updates needing manual review.
     {
         let vuln_svc = svc.clone();
         tokio::spawn(async move {
@@ -595,9 +597,9 @@ async fn main() -> anyhow::Result<()> {
             interval.tick().await; // immediate-first-tick consumption
             loop {
                 match vuln_svc.wp_vuln_scan_tick().await {
-                    Ok(n) if n > 0 => tracing::info!(new_criticals = n, "wp vuln scan tick"),
-                    Ok(_) => tracing::debug!("wp vuln scan tick: no new criticals"),
-                    Err(e) => tracing::warn!(error=%e, "wp vuln scan tick failed"),
+                    Ok(n) if n > 0 => tracing::info!(new_majors = n, "wp defender tick"),
+                    Ok(_) => tracing::debug!("wp defender tick: no new major updates"),
+                    Err(e) => tracing::warn!(error=%e, "wp defender tick failed"),
                 }
                 interval.tick().await;
             }

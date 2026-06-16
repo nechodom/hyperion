@@ -95,35 +95,52 @@ pub struct WpPluginListResponse {
     pub bulk_auto_update: bool,
 }
 
-/// One known vulnerability affecting an installed plugin/theme,
-/// matched against the Wordfence Intelligence feed.
+/// One outdated installed component (plugin / theme). The "defender" is
+/// keyless: it flags components with an available update rather than
+/// matching a third-party CVE feed — outdated components are the #1
+/// real-world WordPress attack vector, and wp-cli already knows the
+/// latest version (it queries WordPress.org).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct WpVulnFinding {
     pub slug: String,
     pub name: String,
+    /// Currently-installed version.
     pub installed_version: String,
     pub title: String,
-    /// "critical" | "high" | "medium" | "low" | "unknown".
+    /// "high" (major behind) | "medium" (minor) | "low" (patch).
     pub severity: String,
-    /// CVE id, or "" when none is assigned.
+    /// CVE id — empty in keyless mode (kept for wire compatibility).
     pub cve: String,
-    /// First patched version, or "" when unknown.
+    /// Version to update TO (the latest available).
     pub patched_version: String,
     /// "plugin" | "theme".
     pub kind: String,
+    /// "major" | "minor" | "patch" — how far behind the latest is.
+    #[serde(default)]
+    pub update_type: String,
+    /// True when the latest is a same-major bump, so the defender will
+    /// auto-apply it (minor/patch policy). Majors are left to the operator.
+    #[serde(default)]
+    pub auto_updatable: bool,
 }
 
-/// Result of a WordPress vulnerability scan against the Wordfence feed.
+/// Result of a WordPress update/outdated scan (keyless — via wp-cli's own
+/// update status, no external feed).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct WpVulnScanResult {
     pub findings: Vec<WpVulnFinding>,
-    /// True when the feed couldn't be fetched/parsed (offline, etc.) —
+    /// True when wp-cli couldn't enumerate the install (broken WP, perms) —
     /// the UI shows "couldn't check" rather than a false "all clear".
+    #[serde(alias = "feed_unavailable")]
     pub feed_unavailable: bool,
-    /// Age of the cached feed in seconds (for a "checked N ago" note).
+    /// Unused in keyless mode (kept for wire compatibility).
+    #[serde(default)]
     pub feed_age_secs: i64,
-    /// Plugins/themes actually checked.
+    /// Plugins + themes actually checked.
     pub checked: i64,
+    /// How many components the defender auto-updated on this run (tick only).
+    #[serde(default)]
+    pub auto_updated: i64,
 }
 
 /// One hosting's last stored vuln-scan result, for the cluster-wide

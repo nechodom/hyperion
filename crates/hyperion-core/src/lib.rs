@@ -13,7 +13,7 @@ pub mod master_rpc;
 pub mod real_adapter;
 pub mod secrets;
 pub mod service;
-pub mod wordfence;
+pub mod wp_updates;
 
 pub use agent::AgentImpl;
 pub use real_adapter::RealAdapter;

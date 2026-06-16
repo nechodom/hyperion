@@ -173,6 +173,10 @@ pub fn build_router(state: SharedState) -> Router {
             "/hostings/wp/staging/push",
             post(handlers::hostings::post_wp_staging_push),
         )
+        .route(
+            "/hostings/wp/auto-update",
+            post(handlers::hostings::post_wp_auto_update),
+        )
         .route("/hostings/ban", post(handlers::hostings::post_ban))
         .route(
             "/hostings/:selector/bans-panel",

@@ -23,8 +23,10 @@ struct VulnsTpl<'a> {
     css_version: &'static str,
     htmx_version: &'static str,
     rows: Vec<hyperion_types::HostingVulnSummary>,
-    critical: usize,
-    high: usize,
+    /// Total major updates available across the fleet (manual review).
+    major: usize,
+    /// Total outdated components (any severity) across the fleet.
+    outdated: usize,
     sites: usize,
 }
 
@@ -64,15 +66,15 @@ pub async fn get_vulns(
             }
         }
     }
-    // Worst (most criticals) first.
+    // Most major (high-severity) updates first, then most outdated.
     all.sort_by(|a, b| {
-        b.count_severity("critical")
-            .cmp(&a.count_severity("critical"))
+        b.count_severity("high")
+            .cmp(&a.count_severity("high"))
             .then(b.findings.len().cmp(&a.findings.len()))
     });
 
-    let critical: usize = all.iter().map(|s| s.count_severity("critical")).sum();
-    let high: usize = all.iter().map(|s| s.count_severity("high")).sum();
+    let major: usize = all.iter().map(|s| s.count_severity("high")).sum();
+    let outdated: usize = all.iter().map(|s| s.findings.len()).sum();
     let sites = all.len();
 
     let tpl = VulnsTpl {
@@ -82,8 +84,8 @@ pub async fn get_vulns(
         css_version: super::css_version(),
         htmx_version: super::htmx_version(),
         rows: all,
-        critical,
-        high,
+        major,
+        outdated,
         sites,
     };
     Ok(Html(tpl.render()?).into_response())

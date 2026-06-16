@@ -1,22 +1,22 @@
 {% extends "base.html" %}
-{% block title %}Vulnerabilities · hyperion{% endblock %}
+{% block title %}WP updates · hyperion{% endblock %}
 {% block main %}
 
 <div class="page-header">
   <div>
-    <h1>WordPress vulnerabilities</h1>
-    <div class="subtitle">Every site with a known plugin/theme vuln from the last daily Wordfence scan, across the cluster.</div>
+    <h1>WordPress updates</h1>
+    <div class="subtitle">Every site with outdated plugins/themes from the last daily defender sweep, across the cluster. Safe minor/patch updates are applied automatically; majors are listed for review.</div>
   </div>
 </div>
 
 <div class="grid cols-3" style="margin-bottom:1rem">
   <div class="kpi-card">
-    <div class="kpi-label">Critical findings</div>
-    <div class="kpi-value">{{ critical }}</div>
+    <div class="kpi-label">Major updates (review)</div>
+    <div class="kpi-value">{{ major }}</div>
   </div>
   <div class="kpi-card">
-    <div class="kpi-label">High findings</div>
-    <div class="kpi-value">{{ high }}</div>
+    <div class="kpi-label">Outdated components</div>
+    <div class="kpi-value">{{ outdated }}</div>
   </div>
   <div class="kpi-card">
     <div class="kpi-label">Affected sites</div>
@@ -27,14 +27,14 @@
 <div class="card no-pad-table">
   {% if rows.is_empty() %}
     <div class="empty" style="padding:2.5rem">
-      <p class="muted">No known vulnerabilities across the fleet. 🎉</p>
-      <p class="text-soft small">Sites are scanned daily against the Wordfence Intelligence feed. New findings show up here and notify admins.</p>
+      <p class="muted">Every WordPress site across the fleet is up to date. 🎉</p>
+      <p class="text-soft small">Sites are swept daily. Safe minor/patch updates auto-apply; major updates show up here and notify admins.</p>
     </div>
   {% else %}
     <div class="table-wrap">
       <table>
         <thead><tr>
-          <th>Site</th><th>Node</th><th>Severity</th><th>Affected</th><th class="right">Scanned</th>
+          <th>Site</th><th>Node</th><th>Behind</th><th>Components</th><th class="right">Scanned</th>
         </tr></thead>
         <tbody>
         {% for r in rows %}
@@ -42,13 +42,12 @@
             <td><a href="/hostings/{{ r.domain }}#wordpress">{{ r.domain }}</a></td>
             <td><span class="tag">{{ r.node_id }}</span></td>
             <td>
-              {% if r.count_severity("critical") > 0 %}<span class="pill err">{{ r.count_severity("critical") }} critical</span> {% endif %}
-              {% if r.count_severity("high") > 0 %}<span class="pill warn">{{ r.count_severity("high") }} high</span> {% endif %}
-              {% if r.count_severity("medium") > 0 %}<span class="pill">{{ r.count_severity("medium") }} medium</span> {% endif %}
-              {% if r.count_severity("low") > 0 %}<span class="pill">{{ r.count_severity("low") }} low</span>{% endif %}
+              {% if r.count_severity("high") > 0 %}<span class="pill warn">{{ r.count_severity("high") }} major</span> {% endif %}
+              {% if r.count_severity("medium") > 0 %}<span class="pill">{{ r.count_severity("medium") }} minor</span> {% endif %}
+              {% if r.count_severity("low") > 0 %}<span class="pill">{{ r.count_severity("low") }} patch</span>{% endif %}
             </td>
             <td class="muted small" style="max-width:28rem">
-              {% for f in r.findings %}<code style="font-size:0.74rem">{{ f.kind }}:{{ f.slug }}</code>{% if !f.cve.is_empty() %} <a href="https://nvd.nist.gov/vuln/detail/{{ f.cve }}" target="_blank" rel="noopener noreferrer">{{ f.cve }}</a>{% endif %}{% if !loop.last %} · {% endif %}{% endfor %}
+              {% for f in r.findings %}<code style="font-size:0.74rem">{{ f.kind }}:{{ f.slug }}</code> <span class="text-soft">{{ f.installed_version }}→{{ f.patched_version }}</span>{% if !loop.last %} · {% endif %}{% endfor %}
             </td>
             <td class="right muted numeric" title="{{ r.scanned_at }}">{{ crate::handlers::stats::fmt_ago(r.scanned_at) }}</td>
           </tr>

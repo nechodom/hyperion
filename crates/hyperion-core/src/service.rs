@@ -4973,20 +4973,30 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 message: "hosting must be active to scan".into(),
             });
         }
-        let mut items: Vec<crate::wordfence::InstalledItem> = Vec::new();
+        // Keyless: flag components with an available update. wp-cli's
+        // own update status (which queries WordPress.org) is the source —
+        // no external CVE feed.
+        let mut findings = Vec::new();
+        let mut checked = 0i64;
+        let mut enumerated = false;
         // Plugins.
         if let Ok((plugins, _v)) = self
             .adapters
             .wp_plugin_list(&detail.system_user, &detail.root_dir)
             .await
         {
+            enumerated = true;
             for p in plugins {
-                items.push(crate::wordfence::InstalledItem {
-                    slug: p.slug,
-                    name: p.name,
-                    version: p.version,
-                    kind: "plugin".into(),
-                });
+                checked += 1;
+                if p.update_available && !p.latest_version.is_empty() {
+                    findings.push(crate::wp_updates::outdated_finding(
+                        &p.slug,
+                        &p.name,
+                        "plugin",
+                        &p.version,
+                        &p.latest_version,
+                    ));
+                }
             }
         }
         // Themes.
@@ -4995,23 +5005,35 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .wp_theme_list(&detail.system_user, &detail.root_dir)
             .await
         {
+            enumerated = true;
             for t in themes {
-                items.push(crate::wordfence::InstalledItem {
-                    slug: t.slug,
-                    name: t.name,
-                    version: t.version,
-                    kind: "theme".into(),
-                });
+                checked += 1;
+                if t.update_available && !t.latest_version.is_empty() {
+                    findings.push(crate::wp_updates::outdated_finding(
+                        &t.slug,
+                        &t.name,
+                        "theme",
+                        &t.version,
+                        &t.latest_version,
+                    ));
+                }
             }
         }
-        let result = crate::wordfence::scan(&items).await;
+        findings.sort_by_key(|f| crate::wp_updates::severity_rank(&f.severity));
+        let result = hyperion_types::WpVulnScanResult {
+            findings,
+            feed_unavailable: !enumerated,
+            feed_age_secs: 0,
+            checked,
+            auto_updated: 0,
+        };
         self.append_audit(
             "wp.vuln.scan",
             Some(detail.id.as_str()),
             &serde_json::json!({
                 "checked": result.checked,
                 "findings": result.findings.len(),
-                "feed_unavailable": result.feed_unavailable,
+                "enumerated": enumerated,
             })
             .to_string(),
             if result.feed_unavailable { "failed" } else { "ok" },
@@ -5020,15 +5042,26 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(result)
     }
 
-    /// Daily sweep: scan every active WordPress hosting, store the result
-    /// (for the cluster vuln dashboard) and notify admins about each
-    /// **newly-appeared** critical (diffed against the prior scan so a
-    /// standing vuln doesn't re-alert every day). Returns the number of
-    /// new criticals seen this run.
+    /// Whether the keyless defender may auto-apply minor/patch updates for
+    /// a hosting. Per-hosting toggle in `hosting_kv` (`wp_auto_update`);
+    /// **default ON** (absent ⇒ enabled). "off" disables it.
+    async fn wp_auto_update_enabled(&self, hosting_id: &str) -> bool {
+        match hyperion_state::hosting_kv::get(&self.pool, hosting_id, "wp_auto_update").await {
+            Ok(Some(v)) => v.trim() != "off",
+            _ => true,
+        }
+    }
+
+    /// Daily defender sweep over every active WordPress hosting: scan for
+    /// outdated plugins/themes, AUTO-APPLY safe minor/patch (same-major)
+    /// updates when the per-hosting toggle is on (default), store the
+    /// result for the dashboard, and notify admins about each
+    /// **newly-appeared** major update (manual action) + any auto-update
+    /// failure. Returns the number of new majors seen this run.
     pub async fn wp_vuln_scan_tick(&self) -> Result<i64, RpcError> {
         let now = now_secs();
         let summaries = self.list().await?;
-        let mut new_criticals = 0i64;
+        let mut new_majors = 0i64;
         for s in &summaries {
             if s.state != HostingState::Active {
                 continue;
@@ -5042,11 +5075,67 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             if !has_wp {
                 continue;
             }
-            let scan = match self.wp_vuln_scan(HostingSelector::Id(s.id.clone())).await {
+            let mut scan = match self.wp_vuln_scan(HostingSelector::Id(s.id.clone())).await {
                 Ok(r) if !r.feed_unavailable => r,
-                _ => continue, // feed down / not active — leave prior data
+                _ => continue, // couldn't enumerate — leave prior data
             };
-            // Critical keys from the prior stored scan.
+
+            // Auto-apply minor/patch (same-major) updates when enabled.
+            let mut auto_updated = 0i64;
+            if self.wp_auto_update_enabled(s.id.as_str()).await {
+                let targets: Vec<(String, String)> = scan
+                    .findings
+                    .iter()
+                    .filter(|f| f.auto_updatable)
+                    .map(|f| (f.kind.clone(), f.slug.clone()))
+                    .collect();
+                for (kind, slug) in targets {
+                    let state = if kind == "theme" {
+                        self.wp_theme_action(
+                            HostingSelector::Id(s.id.clone()),
+                            slug.clone(),
+                            hyperion_types::WpThemeAction::Update,
+                        )
+                        .await
+                        .map(|r| r.state)
+                    } else {
+                        self.wp_plugin_action(
+                            HostingSelector::Id(s.id.clone()),
+                            slug.clone(),
+                            hyperion_types::WpPluginAction::Update,
+                        )
+                        .await
+                        .map(|r| r.state)
+                    };
+                    match state {
+                        Ok(st) if st != "failed" => auto_updated += 1,
+                        Ok(_) => {
+                            self.notify_admins(
+                                "warn",
+                                "WordPress auto-update failed",
+                                &format!("{} — couldn't update {kind} {slug}", s.domain),
+                                &format!("/hostings/{}#wordpress", s.domain),
+                                &format!("wp.update.failed:{}:{slug}", s.domain),
+                            )
+                            .await;
+                        }
+                        Err(e) => {
+                            tracing::warn!(domain = %s.domain, %slug, error = %e, "wp auto-update failed");
+                        }
+                    }
+                }
+                // Re-scan so the stored result reflects what's LEFT
+                // (typically only major updates needing manual review).
+                if auto_updated > 0 {
+                    if let Ok(r) = self.wp_vuln_scan(HostingSelector::Id(s.id.clone())).await {
+                        scan = r;
+                    }
+                }
+            }
+            scan.auto_updated = auto_updated;
+
+            // Major-update keys from the prior stored scan (diff so a
+            // standing major doesn't re-alert daily).
             let prior: std::collections::HashSet<String> =
                 hyperion_state::hosting_kv::get(&self.pool, s.id.as_str(), "vuln_scan")
                     .await
@@ -5057,29 +5146,30 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                         st.result
                             .findings
                             .iter()
-                            .filter(|f| f.severity == "critical")
-                            .map(|f| format!("{}:{}", f.slug, f.cve))
+                            .filter(|f| f.update_type == "major")
+                            .map(|f| format!("{}:{}", f.slug, f.patched_version))
                             .collect()
                     })
                     .unwrap_or_default();
-            for f in scan.findings.iter().filter(|f| f.severity == "critical") {
-                let key = format!("{}:{}", f.slug, f.cve);
+            for f in scan.findings.iter().filter(|f| f.update_type == "major") {
+                let key = format!("{}:{}", f.slug, f.patched_version);
                 if prior.contains(&key) {
                     continue;
                 }
-                new_criticals += 1;
+                new_majors += 1;
                 self.notify_admins(
-                    "error",
-                    "Critical WordPress vulnerability",
+                    "warn",
+                    "WordPress major update available",
                     &format!(
-                        "{} — {} {} {}: {}",
-                        s.domain, f.kind, f.name, f.installed_version, f.title
+                        "{} — {} {} {} → {} (major; review before applying)",
+                        s.domain, f.kind, f.name, f.installed_version, f.patched_version
                     ),
-                    &format!("/hostings/{}", s.domain),
-                    &format!("wp.vuln.critical:{}:{}", s.domain, key),
+                    &format!("/hostings/{}#wordpress", s.domain),
+                    &format!("wp.update.major:{}:{}", s.domain, key),
                 )
                 .await;
             }
+
             let stored = StoredVulnScan {
                 scanned_at: now,
                 result: scan,
@@ -5095,7 +5185,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .await;
             }
         }
-        Ok(new_criticals)
+        Ok(new_majors)
     }
 
     /// Read every hosting's last stored vuln scan (this node only) for the
