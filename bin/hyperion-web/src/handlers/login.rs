@@ -24,13 +24,12 @@ struct ThrottleState {
     /// here is a strong attacker signal and triggers a firewall ban.
     blocked: std::collections::HashMap<String, (u32, i64)>,
 }
-static THROTTLE: once_cell::sync::Lazy<Mutex<ThrottleState>> =
-    once_cell::sync::Lazy::new(|| {
-        Mutex::new(ThrottleState {
-            by_ip: std::collections::HashMap::new(),
-            blocked: std::collections::HashMap::new(),
-        })
-    });
+static THROTTLE: once_cell::sync::Lazy<Mutex<ThrottleState>> = once_cell::sync::Lazy::new(|| {
+    Mutex::new(ThrottleState {
+        by_ip: std::collections::HashMap::new(),
+        blocked: std::collections::HashMap::new(),
+    })
+});
 
 /// Number of post-rate-limit (429) hits from one IP within the window
 /// before we escalate to a network-level firewall ban. Set high so only
@@ -62,7 +61,7 @@ fn caller_ip(headers: &HeaderMap) -> String {
 
 fn check_throttle(ip: &str) -> bool {
     let now = hyperion_types::now_secs();
-    let mut s = THROTTLE.lock().expect("login throttle mutex poisoned");
+    let mut s = THROTTLE.lock().unwrap_or_else(|p| p.into_inner());
     // Garbage-collect stale entries opportunistically.
     s.by_ip
         .retain(|_, (_, ts)| now - *ts < THROTTLE_WINDOW_SECS);
@@ -75,7 +74,7 @@ fn check_throttle(ip: &str) -> bool {
 
 fn record_failure(ip: &str) {
     let now = hyperion_types::now_secs();
-    let mut s = THROTTLE.lock().expect("login throttle mutex poisoned");
+    let mut s = THROTTLE.lock().unwrap_or_else(|p| p.into_inner());
     let entry = s.by_ip.entry(ip.to_string()).or_insert((0, now));
     if now - entry.1 >= THROTTLE_WINDOW_SECS {
         *entry = (1, now);
@@ -85,7 +84,7 @@ fn record_failure(ip: &str) {
 }
 
 fn clear_throttle(ip: &str) {
-    let mut s = THROTTLE.lock().expect("login throttle mutex poisoned");
+    let mut s = THROTTLE.lock().unwrap_or_else(|p| p.into_inner());
     s.by_ip.remove(ip);
     s.blocked.remove(ip);
 }
@@ -95,8 +94,9 @@ fn clear_throttle(ip: &str) {
 /// when the count reaches `FIREWALL_BAN_AFTER_BLOCKS`.
 fn register_block(ip: &str) -> u32 {
     let now = hyperion_types::now_secs();
-    let mut s = THROTTLE.lock().expect("login throttle mutex poisoned");
-    s.blocked.retain(|_, (_, ts)| now - *ts < THROTTLE_WINDOW_SECS);
+    let mut s = THROTTLE.lock().unwrap_or_else(|p| p.into_inner());
+    s.blocked
+        .retain(|_, (_, ts)| now - *ts < THROTTLE_WINDOW_SECS);
     let entry = s.blocked.entry(ip.to_string()).or_insert((0, now));
     if now - entry.1 >= THROTTLE_WINDOW_SECS {
         *entry = (0, now);
@@ -224,7 +224,12 @@ async fn post_login_via_rpc(
     .map_err(AppError::from)?;
     match resp {
         hyperion_rpc::codec::Response::WebLogin(result) => match result {
-            hyperion_types::WebLoginResult::Ok { user_id, username, role, .. } => {
+            hyperion_types::WebLoginResult::Ok {
+                user_id,
+                username,
+                role,
+                ..
+            } => {
                 clear_throttle(ip);
                 // Admin+ without 2FA enrolled → gate them into enrolment
                 // before they can use the panel (purpose marks the
@@ -234,8 +239,10 @@ async fn post_login_via_rpc(
                 } else {
                     PURPOSE_SESSION
                 };
-                mint_session_redirect(&state, user_id, username, role, &form.next, &headers, purpose)
-                    .await
+                mint_session_redirect(
+                    &state, user_id, username, role, &form.next, &headers, purpose,
+                )
+                .await
             }
             hyperion_types::WebLoginResult::NeedsTotp { user_id, .. } => {
                 // Remembered device? Skip the second factor and mint a
@@ -527,7 +534,9 @@ pub async fn post_login_2fa(
             }
             Ok(combined)
         }
-        hyperion_rpc::codec::Response::WebVerify2fa(hyperion_types::WebVerify2faResult::Invalid) => {
+        hyperion_rpc::codec::Response::WebVerify2fa(
+            hyperion_types::WebVerify2faResult::Invalid,
+        ) => {
             // Record the failure in the IP bucket so a wrong-code burst
             // contributes to the same throttle as wrong-password tries.
             // Without this, an attacker could try unlimited 6-digit
@@ -636,7 +645,11 @@ fn remember_device_cookie(
         state.cookie_name(),
         token,
         RD_TTL,
-        if state.secure_cookies() { "; Secure" } else { "" }
+        if state.secure_cookies() {
+            "; Secure"
+        } else {
+            ""
+        }
     );
     HeaderValue::from_str(&cookie).ok()
 }
@@ -644,11 +657,7 @@ fn remember_device_cookie(
 /// Read + verify the remember-device cookie for `user_id`. Returns the
 /// trusted session (role + username come from it) when valid + unexpired
 /// + bound to the same user.
-fn read_remember_device(
-    state: &SharedState,
-    headers: &HeaderMap,
-    user_id: i64,
-) -> Option<Session> {
+fn read_remember_device(state: &SharedState, headers: &HeaderMap, user_id: i64) -> Option<Session> {
     let cookie_name = format!("{}_rd", state.cookie_name());
     let token = headers
         .get_all(header::COOKIE)
@@ -667,10 +676,7 @@ fn read_remember_device(
     }
 }
 
-pub async fn post_logout(
-    State(state): State<SharedState>,
-    ctx: crate::auth::AuthCtx,
-) -> Response {
+pub async fn post_logout(State(state): State<SharedState>, ctx: crate::auth::AuthCtx) -> Response {
     // Revoke the row backing this session so a stolen cookie can't
     // outlive logout. Best-effort — the cookie is cleared either
     // way; failing to revoke leaves the row in the table but the

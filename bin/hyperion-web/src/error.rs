@@ -76,10 +76,8 @@ fn redact_addresses(s: &str) -> String {
     // Over-redaction (e.g. trapping `key::value`) is acceptable;
     // missing a leak is not.
     static V6: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(
-            r"[0-9a-fA-F:]*::[0-9a-fA-F:]*|(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}",
-        )
-        .unwrap_or_else(|e| panic!("BUG: V6 redactor regex: {e}"))
+        Regex::new(r"[0-9a-fA-F:]*::[0-9a-fA-F:]*|(?:[0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}")
+            .unwrap_or_else(|e| panic!("BUG: V6 redactor regex: {e}"))
     });
     let s = V4.replace_all(s, "<node>").into_owned();
     V6.replace_all(&s, "<node>").into_owned()
@@ -105,12 +103,7 @@ fn render_themed(
         action,
     };
     match tpl.render() {
-        Ok(html) => (
-            status,
-            [("content-type", "text/html; charset=utf-8")],
-            html,
-        )
-            .into_response(),
+        Ok(html) => (status, [("content-type", "text/html; charset=utf-8")], html).into_response(),
         Err(_) => (
             status,
             [("content-type", "text/html; charset=utf-8")],
@@ -269,8 +262,7 @@ mod tests {
 
     // The real curl-error string we got in production. The IP must
     // never appear in the rendered body.
-    const LEAKING_MSG: &str =
-        "curl exit Some(7): curl: (7) Failed to connect to 168.119.104.66 \
+    const LEAKING_MSG: &str = "curl exit Some(7): curl: (7) Failed to connect to 168.119.104.66 \
          port 9443 after 2 ms: Couldn't connect to server";
 
     #[test]
@@ -290,9 +282,7 @@ mod tests {
 
     #[test]
     fn redacts_ipv6() {
-        let out = redact_addresses(
-            "Failed to connect to 2001:db8::1 port 9443",
-        );
+        let out = redact_addresses("Failed to connect to 2001:db8::1 port 9443");
         assert!(!out.contains("2001:db8"), "leaked IPv6: {out}");
         assert!(out.contains("<node>"));
     }
@@ -312,9 +302,7 @@ mod tests {
         let err = AppError::Rpc(LEAKING_MSG.to_string());
         let resp = err.into_response();
         // Tokio test runtime needed for to_bytes — block manually.
-        let body = futures_block_on(async {
-            to_bytes(resp.into_body(), 64 * 1024).await.unwrap()
-        });
+        let body = futures_block_on(async { to_bytes(resp.into_body(), 64 * 1024).await.unwrap() });
         let text = String::from_utf8_lossy(&body);
         assert!(
             !text.contains("168.119.104.66"),
@@ -331,9 +319,7 @@ mod tests {
             hint: "TCP connect refused (port 9443)".to_string(),
         };
         let resp = err.into_response();
-        let body = futures_block_on(async {
-            to_bytes(resp.into_body(), 64 * 1024).await.unwrap()
-        });
+        let body = futures_block_on(async { to_bytes(resp.into_body(), 64 * 1024).await.unwrap() });
         let text = String::from_utf8_lossy(&body);
         assert!(text.contains("stav"), "node_id missing from page");
         assert!(
@@ -349,13 +335,9 @@ mod tests {
         // BadRequest comes from form validation but operators
         // occasionally pipe error tails in (e.g. "couldn't reach
         // <ip>") — make sure we scrub those.
-        let err = AppError::BadRequest(
-            "validation failed talking to 10.0.0.5".to_string(),
-        );
+        let err = AppError::BadRequest("validation failed talking to 10.0.0.5".to_string());
         let resp = err.into_response();
-        let body = futures_block_on(async {
-            to_bytes(resp.into_body(), 64 * 1024).await.unwrap()
-        });
+        let body = futures_block_on(async { to_bytes(resp.into_body(), 64 * 1024).await.unwrap() });
         let text = String::from_utf8_lossy(&body);
         assert!(!text.contains("10.0.0.5"));
     }

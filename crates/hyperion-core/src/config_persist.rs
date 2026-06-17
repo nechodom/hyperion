@@ -218,8 +218,13 @@ smtp_port = 587
     fn creates_missing_section() {
         let d = tempfile::tempdir().expect("tmp");
         let p = write_sample(d.path());
-        set_string(&p, "slack", "default_webhook", "https://hooks.slack.com/aaa")
-            .expect("set new section");
+        set_string(
+            &p,
+            "slack",
+            "default_webhook",
+            "https://hooks.slack.com/aaa",
+        )
+        .expect("set new section");
         let after = std::fs::read_to_string(&p).expect("read");
         assert!(after.contains("[slack]"));
         assert!(after.contains(r#"default_webhook = "https://hooks.slack.com/aaa""#));

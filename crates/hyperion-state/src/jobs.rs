@@ -86,11 +86,10 @@ pub async fn progress(
     // Read current tail to know whether to truncate after appending.
     // One round-trip is OK here — progress is called at coarse step
     // boundaries, not per byte.
-    let (cur_tail,): (String,) =
-        sqlx::query_as("SELECT log_tail FROM jobs WHERE id = ?")
-            .bind(id)
-            .fetch_one(pool)
-            .await?;
+    let (cur_tail,): (String,) = sqlx::query_as("SELECT log_tail FROM jobs WHERE id = ?")
+        .bind(id)
+        .fetch_one(pool)
+        .await?;
     let mut new_tail = if log_append.is_empty() {
         cur_tail
     } else {
@@ -191,8 +190,22 @@ pub async fn read(pool: &SqlitePool, id: &str) -> Result<Option<JobRow>, StateEr
     .fetch_optional(pool)
     .await?;
     Ok(row.map(
-        |(id, kind, target, state, step_label, progress_pct, log_tail, error, payload_json,
-            actor_uid, actor_label, started_at, updated_at, finished_at)| JobRow {
+        |(
+            id,
+            kind,
+            target,
+            state,
+            step_label,
+            progress_pct,
+            log_tail,
+            error,
+            payload_json,
+            actor_uid,
+            actor_label,
+            started_at,
+            updated_at,
+            finished_at,
+        )| JobRow {
             id,
             kind,
             target,
@@ -235,8 +248,9 @@ pub async fn list(
         i64,
         Option<i64>,
     )> = match (kind, state) {
-        (Some(k), Some(s)) => sqlx::query_as(
-            r#"SELECT id, kind, target, state, step_label, progress_pct,
+        (Some(k), Some(s)) => {
+            sqlx::query_as(
+                r#"SELECT id, kind, target, state, step_label, progress_pct,
                       log_tail, error, payload_json,
                       actor_uid, actor_label,
                       started_at, updated_at, finished_at
@@ -244,14 +258,16 @@ pub async fn list(
                 WHERE kind = ? AND state = ?
                 ORDER BY started_at DESC
                 LIMIT ?"#,
-        )
-        .bind(k)
-        .bind(s)
-        .bind(limit)
-        .fetch_all(pool)
-        .await?,
-        (Some(k), None) => sqlx::query_as(
-            r#"SELECT id, kind, target, state, step_label, progress_pct,
+            )
+            .bind(k)
+            .bind(s)
+            .bind(limit)
+            .fetch_all(pool)
+            .await?
+        }
+        (Some(k), None) => {
+            sqlx::query_as(
+                r#"SELECT id, kind, target, state, step_label, progress_pct,
                       log_tail, error, payload_json,
                       actor_uid, actor_label,
                       started_at, updated_at, finished_at
@@ -259,13 +275,15 @@ pub async fn list(
                 WHERE kind = ?
                 ORDER BY started_at DESC
                 LIMIT ?"#,
-        )
-        .bind(k)
-        .bind(limit)
-        .fetch_all(pool)
-        .await?,
-        (None, Some(s)) => sqlx::query_as(
-            r#"SELECT id, kind, target, state, step_label, progress_pct,
+            )
+            .bind(k)
+            .bind(limit)
+            .fetch_all(pool)
+            .await?
+        }
+        (None, Some(s)) => {
+            sqlx::query_as(
+                r#"SELECT id, kind, target, state, step_label, progress_pct,
                       log_tail, error, payload_json,
                       actor_uid, actor_label,
                       started_at, updated_at, finished_at
@@ -273,29 +291,46 @@ pub async fn list(
                 WHERE state = ?
                 ORDER BY started_at DESC
                 LIMIT ?"#,
-        )
-        .bind(s)
-        .bind(limit)
-        .fetch_all(pool)
-        .await?,
-        (None, None) => sqlx::query_as(
-            r#"SELECT id, kind, target, state, step_label, progress_pct,
+            )
+            .bind(s)
+            .bind(limit)
+            .fetch_all(pool)
+            .await?
+        }
+        (None, None) => {
+            sqlx::query_as(
+                r#"SELECT id, kind, target, state, step_label, progress_pct,
                       log_tail, error, payload_json,
                       actor_uid, actor_label,
                       started_at, updated_at, finished_at
                  FROM jobs
                 ORDER BY started_at DESC
                 LIMIT ?"#,
-        )
-        .bind(limit)
-        .fetch_all(pool)
-        .await?,
+            )
+            .bind(limit)
+            .fetch_all(pool)
+            .await?
+        }
     };
     Ok(rows
         .into_iter()
         .map(
-            |(id, kind, target, state, step_label, progress_pct, log_tail, error, payload_json,
-                actor_uid, actor_label, started_at, updated_at, finished_at)| JobRow {
+            |(
+                id,
+                kind,
+                target,
+                state,
+                step_label,
+                progress_pct,
+                log_tail,
+                error,
+                payload_json,
+                actor_uid,
+                actor_label,
+                started_at,
+                updated_at,
+                finished_at,
+            )| JobRow {
                 id,
                 kind,
                 target,
@@ -377,7 +412,9 @@ mod tests {
         assert_eq!(r.step_label, "Exporting bundle");
         assert!(r.log_tail.contains("tar..."));
 
-        finish(&pool, "job-a", true, None, 1200).await.expect("finish");
+        finish(&pool, "job-a", true, None, 1200)
+            .await
+            .expect("finish");
         let r = read(&pool, "job-a").await.expect("read").expect("present");
         assert_eq!(r.state, "done");
         assert_eq!(r.progress_pct, 100);

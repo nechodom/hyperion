@@ -45,12 +45,11 @@ pub fn otpauth_url(issuer: &str, account: &str, secret_base32: &str) -> String {
     // Both issuer and account go in the path AND as ?issuer= for
     // compatibility — Google Authenticator wants the path form,
     // some others prefer the query form.
-    let label_encoded = url::form_urlencoded::byte_serialize(
-        format!("{issuer}:{account}").as_bytes(),
-    )
-    .collect::<String>();
-    let issuer_encoded = url::form_urlencoded::byte_serialize(issuer.as_bytes())
-        .collect::<String>();
+    let label_encoded =
+        url::form_urlencoded::byte_serialize(format!("{issuer}:{account}").as_bytes())
+            .collect::<String>();
+    let issuer_encoded =
+        url::form_urlencoded::byte_serialize(issuer.as_bytes()).collect::<String>();
     format!(
         "otpauth://totp/{label_encoded}?secret={secret_base32}&issuer={issuer_encoded}&algorithm=SHA1&digits={DIGITS}&period={TIME_STEP_SECS}"
     )
@@ -87,11 +86,7 @@ pub fn verify_code(secret_base32: &str, supplied: &str) -> Result<bool, TotpErro
 }
 
 /// Same as `verify_code` but with an explicit clock — used by tests.
-pub fn verify_code_at(
-    secret_base32: &str,
-    supplied: &str,
-    now: u64,
-) -> Result<bool, TotpError> {
+pub fn verify_code_at(secret_base32: &str, supplied: &str, now: u64) -> Result<bool, TotpError> {
     if supplied.len() != DIGITS as usize {
         return Err(TotpError::CodeLength(supplied.len()));
     }
@@ -127,7 +122,11 @@ pub fn generate_backup_codes(n: usize) -> (Vec<String>, Vec<String>) {
 /// Hash a backup code for comparison against the stored hash.
 pub fn hash_backup_code(code: &str) -> String {
     // Normalise: strip dashes + upper-case so user can type either way.
-    let norm: String = code.chars().filter(|c| *c != '-').map(|c| c.to_ascii_uppercase()).collect();
+    let norm: String = code
+        .chars()
+        .filter(|c| *c != '-')
+        .map(|c| c.to_ascii_uppercase())
+        .collect();
     hex::encode(blake3::hash(norm.as_bytes()).as_bytes())
 }
 

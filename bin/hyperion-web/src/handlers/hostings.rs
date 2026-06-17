@@ -364,19 +364,17 @@ pub async fn get_list(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let unreachable_set: std::collections::HashSet<String> = match hyperion_rpc_client::call(
-        &state.agent_socket,
-        Request::NodesList,
-    )
-    .await
-    {
-        Ok(RpcResponse::NodesList(ns)) => ns
-            .into_iter()
-            .filter(|n| n.last_seen_at > 0 && (now_secs - n.last_seen_at) > UNREACHABLE_HEARTBEAT_SECS)
-            .map(|n| n.node_id)
-            .collect(),
-        _ => std::collections::HashSet::new(),
-    };
+    let unreachable_set: std::collections::HashSet<String> =
+        match hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await {
+            Ok(RpcResponse::NodesList(ns)) => ns
+                .into_iter()
+                .filter(|n| {
+                    n.last_seen_at > 0 && (now_secs - n.last_seen_at) > UNREACHABLE_HEARTBEAT_SECS
+                })
+                .map(|n| n.node_id)
+                .collect(),
+            _ => std::collections::HashSet::new(),
+        };
     let rows: Vec<(HostingSummary, bool, bool)> = rows
         .into_iter()
         .map(|r| {
@@ -405,7 +403,11 @@ pub async fn get_list(
         total_count,
         q: q.q,
         state_filter,
-        sort_key: if sort_key.is_empty() { "domain".to_string() } else { sort_key },
+        sort_key: if sort_key.is_empty() {
+            "domain".to_string()
+        } else {
+            sort_key
+        },
         sort_dir: if desc { "desc".into() } else { "asc".into() },
         csrf_token,
         csrf_bulk,
@@ -614,9 +616,11 @@ pub async fn post_create(
         // leading / trailing dash, ≤ 32 chars. Keeps the derived
         // domain DNS-valid even with weird operator typos.
         let name = form.test_site_name.trim().to_ascii_lowercase();
-        if name.is_empty() || name.len() > 32
+        if name.is_empty()
+            || name.len() > 32
             || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
-            || name.starts_with('-') || name.ends_with('-')
+            || name.starts_with('-')
+            || name.ends_with('-')
         {
             return Ok(render_new_error(
                 &ctx,
@@ -797,8 +801,7 @@ pub async fn post_create(
             }
         }
     }
-    let target = if target_node.is_empty()
-        || target_node == crate::dispatcher::LOCAL_NODE_SENTINEL
+    let target = if target_node.is_empty() || target_node == crate::dispatcher::LOCAL_NODE_SENTINEL
     {
         None
     } else {
@@ -828,12 +831,9 @@ pub async fn post_create(
         target_after_normalize = ?target,
         "post_create dispatch decision"
     );
-    let resp = crate::dispatcher::dispatch_to_node(
-        &state,
-        target,
-        Request::HostingCreate(req.clone()),
-    )
-    .await?;
+    let resp =
+        crate::dispatcher::dispatch_to_node(&state, target, Request::HostingCreate(req.clone()))
+            .await?;
     match resp {
         RpcResponse::HostingCreate(mut created) => {
             // A "redirect" hosting was provisioned as a static site; switch
@@ -864,7 +864,10 @@ pub async fn post_create(
                         tracing::warn!(error = %e, "applying redirect vhost after create failed");
                     }
                     other => {
-                        tracing::warn!(?other, "unexpected response applying redirect vhost after create");
+                        tracing::warn!(
+                            ?other,
+                            "unexpected response applying redirect vhost after create"
+                        );
                     }
                 }
             }
@@ -892,19 +895,17 @@ pub async fn post_create(
             //  shown on the success page).
             // ──────────────────────────────────────────────────────
             let selected_profile: Option<HostingProfile> = if form.profile_id > 0 {
-                fetch_all_profiles(&state).await.ok()
-                    .and_then(|profs| {
-                        profs.into_iter().find(|p| p.id == form.profile_id)
-                    })
+                fetch_all_profiles(&state)
+                    .await
+                    .ok()
+                    .and_then(|profs| profs.into_iter().find(|p| p.id == form.profile_id))
             } else {
                 None
             };
-            let profile_forces_wp = selected_profile
-                .as_ref()
-                .is_some_and(|p| {
-                    profile_has_meaningful_wp_content(&p.wp_plugins)
-                        || profile_has_meaningful_wp_content(&p.wp_themes)
-                });
+            let profile_forces_wp = selected_profile.as_ref().is_some_and(|p| {
+                profile_has_meaningful_wp_content(&p.wp_plugins)
+                    || profile_has_meaningful_wp_content(&p.wp_themes)
+            });
             // ─── WordPress install + profile apply ───────────
             //
             // The previous synchronous path was responsible for the
@@ -1033,11 +1034,7 @@ pub async fn post_create(
                     "profile_id": job_profile_id,
                 });
                 let actor_label = ctx.username.clone();
-                let actor_uid = ctx
-                    .session
-                    .as_ref()
-                    .map(|s| s.user_id)
-                    .unwrap_or(0);
+                let actor_uid = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
                 let job_wp_req = wp_req_opt;
                 let job_domain = req.domain.as_str().to_string();
                 let spawn_res = crate::handlers::jobs::spawn_job(
@@ -1162,9 +1159,10 @@ pub async fn post_create(
                 ftp_new_password: None,
                 error: None,
                 wp_error: wp_install_error,
-                wp_flash: wp_install_job_id
-                    .as_ref()
-                    .map(|_| "Post-create setup kicked off in the background — live status above.".to_string()),
+                wp_flash: wp_install_job_id.as_ref().map(|_| {
+                    "Post-create setup kicked off in the background — live status above."
+                        .to_string()
+                }),
                 backup_error: None,
                 backup_flash: None,
                 expiry_error: None,
@@ -1204,11 +1202,7 @@ pub async fn post_create(
                 vhost_error: None,
                 usage_buckets: vec![],
                 csrf_wp_debug: csrf_token_for(&state, &ctx, "/hostings/wp/debug"),
-                csrf_wp_debug_rotate: csrf_token_for(
-                    &state,
-                    &ctx,
-                    "/hostings/wp/debug-log/rotate",
-                ),
+                csrf_wp_debug_rotate: csrf_token_for(&state, &ctx, "/hostings/wp/debug-log/rotate"),
                 csrf_wp_redis: csrf_token_for(&state, &ctx, "/hostings/wp/redis"),
                 csrf_wp_redis_rotate: csrf_token_for(&state, &ctx, "/hostings/wp/redis/rotate"),
                 wp_extras_flash: false,
@@ -1492,7 +1486,10 @@ pub async fn get_detail(
         match crate::dispatcher::dispatch_to_node(
             &state,
             target,
-            Request::HostingUsage { sel: sel_id.clone(), limit: 48 },
+            Request::HostingUsage {
+                sel: sel_id.clone(),
+                limit: 48,
+            },
         )
         .await
         {
@@ -1538,7 +1535,9 @@ pub async fn get_detail(
             match crate::dispatcher::dispatch_to_node(
                 &state,
                 target,
-                Request::WpPluginList { hosting: sel_id.clone() },
+                Request::WpPluginList {
+                    hosting: sel_id.clone(),
+                },
             )
             .await
             {
@@ -1554,7 +1553,9 @@ pub async fn get_detail(
             match crate::dispatcher::dispatch_to_node(
                 &state,
                 target,
-                Request::WpThemeList { hosting: sel_id.clone() },
+                Request::WpThemeList {
+                    hosting: sel_id.clone(),
+                },
             )
             .await
             {
@@ -1573,7 +1574,9 @@ pub async fn get_detail(
         match crate::dispatcher::dispatch_to_node(
             &state,
             target,
-            Request::MonitorGet { sel: sel_id.clone() },
+            Request::MonitorGet {
+                sel: sel_id.clone(),
+            },
         )
         .await
         {
@@ -1634,12 +1637,8 @@ pub async fn get_detail(
     let ftp_accounts_fut = {
         let state2 = state.clone();
         async move {
-            match crate::dispatcher::dispatch_to_node(
-                &state2,
-                target,
-                Request::FtpAccountsList,
-            )
-            .await
+            match crate::dispatcher::dispatch_to_node(&state2, target, Request::FtpAccountsList)
+                .await
             {
                 Ok(RpcResponse::FtpAccountsList(mut rows)) => {
                     for r in &mut rows {
@@ -1669,15 +1668,7 @@ pub async fn get_detail(
             }
         }
     };
-    let (
-        wp_plugins,
-        wp_themes,
-        monitor_pair,
-        email_log,
-        site_emails,
-        ftp_accounts,
-        quota,
-    ) = tokio::join!(
+    let (wp_plugins, wp_themes, monitor_pair, email_log, site_emails, ftp_accounts, quota) = tokio::join!(
         wp_plugins_fut,
         wp_themes_fut,
         monitor_fut,
@@ -1700,7 +1691,12 @@ pub async fn get_detail(
     let applied_profile_name = profile_apply
         .as_ref()
         .and_then(|a| a.profile_id)
-        .and_then(|pid| profiles.iter().find(|p| p.id == pid).map(|p| p.name.clone()));
+        .and_then(|pid| {
+            profiles
+                .iter()
+                .find(|p| p.id == pid)
+                .map(|p| p.name.clone())
+        });
     // Access tab data — fetched only for super_admin since they're the
     // only ones who see the tab. Empty vec for everyone else is cheap
     // and keeps the template happy.
@@ -1716,8 +1712,7 @@ pub async fn get_detail(
             Ok(RpcResponse::WebListHostingAccess(g)) => g,
             _ => vec![],
         };
-        let users = match hyperion_rpc_client::call(&state.agent_socket, Request::WebUserList)
-            .await
+        let users = match hyperion_rpc_client::call(&state.agent_socket, Request::WebUserList).await
         {
             Ok(RpcResponse::WebUserList(u)) => u
                 .into_iter()
@@ -1902,8 +1897,8 @@ async fn fetch_profile_apply(
     target: Option<&str>,
     sel: HostingSelector,
 ) -> Result<Option<ProfileApply>, AppError> {
-    let resp =
-        crate::dispatcher::dispatch_to_node(state, target, Request::ProfileGetApply { sel }).await?;
+    let resp = crate::dispatcher::dispatch_to_node(state, target, Request::ProfileGetApply { sel })
+        .await?;
     match resp {
         RpcResponse::ProfileGetApply(v) => Ok(v),
         RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
@@ -1939,8 +1934,8 @@ async fn fetch_stats(
     target: Option<&str>,
     sel: HostingSelector,
 ) -> Result<HostingStats, AppError> {
-    let resp = crate::dispatcher::dispatch_to_node(state, target, Request::HostingStats { sel })
-        .await?;
+    let resp =
+        crate::dispatcher::dispatch_to_node(state, target, Request::HostingStats { sel }).await?;
     match resp {
         RpcResponse::HostingStats(s) => Ok(s),
         RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
@@ -2019,8 +2014,8 @@ async fn fetch_expiry(
     target: Option<&str>,
     sel: HostingSelector,
 ) -> Result<hyperion_types::HostingExpiry, AppError> {
-    let resp = crate::dispatcher::dispatch_to_node(state, target, Request::HostingGetExpiry(sel))
-        .await?;
+    let resp =
+        crate::dispatcher::dispatch_to_node(state, target, Request::HostingGetExpiry(sel)).await?;
     match resp {
         RpcResponse::HostingGetExpiry(e) => Ok(e),
         RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
@@ -2089,12 +2084,8 @@ pub async fn post_backup_now(
         Err(r) => return Ok(r),
     };
     let target = node_target(&form.target_node);
-    let resp = crate::dispatcher::dispatch_to_node(
-        &state,
-        target,
-        Request::BackupNow { sel },
-    )
-    .await?;
+    let resp =
+        crate::dispatcher::dispatch_to_node(&state, target, Request::BackupNow { sel }).await?;
     let sel_url = urlencoding(&form.selector);
     match resp {
         RpcResponse::BackupNow(_) => {
@@ -2208,11 +2199,10 @@ pub async fn post_clear_expiry(
     // Find owner node first — when the operator clicks Clear Expiry
     // on a worker-hosted row, dispatch to the worker, not the
     // master that doesn't know about that hosting.
-    let target_owned: Option<String> =
-        find_hosting_anywhere(&state, sel.clone())
-            .await
-            .ok()
-            .and_then(|(_d, n)| n);
+    let target_owned: Option<String> = find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
     let resp = crate::dispatcher::dispatch_to_node(
         &state,
         target_owned.as_deref(),
@@ -2282,11 +2272,10 @@ pub async fn post_wp_install(
     };
     // Find owner node so WpInstall lands on the right agent
     // (post-migration the master may not own the row anymore).
-    let target_owned: Option<String> =
-        find_hosting_anywhere(&state, sel.clone())
-            .await
-            .ok()
-            .and_then(|(_d, n)| n);
+    let target_owned: Option<String> = find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
     let resp = crate::dispatcher::dispatch_to_node(
         &state,
         target_owned.as_deref(),
@@ -2311,8 +2300,8 @@ async fn fetch_limits(
     target: Option<&str>,
     sel: HostingSelector,
 ) -> Result<hyperion_types::HostingLimits, AppError> {
-    let resp = crate::dispatcher::dispatch_to_node(state, target, Request::HostingGetLimits(sel))
-        .await?;
+    let resp =
+        crate::dispatcher::dispatch_to_node(state, target, Request::HostingGetLimits(sel)).await?;
     match resp {
         RpcResponse::HostingGetLimits(l) => Ok(l),
         RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
@@ -2519,7 +2508,12 @@ fn valid_php_size(s: &str) -> bool {
     if s.is_empty() {
         return true;
     }
-    let (digits, suffix) = if s.as_bytes().last().map(u8::is_ascii_alphabetic).unwrap_or(false) {
+    let (digits, suffix) = if s
+        .as_bytes()
+        .last()
+        .map(u8::is_ascii_alphabetic)
+        .unwrap_or(false)
+    {
         (&s[..s.len() - 1], &s[s.len() - 1..])
     } else {
         (s, "")
@@ -2531,7 +2525,10 @@ fn valid_php_size(s: &str) -> bool {
 }
 
 fn valid_php_int(s: &str, lo: i64, hi: i64) -> bool {
-    s.is_empty() || s.parse::<i64>().map(|n| (lo..=hi).contains(&n)).unwrap_or(false)
+    s.is_empty()
+        || s.parse::<i64>()
+            .map(|n| (lo..=hi).contains(&n))
+            .unwrap_or(false)
 }
 
 /// POST /hostings/php-ini — write operator php.ini overrides as a
@@ -2706,12 +2703,8 @@ pub async fn post_resume(
         Err(r) => return Ok(r),
     };
     let target = node_target(&form.target_node);
-    let resp = crate::dispatcher::dispatch_to_node(
-        &state,
-        target,
-        Request::HostingResume(sel),
-    )
-    .await?;
+    let resp =
+        crate::dispatcher::dispatch_to_node(&state, target, Request::HostingResume(sel)).await?;
     match resp {
         RpcResponse::HostingResume => {
             Ok(Redirect::to(&format!("/hostings/{}", urlencoding(&form.selector))).into_response())
@@ -2870,12 +2863,18 @@ pub async fn post_set_aliases(
     .await?;
     let flash = match resp {
         RpcResponse::HostingSetAliases(_) => {
-            "Aliases updated. Re-issue the certificate (SSL tab) to cover any new names.".to_string()
+            "Aliases updated. Re-issue the certificate (SSL tab) to cover any new names."
+                .to_string()
         }
         RpcResponse::Error(e) => format!("Couldn't update aliases: {e}"),
         _ => "Aliases: unexpected response".into(),
     };
-    Ok(Redirect::to(&format!("/hostings/{}?flash={}#access", sel_url, urlencoding(&flash))).into_response())
+    Ok(Redirect::to(&format!(
+        "/hostings/{}?flash={}#access",
+        sel_url,
+        urlencoding(&flash)
+    ))
+    .into_response())
 }
 
 // ──────────── WP debug + Redis handlers ────────────
@@ -2978,9 +2977,7 @@ pub async fn post_wp_debug_log_rotate(
     )
     .await?;
     match resp {
-        RpcResponse::HostingRotateWpDebugLog => {
-            Ok(redirect_after_wp_extras(&form.selector, None))
-        }
+        RpcResponse::HostingRotateWpDebugLog => Ok(redirect_after_wp_extras(&form.selector, None)),
         RpcResponse::Error(e) => Ok(redirect_after_wp_extras(
             &form.selector,
             Some(e.to_string()),
@@ -3293,7 +3290,11 @@ pub async fn post_access_grant(
     if !ctx.is_super_admin() {
         return Ok(Redirect::to("/").into_response());
     }
-    let level = if form.level == "read" { "read" } else { "manage" };
+    let level = if form.level == "read" {
+        "read"
+    } else {
+        "manage"
+    };
     let granted_by = ctx.session.as_ref().map(|s| s.user_id);
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
@@ -3307,10 +3308,11 @@ pub async fn post_access_grant(
     .await
     .map_err(AppError::from)?;
     match resp {
-        RpcResponse::WebGrantHostingAccess => {
-            Ok(Redirect::to(&format!("/hostings/{}#access", urlencoding(&form.hosting_id)))
-                .into_response())
-        }
+        RpcResponse::WebGrantHostingAccess => Ok(Redirect::to(&format!(
+            "/hostings/{}#access",
+            urlencoding(&form.hosting_id)
+        ))
+        .into_response()),
         RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
@@ -3335,10 +3337,11 @@ pub async fn post_access_revoke(
     .await
     .map_err(AppError::from)?;
     match resp {
-        RpcResponse::WebRevokeHostingAccess => {
-            Ok(Redirect::to(&format!("/hostings/{}#access", urlencoding(&form.hosting_id)))
-                .into_response())
-        }
+        RpcResponse::WebRevokeHostingAccess => Ok(Redirect::to(&format!(
+            "/hostings/{}#access",
+            urlencoding(&form.hosting_id)
+        ))
+        .into_response()),
         RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
@@ -3430,10 +3433,11 @@ pub async fn post_monitor_set(
     )
     .await?;
     match resp {
-        RpcResponse::MonitorSet => {
-            Ok(Redirect::to(&format!("/hostings/{}#monitor", urlencoding(&form.selector)))
-                .into_response())
-        }
+        RpcResponse::MonitorSet => Ok(Redirect::to(&format!(
+            "/hostings/{}#monitor",
+            urlencoding(&form.selector)
+        ))
+        .into_response()),
         RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
@@ -3455,14 +3459,13 @@ pub async fn post_monitor_probe(
     if let Err(r) = require_hosting_access(&state, &ctx, detail.id.as_str(), true).await {
         return Ok(r);
     }
-    let _ = crate::dispatcher::dispatch_to_node(
-        &state,
-        target,
-        Request::MonitorProbeNow { sel },
-    )
-    .await?;
-    Ok(Redirect::to(&format!("/hostings/{}#monitor", urlencoding(&form.selector)))
-        .into_response())
+    let _ = crate::dispatcher::dispatch_to_node(&state, target, Request::MonitorProbeNow { sel })
+        .await?;
+    Ok(Redirect::to(&format!(
+        "/hostings/{}#monitor",
+        urlencoding(&form.selector)
+    ))
+    .into_response())
 }
 
 /// Drop hosting summaries the caller doesn't have access to.
@@ -3583,11 +3586,9 @@ pub async fn require_manage_for_selector(
     let hosting_id = match &sel {
         HostingSelector::Id(id) => id.as_str().to_string(),
         _ => {
-            let resp = hyperion_rpc_client::call(
-                &state.agent_socket,
-                Request::HostingGet(sel.clone()),
-            )
-            .await;
+            let resp =
+                hyperion_rpc_client::call(&state.agent_socket, Request::HostingGet(sel.clone()))
+                    .await;
             match resp {
                 Ok(RpcResponse::HostingGet(d)) => d.id.as_str().to_string(),
                 _ => return Err(forbidden()),
@@ -3777,7 +3778,9 @@ mod profile_helper_tests {
         assert!(profile_has_meaningful_wp_content("akismet"));
         assert!(profile_has_meaningful_wp_content("yoast-seo!"));
         assert!(profile_has_meaningful_wp_content("@asset:42"));
-        assert!(profile_has_meaningful_wp_content("  contact-form-7\n  classic-editor"));
+        assert!(profile_has_meaningful_wp_content(
+            "  contact-form-7\n  classic-editor"
+        ));
     }
 
     #[test]
@@ -3805,9 +3808,11 @@ mod profile_helper_tests {
         for _ in 0..50 {
             let p = generate_wp_admin_password();
             assert_eq!(p.len(), 24, "password not 24 chars: {p:?}");
-            assert!(!p.chars().any(|c| c == '0' || c == 'O' || c == '1'
-                || c == 'l' || c == 'I'),
-                "password contains visually-ambiguous char: {p:?}");
+            assert!(
+                !p.chars()
+                    .any(|c| c == '0' || c == 'O' || c == '1' || c == 'l' || c == 'I'),
+                "password contains visually-ambiguous char: {p:?}"
+            );
         }
     }
 }
@@ -3820,9 +3825,8 @@ fn is_valid_wp_username(s: &str) -> bool {
     if bytes[0] == b'-' || bytes[0] == b'.' {
         return false;
     }
-    s.chars().all(|c| {
-        c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '@' || c == '-'
-    })
+    s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '@' || c == '-')
 }
 
 #[cfg(test)]
@@ -3978,9 +3982,7 @@ async fn fetch_master_accepts_hostings(state: &SharedState) -> bool {
 /// evaluate test-node placement rules. Returns the default
 /// (permissive) view on any RPC failure so a misconfigured agent
 /// doesn't deadlock the create form.
-pub(crate) async fn fetch_cluster_config(
-    state: &SharedState,
-) -> hyperion_types::ClusterConfigView {
+pub(crate) async fn fetch_cluster_config(state: &SharedState) -> hyperion_types::ClusterConfigView {
     match hyperion_rpc_client::call(&state.agent_socket, Request::AgentConfigView).await {
         Ok(RpcResponse::AgentConfigView(c)) => c.cluster,
         _ => hyperion_types::ClusterConfigView::default(),
@@ -4097,8 +4099,16 @@ async fn pick_auto_placement_target(state: &SharedState) -> Option<String> {
     // Normalise each axis to [0, 1]. Lower = better. A zero-range
     // axis collapses to 0 contribution (every candidate is equal on
     // that axis).
-    let max_host = candidates.iter().map(|(_, s)| s.hostings_count).max().unwrap_or(0);
-    let max_load = candidates.iter().map(|(_, s)| s.loadavg_1m_x100).max().unwrap_or(0);
+    let max_host = candidates
+        .iter()
+        .map(|(_, s)| s.hostings_count)
+        .max()
+        .unwrap_or(0);
+    let max_load = candidates
+        .iter()
+        .map(|(_, s)| s.loadavg_1m_x100)
+        .max()
+        .unwrap_or(0);
     let max_mem_pct: f64 = candidates
         .iter()
         .map(|(_, s)| mem_pct(s))
@@ -4118,13 +4128,21 @@ async fn pick_auto_placement_target(state: &SharedState) -> Option<String> {
                 0.0
             };
             let m_pct = mem_pct(s);
-            let m = if max_mem_pct > 0.0 { m_pct / max_mem_pct } else { 0.0 };
+            let m = if max_mem_pct > 0.0 {
+                m_pct / max_mem_pct
+            } else {
+                0.0
+            };
             let score = 0.45 * h + 0.35 * l + 0.20 * m;
             (id.clone(), score)
         })
         .collect();
     // Stable tiebreak: lexicographically smaller node_id wins.
-    scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal).then(a.0.cmp(&b.0)));
+    scored.sort_by(|a, b| {
+        a.1.partial_cmp(&b.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.0.cmp(&b.0))
+    });
     scored.into_iter().next().map(|(id, _)| id)
 }
 
@@ -4150,12 +4168,7 @@ pub async fn find_hosting_anywhere(
     sel: HostingSelector,
 ) -> Result<(hyperion_types::HostingDetail, Option<String>), AppError> {
     // 1. Master local.
-    match hyperion_rpc_client::call(
-        &state.agent_socket,
-        Request::HostingGet(sel.clone()),
-    )
-    .await
-    {
+    match hyperion_rpc_client::call(&state.agent_socket, Request::HostingGet(sel.clone())).await {
         Ok(RpcResponse::HostingGet(d)) => return Ok((d, None)),
         Ok(RpcResponse::Error(e)) if !is_not_found_error(&e) => {
             return Err(AppError::Rpc(e.to_string()));
@@ -4164,8 +4177,7 @@ pub async fn find_hosting_anywhere(
         Err(e) => return Err(AppError::from(e)),
     }
     // 2. Fan out to enrolled nodes.
-    let nodes_resp =
-        hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await;
+    let nodes_resp = hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await;
     let nodes: Vec<hyperion_types::NodeSummary> = match nodes_resp {
         Ok(RpcResponse::NodesList(v)) => v,
         _ => Vec::new(),
@@ -4244,12 +4256,11 @@ pub async fn get_check_domain(
         Ok(v) => v,
         Err(e) => {
             tracing::warn!(error=%e, "check-domain: list_hostings failed");
-            return axum::Json(serde_json::json!({"exists": false, "checked": false})).into_response();
+            return axum::Json(serde_json::json!({"exists": false, "checked": false}))
+                .into_response();
         }
     };
-    let hit = rows
-        .iter()
-        .find(|r| r.domain.eq_ignore_ascii_case(&needle));
+    let hit = rows.iter().find(|r| r.domain.eq_ignore_ascii_case(&needle));
     match hit {
         Some(r) => axum::Json(serde_json::json!({
             "exists": true,
@@ -4294,12 +4305,8 @@ async fn list_hostings(state: &SharedState) -> Result<Vec<HostingSummary>, Strin
     };
     let mut all = local;
     for n in nodes {
-        match crate::dispatcher::dispatch_to_node(
-            state,
-            Some(&n.node_id),
-            Request::HostingList,
-        )
-        .await
+        match crate::dispatcher::dispatch_to_node(state, Some(&n.node_id), Request::HostingList)
+            .await
         {
             Ok(RpcResponse::HostingList(mut remote)) => {
                 for r in &mut remote {
@@ -4360,19 +4367,18 @@ pub async fn post_dns_check_domain(
             .into_response());
         }
     };
-    let resp = hyperion_rpc_client::call(
-        &state.agent_socket,
-        Request::DnsCheck { domain: parsed },
-    )
-    .await?;
+    let resp = hyperion_rpc_client::call(&state.agent_socket, Request::DnsCheck { domain: parsed })
+        .await?;
     let html = match resp {
         RpcResponse::DnsCheck(r) => render_dns_fragment(&r),
         RpcResponse::Error(e) => format!(
             "<div class=\"flash error\"><div class=\"flash-body\">DNS check failed: {}</div></div>",
             askama_escape::escape(&e.to_string(), askama_escape::Html)
         ),
-        _ => "<div class=\"flash error\"><div class=\"flash-body\">Unexpected response.</div></div>"
-            .into(),
+        _ => {
+            "<div class=\"flash error\"><div class=\"flash-body\">Unexpected response.</div></div>"
+                .into()
+        }
     };
     Ok(Html(html).into_response())
 }
@@ -4395,8 +4401,7 @@ pub async fn post_dns_check(
     // we only need find_anywhere for the domain lookup.
     let (detail, _) = find_hosting_anywhere(&state, detail_sel).await?;
     let domain = Domain::parse(&detail.domain)?;
-    let resp =
-        hyperion_rpc_client::call(&state.agent_socket, Request::DnsCheck { domain }).await?;
+    let resp = hyperion_rpc_client::call(&state.agent_socket, Request::DnsCheck { domain }).await?;
     let html = match resp {
         RpcResponse::DnsCheck(r) => render_dns_fragment(&r),
         RpcResponse::Error(e) => {
@@ -4405,8 +4410,10 @@ pub async fn post_dns_check(
                 askama_escape::escape(&e.to_string(), askama_escape::Html)
             )
         }
-        _ => "<div class=\"flash error\"><div class=\"flash-body\">Unexpected response.</div></div>"
-            .into(),
+        _ => {
+            "<div class=\"flash error\"><div class=\"flash-body\">Unexpected response.</div></div>"
+                .into()
+        }
     };
     Ok(Html(html).into_response())
 }
@@ -4564,7 +4571,9 @@ pub async fn get_vuln_panel(
     let auto_update_enabled = match crate::dispatcher::dispatch_to_node(
         &state,
         owner_node.as_deref(),
-        Request::HostingKvList { hosting_id: detail.id.as_str().to_string() },
+        Request::HostingKvList {
+            hosting_id: detail.id.as_str().to_string(),
+        },
     )
     .await
     {
@@ -4644,7 +4653,11 @@ pub async fn post_wp_auto_update(
         },
     )
     .await;
-    Ok(Redirect::to(&format!("/hostings/{}?flash_saved=auto-update#wordpress", sel_url)).into_response())
+    Ok(Redirect::to(&format!(
+        "/hostings/{}?flash_saved=auto-update#wordpress",
+        sel_url
+    ))
+    .into_response())
 }
 
 /// Lazily-loaded SFTP panel (FTP tab). Dispatched to the OWNING node —
@@ -4743,7 +4756,11 @@ pub async fn post_sftp(
     let resp = crate::dispatcher::dispatch_to_node(
         &state,
         target_owned.as_deref(),
-        Request::SftpSet { sel, enabled, public_keys: keys },
+        Request::SftpSet {
+            sel,
+            enabled,
+            public_keys: keys,
+        },
     )
     .await?;
     match resp {
@@ -4786,7 +4803,9 @@ pub async fn get_bans_panel(
     let resp = crate::dispatcher::dispatch_to_node(
         &state,
         owner_node.as_deref(),
-        Request::BanList { hosting_id: Some(detail.id.as_str().to_string()) },
+        Request::BanList {
+            hosting_id: Some(detail.id.as_str().to_string()),
+        },
     )
     .await;
     let (bans, error) = match resp {
@@ -4832,7 +4851,9 @@ pub async fn post_ban(
         .ok()
         .and_then(|(_d, n)| n);
     let req = if form.op == "remove" {
-        Request::BanRemove { ip: form.ip.trim().to_string() }
+        Request::BanRemove {
+            ip: form.ip.trim().to_string(),
+        }
     } else {
         let reason = if form.reason.trim().is_empty() {
             "manual ban".to_string()
@@ -4854,8 +4875,10 @@ pub async fn post_ban(
         }
         RpcResponse::Error(e) => {
             let msg = urlencoding(&e.to_string());
-            Ok(Redirect::to(&format!("/hostings/{}?ban_error={}#settings", sel_url, msg))
-                .into_response())
+            Ok(
+                Redirect::to(&format!("/hostings/{}?ban_error={}#settings", sel_url, msg))
+                    .into_response(),
+            )
         }
         _ => Err(AppError::Internal("unexpected response".into())),
     }
@@ -4889,11 +4912,10 @@ pub async fn post_cert_issue(
     // Cert lives on the node that owns the hosting (nginx vhost +
     // /etc/letsencrypt/live both go there). Find the right node
     // before dispatching ACME.
-    let target_owned: Option<String> =
-        find_hosting_anywhere(&state, sel.clone())
-            .await
-            .ok()
-            .and_then(|(_d, n)| n);
+    let target_owned: Option<String> = find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
     let resp = crate::dispatcher::dispatch_to_node(
         &state,
         target_owned.as_deref(),
@@ -5060,14 +5082,22 @@ pub async fn post_cert_dns01_begin(
     let resp = crate::dispatcher::dispatch_to_node(
         &state,
         owner_node.as_deref(),
-        Request::CertDns01Begin { sel, staging, provider },
+        Request::CertDns01Begin {
+            sel,
+            staging,
+            provider,
+        },
     )
     .await?;
     match resp {
-        RpcResponse::CertDns01Begin { completed: true, .. } => {
-            Ok(Redirect::to(&format!("/hostings/{}?cert=wildcard", sel_url)).into_response())
-        }
-        RpcResponse::CertDns01Begin { completed: false, record_name, values } => {
+        RpcResponse::CertDns01Begin {
+            completed: true, ..
+        } => Ok(Redirect::to(&format!("/hostings/{}?cert=wildcard", sel_url)).into_response()),
+        RpcResponse::CertDns01Begin {
+            completed: false,
+            record_name,
+            values,
+        } => {
             let tpl = Dns01Tpl {
                 username: ctx.username.clone(),
                 user_initial: super::user_initial(&ctx.username),
@@ -5475,7 +5505,12 @@ pub async fn post_bulk(
         }
     }
     let flash = if errs.is_empty() {
-        format!("{} {} {}", ok, form.action, if ok == 1 { "ok" } else { "ok" })
+        format!(
+            "{} {} {}",
+            ok,
+            form.action,
+            if ok == 1 { "ok" } else { "ok" }
+        )
     } else {
         format!(
             "{} succeeded, {} failed: {}",
@@ -5591,7 +5626,11 @@ pub async fn post_wp_theme_action(
             Ok(Redirect::to(&format!(
                 "/hostings/{}?{}={}#wordpress",
                 sel_url,
-                if r.state == "failed" { "wp_error" } else { "wp_flash" },
+                if r.state == "failed" {
+                    "wp_error"
+                } else {
+                    "wp_flash"
+                },
                 urlencoding(&msg)
             ))
             .into_response())
@@ -5758,8 +5797,8 @@ pub async fn post_hosting_clone(
         .into_response());
     }
 
-    let source_local = form.source_node.is_empty()
-        || form.source_node == crate::dispatcher::LOCAL_NODE_SENTINEL;
+    let source_local =
+        form.source_node.is_empty() || form.source_node == crate::dispatcher::LOCAL_NODE_SENTINEL;
     let source_node_str = if source_local {
         crate::dispatcher::LOCAL_NODE_SENTINEL.to_string()
     } else {
@@ -5880,7 +5919,11 @@ async fn run_clone_job(
         .step(
             &format!(
                 "Exporting source bundle on {}",
-                if source_local { "master" } else { source_node.as_str() }
+                if source_local {
+                    "master"
+                } else {
+                    source_node.as_str()
+                }
             ),
             5,
             &format!("source selector: {}\n", selector_text),
@@ -5889,7 +5932,9 @@ async fn run_clone_job(
     let export = match crate::dispatcher::dispatch_to_node(
         &state,
         source_dispatch,
-        Request::HostingExport { hosting: sel.clone() },
+        Request::HostingExport {
+            hosting: sel.clone(),
+        },
     )
     .await
     {
@@ -5904,7 +5949,9 @@ async fn run_clone_job(
     let bundle = match export {
         RpcResponse::HostingExport(b) => b,
         RpcResponse::Error(e) => {
-            reporter.finish(false, Some(format!("Export failed: {e}"))).await;
+            reporter
+                .finish(false, Some(format!("Export failed: {e}")))
+                .await;
             return;
         }
         _ => {
@@ -5929,15 +5976,15 @@ async fn run_clone_job(
         reporter
             .step("Proxying bundle from worker to master", 45, "")
             .await;
-        if let Err(e) =
-            pull_bundle_from_worker(&state, &source_node, &bundle.bundle_id).await
-        {
+        if let Err(e) = pull_bundle_from_worker(&state, &source_node, &bundle.bundle_id).await {
             reporter
                 .finish(false, Some(format!("Bundle proxy failed: {e}")))
                 .await;
             return;
         }
-        reporter.step("Bundle landed on master", 55, "proxy ok\n").await;
+        reporter
+            .step("Bundle landed on master", 55, "proxy ok\n")
+            .await;
     } else {
         reporter
             .step("Bundle already on master (source was local)", 55, "")
@@ -5945,16 +5992,12 @@ async fn run_clone_job(
     }
 
     let exp = hyperion_types::now_secs() + bundle_ttl;
-    let token =
-        hyperion_auth::bundle_sig::mint(state.csrf_key.as_ref(), &bundle.bundle_id, exp);
+    let token = hyperion_auth::bundle_sig::mint(state.csrf_key.as_ref(), &bundle.bundle_id, exp);
     let base_url = format!("{master_url}/api/migration/bundle/{}", bundle.bundle_id);
 
     reporter
         .step(
-            &format!(
-                "Importing as {} on {}",
-                new_domain, target_node
-            ),
+            &format!("Importing as {} on {}", new_domain, target_node),
             65,
             &format!("override_domain={new_domain}\n"),
         )
@@ -6125,7 +6168,12 @@ pub async fn post_quota_enable_kernel(
         RpcResponse::Error(e) => format!("Couldn't enable kernel quotas: {e}"),
         _ => "Enable kernel quotas: unexpected response".into(),
     };
-    Ok(Redirect::to(&format!("/hostings/{}?flash={}#quota", sel_url, urlencoding(&flash))).into_response())
+    Ok(Redirect::to(&format!(
+        "/hostings/{}?flash={}#quota",
+        sel_url,
+        urlencoding(&flash)
+    ))
+    .into_response())
 }
 
 pub async fn post_migration_move(
@@ -6149,8 +6197,8 @@ pub async fn post_migration_move(
         ))
         .into_response());
     }
-    let source_local = form.source_node.is_empty()
-        || form.source_node == crate::dispatcher::LOCAL_NODE_SENTINEL;
+    let source_local =
+        form.source_node.is_empty() || form.source_node == crate::dispatcher::LOCAL_NODE_SENTINEL;
     let source_node_str = if source_local {
         crate::dispatcher::LOCAL_NODE_SENTINEL.to_string()
     } else {
@@ -6185,11 +6233,7 @@ pub async fn post_migration_move(
     let migration_source_node = form.source_node.clone();
     let migration_target = target_owned.clone();
     let actor_label = ctx.username.clone();
-    let actor_uid = ctx
-        .session
-        .as_ref()
-        .map(|s| s.user_id)
-        .unwrap_or(0);
+    let actor_uid = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
 
     let job_id = crate::handlers::jobs::spawn_job(
         state.clone(),
@@ -6310,7 +6354,11 @@ async fn run_post_create_job(
                     "Certificate issuance returned an unexpected RPC variant ({other:?}). Re-issue from the SSL tab."
                 ));
                 reporter
-                    .step("Certificate issuance failed — continuing", 30, "✗ cert: unexpected response\n")
+                    .step(
+                        "Certificate issuance failed — continuing",
+                        30,
+                        "✗ cert: unexpected response\n",
+                    )
                     .await;
             }
             Err(e) => {
@@ -6360,40 +6408,41 @@ async fn run_post_create_job(
                 deferred_failures.push(format!(
                     "WordPress install failed: {e}. The hosting itself is alive — re-run from the WordPress tab."
                 ));
-                reporter.finish(false, Some(deferred_failures.join("\n"))).await;
+                reporter
+                    .finish(false, Some(deferred_failures.join("\n")))
+                    .await;
                 return;
             }
             Ok(other) => {
                 deferred_failures.push(format!(
                     "WordPress install returned an unexpected RPC variant ({other:?}). Re-run from the WordPress tab."
                 ));
-                reporter.finish(false, Some(deferred_failures.join("\n"))).await;
+                reporter
+                    .finish(false, Some(deferred_failures.join("\n")))
+                    .await;
                 return;
             }
             Err(e) => {
                 deferred_failures.push(format!(
                     "WordPress install RPC failed (couldn't reach the agent): {e}. Re-run from the WordPress tab."
                 ));
-                reporter.finish(false, Some(deferred_failures.join("\n"))).await;
+                reporter
+                    .finish(false, Some(deferred_failures.join("\n")))
+                    .await;
                 return;
             }
         }
 
         // ── Phase 3: profile (plugins/themes ride with WP) ───
         if profile_id > 0 {
-            if let Err(msg) = run_profile_apply_phase(
-                &reporter,
-                &state,
-                target,
-                &hosting_id,
-                profile_id,
-                70,
-                25,
-            )
-            .await
+            if let Err(msg) =
+                run_profile_apply_phase(&reporter, &state, target, &hosting_id, profile_id, 70, 25)
+                    .await
             {
                 deferred_failures.push(msg);
-                reporter.finish(false, Some(deferred_failures.join("\n"))).await;
+                reporter
+                    .finish(false, Some(deferred_failures.join("\n")))
+                    .await;
                 return;
             }
         }
@@ -6665,7 +6714,14 @@ async fn run_migration_job(
     // ---- 1. Export bundle on source ----
     reporter
         .step(
-            &format!("Exporting bundle on {}", if source_local { "master" } else { source_node.as_str() }),
+            &format!(
+                "Exporting bundle on {}",
+                if source_local {
+                    "master"
+                } else {
+                    source_node.as_str()
+                }
+            ),
             5,
             "scheduling HostingExport RPC\n",
         )
@@ -6673,24 +6729,32 @@ async fn run_migration_job(
     let export = match crate::dispatcher::dispatch_to_node(
         &state,
         source_dispatch,
-        Request::HostingExport { hosting: sel.clone() },
+        Request::HostingExport {
+            hosting: sel.clone(),
+        },
     )
     .await
     {
         Ok(v) => v,
         Err(e) => {
-            reporter.finish(false, Some(format!("dispatch HostingExport: {e}"))).await;
+            reporter
+                .finish(false, Some(format!("dispatch HostingExport: {e}")))
+                .await;
             return;
         }
     };
     let bundle = match export {
         RpcResponse::HostingExport(b) => b,
         RpcResponse::Error(e) => {
-            reporter.finish(false, Some(format!("Export failed: {e}"))).await;
+            reporter
+                .finish(false, Some(format!("Export failed: {e}")))
+                .await;
             return;
         }
         _ => {
-            reporter.finish(false, Some("expected HostingExport response".into())).await;
+            reporter
+                .finish(false, Some("expected HostingExport response".into()))
+                .await;
             return;
         }
     };
@@ -6711,10 +6775,14 @@ async fn run_migration_job(
             .step("Proxying bundle from worker to master", 45, "")
             .await;
         if let Err(e) = pull_bundle_from_worker(&state, &source_node, &bundle.bundle_id).await {
-            reporter.finish(false, Some(format!("Bundle proxy failed: {e}"))).await;
+            reporter
+                .finish(false, Some(format!("Bundle proxy failed: {e}")))
+                .await;
             return;
         }
-        reporter.step("Bundle landed on master", 55, "proxy ok\n").await;
+        reporter
+            .step("Bundle landed on master", 55, "proxy ok\n")
+            .await;
     } else {
         reporter
             .step("Bundle already on master (source was local)", 55, "")
@@ -6748,14 +6816,18 @@ async fn run_migration_job(
     {
         Ok(v) => v,
         Err(e) => {
-            reporter.finish(false, Some(format!("dispatch HostingImportFromUrl: {e}"))).await;
+            reporter
+                .finish(false, Some(format!("dispatch HostingImportFromUrl: {e}")))
+                .await;
             return;
         }
     };
     let new_id = match import {
         RpcResponse::HostingImportFromUrl(r) => r.new_hosting_id,
         RpcResponse::Error(e) => {
-            reporter.finish(false, Some(format!("Target import failed: {e}"))).await;
+            reporter
+                .finish(false, Some(format!("Target import failed: {e}")))
+                .await;
             return;
         }
         _ => {
@@ -6818,7 +6890,6 @@ async fn run_migration_job(
     reporter.finish(true, None).await;
 }
 
-
 pub async fn post_migration_export(
     State(state): State<SharedState>,
     ctx: AuthCtx,
@@ -6830,28 +6901,19 @@ pub async fn post_migration_export(
         Err(r) => return Ok(r),
     };
     let sel_url = urlencoding(&form.selector);
-    let resp = hyperion_rpc_client::call(
-        &state.agent_socket,
-        Request::HostingExport { hosting: sel },
-    )
-    .await?;
+    let resp =
+        hyperion_rpc_client::call(&state.agent_socket, Request::HostingExport { hosting: sel })
+            .await?;
     match resp {
         RpcResponse::HostingExport(mut b) => {
             // Mint the signed download URL — agent has no idea what
             // master URL the operator's browser used to reach us, so
             // the web layer is the only thing that can derive it.
             let master_url = super::derive_master_url(&state, &headers).await;
-            let exp = hyperion_types::now_secs()
-                + crate::handlers::migration::BUNDLE_DOWNLOAD_TTL_SECS;
-            let token = hyperion_auth::bundle_sig::mint(
-                state.csrf_key.as_ref(),
-                &b.bundle_id,
-                exp,
-            );
-            b.download_base_url = format!(
-                "{master_url}/api/migration/bundle/{}",
-                b.bundle_id
-            );
+            let exp =
+                hyperion_types::now_secs() + crate::handlers::migration::BUNDLE_DOWNLOAD_TTL_SECS;
+            let token = hyperion_auth::bundle_sig::mint(state.csrf_key.as_ref(), &b.bundle_id, exp);
+            b.download_base_url = format!("{master_url}/api/migration/bundle/{}", b.bundle_id);
             b.bundle_token = token;
             b.token_expires_at = exp;
 
@@ -6869,8 +6931,11 @@ pub async fn post_migration_export(
         }
         RpcResponse::Error(e) => {
             let msg = urlencoding(&format!("Migration export failed: {}", e));
-            Ok(Redirect::to(&format!("/hostings/{}?flash_error={}#migration", sel_url, msg))
-                .into_response())
+            Ok(Redirect::to(&format!(
+                "/hostings/{}?flash_error={}#migration",
+                sel_url, msg
+            ))
+            .into_response())
         }
         _ => Err(AppError::Internal("unexpected response".into())),
     }
@@ -6940,7 +7005,11 @@ pub async fn post_wp_plugin_action(
     let resp = crate::dispatcher::dispatch_to_node(
         &state,
         target_owned.as_deref(),
-        Request::WpPluginAction { hosting: sel, slug, action },
+        Request::WpPluginAction {
+            hosting: sel,
+            slug,
+            action,
+        },
     )
     .await?;
     match resp {
@@ -7085,18 +7154,18 @@ pub async fn post_ftp_set(
     )
     .await?;
     match resp {
-        RpcResponse::FtpSetPassword { password } => {
-            Ok(Redirect::to(&format!(
-                "/hostings/{}?ftp=set&ftp_pw={}#settings",
-                sel_url,
-                urlencoding(&password)
-            ))
-            .into_response())
-        }
+        RpcResponse::FtpSetPassword { password } => Ok(Redirect::to(&format!(
+            "/hostings/{}?ftp=set&ftp_pw={}#settings",
+            sel_url,
+            urlencoding(&password)
+        ))
+        .into_response()),
         RpcResponse::Error(e) => {
             let msg = urlencoding(&e.to_string());
-            Ok(Redirect::to(&format!("/hostings/{}?ftp_error={}#settings", sel_url, msg))
-                .into_response())
+            Ok(
+                Redirect::to(&format!("/hostings/{}?ftp_error={}#settings", sel_url, msg))
+                    .into_response(),
+            )
         }
         _ => Err(AppError::Internal("unexpected response".into())),
     }
@@ -7118,11 +7187,10 @@ pub async fn post_ftp_disable(
     };
     let sel_url = urlencoding(&form.selector);
     // FTP account lives on the node owning the hosting — find it.
-    let target_owned: Option<String> =
-        find_hosting_anywhere(&state, sel.clone())
-            .await
-            .ok()
-            .and_then(|(_d, n)| n);
+    let target_owned: Option<String> = find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
     let resp = crate::dispatcher::dispatch_to_node(
         &state,
         target_owned.as_deref(),
@@ -7130,13 +7198,17 @@ pub async fn post_ftp_disable(
     )
     .await?;
     match resp {
-        RpcResponse::FtpDisable => {
-            Ok(Redirect::to(&format!("/hostings/{}?ftp=disabled#settings", sel_url)).into_response())
-        }
+        RpcResponse::FtpDisable => Ok(Redirect::to(&format!(
+            "/hostings/{}?ftp=disabled#settings",
+            sel_url
+        ))
+        .into_response()),
         RpcResponse::Error(e) => {
             let msg = urlencoding(&e.to_string());
-            Ok(Redirect::to(&format!("/hostings/{}?ftp_error={}#settings", sel_url, msg))
-                .into_response())
+            Ok(
+                Redirect::to(&format!("/hostings/{}?ftp_error={}#settings", sel_url, msg))
+                    .into_response(),
+            )
         }
         _ => Err(AppError::Internal("unexpected response".into())),
     }
@@ -7204,11 +7276,19 @@ pub async fn get_backup_download(
     let meta = crate::dispatcher::dispatch_to_node(
         &state,
         owner_node.as_deref(),
-        Request::BackupFetchChunk { backup_id, offset: 0, len: 0 },
+        Request::BackupFetchChunk {
+            backup_id,
+            offset: 0,
+            len: 0,
+        },
     )
     .await?;
     let (total_size, filename) = match meta {
-        RpcResponse::BackupFetchChunk { total_size, filename, .. } => (total_size, filename),
+        RpcResponse::BackupFetchChunk {
+            total_size,
+            filename,
+            ..
+        } => (total_size, filename),
         RpcResponse::Error(e) => return Err(AppError::Rpc(e.to_string())),
         _ => return Err(AppError::Internal("unexpected response".into())),
     };
@@ -7224,7 +7304,11 @@ pub async fn get_backup_download(
             let resp = crate::dispatcher::dispatch_to_node(
                 &task_state,
                 task_owner.as_deref(),
-                Request::BackupFetchChunk { backup_id, offset, len: CHUNK },
+                Request::BackupFetchChunk {
+                    backup_id,
+                    offset,
+                    len: CHUNK,
+                },
             )
             .await;
             let (data_b64, eof) = match resp {
@@ -7254,7 +7338,10 @@ pub async fn get_backup_download(
     let safe_name = filename.replace(['"', '\\', '\n', '\r'], "");
     Ok((
         [
-            (axum::http::header::CONTENT_TYPE, "application/gzip".to_string()),
+            (
+                axum::http::header::CONTENT_TYPE,
+                "application/gzip".to_string(),
+            ),
             (
                 axum::http::header::CONTENT_DISPOSITION,
                 format!("attachment; filename=\"{safe_name}\""),
@@ -7318,10 +7405,11 @@ pub async fn post_restore_as_new(
         .into_response()),
         RpcResponse::Error(e) => {
             let msg = urlencoding(&e.to_string());
-            Ok(
-                Redirect::to(&format!("/hostings/{}?restore_error={}#backups", sel_url, msg))
-                    .into_response(),
-            )
+            Ok(Redirect::to(&format!(
+                "/hostings/{}?restore_error={}#backups",
+                sel_url, msg
+            ))
+            .into_response())
         }
         _ => Err(AppError::Internal("unexpected response".into())),
     }
@@ -7341,7 +7429,9 @@ pub struct StagingForm {
 async fn read_master_kv(state: &SharedState, hosting_id: &str, key: &str) -> Option<String> {
     match hyperion_rpc_client::call(
         &state.agent_socket,
-        Request::HostingKvList { hosting_id: hosting_id.to_string() },
+        Request::HostingKvList {
+            hosting_id: hosting_id.to_string(),
+        },
     )
     .await
     {
@@ -7367,11 +7457,15 @@ pub async fn post_wp_staging_create(
     let sel_url = urlencoding(&form.selector);
     // Effective staging hostname: the freshly-typed value wins; else the
     // saved per-hosting override; else None (the node uses staging.<domain>).
-    let staging_override: Option<String> =
-        match form.staging_domain.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            Some(s) => Some(s.to_ascii_lowercase()),
-            None => read_master_kv(&state, &form.selector, "staging_domain").await,
-        };
+    let staging_override: Option<String> = match form
+        .staging_domain
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        Some(s) => Some(s.to_ascii_lowercase()),
+        None => read_master_kv(&state, &form.selector, "staging_domain").await,
+    };
     let target: Option<String> = find_hosting_anywhere(&state, sel.clone())
         .await
         .ok()
@@ -7379,7 +7473,10 @@ pub async fn post_wp_staging_create(
     let resp = crate::dispatcher::dispatch_to_node(
         &state,
         target.as_deref(),
-        Request::WpStagingCreate { sel, staging_domain: staging_override },
+        Request::WpStagingCreate {
+            sel,
+            staging_domain: staging_override,
+        },
     )
     .await?;
     match resp {
@@ -7395,13 +7492,19 @@ pub async fn post_wp_staging_create(
                 },
             )
             .await;
-            Ok(Redirect::to(&format!("/hostings/{}?created=1", urlencoding(&staging_domain)))
-                .into_response())
+            Ok(Redirect::to(&format!(
+                "/hostings/{}?created=1",
+                urlencoding(&staging_domain)
+            ))
+            .into_response())
         }
         RpcResponse::Error(e) => {
             let msg = urlencoding(&e.to_string());
-            Ok(Redirect::to(&format!("/hostings/{}?staging_error={}#wordpress", sel_url, msg))
-                .into_response())
+            Ok(Redirect::to(&format!(
+                "/hostings/{}?staging_error={}#wordpress",
+                sel_url, msg
+            ))
+            .into_response())
         }
         _ => Err(AppError::Internal("unexpected response".into())),
     }
@@ -7427,18 +7530,25 @@ pub async fn post_wp_staging_push(
     let resp = crate::dispatcher::dispatch_to_node(
         &state,
         target.as_deref(),
-        Request::WpStagingPush { sel, staging_domain: staging_override },
+        Request::WpStagingPush {
+            sel,
+            staging_domain: staging_override,
+        },
     )
     .await?;
     match resp {
-        RpcResponse::WpStagingPush => {
-            Ok(Redirect::to(&format!("/hostings/{}?staging=pushed#wordpress", sel_url))
-                .into_response())
-        }
+        RpcResponse::WpStagingPush => Ok(Redirect::to(&format!(
+            "/hostings/{}?staging=pushed#wordpress",
+            sel_url
+        ))
+        .into_response()),
         RpcResponse::Error(e) => {
             let msg = urlencoding(&e.to_string());
-            Ok(Redirect::to(&format!("/hostings/{}?staging_error={}#wordpress", sel_url, msg))
-                .into_response())
+            Ok(Redirect::to(&format!(
+                "/hostings/{}?staging_error={}#wordpress",
+                sel_url, msg
+            ))
+            .into_response())
         }
         _ => Err(AppError::Internal("unexpected response".into())),
     }

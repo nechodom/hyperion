@@ -82,19 +82,10 @@ impl hyperion_core::AdapterPort for StubAdapters {
     async fn nginx_write_vhost(&self, _: &HostingDetail) -> Result<(), AdapterError> {
         Ok(())
     }
-    async fn nginx_delete_vhost(
-        &self,
-        _: &str,
-        _: Option<String>,
-    ) -> Result<(), AdapterError> {
+    async fn nginx_delete_vhost(&self, _: &str, _: Option<String>) -> Result<(), AdapterError> {
         Ok(())
     }
-    async fn nginx_write_htpasswd(
-        &self,
-        _: &str,
-        _: &str,
-        _: &str,
-    ) -> Result<(), AdapterError> {
+    async fn nginx_write_htpasswd(&self, _: &str, _: &str, _: &str) -> Result<(), AdapterError> {
         Ok(())
     }
     async fn nginx_delete_htpasswd(&self, _: &str) -> Result<(), AdapterError> {
@@ -241,9 +232,7 @@ async fn start_agent() -> (std::path::PathBuf, tempfile::TempDir) {
         agent_config_path: None,
         update_cache: Arc::new(tokio::sync::RwLock::new(None)),
         current_git_sha: "dev-unknown".into(),
-        cert_issue_locks: Arc::new(tokio::sync::Mutex::new(
-            std::collections::HashMap::new(),
-        )),
+        cert_issue_locks: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         panel_progress: Arc::new(tokio::sync::RwLock::new(None)),
         master_rpc_signer: None,
         node_state_file: None,
@@ -456,12 +445,9 @@ async fn e2e_bundle_a_c_round_trip_through_wire() {
     .expect("JobProgress");
     assert!(matches!(ack, Response::JobAck), "got {ack:?}");
 
-    let job = match hyperion_rpc_client::call(
-        &path,
-        Request::JobGet { id: job_id.clone() },
-    )
-    .await
-    .expect("JobGet")
+    let job = match hyperion_rpc_client::call(&path, Request::JobGet { id: job_id.clone() })
+        .await
+        .expect("JobGet")
     {
         Response::JobGet(Some(j)) => j,
         other => panic!("expected JobGet(Some), got {other:?}"),
@@ -482,12 +468,9 @@ async fn e2e_bundle_a_c_round_trip_through_wire() {
     .await
     .expect("JobFinish");
 
-    let job_after = match hyperion_rpc_client::call(
-        &path,
-        Request::JobGet { id: job_id.clone() },
-    )
-    .await
-    .expect("JobGet-after")
+    let job_after = match hyperion_rpc_client::call(&path, Request::JobGet { id: job_id.clone() })
+        .await
+        .expect("JobGet-after")
     {
         Response::JobGet(Some(j)) => j,
         other => panic!("expected JobGet(Some), got {other:?}"),
@@ -632,12 +615,9 @@ async fn e2e_bundle_a_c_round_trip_through_wire() {
     };
     assert!(target_id > 0);
 
-    let targets = match hyperion_rpc_client::call(
-        &path,
-        Request::BackupTargetList,
-    )
-    .await
-    .expect("BackupTargetList")
+    let targets = match hyperion_rpc_client::call(&path, Request::BackupTargetList)
+        .await
+        .expect("BackupTargetList")
     {
         Response::BackupTargetList(v) => v,
         other => panic!("expected BackupTargetList, got {other:?}"),

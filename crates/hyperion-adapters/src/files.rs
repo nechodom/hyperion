@@ -29,10 +29,7 @@ fn safe_component(c: &str) -> bool {
 /// (`..`, absolute, symlink, NUL byte). Returns the canonicalised
 /// absolute path inside the jail. `rel_path` is treated as forward-
 /// slash separated for portability with UI-supplied values.
-pub async fn resolve_inside_jail(
-    jail: &Path,
-    rel_path: &str,
-) -> Result<PathBuf, AdapterError> {
+pub async fn resolve_inside_jail(jail: &Path, rel_path: &str) -> Result<PathBuf, AdapterError> {
     let jail_canon = tokio::fs::canonicalize(jail)
         .await
         .map_err(|e| AdapterError::Other(format!("jail not accessible: {e}")))?;
@@ -189,8 +186,14 @@ pub async fn write_file_in_jail(
         )));
     }
     let abs = resolve_inside_jail(jail, rel_path).await?;
-    if abs == tokio::fs::canonicalize(jail).await.unwrap_or_else(|_| jail.to_path_buf()) {
-        return Err(AdapterError::Other("refusing to write the jail root itself".into()));
+    if abs
+        == tokio::fs::canonicalize(jail)
+            .await
+            .unwrap_or_else(|_| jail.to_path_buf())
+    {
+        return Err(AdapterError::Other(
+            "refusing to write the jail root itself".into(),
+        ));
     }
     if let Some(parent) = abs.parent() {
         // Parent must exist already — refuse implicit deep mkdir.
@@ -237,12 +240,11 @@ pub async fn chown_in_jail(
 /// Refuses non-empty directories — operator must clear contents first.
 /// (Operators expecting `rm -rf` semantics get a clean error instead
 /// of accidentally nuking wp-content/.)
-pub async fn delete_in_jail(
-    jail: &std::path::Path,
-    rel_path: &str,
-) -> Result<(), AdapterError> {
+pub async fn delete_in_jail(jail: &std::path::Path, rel_path: &str) -> Result<(), AdapterError> {
     if rel_path.is_empty() || rel_path == "/" {
-        return Err(AdapterError::Other("refusing to delete the jail root".into()));
+        return Err(AdapterError::Other(
+            "refusing to delete the jail root".into(),
+        ));
     }
     let abs = resolve_inside_jail(jail, rel_path).await?;
     let md = tokio::fs::symlink_metadata(&abs)
@@ -276,12 +278,11 @@ pub async fn delete_in_jail(
 
 /// Create one directory inside the jail. Parent must exist already
 /// (no `mkdir -p` behaviour — same rationale as `write_file_in_jail`).
-pub async fn mkdir_in_jail(
-    jail: &std::path::Path,
-    rel_path: &str,
-) -> Result<(), AdapterError> {
+pub async fn mkdir_in_jail(jail: &std::path::Path, rel_path: &str) -> Result<(), AdapterError> {
     if rel_path.is_empty() || rel_path == "/" {
-        return Err(AdapterError::Other("refusing to mkdir the jail root".into()));
+        return Err(AdapterError::Other(
+            "refusing to mkdir the jail root".into(),
+        ));
     }
     let abs = resolve_inside_jail(jail, rel_path).await?;
     if abs.exists() {
@@ -469,9 +470,7 @@ mod tests {
         write_file_in_jail(d.path(), "hello.txt", b"world")
             .await
             .expect("write");
-        let (bytes, name) = read_raw_in_jail(d.path(), "hello.txt")
-            .await
-            .expect("read");
+        let (bytes, name) = read_raw_in_jail(d.path(), "hello.txt").await.expect("read");
         assert_eq!(bytes, b"world");
         assert_eq!(name, "hello.txt");
     }
@@ -494,7 +493,9 @@ mod tests {
     #[tokio::test]
     async fn delete_file_works_but_refuses_root() {
         let d = tempfile::tempdir().expect("tmp");
-        write_file_in_jail(d.path(), "junk.txt", b"x").await.unwrap();
+        write_file_in_jail(d.path(), "junk.txt", b"x")
+            .await
+            .unwrap();
         delete_in_jail(d.path(), "junk.txt").await.expect("delete");
         // Root refusal:
         let r = delete_in_jail(d.path(), "").await;
@@ -512,7 +513,9 @@ mod tests {
         assert!(r.is_err(), "must refuse non-empty dir");
         // Once we delete the file the dir is empty and removable.
         delete_in_jail(d.path(), "stuff/inner.txt").await.unwrap();
-        delete_in_jail(d.path(), "stuff").await.expect("empty dir ok");
+        delete_in_jail(d.path(), "stuff")
+            .await
+            .expect("empty dir ok");
     }
 
     #[tokio::test]
@@ -527,7 +530,9 @@ mod tests {
     async fn rename_round_trips_and_refuses_overwrite() {
         let d = tempfile::tempdir().expect("tmp");
         write_file_in_jail(d.path(), "a.txt", b"x").await.unwrap();
-        rename_in_jail(d.path(), "a.txt", "b.txt").await.expect("rename");
+        rename_in_jail(d.path(), "a.txt", "b.txt")
+            .await
+            .expect("rename");
         // b.txt now exists, a.txt doesn't.
         assert!(d.path().join("b.txt").exists());
         assert!(!d.path().join("a.txt").exists());

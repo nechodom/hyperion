@@ -52,7 +52,11 @@ pub async fn upsert(
 /// Flag (or clear) a cert as a DNS-01 wildcard. The renewal sweep reads
 /// this to pick HTTP-01 vs DNS-01. Kept as a separate column so plain
 /// `upsert` callers don't have to thread it through.
-pub async fn set_wildcard(pool: &SqlitePool, domain: &str, wildcard: bool) -> Result<(), StateError> {
+pub async fn set_wildcard(
+    pool: &SqlitePool,
+    domain: &str,
+    wildcard: bool,
+) -> Result<(), StateError> {
     sqlx::query("UPDATE certificates SET is_wildcard = ? WHERE domain = ?")
         .bind(wildcard as i64)
         .bind(domain)
@@ -192,19 +196,37 @@ mod tests {
         let pool = open_memory().await.expect("open");
         // Unknown domain ⇒ false.
         assert!(!is_wildcard(&pool, "nope.cz").await.unwrap());
-        upsert(&pool, "example.cz", 1, 1000, "/c/f.pem", "/c/p.pem", "letsencrypt")
-            .await
-            .expect("upsert");
+        upsert(
+            &pool,
+            "example.cz",
+            1,
+            1000,
+            "/c/f.pem",
+            "/c/p.pem",
+            "letsencrypt",
+        )
+        .await
+        .expect("upsert");
         // Default after a plain upsert is false (HTTP-01).
         assert!(!is_wildcard(&pool, "example.cz").await.unwrap());
         set_wildcard(&pool, "example.cz", true).await.expect("set");
         assert!(is_wildcard(&pool, "example.cz").await.unwrap());
         // A renewal upsert preserves the flag (not in the update set).
-        upsert(&pool, "example.cz", 2, 2000, "/c/f.pem", "/c/p.pem", "letsencrypt")
-            .await
-            .expect("re-upsert");
+        upsert(
+            &pool,
+            "example.cz",
+            2,
+            2000,
+            "/c/f.pem",
+            "/c/p.pem",
+            "letsencrypt",
+        )
+        .await
+        .expect("re-upsert");
         assert!(is_wildcard(&pool, "example.cz").await.unwrap());
-        set_wildcard(&pool, "example.cz", false).await.expect("clear");
+        set_wildcard(&pool, "example.cz", false)
+            .await
+            .expect("clear");
         assert!(!is_wildcard(&pool, "example.cz").await.unwrap());
     }
 
@@ -277,9 +299,17 @@ mod tests {
     #[tokio::test]
     async fn renewal_type_roundtrip() {
         let pool = open_memory().await.expect("open");
-        upsert(&pool, "example.cz", 1, 1000, "/c/f.pem", "/c/p.pem", "letsencrypt")
-            .await
-            .expect("upsert");
+        upsert(
+            &pool,
+            "example.cz",
+            1,
+            1000,
+            "/c/f.pem",
+            "/c/p.pem",
+            "letsencrypt",
+        )
+        .await
+        .expect("upsert");
         // Default after a plain upsert is "auto" (ACME-managed).
         let got = get(&pool, "example.cz").await.unwrap().unwrap();
         assert_eq!(got.renewal_type, "auto");
@@ -288,16 +318,32 @@ mod tests {
             .await
             .expect("set");
         assert_eq!(
-            get(&pool, "example.cz").await.unwrap().unwrap().renewal_type,
+            get(&pool, "example.cz")
+                .await
+                .unwrap()
+                .unwrap()
+                .renewal_type,
             "manual"
         );
         // A later ACME-style re-upsert must NOT reset it back to "auto"
         // (preserved like is_wildcard).
-        upsert(&pool, "example.cz", 2, 2000, "/c/f.pem", "/c/p.pem", "letsencrypt")
-            .await
-            .expect("re-upsert");
+        upsert(
+            &pool,
+            "example.cz",
+            2,
+            2000,
+            "/c/f.pem",
+            "/c/p.pem",
+            "letsencrypt",
+        )
+        .await
+        .expect("re-upsert");
         assert_eq!(
-            get(&pool, "example.cz").await.unwrap().unwrap().renewal_type,
+            get(&pool, "example.cz")
+                .await
+                .unwrap()
+                .unwrap()
+                .renewal_type,
             "manual"
         );
     }
@@ -309,6 +355,9 @@ mod tests {
             .await
             .expect("upsert");
         let r = set_renewal_type(&pool, "x.cz", "weekly").await;
-        assert!(r.is_err(), "renewal_type CHECK should reject unknown values");
+        assert!(
+            r.is_err(),
+            "renewal_type CHECK should reject unknown values"
+        );
     }
 }

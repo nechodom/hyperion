@@ -24,8 +24,18 @@ pub struct MonitorConfig {
 /// from `hostings` for the agent's monitor_tick to walk.
 pub async fn list_enabled(pool: &SqlitePool) -> Result<Vec<MonitorConfig>, StateError> {
     let rows: Vec<(
-        String, String, i64, Option<String>, Option<i64>, Option<i64>,
-        Option<String>, Option<String>, Option<String>, i64, Option<i64>, String,
+        String,
+        String,
+        i64,
+        Option<String>,
+        Option<i64>,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        i64,
+        Option<i64>,
+        String,
     )> = sqlx::query_as(
         "SELECT id, domain, monitor_enabled, monitor_url_path, monitor_interval_secs,
                 monitor_alert_after_fails, monitor_alert_email,
@@ -38,11 +48,80 @@ pub async fn list_enabled(pool: &SqlitePool) -> Result<Vec<MonitorConfig>, State
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(
-            id, domain, enabled, url_path, interval_secs, alert_after,
-            ae, asw, awu, fails, last_at, state,
+        .map(
+            |(
+                id,
+                domain,
+                enabled,
+                url_path,
+                interval_secs,
+                alert_after,
+                ae,
+                asw,
+                awu,
+                fails,
+                last_at,
+                state,
+            )| MonitorConfig {
+                hosting_id: HostingId(id),
+                domain,
+                enabled: enabled != 0,
+                url_path: url_path.unwrap_or_else(|| "/".into()),
+                interval_secs: interval_secs.unwrap_or(300).clamp(60, 3600),
+                alert_after_fails: alert_after.unwrap_or(3).max(1),
+                alert_email: ae,
+                alert_slack_webhook: asw,
+                alert_webhook_url: awu,
+                consecutive_fails: fails,
+                last_alert_at: last_at,
+                alert_state: state,
+            },
+        )
+        .collect())
+}
+
+/// Look up the monitor config for one hosting (used by the detail
+/// page form to prefill). Returns None when the hosting doesn't exist.
+pub async fn get(pool: &SqlitePool, id: &HostingId) -> Result<Option<MonitorConfig>, StateError> {
+    let row: Option<(
+        String,
+        String,
+        i64,
+        Option<String>,
+        Option<i64>,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        i64,
+        Option<i64>,
+        String,
+    )> = sqlx::query_as(
+        "SELECT id, domain, monitor_enabled, monitor_url_path, monitor_interval_secs,
+                monitor_alert_after_fails, monitor_alert_email,
+                monitor_alert_slack_webhook, monitor_alert_webhook_url,
+                monitor_consecutive_fails, monitor_last_alert_at, monitor_alert_state
+         FROM hostings WHERE id = ?",
+    )
+    .bind(id.as_str())
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(
+        |(
+            rid,
+            domain,
+            enabled,
+            url_path,
+            interval_secs,
+            alert_after,
+            ae,
+            asw,
+            awu,
+            fails,
+            last_at,
+            state,
         )| MonitorConfig {
-            hosting_id: HostingId(id),
+            hosting_id: HostingId(rid),
             domain,
             enabled: enabled != 0,
             url_path: url_path.unwrap_or_else(|| "/".into()),
@@ -54,43 +133,8 @@ pub async fn list_enabled(pool: &SqlitePool) -> Result<Vec<MonitorConfig>, State
             consecutive_fails: fails,
             last_alert_at: last_at,
             alert_state: state,
-        })
-        .collect())
-}
-
-/// Look up the monitor config for one hosting (used by the detail
-/// page form to prefill). Returns None when the hosting doesn't exist.
-pub async fn get(pool: &SqlitePool, id: &HostingId) -> Result<Option<MonitorConfig>, StateError> {
-    let row: Option<(
-        String, String, i64, Option<String>, Option<i64>, Option<i64>,
-        Option<String>, Option<String>, Option<String>, i64, Option<i64>, String,
-    )> = sqlx::query_as(
-        "SELECT id, domain, monitor_enabled, monitor_url_path, monitor_interval_secs,
-                monitor_alert_after_fails, monitor_alert_email,
-                monitor_alert_slack_webhook, monitor_alert_webhook_url,
-                monitor_consecutive_fails, monitor_last_alert_at, monitor_alert_state
-         FROM hostings WHERE id = ?",
-    )
-    .bind(id.as_str())
-    .fetch_optional(pool)
-    .await?;
-    Ok(row.map(|(
-        rid, domain, enabled, url_path, interval_secs, alert_after,
-        ae, asw, awu, fails, last_at, state,
-    )| MonitorConfig {
-        hosting_id: HostingId(rid),
-        domain,
-        enabled: enabled != 0,
-        url_path: url_path.unwrap_or_else(|| "/".into()),
-        interval_secs: interval_secs.unwrap_or(300).clamp(60, 3600),
-        alert_after_fails: alert_after.unwrap_or(3).max(1),
-        alert_email: ae,
-        alert_slack_webhook: asw,
-        alert_webhook_url: awu,
-        consecutive_fails: fails,
-        last_alert_at: last_at,
-        alert_state: state,
-    }))
+        },
+    ))
 }
 
 /// Persist the operator-set fields. None values clear the column.
@@ -134,22 +178,18 @@ pub async fn set_config(
 }
 
 /// Bump the consecutive-failure counter. Returns the new value.
-pub async fn record_fail(
-    pool: &SqlitePool,
-    id: &HostingId,
-) -> Result<i64, StateError> {
+pub async fn record_fail(pool: &SqlitePool, id: &HostingId) -> Result<i64, StateError> {
     sqlx::query(
         "UPDATE hostings SET monitor_consecutive_fails = monitor_consecutive_fails + 1 WHERE id = ?",
     )
     .bind(id.as_str())
     .execute(pool)
     .await?;
-    let (n,): (i64,) = sqlx::query_as(
-        "SELECT monitor_consecutive_fails FROM hostings WHERE id = ?",
-    )
-    .bind(id.as_str())
-    .fetch_one(pool)
-    .await?;
+    let (n,): (i64,) =
+        sqlx::query_as("SELECT monitor_consecutive_fails FROM hostings WHERE id = ?")
+            .bind(id.as_str())
+            .fetch_one(pool)
+            .await?;
     Ok(n)
 }
 
@@ -230,9 +270,7 @@ pub async fn history(
     limit: i64,
 ) -> Result<Vec<MonitorSample>, StateError> {
     let limit = limit.clamp(1, 2000);
-    let rows: Vec<(
-        i64, String, i64, i64, Option<i64>, i64, Option<String>,
-    )> = sqlx::query_as(
+    let rows: Vec<(i64, String, i64, i64, Option<i64>, i64, Option<String>)> = sqlx::query_as(
         "SELECT id, hosting_id, sampled_at, success, http_status, response_ms, error_message
          FROM monitor_samples
          WHERE hosting_id = ?
@@ -276,16 +314,9 @@ mod tests {
         // Use the byte sum so a single-letter username doesn't collide
         // with another single-letter username via the same UID.
         let uid: i64 = 2000 + name.bytes().map(|b| b as i64).sum::<i64>();
-        let suid = crate::system_users::insert(
-            pool,
-            name,
-            uid,
-            &format!("/h/{name}"),
-            "/x",
-            1,
-        )
-        .await
-        .expect("user");
+        let suid = crate::system_users::insert(pool, name, uid, &format!("/h/{name}"), "/x", 1)
+            .await
+            .expect("user");
         let id = HostingId::new_v7();
         crate::hostings::insert(pool, &id, &format!("{name}.cz"), suid, None, "/x", 1, None)
             .await

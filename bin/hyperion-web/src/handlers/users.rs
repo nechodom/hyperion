@@ -48,17 +48,13 @@ pub async fn get_users(
     if !ctx.is_super_admin() {
         return Ok(Redirect::to("/").into_response());
     }
-    let (users, error) = match hyperion_rpc_client::call(
-        &state.agent_socket,
-        Request::WebUserList,
-    )
-    .await
-    {
-        Ok(RpcResponse::WebUserList(u)) => (u, None),
-        Ok(RpcResponse::Error(e)) => (vec![], Some(e.to_string())),
-        Ok(_) => (vec![], Some("unexpected agent response".into())),
-        Err(e) => (vec![], Some(format!("rpc: {e}"))),
-    };
+    let (users, error) =
+        match hyperion_rpc_client::call(&state.agent_socket, Request::WebUserList).await {
+            Ok(RpcResponse::WebUserList(u)) => (u, None),
+            Ok(RpcResponse::Error(e)) => (vec![], Some(e.to_string())),
+            Ok(_) => (vec![], Some("unexpected agent response".into())),
+            Err(e) => (vec![], Some(format!("rpc: {e}"))),
+        };
     let csrf_token = super::session_csrf_token(&state, &ctx);
     let tpl = UsersTpl {
         username: &ctx.username,
@@ -103,7 +99,9 @@ pub async fn post_create(
     .await
     .map_err(AppError::from)?;
     match resp {
-        RpcResponse::WebUserCreate { id: _ } => Ok(Redirect::to("/admin/users?flash=User+created").into_response()),
+        RpcResponse::WebUserCreate { id: _ } => {
+            Ok(Redirect::to("/admin/users?flash=User+created").into_response())
+        }
         RpcResponse::Error(e) => Ok(Redirect::to(&format!(
             "/admin/users?error={}",
             urlencode(&e.to_string())
@@ -171,7 +169,14 @@ pub async fn post_lock(
     )
     .await
     .map_err(AppError::from)?;
-    flash_redirect(resp, if locked { "User locked" } else { "User unlocked" })
+    flash_redirect(
+        resp,
+        if locked {
+            "User locked"
+        } else {
+            "User unlocked"
+        },
+    )
 }
 
 #[derive(Deserialize)]
@@ -224,10 +229,7 @@ pub async fn post_reset_password(
     flash_redirect(resp, "Password reset")
 }
 
-fn flash_redirect(
-    resp: RpcResponse,
-    success_msg: &str,
-) -> Result<Response, AppError> {
+fn flash_redirect(resp: RpcResponse, success_msg: &str) -> Result<Response, AppError> {
     match resp {
         RpcResponse::WebUserSetRole
         | RpcResponse::WebUserSetLocked

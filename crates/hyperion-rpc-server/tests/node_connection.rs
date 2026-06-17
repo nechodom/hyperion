@@ -82,7 +82,12 @@ async fn handle_signed(
     }
     let req: Request = match serde_json::from_slice(body) {
         Ok(r) => r,
-        Err(e) => return (StatusCode::BAD_REQUEST, format!("bad body: {e}").into_bytes()),
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                format!("bad body: {e}").into_bytes(),
+            )
+        }
     };
     let resp = hyperion_rpc_server::dispatch(agent.clone(), req).await;
     match serde_json::to_vec(&resp) {
@@ -154,7 +159,9 @@ async fn spawn_worker() -> Worker {
         pubkey: signer.pubkey_b64().to_string(),
         nonce_cache: Arc::new(Mutex::new(HashMap::new())),
     };
-    let app = Router::new().route("/agent-rpc", post(route)).with_state(st);
+    let app = Router::new()
+        .route("/agent-rpc", post(route))
+        .with_state(st);
 
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
     let port = listener.local_addr().expect("addr").port();
@@ -233,7 +240,10 @@ async fn wire_roundtrip_real_tls() {
     )
     .await
     .expect("HostingCreate over wire");
-    assert!(matches!(resp, RpcResponse::HostingCreate(_)), "got {resp:?}");
+    assert!(
+        matches!(resp, RpcResponse::HostingCreate(_)),
+        "got {resp:?}"
+    );
 
     let resp = call_remote(
         &w.base_url,
@@ -309,9 +319,25 @@ async fn handler_rejects_replayed_nonce() {
     let auth = sign_envelope(&signer, "node-x", &body, ts, "same-nonce");
     let header = format!("Bearer {}", auth.to_header_value());
 
-    let (c1, _) = handle_signed(&agent, "node-x", signer.pubkey_b64(), &cache, Some(&header), &body).await;
+    let (c1, _) = handle_signed(
+        &agent,
+        "node-x",
+        signer.pubkey_b64(),
+        &cache,
+        Some(&header),
+        &body,
+    )
+    .await;
     assert_eq!(c1, StatusCode::OK, "first use accepted");
-    let (c2, _) = handle_signed(&agent, "node-x", signer.pubkey_b64(), &cache, Some(&header), &body).await;
+    let (c2, _) = handle_signed(
+        &agent,
+        "node-x",
+        signer.pubkey_b64(),
+        &cache,
+        Some(&header),
+        &body,
+    )
+    .await;
     assert_eq!(c2, StatusCode::UNAUTHORIZED, "replayed nonce rejected");
 }
 
@@ -341,5 +367,9 @@ async fn handler_rejects_body_tamper() {
         &tampered,
     )
     .await;
-    assert_eq!(code, StatusCode::UNAUTHORIZED, "body-hash mismatch rejected");
+    assert_eq!(
+        code,
+        StatusCode::UNAUTHORIZED,
+        "body-hash mismatch rejected"
+    );
 }

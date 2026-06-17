@@ -11,8 +11,8 @@ use crate::state::SharedState;
 use askama::Template;
 use axum::extract::{ConnectInfo, State};
 use axum::http::HeaderMap;
-use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::response::Json;
+use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Form;
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
 use hyperion_types::{AgentConfigView, EmailLogEntry, SmtpAutodetect, UpdateStatus};
@@ -90,11 +90,16 @@ pub async fn get_settings(
         hyperion_rpc_client::call(&state.agent_socket, Request::AgentConfigView),
         hyperion_rpc_client::call(
             &state.agent_socket,
-            Request::UpdateCheck { force_refresh: false },
+            Request::UpdateCheck {
+                force_refresh: false
+            },
         ),
         hyperion_rpc_client::call(
             &state.agent_socket,
-            Request::EmailLogList { hosting_id: None, limit: 5 },
+            Request::EmailLogList {
+                hosting_id: None,
+                limit: 5
+            },
         ),
         hyperion_rpc_client::call(&state.agent_socket, Request::MtaDiagnostics),
     );
@@ -213,7 +218,10 @@ pub async fn post_email_test(
     // 3/min is comfortable for an operator clicking Test a few times
     // and absurdly low for automated abuse.
     let ip = email_test_ip(&headers, peer);
-    if !state.ratelimit.check("email-test", ip, Bucket::per_minute(3)) {
+    if !state
+        .ratelimit
+        .check("email-test", ip, Bucket::per_minute(3))
+    {
         return Ok(Redirect::to(
             "/settings?flash_error=test+email+rate+limit+exceeded+%E2%80%94+wait+a+minute",
         )
@@ -233,13 +241,12 @@ pub async fn post_email_test(
     // does the actual SMTP send. This verifies that worker's
     // outbound SMTP path independently from the master's.
     let target_owned = form.target_node.trim().to_string();
-    let target = if target_owned.is_empty()
-        || target_owned == crate::dispatcher::LOCAL_NODE_SENTINEL
-    {
-        None
-    } else {
-        Some(target_owned.as_str())
-    };
+    let target =
+        if target_owned.is_empty() || target_owned == crate::dispatcher::LOCAL_NODE_SENTINEL {
+            None
+        } else {
+            Some(target_owned.as_str())
+        };
     let resp = crate::dispatcher::dispatch_to_node(
         &state,
         target,
@@ -259,20 +266,13 @@ pub async fn post_email_test(
                 target_owned.clone()
             };
             let msg = format!("Test email sent from {node_label} to {to} · SMTP relay said {smtp_code} · check /emails for the delivery record");
-            Ok(
-                Redirect::to(&format!("/settings?flash={}", urlencode(&msg)))
-                    .into_response(),
-            )
+            Ok(Redirect::to(&format!("/settings?flash={}", urlencode(&msg))).into_response())
         }
         RpcResponse::Error(e) => {
             // Include a pointer to /emails so the operator can see the
             // failed-row in context (it's already logged there).
             let msg = format!("{e} — see /emails for the failed row");
-            Ok(Redirect::to(&format!(
-                "/settings?flash_error={}",
-                urlencode(&msg)
-            ))
-            .into_response())
+            Ok(Redirect::to(&format!("/settings?flash_error={}", urlencode(&msg))).into_response())
         }
         _ => Err(AppError::Internal("unexpected response".into())),
     }
@@ -518,11 +518,7 @@ pub async fn get_panel_cert_status(
     State(state): State<SharedState>,
     _ctx: AuthCtx,
 ) -> Result<Response, AppError> {
-    let snap = match hyperion_rpc_client::call(
-        &state.agent_socket,
-        Request::PanelCertStatus,
-    )
-    .await
+    let snap = match hyperion_rpc_client::call(&state.agent_socket, Request::PanelCertStatus).await
     {
         Ok(RpcResponse::PanelCertStatus(v)) => v,
         _ => None,
@@ -577,11 +573,7 @@ pub async fn get_panel_cert_status(
             )
         }
     };
-    Ok((
-        [("content-type", "text/html; charset=utf-8")],
-        body,
-    )
-        .into_response())
+    Ok(([("content-type", "text/html; charset=utf-8")], body).into_response())
 }
 
 fn html_escape(s: &str) -> String {
@@ -601,10 +593,10 @@ pub async fn post_panel_provision(
     }
     let hostname = form.hostname.trim().to_lowercase();
     if hostname.is_empty() {
-        return Ok(Redirect::to(
-            "/settings?flash_error=Panel+hostname+is+required#cluster",
-        )
-        .into_response());
+        return Ok(
+            Redirect::to("/settings?flash_error=Panel+hostname+is+required#cluster")
+                .into_response(),
+        );
     }
     let skip_dns_check = matches!(
         form.skip_dns_check.as_deref(),
@@ -612,12 +604,19 @@ pub async fn post_panel_provision(
     );
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
-        Request::PanelProvision { hostname: hostname.clone(), skip_dns_check },
+        Request::PanelProvision {
+            hostname: hostname.clone(),
+            skip_dns_check,
+        },
     )
     .await
     .map_err(AppError::from)?;
     let dest = match resp {
-        RpcResponse::PanelProvision { status, message, panel_url } => {
+        RpcResponse::PanelProvision {
+            status,
+            message,
+            panel_url,
+        } => {
             // Build a friendly one-liner flash. Truncate the agent's
             // multi-line `message` to its first non-empty line so the
             // URL query stays readable — full message lands in the
@@ -671,11 +670,7 @@ pub async fn post_email_autodetect(
         })
         .into_response());
     }
-    let resp = hyperion_rpc_client::call(
-        &state.agent_socket,
-        Request::EmailSmtpAutodetect,
-    )
-    .await?;
+    let resp = hyperion_rpc_client::call(&state.agent_socket, Request::EmailSmtpAutodetect).await?;
     let a = match resp {
         RpcResponse::EmailSmtpAutodetect(a) => a,
         RpcResponse::Error(e) => {
@@ -725,7 +720,11 @@ fn mask_secrets_in_toml(s: &str) -> String {
                 let value_part = trimmed[eq + 1..].trim();
                 if value_part.starts_with('"') {
                     let indent_len = line.len() - trimmed.len();
-                    let mask = if value_part == "\"\"" { "«empty»" } else { "«set»" };
+                    let mask = if value_part == "\"\"" {
+                        "«empty»"
+                    } else {
+                        "«set»"
+                    };
                     out.push_str(&line[..indent_len]);
                     out.push_str(key);
                     out.push_str(" = \"");
@@ -785,9 +784,7 @@ pub async fn post_mta_queue_flush(
     ctx: AuthCtx,
 ) -> Result<Response, AppError> {
     if !ctx.is_admin_or_higher() {
-        return Ok(
-            Redirect::to("/settings?flash_error=admin+role+required#mail").into_response(),
-        );
+        return Ok(Redirect::to("/settings?flash_error=admin+role+required#mail").into_response());
     }
     let resp = hyperion_rpc_client::call(&state.agent_socket, Request::MtaQueueFlush).await?;
     match resp {
@@ -796,16 +793,17 @@ pub async fn post_mta_queue_flush(
                 "Queue flush requested · queue is now empty".to_string()
             } else {
                 let tail: String = output.lines().take(2).collect::<Vec<_>>().join(" · ");
-                let tail = if tail.is_empty() { "(no output)".into() } else { tail };
+                let tail = if tail.is_empty() {
+                    "(no output)".into()
+                } else {
+                    tail
+                };
                 format!(
                     "Queue flush requested · {attempted} message(s) still deferred — \
                      check the log tail for the reason · {tail}"
                 )
             };
-            Ok(
-                Redirect::to(&format!("/settings?flash={}#mail", urlencode(&msg)))
-                    .into_response(),
-            )
+            Ok(Redirect::to(&format!("/settings?flash={}#mail", urlencode(&msg))).into_response())
         }
         RpcResponse::Error(e) => Ok(Redirect::to(&format!(
             "/settings?flash_error={}#mail",
@@ -823,9 +821,7 @@ pub async fn post_mta_queue_clear(
     ctx: AuthCtx,
 ) -> Result<Response, AppError> {
     if !ctx.is_admin_or_higher() {
-        return Ok(
-            Redirect::to("/settings?flash_error=admin+role+required#mail").into_response(),
-        );
+        return Ok(Redirect::to("/settings?flash_error=admin+role+required#mail").into_response());
     }
     let resp = hyperion_rpc_client::call(&state.agent_socket, Request::MtaQueueClear).await?;
     match resp {
@@ -835,10 +831,7 @@ pub async fn post_mta_queue_clear(
             } else {
                 format!("Queue clear · {cleared} message(s) discarded")
             };
-            Ok(
-                Redirect::to(&format!("/settings?flash={}#mail", urlencode(&msg)))
-                    .into_response(),
-            )
+            Ok(Redirect::to(&format!("/settings?flash={}#mail", urlencode(&msg))).into_response())
         }
         RpcResponse::Error(e) => Ok(Redirect::to(&format!(
             "/settings?flash_error={}#mail",
@@ -858,10 +851,10 @@ pub async fn post_mta_reconfigure(
     ctx: AuthCtx,
 ) -> Result<Response, AppError> {
     if !ctx.is_admin_or_higher() {
-        return Ok(
-            Redirect::to("/settings?flash_error=admin+role+required+to+reconfigure+MTA#mail")
-                .into_response(),
-        );
+        return Ok(Redirect::to(
+            "/settings?flash_error=admin+role+required+to+reconfigure+MTA#mail",
+        )
+        .into_response());
     }
     let resp = hyperion_rpc_client::call(&state.agent_socket, Request::MtaReconfigure).await?;
     match resp {
@@ -870,10 +863,7 @@ pub async fn post_mta_reconfigure(
                 "skipped" => "postfix not installed — install it from /services first".to_string(),
                 m => format!("postfix reconfigured: now in {m} mode"),
             };
-            Ok(
-                Redirect::to(&format!("/settings?flash={}#mail", urlencode(&msg)))
-                    .into_response(),
-            )
+            Ok(Redirect::to(&format!("/settings?flash={}#mail", urlencode(&msg))).into_response())
         }
         RpcResponse::Error(e) => Ok(Redirect::to(&format!(
             "/settings?flash_error={}#mail",
@@ -897,10 +887,10 @@ pub async fn post_mta_test(
     Form(form): Form<MtaTestForm>,
 ) -> Result<Response, AppError> {
     if !ctx.is_admin_or_higher() {
-        return Ok(
-            Redirect::to("/settings?flash_error=admin+role+required+to+send+test+emails#mail")
-                .into_response(),
-        );
+        return Ok(Redirect::to(
+            "/settings?flash_error=admin+role+required+to+send+test+emails#mail",
+        )
+        .into_response());
     }
     // Same per-IP rate limit as the SMTP-relay test. Prevents a
     // compromised cookie from turning the local MTA into an
@@ -919,11 +909,9 @@ pub async fn post_mta_test(
                 .into_response(),
         );
     }
-    let resp = hyperion_rpc_client::call(
-        &state.agent_socket,
-        Request::MtaTestSend { to: to.clone() },
-    )
-    .await?;
+    let resp =
+        hyperion_rpc_client::call(&state.agent_socket, Request::MtaTestSend { to: to.clone() })
+            .await?;
     match resp {
         RpcResponse::MtaTestSend { exit_code, output } => {
             if exit_code == 0 {
@@ -944,11 +932,10 @@ pub async fn post_mta_test(
                     trimmed.chars().take(180).collect()
                 };
                 let msg = format!("sendmail exit {exit_code}: {tail}");
-                Ok(Redirect::to(&format!(
-                    "/settings?flash_error={}#mail",
-                    urlencode(&msg)
-                ))
-                .into_response())
+                Ok(
+                    Redirect::to(&format!("/settings?flash_error={}#mail", urlencode(&msg)))
+                        .into_response(),
+                )
             }
         }
         RpcResponse::Error(e) => Ok(Redirect::to(&format!(
@@ -1049,7 +1036,11 @@ pub async fn post_node_wildcard_begin(
             .into_response());
         }
     };
-    let provider = if form.provider == "cloudflare" { "cloudflare" } else { "manual" };
+    let provider = if form.provider == "cloudflare" {
+        "cloudflare"
+    } else {
+        "manual"
+    };
     let staging = form.staging.as_deref() == Some("on");
     let resp = crate::dispatcher::dispatch_to_node(
         &state,
@@ -1063,12 +1054,18 @@ pub async fn post_node_wildcard_begin(
     )
     .await?;
     match resp {
-        RpcResponse::CertDns01BeginDomain { completed: true, .. } => Ok(Redirect::to(&format!(
+        RpcResponse::CertDns01BeginDomain {
+            completed: true, ..
+        } => Ok(Redirect::to(&format!(
             "/settings?flash={}#testnodes",
             urlencode(&format!("wildcard *.{base} issued on {}", form.node_id))
         ))
         .into_response()),
-        RpcResponse::CertDns01BeginDomain { completed: false, record_name, values } => {
+        RpcResponse::CertDns01BeginDomain {
+            completed: false,
+            record_name,
+            values,
+        } => {
             let tpl = NodeWildcardDns01Tpl {
                 username: &ctx.username,
                 user_initial: super::user_initial(&ctx.username),
@@ -1127,7 +1124,10 @@ pub async fn post_node_wildcard_finish(
     match resp {
         RpcResponse::CertDns01FinishDomain(_) => Ok(Redirect::to(&format!(
             "/settings?flash={}#testnodes",
-            urlencode(&format!("wildcard *.{} issued + applied to test sites", form.base))
+            urlencode(&format!(
+                "wildcard *.{} issued + applied to test sites",
+                form.base
+            ))
         ))
         .into_response()),
         RpcResponse::Error(e) => Ok(Redirect::to(&format!(

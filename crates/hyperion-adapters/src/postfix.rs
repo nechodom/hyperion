@@ -19,9 +19,9 @@
 //! No SMTP semantics (lettre handles that for Hyperion's own outbound).
 
 use crate::cmd;
+use crate::email::EmailConfig;
 use crate::fs::atomic_write;
 use crate::AdapterError;
-use crate::email::EmailConfig;
 use std::path::Path;
 
 /// `/etc/postfix/sasl_passwd` holds the relay credentials. We rewrite

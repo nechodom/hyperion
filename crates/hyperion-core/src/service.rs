@@ -302,10 +302,7 @@ pub trait AdapterPort: Send + Sync {
 
     /// Read the size of wp-content/debug.log in bytes (0 if missing).
     /// Used by the agent tick to refresh `wp_debug_log_size_bytes`.
-    async fn wp_debug_log_size(
-        &self,
-        htdocs: &str,
-    ) -> Result<i64, AdapterError>;
+    async fn wp_debug_log_size(&self, htdocs: &str) -> Result<i64, AdapterError>;
 
     /// Provision a per-hosting Redis ACL user. Idempotent — re-running
     /// with the same username + new password rotates the password.
@@ -412,8 +409,7 @@ pub struct HostingService<A: AdapterPort + 'static> {
     /// for a whitelisted unit like php8.4-fpm). Polled via
     /// `ServiceInstallStatus`. Single slot — apt would dpkg-lock
     /// concurrent jobs anyway.
-    pub service_install_progress:
-        Arc<tokio::sync::Mutex<hyperion_types::ServiceInstallStatus>>,
+    pub service_install_progress: Arc<tokio::sync::Mutex<hyperion_types::ServiceInstallStatus>>,
 }
 
 /// Default renewal window — matches Let's Encrypt's recommended
@@ -449,11 +445,7 @@ enum SpfMatch {
 /// no recursion past one `include:`), but the failure mode is
 /// always conservative: we say "differs" when in doubt, never
 /// "matches" wrongly.
-async fn check_spf_authorizes(
-    record: &str,
-    domain: &str,
-    our_ip: Option<&str>,
-) -> SpfMatch {
+async fn check_spf_authorizes(record: &str, domain: &str, our_ip: Option<&str>) -> SpfMatch {
     let our_ip_parsed = match our_ip.and_then(|s| s.parse::<std::net::Ipv4Addr>().ok()) {
         Some(ip) => ip,
         None => return SpfMatch::NoIp,
@@ -570,8 +562,7 @@ async fn check_spf_authorizes(
                     mechanism: format!("include:{target} → {mechanism}"),
                 };
             }
-            if let SpfMatch::CatchAll { mechanism } =
-                check_spf_include(target, our_ip_parsed).await
+            if let SpfMatch::CatchAll { mechanism } = check_spf_include(target, our_ip_parsed).await
             {
                 return SpfMatch::CatchAll {
                     mechanism: format!("include:{target} → {mechanism}"),
@@ -643,13 +634,17 @@ async fn check_spf_authorizes_no_recurse(
         };
         if mech == "all" {
             if qualifier == '+' || qualifier == '?' {
-                return SpfMatch::CatchAll { mechanism: tok.to_string() };
+                return SpfMatch::CatchAll {
+                    mechanism: tok.to_string(),
+                };
             }
             continue;
         }
         if let Some(rest) = mech.strip_prefix("ip4:") {
             if ip4_matches(rest, our_ip) {
-                return SpfMatch::Match { mechanism: format!("ip4:{rest}") };
+                return SpfMatch::Match {
+                    mechanism: format!("ip4:{rest}"),
+                };
             }
             continue;
         }
@@ -658,7 +653,9 @@ async fn check_spf_authorizes_no_recurse(
             for ip_str in dig_records(lookup, "A").await.unwrap_or_default() {
                 if let Ok(ip) = ip_str.parse::<std::net::Ipv4Addr>() {
                     if ip == our_ip {
-                        return SpfMatch::Match { mechanism: format!("a ({lookup})") };
+                        return SpfMatch::Match {
+                            mechanism: format!("a ({lookup})"),
+                        };
                     }
                 }
             }
@@ -754,9 +751,7 @@ fn count_profile_asset_refs(
                     // Boundary check: next char (if any) must be one
                     // of: end-of-string, '!', whitespace, or '#'.
                     // Otherwise `@asset:7` would match @asset:70.
-                    let after = stripped[pos + needle_len..]
-                        .chars()
-                        .next();
+                    let after = stripped[pos + needle_len..].chars().next();
                     let ok = match after {
                         None => true,
                         Some(c) => c == '!' || c.is_whitespace() || c == '#',
@@ -770,7 +765,6 @@ fn count_profile_asset_refs(
     }
     count
 }
-
 
 /// Drive a service-install job (apt-get install + systemctl
 /// enable --now) and stream output into the shared status slot.
@@ -816,7 +810,11 @@ async fn run_service_install(
         cmd: &str,
         args: &[&str],
     ) -> i32 {
-        append_line(slot, &format!("──── {label}: {cmd} {} ────", args.join(" "))).await;
+        append_line(
+            slot,
+            &format!("──── {label}: {cmd} {} ────", args.join(" ")),
+        )
+        .await;
         let mut child = match tokio::process::Command::new(cmd)
             .args(args)
             .env("DEBIAN_FRONTEND", "noninteractive")
@@ -903,11 +901,7 @@ async fn run_service_install(
         {
             Ok(c) => c,
             Err(e) => {
-                append_line(
-                    &slot,
-                    &format!("debconf-set-selections spawn failed: {e}"),
-                )
-                .await;
+                append_line(&slot, &format!("debconf-set-selections spawn failed: {e}")).await;
                 let mut g = slot.lock().await;
                 g.state = "failed".to_string();
                 g.finished_at = now_secs();
@@ -934,8 +928,13 @@ async fn run_service_install(
     // extension bundle), so split it into individual apt args —
     // otherwise apt-get tries to install one package literally named
     // "php8.3-fpm php8.3-cli …" and fails.
-    let mut apt_args: Vec<&str> =
-        vec!["install", "-y", "-q", "-o", "Dpkg::Options::=--force-confold"];
+    let mut apt_args: Vec<&str> = vec![
+        "install",
+        "-y",
+        "-q",
+        "-o",
+        "Dpkg::Options::=--force-confold",
+    ];
     apt_args.extend(pkg.split_whitespace());
     let install_code = tokio::time::timeout(
         std::time::Duration::from_secs(10 * 60),
@@ -968,7 +967,11 @@ async fn run_service_install(
         .await;
     }
 
-    let final_state = if final_code == 0 { "succeeded" } else { "failed" };
+    let final_state = if final_code == 0 {
+        "succeeded"
+    } else {
+        "failed"
+    };
     let mut g = slot.lock().await;
     g.state = final_state.to_string();
     g.finished_at = now_secs();
@@ -1027,7 +1030,11 @@ async fn run_update_script(
         cmd: &str,
         args: &[&str],
     ) -> i32 {
-        append_line(slot, &format!("\n──── {label}: {cmd} {} ────", args.join(" "))).await;
+        append_line(
+            slot,
+            &format!("\n──── {label}: {cmd} {} ────", args.join(" ")),
+        )
+        .await;
         let mut child = match tokio::process::Command::new(cmd)
             .args(args)
             .env("DEBIAN_FRONTEND", "noninteractive")
@@ -1099,9 +1106,7 @@ async fn run_update_script(
         // update.sh path is hardcoded — install-master.sh and
         // install-node.sh both drop it here. Bail with a clear log
         // line if it's missing rather than spawning into the void.
-        let script = std::path::PathBuf::from(
-            "/opt/hyperion/packaging/install/update.sh",
-        );
+        let script = std::path::PathBuf::from("/opt/hyperion/packaging/install/update.sh");
         if !script.exists() {
             append_line(
                 &slot,
@@ -1114,13 +1119,19 @@ async fn run_update_script(
                 &slot,
                 "hyperion-update",
                 "/bin/bash",
-                &[script.to_str().unwrap_or("/opt/hyperion/packaging/install/update.sh")],
+                &[script
+                    .to_str()
+                    .unwrap_or("/opt/hyperion/packaging/install/update.sh")],
             )
             .await;
         }
     }
 
-    let final_state = if last_code == 0 { "succeeded" } else { "failed" };
+    let final_state = if last_code == 0 {
+        "succeeded"
+    } else {
+        "failed"
+    };
     let mut g = slot.lock().await;
     g.state = final_state.to_string();
     g.finished_at = now_secs();
@@ -1148,9 +1159,7 @@ async fn prune_migration_bundle_dir(
         // do, not an error.
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
         Err(e) => {
-            return Err(RpcError::Internal_with(format!(
-                "read migration root: {e}"
-            )));
+            return Err(RpcError::Internal_with(format!("read migration root: {e}")));
         }
     };
     let cutoff = std::time::SystemTime::now()
@@ -1167,7 +1176,9 @@ async fn prune_migration_bundle_dir(
         if !name.starts_with("mig_") {
             continue;
         }
-        let Ok(meta) = entry.metadata().await else { continue };
+        let Ok(meta) = entry.metadata().await else {
+            continue;
+        };
         if !meta.is_dir() {
             continue;
         }
@@ -1235,24 +1246,21 @@ async fn rewrite_manifest_domain(
     new_aliases: &[String],
 ) -> Result<(), RpcError> {
     // Parse-check first so a typo doesn't burn the archive download.
-    let _ok = hyperion_validate::Domain::parse(new_domain).map_err(|e| {
-        RpcError::Validation {
-            message: format!("clone override_domain invalid: {e}"),
-        }
+    let _ok = hyperion_validate::Domain::parse(new_domain).map_err(|e| RpcError::Validation {
+        message: format!("clone override_domain invalid: {e}"),
     })?;
     for a in new_aliases {
         let _ = hyperion_validate::Domain::parse(a).map_err(|e| RpcError::Validation {
             message: format!("clone override_aliases entry '{a}' invalid: {e}"),
         })?;
     }
-    let raw = tokio::fs::read(manifest_path).await.map_err(|e| {
-        RpcError::Internal_with(format!("read manifest for rewrite: {e}"))
-    })?;
-    let mut json: serde_json::Value = serde_json::from_slice(&raw).map_err(|e| {
-        RpcError::Validation {
+    let raw = tokio::fs::read(manifest_path)
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("read manifest for rewrite: {e}")))?;
+    let mut json: serde_json::Value =
+        serde_json::from_slice(&raw).map_err(|e| RpcError::Validation {
             message: format!("manifest is not valid JSON: {e}"),
-        }
-    })?;
+        })?;
     if let Some(obj) = json.as_object_mut() {
         obj.insert(
             "domain".into(),
@@ -1274,12 +1282,11 @@ async fn rewrite_manifest_domain(
             message: "manifest must be a JSON object".into(),
         });
     }
-    let bytes = serde_json::to_vec_pretty(&json).map_err(|e| {
-        RpcError::Internal_with(format!("re-serialize manifest: {e}"))
-    })?;
-    tokio::fs::write(manifest_path, bytes).await.map_err(|e| {
-        RpcError::Internal_with(format!("write rewritten manifest: {e}"))
-    })?;
+    let bytes = serde_json::to_vec_pretty(&json)
+        .map_err(|e| RpcError::Internal_with(format!("re-serialize manifest: {e}")))?;
+    tokio::fs::write(manifest_path, bytes)
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("write rewritten manifest: {e}")))?;
     Ok(())
 }
 
@@ -1314,11 +1321,16 @@ async fn curl_to_file(url: &str, dest: &std::path::Path) -> Result<(), RpcError>
     let args: Vec<String> = vec![
         "-fsS".into(),
         "-k".into(),
-        "--max-time".into(), "1800".into(),
-        "--max-filesize".into(), MIGRATION_MAX_DOWNLOAD_BYTES.to_string(),
-        "--max-redirs".into(), "0".into(),
-        "--proto".into(), "=https,http".into(),
-        "-o".into(), dest.display().to_string(),
+        "--max-time".into(),
+        "1800".into(),
+        "--max-filesize".into(),
+        MIGRATION_MAX_DOWNLOAD_BYTES.to_string(),
+        "--max-redirs".into(),
+        "0".into(),
+        "--proto".into(),
+        "=https,http".into(),
+        "-o".into(),
+        dest.display().to_string(),
         url.to_string(),
     ];
     let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
@@ -1421,7 +1433,14 @@ async fn ahead_of_remote(latest: &str) -> AheadResult {
         return AheadResult::Unknown;
     }
     let out = tokio::process::Command::new("/usr/bin/git")
-        .args(["-C", "/opt/hyperion", "merge-base", "--is-ancestor", latest, "HEAD"])
+        .args([
+            "-C",
+            "/opt/hyperion",
+            "merge-base",
+            "--is-ancestor",
+            latest,
+            "HEAD",
+        ])
         .output()
         .await;
     match out {
@@ -1441,11 +1460,20 @@ async fn ahead_of_remote(latest: &str) -> AheadResult {
                     stderr = %String::from_utf8_lossy(&f.stderr).trim(),
                     "git fetch during version check failed — version may read Unknown"
                 ),
-                Err(e) => tracing::debug!(error = %e, "git fetch during version check could not spawn"),
+                Err(e) => {
+                    tracing::debug!(error = %e, "git fetch during version check could not spawn")
+                }
                 _ => {}
             }
             let retry = tokio::process::Command::new("/usr/bin/git")
-                .args(["-C", "/opt/hyperion", "merge-base", "--is-ancestor", latest, "HEAD"])
+                .args([
+                    "-C",
+                    "/opt/hyperion",
+                    "merge-base",
+                    "--is-ancestor",
+                    latest,
+                    "HEAD",
+                ])
                 .output()
                 .await;
             match retry {
@@ -1870,9 +1898,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                             );
                         }
                         rollback_and_log(&mut stack).await;
-                        return Err(RpcError::Internal_with(format!(
-                            "system_users insert: {e}"
-                        )));
+                        return Err(RpcError::Internal_with(format!("system_users insert: {e}")));
                     }
                 }
             }
@@ -2049,7 +2075,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let sans: Vec<String> = req.aliases.iter().map(|d| d.to_string()).collect();
         let parent_base = domain.split_once('.').map(|(_, rest)| rest.to_string());
         let shared_wildcard = match parent_base.as_deref() {
-            Some(base) if certificates::is_wildcard(&self.pool, base).await.unwrap_or(false) => {
+            Some(base)
+                if certificates::is_wildcard(&self.pool, base)
+                    .await
+                    .unwrap_or(false) =>
+            {
                 certificates::get(&self.pool, base).await.ok().flatten()
             }
             _ => None,
@@ -2510,7 +2540,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         self.notify_admins(
             "warn",
             "Hosting moved to trash",
-            &format!("{} will be GC'd after the trash retention window.", detail.domain),
+            &format!(
+                "{} will be GC'd after the trash retention window.",
+                detail.domain
+            ),
             "/trash",
             "hosting.trash",
         )
@@ -2574,7 +2607,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // refuses to re-trash a trashed row). We bypass delete() and
         // call the hard-delete machinery directly here so the trash
         // setting doesn't redirect us back into trash().
-        self.hard_delete_internal(detail, DeleteOpts::default()).await?;
+        self.hard_delete_internal(detail, DeleteOpts::default())
+            .await?;
         Ok(())
     }
 
@@ -2882,9 +2916,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
         // 5. Re-render vhost so fastcgi_pass points at the new socket.
         //    Pull the FRESH detail (with new php_version) for rendering.
-        let new_detail = self
-            .get(HostingSelector::Id(detail.id.clone()))
-            .await?;
+        let new_detail = self.get(HostingSelector::Id(detail.id.clone())).await?;
         if let Err(e) = self.adapters.nginx_write_vhost(&new_detail).await {
             return Err(RpcError::Internal_with(format!(
                 "nginx_write_vhost after PHP version change failed: {e} \
@@ -3226,8 +3258,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // roll the alias set back to what nginx is still serving.
         let new_detail = self.get(HostingSelector::Id(detail.id.clone())).await?;
         if let Err(e) = self.adapters.nginx_write_vhost(&new_detail).await {
-            let _ =
-                hyperion_state::hostings::replace_aliases(&self.pool, &detail.id, &old_aliases).await;
+            let _ = hyperion_state::hostings::replace_aliases(&self.pool, &detail.id, &old_aliases)
+                .await;
             return Err(RpcError::Validation {
                 message: format!("nginx config rejected: {e}. Aliases reverted."),
             });
@@ -3326,7 +3358,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             // Clear stored password secret.
             let _ = self
                 .secrets
-                .delete(&hyperion_types::SecretId(format!("redis-{}", detail.id.as_str())))
+                .delete(&hyperion_types::SecretId(format!(
+                    "redis-{}",
+                    detail.id.as_str()
+                )))
                 .await;
             self.append_audit(
                 "hosting.set_redis",
@@ -3491,9 +3526,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             Ok(_) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => {
-                return Err(RpcError::Internal_with(format!(
-                    "truncate debug.log: {e}"
-                )));
+                return Err(RpcError::Internal_with(format!("truncate debug.log: {e}")));
             }
         }
         // Update sampled size in DB so the UI reflects the new state.
@@ -3580,7 +3613,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let updated = hyperion_state::scheduler::get_expiry(&self.pool, &detail.id)
             .await
             .map_err(|e| RpcError::Internal_with(format!("get_expiry: {e}")))?
-            .ok_or(RpcError::Internal { message: "row vanished after write (concurrent delete?)".into() })?;
+            .ok_or(RpcError::Internal {
+                message: "row vanished after write (concurrent delete?)".into(),
+            })?;
         Ok(expiry_row_to_dto(updated))
     }
 
@@ -4027,9 +4062,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     let (ok, note) = match (&archive_result, &dump_result) {
                         (Ok(_), None) => (true, "archive pushed".to_string()),
                         (Ok(_), Some(Ok(_))) => (true, "archive + dump pushed".into()),
-                        (Ok(_), Some(Err(e))) => {
-                            (false, format!("archive ok, dump failed: {e}"))
-                        }
+                        (Ok(_), Some(Err(e))) => (false, format!("archive ok, dump failed: {e}")),
                         (Err(e), _) => (false, format!("archive push failed: {e}")),
                     };
                     self.append_audit(
@@ -4070,24 +4103,26 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let rows = hyperion_state::backups::list_for(&self.pool, &detail.id, 1)
             .await
             .map_err(|e| RpcError::Internal_with(format!("list_for: {e}")))?;
-        let r = rows.into_iter().next().ok_or(RpcError::Internal { message: "row vanished after write (concurrent delete?)".into() })?;
+        let r = rows.into_iter().next().ok_or(RpcError::Internal {
+            message: "row vanished after write (concurrent delete?)".into(),
+        })?;
         Ok(run_to_wire(r))
     }
 
     /// Drop backup archives older than `retention.max_age_days` from disk
     /// AND from the backup_runs table, keeping the newest
     /// `retention.keep_latest_n` per hosting regardless of age.
-    pub(crate) async fn prune_old_backups(
-        &self,
-        hosting_id: &HostingId,
-    ) -> Result<u64, RpcError> {
+    pub(crate) async fn prune_old_backups(&self, hosting_id: &HostingId) -> Result<u64, RpcError> {
         let rows = hyperion_state::backups::list_for(&self.pool, hosting_id, 1000)
             .await
             .map_err(|e| RpcError::Internal_with(format!("list_for: {e}")))?;
         let cutoff = now_secs() - self.retention.max_age_days.max(1) * 24 * 3600;
         let mut pruned = 0u64;
         // Newest-first; skip the first keep_latest_n.
-        for r in rows.into_iter().skip(self.retention.keep_latest_n.max(1) as usize) {
+        for r in rows
+            .into_iter()
+            .skip(self.retention.keep_latest_n.max(1) as usize)
+        {
             if r.started_at >= cutoff {
                 continue;
             }
@@ -4264,11 +4299,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // Stable hash describing what we installed. Without an app_pack
         // this is just "vanilla-<version>-<locale>" so re-applying the
         // same options is detectable later.
-        let manifest_marker = format!(
-            "vanilla-{}-{}",
-            installed_version.trim(),
-            req.locale.trim()
-        );
+        let manifest_marker = format!("vanilla-{}-{}", installed_version.trim(), req.locale.trim());
         let pack_hash = wordpress::pack_hash(&manifest_marker);
         let now = now_secs();
         wordpress::record_install(
@@ -4326,18 +4357,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // through stdin via --prompt if wp-cli supports it. For simplicity
         // pass --user_pass=<pw> directly; arg array prevents shell injection.
         let user_arg = format!("--user_pass={new_password}");
-        let wp_args: [&str; 5] = [
-            "user",
-            "update",
-            &wp_user,
-            &user_arg,
-            "--skip-email",
-        ];
-        let argv = hyperion_adapters::wpcli::build_argv(
-            &detail.system_user,
-            &detail.root_dir,
-            &wp_args,
-        );
+        let wp_args: [&str; 5] = ["user", "update", &wp_user, &user_arg, "--skip-email"];
+        let argv =
+            hyperion_adapters::wpcli::build_argv(&detail.system_user, &detail.root_dir, &wp_args);
         let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
         hyperion_adapters::cmd::run("/usr/bin/sudo", &argv_refs)
             .await
@@ -4432,13 +4454,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     ) -> Result<hyperion_types::SftpStatus, RpcError> {
         let detail = self.get(sel).await?;
         let home = self.home_dir_for(&detail.system_user);
-        let (enabled, keys) =
-            hyperion_adapters::ssh::read_status(&detail.system_user, &home)
-                .await
-                .map_err(|e| RpcError::ProvisioningFailed {
-                    stage: "sftp_status".into(),
-                    reason: e.to_string(),
-                })?;
+        let (enabled, keys) = hyperion_adapters::ssh::read_status(&detail.system_user, &home)
+            .await
+            .map_err(|e| RpcError::ProvisioningFailed {
+                stage: "sftp_status".into(),
+                reason: e.to_string(),
+            })?;
         Ok(hyperion_types::SftpStatus {
             enabled,
             system_user: detail.system_user.clone(),
@@ -4501,7 +4522,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             "ok",
         )
         .await;
-        self.sftp_status(HostingSelector::Id(detail.id.clone())).await
+        self.sftp_status(HostingSelector::Id(detail.id.clone()))
+            .await
     }
 
     /// Add an IP ban (manual or auto). IPv4 only — validated at the
@@ -4814,8 +4836,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         if detail.root_dir.is_empty() {
             return Ok(None);
         }
-        let Some(detected_version) = detect_wp_install_on_disk(&detail.root_dir).await
-        else {
+        let Some(detected_version) = detect_wp_install_on_disk(&detail.root_dir).await else {
             return Ok(None);
         };
         // Self-heal: record the detected install so subsequent
@@ -4938,7 +4959,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             hyperion_types::WpPluginAction::UpdateAll => "update_all",
             hyperion_types::WpPluginAction::Delete => "delete",
             hyperion_types::WpPluginAction::SetAutoUpdate { enabled } => {
-                if *enabled { "auto_update_enable" } else { "auto_update_disable" }
+                if *enabled {
+                    "auto_update_enable"
+                } else {
+                    "auto_update_disable"
+                }
             }
         };
         self.append_audit(
@@ -4948,7 +4973,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 "action": action_label,
                 "slug": slug,
                 "state": out.state,
-            }).to_string(),
+            })
+            .to_string(),
             &out.state,
         )
         .await;
@@ -5105,7 +5131,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 "enumerated": enumerated,
             })
             .to_string(),
-            if result.feed_unavailable { "failed" } else { "ok" },
+            if result.feed_unavailable {
+                "failed"
+            } else {
+                "ok"
+            },
         )
         .await;
         Ok(result)
@@ -5373,9 +5403,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // Reuse backup_now to produce the archive — it's already the
         // most-tested code path for "snapshot this hosting to disk".
         let run = self.backup_now(sel.clone()).await?;
-        let archive_path_str = run.archive_path.as_ref().ok_or_else(|| {
-            RpcError::Internal_with("backup did not produce an archive".into())
-        })?;
+        let archive_path_str = run
+            .archive_path
+            .as_ref()
+            .ok_or_else(|| RpcError::Internal_with("backup did not produce an archive".into()))?;
         let archive_path = std::path::PathBuf::from(archive_path_str);
         if !archive_path.exists() {
             return Err(RpcError::Internal_with(
@@ -5393,10 +5424,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // Hardlink the archive into the migration dir — keeps a stable
         // path while costing zero disk (same inode). Fall back to copy
         // if the FS doesn't support hardlinks (NFS, certain overlayfs).
-        if tokio::fs::hard_link(&archive_path, &archive_dest).await.is_err() {
-            tokio::fs::copy(&archive_path, &archive_dest).await.map_err(|e| {
-                RpcError::Internal_with(format!("copy archive into bundle: {e}"))
-            })?;
+        if tokio::fs::hard_link(&archive_path, &archive_dest)
+            .await
+            .is_err()
+        {
+            tokio::fs::copy(&archive_path, &archive_dest)
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("copy archive into bundle: {e}")))?;
         }
 
         // Compute SHA-256 of the archive for the manifest. The full
@@ -5491,16 +5525,18 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         &self,
         manifest_path: String,
     ) -> Result<hyperion_types::HostingImportResult, RpcError> {
-        let manifest_bytes = tokio::fs::read(&manifest_path).await.map_err(|e| {
-            RpcError::Validation {
-                message: format!("manifest read failed: {e}"),
-            }
-        })?;
+        let manifest_bytes =
+            tokio::fs::read(&manifest_path)
+                .await
+                .map_err(|e| RpcError::Validation {
+                    message: format!("manifest read failed: {e}"),
+                })?;
         let manifest: hyperion_types::HostingMigrationManifest =
             serde_json::from_slice(&manifest_bytes).map_err(|e| RpcError::Validation {
                 message: format!("manifest parse failed: {e}"),
             })?;
-        if manifest.schema_version > hyperion_types::HostingMigrationManifest::CURRENT_SCHEMA_VERSION
+        if manifest.schema_version
+            > hyperion_types::HostingMigrationManifest::CURRENT_SCHEMA_VERSION
         {
             return Err(RpcError::Validation {
                 message: format!(
@@ -5584,22 +5620,28 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // system_user, etc.) so the operator can retry without
         // hitting "AlreadyExists" on the second attempt.
         let restore_path = archive_path.display().to_string();
-        if let Err(restore_err) = self.backup_restore(
-            HostingSelector::Id(created.id.clone()),
-            restore_path,
-            hyperion_types::BackupRestoreMode::FilesAndDb,
-        )
-        .await
+        if let Err(restore_err) = self
+            .backup_restore(
+                HostingSelector::Id(created.id.clone()),
+                restore_path,
+                hyperion_types::BackupRestoreMode::FilesAndDb,
+            )
+            .await
         {
             tracing::warn!(
                 hosting = %created.id.as_str(),
                 error = %restore_err,
                 "migration import: restore failed — rolling back half-created hosting"
             );
-            let _ = self.delete(
-                HostingSelector::Id(created.id.clone()),
-                DeleteOpts { keep_user: false, keep_database: false },
-            ).await;
+            let _ = self
+                .delete(
+                    HostingSelector::Id(created.id.clone()),
+                    DeleteOpts {
+                        keep_user: false,
+                        keep_database: false,
+                    },
+                )
+                .await;
             return Err(restore_err);
         }
 
@@ -5688,8 +5730,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // Staging area lives next to the export dir so /var/lib has
         // a single migration namespace operators can grep / delete.
         let staging_id = format!("inc_{}", ulid::Ulid::new());
-        let staging = std::path::PathBuf::from("/var/lib/hyperion/migration-incoming")
-            .join(&staging_id);
+        let staging =
+            std::path::PathBuf::from("/var/lib/hyperion/migration-incoming").join(&staging_id);
         tokio::fs::create_dir_all(&staging)
             .await
             .map_err(|e| RpcError::Internal_with(format!("mkdir staging: {e}")))?;
@@ -5712,12 +5754,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // preserved (it's the archive's checksum, not the
         // manifest's), so the integrity check still passes.
         if let Some(ref new_dom) = override_domain {
-            if let Err(e) = rewrite_manifest_domain(
-                &manifest_path,
-                new_dom,
-                &override_aliases,
-            )
-            .await
+            if let Err(e) =
+                rewrite_manifest_domain(&manifest_path, new_dom, &override_aliases).await
             {
                 // Wipe staging before bailing — manifest rewrite is
                 // pre-archive, so we haven't burned the GB yet.
@@ -5973,11 +6011,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// Forwards to the adapter's curl-based probe. Validates the
     /// username shape upfront so a malicious caller can't smuggle
     /// curl args via "user".
-    pub async fn ftp_verify_login(
-        &self,
-        user: String,
-        password: String,
-    ) -> Result<bool, RpcError> {
+    pub async fn ftp_verify_login(&self, user: String, password: String) -> Result<bool, RpcError> {
         if !user
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
@@ -6171,10 +6205,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         };
 
         let (status, reason): (String, String) = if existing.is_empty() {
-            (
-                "missing".into(),
-                "no SPF TXT record at the apex".into(),
-            )
+            ("missing".into(), "no SPF TXT record at the apex".into())
         } else if existing.len() > 1 {
             (
                 "multiple".into(),
@@ -6302,7 +6333,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .get(HostingSelector::Id(row.hosting_id.clone()))
                 .await
                 .ok();
-            let domain = detail.as_ref().map(|d| d.domain.clone()).unwrap_or_default();
+            let domain = detail
+                .as_ref()
+                .map(|d| d.domain.clone())
+                .unwrap_or_default();
             let webhook = match row.profile_id {
                 Some(pid) => self
                     .profile_get(pid)
@@ -6338,7 +6372,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             let body = format!(
                 "Hosting:    {domain}\nPrice:      {price_str}\nDue in:     {due_in_days} day(s)\n\n--\nHyperion\n"
             );
-            self.notify_email(&to, &subj, &body, Some(row.hosting_id.as_str()), "billing").await;
+            self.notify_email(&to, &subj, &body, Some(row.hosting_id.as_str()), "billing")
+                .await;
             count += 1;
         }
         Ok(count)
@@ -6378,7 +6413,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let row = profiles::get(&self.pool, id)
             .await
             .map_err(|e| RpcError::Internal_with(format!("profile re-read: {e}")))?
-            .ok_or(RpcError::Internal { message: "row vanished after write (concurrent delete?)".into() })?;
+            .ok_or(RpcError::Internal {
+                message: "row vanished after write (concurrent delete?)".into(),
+            })?;
         self.append_audit(
             "profile.create",
             None,
@@ -6449,11 +6486,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         limits.db_max_connections = p.db_max_connections;
         limits.disk_hard_bytes = p.disk_hard_mb.map(|m| m * 1024 * 1024);
         limits.bw_monthly_bytes = p.bw_monthly_mb.map(|m| m * 1024 * 1024);
-        self.set_limits(
-            HostingSelector::Id(detail.id.clone()),
-            limits,
-        )
-        .await?;
+        self.set_limits(HostingSelector::Id(detail.id.clone()), limits)
+            .await?;
 
         // Push expiry policy (without changing expires_at — operator sets that).
         let cur = self
@@ -6526,8 +6560,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         self.append_audit(
             "profile.apply",
             Some(detail.id.as_str()),
-            &serde_json::json!({"profile_id": profile_id, "profile_name": p.name})
-                .to_string(),
+            &serde_json::json!({"profile_id": profile_id, "profile_name": p.name}).to_string(),
             "ok",
         )
         .await;
@@ -6562,7 +6595,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let mut ok = 0usize;
         let mut fail = 0usize;
         for kind in ["plugin", "theme"] {
-            let text = if kind == "plugin" { plugins_text } else { themes_text };
+            let text = if kind == "plugin" {
+                plugins_text
+            } else {
+                themes_text
+            };
             for raw in text.lines() {
                 let line = raw.trim();
                 if line.is_empty() || line.starts_with('#') {
@@ -6648,9 +6685,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 activate,
             )
             .await
-            .map_err(|e| RpcError::Internal_with(format!(
-                "wp {kind} install {label} failed: {e}"
-            )))?;
+            .map_err(|e| {
+                RpcError::Internal_with(format!("wp {kind} install {label} failed: {e}"))
+            })?;
         Ok((label, activate))
     }
 
@@ -6943,9 +6980,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// expiring soonest at the top. The `node_id` field carries
     /// where the cert lives so the panel's cross-node fanout can
     /// merge multiple agents' results into one screen.
-    pub async fn cert_overview(
-        &self,
-    ) -> Result<Vec<hyperion_types::CertOverviewItem>, RpcError> {
+    pub async fn cert_overview(&self) -> Result<Vec<hyperion_types::CertOverviewItem>, RpcError> {
         let rows = hyperion_state::certificates::list_all(&self.pool)
             .await
             .map_err(|e| RpcError::Internal_with(format!("cert_overview list: {e}")))?;
@@ -7139,8 +7174,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         use rand::RngCore;
         rand::thread_rng().fill_bytes(&mut secret_bytes);
         let secret_plain = hex::encode(secret_bytes);
-        let secret_hash =
-            hex::encode(blake3::hash(secret_plain.as_bytes()).as_bytes());
+        let secret_hash = hex::encode(blake3::hash(secret_plain.as_bytes()).as_bytes());
         let row = hyperion_state::nodes::NewNode {
             node_id: node_id.clone(),
             label,
@@ -7358,9 +7392,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             // Best-effort write; failure is non-fatal — the row
             // gets stored without a secret path, the UI shows
             // "secret never persisted" and the runner refuses.
-            if let Err(e) =
-                write_secret_file(&path, plaintext.as_bytes()).await
-            {
+            if let Err(e) = write_secret_file(&path, plaintext.as_bytes()).await {
                 tracing::warn!(path = %path, error = %e, "backup secret write failed");
             }
             Some(path)
@@ -7416,13 +7448,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         hyperion_state::backup_targets::delete(&self.pool, id)
             .await
             .map_err(|e| RpcError::Internal_with(format!("backup_target delete: {e}")))?;
-        self.append_audit(
-            "backup.target.delete",
-            Some(&id.to_string()),
-            "{}",
-            "ok",
-        )
-        .await;
+        self.append_audit("backup.target.delete", Some(&id.to_string()), "{}", "ok")
+            .await;
         Ok(())
     }
 
@@ -7475,7 +7502,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             format!("endpoint reachable (HTTP {code})")
         } else {
             let stderr = String::from_utf8_lossy(&out.stderr);
-            format!("probe failed: {} (curl exit {:?})", stderr.trim(), out.status.code())
+            format!(
+                "probe failed: {} (curl exit {:?})",
+                stderr.trim(),
+                out.status.code()
+            )
         };
         Ok(hyperion_types::BackupTargetProbe {
             ok,
@@ -7712,11 +7743,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .collect())
     }
 
-    pub async fn web_session_revoke(
-        &self,
-        sid: &str,
-        revoked_by: i64,
-    ) -> Result<bool, RpcError> {
+    pub async fn web_session_revoke(&self, sid: &str, revoked_by: i64) -> Result<bool, RpcError> {
         let r = hyperion_state::web_sessions::revoke(&self.pool, sid, revoked_by, now_secs())
             .await
             .map_err(|e| RpcError::Internal_with(format!("web_session_revoke: {e}")))?;
@@ -8101,16 +8128,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 stage: "cert_write".into(),
                 reason: e.to_string(),
             })?;
-        hyperion_adapters::fs::atomic_write(
-            &cert_path,
-            validated.fullchain_pem.as_bytes(),
-            0o644,
-        )
-        .await
-        .map_err(|e| RpcError::ProvisioningFailed {
-            stage: "cert_write".into(),
-            reason: e.to_string(),
-        })?;
+        hyperion_adapters::fs::atomic_write(&cert_path, validated.fullchain_pem.as_bytes(), 0o644)
+            .await
+            .map_err(|e| RpcError::ProvisioningFailed {
+                stage: "cert_write".into(),
+                reason: e.to_string(),
+            })?;
         hyperion_adapters::fs::atomic_write(&key_path, key_pem.as_bytes(), 0o600)
             .await
             .map_err(|e| RpcError::ProvisioningFailed {
@@ -8191,10 +8214,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
     /// Resolve the effective ACME contact email for a hosting (per-hosting
     /// override → agent default), rejecting placeholders.
-    fn effective_acme_email<'a>(
-        &'a self,
-        row_email: Option<&'a str>,
-    ) -> Result<&'a str, RpcError> {
+    fn effective_acme_email<'a>(&'a self, row_email: Option<&'a str>) -> Result<&'a str, RpcError> {
         let email = row_email
             .filter(|s| !s.trim().is_empty())
             .unwrap_or(self.acme_contact_email.as_str())
@@ -8241,27 +8261,21 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let wildcard = format!("*.{}", detail.domain);
         let sans = vec![wildcard];
 
-        let pending = hyperion_adapters::acme::dns01_begin(
-            &detail.domain,
-            &sans,
-            &email,
-            staging,
-        )
-        .await
-        .map_err(|e| RpcError::ProvisioningFailed {
-            stage: "acme_dns01_begin".into(),
-            reason: e.to_string(),
-        })?;
+        let pending = hyperion_adapters::acme::dns01_begin(&detail.domain, &sans, &email, staging)
+            .await
+            .map_err(|e| RpcError::ProvisioningFailed {
+                stage: "acme_dns01_begin".into(),
+                reason: e.to_string(),
+            })?;
 
         if provider == "cloudflare" {
-            let token = hyperion_adapters::cloudflare::token().ok_or_else(|| {
-                RpcError::Validation {
+            let token =
+                hyperion_adapters::cloudflare::token().ok_or_else(|| RpcError::Validation {
                     message: "no Cloudflare token configured — drop one in \
                               /etc/hyperion/cloudflare.token (Zone:Read + DNS:Edit) \
                               or use the manual flow"
                         .into(),
-                }
-            })?;
+                })?;
             let ids = hyperion_adapters::cloudflare::publish_txt(
                 &token,
                 &pending.record_name,
@@ -8367,23 +8381,21 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let email = self.effective_acme_email(email)?.to_string();
         let sans = vec![format!("*.{}", base.as_str())];
 
-        let pending =
-            hyperion_adapters::acme::dns01_begin(base.as_str(), &sans, &email, staging)
-                .await
-                .map_err(|e| RpcError::ProvisioningFailed {
-                    stage: "acme_dns01_begin".into(),
-                    reason: e.to_string(),
-                })?;
+        let pending = hyperion_adapters::acme::dns01_begin(base.as_str(), &sans, &email, staging)
+            .await
+            .map_err(|e| RpcError::ProvisioningFailed {
+                stage: "acme_dns01_begin".into(),
+                reason: e.to_string(),
+            })?;
 
         if provider == "cloudflare" {
-            let token = hyperion_adapters::cloudflare::token().ok_or_else(|| {
-                RpcError::Validation {
+            let token =
+                hyperion_adapters::cloudflare::token().ok_or_else(|| RpcError::Validation {
                     message: "no Cloudflare token configured — drop one in \
                               /etc/hyperion/cloudflare.token (Zone:Read + DNS:Edit) \
                               or use the manual flow"
                         .into(),
-                }
-            })?;
+                })?;
             let ids = hyperion_adapters::cloudflare::publish_txt(
                 &token,
                 &pending.record_name,
@@ -8651,7 +8663,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                             Ok(_) => CertRenewOutcome::Failed {
                                 error: "Cloudflare DNS-01 renewal did not complete".into(),
                             },
-                            Err(e) => CertRenewOutcome::Failed { error: e.to_string() },
+                            Err(e) => CertRenewOutcome::Failed {
+                                error: e.to_string(),
+                            },
                         }
                     } else {
                         CertRenewOutcome::Skipped {
@@ -8715,10 +8729,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     self.notify_admins(
                         if days_left < 7 { "error" } else { "warn" },
                         "Cert renewal failed",
-                        &format!(
-                            "{domain_str} — {error} ({} day(s) until expiry)",
-                            days_left
-                        ),
+                        &format!("{domain_str} — {error} ({} day(s) until expiry)", days_left),
                         &format!("/hostings/{}", domain_str),
                         &format!("cert.renew_failed:{domain_str}"),
                     )
@@ -8878,11 +8889,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         })
     }
 
-    pub async fn node_stats(
-        &self,
-        hostname: &str,
-        version: &str,
-    ) -> Result<NodeStats, RpcError> {
+    pub async fn node_stats(&self, hostname: &str, version: &str) -> Result<NodeStats, RpcError> {
         let latest = metrics::latest(&self.pool)
             .await
             .map_err(|e| RpcError::Internal_with(format!("metrics: {e}")))?;
@@ -8925,14 +8932,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 });
             }
         }
-        hostings::set_acme_contact_email(
-            &self.pool,
-            &detail.id,
-            cleaned.as_deref(),
-            now_secs(),
-        )
-        .await
-        .map_err(|e| RpcError::Internal_with(format!("update: {e}")))?;
+        hostings::set_acme_contact_email(&self.pool, &detail.id, cleaned.as_deref(), now_secs())
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("update: {e}")))?;
         self.append_audit(
             "hosting.acme_email.set",
             Some(detail.id.as_str()),
@@ -8975,7 +8977,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         };
         if user.locked {
             return Ok(hyperion_types::WebLoginResult::Locked {
-                reason: user.locked_reason.unwrap_or_else(|| "account locked".into()),
+                reason: user
+                    .locked_reason
+                    .unwrap_or_else(|| "account locked".into()),
             });
         }
         // Verify the password (constant-time via argon2).
@@ -8997,8 +9001,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 self.append_audit(
                     "web.user.locked",
                     None,
-                    &serde_json::json!({"user_id": user.id, "reason": "failed_logins"})
-                        .to_string(),
+                    &serde_json::json!({"user_id": user.id, "reason": "failed_logins"}).to_string(),
                     "ok",
                 )
                 .await;
@@ -9155,9 +9158,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 message: "password must be at least 8 characters".into(),
             });
         }
-        let role: hyperion_state::web_users::WebRole = role.parse().map_err(|e: String| {
-            RpcError::Validation { message: e }
-        })?;
+        let role: hyperion_state::web_users::WebRole = role
+            .parse()
+            .map_err(|e: String| RpcError::Validation { message: e })?;
         let phc = hyperion_auth::hash_password(&password)
             .map_err(|e| RpcError::Internal_with(format!("hash: {e}")))?;
         let id = hyperion_state::web_users::insert(
@@ -9175,8 +9178,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         self.append_audit(
             "web.user.create",
             None,
-            &serde_json::json!({"id": id, "username": username, "role": role.as_str()})
-                .to_string(),
+            &serde_json::json!({"id": id, "username": username, "role": role.as_str()}).to_string(),
             "ok",
         )
         .await;
@@ -9313,11 +9315,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(mask_email(&new_email))
     }
 
-    pub async fn email_change_confirm(
-        &self,
-        user_id: i64,
-        code: String,
-    ) -> Result<(), RpcError> {
+    pub async fn email_change_confirm(&self, user_id: i64, code: String) -> Result<(), RpcError> {
         let pending = hyperion_state::web_users::get_pending_email(&self.pool, user_id)
             .await
             .map_err(|e| RpcError::Internal_with(format!("get pending: {e}")))?
@@ -9341,22 +9339,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let ok = hyperion_auth::verify_password(&code, &pending.code_hash)
             .map_err(|e| RpcError::Internal_with(format!("verify code: {e}")))?;
         if !ok {
-            let _ = hyperion_state::web_users::bump_pending_email_attempts(
-                &self.pool, user_id,
-            )
-            .await;
+            let _ =
+                hyperion_state::web_users::bump_pending_email_attempts(&self.pool, user_id).await;
             return Err(RpcError::Validation {
                 message: "wrong code".into(),
             });
         }
-        hyperion_state::web_users::set_email(
-            &self.pool,
-            user_id,
-            &pending.new_email,
-            now_secs(),
-        )
-        .await
-        .map_err(|e| RpcError::Internal_with(format!("set email: {e}")))?;
+        hyperion_state::web_users::set_email(&self.pool, user_id, &pending.new_email, now_secs())
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("set email: {e}")))?;
         let _ = hyperion_state::web_users::clear_pending_email(&self.pool, user_id).await;
         self.append_audit(
             "web.user.email_changed",
@@ -9380,9 +9371,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     }
 
     pub async fn web_user_set_role(&self, user_id: i64, role: String) -> Result<(), RpcError> {
-        let parsed: hyperion_state::web_users::WebRole = role.parse().map_err(|e: String| {
-            RpcError::Validation { message: e }
-        })?;
+        let parsed: hyperion_state::web_users::WebRole = role
+            .parse()
+            .map_err(|e: String| RpcError::Validation { message: e })?;
         // Refuse to demote the last super_admin.
         if !parsed.can_manage_users() {
             self.guard_last_super_admin(user_id).await?;
@@ -9420,7 +9411,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         .await
         .map_err(|e| RpcError::Internal_with(format!("lock: {e}")))?;
         self.append_audit(
-            if locked { "web.user.locked" } else { "web.user.unlocked" },
+            if locked {
+                "web.user.locked"
+            } else {
+                "web.user.unlocked"
+            },
             None,
             &serde_json::json!({"user_id": user_id, "reason": reason}).to_string(),
             "ok",
@@ -9466,7 +9461,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .map_err(|e| RpcError::Internal_with(format!("guard list: {e}")))?;
         let super_admins = users
             .iter()
-            .filter(|u| matches!(u.role, hyperion_state::web_users::WebRole::SuperAdmin) && !u.locked)
+            .filter(|u| {
+                matches!(u.role, hyperion_state::web_users::WebRole::SuperAdmin) && !u.locked
+            })
             .count();
         if super_admins <= 1 {
             return Err(RpcError::Validation {
@@ -9532,8 +9529,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .ok_or_else(|| RpcError::Validation {
                 message: "no pending 2FA enrollment".into(),
             })?;
-        let ok = hyperion_auth::verify_code(secret, code.trim())
-            .map_err(|e| RpcError::Validation {
+        let ok =
+            hyperion_auth::verify_code(secret, code.trim()).map_err(|e| RpcError::Validation {
                 message: format!("invalid code: {e}"),
             })?;
         if !ok {
@@ -9568,7 +9565,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         level: String,
         granted_by: Option<i64>,
     ) -> Result<(), RpcError> {
-        let lvl: hyperion_state::web_users::AccessLevel = level.parse()
+        let lvl: hyperion_state::web_users::AccessLevel = level
+            .parse()
             .map_err(|e: String| RpcError::Validation { message: e })?;
         // Validate user + hosting exist before writing.
         let user = hyperion_state::web_users::get_by_id(&self.pool, user_id)
@@ -9654,11 +9652,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .map_err(|e| RpcError::Internal_with(format!("avatar_filename: {e}")))
     }
 
-    pub async fn avatar_set(
-        &self,
-        user_id: i64,
-        filename: Option<String>,
-    ) -> Result<(), RpcError> {
+    pub async fn avatar_set(&self, user_id: i64, filename: Option<String>) -> Result<(), RpcError> {
         // Whitelist the filename shape (defense in depth — the web
         // handler already validates, but RPC consumers can call us
         // directly too).
@@ -9726,8 +9720,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             } else {
                 0
             };
-            let last_sampled_at =
-                samples.iter().map(|s| s.sampled_at).max().unwrap_or(0);
+            let last_sampled_at = samples.iter().map(|s| s.sampled_at).max().unwrap_or(0);
             let alert_state = if total == 0 {
                 "unknown".to_string()
             } else {
@@ -9769,7 +9762,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     pub async fn monitor_get(
         &self,
         sel: HostingSelector,
-    ) -> Result<(hyperion_types::MonitorConfigView, hyperion_types::MonitorHistory), RpcError> {
+    ) -> Result<
+        (
+            hyperion_types::MonitorConfigView,
+            hyperion_types::MonitorHistory,
+        ),
+        RpcError,
+    > {
         let detail = self.get(sel).await?;
         let cfg = hyperion_state::monitors::get(&self.pool, &detail.id)
             .await
@@ -9840,9 +9839,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
         }
         if let Some(ref u) = alert_webhook_url {
-            if !u.trim().is_empty()
-                && !(u.starts_with("https://") || u.starts_with("http://"))
-            {
+            if !u.trim().is_empty() && !(u.starts_with("https://") || u.starts_with("http://")) {
                 return Err(RpcError::Validation {
                     message: "webhook URL must start with http:// or https://".into(),
                 });
@@ -9868,8 +9865,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         self.append_audit(
             "monitor.config.set",
             Some(detail.id.as_str()),
-            &serde_json::json!({"enabled": enabled, "interval_secs": interval_secs})
-                .to_string(),
+            &serde_json::json!({"enabled": enabled, "interval_secs": interval_secs}).to_string(),
             "ok",
         )
         .await;
@@ -10112,11 +10108,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 message: e.to_string(),
             })?;
         let mut entries = Vec::new();
-        let mut rd = tokio::fs::read_dir(&abs).await.map_err(|e| {
-            RpcError::Validation {
+        let mut rd = tokio::fs::read_dir(&abs)
+            .await
+            .map_err(|e| RpcError::Validation {
                 message: format!("read_dir: {e}"),
-            }
-        })?;
+            })?;
         while let Some(entry) = rd
             .next_entry()
             .await
@@ -10188,12 +10184,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         use base64::Engine;
         let detail = self.get(sel).await?;
         let jail = std::path::PathBuf::from(&detail.root_dir);
-        let (bytes, name) =
-            hyperion_adapters::files::read_raw_in_jail(&jail, &rel_path)
-                .await
-                .map_err(|e| RpcError::Validation {
-                    message: e.to_string(),
-                })?;
+        let (bytes, name) = hyperion_adapters::files::read_raw_in_jail(&jail, &rel_path)
+            .await
+            .map_err(|e| RpcError::Validation {
+                message: e.to_string(),
+            })?;
         let mime = hyperion_adapters::files::guess_mime(&name).to_string();
         let bytes_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
         Ok((rel_path, bytes_b64, mime))
@@ -10221,8 +10216,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // The agent runs as root, so the file just written is root-owned
         // — chown it to the hosting's system user so PHP/WordPress and
         // FTP (running as that user) can rewrite/delete it. Best-effort.
-        let _ = hyperion_adapters::files::chown_in_jail(&jail, &rel_path, &detail.system_user)
-            .await;
+        let _ =
+            hyperion_adapters::files::chown_in_jail(&jail, &rel_path, &detail.system_user).await;
         self.append_audit(
             "hosting.file.write",
             Some(detail.id.as_str()),
@@ -10278,8 +10273,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             })?;
         // Root-owned otherwise — chown to the hosting user so WP plugin/
         // theme installs into this dir (and FTP) work. Best-effort.
-        let _ = hyperion_adapters::files::chown_in_jail(&jail, &rel_path, &detail.system_user)
-            .await;
+        let _ =
+            hyperion_adapters::files::chown_in_jail(&jail, &rel_path, &detail.system_user).await;
         self.append_audit(
             "hosting.file.mkdir",
             Some(detail.id.as_str()),
@@ -10334,11 +10329,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .map_err(|e| RpcError::Validation {
                 message: e.to_string(),
             })?;
-        let md = tokio::fs::metadata(&abs).await.map_err(|e| {
-            RpcError::Validation {
+        let md = tokio::fs::metadata(&abs)
+            .await
+            .map_err(|e| RpcError::Validation {
                 message: format!("stat: {e}"),
-            }
-        })?;
+            })?;
         if !md.is_file() {
             return Err(RpcError::Validation {
                 message: "not a regular file".into(),
@@ -10385,14 +10380,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .map_err(|e| RpcError::Internal_with(format!("list: {e}")))?;
         Ok(rows
             .into_iter()
-            .map(|(uid, username, email, lvl, by, at)| hyperion_types::WebHostingAccess {
-                user_id: uid,
-                username,
-                email,
-                level: lvl.as_str().to_string(),
-                granted_by: by,
-                granted_at: at,
-            })
+            .map(
+                |(uid, username, email, lvl, by, at)| hyperion_types::WebHostingAccess {
+                    user_id: uid,
+                    username,
+                    email,
+                    level: lvl.as_str().to_string(),
+                    granted_by: by,
+                    granted_at: at,
+                },
+            )
             .collect())
     }
 
@@ -10497,9 +10494,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 message: "destination address is required and must contain '@'".into(),
             });
         }
-        let cfg = self.email_config.as_ref().ok_or_else(|| RpcError::Validation {
-            message: "email is not configured — set [email] enabled=true + SMTP relay in agent.toml".into(),
-        })?;
+        let cfg = self
+            .email_config
+            .as_ref()
+            .ok_or_else(|| RpcError::Validation {
+                message:
+                    "email is not configured — set [email] enabled=true + SMTP relay in agent.toml"
+                        .into(),
+            })?;
         let subject = "Hyperion test email";
         let body = format!(
             "This is a test email from hyperion-agent.\n\
@@ -10541,8 +10543,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                  restart hyperion-agent to apply migration 017 if it hasn't yet"
             );
         }
-        let code = send_result
-            .map_err(|e| RpcError::Internal_with(format!("email send failed: {e}")))?;
+        let code =
+            send_result.map_err(|e| RpcError::Internal_with(format!("email send failed: {e}")))?;
         self.append_audit(
             "email.test.send",
             None,
@@ -10637,39 +10639,42 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // mailq output — full body + parsed summary. The summary
         // line is the last non-empty line; either "Mail queue is
         // empty" or "-- N Kbytes in M Requests."
-        let (mailq_summary, mailq_total, mailq_detail) =
-            match Command::new("/usr/sbin/postqueue").args(["-p"]).output().await {
-                Ok(o) if o.status.success() => {
-                    let body = String::from_utf8_lossy(&o.stdout).into_owned();
-                    let summary = body
-                        .lines()
-                        .rev()
-                        .find(|l| !l.trim().is_empty())
-                        .map(|s| s.trim().to_string())
-                        .unwrap_or_default();
-                    // Parse "N Requests" out of "-- 0 Kbytes in N Requests."
-                    let total = summary
-                        .split_whitespace()
-                        .position(|w| w == "Request" || w == "Requests")
-                        .and_then(|i| {
-                            let words: Vec<&str> = summary.split_whitespace().collect();
-                            i.checked_sub(1).and_then(|j| words.get(j).copied())
-                        })
-                        .and_then(|s| s.parse::<usize>().ok())
-                        .unwrap_or(0);
-                    // Cap detail at 4 KB so a runaway queue can't
-                    // bloat the RPC response.
-                    let detail = if body.len() > 4096 {
-                        let mut truncated: String = body.chars().take(4000).collect();
-                        truncated.push_str("\n… (truncated)\n");
-                        truncated
-                    } else {
-                        body
-                    };
-                    (summary, total, detail)
-                }
-                _ => (String::new(), 0usize, String::new()),
-            };
+        let (mailq_summary, mailq_total, mailq_detail) = match Command::new("/usr/sbin/postqueue")
+            .args(["-p"])
+            .output()
+            .await
+        {
+            Ok(o) if o.status.success() => {
+                let body = String::from_utf8_lossy(&o.stdout).into_owned();
+                let summary = body
+                    .lines()
+                    .rev()
+                    .find(|l| !l.trim().is_empty())
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_default();
+                // Parse "N Requests" out of "-- 0 Kbytes in N Requests."
+                let total = summary
+                    .split_whitespace()
+                    .position(|w| w == "Request" || w == "Requests")
+                    .and_then(|i| {
+                        let words: Vec<&str> = summary.split_whitespace().collect();
+                        i.checked_sub(1).and_then(|j| words.get(j).copied())
+                    })
+                    .and_then(|s| s.parse::<usize>().ok())
+                    .unwrap_or(0);
+                // Cap detail at 4 KB so a runaway queue can't
+                // bloat the RPC response.
+                let detail = if body.len() > 4096 {
+                    let mut truncated: String = body.chars().take(4000).collect();
+                    truncated.push_str("\n… (truncated)\n");
+                    truncated
+                } else {
+                    body
+                };
+                (summary, total, detail)
+            }
+            _ => (String::new(), 0usize, String::new()),
+        };
 
         // Outbound TCP probes for every common SMTP port. When 25
         // is blocked (typical for Hetzner / AWS / GCP / many Czech
@@ -10686,7 +10691,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .find(|p| p.port == 25)
             .map(|p| {
                 let msg = if p.reachable {
-                    format!("OK · {} reachable in {} ms", format_args!("{}:25", p.host), p.latency_ms)
+                    format!(
+                        "OK · {} reachable in {} ms",
+                        format_args!("{}:25", p.host),
+                        p.latency_ms
+                    )
                 } else {
                     format!(
                         "BLOCKED — connect to {}:25 failed: {}. \
@@ -10755,8 +10764,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         self.append_audit(
             "mta.queue_flush",
             None,
-            &serde_json::json!({ "attempted_after_flush": attempted })
-                .to_string(),
+            &serde_json::json!({ "attempted_after_flush": attempted }).to_string(),
             if out.status.success() { "ok" } else { "failed" },
         )
         .await;
@@ -10784,8 +10792,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         self.append_audit(
             "mta.queue_clear",
             None,
-            &serde_json::json!({ "cleared_count": before })
-                .to_string(),
+            &serde_json::json!({ "cleared_count": before }).to_string(),
             if out.status.success() { "ok" } else { "failed" },
         )
         .await;
@@ -10816,9 +10823,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// "validation-failed"}.
     /// Read the current panel ACME progress. Used by /settings to
     /// drive the HTMX-polled progress card.
-    pub async fn panel_cert_status(
-        &self,
-    ) -> Result<Option<PanelProgress>, RpcError> {
+    pub async fn panel_cert_status(&self) -> Result<Option<PanelProgress>, RpcError> {
         Ok(self.panel_progress.read().await.clone())
     }
 
@@ -10878,7 +10883,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                              Add an A record → {our_v4}{maybe_v6}. \
                              If you've just added it, retry with \"Skip DNS check\" \
                              once propagation completes.\n\nNote: {note}",
-                            maybe_v6 = if our_v6.is_empty() { String::new() } else { format!(" (or AAAA → {our_v6})") },
+                            maybe_v6 = if our_v6.is_empty() {
+                                String::new()
+                            } else {
+                                format!(" (or AAAA → {our_v6})")
+                            },
                             note = r.note,
                         ),
                         String::new(),
@@ -10939,8 +10948,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             acme_challenge_root: &acme_root,
         };
         let paths = hyperion_adapters::nginx::Paths::debian_defaults();
-        if let Err(e) = hyperion_adapters::nginx::write_panel_vhost(&paths, &input).await
-        {
+        if let Err(e) = hyperion_adapters::nginx::write_panel_vhost(&paths, &input).await {
             return Ok((
                 "nginx-failed".into(),
                 format!(
@@ -10973,7 +10981,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             *g = Some(PanelProgress {
                 hostname: hostname.clone(),
                 stage: "self-signed".into(),
-                message: "Bootstrap self-signed cert serving — Let's Encrypt issuance starting…".into(),
+                message: "Bootstrap self-signed cert serving — Let's Encrypt issuance starting…"
+                    .into(),
                 started_at: now_secs(),
                 not_after: bootstrap_not_after,
             });
@@ -11005,22 +11014,22 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     *g = Some(PanelProgress {
                         hostname: hostname_bg.clone(),
                         stage: "issuing".into(),
-                        message: "Requesting cert from Let's Encrypt + serving HTTP-01 challenge…".into(),
+                        message: "Requesting cert from Let's Encrypt + serving HTTP-01 challenge…"
+                            .into(),
                         started_at: now_secs(),
                         not_after: 0,
                     });
                 }
-                let result = hyperion_adapters::acme::issue_http01(
-                    hyperion_adapters::acme::IssueRequest {
+                let result =
+                    hyperion_adapters::acme::issue_http01(hyperion_adapters::acme::IssueRequest {
                         domain: &hostname_bg,
                         sans: &[],
                         contact_email: &email_trimmed,
                         staging: false,
                         challenge_root: std::path::Path::new(&challenge_root),
                         certs_root: "/etc/hyperion/certs",
-                    },
-                )
-                .await;
+                    })
+                    .await;
                 match result {
                     Ok(info) => {
                         // Re-render panel vhost — paths unchanged,
@@ -11041,9 +11050,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                             *g = Some(PanelProgress {
                                 hostname: hostname_bg,
                                 stage: "failed".into(),
-                                message: format!(
-                                    "Cert issued but nginx reload failed: {e}"
-                                ),
+                                message: format!("Cert issued but nginx reload failed: {e}"),
                                 started_at: now_secs(),
                                 not_after: info.not_after,
                             });
@@ -11284,7 +11291,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         actor_label: &str,
         actor_uid: i64,
     ) -> Result<String, RpcError> {
-        self.job_start(kind, target, payload_json, actor_label, actor_uid).await
+        self.job_start(kind, target, payload_json, actor_label, actor_uid)
+            .await
     }
 
     pub async fn job_progress_external(
@@ -11294,7 +11302,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         progress_pct: i64,
         log_append: &str,
     ) -> Result<(), RpcError> {
-        self.job_progress(id, step_label, progress_pct, log_append).await
+        self.job_progress(id, step_label, progress_pct, log_append)
+            .await
     }
 
     pub async fn job_finish_external(
@@ -11466,12 +11475,26 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         //                            that really failed.
 
         // Step 1.
-        d.fix_steps.push(self.run_fix_step("mount -o remount,rw /", "/bin/mount", &["-o", "remount,rw", "/"]).await);
+        d.fix_steps.push(
+            self.run_fix_step(
+                "mount -o remount,rw /",
+                "/bin/mount",
+                &["-o", "remount,rw", "/"],
+            )
+            .await,
+        );
         d.usr_writable_now = check_usr_writable().await.is_none();
 
         // Step 2: separate /usr mountpoint.
         if !d.usr_writable_now && !d.usr_mount_line.is_empty() {
-            d.fix_steps.push(self.run_fix_step("mount -o remount,rw /usr", "/bin/mount", &["-o", "remount,rw", "/usr"]).await);
+            d.fix_steps.push(
+                self.run_fix_step(
+                    "mount -o remount,rw /usr",
+                    "/bin/mount",
+                    &["-o", "remount,rw", "/usr"],
+                )
+                .await,
+            );
             d.usr_writable_now = check_usr_writable().await.is_none();
         }
 
@@ -11480,17 +11503,18 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // "Read-only file system" errors that confused the operator
         // even when the overall fix succeeded.
         if !d.usr_writable_now && d.immutable_attr_set {
-            d.fix_steps.push(self.run_fix_step("chattr -i /usr", "/usr/bin/chattr", &["-i", "/usr"]).await);
+            d.fix_steps.push(
+                self.run_fix_step("chattr -i /usr", "/usr/bin/chattr", &["-i", "/usr"])
+                    .await,
+            );
             d.usr_writable_now = check_usr_writable().await.is_none();
         }
 
         // ── final state + recommendations ───────────────────
         if d.usr_writable_now {
             d.final_state = "fixed".to_string();
-            d.recommendations.push(
-                "✓ /usr is now writable. Retry the install — apt-get should succeed."
-                    .into(),
-            );
+            d.recommendations
+                .push("✓ /usr is now writable. Retry the install — apt-get should succeed.".into());
             if d.fstab_root_line.contains("ro,") || d.fstab_root_line.contains(" ro ") {
                 d.recommendations.push(
                     "Warning: your /etc/fstab still says rootfs is `ro` — the next reboot \
@@ -11546,7 +11570,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     }
 
     /// Run one fix step, capture (exit, message, writability).
-    async fn run_fix_step(&self, label: &str, cmd: &str, args: &[&str]) -> hyperion_types::FsFixStep {
+    async fn run_fix_step(
+        &self,
+        label: &str,
+        cmd: &str,
+        args: &[&str],
+    ) -> hyperion_types::FsFixStep {
         let out = tokio::process::Command::new(cmd).args(args).output().await;
         let (exit_code, message) = match out {
             Ok(o) => {
@@ -11644,7 +11673,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                             return None;
                         }
                         let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                        if s.is_empty() { None } else { Some(s) }
+                        if s.is_empty() {
+                            None
+                        } else {
+                            Some(s)
+                        }
                     })
                     .unwrap_or_else(|| "localhost".to_string());
                 hyperion_adapters::postfix::ensure_direct_delivery_config(&fqdn)
@@ -11759,7 +11792,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // up zombie entries). Track outcomes for audit.
         let mut disk_removed = 0u8;
         let mut disk_errors: Vec<String> = Vec::new();
-        for p in [row.archive_path.clone(), row.db_dump_path.clone()].into_iter().flatten() {
+        for p in [row.archive_path.clone(), row.db_dump_path.clone()]
+            .into_iter()
+            .flatten()
+        {
             match tokio::fs::remove_file(&p).await {
                 Ok(()) => disk_removed += 1,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -11786,7 +11822,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 "disk_errors": disk_errors,
             })
             .to_string(),
-            if disk_errors.is_empty() { "ok" } else { "partial" },
+            if disk_errors.is_empty() {
+                "ok"
+            } else {
+                "partial"
+            },
         )
         .await;
         Ok(())
@@ -11875,23 +11915,21 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         section: String,
         fields: std::collections::BTreeMap<String, String>,
     ) -> Result<(), RpcError> {
-        let path = self.agent_config_path.as_ref().ok_or_else(|| {
-            RpcError::Validation {
+        let path = self
+            .agent_config_path
+            .as_ref()
+            .ok_or_else(|| RpcError::Validation {
                 message: "agent_config_path not wired — UI editing disabled".into(),
-            }
-        })?;
+            })?;
         let parsed = parse_agent_section_fields(&section, &fields)?;
         // Convert to the &[(&str, FieldValue)] shape the persist module
         // wants. Done in two steps so the &str references live long
         // enough for the slice.
         let owned: Vec<(String, crate::config_persist::FieldValue)> = parsed;
-        let view: Vec<(&str, crate::config_persist::FieldValue)> = owned
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.clone()))
-            .collect();
-        crate::config_persist::set_many(path, &section, &view).map_err(|e| {
-            RpcError::Internal_with(format!("config write failed: {e}"))
-        })?;
+        let view: Vec<(&str, crate::config_persist::FieldValue)> =
+            owned.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+        crate::config_persist::set_many(path, &section, &view)
+            .map_err(|e| RpcError::Internal_with(format!("config write failed: {e}")))?;
         // Audit. Don't echo field values (might be a password).
         let field_names: Vec<&str> = fields.keys().map(|s| s.as_str()).collect();
         self.append_audit(
@@ -11957,17 +11995,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             Ok(out) if out.status.success() => {
                 // Output: "<sha>\trefs/tags/rolling\n"
                 let raw = String::from_utf8_lossy(&out.stdout);
-                let sha = raw
-                    .split_whitespace()
-                    .next()
-                    .unwrap_or("")
-                    .to_string();
+                let sha = raw.split_whitespace().next().unwrap_or("").to_string();
                 if sha.is_empty() {
                     status.message = "probe failed: empty ls-remote output".into();
                 } else {
                     status.latest_sha = sha;
-                    let (avail, msg) =
-                        compare_git_shas(&status.current_sha, &status.latest_sha);
+                    let (avail, msg) = compare_git_shas(&status.current_sha, &status.latest_sha);
                     if avail {
                         // SHAs differ. Before flagging "update available",
                         // check whether `current` is actually a descendant
@@ -11981,8 +12014,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                         match ahead_of_remote(&status.latest_sha).await {
                             AheadResult::AheadOrEqual => {
                                 status.update_available = false;
-                                status.message =
-                                    "up to date (ahead of rolling tag)".into();
+                                status.message = "up to date (ahead of rolling tag)".into();
                             }
                             AheadResult::Behind => {
                                 status.update_available = true;
@@ -12038,11 +12070,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// drop `-qq` (we now stream output), capture stdout+stderr in
     /// the slot, and surface the real failure.
     pub async fn service_install(&self, name: String) -> Result<(), RpcError> {
-        let pkg = Self::service_whitelist_for(&name, false).ok_or_else(|| {
-            RpcError::Validation {
+        let pkg =
+            Self::service_whitelist_for(&name, false).ok_or_else(|| RpcError::Validation {
                 message: format!("service `{name}` is not on the install whitelist"),
-            }
-        })?;
+            })?;
         {
             let guard = self.service_install_progress.lock().await;
             if guard.state == "running" {
@@ -12150,10 +12181,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // backup archive checksums.
         let sha = hex::encode(blake3::hash(&bytes).as_bytes());
         // Dedupe — if the same bytes already exist, return that row.
-        if let Some(existing) =
-            hyperion_state::wp_assets::get_by_sha(&self.pool, &sha)
-                .await
-                .map_err(|e| RpcError::Internal_with(format!("dedupe lookup: {e}")))?
+        if let Some(existing) = hyperion_state::wp_assets::get_by_sha(&self.pool, &sha)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("dedupe lookup: {e}")))?
         {
             return Ok((existing.id, true));
         }
@@ -12223,9 +12253,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok((id, false))
     }
 
-    pub async fn wp_asset_list(
-        &self,
-    ) -> Result<Vec<hyperion_types::WpAssetSummary>, RpcError> {
+    pub async fn wp_asset_list(&self) -> Result<Vec<hyperion_types::WpAssetSummary>, RpcError> {
         let rows = hyperion_state::wp_assets::list(&self.pool)
             .await
             .map_err(|e| RpcError::Internal_with(format!("wp_asset list: {e}")))?;
@@ -12241,10 +12269,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let mut out: Vec<hyperion_types::WpAssetSummary> = Vec::with_capacity(rows.len());
         for r in rows {
             let profile_refs = count_profile_asset_refs(&profiles, r.id);
-            let install_count =
-                hyperion_state::wp_assets::install_count(&self.pool, r.id)
-                    .await
-                    .unwrap_or(0);
+            let install_count = hyperion_state::wp_assets::install_count(&self.pool, r.id)
+                .await
+                .unwrap_or(0);
             out.push(hyperion_types::WpAssetSummary {
                 id: r.id,
                 kind: r.kind,
@@ -12290,10 +12317,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         self.adapters
             .wp_cli(&detail.system_user, &htdocs, &row.kind, &source, activate)
             .await
-            .map_err(|e| RpcError::Internal_with(format!(
-                "wp {} install {} failed: {e}",
-                row.kind, row.original_name
-            )))?;
+            .map_err(|e| {
+                RpcError::Internal_with(format!(
+                    "wp {} install {} failed: {e}",
+                    row.kind, row.original_name
+                ))
+            })?;
         self.append_audit(
             "wp.install_from_asset",
             Some(detail.id.as_str()),
@@ -12370,9 +12399,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // write the new file in the same dir.
         let dir = std::path::PathBuf::from("/var/lib/hyperion/wp-assets").join(id.to_string());
         let _ = tokio::fs::remove_file(&dir.join(&row.stored_filename)).await;
-        tokio::fs::create_dir_all(&dir).await.map_err(|e| {
-            RpcError::Internal_with(format!("mkdir wp-assets/{id}: {e}"))
-        })?;
+        tokio::fs::create_dir_all(&dir)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("mkdir wp-assets/{id}: {e}")))?;
         let safe_name: String = original_name
             .chars()
             .filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-' || *c == '_')
@@ -12442,10 +12471,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             let sel = HostingSelector::Id(hyperion_types::HostingId(t.hosting_id.clone()));
             // Re-run the same install path. Reusing wp_install_from_asset
             // means it also updates record_install (bumps last_at) for free.
-            match self
-                .wp_install_from_asset(sel, asset_id, activate)
-                .await
-            {
+            match self.wp_install_from_asset(sel, asset_id, activate).await {
                 Ok(_) => ok += 1,
                 Err(e) => {
                     fail += 1;
@@ -12482,8 +12508,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         hyperion_state::wp_assets::delete(&self.pool, id)
             .await
             .map_err(|e| RpcError::Internal_with(format!("wp_asset delete: {e}")))?;
-        let dir =
-            std::path::PathBuf::from("/var/lib/hyperion/wp-assets").join(id.to_string());
+        let dir = std::path::PathBuf::from("/var/lib/hyperion/wp-assets").join(id.to_string());
         let _ = tokio::fs::remove_dir_all(&dir).await;
         self.append_audit(
             "wp_asset.delete",
@@ -12511,15 +12536,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     ///
     /// Refuses to start when an update is already running (one job
     /// per node at a time — `apt-get` would lock dpkg anyway).
-    pub async fn node_update_run(
-        &self,
-        do_apt: bool,
-        do_hyperion: bool,
-    ) -> Result<i64, RpcError> {
+    pub async fn node_update_run(&self, do_apt: bool, do_hyperion: bool) -> Result<i64, RpcError> {
         if !do_apt && !do_hyperion {
             return Err(RpcError::Validation {
-                message: "node_update_run: nothing to do (do_apt=false, do_hyperion=false)"
-                    .into(),
+                message: "node_update_run: nothing to do (do_apt=false, do_hyperion=false)".into(),
             });
         }
         let started_at = now_secs();
@@ -12562,9 +12582,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
     /// Read the current node-update job state. Cheap — just clones
     /// the in-memory state slot.
-    pub async fn node_update_status(
-        &self,
-    ) -> Result<hyperion_types::NodeUpdateStatus, RpcError> {
+    pub async fn node_update_status(&self) -> Result<hyperion_types::NodeUpdateStatus, RpcError> {
         Ok(self.node_update.lock().await.clone())
     }
 
@@ -12613,10 +12631,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         &self,
         template_id: &str,
     ) -> Result<(bool, String, String), RpcError> {
-        let cmds = firewall_template_commands(template_id).ok_or_else(|| {
-            RpcError::Validation {
-                message: format!("unknown firewall template id: {template_id}"),
-            }
+        let cmds = firewall_template_commands(template_id).ok_or_else(|| RpcError::Validation {
+            message: format!("unknown firewall template id: {template_id}"),
         })?;
         let mut out = String::new();
         let mut err = String::new();
@@ -12668,7 +12684,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 }
                 Ok(o) => {
                     applied = false;
-                    err = format!("nft list ruleset for persist: {}", String::from_utf8_lossy(&o.stderr));
+                    err = format!(
+                        "nft list ruleset for persist: {}",
+                        String::from_utf8_lossy(&o.stderr)
+                    );
                 }
                 Err(e) => {
                     applied = false;
@@ -12922,7 +12941,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             if masked {
                 sub = "masked".into();
             } else if !present {
-                sub = if is_critical { "missing".into() } else { "not installed".into() };
+                sub = if is_critical {
+                    "missing".into()
+                } else {
+                    "not installed".into()
+                };
             }
             let transient = status.transient();
             let severity = if masked {
@@ -13094,15 +13117,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// file + `crontab -u <user> <file>`. Validates lines look like
     /// crontab entries (5 schedule fields + a command, OR @reboot etc.)
     /// to prevent injection.
-    pub async fn cron_replace(
-        &self,
-        sel: HostingSelector,
-        body: String,
-    ) -> Result<(), RpcError> {
+    pub async fn cron_replace(&self, sel: HostingSelector, body: String) -> Result<(), RpcError> {
         let detail = self.get(sel).await?;
         validate_crontab(&body)?;
-        let tmp =
-            std::env::temp_dir().join(format!("hyperion-cron-{}.tab", detail.system_user));
+        let tmp = std::env::temp_dir().join(format!("hyperion-cron-{}.tab", detail.system_user));
         tokio::fs::write(&tmp, body.as_bytes())
             .await
             .map_err(|e| RpcError::Internal_with(format!("write tmp: {e}")))?;
@@ -13165,14 +13183,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         user_id: i64,
         notification_id: i64,
     ) -> Result<(), RpcError> {
-        hyperion_state::notifications::mark_read(
-            &self.pool,
-            user_id,
-            notification_id,
-            now_secs(),
-        )
-        .await
-        .map_err(|e| RpcError::Internal_with(format!("notifications mark_read: {e}")))?;
+        hyperion_state::notifications::mark_read(&self.pool, user_id, notification_id, now_secs())
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("notifications mark_read: {e}")))?;
         Ok(())
     }
 
@@ -13214,14 +13227,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 continue;
             }
             if let Err(e) = hyperion_state::notifications::insert(
-                &self.pool,
-                u.id,
-                severity,
-                title,
-                body,
-                href,
-                kind,
-                now,
+                &self.pool, u.id, severity, title, body, href, kind, now,
             )
             .await
             {
@@ -13256,10 +13262,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             // workflow fails at the very last step.
             std::path::PathBuf::from("/var/lib/hyperion/migration-incoming"),
         ];
-        if !allowed_roots
-            .iter()
-            .any(|r| canonical.starts_with(r))
-        {
+        if !allowed_roots.iter().any(|r| canonical.starts_with(r)) {
             return Err(RpcError::Validation {
                 message: format!(
                     "archive {} is not under an allowed backup root",
@@ -13435,11 +13438,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         new_domain: String,
     ) -> Result<(String, String), RpcError> {
         let source = self.get(sel).await?;
-        let new_dom = hyperion_validate::Domain::parse(&new_domain).map_err(|e| {
-            RpcError::Validation {
+        let new_dom =
+            hyperion_validate::Domain::parse(&new_domain).map_err(|e| RpcError::Validation {
                 message: format!("new domain invalid: {e}"),
-            }
-        })?;
+            })?;
         if new_dom.as_str() == source.domain {
             return Err(RpcError::Validation {
                 message: "new domain must differ from the source domain".into(),
@@ -13476,7 +13478,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             let _ = self
                 .delete(
                     HostingSelector::Id(created.id.clone()),
-                    DeleteOpts { keep_user: false, keep_database: false },
+                    DeleteOpts {
+                        keep_user: false,
+                        keep_database: false,
+                    },
                 )
                 .await;
             return Err(e);
@@ -13538,7 +13543,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         )
         .await;
 
-        Ok((created.id.as_str().to_string(), new_dom.as_str().to_string()))
+        Ok((
+            created.id.as_str().to_string(),
+            new_dom.as_str().to_string(),
+        ))
     }
 
     /// Best-effort `wp search-replace //from //to` + cache flush on a
@@ -13568,7 +13576,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 let frefs: Vec<&str> = flush.iter().map(String::as_str).collect();
                 let _ = hyperion_adapters::cmd::run("/usr/bin/sudo", &frefs).await;
             }
-            Err(e) => tracing::info!(error = %e, "wp_rewrite_domain skipped (non-WP or wp-cli error)"),
+            Err(e) => {
+                tracing::info!(error = %e, "wp_rewrite_domain skipped (non-WP or wp-cli error)")
+            }
         }
     }
 
@@ -13634,10 +13644,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let staging_domain = self
             .resolve_staging_domain(prod.id.as_str(), &prod.domain, staging_domain.as_deref())
             .await;
-        let staging_dom =
-            hyperion_validate::Domain::parse(&staging_domain).map_err(|e| RpcError::Validation {
+        let staging_dom = hyperion_validate::Domain::parse(&staging_domain).map_err(|e| {
+            RpcError::Validation {
                 message: format!("staging domain invalid: {e}"),
-            })?;
+            }
+        })?;
         // A custom hostname must differ from production, or the push-back
         // would overwrite the site it came from.
         if staging_domain == prod.domain {
@@ -13674,11 +13685,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
 
         // 1. Snapshot prod (also our restore source).
-        let run = self.backup_now(HostingSelector::Id(prod.id.clone())).await?;
-        let archive = run.archive_path.ok_or_else(|| RpcError::ProvisioningFailed {
-            stage: "staging_backup".into(),
-            reason: "prod backup produced no archive".into(),
-        })?;
+        let run = self
+            .backup_now(HostingSelector::Id(prod.id.clone()))
+            .await?;
+        let archive = run
+            .archive_path
+            .ok_or_else(|| RpcError::ProvisioningFailed {
+                stage: "staging_backup".into(),
+                reason: "prod backup produced no archive".into(),
+            })?;
 
         // 2. Provision the staging hosting mirroring prod.
         let create = HostingCreateReq {
@@ -13704,15 +13719,24 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             let _ = self
                 .delete(
                     HostingSelector::Id(created.id.clone()),
-                    DeleteOpts { keep_user: false, keep_database: false },
+                    DeleteOpts {
+                        keep_user: false,
+                        keep_database: false,
+                    },
                 )
                 .await;
             return Err(e);
         }
         let staging = self.get(HostingSelector::Id(created.id.clone())).await?;
-        self.chown_home_tree(&staging.system_user, &staging.domain).await?;
-        self.wp_rewrite_domain(&staging.system_user, &staging.root_dir, &prod.domain, &staging_domain)
-            .await;
+        self.chown_home_tree(&staging.system_user, &staging.domain)
+            .await?;
+        self.wp_rewrite_domain(
+            &staging.system_user,
+            &staging.root_dir,
+            &prod.domain,
+            &staging_domain,
+        )
+        .await;
 
         // Record the hostname THIS node actually used so push-back +
         // "Open staging" resolve it even if the master-side metadata write
@@ -13749,10 +13773,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let staging_domain = self
             .resolve_staging_domain(prod.id.as_str(), &prod.domain, staging_domain.as_deref())
             .await;
-        let staging_dom =
-            hyperion_validate::Domain::parse(&staging_domain).map_err(|e| RpcError::Validation {
+        let staging_dom = hyperion_validate::Domain::parse(&staging_domain).map_err(|e| {
+            RpcError::Validation {
                 message: format!("staging domain invalid: {e}"),
-            })?;
+            }
+        })?;
         let staging = self
             .get(HostingSelector::Domain(staging_dom))
             .await
@@ -13761,13 +13786,19 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             })?;
 
         // 1. Pre-push safety backup of prod (so a bad push is recoverable).
-        let _ = self.backup_now(HostingSelector::Id(prod.id.clone())).await?;
+        let _ = self
+            .backup_now(HostingSelector::Id(prod.id.clone()))
+            .await?;
         // 2. Snapshot staging — our push source.
-        let run = self.backup_now(HostingSelector::Id(staging.id.clone())).await?;
-        let archive = run.archive_path.ok_or_else(|| RpcError::ProvisioningFailed {
-            stage: "staging_backup".into(),
-            reason: "staging backup produced no archive".into(),
-        })?;
+        let run = self
+            .backup_now(HostingSelector::Id(staging.id.clone()))
+            .await?;
+        let archive = run
+            .archive_path
+            .ok_or_else(|| RpcError::ProvisioningFailed {
+                stage: "staging_backup".into(),
+                reason: "staging backup produced no archive".into(),
+            })?;
         // 3. Restore staging's snapshot over prod, fix ownership, rewrite.
         self.backup_restore(
             HostingSelector::Id(prod.id.clone()),
@@ -13775,9 +13806,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             hyperion_types::BackupRestoreMode::FilesAndDb,
         )
         .await?;
-        self.chown_home_tree(&prod.system_user, &prod.domain).await?;
-        self.wp_rewrite_domain(&prod.system_user, &prod.root_dir, &staging_domain, &prod.domain)
-            .await;
+        self.chown_home_tree(&prod.system_user, &prod.domain)
+            .await?;
+        self.wp_rewrite_domain(
+            &prod.system_user,
+            &prod.root_dir,
+            &staging_domain,
+            &prod.domain,
+        )
+        .await;
 
         self.append_audit(
             "wp.staging.push",
@@ -13796,14 +13833,14 @@ fn node_stats_from(
     latest: Option<metrics::NodeMetricsRow>,
     summaries: &[HostingSummary],
 ) -> NodeStats {
-    let (a, s, f) = summaries.iter().fold((0i64, 0i64, 0i64), |(a, s, f), x| {
-        match x.state {
+    let (a, s, f) = summaries
+        .iter()
+        .fold((0i64, 0i64, 0i64), |(a, s, f), x| match x.state {
             HostingState::Active => (a + 1, s, f),
             HostingState::Suspended => (a, s + 1, f),
             HostingState::Failed => (a, s, f + 1),
             _ => (a, s, f),
-        }
-    });
+        });
     let count = summaries.len() as i64;
     match latest {
         Some(r) => NodeStats {
@@ -13928,12 +13965,8 @@ fn profile_input_to_new(input: ProfileInput) -> hyperion_state::profiles::NewPro
         wp_themes: input.wp_themes,
         // Normalise empty strings to None so the DB stores NULL and
         // the wizard's "no preference" path stays clean.
-        default_php_version: input
-            .default_php_version
-            .filter(|s| !s.trim().is_empty()),
-        default_db_engine: input
-            .default_db_engine
-            .filter(|s| !s.trim().is_empty()),
+        default_php_version: input.default_php_version.filter(|s| !s.trim().is_empty()),
+        default_db_engine: input.default_db_engine.filter(|s| !s.trim().is_empty()),
     }
 }
 
@@ -13967,7 +14000,9 @@ fn profile_row_to_wire(r: hyperion_state::profiles::ProfileRow) -> HostingProfil
 fn derive_user_from_summary(s: &HostingSummary) -> Option<String> {
     // HostingSummary doesn't carry system_user yet; fall back to deriving
     // it from the domain the same way the create flow does.
-    SystemUserName::derive_from_domain(&s.domain).ok().map(|u| u.as_str().to_string())
+    SystemUserName::derive_from_domain(&s.domain)
+        .ok()
+        .map(|u| u.as_str().to_string())
 }
 
 fn period_key(now: i64) -> String {
@@ -14138,50 +14173,116 @@ fn firewall_template_commands(id: &str) -> Option<Vec<Vec<&'static str>>> {
     let header: Vec<Vec<&'static str>> = vec![
         vec!["add", "table", "inet", "hyperion"],
         vec![
-            "add", "chain", "inet", "hyperion", "input",
-            "{", "type", "filter", "hook", "input", "priority", "0", ";",
-            "policy", "accept", ";", "}",
+            "add", "chain", "inet", "hyperion", "input", "{", "type", "filter", "hook", "input",
+            "priority", "0", ";", "policy", "accept", ";", "}",
         ],
     ];
     let body: Vec<Vec<&'static str>> = match id {
         "web" => vec![
             vec![
-                "add", "rule", "inet", "hyperion", "input",
-                "tcp", "dport", "{", "80,", "443", "}", "accept",
-                "comment", "hyperion:web",
+                "add",
+                "rule",
+                "inet",
+                "hyperion",
+                "input",
+                "tcp",
+                "dport",
+                "{",
+                "80,",
+                "443",
+                "}",
+                "accept",
+                "comment",
+                "hyperion:web",
             ],
             vec![
-                "add", "rule", "inet", "hyperion", "input",
-                "udp", "dport", "443", "accept",
-                "comment", "hyperion:web-quic",
+                "add",
+                "rule",
+                "inet",
+                "hyperion",
+                "input",
+                "udp",
+                "dport",
+                "443",
+                "accept",
+                "comment",
+                "hyperion:web-quic",
             ],
         ],
         "mail" => vec![vec![
-            "add", "rule", "inet", "hyperion", "input",
-            "tcp", "dport",
-            "{", "25,", "465,", "587,", "993,", "995", "}", "accept",
-            "comment", "hyperion:mail",
+            "add",
+            "rule",
+            "inet",
+            "hyperion",
+            "input",
+            "tcp",
+            "dport",
+            "{",
+            "25,",
+            "465,",
+            "587,",
+            "993,",
+            "995",
+            "}",
+            "accept",
+            "comment",
+            "hyperion:mail",
         ]],
         "hyperion" => vec![vec![
-            "add", "rule", "inet", "hyperion", "input",
-            "tcp", "dport", "{", "8443,", "9443", "}", "accept",
-            "comment", "hyperion:hyperion",
+            "add",
+            "rule",
+            "inet",
+            "hyperion",
+            "input",
+            "tcp",
+            "dport",
+            "{",
+            "8443,",
+            "9443",
+            "}",
+            "accept",
+            "comment",
+            "hyperion:hyperion",
         ]],
         "ssh" => vec![vec![
-            "add", "rule", "inet", "hyperion", "input",
-            "tcp", "dport", "22", "accept",
-            "comment", "hyperion:ssh",
+            "add",
+            "rule",
+            "inet",
+            "hyperion",
+            "input",
+            "tcp",
+            "dport",
+            "22",
+            "accept",
+            "comment",
+            "hyperion:ssh",
         ]],
         "ftp" => vec![
             vec![
-                "add", "rule", "inet", "hyperion", "input",
-                "tcp", "dport", "21", "accept",
-                "comment", "hyperion:ftp-control",
+                "add",
+                "rule",
+                "inet",
+                "hyperion",
+                "input",
+                "tcp",
+                "dport",
+                "21",
+                "accept",
+                "comment",
+                "hyperion:ftp-control",
             ],
             vec![
-                "add", "rule", "inet", "hyperion", "input",
-                "tcp", "dport", "40000-50000", "accept",
-                "comment", "hyperion:ftp-passive",
+                "add",
+                "rule",
+                "inet",
+                "hyperion",
+                "input",
+                "tcp",
+                "dport",
+                "40000-50000",
+                "accept",
+                "comment",
+                "hyperion:ftp-passive",
             ],
         ],
         // "worker_rpc" needs <MASTER_IP> substitution which we
@@ -14215,8 +14316,19 @@ async fn nft_ensure_ban_infra() -> Result<(), RpcError> {
     let _ = hyperion_adapters::cmd::run(
         NFT,
         &[
-            "add", "set", "inet", "hyperion", "banned", "{", "type", "ipv4_addr", ";", "flags",
-            "timeout", ";", "}",
+            "add",
+            "set",
+            "inet",
+            "hyperion",
+            "banned",
+            "{",
+            "type",
+            "ipv4_addr",
+            ";",
+            "flags",
+            "timeout",
+            ";",
+            "}",
         ],
     )
     .await;
@@ -14224,8 +14336,19 @@ async fn nft_ensure_ban_infra() -> Result<(), RpcError> {
     let _ = hyperion_adapters::cmd::run(
         NFT,
         &[
-            "add", "set", "inet", "hyperion", "banned6", "{", "type", "ipv6_addr", ";", "flags",
-            "timeout", ";", "}",
+            "add",
+            "set",
+            "inet",
+            "hyperion",
+            "banned6",
+            "{",
+            "type",
+            "ipv6_addr",
+            ";",
+            "flags",
+            "timeout",
+            ";",
+            "}",
         ],
     )
     .await;
@@ -14237,8 +14360,17 @@ async fn nft_ensure_ban_infra() -> Result<(), RpcError> {
         hyperion_adapters::cmd::run(
             NFT,
             &[
-                "insert", "rule", "inet", "hyperion", "input", "ip", "saddr", "@banned", "drop",
-                "comment", "hyperion:ban-drop",
+                "insert",
+                "rule",
+                "inet",
+                "hyperion",
+                "input",
+                "ip",
+                "saddr",
+                "@banned",
+                "drop",
+                "comment",
+                "hyperion:ban-drop",
             ],
         )
         .await
@@ -14254,8 +14386,17 @@ async fn nft_ensure_ban_infra() -> Result<(), RpcError> {
         hyperion_adapters::cmd::run(
             NFT,
             &[
-                "insert", "rule", "inet", "hyperion", "input", "ip6", "saddr", "@banned6", "drop",
-                "comment", "hyperion:ban6-drop",
+                "insert",
+                "rule",
+                "inet",
+                "hyperion",
+                "input",
+                "ip6",
+                "saddr",
+                "@banned6",
+                "drop",
+                "comment",
+                "hyperion:ban6-drop",
             ],
         )
         .await
@@ -14273,7 +14414,11 @@ async fn nft_ensure_ban_infra() -> Result<(), RpcError> {
 /// first), so a colon unambiguously means IPv6 — IPv4 never contains one
 /// and there's no port suffix to confuse it.
 fn nft_ban_set(ip: &str) -> &'static str {
-    if ip.contains(':') { "banned6" } else { "banned" }
+    if ip.contains(':') {
+        "banned6"
+    } else {
+        "banned"
+    }
 }
 
 /// Add an IP to the nft `banned` set with an optional timeout (0 = no
@@ -14328,7 +14473,16 @@ async fn scan_sshd_journal_for_bruteforce(window_secs: i64, threshold: u32) -> V
     let out = match hyperion_adapters::cmd::run(
         "/usr/bin/journalctl",
         &[
-            "-u", "ssh", "-u", "sshd", "--since", &since, "--no-pager", "-q", "-o", "cat",
+            "-u",
+            "ssh",
+            "-u",
+            "sshd",
+            "--since",
+            &since,
+            "--no-pager",
+            "-q",
+            "-o",
+            "cat",
         ],
     )
     .await
@@ -14387,8 +14541,12 @@ async fn scan_access_log_for_bruteforce(
         if ip.parse::<std::net::IpAddr>().is_err() {
             continue;
         }
-        let Some(start) = line.find('[') else { continue };
-        let Some(end_rel) = line[start..].find(']') else { continue };
+        let Some(start) = line.find('[') else {
+            continue;
+        };
+        let Some(end_rel) = line[start..].find(']') else {
+            continue;
+        };
         let ts_str = &line[start + 1..start + end_rel];
         let Ok(dt) = DateTime::<FixedOffset>::parse_from_str(ts_str, "%d/%b/%Y:%H:%M:%S %z") else {
             continue;
@@ -14398,7 +14556,9 @@ async fn scan_access_log_for_bruteforce(
         }
         // The request line is the first quoted field: "METHOD path proto".
         let Some(q1) = line.find('"') else { continue };
-        let Some(q2_rel) = line[q1 + 1..].find('"') else { continue };
+        let Some(q2_rel) = line[q1 + 1..].find('"') else {
+            continue;
+        };
         let req = &line[q1 + 1..q1 + 1 + q2_rel];
         let is_probe = req.starts_with("POST ")
             && (req.contains("/wp-login.php") || req.contains("/xmlrpc.php"));
@@ -14424,8 +14584,12 @@ async fn parse_access_log_window(path: &std::path::Path, since: i64) -> (i64, i6
     let mut last_ts: i64 = 0;
     for line in body.lines() {
         // Extract bracketed timestamp.
-        let Some(start) = line.find('[') else { continue };
-        let Some(end) = line[start..].find(']') else { continue };
+        let Some(start) = line.find('[') else {
+            continue;
+        };
+        let Some(end) = line[start..].find(']') else {
+            continue;
+        };
         let ts_str = &line[start + 1..start + end];
         let Ok(dt) = DateTime::<FixedOffset>::parse_from_str(ts_str, "%d/%b/%Y:%H:%M:%S %z") else {
             continue;
@@ -14524,7 +14688,7 @@ async fn probe_http(url: &str) -> HttpProbeResult {
     // reqwest+tls stack and the rustls CryptoProvider dance.
     let res = tokio::process::Command::new("/usr/bin/curl")
         .args([
-            "-skLI",                  // silent + insecure + follow + HEAD
+            "-skLI", // silent + insecure + follow + HEAD
             "--max-time",
             "5",
             "--max-redirs",
@@ -14606,9 +14770,7 @@ async fn http_post_json(url: &str, json_body: &str) -> Result<(), String> {
 /// default (`master_accepts_hostings = true`) on parse failure or
 /// missing file/section so an out-of-date agent.toml never breaks
 /// the settings page.
-fn read_cluster_section(
-    cfg_path: Option<&std::path::Path>,
-) -> hyperion_types::ClusterConfigView {
+fn read_cluster_section(cfg_path: Option<&std::path::Path>) -> hyperion_types::ClusterConfigView {
     let Some(path) = cfg_path else {
         return hyperion_types::ClusterConfigView::default();
     };
@@ -14699,29 +14861,20 @@ fn parse_agent_section_fields(
             | ("email", "from_address")
             | ("email", "from_name")
             | ("email", "security")
-            | ("email", "default_to") => {
-                crate::config_persist::FieldValue::Str(v.clone())
-            }
+            | ("email", "default_to") => crate::config_persist::FieldValue::Str(v.clone()),
             ("email", "smtp_port") => crate::config_persist::FieldValue::Int(parse_int(v)?),
             // [slack]
             ("slack", "default_webhook") => crate::config_persist::FieldValue::Str(v.clone()),
             // [backup_remote]
-            ("backup_remote", "enabled") => {
-                crate::config_persist::FieldValue::Bool(parse_bool(v)?)
-            }
+            ("backup_remote", "enabled") => crate::config_persist::FieldValue::Bool(parse_bool(v)?),
             ("backup_remote", "scheme")
             | ("backup_remote", "host")
             | ("backup_remote", "user")
             | ("backup_remote", "password")
-            | ("backup_remote", "base_path") => {
-                crate::config_persist::FieldValue::Str(v.clone())
-            }
-            ("backup_remote", "port") => {
-                crate::config_persist::FieldValue::Int(parse_int(v)?)
-            }
+            | ("backup_remote", "base_path") => crate::config_persist::FieldValue::Str(v.clone()),
+            ("backup_remote", "port") => crate::config_persist::FieldValue::Int(parse_int(v)?),
             // [backup_retention]
-            ("backup_retention", "max_age_days")
-            | ("backup_retention", "keep_latest_n") => {
+            ("backup_retention", "max_age_days") | ("backup_retention", "keep_latest_n") => {
                 crate::config_persist::FieldValue::Int(parse_int(v)?)
             }
             // [cluster] — master web UI placement preferences
@@ -14837,19 +14990,23 @@ fn expiry_row_to_dto(row: hyperion_state::scheduler::ExpiryRow) -> hyperion_type
 /// Each probe is a TCP-connect, no SMTP banner read — we just
 /// want to know whether the egress firewall allows the port.
 async fn probe_outbound_smtp_all() -> Vec<hyperion_types::MtaPortProbe> {
-    let p25 = single_smtp_probe(25, "gmail-smtp-in.l.google.com", "MX delivery (recipient servers)");
+    let p25 = single_smtp_probe(
+        25,
+        "gmail-smtp-in.l.google.com",
+        "MX delivery (recipient servers)",
+    );
     let p465 = single_smtp_probe(465, "smtp.gmail.com", "Implicit-TLS submission");
     let p587 = single_smtp_probe(587, "smtp.gmail.com", "STARTTLS submission (most common)");
-    let p2525 = single_smtp_probe(2525, "smtp.mailgun.org", "Alt-submission (when 587 blocked)");
+    let p2525 = single_smtp_probe(
+        2525,
+        "smtp.mailgun.org",
+        "Alt-submission (when 587 blocked)",
+    );
     let (r25, r465, r587, r2525) = tokio::join!(p25, p465, p587, p2525);
     vec![r25, r465, r587, r2525]
 }
 
-async fn single_smtp_probe(
-    port: u16,
-    host: &str,
-    purpose: &str,
-) -> hyperion_types::MtaPortProbe {
+async fn single_smtp_probe(port: u16, host: &str, purpose: &str) -> hyperion_types::MtaPortProbe {
     use std::time::Instant;
     use tokio::net::TcpStream;
     const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
@@ -15071,11 +15228,7 @@ trait RpcErrorExt {
 /// most common failure is `setquota: Cannot wait for ... quotas
 /// turned off` when /etc/fstab doesn't carry `usrquota` — the UI
 /// surfaces that via the `setup_hint` returned alongside reads.
-async fn apply_disk_quota(
-    user: &str,
-    soft_kib: i64,
-    hard_kib: i64,
-) -> Result<(), String> {
+async fn apply_disk_quota(user: &str, soft_kib: i64, hard_kib: i64) -> Result<(), String> {
     // setquota refuses to run if quotaon hasn't been done on at
     // least one mount. Probe `quotacheck`'s output cheaply via
     // `quotaon -p` (print state). If no mount has quotas enabled,
@@ -15091,9 +15244,9 @@ async fn apply_disk_quota(
         // "user quotas off". When ALL lines say off, setquota would
         // fail. We tolerate stderr-only output too (some distros
         // print to stderr).
-        let any_on = out.lines().any(|l| {
-            l.contains("user quotas on") || l.contains("group quotas on")
-        });
+        let any_on = out
+            .lines()
+            .any(|l| l.contains("user quotas on") || l.contains("group quotas on"));
         if !any_on && !out.is_empty() {
             return Err(
                 "quotas not enabled on any filesystem — add usrquota,grpquota to /etc/fstab and run `mount -o remount /` + `quotacheck -ugm /` + `quotaon -v /`".into(),
@@ -15135,10 +15288,7 @@ async fn apply_disk_quota(
 ///      without quotas configured).
 ///
 /// Returns (current_disk_kib, quotas_enabled_on_fs, setup_hint).
-async fn quota_probe_current(
-    user: &str,
-    home_dir: &str,
-) -> (i64, bool, String) {
+async fn quota_probe_current(user: &str, home_dir: &str) -> (i64, bool, String) {
     // `quota -u -q -w` prints used blocks in machine-readable form.
     // Output (when quotas are on) is one line: "<fs>  <used>  <soft>
     // <hard>  <files>  <soft>  <hard>". When quotas are off, exit
@@ -15155,11 +15305,7 @@ async fn quota_probe_current(
                 let cols: Vec<&str> = line.split_whitespace().collect();
                 if cols.len() >= 2 {
                     if let Ok(used) = cols[1].trim_end_matches('*').parse::<i64>() {
-                        return (
-                            used,
-                            true,
-                            String::new(),
-                        );
+                        return (used, true, String::new());
                     }
                 }
             }
@@ -15215,7 +15361,9 @@ async fn quota_run_cmd(bin: &str, args: &[&str]) -> (bool, String) {
 
 /// `/proc/self/mounts` escapes spaces (and a few others) octally.
 fn unescape_mount_field(s: &str) -> String {
-    s.replace("\\040", " ").replace("\\011", "\t").replace("\\134", "\\")
+    s.replace("\\040", " ")
+        .replace("\\011", "\t")
+        .replace("\\134", "\\")
 }
 
 /// Byte ranges (start, end) of each whitespace-delimited field in an fstab
@@ -15289,7 +15437,12 @@ fn fstab_with_quota_options(
                 }
             }
             // Splice ONLY the options column; everything else stays byte-for-byte.
-            let spliced = format!("{}{}{}", &line[..opt_start], opts.join(","), &line[opt_end..]);
+            let spliced = format!(
+                "{}{}{}",
+                &line[..opt_start],
+                opts.join(","),
+                &line[opt_end..]
+            );
             out.push(spliced);
         } else {
             out.push(line.to_string());
@@ -15388,10 +15541,16 @@ async fn enable_kernel_quotas(home_path: &str) -> hyperion_types::QuotaEnableSum
         .output()
         .await
         .ok()
-        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<u32>().ok());
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .parse::<u32>()
+                .ok()
+        });
     if uid != Some(0) {
         return fail(
-            "the agent isn't running as root, so it can't change mount options or enable quotas".into(),
+            "the agent isn't running as root, so it can't change mount options or enable quotas"
+                .into(),
             String::new(),
             String::new(),
         );
@@ -15400,7 +15559,13 @@ async fn enable_kernel_quotas(home_path: &str) -> hyperion_types::QuotaEnableSum
     // 1. Discover the mount carrying home_path (longest matching mountpoint).
     let mounts = match tokio::fs::read_to_string("/proc/self/mounts").await {
         Ok(s) => s,
-        Err(e) => return fail(format!("couldn't read /proc/self/mounts: {e}"), String::new(), String::new()),
+        Err(e) => {
+            return fail(
+                format!("couldn't read /proc/self/mounts: {e}"),
+                String::new(),
+                String::new(),
+            )
+        }
     };
     let mut best: Option<(String, String, String)> = None; // (mount, fstype, options)
     for line in mounts.lines() {
@@ -15413,7 +15578,10 @@ async fn enable_kernel_quotas(home_path: &str) -> hyperion_types::QuotaEnableSum
             || mp == "/"
             || home_path.starts_with(&format!("{}/", mp.trim_end_matches('/')));
         if covers {
-            let better = best.as_ref().map(|(m, _, _)| mp.len() > m.len()).unwrap_or(true);
+            let better = best
+                .as_ref()
+                .map(|(m, _, _)| mp.len() > m.len())
+                .unwrap_or(true);
             if better {
                 best = Some((mp, f[2].to_string(), f[3].to_string()));
             }
@@ -15421,7 +15589,13 @@ async fn enable_kernel_quotas(home_path: &str) -> hyperion_types::QuotaEnableSum
     }
     let (mount_point, fs_type, cur_opts) = match best {
         Some(v) => v,
-        None => return fail(format!("couldn't find the mount for {home_path}"), String::new(), String::new()),
+        None => {
+            return fail(
+                format!("couldn't find the mount for {home_path}"),
+                String::new(),
+                String::new(),
+            )
+        }
     };
 
     let is_xfs = fs_type == "xfs";
@@ -15432,9 +15606,19 @@ async fn enable_kernel_quotas(home_path: &str) -> hyperion_types::QuotaEnableSum
     // 2. Make sure /etc/fstab carries the quota option for next boot.
     let fstab_added = match ensure_fstab_quota_option(&mount_point, is_xfs).await {
         Ok(added) => added,
-        Err(e) => return fail(format!("couldn't update /etc/fstab: {e}"), mount_point, fs_type),
+        Err(e) => {
+            return fail(
+                format!("couldn't update /etc/fstab: {e}"),
+                mount_point,
+                fs_type,
+            )
+        }
     };
-    let fstab_note = if fstab_added { "/etc/fstab updated" } else { "/etc/fstab already had it" };
+    let fstab_note = if fstab_added {
+        "/etc/fstab updated"
+    } else {
+        "/etc/fstab already had it"
+    };
 
     // 3. XFS: quotas only initialise at mount, never on a live fs.
     if is_xfs {
@@ -15493,7 +15677,8 @@ async fn enable_kernel_quotas(home_path: &str) -> hyperion_types::QuotaEnableSum
         }
     }
     // quotacheck builds aquota.user/.group; -m allows it while mounted.
-    let (_check_ok, check_msg) = quota_run_cmd("/usr/sbin/quotacheck", &["-ugm", &mount_point]).await;
+    let (_check_ok, check_msg) =
+        quota_run_cmd("/usr/sbin/quotacheck", &["-ugm", &mount_point]).await;
     let (_qon_ok, qon) = quota_run_cmd("/usr/sbin/quotaon", &["-v", &mount_point]).await;
     if ext_quota_on(&mount_point).await {
         Summary {
@@ -15585,7 +15770,12 @@ async fn probe_disk_usages() -> std::io::Result<Vec<DiskUsage>> {
 /// "8589934592 bytes". Caps at TiB; anything bigger would be a
 /// genuine surprise on a hosting node.
 fn human_bytes(bytes: i64) -> String {
-    let units = [("TiB", 1i64 << 40), ("GiB", 1 << 30), ("MiB", 1 << 20), ("KiB", 1 << 10)];
+    let units = [
+        ("TiB", 1i64 << 40),
+        ("GiB", 1 << 30),
+        ("MiB", 1 << 20),
+        ("KiB", 1 << 10),
+    ];
     for (label, scale) in units.iter() {
         if bytes >= *scale {
             return format!("{:.1} {}", bytes as f64 / *scale as f64, label);
@@ -15961,7 +16151,8 @@ mod tests {
     #[test]
     fn fstab_splice_idempotent_when_already_present() {
         let content = "UUID=abc /home ext4 defaults,usrquota,grpquota 0 2\n";
-        let out = fstab_with_quota_options(content, "/home", &["usrquota", "grpquota"]).expect("match");
+        let out =
+            fstab_with_quota_options(content, "/home", &["usrquota", "grpquota"]).expect("match");
         assert!(out.is_none(), "no change needed → Ok(None)");
     }
 
@@ -15978,7 +16169,10 @@ mod tests {
     fn fstab_splice_errors_when_mount_absent() {
         let content = "UUID=abc / ext4 defaults 0 1\n";
         let err = fstab_with_quota_options(content, "/home", &["usrquota"]).unwrap_err();
-        assert!(err.contains("/home"), "error names the missing mount: {err}");
+        assert!(
+            err.contains("/home"),
+            "error names the missing mount: {err}"
+        );
     }
 
     #[test]
@@ -15989,7 +16183,10 @@ mod tests {
             .expect("should match via unescape")
             .expect("changed");
         // The escaped mountpoint token is preserved verbatim; only opts change.
-        assert_eq!(out, "UUID=abc /mnt/my\\040disk ext4 defaults,usrquota 0 2\n");
+        assert_eq!(
+            out,
+            "UUID=abc /mnt/my\\040disk ext4 defaults,usrquota 0 2\n"
+        );
     }
 
     #[test]
@@ -16022,7 +16219,9 @@ mod tests {
             "user quota on /home (/dev/sda3) is on\ngroup quota on /home (/dev/sda3) is off"
         ));
         // Older format.
-        assert!(quota_report_shows_on("/dev/sda1 [/home]: user quotas turned on"));
+        assert!(quota_report_shows_on(
+            "/dev/sda1 [/home]: user quotas turned on"
+        ));
         // Everything off must read inactive (no `is on` substring in `is off`).
         assert!(!quota_report_shows_on(
             "user quota on /home (/dev/sda3) is off\ngroup quota on /home (/dev/sda3) is off"
@@ -16043,9 +16242,7 @@ mod tests {
     //  as critical on workers" behavior.
     // ============================================================
 
-    async fn svc_with_state_file(
-        p: Option<std::path::PathBuf>,
-    ) -> HostingService<MockAdapterPort> {
+    async fn svc_with_state_file(p: Option<std::path::PathBuf>) -> HostingService<MockAdapterPort> {
         let pool = open_memory().await.expect("memory db");
         let a = MockAdapterPort::new();
         let mut s = svc(pool, a);
@@ -16156,7 +16353,9 @@ mod tests {
         let plain_file = root.join("README");
         for d in [&mig_a, &mig_b, &other] {
             tokio::fs::create_dir_all(d).await.unwrap();
-            tokio::fs::write(d.join("archive.tar.gz"), b"x").await.unwrap();
+            tokio::fs::write(d.join("archive.tar.gz"), b"x")
+                .await
+                .unwrap();
         }
         tokio::fs::write(&plain_file, b"hi").await.unwrap();
 
@@ -16464,9 +16663,7 @@ mod tests {
         let _ = s.create(req("test5.example.cz")).await;
         // After rollback the system_users row MUST be gone — else
         // the next create's UNIQUE(uid) hits a phantom row.
-        let leftover = system_users::get_by_uid(&pool, 1000)
-            .await
-            .expect("query");
+        let leftover = system_users::get_by_uid(&pool, 1000).await.expect("query");
         assert!(
             leftover.is_none(),
             "rollback must DELETE the system_users row, not just the Linux user — \
@@ -16544,8 +16741,8 @@ mod tests {
         a.expect_delete_user().returning(|_| Ok(()));
         let s = svc(pool.clone(), a);
         let _ = s.create(req("retry.cz")).await; // expected to fail
-        // PRE-FIX: list would now contain a state='failed' row.
-        // POST-FIX: list is empty for that domain.
+                                                 // PRE-FIX: list would now contain a state='failed' row.
+                                                 // POST-FIX: list is empty for that domain.
         let leftover = hostings::get_by_domain(&pool, "retry.cz").await.unwrap();
         assert!(
             leftover.is_none(),
@@ -16589,9 +16786,9 @@ mod tests {
                 hyperion_types::ServiceInstallStatus::default(),
             )),
         };
-        s2.create(req("retry.cz"))
-            .await
-            .expect("second create must succeed — the orphan row should have been deleted by rollback");
+        s2.create(req("retry.cz")).await.expect(
+            "second create must succeed — the orphan row should have been deleted by rollback",
+        );
     }
 
     #[tokio::test]
@@ -16652,8 +16849,10 @@ mod tests {
     /// SHA comparison: identical full SHAs ⇒ no update.
     #[test]
     fn compare_git_shas_identical_no_update() {
-        let (avail, msg) =
-            compare_git_shas("abcdef0123456789abcdef0123456789abcdef01", "abcdef0123456789abcdef0123456789abcdef01");
+        let (avail, msg) = compare_git_shas(
+            "abcdef0123456789abcdef0123456789abcdef01",
+            "abcdef0123456789abcdef0123456789abcdef01",
+        );
         assert!(!avail);
         assert_eq!(msg, "up to date");
     }
@@ -16665,15 +16864,17 @@ mod tests {
         let cur = "abcdef012345"; // 12-char short
         let lat = "abcdef0123456789abcdef0123456789abcdef01"; // 40-char full
         let (avail, msg) = compare_git_shas(cur, lat);
-        assert!(!avail, "12-char prefix of 40-char SHA should not flag update");
+        assert!(
+            !avail,
+            "12-char prefix of 40-char SHA should not flag update"
+        );
         assert_eq!(msg, "up to date");
     }
 
     /// Different SHAs ⇒ flag update.
     #[test]
     fn compare_git_shas_different_flags_update() {
-        let (avail, msg) =
-            compare_git_shas("aaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbb");
+        let (avail, msg) = compare_git_shas("aaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbb");
         assert!(avail);
         assert_eq!(msg, "update available");
     }
@@ -17298,26 +17499,58 @@ mod tests {
         let exp = later + 10 * 86_400; // inside the renewal window
 
         // The node wildcard base — flagged wildcard, owns its files.
-        certificates::upsert(&pool, "base.cz", now, exp, "/c/base/f.pem", "/c/base/k.pem", "letsencrypt")
+        certificates::upsert(
+            &pool,
+            "base.cz",
+            now,
+            exp,
+            "/c/base/f.pem",
+            "/c/base/k.pem",
+            "letsencrypt",
+        )
+        .await
+        .expect("upsert base");
+        certificates::set_wildcard(&pool, "base.cz", true)
             .await
-            .expect("upsert base");
-        certificates::set_wildcard(&pool, "base.cz", true).await.expect("flag");
+            .expect("flag");
         // A reuse subdomain — same cert files as the parent wildcard.
-        certificates::upsert(&pool, "a.base.cz", now, exp, "/c/base/f.pem", "/c/base/k.pem", "letsencrypt")
-            .await
-            .expect("upsert ref");
+        certificates::upsert(
+            &pool,
+            "a.base.cz",
+            now,
+            exp,
+            "/c/base/f.pem",
+            "/c/base/k.pem",
+            "letsencrypt",
+        )
+        .await
+        .expect("upsert ref");
         // A sibling with its OWN distinct cert — must still renew.
-        certificates::upsert(&pool, "b.base.cz", now, exp, "/c/b.base.cz/f.pem", "/c/b.base.cz/k.pem", "letsencrypt")
-            .await
-            .expect("upsert own");
+        certificates::upsert(
+            &pool,
+            "b.base.cz",
+            now,
+            exp,
+            "/c/b.base.cz/f.pem",
+            "/c/b.base.cz/k.pem",
+            "letsencrypt",
+        )
+        .await
+        .expect("upsert own");
 
         let results = s
             .cert_renew_tick(later, CERT_RENEWAL_WINDOW_DAYS)
             .await
             .expect("tick");
         let domains: Vec<&str> = results.iter().map(|r| r.domain.as_str()).collect();
-        assert!(domains.contains(&"base.cz"), "wildcard base renews: {domains:?}");
-        assert!(domains.contains(&"b.base.cz"), "own-cert sibling renews: {domains:?}");
+        assert!(
+            domains.contains(&"base.cz"),
+            "wildcard base renews: {domains:?}"
+        );
+        assert!(
+            domains.contains(&"b.base.cz"),
+            "own-cert sibling renews: {domains:?}"
+        );
         assert!(
             !domains.contains(&"a.base.cz"),
             "reuse reference must be skipped: {domains:?}"
@@ -17328,11 +17561,20 @@ mod tests {
     fn effective_staging_domain_prefers_override() {
         type S = HostingService<MockAdapterPort>;
         // No override ⇒ default prefix.
-        assert_eq!(S::effective_staging_domain(None, "example.cz"), "staging.example.cz");
+        assert_eq!(
+            S::effective_staging_domain(None, "example.cz"),
+            "staging.example.cz"
+        );
         // Blank / whitespace override ⇒ default.
-        assert_eq!(S::effective_staging_domain(Some("  "), "example.cz"), "staging.example.cz");
+        assert_eq!(
+            S::effective_staging_domain(Some("  "), "example.cz"),
+            "staging.example.cz"
+        );
         // Real override wins, trimmed + lower-cased.
-        assert_eq!(S::effective_staging_domain(Some(" Dev.Example.CZ "), "example.cz"), "dev.example.cz");
+        assert_eq!(
+            S::effective_staging_domain(Some(" Dev.Example.CZ "), "example.cz"),
+            "dev.example.cz"
+        );
     }
 
     /// Empty-DB sanity check: the renewal tick on a fresh agent
@@ -17440,9 +17682,7 @@ mod tests {
         let pool = open_memory().await.expect("open");
         let mut a = happy_mocks();
         a.expect_nginx_write_htpasswd()
-            .withf(|hid, user, hash| {
-                !hid.is_empty() && user == "preview" && hash.starts_with("$2")
-            })
+            .withf(|hid, user, hash| !hid.is_empty() && user == "preview" && hash.starts_with("$2"))
             .returning(|_, _, _| Ok(()));
         a.expect_nginx_delete_htpasswd().returning(|_| Ok(()));
         let s = svc(pool.clone(), a);

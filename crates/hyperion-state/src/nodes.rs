@@ -207,7 +207,9 @@ pub async fn undrain(pool: &SqlitePool, node_id: &str) -> Result<(), StateError>
 
 /// Set of currently-drained node ids. Cheap lookup the auto-
 /// placer + create wizard call before placing new hostings.
-pub async fn drained_set(pool: &SqlitePool) -> Result<std::collections::HashSet<String>, StateError> {
+pub async fn drained_set(
+    pool: &SqlitePool,
+) -> Result<std::collections::HashSet<String>, StateError> {
     let rows: Vec<(String,)> = sqlx::query_as("SELECT node_id FROM node_drain")
         .fetch_all(pool)
         .await?;
@@ -242,16 +244,12 @@ pub async fn delete(pool: &SqlitePool, node_id: &str) -> Result<bool, StateError
 /// Count hostings currently routed to this node — used by the
 /// node-removal flow's "are you sure?" gate. Excludes trashed
 /// rows since those are headed for hard-delete anyway.
-pub async fn count_hostings_on_node(
-    pool: &SqlitePool,
-    node_id: &str,
-) -> Result<i64, StateError> {
-    let (n,): (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM hostings WHERE node_id = ? AND state != 'trashed'",
-    )
-    .bind(node_id)
-    .fetch_one(pool)
-    .await?;
+pub async fn count_hostings_on_node(pool: &SqlitePool, node_id: &str) -> Result<i64, StateError> {
+    let (n,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM hostings WHERE node_id = ? AND state != 'trashed'")
+            .bind(node_id)
+            .fetch_one(pool)
+            .await?;
     Ok(n)
 }
 
@@ -263,11 +261,7 @@ pub async fn count_hostings_on_node(
 /// the enrollment dance.
 ///
 /// Returns `true` when the row existed and was updated.
-pub async fn set_label(
-    pool: &SqlitePool,
-    node_id: &str,
-    label: &str,
-) -> Result<bool, StateError> {
+pub async fn set_label(pool: &SqlitePool, node_id: &str, label: &str) -> Result<bool, StateError> {
     let n = sqlx::query("UPDATE nodes SET label = ? WHERE node_id = ?")
         .bind(label)
         .bind(node_id)

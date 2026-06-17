@@ -58,7 +58,10 @@ pub async fn get_bans(
         return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
     }
     let mut rows: Vec<BanRow> = Vec::new();
-    let push = |rows: &mut Vec<BanRow>, node_id: &str, node_label: &str, bans: Vec<hyperion_types::IpBanWire>| {
+    let push = |rows: &mut Vec<BanRow>,
+                node_id: &str,
+                node_label: &str,
+                bans: Vec<hyperion_types::IpBanWire>| {
         for b in bans {
             rows.push(BanRow {
                 node_id: node_id.to_string(),
@@ -138,7 +141,9 @@ pub async fn post_unban(
     let resp = crate::dispatcher::dispatch_to_node(
         &state,
         target,
-        Request::BanRemove { ip: form.ip.trim().to_string() },
+        Request::BanRemove {
+            ip: form.ip.trim().to_string(),
+        },
     )
     .await?;
     match resp {

@@ -105,10 +105,7 @@ pub trait AgentApi: Send + Sync + 'static {
     ) -> Result<hyperion_types::WpExtras, RpcError>;
 
     /// Truncate wp-content/debug.log to 0 bytes. Idempotent.
-    async fn hosting_rotate_wp_debug_log(
-        &self,
-        sel: HostingSelector,
-    ) -> Result<(), RpcError>;
+    async fn hosting_rotate_wp_debug_log(&self, sel: HostingSelector) -> Result<(), RpcError>;
     async fn hosting_usage(
         &self,
         sel: HostingSelector,
@@ -196,11 +193,7 @@ pub trait AgentApi: Send + Sync + 'static {
 
     /// Flip `revoked_at`. Returns true if the row existed and was
     /// still live.
-    async fn web_session_revoke(
-        &self,
-        sid: String,
-        revoked_by: i64,
-    ) -> Result<bool, RpcError>;
+    async fn web_session_revoke(&self, sid: String, revoked_by: i64) -> Result<bool, RpcError>;
 
     async fn hosting_set_expiry(
         &self,
@@ -216,10 +209,7 @@ pub trait AgentApi: Send + Sync + 'static {
         key: String,
         value: String,
     ) -> Result<(), RpcError>;
-    async fn hosting_kv_list(
-        &self,
-        hosting_id: String,
-    ) -> Result<Vec<(String, String)>, RpcError>;
+    async fn hosting_kv_list(&self, hosting_id: String) -> Result<Vec<(String, String)>, RpcError>;
     async fn upcoming_expiries(
         &self,
         within_seconds: i64,
@@ -399,9 +389,8 @@ pub trait AgentApi: Send + Sync + 'static {
         hosting: HostingSelector,
     ) -> Result<hyperion_types::WpVulnScanResult, RpcError>;
     /// Every hosting's last stored vuln scan on this node.
-    async fn vuln_findings_list(
-        &self,
-    ) -> Result<Vec<hyperion_types::HostingVulnSummary>, RpcError>;
+    async fn vuln_findings_list(&self)
+        -> Result<Vec<hyperion_types::HostingVulnSummary>, RpcError>;
     /// Create a staging.<domain> copy of a hosting. Returns the domain.
     /// `staging_domain` overrides the default hostname when Some + non-empty.
     async fn wp_staging_create(
@@ -419,15 +408,9 @@ pub trait AgentApi: Send + Sync + 'static {
     /// Start a background node-update job. Returns the unix
     /// timestamp the job started at. `NodeUpdateStatus` polls the
     /// log tail + state.
-    async fn node_update_run(
-        &self,
-        do_apt: bool,
-        do_hyperion: bool,
-    ) -> Result<i64, RpcError>;
+    async fn node_update_run(&self, do_apt: bool, do_hyperion: bool) -> Result<i64, RpcError>;
     /// Read the state of the most-recent / in-progress update job.
-    async fn node_update_status(
-        &self,
-    ) -> Result<hyperion_types::NodeUpdateStatus, RpcError>;
+    async fn node_update_status(&self) -> Result<hyperion_types::NodeUpdateStatus, RpcError>;
     /// Update one section of `/etc/hyperion/agent.toml`.
     async fn agent_config_update(
         &self,
@@ -483,16 +466,10 @@ pub trait AgentApi: Send + Sync + 'static {
     /// List every Linux user on this node with an FTP-usable shadow
     /// password. Joined with the local hosting table so the UI shows
     /// "domain + state + node" alongside the user name.
-    async fn ftp_accounts_list(
-        &self,
-    ) -> Result<Vec<hyperion_types::FtpAccountSummary>, RpcError>;
+    async fn ftp_accounts_list(&self) -> Result<Vec<hyperion_types::FtpAccountSummary>, RpcError>;
 
     /// Probe vsftpd at localhost with the supplied credential.
-    async fn ftp_verify_login(
-        &self,
-        user: String,
-        password: String,
-    ) -> Result<bool, RpcError>;
+    async fn ftp_verify_login(&self, user: String, password: String) -> Result<bool, RpcError>;
 
     /// Probe localhost for a usable SMTP relay.
     async fn email_smtp_autodetect(&self) -> Result<hyperion_types::SmtpAutodetect, RpcError>;
@@ -577,12 +554,8 @@ pub trait AgentApi: Send + Sync + 'static {
     ) -> Result<(), RpcError>;
 
     /// Flip a job to a terminal state.
-    async fn job_finish(
-        &self,
-        id: String,
-        ok: bool,
-        error: Option<String>,
-    ) -> Result<(), RpcError>;
+    async fn job_finish(&self, id: String, ok: bool, error: Option<String>)
+        -> Result<(), RpcError>;
 
     /// Import a migration bundle by URL — downloads from the source
     /// node's signed `/api/migration/bundle/<id>` endpoint then runs
@@ -735,18 +708,12 @@ pub trait AgentApi: Send + Sync + 'static {
     /// with monitor enabled, plus computed 24h success rate +
     /// avg latency. Web fan-outs this to every enrolled worker
     /// and concatenates the rows.
-    async fn monitor_overview(
-        &self,
-    ) -> Result<Vec<hyperion_types::MonitorOverviewItem>, RpcError>;
+    async fn monitor_overview(&self) -> Result<Vec<hyperion_types::MonitorOverviewItem>, RpcError>;
 
     /// Read the avatar filename column for one user.
     async fn avatar_filename(&self, user_id: i64) -> Result<Option<String>, RpcError>;
     /// Set / clear the avatar filename column.
-    async fn avatar_set(
-        &self,
-        user_id: i64,
-        filename: Option<String>,
-    ) -> Result<(), RpcError>;
+    async fn avatar_set(&self, user_id: i64, filename: Option<String>) -> Result<(), RpcError>;
 
     /// Verify current_password + store the new_email pending +
     /// send a 6-digit code to it. Returns the masked target.
@@ -757,18 +724,20 @@ pub trait AgentApi: Send + Sync + 'static {
         current_password: String,
     ) -> Result<String, RpcError>;
     /// Validate the 6-digit code; on success, swap email → pending.
-    async fn email_change_confirm(
-        &self,
-        user_id: i64,
-        code: String,
-    ) -> Result<(), RpcError>;
+    async fn email_change_confirm(&self, user_id: i64, code: String) -> Result<(), RpcError>;
     async fn email_change_cancel(&self, user_id: i64) -> Result<(), RpcError>;
 
     /// Per-hosting monitor: get config + recent samples.
     async fn monitor_get(
         &self,
         sel: crate::wire::HostingSelector,
-    ) -> Result<(hyperion_types::MonitorConfigView, hyperion_types::MonitorHistory), RpcError>;
+    ) -> Result<
+        (
+            hyperion_types::MonitorConfigView,
+            hyperion_types::MonitorHistory,
+        ),
+        RpcError,
+    >;
     #[allow(clippy::too_many_arguments)]
     async fn monitor_set(
         &self,
@@ -888,8 +857,11 @@ pub trait AgentApi: Send + Sync + 'static {
     async fn profile_list(&self) -> Result<Vec<HostingProfile>, RpcError>;
     async fn profile_get(&self, id: i64) -> Result<HostingProfile, RpcError>;
     async fn profile_create(&self, input: ProfileInput) -> Result<HostingProfile, RpcError>;
-    async fn profile_update(&self, id: i64, input: ProfileInput)
-        -> Result<HostingProfile, RpcError>;
+    async fn profile_update(
+        &self,
+        id: i64,
+        input: ProfileInput,
+    ) -> Result<HostingProfile, RpcError>;
     async fn profile_delete(&self, id: i64) -> Result<(), RpcError>;
     /// Apply a profile to a hosting — copies limits + expiry policy +
     /// pricing onto the hosting and links it. `skip_wp_items=true`

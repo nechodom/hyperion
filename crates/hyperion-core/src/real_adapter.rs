@@ -5,7 +5,9 @@ use crate::service::AdapterPort;
 use async_trait::async_trait;
 use hyperion_adapters::AdapterError;
 use hyperion_rpc::wire::DbCredentials;
-use hyperion_types::{CertInfo, DbProvision, HostingDetail, HostingId, PhpVersion, WpInstallRequest};
+use hyperion_types::{
+    CertInfo, DbProvision, HostingDetail, HostingId, PhpVersion, WpInstallRequest,
+};
 use hyperion_validate::SystemUserName;
 use std::path::PathBuf;
 
@@ -153,10 +155,7 @@ impl AdapterPort for RealAdapter {
         // hosting 0711 home, consistent with htdocs already being
         // world-readable. Already-traversable dirs (/, /home, …) are
         // skipped, so this only touches the per-user homes we own.
-        hyperion_adapters::fs::ensure_ancestors_traversable(
-            std::path::Path::new(htdocs),
-        )
-        .await;
+        hyperion_adapters::fs::ensure_ancestors_traversable(std::path::Path::new(htdocs)).await;
 
         // Drop a placeholder index.html so a fresh site shows a friendly
         // "Hello from Hyperion" page instead of an nginx 403 (which is
@@ -169,7 +168,9 @@ impl AdapterPort for RealAdapter {
                 tracing::warn!(error=%e, "could not write placeholder index.html");
             } else {
                 let mut chown = tokio::process::Command::new("/usr/bin/chown");
-                chown.arg(format!("{}:{}", owner_uid, owner_uid)).arg(&index_path);
+                chown
+                    .arg(format!("{}:{}", owner_uid, owner_uid))
+                    .arg(&index_path);
                 best_effort_cmd(chown, "chown placeholder index.html").await;
                 let mut chmod = tokio::process::Command::new("/usr/bin/chmod");
                 chmod.arg("0644").arg(&index_path);
@@ -435,9 +436,8 @@ impl AdapterPort for RealAdapter {
                 if missing.is_empty() {
                     continue;
                 }
-                let quarantine_path = path.with_extension(format!(
-                    "conf.hyperion-quarantined-{now_ts}"
-                ));
+                let quarantine_path =
+                    path.with_extension(format!("conf.hyperion-quarantined-{now_ts}"));
                 tracing::warn!(
                     pool = %path.display(),
                     quarantined = %quarantine_path.display(),
@@ -487,9 +487,8 @@ impl AdapterPort for RealAdapter {
                             );
                             break;
                         }
-                        let qpath = bad_path.with_extension(format!(
-                            "conf.hyperion-quarantined-{now_ts}"
-                        ));
+                        let qpath =
+                            bad_path.with_extension(format!("conf.hyperion-quarantined-{now_ts}"));
                         tracing::warn!(
                             pool = %bad_path.display(),
                             quarantined = %qpath.display(),
@@ -550,9 +549,7 @@ impl AdapterPort for RealAdapter {
                 // Defensive: only create dirs under /home or /var.
                 // We never want to mkdir somewhere weird if a vhost
                 // gets pasted in pointing at /etc or /.
-                if !log_path.starts_with("/home")
-                    && !log_path.starts_with("/var")
-                {
+                if !log_path.starts_with("/home") && !log_path.starts_with("/var") {
                     continue;
                 }
                 let Some(parent) = log_path.parent() else {
@@ -579,7 +576,11 @@ impl AdapterPort for RealAdapter {
                 // /home/<user>/<domain>/logs → owner = <user>.
                 if let Some(user) = derive_system_user_from_log_path(parent) {
                     let mut chown = tokio::process::Command::new("/usr/bin/chown");
-                    chown.args(["-R", &format!("{user}:{user}"), &parent.display().to_string()]);
+                    chown.args([
+                        "-R",
+                        &format!("{user}:{user}"),
+                        &parent.display().to_string(),
+                    ]);
                     best_effort_cmd(chown, "chown vhost log dir").await;
                 }
                 created += 1;
@@ -670,10 +671,18 @@ impl AdapterPort for RealAdapter {
         // reused by every auto-subdomain) win; otherwise derive the
         // per-domain default.
         let cert_path = detail.cert_path.clone().unwrap_or_else(|| {
-            format!("{}/{}/fullchain.pem", self.certs_root.display(), detail.domain)
+            format!(
+                "{}/{}/fullchain.pem",
+                self.certs_root.display(),
+                detail.domain
+            )
         });
         let key_path = detail.cert_key_path.clone().unwrap_or_else(|| {
-            format!("{}/{}/privkey.pem", self.certs_root.display(), detail.domain)
+            format!(
+                "{}/{}/privkey.pem",
+                self.certs_root.display(),
+                detail.domain
+            )
         });
         // Self-heal: if the cert files have gone missing (operator
         // manually deleted /etc/hyperion/certs/<domain>, partial
@@ -688,9 +697,7 @@ impl AdapterPort for RealAdapter {
         // acme_issue() would have written; the real LE cert is
         // re-issued on the next renewal tick (or via "Issue cert"
         // on the SSL tab).
-        if !std::path::Path::new(&cert_path).exists()
-            || !std::path::Path::new(&key_path).exists()
-        {
+        if !std::path::Path::new(&cert_path).exists() || !std::path::Path::new(&key_path).exists() {
             tracing::warn!(
                 domain = %detail.domain,
                 "cert files missing — generating self-signed bootstrap (LE will replace on next renewal tick)"
@@ -786,12 +793,8 @@ impl AdapterPort for RealAdapter {
         domain: &str,
         hosting_id: Option<String>,
     ) -> Result<(), AdapterError> {
-        hyperion_adapters::nginx::delete_vhost(
-            &self.nginx_paths,
-            domain,
-            hosting_id.as_deref(),
-        )
-        .await
+        hyperion_adapters::nginx::delete_vhost(&self.nginx_paths, domain, hosting_id.as_deref())
+            .await
     }
 
     async fn nginx_write_htpasswd(
@@ -1111,7 +1114,9 @@ impl AdapterPort for RealAdapter {
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
         {
-            return Err(AdapterError::Other(format!("bad redis username: {username}")));
+            return Err(AdapterError::Other(format!(
+                "bad redis username: {username}"
+            )));
         }
         if !(0..=63).contains(&db_number) {
             return Err(AdapterError::Other(format!(
@@ -1159,7 +1164,9 @@ impl AdapterPort for RealAdapter {
         // ACL DELUSER returns 1 if deleted, 0 if didn't exist — both fine.
         // A *failure* (redis down, auth error), though, can leave a stale
         // credential active and reusable, so log it instead of swallowing.
-        if let Err(e) = hyperion_adapters::cmd::run("/usr/bin/redis-cli", &["ACL", "DELUSER", username]).await {
+        if let Err(e) =
+            hyperion_adapters::cmd::run("/usr/bin/redis-cli", &["ACL", "DELUSER", username]).await
+        {
             tracing::warn!(user = %username, error = %e, "redis ACL DELUSER failed — credential may persist");
         }
         Ok(())
@@ -1440,7 +1447,11 @@ mod tests {
         .expect("ensure_dirs");
 
         // htdocs: world rx required (others execute → 0o005 minimum).
-        let m = std::fs::metadata(&htdocs).expect("htdocs metadata").permissions().mode() & 0o777;
+        let m = std::fs::metadata(&htdocs)
+            .expect("htdocs metadata")
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(m, 0o755, "htdocs mode must be 0755, got {:o}", m);
 
         // logs + tmp: must NOT be world-readable.
@@ -1457,7 +1468,11 @@ mod tests {
             body.contains("Hyperion"),
             "placeholder should be the hyperion branded one"
         );
-        let im = std::fs::metadata(&idx).expect("idx meta").permissions().mode() & 0o777;
+        let im = std::fs::metadata(&idx)
+            .expect("idx meta")
+            .permissions()
+            .mode()
+            & 0o777;
         assert_eq!(im, 0o644, "index.html mode must be 0644, got {:o}", im);
     }
 
@@ -1486,7 +1501,10 @@ mod tests {
         .expect("ensure_dirs");
 
         let body = std::fs::read_to_string(&idx).expect("read");
-        assert_eq!(body, "<h1>my real site</h1>", "existing index was overwritten");
+        assert_eq!(
+            body, "<h1>my real site</h1>",
+            "existing index was overwritten"
+        );
     }
 
     /// Regression for the "WordPress installed but the site 404s" bug:
@@ -1542,7 +1560,10 @@ mod tests {
         }
         // macOS / fallback: USER → id -u via env not reliable; just use 1000.
         // chown of a non-existent uid will fail best-effort, which is fine.
-        std::env::var("UID").ok().and_then(|s| s.parse().ok()).unwrap_or(1000)
+        std::env::var("UID")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1000)
     }
 
     #[tokio::test]
@@ -1662,7 +1683,10 @@ mod tests {
         };
 
         let (repaired, scanned) = a.repair_orphan_certs().await.expect("repair");
-        assert_eq!(scanned, 2, "should have scanned 2 .conf files (default skipped)");
+        assert_eq!(
+            scanned, 2,
+            "should have scanned 2 .conf files (default skipped)"
+        );
         assert_eq!(repaired, 1, "should have repaired the one orphan");
 
         // Orphan now has a real PEM cert.
@@ -1671,8 +1695,8 @@ mod tests {
         assert!(body.contains("BEGIN CERTIFICATE"));
 
         // Existing cert was NOT clobbered.
-        let alive_body = std::fs::read_to_string(alive_cert_dir.join("fullchain.pem"))
-            .expect("read");
+        let alive_body =
+            std::fs::read_to_string(alive_cert_dir.join("fullchain.pem")).expect("read");
         assert_eq!(alive_body, "existing");
     }
 
@@ -1820,9 +1844,7 @@ mod tests {
         let p = extract_fpm_test_failed_path(stderr).expect("must extract path");
         assert_eq!(
             p,
-            std::path::PathBuf::from(
-                "/etc/php/8.3/fpm/pool.d/test_four_testovaciverze_cz.conf"
-            )
+            std::path::PathBuf::from("/etc/php/8.3/fpm/pool.d/test_four_testovaciverze_cz.conf")
         );
     }
 
@@ -1904,7 +1926,10 @@ mod tests {
     #[test]
     fn derive_system_user_from_log_path_typical_shape() {
         let p = std::path::Path::new("/home/alice_cz/alice.cz/logs");
-        assert_eq!(derive_system_user_from_log_path(p), Some("alice_cz".to_string()));
+        assert_eq!(
+            derive_system_user_from_log_path(p),
+            Some("alice_cz".to_string())
+        );
     }
 
     #[test]
@@ -1928,15 +1953,11 @@ mod tests {
     #[test]
     fn derive_system_user_from_log_path_rejects_garbage() {
         assert_eq!(
-            derive_system_user_from_log_path(std::path::Path::new(
-                "/home/$(rm -rf)/x.cz/logs"
-            )),
+            derive_system_user_from_log_path(std::path::Path::new("/home/$(rm -rf)/x.cz/logs")),
             None
         );
         assert_eq!(
-            derive_system_user_from_log_path(std::path::Path::new(
-                "/home/a:b/x.cz/logs"
-            )),
+            derive_system_user_from_log_path(std::path::Path::new("/home/a:b/x.cz/logs")),
             None
         );
     }

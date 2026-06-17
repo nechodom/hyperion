@@ -140,7 +140,15 @@ pub async fn list_for(
 /// archive path on disk before deleting it.
 pub async fn get_by_id(pool: &SqlitePool, id: i64) -> Result<Option<BackupRun>, StateError> {
     let row: Option<(
-        i64, String, String, i64, Option<i64>, String, Option<String>, Option<String>, i64,
+        i64,
+        String,
+        String,
+        i64,
+        Option<i64>,
+        String,
+        Option<String>,
+        Option<String>,
+        i64,
         Option<String>,
     )> = sqlx::query_as(
         "SELECT id, hosting_id, target, started_at, finished_at, state, archive_path,

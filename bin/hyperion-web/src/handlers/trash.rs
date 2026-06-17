@@ -83,12 +83,8 @@ pub async fn get_trash(
         .await
         .unwrap_or_default();
     for n in workers {
-        if let Ok(RpcResponse::TrashList(rows)) = crate::dispatcher::dispatch_to_node(
-            &state,
-            Some(&n.node_id),
-            Request::TrashList,
-        )
-        .await
+        if let Ok(RpcResponse::TrashList(rows)) =
+            crate::dispatcher::dispatch_to_node(&state, Some(&n.node_id), Request::TrashList).await
         {
             let mut rows = rows;
             for r in &mut rows {
@@ -142,12 +138,8 @@ pub async fn post_trash_restore(
     } else {
         Some(form.target_node.as_str())
     };
-    let resp = crate::dispatcher::dispatch_to_node(
-        &state,
-        target,
-        Request::TrashRestore(sel),
-    )
-    .await?;
+    let resp =
+        crate::dispatcher::dispatch_to_node(&state, target, Request::TrashRestore(sel)).await?;
     match resp {
         RpcResponse::TrashRestore => Ok(Redirect::to(&format!(
             "/trash?flash=Restored+{}",
@@ -179,12 +171,8 @@ pub async fn post_trash_purge(
     } else {
         Some(form.target_node.as_str())
     };
-    let resp = crate::dispatcher::dispatch_to_node(
-        &state,
-        target,
-        Request::TrashPurge(sel),
-    )
-    .await?;
+    let resp =
+        crate::dispatcher::dispatch_to_node(&state, target, Request::TrashPurge(sel)).await?;
     match resp {
         RpcResponse::TrashPurge => Ok(Redirect::to(&format!(
             "/trash?flash=Permanently+deleted+{}",
@@ -232,11 +220,9 @@ pub async fn get_trash_count(
     }
     // Also poll every remote node (same fan-out as get_trash). Best
     // effort — a flaky worker shouldn't make the badge go to 0.
-    if let Ok(RpcResponse::NodesList(nodes)) = hyperion_rpc_client::call(
-        &state.agent_socket,
-        hyperion_rpc::codec::Request::NodesList,
-    )
-    .await
+    if let Ok(RpcResponse::NodesList(nodes)) =
+        hyperion_rpc_client::call(&state.agent_socket, hyperion_rpc::codec::Request::NodesList)
+            .await
     {
         for n in nodes {
             if let Ok(RpcResponse::TrashList(rows)) = crate::dispatcher::dispatch_to_node(

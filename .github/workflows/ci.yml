@@ -1,15 +1,15 @@
 name: CI
 
-# Gates every PR (and pushes to main) on what the project actually maintains:
-# the workspace must build and the test suite must pass. release.yml only builds
-# the three shipped binaries; this also compiles + runs all tests (catching e.g.
-# a test regression before it reaches the rolling release).
+# Gates every PR (and pushes to main) on the checks the project now maintains:
+# rustfmt, clippy, build, and the full test suite. release.yml only builds the
+# three shipped binaries; this also formats/lints/tests everything so a
+# regression is caught before it reaches the rolling release.
 #
-# fmt + clippy run too, but as INFORMATIONAL (continue-on-error) steps: the
-# codebase predates any lint gating and isn't yet rustfmt-clean nor free of the
-# crate-level deny(unwrap_used/expect_used) violations clippy surfaces. Making
-# them blocking would red every build for pre-existing debt. They stay visible
-# in the log so the debt can be paid down over time, then flipped to blocking.
+# clippy runs WITHOUT `-D warnings`: the crate-level deny(unwrap_used/
+# expect_used) gates already make those hard errors, while the remaining style
+# lints (complex types, doc formatting, …) stay non-fatal warnings until they're
+# cleaned up. So clippy here enforces "no new unwrap/expect in shipping code"
+# without red-X'ing on pre-existing style debt.
 on:
   pull_request:
   push:
@@ -42,18 +42,16 @@ jobs:
         with:
           cache-on-failure: true
 
-      # ---- Blocking gates ----
+      - name: Format check
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        # Not -D warnings — the crate-level deny(unwrap_used/expect_used) is the
+        # hard gate; style lints stay as (non-fatal) warnings for now.
+        run: cargo clippy --workspace --all-targets
+
       - name: Tests
         run: cargo test --workspace
 
       - name: Build (release — mirrors the rolling release)
         run: cargo build --workspace --release
-
-      # ---- Informational (do not fail the build yet) ----
-      - name: Format check (informational)
-        run: cargo fmt --all --check
-        continue-on-error: true
-
-      - name: Clippy (informational)
-        run: cargo clippy --workspace --all-targets
-        continue-on-error: true

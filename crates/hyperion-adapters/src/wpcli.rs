@@ -297,7 +297,11 @@ pub fn validate_plugin_url(s: &str) -> Result<(), AdapterError> {
         return refused("must be https://");
     };
     // Host = everything up to the first '/', ':' or '?'.
-    let host = rest.split(['/', ':', '?']).next().unwrap_or("").to_ascii_lowercase();
+    let host = rest
+        .split(['/', ':', '?'])
+        .next()
+        .unwrap_or("")
+        .to_ascii_lowercase();
     if host.is_empty() {
         return refused("empty host");
     }
@@ -337,7 +341,12 @@ pub async fn theme_list(
     let argv = build_argv(
         user,
         htdocs,
-        &["theme", "list", "--format=json", "--fields=name,status,update,version,update_version"],
+        &[
+            "theme",
+            "list",
+            "--format=json",
+            "--fields=name,status,update,version,update_version",
+        ],
     );
     let out = cmd::run("/usr/bin/sudo", &argv_as_refs(&argv)).await?;
     // wp-cli emits each row with `name` (= slug) and a separate
@@ -401,7 +410,12 @@ pub async fn theme_action(
             } else {
                 validate_plugin_slug(source)?;
             }
-            vec!["theme".into(), "install".into(), source.clone(), "--activate".into()]
+            vec![
+                "theme".into(),
+                "install".into(),
+                source.clone(),
+                "--activate".into(),
+            ]
         }
         hyperion_types::WpThemeAction::Activate => {
             vec!["theme".into(), "activate".into(), slug.into()]
@@ -532,7 +546,9 @@ pub async fn plugin_list(
         // denies unwrap/expect but slicing bypasses that). Matches
         // theme_list's handling.
         let preview: String = stdout.chars().take(200).collect();
-        AdapterError::Other(format!("wp plugin list returned non-JSON: {e} — body: {preview}"))
+        AdapterError::Other(format!(
+            "wp plugin list returned non-JSON: {e} — body: {preview}"
+        ))
     })?;
     let plugins: Vec<hyperion_types::WpPlugin> = rows
         .into_iter()
@@ -588,16 +604,36 @@ pub async fn plugin_action(
             } else {
                 validate_plugin_slug(source)?;
             }
-            vec!["plugin".into(), "install".into(), source.clone(), "--activate".into()]
+            vec![
+                "plugin".into(),
+                "install".into(),
+                source.clone(),
+                "--activate".into(),
+            ]
         }
-        hyperion_types::WpPluginAction::Activate => vec!["plugin".into(), "activate".into(), slug.into()],
-        hyperion_types::WpPluginAction::Deactivate => vec!["plugin".into(), "deactivate".into(), slug.into()],
-        hyperion_types::WpPluginAction::Update => vec!["plugin".into(), "update".into(), slug.into()],
-        hyperion_types::WpPluginAction::UpdateAll => vec!["plugin".into(), "update".into(), "--all".into()],
-        hyperion_types::WpPluginAction::Delete => vec!["plugin".into(), "delete".into(), slug.into()],
+        hyperion_types::WpPluginAction::Activate => {
+            vec!["plugin".into(), "activate".into(), slug.into()]
+        }
+        hyperion_types::WpPluginAction::Deactivate => {
+            vec!["plugin".into(), "deactivate".into(), slug.into()]
+        }
+        hyperion_types::WpPluginAction::Update => {
+            vec!["plugin".into(), "update".into(), slug.into()]
+        }
+        hyperion_types::WpPluginAction::UpdateAll => {
+            vec!["plugin".into(), "update".into(), "--all".into()]
+        }
+        hyperion_types::WpPluginAction::Delete => {
+            vec!["plugin".into(), "delete".into(), slug.into()]
+        }
         hyperion_types::WpPluginAction::SetAutoUpdate { enabled } => {
             let sub = if *enabled { "enable" } else { "disable" };
-            vec!["plugin".into(), "auto-updates".into(), sub.into(), slug.into()]
+            vec![
+                "plugin".into(),
+                "auto-updates".into(),
+                sub.into(),
+                slug.into(),
+            ]
         }
     };
     let args_refs: Vec<&str> = args_owned.iter().map(|s| s.as_str()).collect();
@@ -608,7 +644,8 @@ pub async fn plugin_action(
             let tail = tail_4k(&out);
             // wp-cli prints "Success:" on happy path and "Warning:" on
             // noop ("Plugin already activated").
-            let noop = out.contains("already active") || out.contains("already deactivated")
+            let noop = out.contains("already active")
+                || out.contains("already deactivated")
                 || out.contains("Warning: ");
             let state = if noop { "noop" } else { "ok" };
             (state.to_string(), short_summary(&out), tail)

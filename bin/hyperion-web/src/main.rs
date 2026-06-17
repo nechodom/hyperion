@@ -98,9 +98,7 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
         let state_for_refresh = state.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(30));
-            tick.set_missed_tick_behavior(
-                tokio::time::MissedTickBehavior::Delay,
-            );
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tick.tick().await;
                 let resp = hyperion_rpc_client::call(
@@ -129,8 +127,7 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
         // Set the `ring` provider once at startup; subsequent calls
         // (e.g. in tests) are harmless no-ops.
         let _ = rustls::crypto::ring::default_provider().install_default();
-        ensure_self_signed(&tls_cert, &tls_key)
-            .context("TLS cert/key auto-provision")?;
+        ensure_self_signed(&tls_cert, &tls_key).context("TLS cert/key auto-provision")?;
         let rustls_config =
             axum_server::tls_rustls::RustlsConfig::from_pem_file(&tls_cert, &tls_key)
                 .await
@@ -189,7 +186,11 @@ fn ensure_self_signed(
         .unwrap_or_else(|| "hyperion".to_string());
     let mut names = vec![hostname.clone(), "localhost".to_string()];
     if let Ok(local_addr) = std::env::var("HYPERION_TLS_SAN") {
-        for s in local_addr.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        for s in local_addr
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             names.push(s.to_string());
         }
     }

@@ -64,7 +64,19 @@ pub async fn insert(pool: &SqlitePool, m: &NodeMetricsInput) -> Result<i64, Stat
 
 pub async fn latest(pool: &SqlitePool) -> Result<Option<NodeMetricsRow>, StateError> {
     let row: Option<(
-        i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
     )> = sqlx::query_as(
         "SELECT id, sampled_at, hostings_count, hostings_active, hostings_suspended,
                 hostings_failed, total_disk_bytes, total_bw_out_24h,
@@ -110,13 +122,22 @@ pub async fn latest(pool: &SqlitePool) -> Result<Option<NodeMetricsRow>, StateEr
 /// Last N node_metrics samples ordered oldest → newest (so charts read
 /// left-to-right). Caller picks `limit`; typical: 48 for a "last 4h
 /// @ 5min tick" sparkline, 288 for a 24h window.
-pub async fn history(
-    pool: &SqlitePool,
-    limit: i64,
-) -> Result<Vec<NodeMetricsRow>, StateError> {
+pub async fn history(pool: &SqlitePool, limit: i64) -> Result<Vec<NodeMetricsRow>, StateError> {
     let limit = limit.clamp(1, 2000);
     let rows: Vec<(
-        i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64, i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
     )> = sqlx::query_as(
         "SELECT id, sampled_at, hostings_count, hostings_active, hostings_suspended,
                 hostings_failed, total_disk_bytes, total_bw_out_24h,
@@ -217,11 +238,14 @@ mod tests {
         let pool = open_memory().await.expect("open");
         // Insert in reverse time order to confirm the function sorts.
         for ts in [300, 100, 200] {
-            insert(&pool, &NodeMetricsInput {
-                sampled_at: ts,
-                hostings_count: ts,
-                ..Default::default()
-            })
+            insert(
+                &pool,
+                &NodeMetricsInput {
+                    sampled_at: ts,
+                    hostings_count: ts,
+                    ..Default::default()
+                },
+            )
             .await
             .expect("insert");
         }
@@ -235,10 +259,13 @@ mod tests {
     async fn history_respects_limit() {
         let pool = open_memory().await.expect("open");
         for ts in 1..=20 {
-            insert(&pool, &NodeMetricsInput {
-                sampled_at: ts,
-                ..Default::default()
-            })
+            insert(
+                &pool,
+                &NodeMetricsInput {
+                    sampled_at: ts,
+                    ..Default::default()
+                },
+            )
             .await
             .expect("insert");
         }

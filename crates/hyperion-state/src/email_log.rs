@@ -97,43 +97,49 @@ pub async fn list(
         Option<String>,
         i64,
     )> = match hosting_id {
-        Some(id) => sqlx::query_as(
-            "SELECT id, hosting_id, to_address, subject, body_preview, kind, state,
+        Some(id) => {
+            sqlx::query_as(
+                "SELECT id, hosting_id, to_address, subject, body_preview, kind, state,
                     error, smtp_code, sent_at
                FROM email_log
               WHERE hosting_id = ?
               ORDER BY sent_at DESC, id DESC
               LIMIT ?",
-        )
-        .bind(id)
-        .bind(limit)
-        .fetch_all(pool)
-        .await?,
-        None => sqlx::query_as(
-            "SELECT id, hosting_id, to_address, subject, body_preview, kind, state,
+            )
+            .bind(id)
+            .bind(limit)
+            .fetch_all(pool)
+            .await?
+        }
+        None => {
+            sqlx::query_as(
+                "SELECT id, hosting_id, to_address, subject, body_preview, kind, state,
                     error, smtp_code, sent_at
                FROM email_log
               ORDER BY sent_at DESC, id DESC
               LIMIT ?",
-        )
-        .bind(limit)
-        .fetch_all(pool)
-        .await?,
+            )
+            .bind(limit)
+            .fetch_all(pool)
+            .await?
+        }
     };
     Ok(rows
         .into_iter()
-        .map(|(id, hid, to, subj, prev, kind, state, err, code, sent)| EmailLogRow {
-            id,
-            hosting_id: hid,
-            to_address: to,
-            subject: subj,
-            body_preview: prev,
-            kind,
-            state,
-            error: err,
-            smtp_code: code,
-            sent_at: sent,
-        })
+        .map(
+            |(id, hid, to, subj, prev, kind, state, err, code, sent)| EmailLogRow {
+                id,
+                hosting_id: hid,
+                to_address: to,
+                subject: subj,
+                body_preview: prev,
+                kind,
+                state,
+                error: err,
+                smtp_code: code,
+                sent_at: sent,
+            },
+        )
         .collect())
 }
 

@@ -427,7 +427,9 @@ pub enum Request {
     /// Produce a migration bundle (archive + manifest) for `hosting`.
     /// The bundle lives on the source node's disk; the operator
     /// transfers it out-of-band and imports on the target.
-    HostingExport { hosting: HostingSelector },
+    HostingExport {
+        hosting: HostingSelector,
+    },
     /// Read one file from `/var/lib/hyperion/migration/<bundle_id>/`
     /// and return its raw bytes (base64). Used by the master to pull
     /// a bundle off a WORKER source during worker-to-X migration —
@@ -444,7 +446,9 @@ pub enum Request {
     },
     /// Import a migration bundle by manifest path. Sibling
     /// `archive.tar.gz` is expected next to the manifest.
-    HostingImport { manifest_path: String },
+    HostingImport {
+        manifest_path: String,
+    },
     /// Per-hosting (or cluster-wide) email log.
     EmailLogList {
         /// `None` returns the cluster-wide stream; `Some(hosting_id)`
@@ -536,7 +540,9 @@ pub enum Request {
     /// Look up a single background job by id. Returns `None` if the
     /// id has been rotated out of the table (very rare; rows are
     /// retained for at least 30 days).
-    JobGet { id: String },
+    JobGet {
+        id: String,
+    },
     /// List background jobs, newest first. `kind=None` returns all
     /// kinds; `state=None` returns all states. `limit` is clamped to
     /// 1..=1000 server-side.
@@ -565,10 +571,14 @@ pub enum Request {
     /// `Response::Bool(true)` when the session is live (row
     /// present, revoked_at IS NULL); `false` for revoked /
     /// missing rows (treat as anonymous).
-    WebSessionTouch { sid: String },
+    WebSessionTouch {
+        sid: String,
+    },
     /// Newest-first list of `user_id`'s sessions (used by
     /// /settings/sessions).
-    WebSessionList { user_id: i64 },
+    WebSessionList {
+        user_id: i64,
+    },
     /// Flip `revoked_at`. Caller (panel) checks ownership before
     /// dispatching — server only enforces existence.
     WebSessionRevoke {
@@ -601,13 +611,19 @@ pub enum Request {
     /// Delete a backup target. Existing backup_runs rows that
     /// reference it have target_id set to NULL (history is
     /// preserved).
-    BackupTargetDelete { id: i64 },
+    BackupTargetDelete {
+        id: i64,
+    },
     /// Probe the configured target with a small PUT + DELETE
     /// round-trip. Returns latency + a human-readable message.
-    BackupTargetProbe { id: i64 },
+    BackupTargetProbe {
+        id: i64,
+    },
     /// Read the current quota policy + usage report for one
     /// hosting. Returns zero-everywhere when no row exists.
-    QuotaGet { hosting: HostingSelector },
+    QuotaGet {
+        hosting: HostingSelector,
+    },
     /// Persist the policy + invoke `setquota` against the owner
     /// uid. Returns `Response::QuotaApplied` with the applied row
     /// (success) or `Response::Error` (validation / kernel failure).
@@ -622,7 +638,9 @@ pub enum Request {
     /// Automatically enable Linux kernel disk quotas on the filesystem
     /// carrying this hosting's home tree (edits /etc/fstab + remount +
     /// quotacheck + quotaon where possible).
-    QuotaEnableKernel { hosting: HostingSelector },
+    QuotaEnableKernel {
+        hosting: HostingSelector,
+    },
     /// Walk the entire audit_log hash chain and verify each row's
     /// `row_hash = BLAKE3(prev_hash || canonical_fields)`. Returns
     /// `Response::AuditVerifyChain { ok, broken_at_id, message }`
@@ -684,7 +702,9 @@ pub enum Request {
         override_aliases: Vec<String>,
     },
     /// List installed WordPress plugins for `hosting`.
-    WpPluginList { hosting: HostingSelector },
+    WpPluginList {
+        hosting: HostingSelector,
+    },
     /// Apply one plugin action via wp-cli. `slug` is the plugin
     /// folder name (ignored for `UpdateAll`).
     WpPluginAction {
@@ -960,7 +980,10 @@ pub enum Request {
     CertOverview,
     /// Rename an enrolled node's display label. `node_id` is the
     /// immutable enrollment identifier; only `label` changes.
-    NodeSetLabel { node_id: String, label: String },
+    NodeSetLabel {
+        node_id: String,
+        label: String,
+    },
     /// Toggle a node's drain flag. `drain=true` marks the node as
     /// maintenance — auto-placer + create wizard skip it; existing
     /// hostings keep serving. `drain=false` lifts the flag.
@@ -1032,10 +1055,17 @@ pub enum Request {
     },
     DashboardAlerts,
     ProfileList,
-    ProfileGet { id: i64 },
+    ProfileGet {
+        id: i64,
+    },
     ProfileCreate(ProfileInput),
-    ProfileUpdate { id: i64, input: ProfileInput },
-    ProfileDelete { id: i64 },
+    ProfileUpdate {
+        id: i64,
+        input: ProfileInput,
+    },
+    ProfileDelete {
+        id: i64,
+    },
     ProfileApply {
         sel: HostingSelector,
         profile_id: i64,
@@ -1049,7 +1079,9 @@ pub enum Request {
         #[serde(default)]
         skip_wp_items: bool,
     },
-    ProfileGetApply { sel: HostingSelector },
+    ProfileGetApply {
+        sel: HostingSelector,
+    },
     /// Install ONE line of a profile's wp_plugins / wp_themes list
     /// on a hosting. `line` uses the same syntax as the profile
     /// fields: `slug`, `@asset:<id>`, trailing `!` = activate,
@@ -1097,7 +1129,9 @@ pub enum Response {
     HostingKvSet,
     HostingKvList(Vec<(String, String)>),
     UpcomingExpiries(Vec<ExpiringHosting>),
-    SchedulerTick { actions_processed: i64 },
+    SchedulerTick {
+        actions_processed: i64,
+    },
     BackupNow(BackupRunWire),
     BackupList(Vec<BackupRunWire>),
     InviteCreate(NodeInviteMint),
@@ -1153,7 +1187,9 @@ pub enum Response {
     /// SMTP response code from the relay (e.g. `Code(250)`).
     /// Surfaced in the UI flash so the operator can verify the
     /// relay actually accepted the message.
-    EmailSendTest { smtp_code: String },
+    EmailSendTest {
+        smtp_code: String,
+    },
     ServiceRestart,
     ServiceInstall,
     /// Current state of the most-recent / in-progress
@@ -1161,7 +1197,10 @@ pub enum Response {
     ServiceInstallStatus(hyperion_types::ServiceInstallStatus),
     /// Upload accepted. `id` is the newly-inserted row id (or the
     /// existing one if dedupe matched on SHA-256).
-    WpAssetUpload { id: i64, deduped: bool },
+    WpAssetUpload {
+        id: i64,
+        deduped: bool,
+    },
     /// Library snapshot — never empty unless no uploads have ever
     /// happened on this node.
     WpAssetList(Vec<hyperion_types::WpAssetSummary>),
@@ -1187,18 +1226,24 @@ pub enum Response {
     WpThemeAction(hyperion_types::WpThemeActionResult),
     WpVulnScan(hyperion_types::WpVulnScanResult),
     VulnFindingsList(Vec<hyperion_types::HostingVulnSummary>),
-    WpStagingCreate { staging_domain: String },
+    WpStagingCreate {
+        staging_domain: String,
+    },
     WpStagingPush,
     /// Acknowledgement that the background update task spawned.
     /// Failures during the actual update show up in the log tail,
     /// not here.
-    NodeUpdateRun { started_at: i64 },
+    NodeUpdateRun {
+        started_at: i64,
+    },
     /// Current update job state + the last ~8 kB of stdout/stderr.
     NodeUpdateStatus(hyperion_types::NodeUpdateStatus),
     AgentConfigUpdate,
     UpdateCheck(hyperion_types::UpdateStatus),
     HostingExport(hyperion_types::HostingMigrationBundle),
-    HostingMigrationFetchBundleFile { bytes_b64: String },
+    HostingMigrationFetchBundleFile {
+        bytes_b64: String,
+    },
     HostingImport(hyperion_types::HostingImportResult),
     HostingImportFromUrl(hyperion_types::HostingImportResult),
     EmailLogList(Vec<hyperion_types::EmailLogEntry>),
@@ -1206,12 +1251,16 @@ pub enum Response {
     FtpAccountsList(Vec<hyperion_types::FtpAccountSummary>),
     /// True = login accepted, false = refused. Transport failure
     /// surfaces as Response::Error so the UI can distinguish.
-    FtpVerifyLogin { accepted: bool },
+    FtpVerifyLogin {
+        accepted: bool,
+    },
     EmailSmtpAutodetect(hyperion_types::SmtpAutodetect),
     MtaDiagnostics(hyperion_types::MtaDiagnostics),
     /// Echoes the mode that was just applied — `"direct-mx"`,
     /// `"smart-host"`, or `"skipped"` (postfix not installed).
-    MtaReconfigure { mode: String },
+    MtaReconfigure {
+        mode: String,
+    },
     /// `exit_code` from /usr/sbin/sendmail (0 = queued). `output`
     /// is whatever sendmail printed to stderr (usually empty on
     /// success).
@@ -1249,10 +1298,15 @@ pub enum Response {
     /// empty on success). `success` false + message = failed
     /// remount (e.g. snap-managed rootfs that genuinely cannot
     /// be made RW — operator needs a different base image).
-    RemountUsrRw { success: bool, message: String },
+    RemountUsrRw {
+        success: bool,
+        message: String,
+    },
     FsDiagnoseAndFix(hyperion_types::FsDiagnostics),
     BackupTargetList(Vec<hyperion_types::BackupTargetView>),
-    BackupTargetUpserted { id: i64 },
+    BackupTargetUpserted {
+        id: i64,
+    },
     BackupTargetDeleted,
     BackupTargetProbe(hyperion_types::BackupTargetProbe),
     /// Per-hosting quota report (policy + current usage).
@@ -1283,7 +1337,9 @@ pub enum Response {
     JobList(Vec<hyperion_types::JobView>),
     /// Returns the `job_id` minted by `JobStart` (and reused for
     /// later `JobProgress` / `JobFinish` ticks).
-    JobStarted { job_id: String },
+    JobStarted {
+        job_id: String,
+    },
     /// Plain ack for `JobProgress` / `JobFinish`. No payload — the
     /// caller already knows the id.
     JobAck,
@@ -1294,13 +1350,17 @@ pub enum Response {
     WebVerify2fa(hyperion_types::WebVerify2faResult),
     WebUserList(Vec<hyperion_types::WebUserSummary>),
     WebUserGet(Option<hyperion_types::WebUserSummary>),
-    WebUserCreate { id: i64 },
+    WebUserCreate {
+        id: i64,
+    },
     WebUserSetPassword,
     WebUserSetRole,
     WebUserSetLocked,
     WebUserDelete,
     Web2faEnrollStart(hyperion_types::Web2faEnrollment),
-    Web2faConfirmEnroll { ok: bool },
+    Web2faConfirmEnroll {
+        ok: bool,
+    },
     Web2faDisable,
     WebGrantHostingAccess,
     WebRevokeHostingAccess,
@@ -1323,7 +1383,9 @@ pub enum Response {
     AvatarFilename(Option<String>),
     AvatarSet,
     /// Returns the masked target address (e.g. "k****@example.cz").
-    EmailChangeRequest { masked_to: String },
+    EmailChangeRequest {
+        masked_to: String,
+    },
     EmailChangeConfirm,
     EmailChangeCancel,
     MonitorGet {
@@ -1332,8 +1394,12 @@ pub enum Response {
     },
     MonitorSet,
     MonitorProbeNow(hyperion_types::MonitorSamplePoint),
-    MonitorTick { sampled: i64 },
-    StatsTick { hostings_sampled: i64 },
+    MonitorTick {
+        sampled: i64,
+    },
+    StatsTick {
+        hostings_sampled: i64,
+    },
     BackupRestore,
     BackupFetchChunk {
         data_b64: String,
@@ -1347,7 +1413,9 @@ pub enum Response {
     },
     NotificationsFeed(hyperion_types::NotificationFeed),
     NotificationsMarkRead,
-    NotificationsMarkAllRead { marked: i64 },
+    NotificationsMarkAllRead {
+        marked: i64,
+    },
     HostingLogs(String),
     CronList(String),
     CronReplace,
@@ -1385,7 +1453,9 @@ pub enum Response {
     },
     WpResetPassword,
     DbResetPassword,
-    FtpSetPassword { password: String },
+    FtpSetPassword {
+        password: String,
+    },
     FtpDisable,
     SftpStatus(hyperion_types::SftpStatus),
     SftpSet(hyperion_types::SftpStatus),
@@ -1404,7 +1474,10 @@ pub enum Response {
     /// name of what got installed (asset original_name for
     /// `@asset:` lines, the slug otherwise); `activated` echoes
     /// whether the trailing-`!` activate ran.
-    ProfileWpItemInstalled { label: String, activated: bool },
+    ProfileWpItemInstalled {
+        label: String,
+        activated: bool,
+    },
     Error(RpcError),
 }
 
@@ -1506,7 +1579,8 @@ mod tests {
         // The socket handler logs `debug!(?req)`, so Debug of an upload
         // request must never contain the private key — while the wire form
         // must still carry the real bytes to the node.
-        let secret = "-----BEGIN PRIVATE KEY-----\nSUPERSECRETKEYMATERIAL\n-----END PRIVATE KEY-----";
+        let secret =
+            "-----BEGIN PRIVATE KEY-----\nSUPERSECRETKEYMATERIAL\n-----END PRIVATE KEY-----";
         let req = Request::CertUpload {
             sel: HostingSelector::Domain(Domain::parse("example.com").expect("domain")),
             cert_pem: "-----BEGIN CERTIFICATE-----\nCERTDATA\n-----END CERTIFICATE-----"
@@ -1520,7 +1594,10 @@ mod tests {
             !dbg.contains("SUPERSECRETKEYMATERIAL"),
             "private key leaked into Debug: {dbg}"
         );
-        assert!(dbg.contains("redacted"), "Debug should mark the field redacted");
+        assert!(
+            dbg.contains("redacted"),
+            "Debug should mark the field redacted"
+        );
 
         let json = serde_json::to_string(&req).expect("serialize");
         assert!(

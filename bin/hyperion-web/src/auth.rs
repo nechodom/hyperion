@@ -25,19 +25,31 @@ impl AuthCtx {
     /// Role string from the session, or "viewer" if unauthenticated.
     /// Used by handlers to short-circuit write operations.
     pub fn role(&self) -> &str {
-        self.session.as_ref().map(|s| s.role.as_str()).unwrap_or("viewer")
+        self.session
+            .as_ref()
+            .map(|s| s.role.as_str())
+            .unwrap_or("viewer")
     }
 
     pub fn is_super_admin(&self) -> bool {
-        self.session.as_ref().map(|s| s.is_super_admin()).unwrap_or(false)
+        self.session
+            .as_ref()
+            .map(|s| s.is_super_admin())
+            .unwrap_or(false)
     }
 
     pub fn is_admin_or_higher(&self) -> bool {
-        self.session.as_ref().map(|s| s.is_admin_or_higher()).unwrap_or(false)
+        self.session
+            .as_ref()
+            .map(|s| s.is_admin_or_higher())
+            .unwrap_or(false)
     }
 
     pub fn is_read_only(&self) -> bool {
-        self.session.as_ref().map(|s| s.is_read_only()).unwrap_or(true)
+        self.session
+            .as_ref()
+            .map(|s| s.is_read_only())
+            .unwrap_or(true)
     }
 
     /// Tenant-scoped: operator/customer/viewer — sees only granted
@@ -51,7 +63,10 @@ impl AuthCtx {
 
     /// Customer role — slim navigation in base.html.
     pub fn is_customer(&self) -> bool {
-        self.session.as_ref().map(|s| s.is_customer()).unwrap_or(false)
+        self.session
+            .as_ref()
+            .map(|s| s.is_customer())
+            .unwrap_or(false)
     }
 }
 
@@ -150,9 +165,7 @@ async fn extract_auth(parts: &mut Parts, state: &SharedState) -> AuthCtx {
                     // "unknown sid ⇒ anonymous".
                     let live = match hyperion_rpc_client::call(
                         &state.agent_socket,
-                        hyperion_rpc::codec::Request::WebSessionTouch {
-                            sid: s.sid.clone(),
-                        },
+                        hyperion_rpc::codec::Request::WebSessionTouch { sid: s.sid.clone() },
                     )
                     .await
                     {
@@ -272,14 +285,11 @@ pub async fn check_csrf(
 
     // 2. Query string — for multipart uploads. Also a no-cost fallback
     //    for any form that wants to put the token in the action URL.
-    let query_token: Option<String> = req
-        .uri()
-        .query()
-        .and_then(|q| {
-            url::form_urlencoded::parse(q.as_bytes())
-                .find(|(k, _)| k == "_csrf")
-                .map(|(_, v)| v.into_owned())
-        });
+    let query_token: Option<String> = req.uri().query().and_then(|q| {
+        url::form_urlencoded::parse(q.as_bytes())
+            .find(|(k, _)| k == "_csrf")
+            .map(|(_, v)| v.into_owned())
+    });
 
     // Decide whether we need to read the body. Skip it entirely for
     // multipart — a 2 GB upload would otherwise sit in memory just to
@@ -292,33 +302,30 @@ pub async fn check_csrf(
         .map(|s| s.to_ascii_lowercase().starts_with("multipart/"))
         .unwrap_or(false);
 
-    let (parts, body, body_bytes_opt) = if is_multipart || header_token.is_some()
-        || query_token.is_some()
-    {
-        // Don't buffer — re-attach the body unread.
-        let (p, b) = req.into_parts();
-        (p, b, None)
-    } else {
-        // Urlencoded path: buffer + parse for `_csrf`.
-        let (p, b) = req.into_parts();
-        match http_body_util::BodyExt::collect(b).await {
-            Ok(c) => {
-                let bytes = c.to_bytes();
-                (p, Body::from(bytes.clone()), Some(bytes))
+    let (parts, body, body_bytes_opt) =
+        if is_multipart || header_token.is_some() || query_token.is_some() {
+            // Don't buffer — re-attach the body unread.
+            let (p, b) = req.into_parts();
+            (p, b, None)
+        } else {
+            // Urlencoded path: buffer + parse for `_csrf`.
+            let (p, b) = req.into_parts();
+            match http_body_util::BodyExt::collect(b).await {
+                Ok(c) => {
+                    let bytes = c.to_bytes();
+                    (p, Body::from(bytes.clone()), Some(bytes))
+                }
+                Err(_) => {
+                    return (StatusCode::BAD_REQUEST, "bad body").into_response();
+                }
             }
-            Err(_) => {
-                return (StatusCode::BAD_REQUEST, "bad body").into_response();
-            }
-        }
-    };
+        };
 
-    let body_token: Option<String> = body_bytes_opt
-        .as_ref()
-        .and_then(|bytes| {
-            url::form_urlencoded::parse(bytes)
-                .find(|(k, _)| k == "_csrf")
-                .map(|(_, v)| v.into_owned())
-        });
+    let body_token: Option<String> = body_bytes_opt.as_ref().and_then(|bytes| {
+        url::form_urlencoded::parse(bytes)
+            .find(|(k, _)| k == "_csrf")
+            .map(|(_, v)| v.into_owned())
+    });
 
     // Pick the first non-empty token, in priority order.
     let token: Option<String> = header_token

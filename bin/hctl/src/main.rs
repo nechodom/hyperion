@@ -322,7 +322,8 @@ fn print_pretty(resp: &Response) {
             // the master OK?" without SSHing in to cat node-id.json.
             match (&i.node_id, &i.master_url) {
                 (Some(node_id), Some(master_url)) => {
-                    let when = i.enrolled_at
+                    let when = i
+                        .enrolled_at
                         .map(|t| format!("unix:{t}"))
                         .unwrap_or_else(|| "?".into());
                     println!("node:   {node_id} → {master_url} (enrolled {when})");
@@ -418,7 +419,14 @@ fn print_pretty(resp: &Response) {
             println!("service enabled  {}", d.service_enabled);
             println!("myhostname       {}", d.myhostname);
             println!("myhostname FQDN  {}", d.myhostname_is_fqdn);
-            println!("relayhost        {}", if d.relayhost.is_empty() { "(direct MX)" } else { d.relayhost.as_str() });
+            println!(
+                "relayhost        {}",
+                if d.relayhost.is_empty() {
+                    "(direct MX)"
+                } else {
+                    d.relayhost.as_str()
+                }
+            );
             println!("mailq            {}", d.mailq_summary);
             if !d.recent_log_tail.is_empty() {
                 println!("recent log tail:");
@@ -450,7 +458,11 @@ fn print_pretty(resp: &Response) {
                 println!("{output}");
             }
         }
-        Response::PanelProvision { status, message, panel_url } => {
+        Response::PanelProvision {
+            status,
+            message,
+            panel_url,
+        } => {
             println!("status: {status}");
             if !panel_url.is_empty() {
                 println!("panel:  {panel_url}");
@@ -479,7 +491,10 @@ fn print_pretty(resp: &Response) {
             }
         }
         Response::TrashList(entries) => {
-            println!("{:<32} {:<14} {:<14} NODE", "DOMAIN", "TRASHED_AT", "PURGE_IN");
+            println!(
+                "{:<32} {:<14} {:<14} NODE",
+                "DOMAIN", "TRASHED_AT", "PURGE_IN"
+            );
             for e in entries.iter() {
                 println!(
                     "{:<32} {:<14} {:<14} {}",
@@ -577,8 +592,15 @@ fn print_pretty(resp: &Response) {
         Response::NotificationsMarkAllRead { marked } => {
             println!("✓ marked {marked} notifications read");
         }
-        Response::HostingFileDownload { rel_path, bytes_b64, mime } => {
-            println!("✓ downloaded {rel_path} ({mime}, {} bytes b64)", bytes_b64.len());
+        Response::HostingFileDownload {
+            rel_path,
+            bytes_b64,
+            mime,
+        } => {
+            println!(
+                "✓ downloaded {rel_path} ({mime}, {} bytes b64)",
+                bytes_b64.len()
+            );
         }
         Response::HostingFileWrite => println!("✓ file written"),
         Response::HostingFileDelete => println!("✓ file deleted"),
@@ -634,9 +656,7 @@ fn print_pretty(resp: &Response) {
             if *ok {
                 println!("audit chain OK ({rows_checked} rows verified)");
             } else {
-                println!(
-                    "audit chain BROKEN — {rows_checked} rows checked, error: {message}"
-                );
+                println!("audit chain BROKEN — {rows_checked} rows checked, error: {message}");
             }
         }
         Response::AuditList(rows) => {
@@ -768,18 +788,9 @@ fn print_pretty(resp: &Response) {
             println!("domain:   {}", c.domain);
             println!("A:        {:?}", c.resolved_a);
             println!("AAAA:     {:?}", c.resolved_aaaa);
-            println!(
-                "our v4:   {}",
-                c.our_public_ipv4.as_deref().unwrap_or("?")
-            );
-            println!(
-                "our v6:   {}",
-                c.our_public_ipv6.as_deref().unwrap_or("?")
-            );
-            println!(
-                "matches:  {}",
-                if c.matches { "yes ✓" } else { "no ✗" }
-            );
+            println!("our v4:   {}", c.our_public_ipv4.as_deref().unwrap_or("?"));
+            println!("our v6:   {}", c.our_public_ipv6.as_deref().unwrap_or("?"));
+            println!("matches:  {}", if c.matches { "yes ✓" } else { "no ✗" });
             println!("note:     {}", c.note);
         }
         Response::CertIssueAcme(c)
@@ -791,8 +802,16 @@ fn print_pretty(resp: &Response) {
             println!("  not_after: {}", c.not_after);
             println!("  fp:        {}", c.fingerprint_sha256);
         }
-        Response::CertDns01Begin { completed, record_name, values }
-        | Response::CertDns01BeginDomain { completed, record_name, values } => {
+        Response::CertDns01Begin {
+            completed,
+            record_name,
+            values,
+        }
+        | Response::CertDns01BeginDomain {
+            completed,
+            record_name,
+            values,
+        } => {
             if *completed {
                 println!("✓ DNS-01 completed (cloudflare)");
             } else {
@@ -818,17 +837,17 @@ fn print_pretty(resp: &Response) {
             println!("  disk:     {} B total", n.total_disk_bytes);
             println!("  bw_out:   {} B (24h)", n.total_bw_out_24h);
             println!("  reqs:     {} (24h)", n.total_requests_24h);
-            println!(
-                "  load1:    {:.2}",
-                n.loadavg_1m_x100 as f64 / 100.0
-            );
+            println!("  load1:    {:.2}", n.loadavg_1m_x100 as f64 / 100.0);
             println!("  mem:      {} / {} kiB", n.mem_used_kib, n.mem_total_kib);
             println!("  uptime:   {}s", n.uptime_secs);
         }
         Response::ClusterStats(c) => {
             println!("nodes: {}", c.nodes.len());
             for n in &c.nodes {
-                println!("  - {} ({}), {} hostings", n.label, n.node_id, n.hostings_count);
+                println!(
+                    "  - {} ({}), {} hostings",
+                    n.label, n.node_id, n.hostings_count
+                );
             }
             println!(
                 "totals: hostings={} (active={}/susp={}/fail={}), disk={} B, bw_out_24h={} B",
@@ -844,7 +863,12 @@ fn print_pretty(resp: &Response) {
             println!("✓ {} hostings sampled", hostings_sampled);
         }
         Response::BackupRestore => println!("✓ backup restored"),
-        Response::BackupFetchChunk { total_size, filename, eof, .. } => {
+        Response::BackupFetchChunk {
+            total_size,
+            filename,
+            eof,
+            ..
+        } => {
             println!("chunk of {filename} ({total_size} bytes total, eof={eof})");
         }
         Response::BackupRestoreAsNew { hosting_id, domain } => {
@@ -916,12 +940,7 @@ fn print_pretty(resp: &Response) {
         }
         Response::ProfileList(rows) => {
             for p in rows {
-                println!(
-                    "{}\t{}\t{}",
-                    p.id,
-                    p.name,
-                    p.pretty_price()
-                );
+                println!("{}\t{}\t{}", p.id, p.name, p.pretty_price());
             }
         }
         Response::ProfileGet(p) | Response::ProfileCreate(p) | Response::ProfileUpdate(p) => {
@@ -955,12 +974,7 @@ fn print_pretty(resp: &Response) {
                 println!("(no alerts)");
             } else {
                 for a in alerts {
-                    println!(
-                        "{}  {}  {}",
-                        a.severity.to_uppercase(),
-                        a.kind,
-                        a.message
-                    );
+                    println!("{}  {}  {}", a.severity.to_uppercase(), a.kind, a.message);
                 }
             }
         }
@@ -1001,7 +1015,10 @@ fn print_pretty(resp: &Response) {
         Response::FirewallList(v) => {
             println!("firewall backend: {}", v.backend);
             if !v.ports.is_empty() {
-                println!("{:<8} {:<6} {:<10} {}", "PORT", "PROTO", "CATEGORY", "REASON");
+                println!(
+                    "{:<8} {:<6} {:<10} {}",
+                    "PORT", "PROTO", "CATEGORY", "REASON"
+                );
                 for p in &v.ports {
                     println!(
                         "{:<8} {:<6} {:<10} {}",
@@ -1017,7 +1034,11 @@ fn print_pretty(resp: &Response) {
                 println!("{}", v.raw);
             }
         }
-        Response::FirewallTemplateApplied { applied, output, error } => {
+        Response::FirewallTemplateApplied {
+            applied,
+            output,
+            error,
+        } => {
             if *applied {
                 println!("✓ template applied + persisted to /etc/nftables.conf");
             } else {
@@ -1031,27 +1052,53 @@ fn print_pretty(resp: &Response) {
             }
         }
         Response::AgentConfigView(c) => {
-            println!("agent: {} v{} (nginx user: {})",
-                c.hostname, c.agent_version,
-                if c.nginx_user.is_empty() { "unknown" } else { c.nginx_user.as_str() });
-            println!("acme: contact={} challenge_dir={}",
-                c.acme.contact_email, c.acme.challenge_dir);
-            println!("email: enabled={} smtp={}:{} from={} security={}",
-                c.email.enabled, c.email.smtp_host, c.email.smtp_port,
-                c.email.from_address, c.email.security);
+            println!(
+                "agent: {} v{} (nginx user: {})",
+                c.hostname,
+                c.agent_version,
+                if c.nginx_user.is_empty() {
+                    "unknown"
+                } else {
+                    c.nginx_user.as_str()
+                }
+            );
+            println!(
+                "acme: contact={} challenge_dir={}",
+                c.acme.contact_email, c.acme.challenge_dir
+            );
+            println!(
+                "email: enabled={} smtp={}:{} from={} security={}",
+                c.email.enabled,
+                c.email.smtp_host,
+                c.email.smtp_port,
+                c.email.from_address,
+                c.email.security
+            );
             println!("slack: webhook_set={}", c.slack.default_webhook_set);
-            println!("backup_remote: enabled={} {}://{}@{}:{}{}",
-                c.backup_remote.enabled, c.backup_remote.scheme,
-                c.backup_remote.user, c.backup_remote.host,
-                c.backup_remote.port, c.backup_remote.base_path);
-            println!("backup_retention: max_age_days={} keep_latest_n={}",
-                c.backup_retention.max_age_days, c.backup_retention.keep_latest_n);
+            println!(
+                "backup_remote: enabled={} {}://{}@{}:{}{}",
+                c.backup_remote.enabled,
+                c.backup_remote.scheme,
+                c.backup_remote.user,
+                c.backup_remote.host,
+                c.backup_remote.port,
+                c.backup_remote.base_path
+            );
+            println!(
+                "backup_retention: max_age_days={} keep_latest_n={}",
+                c.backup_retention.max_age_days, c.backup_retention.keep_latest_n
+            );
         }
         Response::EmailSendTest { smtp_code } => {
             println!("test email sent — SMTP response: {smtp_code}");
         }
         Response::WebLogin(r) => match r {
-            hyperion_types::WebLoginResult::Ok { user_id, username, role, .. } => {
+            hyperion_types::WebLoginResult::Ok {
+                user_id,
+                username,
+                role,
+                ..
+            } => {
                 println!("login ok: id={user_id} user={username} role={role}");
             }
             hyperion_types::WebLoginResult::NeedsTotp { user_id, username } => {
@@ -1065,7 +1112,9 @@ fn print_pretty(resp: &Response) {
             }
         },
         Response::WebVerify2fa(r) => match r {
-            hyperion_types::WebVerify2faResult::Ok { user_id, username, .. } => {
+            hyperion_types::WebVerify2faResult::Ok {
+                user_id, username, ..
+            } => {
                 println!("2FA ok: id={user_id} user={username}");
             }
             hyperion_types::WebVerify2faResult::Invalid => {
@@ -1077,14 +1126,20 @@ fn print_pretty(resp: &Response) {
             for u in users {
                 println!(
                     "  id={} {} <{}> role={}{}{}",
-                    u.id, u.username, u.email, u.role,
+                    u.id,
+                    u.username,
+                    u.email,
+                    u.role,
                     if u.totp_enrolled { " 2FA✓" } else { "" },
                     if u.locked { " LOCKED" } else { "" }
                 );
             }
         }
         Response::WebUserGet(Some(u)) => {
-            println!("user id={} {} <{}> role={}", u.id, u.username, u.email, u.role);
+            println!(
+                "user id={} {} <{}> role={}",
+                u.id, u.username, u.email, u.role
+            );
         }
         Response::WebUserGet(None) => {
             println!("user not found");
@@ -1106,7 +1161,10 @@ fn print_pretty(resp: &Response) {
             }
         }
         Response::Web2faConfirmEnroll { ok } => {
-            println!("2FA enrollment {}", if *ok { "confirmed" } else { "rejected" });
+            println!(
+                "2FA enrollment {}",
+                if *ok { "confirmed" } else { "rejected" }
+            );
         }
         Response::Web2faDisable => println!("2FA disabled"),
         Response::WebGrantHostingAccess => println!("access granted"),
@@ -1123,32 +1181,39 @@ fn print_pretty(resp: &Response) {
         Response::HostingFileList { rel_path, entries } => {
             println!("{} ({} entries):", rel_path, entries.len());
             for e in entries {
-                println!(
-                    "  [{}] {:>10} {} {}",
-                    e.kind, e.size, e.mime, e.name
-                );
+                println!("  [{}] {:>10} {} {}", e.kind, e.size, e.mime, e.name);
             }
         }
         Response::HostingFileRead(c) => {
-            println!("{} ({} bytes, {}){}", c.rel_path, c.size, c.mime,
-                if c.truncated { " — TRUNCATED" } else { "" });
+            println!(
+                "{} ({} bytes, {}){}",
+                c.rel_path,
+                c.size,
+                c.mime,
+                if c.truncated { " — TRUNCATED" } else { "" }
+            );
             println!("---");
             println!("{}", c.content);
         }
         Response::MonitorGet { config, history } => {
-            println!("monitor: enabled={} interval={}s alert_after={} state={}",
-                config.enabled, config.interval_secs,
-                config.alert_after_fails, config.alert_state);
+            println!(
+                "monitor: enabled={} interval={}s alert_after={} state={}",
+                config.enabled, config.interval_secs, config.alert_after_fails, config.alert_state
+            );
             println!("samples (last {}):", history.samples.len());
             for s in history.samples.iter().rev().take(10) {
-                println!("  ts={} ok={} status={:?} ms={}",
-                    s.at, s.success, s.http_status, s.response_ms);
+                println!(
+                    "  ts={} ok={} status={:?} ms={}",
+                    s.at, s.success, s.http_status, s.response_ms
+                );
             }
         }
         Response::MonitorSet => println!("monitor config saved"),
         Response::MonitorProbeNow(s) => {
-            println!("probe: ok={} status={:?} ms={}",
-                s.success, s.http_status, s.response_ms);
+            println!(
+                "probe: ok={} status={:?} ms={}",
+                s.success, s.http_status, s.response_ms
+            );
         }
         Response::MonitorTick { sampled } => {
             println!("monitor tick: {sampled} hosting(s) sampled");
@@ -1166,12 +1231,26 @@ fn print_pretty(resp: &Response) {
             }
         }
         Response::WpPluginList(r) => {
-            println!("WordPress {} — {} plugin(s), {} update(s) pending:",
-                r.wp_version, r.plugins.len(), r.updates_pending);
-            println!("{:<40} {:<10} {:<14} {:<20}", "SLUG", "STATUS", "VERSION", "LATEST");
+            println!(
+                "WordPress {} — {} plugin(s), {} update(s) pending:",
+                r.wp_version,
+                r.plugins.len(),
+                r.updates_pending
+            );
+            println!(
+                "{:<40} {:<10} {:<14} {:<20}",
+                "SLUG", "STATUS", "VERSION", "LATEST"
+            );
             for p in &r.plugins {
-                let latest = if p.update_available { &p.latest_version[..] } else { "-" };
-                println!("{:<40} {:<10} {:<14} {:<20}", p.slug, p.status, p.version, latest);
+                let latest = if p.update_available {
+                    &p.latest_version[..]
+                } else {
+                    "-"
+                };
+                println!(
+                    "{:<40} {:<10} {:<14} {:<20}",
+                    p.slug, p.status, p.version, latest
+                );
             }
         }
         Response::WpPluginAction(r) => {
@@ -1190,21 +1269,40 @@ fn print_pretty(resp: &Response) {
             println!();
             println!("transfer to the target node, then on the target run:");
             println!("  sudo hctl hosting import --manifest {}", b.manifest_path);
-            println!("(typical transfer: scp -r {} root@target:/var/lib/hyperion/migration/)",
-                std::path::Path::new(&b.manifest_path).parent().map(|p| p.display().to_string()).unwrap_or_default());
+            println!(
+                "(typical transfer: scp -r {} root@target:/var/lib/hyperion/migration/)",
+                std::path::Path::new(&b.manifest_path)
+                    .parent()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_default()
+            );
         }
         Response::EmailLogList(rows) => {
-            println!("{} email log entr{}:", rows.len(), if rows.len() == 1 { "y" } else { "ies" });
+            println!(
+                "{} email log entr{}:",
+                rows.len(),
+                if rows.len() == 1 { "y" } else { "ies" }
+            );
             for r in rows.iter().take(50) {
-                println!("  [{}] {} → {} · {} · {} · {}",
-                    r.sent_at, r.kind, r.to_address, r.state,
+                println!(
+                    "  [{}] {} → {} · {} · {} · {}",
+                    r.sent_at,
+                    r.kind,
+                    r.to_address,
+                    r.state,
                     r.subject,
-                    r.error.as_deref().unwrap_or(r.smtp_code.as_deref().unwrap_or("-")));
+                    r.error
+                        .as_deref()
+                        .unwrap_or(r.smtp_code.as_deref().unwrap_or("-"))
+                );
             }
         }
         Response::EmailSmtpAutodetect(a) => {
             if a.found {
-                println!("found local SMTP: {}:{} ({})", a.smtp_host, a.smtp_port, a.security);
+                println!(
+                    "found local SMTP: {}:{} ({})",
+                    a.smtp_host, a.smtp_port, a.security
+                );
                 println!("  suggested_from = {}", a.suggested_from);
                 println!("  note: {}", a.notes);
             } else {
@@ -1329,7 +1427,10 @@ fn print_pretty(resp: &Response) {
                 for h in list {
                     println!("{} — {} finding(s)", h.domain, h.findings.len());
                     for f in &h.findings {
-                        println!("  [{}] {} {} ({})", f.severity, f.kind, f.slug, f.installed_version);
+                        println!(
+                            "  [{}] {} {} ({})",
+                            f.severity, f.kind, f.slug, f.installed_version
+                        );
                     }
                 }
             }
@@ -1489,7 +1590,10 @@ fn print_pretty(resp: &Response) {
             }
         }
         Response::QuotaEnableKernel(s) => {
-            println!("quota enable: ok={} requires_reboot={}", s.ok, s.requires_reboot);
+            println!(
+                "quota enable: ok={} requires_reboot={}",
+                s.ok, s.requires_reboot
+            );
             println!("  fs={} mount={}", s.fs_type, s.mount_point);
             println!("  {}", s.message);
         }
@@ -1508,7 +1612,10 @@ fn print_pretty(resp: &Response) {
         }
         Response::NodeLabelUpdated => println!("node label updated"),
         Response::NodeDrainUpdated => println!("node drain flag updated"),
-        Response::NodeRemoved { removed, hostings_blocking } => {
+        Response::NodeRemoved {
+            removed,
+            hostings_blocking,
+        } => {
             if *removed {
                 println!("✓ node removed (orphaned hostings: {hostings_blocking})");
             } else if *hostings_blocking > 0 {
@@ -1523,10 +1630,7 @@ fn print_pretty(resp: &Response) {
             if items.is_empty() {
                 println!("no certificates");
             } else {
-                println!(
-                    "{:<40} {:<14} {:>5} {}",
-                    "domain", "issuer", "days", "band"
-                );
+                println!("{:<40} {:<14} {:>5} {}", "domain", "issuer", "days", "band");
                 for it in items {
                     println!(
                         "{:<40} {:<14} {:>5} {}",

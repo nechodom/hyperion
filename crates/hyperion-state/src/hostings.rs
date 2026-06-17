@@ -135,11 +135,7 @@ pub async fn set_state(
 /// Set state = Trashed + stamp trashed_at = now. The scheduler
 /// reads `trashed_at` to decide when to GC; the UI uses it for
 /// the "X days remaining" badge on /trash.
-pub async fn mark_trashed(
-    pool: &SqlitePool,
-    id: &HostingId,
-    now: i64,
-) -> Result<(), StateError> {
+pub async fn mark_trashed(pool: &SqlitePool, id: &HostingId, now: i64) -> Result<(), StateError> {
     sqlx::query(
         "UPDATE hostings SET state = 'trashed', trashed_at = ?, updated_at = ? WHERE id = ?",
     )
@@ -152,11 +148,7 @@ pub async fn mark_trashed(
 }
 
 /// Restore a trashed hosting back to Active (clears trashed_at).
-pub async fn unmark_trashed(
-    pool: &SqlitePool,
-    id: &HostingId,
-    now: i64,
-) -> Result<(), StateError> {
+pub async fn unmark_trashed(pool: &SqlitePool, id: &HostingId, now: i64) -> Result<(), StateError> {
     sqlx::query(
         "UPDATE hostings SET state = 'active', trashed_at = NULL, updated_at = ? WHERE id = ?",
     )
@@ -196,11 +188,10 @@ pub async fn list_trashed_expired(
 /// All currently-trashed hostings (any age). Used by the
 /// /trash page UI.
 pub async fn list_trashed(pool: &SqlitePool) -> Result<Vec<HostingRow>, StateError> {
-    let ids: Vec<(String,)> = sqlx::query_as(
-        "SELECT id FROM hostings WHERE state = 'trashed' ORDER BY trashed_at DESC",
-    )
-    .fetch_all(pool)
-    .await?;
+    let ids: Vec<(String,)> =
+        sqlx::query_as("SELECT id FROM hostings WHERE state = 'trashed' ORDER BY trashed_at DESC")
+            .fetch_all(pool)
+            .await?;
     let mut out = Vec::with_capacity(ids.len());
     for (id,) in ids {
         if let Some(row) = get_by_id(pool, &HostingId(id)).await? {
@@ -212,16 +203,12 @@ pub async fn list_trashed(pool: &SqlitePool) -> Result<Vec<HostingRow>, StateErr
 
 /// Read just the trashed_at timestamp (NULL for not-trashed).
 /// Used by the service layer to compute "days remaining".
-pub async fn get_trashed_at(
-    pool: &SqlitePool,
-    id: &HostingId,
-) -> Result<Option<i64>, StateError> {
-    let row: Option<(Option<i64>,)> = sqlx::query_as(
-        "SELECT trashed_at FROM hostings WHERE id = ?",
-    )
-    .bind(id.as_str())
-    .fetch_optional(pool)
-    .await?;
+pub async fn get_trashed_at(pool: &SqlitePool, id: &HostingId) -> Result<Option<i64>, StateError> {
+    let row: Option<(Option<i64>,)> =
+        sqlx::query_as("SELECT trashed_at FROM hostings WHERE id = ?")
+            .bind(id.as_str())
+            .fetch_optional(pool)
+            .await?;
     Ok(row.and_then(|(t,)| t))
 }
 
@@ -261,15 +248,22 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<HostingSummary>, StateError> 
     // `maintenance_mode` joins in for the MAINTENANCE pill on the
     // hostings list. It's a separate column from migration 020 but
     // lives on the same row so the query stays a single SELECT.
-    let rows: Vec<(String, String, String, Option<String>, i64, Option<String>, i64)> =
-        sqlx::query_as(
-            "SELECT id, domain, state, php_version, created_at, node_id, maintenance_mode \
+    let rows: Vec<(
+        String,
+        String,
+        String,
+        Option<String>,
+        i64,
+        Option<String>,
+        i64,
+    )> = sqlx::query_as(
+        "SELECT id, domain, state, php_version, created_at, node_id, maintenance_mode \
              FROM hostings \
              WHERE state != 'trashed' \
              ORDER BY domain",
-        )
-        .fetch_all(pool)
-        .await?;
+    )
+    .fetch_all(pool)
+    .await?;
     let mut out = Vec::with_capacity(rows.len());
     for (id, domain, state, php_version, created_at, node_id, maintenance_mode) in rows {
         out.push(HostingSummary {
@@ -298,19 +292,19 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<HostingSummary>, StateError> 
 // second is a cheap UNIQUE-keyed lookup, so the latency hit is
 // marginal vs. one big JOIN-shaped query.
 type RawHostingHead = (
-    String,           // id
-    String,           // domain
-    String,           // state
-    i64,              // system_user_id
-    Option<String>,   // php_version
-    String,           // root_dir
-    i64,              // created_at
-    i64,              // updated_at
-    Option<String>,   // acme_contact_email
-    String,           // kind
-    Option<String>,   // proxy_upstream_url
-    Option<String>,   // node_id
-    Option<i64>,      // trashed_at (NULL when not trashed)
+    String,         // id
+    String,         // domain
+    String,         // state
+    i64,            // system_user_id
+    Option<String>, // php_version
+    String,         // root_dir
+    i64,            // created_at
+    i64,            // updated_at
+    Option<String>, // acme_contact_email
+    String,         // kind
+    Option<String>, // proxy_upstream_url
+    Option<String>, // node_id
+    Option<i64>,    // trashed_at (NULL when not trashed)
 );
 type RawHostingVhost = (
     i64,    // basic_auth_enabled
@@ -346,13 +340,13 @@ const QUERY_VHOST_BY_ID: &str =
 // Third row tuple for the WP/Redis extras (migration 021). Same PK
 // lookup as the vhost half — single index hit per detail load.
 type RawHostingWp = (
-    i64, // wp_debug_enabled
-    i64, // wp_debug_log
-    i64, // wp_debug_display
-    i64, // wp_debug_log_size_bytes
-    i64, // redis_enabled
+    i64,         // wp_debug_enabled
+    i64,         // wp_debug_log
+    i64,         // wp_debug_display
+    i64,         // wp_debug_log_size_bytes
+    i64,         // redis_enabled
     Option<i64>, // redis_db_number
-    i64, // redis_password_set
+    i64,         // redis_password_set
 );
 
 const QUERY_WP_BY_ID: &str =
@@ -475,16 +469,12 @@ async fn fetch_one<'a>(
 /// HostingRow.vhost_options — only the "is_set" bool is). Used by
 /// the vhost render to write the .htpasswd file. Empty string when
 /// basic auth isn't configured.
-pub async fn get_basic_auth_hash(
-    pool: &SqlitePool,
-    id: &HostingId,
-) -> Result<String, StateError> {
-    let row: Option<(String,)> = sqlx::query_as(
-        "SELECT basic_auth_hash FROM hostings WHERE id = ?",
-    )
-    .bind(id.as_str())
-    .fetch_optional(pool)
-    .await?;
+pub async fn get_basic_auth_hash(pool: &SqlitePool, id: &HostingId) -> Result<String, StateError> {
+    let row: Option<(String,)> =
+        sqlx::query_as("SELECT basic_auth_hash FROM hostings WHERE id = ?")
+            .bind(id.as_str())
+            .fetch_optional(pool)
+            .await?;
     Ok(row.map(|(s,)| s).unwrap_or_default())
 }
 
@@ -635,10 +625,7 @@ pub async fn set_redis(
 /// Returns `Some(n)` for the smallest free slot in [0, max), or
 /// `None` if every slot is taken (operator needs to bump
 /// `databases` in /etc/redis/redis.conf and reload first).
-pub async fn next_free_redis_db(
-    pool: &SqlitePool,
-    max: i64,
-) -> Result<Option<i64>, StateError> {
+pub async fn next_free_redis_db(pool: &SqlitePool, max: i64) -> Result<Option<i64>, StateError> {
     let taken: Vec<(i64,)> = sqlx::query_as(
         "SELECT redis_db_number FROM hostings \
          WHERE redis_enabled = 1 AND redis_db_number IS NOT NULL \
@@ -715,10 +702,7 @@ pub async fn insert_with_kind(
 /// One-shot backfill: every hostings row with NULL node_id gets the
 /// caller's node id. Called by the agent at startup so the list +
 /// detail UIs show a node chip even for pre-migration rows.
-pub async fn backfill_node_id(
-    pool: &SqlitePool,
-    node_id: &str,
-) -> Result<u64, StateError> {
+pub async fn backfill_node_id(pool: &SqlitePool, node_id: &str) -> Result<u64, StateError> {
     let r = sqlx::query("UPDATE hostings SET node_id = ? WHERE node_id IS NULL")
         .bind(node_id)
         .execute(pool)
@@ -735,14 +719,12 @@ pub async fn set_acme_contact_email(
     email: Option<&str>,
     now: i64,
 ) -> Result<u64, StateError> {
-    let r = sqlx::query(
-        "UPDATE hostings SET acme_contact_email = ?, updated_at = ? WHERE id = ?",
-    )
-    .bind(email)
-    .bind(now)
-    .bind(id.as_str())
-    .execute(pool)
-    .await?;
+    let r = sqlx::query("UPDATE hostings SET acme_contact_email = ?, updated_at = ? WHERE id = ?")
+        .bind(email)
+        .bind(now)
+        .bind(id.as_str())
+        .execute(pool)
+        .await?;
     Ok(r.rows_affected())
 }
 
@@ -756,14 +738,12 @@ pub async fn set_php_version(
     php_version: Option<PhpVersion>,
     now: i64,
 ) -> Result<u64, StateError> {
-    let r = sqlx::query(
-        "UPDATE hostings SET php_version = ?, updated_at = ? WHERE id = ?",
-    )
-    .bind(php_version.map(|v| v.as_str()))
-    .bind(now)
-    .bind(id.as_str())
-    .execute(pool)
-    .await?;
+    let r = sqlx::query("UPDATE hostings SET php_version = ?, updated_at = ? WHERE id = ?")
+        .bind(php_version.map(|v| v.as_str()))
+        .bind(now)
+        .bind(id.as_str())
+        .execute(pool)
+        .await?;
     Ok(r.rows_affected())
 }
 
@@ -969,9 +949,18 @@ mod tests {
         let suid = fresh_user(&pool, "u", 1042).await;
         let a = HostingId::new_v7();
         let b = HostingId::new_v7();
-        insert(&pool, &a, "a.cz", suid, Some(PhpVersion::V8_3), "/x", 1, None)
-            .await
-            .expect("ok");
+        insert(
+            &pool,
+            &a,
+            "a.cz",
+            suid,
+            Some(PhpVersion::V8_3),
+            "/x",
+            1,
+            None,
+        )
+        .await
+        .expect("ok");
         insert(&pool, &b, "b.cz", suid, None, "/y", 2, None)
             .await
             .expect("ok");

@@ -83,19 +83,10 @@ impl hyperion_core::AdapterPort for StubAdapters {
     async fn nginx_write_vhost(&self, _: &HostingDetail) -> Result<(), AdapterError> {
         Ok(())
     }
-    async fn nginx_delete_vhost(
-        &self,
-        _: &str,
-        _: Option<String>,
-    ) -> Result<(), AdapterError> {
+    async fn nginx_delete_vhost(&self, _: &str, _: Option<String>) -> Result<(), AdapterError> {
         Ok(())
     }
-    async fn nginx_write_htpasswd(
-        &self,
-        _: &str,
-        _: &str,
-        _: &str,
-    ) -> Result<(), AdapterError> {
+    async fn nginx_write_htpasswd(&self, _: &str, _: &str, _: &str) -> Result<(), AdapterError> {
         Ok(())
     }
     async fn nginx_delete_htpasswd(&self, _: &str) -> Result<(), AdapterError> {
@@ -244,9 +235,7 @@ async fn start_agent() -> (PathBuf, tempfile::TempDir) {
         agent_config_path: None,
         update_cache: Arc::new(tokio::sync::RwLock::new(None)),
         current_git_sha: "dev-unknown".into(),
-        cert_issue_locks: Arc::new(tokio::sync::Mutex::new(
-            std::collections::HashMap::new(),
-        )),
+        cert_issue_locks: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         panel_progress: Arc::new(tokio::sync::RwLock::new(None)),
         master_rpc_signer: None,
         node_state_file: None,
@@ -1180,9 +1169,8 @@ async fn viewer_cannot_delete_hosting_via_direct_post() {
         .await
         .expect("call");
     let csrf = extract_csrf(&body_string(resp).await);
-    let body = format!(
-        "_csrf={csrf}&domain=rbac-victim.cz&aliases=&php=8.3&db=mariadb&system_user="
-    );
+    let body =
+        format!("_csrf={csrf}&domain=rbac-victim.cz&aliases=&php=8.3&db=mariadb&system_user=");
     let resp = app
         .clone()
         .oneshot(
@@ -1327,8 +1315,14 @@ async fn emails_page_renders_with_filters() {
     assert_eq!(resp.status(), StatusCode::OK);
     let body = body_string(resp).await;
     assert!(body.contains("Email log"), "missing page title");
-    assert!(body.contains("/emails?kind=test"), "kind=test filter missing");
-    assert!(body.contains("/emails?state=failed"), "state=failed filter missing");
+    assert!(
+        body.contains("/emails?kind=test"),
+        "kind=test filter missing"
+    );
+    assert!(
+        body.contains("/emails?state=failed"),
+        "state=failed filter missing"
+    );
 }
 
 /// Migration bundle download endpoint refuses requests without a
@@ -1445,7 +1439,9 @@ async fn transfer_wizard_renders_three_modes() {
                 .method(Method::POST)
                 .uri("/login")
                 .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
-                .body(Body::from(b"username=kevin&password=good-pw&next=/".to_vec()))
+                .body(Body::from(
+                    b"username=kevin&password=good-pw&next=/".to_vec(),
+                ))
                 .unwrap(),
         )
         .await

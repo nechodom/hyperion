@@ -122,12 +122,11 @@ pub async fn purge_older_than(
     // The oldest surviving row's `prev_hash` is what verify_chain
     // needs to seed its expected_prev with. Capture BEFORE deleting
     // so we don't have to re-query.
-    let survivor: Option<(String,)> = sqlx::query_as(
-        "SELECT prev_hash FROM audit_log WHERE ts >= ? ORDER BY id ASC LIMIT 1",
-    )
-    .bind(cutoff_ts)
-    .fetch_optional(&mut *tx)
-    .await?;
+    let survivor: Option<(String,)> =
+        sqlx::query_as("SELECT prev_hash FROM audit_log WHERE ts >= ? ORDER BY id ASC LIMIT 1")
+            .bind(cutoff_ts)
+            .fetch_optional(&mut *tx)
+            .await?;
     // Highest id we're about to delete — purely informational, for
     // the anchor row + operator forensics.
     let last_purged: Option<i64> = sqlx::query_as("SELECT MAX(id) FROM audit_log WHERE ts < ?")

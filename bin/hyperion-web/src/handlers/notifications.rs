@@ -132,10 +132,7 @@ pub async fn get_feed(
     .map_err(AppError::from)?;
     match resp {
         RpcResponse::NotificationsFeed(feed) => Ok((
-            [(
-                header::CACHE_CONTROL,
-                "no-store, no-cache, must-revalidate",
-            )],
+            [(header::CACHE_CONTROL, "no-store, no-cache, must-revalidate")],
             Json(feed),
         )
             .into_response()),

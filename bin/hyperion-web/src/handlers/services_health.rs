@@ -57,16 +57,11 @@ pub async fn get_services_health(
     Query(q): Query<ServicesQuery>,
 ) -> Result<Response, AppError> {
     let target = q.node.as_deref();
-    let dispatch = match crate::dispatcher::dispatch_to_node(
-        &state,
-        target,
-        Request::ServicesHealth,
-    )
-    .await
-    {
-        Ok(r) => Ok(r),
-        Err(e) => Err(e),
-    };
+    let dispatch =
+        match crate::dispatcher::dispatch_to_node(&state, target, Request::ServicesHealth).await {
+            Ok(r) => Ok(r),
+            Err(e) => Err(e),
+        };
     let (health, error) = match dispatch {
         Ok(RpcResponse::ServicesHealth(h)) => (h, None),
         Ok(RpcResponse::Error(e)) => (ServicesHealth::default(), Some(e.to_string())),
@@ -145,9 +140,7 @@ pub async fn post_service_restart(
     if !ctx.is_super_admin() {
         return Ok(Redirect::to("/").into_response());
     }
-    let target = if form.node.is_empty()
-        || form.node == crate::dispatcher::LOCAL_NODE_SENTINEL
-    {
+    let target = if form.node.is_empty() || form.node == crate::dispatcher::LOCAL_NODE_SENTINEL {
         None
     } else {
         Some(form.node.as_str())
@@ -190,9 +183,7 @@ pub async fn post_service_install(
     if !ctx.is_super_admin() {
         return Ok(Redirect::to("/").into_response());
     }
-    let target = if form.node.is_empty()
-        || form.node == crate::dispatcher::LOCAL_NODE_SENTINEL
-    {
+    let target = if form.node.is_empty() || form.node == crate::dispatcher::LOCAL_NODE_SENTINEL {
         None
     } else {
         Some(form.node.as_str())
@@ -368,9 +359,7 @@ pub async fn post_fs_diagnose(
         )
             .into_response();
     }
-    let target = if form.node.is_empty()
-        || form.node == crate::dispatcher::LOCAL_NODE_SENTINEL
-    {
+    let target = if form.node.is_empty() || form.node == crate::dispatcher::LOCAL_NODE_SENTINEL {
         None
     } else {
         Some(form.node.as_str())
@@ -403,7 +392,9 @@ pub async fn post_fs_diagnose(
 /// fragment that never escapes a single handler.
 fn render_fs_diagnostics(d: &hyperion_types::FsDiagnostics) -> Response {
     fn esc(s: &str) -> String {
-        s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
     }
     let pill_class = match d.final_state.as_str() {
         "fixed" | "no-fix-needed" => "ok",
@@ -492,11 +483,7 @@ fn render_fs_diagnostics(d: &hyperion_types::FsDiagnostics) -> Response {
         html.push_str("</ul></div>");
     }
     html.push_str("</div>");
-    (
-        [("content-type", "text/html; charset=utf-8")],
-        html,
-    )
-        .into_response()
+    ([("content-type", "text/html; charset=utf-8")], html).into_response()
 }
 
 fn html_error(msg: &str) -> Response {
@@ -524,15 +511,12 @@ pub async fn post_remount_usr_rw(
     if !ctx.is_super_admin() {
         return Ok(Redirect::to("/").into_response());
     }
-    let target = if form.node.is_empty()
-        || form.node == crate::dispatcher::LOCAL_NODE_SENTINEL
-    {
+    let target = if form.node.is_empty() || form.node == crate::dispatcher::LOCAL_NODE_SENTINEL {
         None
     } else {
         Some(form.node.as_str())
     };
-    let resp =
-        crate::dispatcher::dispatch_to_node(&state, target, Request::RemountUsrRw).await?;
+    let resp = crate::dispatcher::dispatch_to_node(&state, target, Request::RemountUsrRw).await?;
     let dest = match resp {
         RpcResponse::RemountUsrRw { success, message } => {
             let label = if success { "flash" } else { "flash_error" };

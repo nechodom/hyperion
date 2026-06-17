@@ -55,7 +55,11 @@ pub struct HostingProfile {
 impl HostingProfile {
     /// Pretty price like "199.00 Kč/měsíc" or "—" when no price.
     pub fn pretty_price(&self) -> String {
-        match (&self.price_minor, &self.price_currency, &self.price_interval) {
+        match (
+            &self.price_minor,
+            &self.price_currency,
+            &self.price_interval,
+        ) {
             (Some(m), Some(c), Some(iv)) => {
                 let major = *m as f64 / 100.0;
                 let iv_word = match iv.as_str() {

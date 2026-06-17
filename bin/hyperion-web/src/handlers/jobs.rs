@@ -119,10 +119,9 @@ pub async fn post_job_retry(
     let job = match fetch_job(&state, &id).await? {
         Some(j) => j,
         None => {
-            return Ok(axum::response::Redirect::to(
-                "/jobs?flash_error=Job+id+not+found",
-            )
-            .into_response());
+            return Ok(
+                axum::response::Redirect::to("/jobs?flash_error=Job+id+not+found").into_response(),
+            );
         }
     };
     if !job.is_terminal() {
@@ -229,7 +228,9 @@ pub async fn get_jobs(
     // Like /audit, jobs leak cross-tenant operational data —
     // operator-only.
     if !ctx.is_admin_or_higher() {
-        return Ok(axum::response::Redirect::to("/?flash_error=admin+role+required").into_response());
+        return Ok(
+            axum::response::Redirect::to("/?flash_error=admin+role+required").into_response(),
+        );
     }
     let kind = if q.kind.trim().is_empty() {
         None
@@ -274,7 +275,9 @@ pub async fn get_job_detail(
     AxPath(id): AxPath<String>,
 ) -> Result<Response, AppError> {
     if !ctx.is_admin_or_higher() {
-        return Ok(axum::response::Redirect::to("/?flash_error=admin+role+required").into_response());
+        return Ok(
+            axum::response::Redirect::to("/?flash_error=admin+role+required").into_response(),
+        );
     }
     let job = match fetch_job(&state, &id).await? {
         Some(j) => j,
@@ -308,15 +311,17 @@ pub async fn get_job_progress(
     AxPath(id): AxPath<String>,
 ) -> Result<Response, AppError> {
     if !ctx.is_admin_or_higher() {
-        return Ok(Html("<div class=\"text-soft\">admin role required</div>".to_string()).into_response());
+        return Ok(
+            Html("<div class=\"text-soft\">admin role required</div>".to_string()).into_response(),
+        );
     }
     let job = match fetch_job(&state, &id).await? {
         Some(j) => j,
         None => {
-            return Ok(Html(
-                "<div class=\"text-soft\">job no longer present</div>".to_string(),
-            )
-            .into_response());
+            return Ok(
+                Html("<div class=\"text-soft\">job no longer present</div>".to_string())
+                    .into_response(),
+            );
         }
     };
     let is_running = !job.is_terminal();
@@ -341,12 +346,13 @@ pub async fn get_job_progress(
     Ok(resp)
 }
 
-async fn fetch_job(state: &SharedState, id: &str) -> Result<Option<hyperion_types::JobView>, AppError> {
-    let resp = hyperion_rpc_client::call(
-        &state.agent_socket,
-        Request::JobGet { id: id.to_string() },
-    )
-    .await?;
+async fn fetch_job(
+    state: &SharedState,
+    id: &str,
+) -> Result<Option<hyperion_types::JobView>, AppError> {
+    let resp =
+        hyperion_rpc_client::call(&state.agent_socket, Request::JobGet { id: id.to_string() })
+            .await?;
     match resp {
         RpcResponse::JobGet(v) => Ok(v),
         RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),

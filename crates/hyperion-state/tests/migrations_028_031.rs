@@ -85,26 +85,17 @@ async fn migrations_028_to_031_coexist_and_round_trip() {
     assert_eq!(job.progress_pct, 50);
 
     // ---- 029 web_sessions ----
-    hyperion_state::web_sessions::insert(
-        &p,
-        "sid-x",
-        uid,
-        Some("1.2.3.4"),
-        Some("test-ua"),
-        200,
-    )
-    .await
-    .expect("web_sessions::insert");
+    hyperion_state::web_sessions::insert(&p, "sid-x", uid, Some("1.2.3.4"), Some("test-ua"), 200)
+        .await
+        .expect("web_sessions::insert");
     assert!(
         hyperion_state::web_sessions::touch_if_live(&p, "sid-x", 210)
             .await
             .expect("touch")
     );
-    assert!(
-        hyperion_state::web_sessions::revoke(&p, "sid-x", uid, 220)
-            .await
-            .expect("revoke")
-    );
+    assert!(hyperion_state::web_sessions::revoke(&p, "sid-x", uid, 220)
+        .await
+        .expect("revoke"));
     assert!(
         !hyperion_state::web_sessions::touch_if_live(&p, "sid-x", 230)
             .await
@@ -197,8 +188,6 @@ async fn migrations_028_to_031_coexist_and_round_trip() {
 
     // Job rows survive — they're a generic ledger, no FK back to
     // hostings (the `target` column is just a string).
-    let job_after = hyperion_state::jobs::read(&p, "job-x")
-        .await
-        .expect("read");
+    let job_after = hyperion_state::jobs::read(&p, "job-x").await.expect("read");
     assert!(job_after.is_some(), "job row must survive a hosting delete");
 }

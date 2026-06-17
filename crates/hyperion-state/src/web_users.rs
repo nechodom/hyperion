@@ -249,10 +249,7 @@ pub async fn get_pending_email(
     }))
 }
 
-pub async fn clear_pending_email(
-    pool: &SqlitePool,
-    user_id: i64,
-) -> Result<(), StateError> {
+pub async fn clear_pending_email(pool: &SqlitePool, user_id: i64) -> Result<(), StateError> {
     sqlx::query(
         "UPDATE web_users SET pending_email = NULL, pending_email_code_hash = NULL, \
                               pending_email_expires_at = NULL, pending_email_attempts = 0 \
@@ -275,11 +272,10 @@ pub async fn bump_pending_email_attempts(
     .bind(user_id)
     .execute(pool)
     .await?;
-    let row: (i64,) =
-        sqlx::query_as("SELECT pending_email_attempts FROM web_users WHERE id = ?")
-            .bind(user_id)
-            .fetch_one(pool)
-            .await?;
+    let row: (i64,) = sqlx::query_as("SELECT pending_email_attempts FROM web_users WHERE id = ?")
+        .bind(user_id)
+        .fetch_one(pool)
+        .await?;
     Ok(row.0)
 }
 
@@ -306,12 +302,11 @@ pub async fn get_avatar_filename(
     pool: &SqlitePool,
     user_id: i64,
 ) -> Result<Option<String>, StateError> {
-    let row: Option<(Option<String>,)> = sqlx::query_as(
-        "SELECT avatar_filename FROM web_users WHERE id = ?",
-    )
-    .bind(user_id)
-    .fetch_optional(pool)
-    .await?;
+    let row: Option<(Option<String>,)> =
+        sqlx::query_as("SELECT avatar_filename FROM web_users WHERE id = ?")
+            .bind(user_id)
+            .fetch_optional(pool)
+            .await?;
     Ok(row.and_then(|(f,)| f))
 }
 
@@ -322,15 +317,13 @@ pub async fn set_locked(
     reason: Option<&str>,
     now: i64,
 ) -> Result<(), StateError> {
-    sqlx::query(
-        "UPDATE web_users SET locked = ?, locked_reason = ?, updated_at = ? WHERE id = ?",
-    )
-    .bind(if locked { 1 } else { 0 })
-    .bind(reason)
-    .bind(now)
-    .bind(user_id)
-    .execute(pool)
-    .await?;
+    sqlx::query("UPDATE web_users SET locked = ?, locked_reason = ?, updated_at = ? WHERE id = ?")
+        .bind(if locked { 1 } else { 0 })
+        .bind(reason)
+        .bind(now)
+        .bind(user_id)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -394,11 +387,13 @@ pub async fn record_failed_login(
     user_id: i64,
     now: i64,
 ) -> Result<i64, StateError> {
-    sqlx::query("UPDATE web_users SET failed_logins = failed_logins + 1, updated_at = ? WHERE id = ?")
-        .bind(now)
-        .bind(user_id)
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "UPDATE web_users SET failed_logins = failed_logins + 1, updated_at = ? WHERE id = ?",
+    )
+    .bind(now)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
     let (n,): (i64,) = sqlx::query_as("SELECT failed_logins FROM web_users WHERE id = ?")
         .bind(user_id)
         .fetch_one(pool)
@@ -462,10 +457,7 @@ pub async fn consume_backup_code(
     Ok(r.rows_affected() == 1)
 }
 
-pub async fn count_unused_backup_codes(
-    pool: &SqlitePool,
-    user_id: i64,
-) -> Result<i64, StateError> {
+pub async fn count_unused_backup_codes(pool: &SqlitePool, user_id: i64) -> Result<i64, StateError> {
     let (n,): (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM web_user_backup_codes WHERE user_id = ? AND used_at IS NULL",
     )
@@ -530,13 +522,11 @@ pub async fn revoke_hosting_access(
     user_id: i64,
     hosting_id: &HostingId,
 ) -> Result<u64, StateError> {
-    let r = sqlx::query(
-        "DELETE FROM web_user_hosting_access WHERE user_id = ? AND hosting_id = ?",
-    )
-    .bind(user_id)
-    .bind(hosting_id.as_str())
-    .execute(pool)
-    .await?;
+    let r = sqlx::query("DELETE FROM web_user_hosting_access WHERE user_id = ? AND hosting_id = ?")
+        .bind(user_id)
+        .bind(hosting_id.as_str())
+        .execute(pool)
+        .await?;
     Ok(r.rows_affected())
 }
 
@@ -544,12 +534,11 @@ pub async fn list_hosting_ids_for_user(
     pool: &SqlitePool,
     user_id: i64,
 ) -> Result<Vec<(HostingId, AccessLevel)>, StateError> {
-    let rows: Vec<(String, String)> = sqlx::query_as(
-        "SELECT hosting_id, level FROM web_user_hosting_access WHERE user_id = ?",
-    )
-    .bind(user_id)
-    .fetch_all(pool)
-    .await?;
+    let rows: Vec<(String, String)> =
+        sqlx::query_as("SELECT hosting_id, level FROM web_user_hosting_access WHERE user_id = ?")
+            .bind(user_id)
+            .fetch_all(pool)
+            .await?;
     let mut out = Vec::with_capacity(rows.len());
     for (hid, lvl) in rows {
         out.push((
@@ -605,7 +594,9 @@ pub async fn user_hosting_access(
     .await?;
     match row {
         None => Ok(None),
-        Some((s,)) => Ok(Some(AccessLevel::from_str(&s).map_err(StateError::InvalidState)?)),
+        Some((s,)) => Ok(Some(
+            AccessLevel::from_str(&s).map_err(StateError::InvalidState)?,
+        )),
     }
 }
 
@@ -654,7 +645,15 @@ pub async fn find_invite_by_hash(
     token_hash: &str,
 ) -> Result<Option<InviteRow>, StateError> {
     let row: Option<(
-        i64, String, String, String, Option<i64>, i64, i64, Option<i64>, Option<i64>,
+        i64,
+        String,
+        String,
+        String,
+        Option<i64>,
+        i64,
+        i64,
+        Option<i64>,
+        Option<i64>,
     )> = sqlx::query_as(
         "SELECT id, token_hash, email, role, created_by, created_at, expires_at,
                 accepted_at, accepted_user_id
@@ -682,20 +681,26 @@ pub async fn mark_invite_accepted(
     user_id: i64,
     now: i64,
 ) -> Result<(), StateError> {
-    sqlx::query(
-        "UPDATE web_invites SET accepted_at = ?, accepted_user_id = ? WHERE id = ?",
-    )
-    .bind(now)
-    .bind(user_id)
-    .bind(invite_id)
-    .execute(pool)
-    .await?;
+    sqlx::query("UPDATE web_invites SET accepted_at = ?, accepted_user_id = ? WHERE id = ?")
+        .bind(now)
+        .bind(user_id)
+        .bind(invite_id)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
 pub async fn list_pending_invites(pool: &SqlitePool) -> Result<Vec<InviteRow>, StateError> {
     let rows: Vec<(
-        i64, String, String, String, Option<i64>, i64, i64, Option<i64>, Option<i64>,
+        i64,
+        String,
+        String,
+        String,
+        Option<i64>,
+        i64,
+        i64,
+        Option<i64>,
+        Option<i64>,
     )> = sqlx::query_as(
         "SELECT id, token_hash, email, role, created_by, created_at, expires_at,
                 accepted_at, accepted_user_id
@@ -922,7 +927,10 @@ mod tests {
         insert_backup_codes(&pool, id, &hashes, 1)
             .await
             .expect("insert codes");
-        assert_eq!(count_unused_backup_codes(&pool, id).await.expect("count"), 2);
+        assert_eq!(
+            count_unused_backup_codes(&pool, id).await.expect("count"),
+            2
+        );
         // First consume succeeds.
         assert!(consume_backup_code(&pool, id, "hash1", 2)
             .await
@@ -935,7 +943,10 @@ mod tests {
         assert!(!consume_backup_code(&pool, id, "nope", 4)
             .await
             .expect("wrong"));
-        assert_eq!(count_unused_backup_codes(&pool, id).await.expect("count"), 1);
+        assert_eq!(
+            count_unused_backup_codes(&pool, id).await.expect("count"),
+            1
+        );
     }
 
     #[tokio::test]

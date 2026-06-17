@@ -244,8 +244,7 @@ pub async fn get_firewall(
     // topology that an operator role doesn't need.
     if !ctx.is_admin_or_higher() {
         return Ok(
-            Redirect::to("/?flash_error=admin+role+required+to+view+firewall")
-                .into_response(),
+            Redirect::to("/?flash_error=admin+role+required+to+view+firewall").into_response(),
         );
     }
     let mut nodes: Vec<NodeFirewall> = Vec::new();
@@ -429,11 +428,7 @@ pub async fn post_apply(
         ),
         _ => "<span class=\"pill err\">✗ unexpected response</span>".to_string(),
     };
-    Ok((
-        [("content-type", "text/html; charset=utf-8")],
-        body,
-    )
-        .into_response())
+    Ok(([("content-type", "text/html; charset=utf-8")], body).into_response())
 }
 
 fn html_escape(s: &str) -> String {

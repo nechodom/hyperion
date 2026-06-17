@@ -61,7 +61,9 @@ pub async fn get_profile(
     };
     let user_resp = hyperion_rpc_client::call(
         &state.agent_socket,
-        Request::WebUserGet { id: session.user_id },
+        Request::WebUserGet {
+            id: session.user_id,
+        },
     )
     .await
     .map_err(AppError::from)?;
@@ -107,11 +109,10 @@ pub async fn post_2fa_start(
     let enrollment = match resp {
         RpcResponse::Web2faEnrollStart(e) => e,
         RpcResponse::Error(e) => {
-            return Ok(Redirect::to(&format!(
-                "/profile?error={}",
-                urlencode(&e.to_string())
-            ))
-            .into_response());
+            return Ok(
+                Redirect::to(&format!("/profile?error={}", urlencode(&e.to_string())))
+                    .into_response(),
+            );
         }
         _ => return Err(AppError::Internal("unexpected response".into())),
     };
@@ -128,7 +129,9 @@ pub async fn post_2fa_start(
     };
     let user_resp = hyperion_rpc_client::call(
         &state.agent_socket,
-        Request::WebUserGet { id: session.user_id },
+        Request::WebUserGet {
+            id: session.user_id,
+        },
     )
     .await
     .map_err(AppError::from)?;
@@ -241,7 +244,9 @@ pub async fn post_2fa_disable(
     .await
     .map_err(AppError::from)?;
     match resp {
-        RpcResponse::Web2faDisable => Ok(Redirect::to("/profile?flash=2FA+disabled").into_response()),
+        RpcResponse::Web2faDisable => {
+            Ok(Redirect::to("/profile?flash=2FA+disabled").into_response())
+        }
         RpcResponse::Error(e) => Ok(Redirect::to(&format!(
             "/profile?error={}",
             urlencode(&e.to_string())

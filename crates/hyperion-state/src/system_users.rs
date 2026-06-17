@@ -60,10 +60,7 @@ pub async fn get_by_name(
 /// Look up a system_users row by UID. Used to detect stale rows left
 /// from earlier failed deletes (UID gets re-assigned by Linux but the
 /// orphan row in our DB collides on the UNIQUE(uid) constraint).
-pub async fn get_by_uid(
-    pool: &SqlitePool,
-    uid: i64,
-) -> Result<Option<SystemUserRow>, StateError> {
+pub async fn get_by_uid(pool: &SqlitePool, uid: i64) -> Result<Option<SystemUserRow>, StateError> {
     let row = sqlx::query_as::<_, (i64, String, i64, String, String, i64)>(
         "SELECT id, name, uid, home_dir, shell, created_at FROM system_users WHERE uid = ?",
     )
@@ -84,11 +81,10 @@ pub async fn get_by_uid(
 
 /// True iff at least one hosting still references this `system_users` row.
 pub async fn has_hostings(pool: &SqlitePool, id: i64) -> Result<bool, StateError> {
-    let row: (i64,) =
-        sqlx::query_as("SELECT count(*) FROM hostings WHERE system_user_id = ?")
-            .bind(id)
-            .fetch_one(pool)
-            .await?;
+    let row: (i64,) = sqlx::query_as("SELECT count(*) FROM hostings WHERE system_user_id = ?")
+        .bind(id)
+        .fetch_one(pool)
+        .await?;
     Ok(row.0 > 0)
 }
 
@@ -166,9 +162,6 @@ mod tests {
             .expect("insert");
         let r = get_by_uid(&pool, 1042).await.expect("get");
         assert_eq!(r.expect("present").name, "ghost");
-        assert!(get_by_uid(&pool, 1099)
-            .await
-            .expect("get")
-            .is_none());
+        assert!(get_by_uid(&pool, 1099).await.expect("get").is_none());
     }
 }

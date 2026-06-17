@@ -180,7 +180,10 @@ pub async fn post_heartbeat(
     // we'd start dropping. Realistic deployments have at most a
     // handful — anything well above that is fuzzing / enumeration.
     let ip = effective_ip(&headers, peer);
-    if !state.ratelimit.check("heartbeat", ip, Bucket::per_minute(60)) {
+    if !state
+        .ratelimit
+        .check("heartbeat", ip, Bucket::per_minute(60))
+    {
         return Err(AppError::TooManyRequests(
             "heartbeat rate limit exceeded".into(),
         ));

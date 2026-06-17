@@ -39,13 +39,11 @@ pub fn mint(key: &[u8], bundle_id: &str, exp_ts: i64) -> String {
 /// The caller still has to compare `exp_ts` against `now_secs()`
 /// — different endpoints want different freshness rules (a 1h
 /// download window is typical).
-pub fn verify(
-    key: &[u8],
-    bundle_id_expected: &str,
-    token: &str,
-) -> Result<i64, &'static str> {
+pub fn verify(key: &[u8], bundle_id_expected: &str, token: &str) -> Result<i64, &'static str> {
     let (payload_b64, mac_b64) = token.split_once('.').ok_or("malformed token")?;
-    let payload = B64.decode(payload_b64.as_bytes()).map_err(|_| "bad payload b64")?;
+    let payload = B64
+        .decode(payload_b64.as_bytes())
+        .map_err(|_| "bad payload b64")?;
     let mac_given = B64.decode(mac_b64.as_bytes()).map_err(|_| "bad mac b64")?;
 
     // Layout: PREFIX || bundle_id || '|' || exp_ts (8 BE bytes)
@@ -61,7 +59,11 @@ pub fn verify(
         return Err("payload length wrong");
     }
     let bundle_id_bytes = &after_prefix[..pipe_pos];
-    if bundle_id_bytes.ct_eq(bundle_id_expected.as_bytes()).unwrap_u8() != 1 {
+    if bundle_id_bytes
+        .ct_eq(bundle_id_expected.as_bytes())
+        .unwrap_u8()
+        != 1
+    {
         return Err("bundle_id mismatch");
     }
     let mut ts_bytes = [0u8; 8];

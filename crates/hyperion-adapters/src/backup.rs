@@ -136,11 +136,7 @@ pub async fn restore_archive(archive: &Path, target_root: &Path) -> Result<u64, 
     tokio::fs::create_dir_all(target_root).await?;
     let archive_str = archive.display().to_string();
     let target_str = target_root.display().to_string();
-    cmd::run(
-        "/usr/bin/tar",
-        &["-xzf", &archive_str, "-C", &target_str],
-    )
-    .await?;
+    cmd::run("/usr/bin/tar", &["-xzf", &archive_str, "-C", &target_str]).await?;
     let meta = tokio::fs::metadata(archive).await?;
     Ok(meta.len())
 }
@@ -177,10 +173,7 @@ pub struct RemoteUpload<'a> {
 
 /// Push a local file to a remote destination via curl. Returns the URL
 /// the file landed at.
-pub async fn upload_remote(
-    file: &Path,
-    upload: &RemoteUpload<'_>,
-) -> Result<String, AdapterError> {
+pub async fn upload_remote(file: &Path, upload: &RemoteUpload<'_>) -> Result<String, AdapterError> {
     let scheme = match upload.scheme {
         "ftp" | "ftps" | "sftp" => upload.scheme,
         other => {
@@ -215,7 +208,8 @@ pub async fn upload_remote(
         "--user",
         &creds,
         "--upload-file",
-        file.to_str().ok_or_else(|| AdapterError::Other("file path not utf8".into()))?,
+        file.to_str()
+            .ok_or_else(|| AdapterError::Other("file path not utf8".into()))?,
         &url,
     ];
     cmd::run("/usr/bin/curl", &args).await?;

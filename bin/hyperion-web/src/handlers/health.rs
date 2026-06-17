@@ -31,11 +31,10 @@ pub async fn get_healthz() -> Response {
 
 pub async fn get_readyz(State(state): State<SharedState>) -> Response {
     let started = std::time::Instant::now();
-    let probe =
-        tokio::time::timeout(std::time::Duration::from_secs(3), async {
-            hyperion_rpc_client::call(&state.agent_socket, Request::AgentInfo).await
-        })
-        .await;
+    let probe = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+        hyperion_rpc_client::call(&state.agent_socket, Request::AgentInfo).await
+    })
+    .await;
     let elapsed_ms = started.elapsed().as_millis() as u64;
     let (status, body) = match probe {
         Ok(Ok(RpcResponse::AgentInfo(i))) => (

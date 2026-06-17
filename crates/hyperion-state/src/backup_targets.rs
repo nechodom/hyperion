@@ -135,38 +135,24 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<BackupTargetRow>, StateError>
     Ok(rows
         .into_iter()
         .map(
-            |(
-                id,
-                name,
-                kind,
-                endpoint,
-                bucket,
-                region,
-                aki,
-                ski,
-                age,
-                rd,
-                rw,
-                rm,
-                en,
-                ca,
-                ua,
-            )| BackupTargetRow {
-                id,
-                name,
-                kind,
-                endpoint,
-                bucket,
-                region,
-                access_key_id: aki,
-                secret_key_id: ski,
-                age_recipient: age,
-                retention_daily: rd,
-                retention_weekly: rw,
-                retention_monthly: rm,
-                enabled: en != 0,
-                created_at: ca,
-                updated_at: ua,
+            |(id, name, kind, endpoint, bucket, region, aki, ski, age, rd, rw, rm, en, ca, ua)| {
+                BackupTargetRow {
+                    id,
+                    name,
+                    kind,
+                    endpoint,
+                    bucket,
+                    region,
+                    access_key_id: aki,
+                    secret_key_id: ski,
+                    age_recipient: age,
+                    retention_daily: rd,
+                    retention_weekly: rw,
+                    retention_monthly: rm,
+                    enabled: en != 0,
+                    created_at: ca,
+                    updated_at: ua,
+                }
             },
         )
         .collect())

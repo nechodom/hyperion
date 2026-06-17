@@ -10,9 +10,9 @@
 //! `.then(r => r.text())` is enough.
 
 use crate::auth::AuthCtx;
-use axum::response::Response;
 use axum::http::header;
 use axum::response::IntoResponse;
+use axum::response::Response;
 
 /// GET /api/me/role — returns the current session's role as plain text.
 ///

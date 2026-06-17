@@ -86,15 +86,15 @@ impl RateLimiter {
             let stale_cutoff = now - Duration::from_secs(600);
             guard.retain(|_, s| s.last_refill > stale_cutoff);
         }
-        let state = guard
-            .entry((endpoint, ip))
-            .or_insert(BucketState {
-                tokens: bucket.capacity as f64,
-                last_refill: now,
-            });
+        let state = guard.entry((endpoint, ip)).or_insert(BucketState {
+            tokens: bucket.capacity as f64,
+            last_refill: now,
+        });
         // Refill: capacity tokens over refill_period seconds → rate
         // = capacity / refill_period.
-        let elapsed = now.saturating_duration_since(state.last_refill).as_secs_f64();
+        let elapsed = now
+            .saturating_duration_since(state.last_refill)
+            .as_secs_f64();
         let rate = bucket.capacity as f64 / bucket.refill_period.as_secs_f64();
         state.tokens = (state.tokens + elapsed * rate).min(bucket.capacity as f64);
         state.last_refill = now;
@@ -181,6 +181,9 @@ mod tests {
             let s = g.get_mut(&("e", ip)).unwrap();
             s.last_refill -= Duration::from_secs(11);
         }
-        assert!(rl.check("e", ip, b), "should have refilled at least 1 token");
+        assert!(
+            rl.check("e", ip, b),
+            "should have refilled at least 1 token"
+        );
     }
 }

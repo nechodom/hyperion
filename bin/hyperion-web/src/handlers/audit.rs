@@ -86,7 +86,9 @@ pub async fn get_audit(
     // payloads leak cross-tenant operational data — viewer with
     // access to one site can read everything else.
     if !ctx.is_admin_or_higher() {
-        return Ok(axum::response::Redirect::to("/?flash_error=admin+role+required").into_response());
+        return Ok(
+            axum::response::Redirect::to("/?flash_error=admin+role+required").into_response(),
+        );
     }
     let limit = q.limit.clamp(1, 1000);
     let resp = hyperion_rpc_client::call(&state.agent_socket, Request::AuditList { limit }).await?;
@@ -141,7 +143,9 @@ pub async fn get_audit(
         .filter(|r| {
             action_filter.is_empty()
                 || r.action == action_filter
-                || r.action.to_lowercase().contains(&action_filter.to_lowercase())
+                || r.action
+                    .to_lowercase()
+                    .contains(&action_filter.to_lowercase())
         })
         .filter(|r| result_filter.is_empty() || r.result.to_lowercase() == result_filter)
         .collect();
@@ -177,10 +181,9 @@ pub async fn post_verify_chain(
     ctx: AuthCtx,
 ) -> Result<Response, AppError> {
     if !ctx.is_admin_or_higher() {
-        return Ok(Html(
-            "<div class=\"pill err\">admin role required</div>".to_string(),
-        )
-        .into_response());
+        return Ok(
+            Html("<div class=\"pill err\">admin role required</div>".to_string()).into_response(),
+        );
     }
     let resp = hyperion_rpc_client::call(&state.agent_socket, Request::AuditVerifyChain).await?;
     let html = match resp {

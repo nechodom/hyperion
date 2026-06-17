@@ -27,7 +27,10 @@ fn numeric_segments(v: &str) -> Vec<u64> {
 /// missing major on either side is treated as NOT same-major (never
 /// auto-update something we can't reason about).
 pub fn is_same_major(current: &str, latest: &str) -> bool {
-    match (numeric_segments(current).first(), numeric_segments(latest).first()) {
+    match (
+        numeric_segments(current).first(),
+        numeric_segments(latest).first(),
+    ) {
         (Some(c), Some(l)) => c == l,
         _ => false,
     }

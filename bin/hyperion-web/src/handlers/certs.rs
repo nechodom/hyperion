@@ -53,7 +53,9 @@ pub async fn get_certs(
     axum::extract::Query(q): axum::extract::Query<CertsQuery>,
 ) -> Result<Response, AppError> {
     if !ctx.is_admin_or_higher() {
-        return Ok(axum::response::Redirect::to("/?flash_error=admin+role+required").into_response());
+        return Ok(
+            axum::response::Redirect::to("/?flash_error=admin+role+required").into_response(),
+        );
     }
     // Collect from master + every enrolled node. A worker that's
     // offline / rejects RPC contributes nothing — best-effort,
@@ -70,13 +72,12 @@ pub async fn get_certs(
         hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await
     {
         for n in nodes {
-            if let Ok(RpcResponse::CertOverview(mut items)) =
-                crate::dispatcher::dispatch_to_node(
-                    &state,
-                    Some(n.node_id.as_str()),
-                    Request::CertOverview,
-                )
-                .await
+            if let Ok(RpcResponse::CertOverview(mut items)) = crate::dispatcher::dispatch_to_node(
+                &state,
+                Some(n.node_id.as_str()),
+                Request::CertOverview,
+            )
+            .await
             {
                 for item in items.iter_mut() {
                     item.node_id = n.label.clone();
@@ -189,9 +190,5 @@ pub async fn post_renew_all(
     } else {
         "flash"
     };
-    Ok(Redirect::to(&format!(
-        "/certs?{key}={}",
-        urlencode(&msg)
-    ))
-    .into_response())
+    Ok(Redirect::to(&format!("/certs?{key}={}", urlencode(&msg))).into_response())
 }

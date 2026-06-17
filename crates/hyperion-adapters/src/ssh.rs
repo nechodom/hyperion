@@ -105,7 +105,9 @@ pub async fn ensure_sftp_infra() -> Result<(), AdapterError> {
     cmd::run("/usr/sbin/groupadd", &["-f", SFTP_GROUP]).await?;
 
     let want = DROPIN_BODY;
-    let have = tokio::fs::read_to_string(SSHD_DROPIN).await.unwrap_or_default();
+    let have = tokio::fs::read_to_string(SSHD_DROPIN)
+        .await
+        .unwrap_or_default();
     if have != want {
         crate::fs::atomic_write(Path::new(SSHD_DROPIN), want.as_bytes(), 0o644).await?;
         // Validate the WHOLE sshd config (including this drop-in) before
@@ -127,11 +129,7 @@ pub async fn ensure_sftp_infra() -> Result<(), AdapterError> {
 
 /// Enable SFTP for `user`: join the group, root-own the home for chroot,
 /// and install the validated keys into `~/.ssh/authorized_keys`.
-pub async fn enable_sftp(
-    user: &str,
-    home_dir: &str,
-    keys: &[String],
-) -> Result<(), AdapterError> {
+pub async fn enable_sftp(user: &str, home_dir: &str, keys: &[String]) -> Result<(), AdapterError> {
     ensure_sftp_infra().await?;
     cmd::run("/usr/sbin/usermod", &["-aG", SFTP_GROUP, user]).await?;
 
@@ -177,7 +175,9 @@ pub async fn disable_sftp(user: &str, home_dir: &str) -> Result<(), AdapterError
 /// Read the current SFTP status for a user: whether they're in the group
 /// and the public keys currently installed.
 pub async fn read_status(user: &str, home_dir: &str) -> Result<(bool, Vec<String>), AdapterError> {
-    let groups = cmd::run("/usr/bin/id", &["-nG", user]).await.unwrap_or_default();
+    let groups = cmd::run("/usr/bin/id", &["-nG", user])
+        .await
+        .unwrap_or_default();
     let enabled = groups.split_whitespace().any(|g| g == SFTP_GROUP);
     let ak = format!("{home_dir}/.ssh/authorized_keys");
     let keys = match tokio::fs::read_to_string(&ak).await {

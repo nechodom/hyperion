@@ -70,15 +70,11 @@ pub async fn get_profiles(
 ) -> Result<Response, AppError> {
     let profiles = fetch_profiles(&state).await.unwrap_or_default();
     // Asset library — best-effort. An empty list hides the picker.
-    let assets: Vec<WpAssetSummary> = match hyperion_rpc_client::call(
-        &state.agent_socket,
-        Request::WpAssetList,
-    )
-    .await
-    {
-        Ok(RpcResponse::WpAssetList(v)) => v,
-        _ => Vec::new(),
-    };
+    let assets: Vec<WpAssetSummary> =
+        match hyperion_rpc_client::call(&state.agent_socket, Request::WpAssetList).await {
+            Ok(RpcResponse::WpAssetList(v)) => v,
+            _ => Vec::new(),
+        };
     let (plugin_assets, theme_assets): (Vec<_>, Vec<_>) =
         assets.into_iter().partition(|a| a.kind == "plugin");
     let tpl = ProfilesTpl {
@@ -247,10 +243,11 @@ pub async fn post_create(
             urlencoding(&format!("Profile \"{}\" created.", p.name))
         ))
         .into_response()),
-        RpcResponse::Error(e) => {
-            Ok(Redirect::to(&format!("/profiles?error={}", urlencoding(&e.to_string())))
-                .into_response())
-        }
+        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
+            "/profiles?error={}",
+            urlencoding(&e.to_string())
+        ))
+        .into_response()),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }
@@ -284,18 +281,18 @@ pub async fn post_clone(
         return Err(AppError::Forbidden);
     }
     // Fetch the source profile.
-    let resp = hyperion_rpc_client::call(
-        &state.agent_socket,
-        Request::ProfileGet { id: form.id },
-    )
-    .await?;
+    let resp =
+        hyperion_rpc_client::call(&state.agent_socket, Request::ProfileGet { id: form.id }).await?;
     let src = match resp {
         RpcResponse::ProfileGet(p) => p,
         RpcResponse::Error(hyperion_rpc::RpcError::NotFound { .. }) => {
             return Ok(Redirect::to("/profiles?error=Profile+not+found").into_response());
         }
         RpcResponse::Error(e) => {
-            return Ok(Redirect::to(&format!("/profiles?error={}", urlencoding(&e.to_string()))).into_response());
+            return Ok(
+                Redirect::to(&format!("/profiles?error={}", urlencoding(&e.to_string())))
+                    .into_response(),
+            );
         }
         _ => return Err(AppError::Internal("unexpected response".into())),
     };
@@ -330,7 +327,10 @@ pub async fn post_clone(
         RpcResponse::ProfileCreate(p) => Ok(Redirect::to(&format!(
             "/profiles/{}/edit?flash={}",
             p.id,
-            urlencoding(&format!("Cloned from \"{}\" — edit the copy and save.", src.name))
+            urlencoding(&format!(
+                "Cloned from \"{}\" — edit the copy and save.",
+                src.name
+            ))
         ))
         .into_response()),
         RpcResponse::Error(e) => Ok(Redirect::to(&format!(
@@ -365,15 +365,11 @@ pub async fn get_edit(
     // here shouldn't 500 the edit page; an empty Vec just hides
     // the picker entirely and the operator falls back to typing
     // `@asset:N` by hand.
-    let assets: Vec<WpAssetSummary> = match hyperion_rpc_client::call(
-        &state.agent_socket,
-        Request::WpAssetList,
-    )
-    .await
-    {
-        Ok(RpcResponse::WpAssetList(v)) => v,
-        _ => Vec::new(),
-    };
+    let assets: Vec<WpAssetSummary> =
+        match hyperion_rpc_client::call(&state.agent_socket, Request::WpAssetList).await {
+            Ok(RpcResponse::WpAssetList(v)) => v,
+            _ => Vec::new(),
+        };
     let (plugin_assets, theme_assets): (Vec<_>, Vec<_>) =
         assets.into_iter().partition(|a| a.kind == "plugin");
     let tpl = ProfileEditTpl {
@@ -451,11 +447,8 @@ pub async fn post_update(
             Some(form.default_db_engine.trim().to_string())
         },
     };
-    let resp = hyperion_rpc_client::call(
-        &state.agent_socket,
-        Request::ProfileUpdate { id, input },
-    )
-    .await?;
+    let resp = hyperion_rpc_client::call(&state.agent_socket, Request::ProfileUpdate { id, input })
+        .await?;
     match resp {
         RpcResponse::ProfileUpdate(p) => Ok(Redirect::to(&format!(
             "/profiles?flash={}",
@@ -484,11 +477,14 @@ pub async fn post_delete(
         hyperion_rpc_client::call(&state.agent_socket, Request::ProfileDelete { id: form.id })
             .await?;
     match resp {
-        RpcResponse::ProfileDelete => Ok(Redirect::to("/profiles?flash=Profile+deleted").into_response()),
-        RpcResponse::Error(e) => {
-            Ok(Redirect::to(&format!("/profiles?error={}", urlencoding(&e.to_string())))
-                .into_response())
+        RpcResponse::ProfileDelete => {
+            Ok(Redirect::to("/profiles?flash=Profile+deleted").into_response())
         }
+        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
+            "/profiles?error={}",
+            urlencoding(&e.to_string())
+        ))
+        .into_response()),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }
@@ -527,18 +523,17 @@ pub async fn post_apply(
     };
     let sel_url = urlencoding(&form.selector);
     // Resolve the owning node — the job's RPCs must land there.
-    let (detail, owner_node) =
-        match super::hostings::find_hosting_anywhere(&state, sel).await {
-            Ok(v) => v,
-            Err(e) => {
-                return Ok(Redirect::to(&format!(
-                    "/hostings/{}?profile_error={}",
-                    sel_url,
-                    urlencoding(&e.to_string())
-                ))
-                .into_response());
-            }
-        };
+    let (detail, owner_node) = match super::hostings::find_hosting_anywhere(&state, sel).await {
+        Ok(v) => v,
+        Err(e) => {
+            return Ok(Redirect::to(&format!(
+                "/hostings/{}?profile_error={}",
+                sel_url,
+                urlencoding(&e.to_string())
+            ))
+            .into_response());
+        }
+    };
     let actor_label = ctx.username.clone();
     let actor_uid = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
     let payload = serde_json::json!({
@@ -570,9 +565,7 @@ pub async fn post_apply(
             .await
             {
                 Ok(()) => {
-                    reporter
-                        .step("Done", 100, "Profile fully applied.\n")
-                        .await;
+                    reporter.step("Done", 100, "Profile fully applied.\n").await;
                     reporter.finish(true, None).await;
                 }
                 Err(msg) => {
@@ -582,11 +575,7 @@ pub async fn post_apply(
         },
     )
     .await?;
-    Ok(Redirect::to(&format!(
-        "/hostings/{}?wpjob={}#wordpress",
-        sel_url, job_id
-    ))
-    .into_response())
+    Ok(Redirect::to(&format!("/hostings/{}?wpjob={}#wordpress", sel_url, job_id)).into_response())
 }
 
 fn parse_opt_i64(s: &str) -> Option<i64> {
@@ -778,11 +767,10 @@ pub async fn post_wp_asset_upload(
             } else {
                 format!("Uploaded \"{original_name}\" → id {id}.")
             };
-            Ok(Redirect::to(&format!(
-                "/profiles/wp-assets?flash={}",
-                urlencoding(&msg)
-            ))
-            .into_response())
+            Ok(
+                Redirect::to(&format!("/profiles/wp-assets?flash={}", urlencoding(&msg)))
+                    .into_response(),
+            )
         }
         RpcResponse::Error(e) => Ok(Redirect::to(&format!(
             "/profiles/wp-assets?error={}",
@@ -853,9 +841,7 @@ pub async fn post_wp_install_from_asset(
             original_name,
         } => {
             let activated = if activate { " and activated" } else { "" };
-            let msg = format!(
-                "Installed {kind} \"{original_name}\" from library{activated}."
-            );
+            let msg = format!("Installed {kind} \"{original_name}\" from library{activated}.");
             Ok(Redirect::to(&format!(
                 "/hostings/{}?wp_flash={}#wordpress",
                 sel_url,
@@ -1004,7 +990,11 @@ pub async fn post_wp_asset_reinstall_all(
                     failure_tail.lines().take(3).collect::<Vec<_>>().join(" | ")
                 )
             };
-            let key = if installed_failed == 0 { "flash" } else { "error" };
+            let key = if installed_failed == 0 {
+                "flash"
+            } else {
+                "error"
+            };
             Ok(Redirect::to(&format!(
                 "/profiles/wp-assets?{}={}",
                 key,
@@ -1029,16 +1019,13 @@ pub async fn post_wp_asset_delete(
     if !ctx.is_admin_or_higher() {
         return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
     }
-    let resp = hyperion_rpc_client::call(
-        &state.agent_socket,
-        Request::WpAssetDelete { id: form.id },
-    )
-    .await?;
+    let resp =
+        hyperion_rpc_client::call(&state.agent_socket, Request::WpAssetDelete { id: form.id })
+            .await?;
     match resp {
-        RpcResponse::WpAssetDelete => Ok(Redirect::to(
-            "/profiles/wp-assets?flash=Asset+deleted",
-        )
-        .into_response()),
+        RpcResponse::WpAssetDelete => {
+            Ok(Redirect::to("/profiles/wp-assets?flash=Asset+deleted").into_response())
+        }
         RpcResponse::Error(e) => Ok(Redirect::to(&format!(
             "/profiles/wp-assets?error={}",
             urlencoding(&e.to_string())

@@ -56,11 +56,7 @@ pub async fn insert(
 /// signature already prevents forgery, so accepting unknown sids
 /// is safe. Returning `false` for unknown sids would log out
 /// every operator immediately after the schema migration.
-pub async fn touch_if_live(
-    pool: &SqlitePool,
-    sid: &str,
-    now: i64,
-) -> Result<bool, StateError> {
+pub async fn touch_if_live(pool: &SqlitePool, sid: &str, now: i64) -> Result<bool, StateError> {
     let row: Option<(Option<i64>,)> =
         sqlx::query_as("SELECT revoked_at FROM web_sessions WHERE sid = ?")
             .bind(sid)
@@ -174,10 +170,7 @@ pub async fn revoke_all_for_user(
 /// Drop rows older than `keep_secs`. Run from the daily scheduler
 /// to keep the table bounded. Even with aggressive sign-in churn
 /// this stays in the low thousands of rows; the GC is cheap.
-pub async fn gc_older_than(
-    pool: &SqlitePool,
-    cutoff: i64,
-) -> Result<u64, StateError> {
+pub async fn gc_older_than(pool: &SqlitePool, cutoff: i64) -> Result<u64, StateError> {
     let n = sqlx::query("DELETE FROM web_sessions WHERE created_at < ?")
         .bind(cutoff)
         .execute(pool)

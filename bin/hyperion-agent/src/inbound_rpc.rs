@@ -81,10 +81,8 @@ pub async fn spawn_listener(
     if !tls_cert.exists() || !tls_key.exists() {
         ensure_self_signed(&tls_cert, &tls_key)?;
     }
-    let rustls_config = axum_server::tls_rustls::RustlsConfig::from_pem_file(
-        &tls_cert, &tls_key,
-    )
-    .await?;
+    let rustls_config =
+        axum_server::tls_rustls::RustlsConfig::from_pem_file(&tls_cert, &tls_key).await?;
 
     let st = InboundState {
         agent,
@@ -107,25 +105,20 @@ pub async fn spawn_listener(
     Ok(())
 }
 
-async fn handle_rpc(
-    State(st): State<InboundState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
+async fn handle_rpc(State(st): State<InboundState>, headers: HeaderMap, body: Bytes) -> Response {
     // 1. Pull the receiver's own node_id + master pubkey out of
     //    /etc/hyperion/node-id.json. If we haven't been enrolled
     //    yet, we have no way to verify and must refuse.
     let persisted = match read_persisted(&st.state_file).await {
         Some(p) => p,
         None => {
-            return (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "node not yet enrolled",
-            )
-                .into_response();
+            return (StatusCode::SERVICE_UNAVAILABLE, "node not yet enrolled").into_response();
         }
     };
-    let Some(pubkey_b64) = persisted.master_rpc_pubkey.as_deref().filter(|s| !s.is_empty())
+    let Some(pubkey_b64) = persisted
+        .master_rpc_pubkey
+        .as_deref()
+        .filter(|s| !s.is_empty())
     else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -165,11 +158,7 @@ async fn handle_rpc(
     let req: Request = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                format!("bad request body: {e}"),
-            )
-                .into_response();
+            return (StatusCode::BAD_REQUEST, format!("bad request body: {e}")).into_response();
         }
     };
     let resp = hyperion_rpc_server::dispatch(st.agent.clone(), req).await;

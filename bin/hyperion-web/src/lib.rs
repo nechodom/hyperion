@@ -63,10 +63,7 @@ pub fn build_router(state: SharedState) -> Router {
             "/hostings/acme-email",
             post(handlers::hostings::post_set_acme_email),
         )
-        .route(
-            "/hostings/notes",
-            post(handlers::hostings::post_set_notes),
-        )
+        .route("/hostings/notes", post(handlers::hostings::post_set_notes))
         .route(
             "/hostings/php-ini",
             post(handlers::hostings::post_set_php_ini),
@@ -143,10 +140,7 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::hostings::post_cert_upload)
                 .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024)),
         )
-        .route(
-            "/hostings/restore",
-            post(handlers::hostings::post_restore),
-        )
+        .route("/hostings/restore", post(handlers::hostings::post_restore))
         .route(
             "/hostings/restore-as-new",
             post(handlers::hostings::post_restore_as_new),
@@ -155,14 +149,8 @@ pub fn build_router(state: SharedState) -> Router {
             "/hostings/:selector/backup-download/:backup_id",
             get(handlers::hostings::get_backup_download),
         )
-        .route(
-            "/hostings/logs",
-            post(handlers::hostings::post_logs),
-        )
-        .route(
-            "/hostings/cron",
-            post(handlers::hostings::post_cron_save),
-        )
+        .route("/hostings/logs", post(handlers::hostings::post_logs))
+        .route("/hostings/cron", post(handlers::hostings::post_cron_save))
         .route(
             "/hostings/wp/reset-password",
             post(handlers::hostings::post_wp_reset),
@@ -171,10 +159,7 @@ pub fn build_router(state: SharedState) -> Router {
             "/hostings/db/reset-password",
             post(handlers::hostings::post_db_reset),
         )
-        .route(
-            "/hostings/ftp/set",
-            post(handlers::hostings::post_ftp_set),
-        )
+        .route("/hostings/ftp/set", post(handlers::hostings::post_ftp_set))
         .route(
             "/hostings/ftp/disable",
             post(handlers::hostings::post_ftp_disable),
@@ -213,7 +198,10 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/trash/restore", post(handlers::trash::post_trash_restore))
         .route("/trash/purge", post(handlers::trash::post_trash_purge))
         .route("/api/trash-count", get(handlers::trash::get_trash_count))
-        .route("/api/check-domain", get(handlers::hostings::get_check_domain))
+        .route(
+            "/api/check-domain",
+            get(handlers::hostings::get_check_domain),
+        )
         .route(
             "/services",
             get(handlers::services_health::get_services_health),
@@ -263,10 +251,7 @@ pub fn build_router(state: SharedState) -> Router {
             "/api/email-autodetect",
             post(handlers::settings::post_email_autodetect),
         )
-        .route(
-            "/settings/config",
-            post(handlers::settings::post_config),
-        )
+        .route("/settings/config", post(handlers::settings::post_config))
         .route(
             "/settings/node-wildcard/begin",
             post(handlers::settings::post_node_wildcard_begin),
@@ -300,10 +285,7 @@ pub fn build_router(state: SharedState) -> Router {
             "/hostings/access/revoke",
             post(handlers::hostings::post_access_revoke),
         )
-        .route(
-            "/hostings/:selector/files",
-            get(handlers::files::get_files),
-        )
+        .route("/hostings/:selector/files", get(handlers::files::get_files))
         .route(
             "/hostings/:selector/files/upload",
             post(handlers::files::post_upload)
@@ -337,9 +319,18 @@ pub fn build_router(state: SharedState) -> Router {
         )
         .route("/api/search", get(handlers::search::get_search))
         .route("/profile", get(handlers::profile::get_profile))
-        .route("/profile/2fa/start", post(handlers::profile::post_2fa_start))
-        .route("/profile/2fa/confirm", post(handlers::profile::post_2fa_confirm))
-        .route("/profile/2fa/disable", post(handlers::profile::post_2fa_disable))
+        .route(
+            "/profile/2fa/start",
+            post(handlers::profile::post_2fa_start),
+        )
+        .route(
+            "/profile/2fa/confirm",
+            post(handlers::profile::post_2fa_confirm),
+        )
+        .route(
+            "/profile/2fa/disable",
+            post(handlers::profile::post_2fa_disable),
+        )
         .route(
             "/profile/password",
             post(handlers::profile::post_change_password),
@@ -398,10 +389,7 @@ pub fn build_router(state: SharedState) -> Router {
             "/hostings/wp/theme-action",
             post(handlers::hostings::post_wp_theme_action),
         )
-        .route(
-            "/profiles/:id/edit",
-            get(handlers::profiles::get_edit),
-        )
+        .route("/profiles/:id/edit", get(handlers::profiles::get_edit))
         .route(
             "/profiles/:id/update",
             post(handlers::profiles::post_update),
@@ -438,14 +426,8 @@ pub fn build_router(state: SharedState) -> Router {
         )
         .route("/jobs", get(handlers::jobs::get_jobs))
         .route("/jobs/:id", get(handlers::jobs::get_job_detail))
-        .route(
-            "/jobs/:id/progress",
-            get(handlers::jobs::get_job_progress),
-        )
-        .route(
-            "/jobs/:id/retry",
-            post(handlers::jobs::post_job_retry),
-        )
+        .route("/jobs/:id/progress", get(handlers::jobs::get_job_progress))
+        .route("/jobs/:id/retry", post(handlers::jobs::post_job_retry))
         .route(
             "/api/jobs-running-count",
             get(handlers::jobs::get_running_count),
@@ -521,10 +503,7 @@ pub fn build_router(state: SharedState) -> Router {
         )
         // Bell-icon notification feed. mark-read + mark-all-read are
         // CSRF-exempt at the middleware (see check_csrf comment).
-        .route(
-            "/notifications",
-            get(handlers::notifications::get_archive),
-        )
+        .route("/notifications", get(handlers::notifications::get_archive))
         .route(
             "/api/notifications/feed",
             get(handlers::notifications::get_feed),
@@ -611,9 +590,7 @@ async fn enforce_panel_hostname(
     // re-registers. Only browser admin routes get canonicalised.
     {
         let path = req.uri().path();
-        if path.starts_with("/healthz")
-            || path.starts_with("/readyz")
-            || path.starts_with("/api/")
+        if path.starts_with("/healthz") || path.starts_with("/readyz") || path.starts_with("/api/")
         {
             return next.run(req).await;
         }
@@ -666,12 +643,13 @@ async fn enforce_panel_hostname(
         .map(|pq| pq.as_str())
         .unwrap_or("/");
     let target = format!("https://{panel}{port_suffix}{path_and_query}");
-    let mut redirect = axum::response::Response::builder()
-        .status(axum::http::StatusCode::PERMANENT_REDIRECT)
-        .body(axum::body::Body::empty())
-        .expect("static redirect response always builds");
+    // Response::new is infallible (vs. builder().body().expect()).
+    let mut redirect = axum::response::Response::new(axum::body::Body::empty());
+    *redirect.status_mut() = axum::http::StatusCode::PERMANENT_REDIRECT;
     if let Ok(loc) = axum::http::HeaderValue::from_str(&target) {
-        redirect.headers_mut().insert(axum::http::header::LOCATION, loc);
+        redirect
+            .headers_mut()
+            .insert(axum::http::header::LOCATION, loc);
     }
     redirect
 }

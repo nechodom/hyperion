@@ -71,13 +71,7 @@ pub async fn create_db_and_role(
     let db_sql = build_db_sql(&db, &user);
     cmd::run_with_stdin(
         "/usr/bin/sudo",
-        &[
-            "-u",
-            "postgres",
-            "/usr/bin/psql",
-            "-v",
-            "ON_ERROR_STOP=1",
-        ],
+        &["-u", "postgres", "/usr/bin/psql", "-v", "ON_ERROR_STOP=1"],
         db_sql.as_bytes(),
     )
     .await?;

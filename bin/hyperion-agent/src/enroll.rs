@@ -180,9 +180,12 @@ async fn post_json(url: &str, body: &str, verify_tls: bool) -> Result<Vec<u8>, S
         args.push("-k");
     }
     args.extend([
-        "-X", "POST",
-        "-H", "content-type: application/json",
-        "--data-binary", "@-",
+        "-X",
+        "POST",
+        "-H",
+        "content-type: application/json",
+        "--data-binary",
+        "@-",
         url,
     ]);
     let mut child = tokio::process::Command::new("/usr/bin/curl")
@@ -257,8 +260,12 @@ fn should_try_https_fallback(base: &str, err: &str) -> bool {
 }
 
 async fn finish_enrollment(cfg: &EnrollmentConfig, stdout: &[u8]) -> Result<(), String> {
-    let resp: EnrollResponse = serde_json::from_slice(stdout)
-        .map_err(|e| format!("parse response: {e} (raw: {})", String::from_utf8_lossy(stdout)))?;
+    let resp: EnrollResponse = serde_json::from_slice(stdout).map_err(|e| {
+        format!(
+            "parse response: {e} (raw: {})",
+            String::from_utf8_lossy(stdout)
+        )
+    })?;
     // Persist the OPERATOR-supplied master_url (cfg.master_url), NOT
     // the URL returned in the enrollment response. The master is
     // happy to tell us "I'm at https://attacker.example" if a MITM
@@ -386,9 +393,12 @@ pub async fn heartbeat_loop(state_file: std::path::PathBuf, period_secs: u64, ve
             args.push("-k");
         }
         args.extend([
-            "-X", "POST",
-            "-H", "content-type: application/json",
-            "--data-binary", "@-",
+            "-X",
+            "POST",
+            "-H",
+            "content-type: application/json",
+            "--data-binary",
+            "@-",
             &url,
         ]);
         let mut child = match tokio::process::Command::new("/usr/bin/curl")
@@ -430,9 +440,7 @@ pub async fn heartbeat_loop(state_file: std::path::PathBuf, period_secs: u64, ve
                                 "persisting master_rpc_pubkey to node-id.json failed"
                             );
                         } else {
-                            tracing::info!(
-                                "picked up master_rpc_pubkey from heartbeat ack"
-                            );
+                            tracing::info!("picked up master_rpc_pubkey from heartbeat ack");
                         }
                     }
                 }
@@ -469,8 +477,8 @@ async fn atomically_persist(
     state_file: &std::path::Path,
     persisted: &PersistedNodeId,
 ) -> Result<(), String> {
-    let bytes = serde_json::to_vec_pretty(persisted)
-        .map_err(|e| format!("serialize persisted: {e}"))?;
+    let bytes =
+        serde_json::to_vec_pretty(persisted).map_err(|e| format!("serialize persisted: {e}"))?;
     let tmp = state_file.with_extension("json.tmp");
     tokio::fs::write(&tmp, &bytes)
         .await
@@ -479,13 +487,7 @@ async fn atomically_persist(
     let _ = tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).await;
     tokio::fs::rename(&tmp, state_file)
         .await
-        .map_err(|e| {
-            format!(
-                "rename {} → {}: {e}",
-                tmp.display(),
-                state_file.display()
-            )
-        })?;
+        .map_err(|e| format!("rename {} → {}: {e}", tmp.display(), state_file.display()))?;
     Ok(())
 }
 

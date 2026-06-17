@@ -1,19 +1,18 @@
 pub mod audit;
+pub mod avatar;
 pub mod backups;
 pub mod bans;
 pub mod certs;
-pub mod vulns;
-pub mod avatar;
 pub mod dashboard;
+pub mod emails;
 pub mod enroll;
+pub mod files;
 pub mod firewall;
 pub mod health;
 pub mod hostings;
 pub mod install;
 pub mod jobs;
 pub mod login;
-pub mod emails;
-pub mod files;
 pub mod me;
 pub mod migration;
 pub mod monitoring;
@@ -21,13 +20,14 @@ pub mod notifications;
 pub mod profile;
 pub mod profiles;
 pub mod search;
-pub mod sessions;
 pub mod services_health;
+pub mod sessions;
 pub mod settings;
 pub mod statics;
 pub mod stats;
 pub mod trash;
 pub mod users;
+pub mod vulns;
 
 /// Uppercase first ASCII letter of `username`, or `?` if empty / non-ASCII.
 /// Used as the avatar glyph in the sidebar.
@@ -73,10 +73,7 @@ pub fn htmx_version() -> &'static str {
 /// in every form. Returns empty string on unauthenticated requests
 /// (which never reach the CSRF guard anyway — they're redirected to
 /// /login before the POST middleware runs).
-pub fn session_csrf_token(
-    state: &crate::state::SharedState,
-    ctx: &crate::auth::AuthCtx,
-) -> String {
+pub fn session_csrf_token(state: &crate::state::SharedState, ctx: &crate::auth::AuthCtx) -> String {
     let sid = ctx
         .session
         .as_ref()
@@ -128,7 +125,10 @@ pub async fn derive_master_url(
     //      to cached_public_ip).
     //   4. secure_cookies flag — boolean operator preference.
     //   5. plain http as last resort.
-    let host_header = headers.get("host").and_then(|v| v.to_str().ok()).map(String::from);
+    let host_header = headers
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from);
     let listen_port = port_from_listen(&state.cfg.web.listen);
 
     let scheme_from_proto = headers
@@ -149,15 +149,13 @@ pub async fn derive_master_url(
             _ => None,
         });
 
-    let scheme = scheme_from_proto
-        .or(scheme_from_port)
-        .unwrap_or_else(|| {
-            if state.cfg.web.secure_cookies {
-                "https".to_string()
-            } else {
-                "http".to_string()
-            }
-        });
+    let scheme = scheme_from_proto.or(scheme_from_port).unwrap_or_else(|| {
+        if state.cfg.web.secure_cookies {
+            "https".to_string()
+        } else {
+            "http".to_string()
+        }
+    });
 
     if let Some(h) = host_header.as_deref() {
         if !host_is_useless(h) {
@@ -205,7 +203,10 @@ fn host_is_useless(host: &str) -> bool {
         return true;
     }
     let bare = if host.starts_with('[') {
-        host.split(']').next().unwrap_or(host).trim_start_matches('[')
+        host.split(']')
+            .next()
+            .unwrap_or(host)
+            .trim_start_matches('[')
     } else {
         // Only split on colon when the host has at most ONE colon —
         // anything with multiple colons is an unbracketed IPv6 host
@@ -322,7 +323,10 @@ mod tests {
         assert_eq!(port_from_host_header("178.105.99.35"), None);
         // IPv6 bracketed.
         assert_eq!(port_from_host_header("[::1]:8443"), Some(8443));
-        assert_eq!(port_from_host_header("[2a00:1450:4001:830::200e]:443"), Some(443));
+        assert_eq!(
+            port_from_host_header("[2a00:1450:4001:830::200e]:443"),
+            Some(443)
+        );
         // IPv6 bare (no brackets) ⇒ no explicit port — multiple
         // colons confuse a naive split, so we MUST not return one
         // of the address segments as the port.

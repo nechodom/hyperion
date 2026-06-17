@@ -77,11 +77,8 @@ async fn serve_avatar(state: &SharedState, user_id: i64) -> Result<Response, App
     // RPC to the agent for the filename column. Avatars themselves
     // live on the master web's filesystem (one upload point); the
     // agent only knows the basename.
-    let resp = hyperion_rpc_client::call(
-        &state.agent_socket,
-        Request::AvatarFilename { user_id },
-    )
-    .await?;
+    let resp =
+        hyperion_rpc_client::call(&state.agent_socket, Request::AvatarFilename { user_id }).await?;
     let filename = match resp {
         RpcResponse::AvatarFilename(f) => f,
         _ => return Ok(StatusCode::NOT_FOUND.into_response()),

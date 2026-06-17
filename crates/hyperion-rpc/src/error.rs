@@ -127,7 +127,10 @@ mod tests {
             stderr_tail: "useradd: group foo exists".into(),
         };
         let s = e.to_string();
-        assert!(s.contains("useradd: group foo exists"), "missing stderr: {s}");
+        assert!(
+            s.contains("useradd: group foo exists"),
+            "missing stderr: {s}"
+        );
         assert!(s.contains("exit 9"), "missing exit code: {s}");
         assert!(s.contains("/usr/sbin/useradd -U foo"), "missing cmd: {s}");
     }

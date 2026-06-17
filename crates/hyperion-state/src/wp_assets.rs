@@ -59,7 +59,16 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<WpAssetRow>, StateError> {
     Ok(rows
         .into_iter()
         .map(
-            |(id, kind, original_name, stored_filename, size_bytes, sha256, uploaded_at, uploaded_by)| {
+            |(
+                id,
+                kind,
+                original_name,
+                stored_filename,
+                size_bytes,
+                sha256,
+                uploaded_at,
+                uploaded_by,
+            )| {
                 WpAssetRow {
                     id,
                     kind,
@@ -84,7 +93,16 @@ pub async fn get_by_id(pool: &SqlitePool, id: i64) -> Result<Option<WpAssetRow>,
     .fetch_optional(pool)
     .await?;
     Ok(row.map(
-        |(id, kind, original_name, stored_filename, size_bytes, sha256, uploaded_at, uploaded_by)| {
+        |(
+            id,
+            kind,
+            original_name,
+            stored_filename,
+            size_bytes,
+            sha256,
+            uploaded_at,
+            uploaded_by,
+        )| {
             WpAssetRow {
                 id,
                 kind,
@@ -172,12 +190,10 @@ pub async fn record_install(
 /// Count distinct hostings tracked as having `asset_id` installed.
 /// Returns 0 for unknown assets (no row constraint here).
 pub async fn install_count(pool: &SqlitePool, asset_id: i64) -> Result<i64, StateError> {
-    let row: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM wp_asset_installs WHERE asset_id = ?",
-    )
-    .bind(asset_id)
-    .fetch_one(pool)
-    .await?;
+    let row: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM wp_asset_installs WHERE asset_id = ?")
+        .bind(asset_id)
+        .fetch_one(pool)
+        .await?;
     Ok(row.0)
 }
 
@@ -204,12 +220,14 @@ pub async fn list_install_targets(
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(hosting_id, node_id, activate, last_at)| InstallTargetRow {
-            hosting_id,
-            node_id,
-            activate: activate != 0,
-            last_at,
-        })
+        .map(
+            |(hosting_id, node_id, activate, last_at)| InstallTargetRow {
+                hosting_id,
+                node_id,
+                activate: activate != 0,
+                last_at,
+            },
+        )
         .collect())
 }
 
@@ -225,7 +243,16 @@ pub async fn get_by_sha(pool: &SqlitePool, sha256: &str) -> Result<Option<WpAsse
     .fetch_optional(pool)
     .await?;
     Ok(row.map(
-        |(id, kind, original_name, stored_filename, size_bytes, sha256, uploaded_at, uploaded_by)| {
+        |(
+            id,
+            kind,
+            original_name,
+            stored_filename,
+            size_bytes,
+            sha256,
+            uploaded_at,
+            uploaded_by,
+        )| {
             WpAssetRow {
                 id,
                 kind,
@@ -271,14 +298,7 @@ mod tests {
     async fn get_by_sha_dedupes() {
         let pool = open_memory().await.expect("open");
         let _ = insert(
-            &pool,
-            "plugin",
-            "x.zip",
-            "x-1.zip",
-            1,
-            "shaaaaaa",
-            1,
-            "kevin",
+            &pool, "plugin", "x.zip", "x-1.zip", 1, "shaaaaaa", 1, "kevin",
         )
         .await
         .unwrap();

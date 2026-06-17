@@ -117,7 +117,12 @@ pub async fn insert(pool: &SqlitePool, p: &NewProfile, now: i64) -> Result<i64, 
     Ok(row.0)
 }
 
-pub async fn update(pool: &SqlitePool, id: i64, p: &NewProfile, now: i64) -> Result<(), StateError> {
+pub async fn update(
+    pool: &SqlitePool,
+    id: i64,
+    p: &NewProfile,
+    now: i64,
+) -> Result<(), StateError> {
     sqlx::query(
         r#"UPDATE hosting_profiles SET
             name = ?, description = ?, php_memory_mb = ?, php_max_exec_secs = ?,

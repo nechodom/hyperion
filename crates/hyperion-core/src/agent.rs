@@ -31,7 +31,10 @@ impl<A: AdapterPort + 'static> AgentImpl<A> {
         Self::with_state_file(svc, "/etc/hyperion/node-id.json".into())
     }
 
-    pub fn with_state_file(svc: Arc<HostingService<A>>, node_state_file: std::path::PathBuf) -> Self {
+    pub fn with_state_file(
+        svc: Arc<HostingService<A>>,
+        node_state_file: std::path::PathBuf,
+    ) -> Self {
         Self {
             svc,
             hostname: hostname_or_unknown(),
@@ -81,7 +84,11 @@ async fn read_node_state(path: &std::path::Path) -> (Option<String>, Option<Stri
         Ok(p) => (
             Some(p.node_id),
             Some(p.master_url),
-            if p.enrolled_at > 0 { Some(p.enrolled_at) } else { None },
+            if p.enrolled_at > 0 {
+                Some(p.enrolled_at)
+            } else {
+                None
+            },
         ),
         Err(_) => (None, None, None),
     }
@@ -215,10 +222,7 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.rotate_redis_password(sel).await
     }
 
-    async fn hosting_rotate_wp_debug_log(
-        &self,
-        sel: HostingSelector,
-    ) -> Result<(), RpcError> {
+    async fn hosting_rotate_wp_debug_log(&self, sel: HostingSelector) -> Result<(), RpcError> {
         self.svc.rotate_wp_debug_log(sel).await
     }
 
@@ -238,9 +242,7 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.audit_verify_chain().await
     }
 
-    async fn backup_target_list(
-        &self,
-    ) -> Result<Vec<hyperion_types::BackupTargetView>, RpcError> {
+    async fn backup_target_list(&self) -> Result<Vec<hyperion_types::BackupTargetView>, RpcError> {
         self.svc.backup_target_list().await
     }
 
@@ -348,11 +350,7 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.web_session_list(user_id).await
     }
 
-    async fn web_session_revoke(
-        &self,
-        sid: String,
-        revoked_by: i64,
-    ) -> Result<bool, RpcError> {
+    async fn web_session_revoke(&self, sid: String, revoked_by: i64) -> Result<bool, RpcError> {
         self.svc.web_session_revoke(&sid, revoked_by).await
     }
 
@@ -381,10 +379,7 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.hosting_kv_set(hosting_id, key, value).await
     }
 
-    async fn hosting_kv_list(
-        &self,
-        hosting_id: String,
-    ) -> Result<Vec<(String, String)>, RpcError> {
+    async fn hosting_kv_list(&self, hosting_id: String) -> Result<Vec<(String, String)>, RpcError> {
         self.svc.hosting_kv_list(hosting_id).await
     }
 
@@ -428,7 +423,9 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     }
 
     async fn cert_issue(&self, _domain: Domain) -> Result<CertInfo, RpcError> {
-        Err(RpcError::Internal { message: "not supported by this agent".into() })
+        Err(RpcError::Internal {
+            message: "not supported by this agent".into(),
+        })
     }
 
     async fn cert_renew_all(&self) -> Result<Vec<CertRenewResult>, RpcError> {
@@ -451,10 +448,7 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.install_wordpress(sel, req).await
     }
 
-    async fn wp_status(
-        &self,
-        sel: HostingSelector,
-    ) -> Result<Option<WpInstallStatus>, RpcError> {
+    async fn wp_status(&self, sel: HostingSelector) -> Result<Option<WpInstallStatus>, RpcError> {
         self.svc.wp_status(sel).await
     }
 
@@ -486,10 +480,7 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.cert_dns01_begin(sel, staging, provider).await
     }
 
-    async fn cert_dns01_finish(
-        &self,
-        sel: HostingSelector,
-    ) -> Result<CertInfo, RpcError> {
+    async fn cert_dns01_finish(&self, sel: HostingSelector) -> Result<CertInfo, RpcError> {
         self.svc.cert_dns01_finish(sel).await
     }
 
@@ -594,7 +585,9 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         asset_id: i64,
         activate: bool,
     ) -> Result<(String, String), RpcError> {
-        self.svc.wp_install_from_asset(sel, asset_id, activate).await
+        self.svc
+            .wp_install_from_asset(sel, asset_id, activate)
+            .await
     }
     async fn wp_asset_replace(
         &self,
@@ -658,16 +651,10 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     ) -> Result<(), RpcError> {
         self.svc.wp_staging_push(sel, staging_domain).await
     }
-    async fn node_update_run(
-        &self,
-        do_apt: bool,
-        do_hyperion: bool,
-    ) -> Result<i64, RpcError> {
+    async fn node_update_run(&self, do_apt: bool, do_hyperion: bool) -> Result<i64, RpcError> {
         self.svc.node_update_run(do_apt, do_hyperion).await
     }
-    async fn node_update_status(
-        &self,
-    ) -> Result<hyperion_types::NodeUpdateStatus, RpcError> {
+    async fn node_update_status(&self) -> Result<hyperion_types::NodeUpdateStatus, RpcError> {
         self.svc.node_update_status().await
     }
     async fn agent_config_update(
@@ -737,16 +724,10 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.site_email_log_list(system_user, limit).await
     }
 
-    async fn ftp_accounts_list(
-        &self,
-    ) -> Result<Vec<hyperion_types::FtpAccountSummary>, RpcError> {
+    async fn ftp_accounts_list(&self) -> Result<Vec<hyperion_types::FtpAccountSummary>, RpcError> {
         self.svc.ftp_accounts_list().await
     }
-    async fn ftp_verify_login(
-        &self,
-        user: String,
-        password: String,
-    ) -> Result<bool, RpcError> {
+    async fn ftp_verify_login(&self, user: String, password: String) -> Result<bool, RpcError> {
         self.svc.ftp_verify_login(user, password).await
     }
 
@@ -834,7 +815,13 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         actor_uid: i64,
     ) -> Result<String, RpcError> {
         self.svc
-            .job_start_external(&kind, target.as_deref(), &payload_json, &actor_label, actor_uid)
+            .job_start_external(
+                &kind,
+                target.as_deref(),
+                &payload_json,
+                &actor_label,
+                actor_uid,
+            )
             .await
     }
 
@@ -856,7 +843,9 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         ok: bool,
         error: Option<String>,
     ) -> Result<(), RpcError> {
-        self.svc.job_finish_external(&id, ok, error.as_deref()).await
+        self.svc
+            .job_finish_external(&id, ok, error.as_deref())
+            .await
     }
 
     async fn wp_plugin_list(
@@ -880,7 +869,9 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     }
 
     async fn agent_config_view(&self) -> Result<hyperion_types::AgentConfigView, RpcError> {
-        self.svc.agent_config_view(&self.hostname, &self.version).await
+        self.svc
+            .agent_config_view(&self.hostname, &self.version)
+            .await
     }
 
     async fn email_send_test(&self, to: String) -> Result<String, RpcError> {
@@ -919,7 +910,9 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         password: String,
         role: String,
     ) -> Result<i64, RpcError> {
-        self.svc.web_user_create(username, email, password, role).await
+        self.svc
+            .web_user_create(username, email, password, role)
+            .await
     }
     async fn web_user_set_password(
         &self,
@@ -971,7 +964,9 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         user_id: i64,
         hosting_id: String,
     ) -> Result<(), RpcError> {
-        self.svc.web_revoke_hosting_access(user_id, hosting_id).await
+        self.svc
+            .web_revoke_hosting_access(user_id, hosting_id)
+            .await
     }
     async fn web_list_hosting_access(
         &self,
@@ -1031,19 +1026,13 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     ) -> Result<(), RpcError> {
         self.svc.hosting_file_rename(sel, from, to).await
     }
-    async fn monitor_overview(
-        &self,
-    ) -> Result<Vec<hyperion_types::MonitorOverviewItem>, RpcError> {
+    async fn monitor_overview(&self) -> Result<Vec<hyperion_types::MonitorOverviewItem>, RpcError> {
         self.svc.monitor_overview().await
     }
     async fn avatar_filename(&self, user_id: i64) -> Result<Option<String>, RpcError> {
         self.svc.avatar_filename(user_id).await
     }
-    async fn avatar_set(
-        &self,
-        user_id: i64,
-        filename: Option<String>,
-    ) -> Result<(), RpcError> {
+    async fn avatar_set(&self, user_id: i64, filename: Option<String>) -> Result<(), RpcError> {
         self.svc.avatar_set(user_id, filename).await
     }
 
@@ -1057,11 +1046,7 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
             .email_change_request(user_id, new_email, current_password)
             .await
     }
-    async fn email_change_confirm(
-        &self,
-        user_id: i64,
-        code: String,
-    ) -> Result<(), RpcError> {
+    async fn email_change_confirm(&self, user_id: i64, code: String) -> Result<(), RpcError> {
         self.svc.email_change_confirm(user_id, code).await
     }
     async fn email_change_cancel(&self, user_id: i64) -> Result<(), RpcError> {
@@ -1070,8 +1055,13 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     async fn monitor_get(
         &self,
         sel: HostingSelector,
-    ) -> Result<(hyperion_types::MonitorConfigView, hyperion_types::MonitorHistory), RpcError>
-    {
+    ) -> Result<
+        (
+            hyperion_types::MonitorConfigView,
+            hyperion_types::MonitorHistory,
+        ),
+        RpcError,
+    > {
         self.svc.monitor_get(sel).await
     }
     async fn monitor_set(
@@ -1176,11 +1166,7 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.cron_list(sel).await
     }
 
-    async fn cron_replace(
-        &self,
-        sel: HostingSelector,
-        body: String,
-    ) -> Result<(), RpcError> {
+    async fn cron_replace(&self, sel: HostingSelector, body: String) -> Result<(), RpcError> {
         self.svc.cron_replace(sel, body).await
     }
 
@@ -1231,7 +1217,9 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         reason: String,
         actor_uid: i64,
     ) -> Result<(), RpcError> {
-        self.svc.node_set_drain(&node_id, drain, &reason, actor_uid).await
+        self.svc
+            .node_set_drain(&node_id, drain, &reason, actor_uid)
+            .await
     }
 
     async fn node_remove(
@@ -1303,7 +1291,9 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         ttl_secs: i64,
         source: String,
     ) -> Result<(), RpcError> {
-        self.svc.ban_add(ip, hosting_id, reason, ttl_secs, source).await
+        self.svc
+            .ban_add(ip, hosting_id, reason, ttl_secs, source)
+            .await
     }
 
     async fn ban_remove(&self, ip: String) -> Result<(), RpcError> {
@@ -1353,6 +1343,8 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         item_kind: String,
         line: String,
     ) -> Result<(String, bool), RpcError> {
-        self.svc.profile_wp_item_install(sel, &item_kind, &line).await
+        self.svc
+            .profile_wp_item_install(sel, &item_kind, &line)
+            .await
     }
 }

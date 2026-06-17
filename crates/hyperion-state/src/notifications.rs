@@ -63,16 +63,25 @@ pub async fn list_recent(
     limit: i64,
 ) -> Result<Vec<NotificationRow>, StateError> {
     let limit = limit.clamp(1, 100);
-    let rows: Vec<(i64, i64, String, String, String, String, String, i64, Option<i64>)> =
-        sqlx::query_as(
-            "SELECT id, user_id, severity, title, body, href, kind, created_at, read_at \
+    let rows: Vec<(
+        i64,
+        i64,
+        String,
+        String,
+        String,
+        String,
+        String,
+        i64,
+        Option<i64>,
+    )> = sqlx::query_as(
+        "SELECT id, user_id, severity, title, body, href, kind, created_at, read_at \
              FROM notifications WHERE user_id = ? \
              ORDER BY created_at DESC LIMIT ?",
-        )
-        .bind(user_id)
-        .bind(limit)
-        .fetch_all(pool)
-        .await?;
+    )
+    .bind(user_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
     Ok(rows
         .into_iter()
         .map(
@@ -96,12 +105,11 @@ pub async fn list_recent(
 /// Count of unread notifications for one user. Drives the red
 /// badge on the bell icon.
 pub async fn unread_count(pool: &SqlitePool, user_id: i64) -> Result<i64, StateError> {
-    let row: (i64,) = sqlx::query_as(
-        "SELECT COUNT(*) FROM notifications WHERE user_id = ? AND read_at IS NULL",
-    )
-    .bind(user_id)
-    .fetch_one(pool)
-    .await?;
+    let row: (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM notifications WHERE user_id = ? AND read_at IS NULL")
+            .bind(user_id)
+            .fetch_one(pool)
+            .await?;
     Ok(row.0)
 }
 
@@ -128,11 +136,7 @@ pub async fn mark_read(
 
 /// Mark every unread notification for this user as read. Used by
 /// the "mark all read" button in the dropdown.
-pub async fn mark_all_read(
-    pool: &SqlitePool,
-    user_id: i64,
-    now: i64,
-) -> Result<i64, StateError> {
+pub async fn mark_all_read(pool: &SqlitePool, user_id: i64, now: i64) -> Result<i64, StateError> {
     let r = sqlx::query(
         "UPDATE notifications SET read_at = ? \
          WHERE user_id = ? AND read_at IS NULL",
@@ -182,9 +186,15 @@ mod tests {
     #[tokio::test]
     async fn insert_then_list_returns_in_reverse_chrono_order() {
         let pool = fresh().await;
-        insert(&pool, 1, "info", "first", "", "/", "test", 1).await.unwrap();
-        insert(&pool, 1, "info", "second", "", "/", "test", 2).await.unwrap();
-        insert(&pool, 1, "info", "third", "", "/", "test", 3).await.unwrap();
+        insert(&pool, 1, "info", "first", "", "/", "test", 1)
+            .await
+            .unwrap();
+        insert(&pool, 1, "info", "second", "", "/", "test", 2)
+            .await
+            .unwrap();
+        insert(&pool, 1, "info", "third", "", "/", "test", 3)
+            .await
+            .unwrap();
         let rows = list_recent(&pool, 1, 10).await.unwrap();
         assert_eq!(rows.len(), 3);
         assert_eq!(rows[0].title, "third");
@@ -195,9 +205,15 @@ mod tests {
     #[tokio::test]
     async fn unread_count_decrements_when_marked_read() {
         let pool = fresh().await;
-        let a = insert(&pool, 1, "info", "a", "", "/", "test", 1).await.unwrap();
-        insert(&pool, 1, "info", "b", "", "/", "test", 2).await.unwrap();
-        insert(&pool, 1, "info", "c", "", "/", "test", 3).await.unwrap();
+        let a = insert(&pool, 1, "info", "a", "", "/", "test", 1)
+            .await
+            .unwrap();
+        insert(&pool, 1, "info", "b", "", "/", "test", 2)
+            .await
+            .unwrap();
+        insert(&pool, 1, "info", "c", "", "/", "test", 3)
+            .await
+            .unwrap();
         assert_eq!(unread_count(&pool, 1).await.unwrap(), 3);
         mark_read(&pool, 1, a, 10).await.unwrap();
         assert_eq!(unread_count(&pool, 1).await.unwrap(), 2);
@@ -214,7 +230,9 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        let n = insert(&pool, 1, "info", "secret", "", "/", "test", 1).await.unwrap();
+        let n = insert(&pool, 1, "info", "secret", "", "/", "test", 1)
+            .await
+            .unwrap();
         // mallory (user 2) tries to mark kevin's (user 1) notification
         mark_read(&pool, 2, n, 10).await.unwrap();
         // still unread for kevin
@@ -240,8 +258,12 @@ mod tests {
     #[tokio::test]
     async fn gc_drops_older_rows() {
         let pool = fresh().await;
-        insert(&pool, 1, "info", "ancient", "", "/", "test", 100).await.unwrap();
-        insert(&pool, 1, "info", "recent", "", "/", "test", 1000).await.unwrap();
+        insert(&pool, 1, "info", "ancient", "", "/", "test", 100)
+            .await
+            .unwrap();
+        insert(&pool, 1, "info", "recent", "", "/", "test", 1000)
+            .await
+            .unwrap();
         // now=2000, ttl=500 → cutoff=1500 → "ancient" (100) deleted, "recent" (1000) deleted too
         // Use ttl 1500 → cutoff = 500 → only "ancient" deleted
         let n = gc_older_than(&pool, 1500, 2000).await.unwrap();

@@ -50,7 +50,9 @@ pub async fn ensure_vsftpd_running() -> Result<(), AdapterError> {
     // Not active: try enable + start.
     match cmd::run("/usr/bin/systemctl", &["enable", "--now", "vsftpd"]).await {
         Ok(_) => Ok(()),
-        Err(AdapterError::Command { stderr_tail, .. }) if stderr_tail.contains("does not exist") => {
+        Err(AdapterError::Command { stderr_tail, .. })
+            if stderr_tail.contains("does not exist") =>
+        {
             tracing::warn!("vsftpd.service unit missing — auto-installing package");
             // Best-effort apt install. `-qq` keeps logs clean.
             // `DEBIAN_FRONTEND=noninteractive` so an unexpected prompt

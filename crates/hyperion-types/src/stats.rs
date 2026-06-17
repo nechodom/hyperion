@@ -468,18 +468,13 @@ pub enum WebLoginResult {
     /// Password matches but user has 2FA enrolled — prompt for TOTP.
     /// Web should stash `user_id` in a short-lived signed cookie and
     /// require a second POST with the TOTP code.
-    NeedsTotp {
-        user_id: i64,
-        username: String,
-    },
+    NeedsTotp { user_id: i64, username: String },
     /// Password doesn't match (or user doesn't exist). We do NOT
     /// distinguish "no such user" from "wrong password" to avoid
     /// account-enumeration.
     Invalid,
     /// User is locked. `reason` is shown to the user verbatim.
-    Locked {
-        reason: String,
-    },
+    Locked { reason: String },
 }
 
 /// Outcome of `Request::WebVerify2fa` — accept the TOTP code.

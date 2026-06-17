@@ -237,7 +237,11 @@ async fn main() -> anyhow::Result<()> {
                     {
                         Ok(o) if o.status.success() => {
                             let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                            if s.is_empty() { agent_hostname.clone() } else { s }
+                            if s.is_empty() {
+                                agent_hostname.clone()
+                            } else {
+                                s
+                            }
                         }
                         _ => agent_hostname.clone(),
                     };
@@ -277,22 +281,21 @@ async fn main() -> anyhow::Result<()> {
     // is logged and `with_master_rpc_signer` is simply skipped;
     // the node becomes a "remote RPC disabled" master.
     let master_rpc_key_path = std::path::PathBuf::from("/etc/hyperion/master-rpc.key");
-    let master_rpc_signer = match hyperion_core::master_rpc::MasterRpcSigner::load_or_init(
-        &master_rpc_key_path,
-    ) {
-        Ok(s) => {
-            tracing::info!(path=%master_rpc_key_path.display(), "master_rpc signing key ready");
-            Some(Arc::new(s))
-        }
-        Err(e) => {
-            tracing::warn!(
-                error=%e,
-                path=%master_rpc_key_path.display(),
-                "master_rpc signing key unavailable — remote-node RPC will be disabled"
-            );
-            None
-        }
-    };
+    let master_rpc_signer =
+        match hyperion_core::master_rpc::MasterRpcSigner::load_or_init(&master_rpc_key_path) {
+            Ok(s) => {
+                tracing::info!(path=%master_rpc_key_path.display(), "master_rpc signing key ready");
+                Some(Arc::new(s))
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error=%e,
+                    path=%master_rpc_key_path.display(),
+                    "master_rpc signing key unavailable — remote-node RPC will be disabled"
+                );
+                None
+            }
+        };
 
     // The agent's enrollment state file path. Service checks its
     // existence at services_health() time as the "is this a worker?"
@@ -330,7 +333,10 @@ async fn main() -> anyhow::Result<()> {
         tokio::spawn(async move {
             let n = rerender_svc.rerender_fpm_pools().await;
             if n > 0 {
-                tracing::info!(count = n, "boot: re-rendered FPM pools with current nginx user");
+                tracing::info!(
+                    count = n,
+                    "boot: re-rendered FPM pools with current nginx user"
+                );
             }
         });
     }
@@ -591,8 +597,7 @@ async fn main() -> anyhow::Result<()> {
             // 3-minute offset so we don't collide with scheduler /
             // stats / monitor ticks at boot.
             tokio::time::sleep(std::time::Duration::from_secs(180)).await;
-            let mut interval =
-                tokio::time::interval(std::time::Duration::from_secs(24 * 3600));
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 3600));
             interval.tick().await; // immediate-first-tick consumption
             loop {
                 let now = hyperion_types::now_secs();
@@ -610,18 +615,10 @@ async fn main() -> anyhow::Result<()> {
                         let failed = results
                             .iter()
                             .filter(|r| {
-                                matches!(
-                                    r.outcome,
-                                    hyperion_types::CertRenewOutcome::Failed { .. }
-                                )
+                                matches!(r.outcome, hyperion_types::CertRenewOutcome::Failed { .. })
                             })
                             .count();
-                        tracing::info!(
-                            due = results.len(),
-                            renewed,
-                            failed,
-                            "cert renewal tick"
-                        );
+                        tracing::info!(due = results.len(), renewed, failed, "cert renewal tick");
                     }
                     Ok(_) => tracing::debug!("cert renewal tick: nothing due"),
                     Err(e) => tracing::warn!(error=%e, "cert renewal tick failed"),

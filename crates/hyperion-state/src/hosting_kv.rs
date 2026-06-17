@@ -64,11 +64,12 @@ pub async fn list_by_key(
     pool: &SqlitePool,
     key: &str,
 ) -> Result<Vec<(String, String)>, StateError> {
-    let rows: Vec<(String, String)> =
-        sqlx::query_as("SELECT hosting_id, value FROM hosting_kv WHERE key = ? ORDER BY hosting_id")
-            .bind(key)
-            .fetch_all(pool)
-            .await?;
+    let rows: Vec<(String, String)> = sqlx::query_as(
+        "SELECT hosting_id, value FROM hosting_kv WHERE key = ? ORDER BY hosting_id",
+    )
+    .bind(key)
+    .fetch_all(pool)
+    .await?;
     Ok(rows)
 }
 
@@ -102,10 +103,16 @@ mod tests {
         let pool = open_memory().await.expect("open");
         set(&pool, "h1", "notes", "hello", 1).await.expect("set");
         set(&pool, "h1", "tags", "a,b", 1).await.expect("set");
-        assert_eq!(get(&pool, "h1", "notes").await.unwrap().as_deref(), Some("hello"));
+        assert_eq!(
+            get(&pool, "h1", "notes").await.unwrap().as_deref(),
+            Some("hello")
+        );
         // upsert overwrites
         set(&pool, "h1", "notes", "world", 2).await.expect("set2");
-        assert_eq!(get(&pool, "h1", "notes").await.unwrap().as_deref(), Some("world"));
+        assert_eq!(
+            get(&pool, "h1", "notes").await.unwrap().as_deref(),
+            Some("world")
+        );
         let all = list(&pool, "h1").await.unwrap();
         assert_eq!(all.len(), 2);
         delete(&pool, "h1", "tags").await.expect("del");

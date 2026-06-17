@@ -142,7 +142,13 @@ pub async fn get_search(
                 if state_str == "active" {
                     s += 5;
                 }
-                Some((s, HostingHit { domain: r.domain, state: state_str }))
+                Some((
+                    s,
+                    HostingHit {
+                        domain: r.domain,
+                        state: state_str,
+                    },
+                ))
             })
             .collect();
         scored.sort_by(|a, b| b.0.cmp(&a.0));
@@ -166,7 +172,13 @@ pub async fn get_search(
                     if s == 0 {
                         return None;
                     }
-                    Some((s, UserHit { username: u.username, role: u.role }))
+                    Some((
+                        s,
+                        UserHit {
+                            username: u.username,
+                            role: u.role,
+                        },
+                    ))
                 })
                 .collect();
             scored.sort_by(|a, b| b.0.cmp(&a.0));

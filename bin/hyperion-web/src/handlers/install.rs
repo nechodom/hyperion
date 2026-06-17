@@ -77,7 +77,9 @@ pub async fn get_install(
     // token + master URL on the install one-liner is enough to
     // social-engineer a misconfigured node into a malicious cluster.
     if !ctx.is_super_admin() {
-        return Ok(Redirect::to("/?flash_error=admin+role+required+for+node+enrollment").into_response());
+        return Ok(
+            Redirect::to("/?flash_error=admin+role+required+for+node+enrollment").into_response(),
+        );
     }
     let invites = fetch_invites(&state).await.unwrap_or_default();
     let nodes = fetch_nodes_with_test_flag(&state).await;
@@ -119,7 +121,9 @@ pub async fn post_invite(
     Form(form): Form<CreateForm>,
 ) -> Result<Response, AppError> {
     if !ctx.is_super_admin() {
-        return Ok(Redirect::to("/?flash_error=admin+role+required+for+node+enrollment").into_response());
+        return Ok(
+            Redirect::to("/?flash_error=admin+role+required+for+node+enrollment").into_response(),
+        );
     }
     let label = form.label.trim().to_string();
     if label.is_empty() {
@@ -166,7 +170,10 @@ pub async fn post_invite(
         axum::http::header::CACHE_CONTROL,
         axum::http::HeaderValue::from_static("no-store, no-cache, must-revalidate, private"),
     );
-    h.insert(axum::http::header::PRAGMA, axum::http::HeaderValue::from_static("no-cache"));
+    h.insert(
+        axum::http::header::PRAGMA,
+        axum::http::HeaderValue::from_static("no-cache"),
+    );
     h.insert("vary", axum::http::HeaderValue::from_static("Cookie"));
     Ok(response)
 }
@@ -182,7 +189,9 @@ pub async fn post_revoke(
     Form(form): Form<RevokeForm>,
 ) -> Result<Response, AppError> {
     if !ctx.is_super_admin() {
-        return Ok(Redirect::to("/?flash_error=admin+role+required+for+node+enrollment").into_response());
+        return Ok(
+            Redirect::to("/?flash_error=admin+role+required+for+node+enrollment").into_response(),
+        );
     }
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
@@ -242,25 +251,24 @@ pub async fn post_update_node(
     let resp = crate::dispatcher::dispatch_to_node(
         &state,
         target,
-        Request::NodeUpdateRun { do_apt, do_hyperion },
+        Request::NodeUpdateRun {
+            do_apt,
+            do_hyperion,
+        },
     )
     .await?;
     match resp {
-        RpcResponse::NodeUpdateRun { started_at } => {
-            Ok(Redirect::to(&format!(
-                "/install?flash=update+started+%28unix%3A{}%29#node-{}",
-                started_at,
-                urlencode(&node_id)
-            ))
-            .into_response())
-        }
-        RpcResponse::Error(e) => {
-            Ok(Redirect::to(&format!(
-                "/install?flash_error={}",
-                urlencode(&format!("update failed to start: {e}"))
-            ))
-            .into_response())
-        }
+        RpcResponse::NodeUpdateRun { started_at } => Ok(Redirect::to(&format!(
+            "/install?flash=update+started+%28unix%3A{}%29#node-{}",
+            started_at,
+            urlencode(&node_id)
+        ))
+        .into_response()),
+        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
+            "/install?flash_error={}",
+            urlencode(&format!("update failed to start: {e}"))
+        ))
+        .into_response()),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }
@@ -441,13 +449,7 @@ pub async fn post_remove_node(
     } else {
         format!("#node-{}", urlencode(&node_id))
     };
-    Ok(Redirect::to(&format!(
-        "/install?{}={}{}",
-        key,
-        urlencode(&flash),
-        anchor
-    ))
-    .into_response())
+    Ok(Redirect::to(&format!("/install?{}={}{}", key, urlencode(&flash), anchor)).into_response())
 }
 
 /// GET /install/update-node-status?node_id=… — returns a tiny HTML
@@ -476,8 +478,7 @@ pub async fn get_update_node_status(
     } else {
         Some(node_id)
     };
-    let resp =
-        crate::dispatcher::dispatch_to_node(&state, target, Request::NodeUpdateStatus).await;
+    let resp = crate::dispatcher::dispatch_to_node(&state, target, Request::NodeUpdateStatus).await;
     let body = match resp {
         Ok(RpcResponse::NodeUpdateStatus(s)) => render_update_status(&s),
         Ok(RpcResponse::Error(e)) => format!(
@@ -502,8 +503,7 @@ pub async fn get_update_node_status(
 /// /install per-row poll target.
 fn render_update_status(s: &hyperion_types::NodeUpdateStatus) -> String {
     if s.started_at == 0 {
-        return "<span class=\"text-soft small\">no update has run on this node</span>"
-            .to_string();
+        return "<span class=\"text-soft small\">no update has run on this node</span>".to_string();
     }
     let pill = match s.state.as_str() {
         "running" => "<span class=\"pill warn pulse\">running</span>",
@@ -581,15 +581,11 @@ pub async fn post_toggle_test_node(
     Form(form): Form<TestNodeForm>,
 ) -> Result<Response, AppError> {
     if !ctx.is_super_admin() {
-        return Ok(
-            Redirect::to("/install?flash_error=super_admin+required").into_response(),
-        );
+        return Ok(Redirect::to("/install?flash_error=super_admin+required").into_response());
     }
     let node_id = form.node_id.trim();
     if node_id.is_empty() {
-        return Ok(
-            Redirect::to("/install?flash_error=missing+node_id").into_response(),
-        );
+        return Ok(Redirect::to("/install?flash_error=missing+node_id").into_response());
     }
     // Reject anything that isn't a sane node ID — the CSV gets
     // written straight into agent.toml so we don't want to allow
@@ -599,13 +595,11 @@ pub async fn post_toggle_test_node(
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
     {
-        return Ok(
-            Redirect::to(&format!(
-                "/install?flash_error={}",
-                urlencode("invalid characters in node_id")
-            ))
-            .into_response(),
-        );
+        return Ok(Redirect::to(&format!(
+            "/install?flash_error={}",
+            urlencode("invalid characters in node_id")
+        ))
+        .into_response());
     }
     // Read current CSV, toggle membership, persist via
     // AgentConfigUpdate. We deliberately re-read on every request
@@ -646,10 +640,7 @@ pub async fn post_toggle_test_node(
                  (Service health → Restart) for the wizard's domain-validation to fully pick up \
                  the change."
             );
-            Ok(
-                Redirect::to(&format!("/install?flash={}", urlencode(&msg)))
-                    .into_response(),
-            )
+            Ok(Redirect::to(&format!("/install?flash={}", urlencode(&msg))).into_response())
         }
         RpcResponse::Error(e) => Ok(Redirect::to(&format!(
             "/install?flash_error={}",
@@ -659,7 +650,6 @@ pub async fn post_toggle_test_node(
         _ => Err(AppError::Internal("unexpected response".into())),
     }
 }
-
 
 pub async fn post_test_node(
     State(state): State<SharedState>,
@@ -679,12 +669,8 @@ pub async fn post_test_node(
         return html_pill_err("missing node_id");
     }
     let started = std::time::Instant::now();
-    let result = crate::dispatcher::dispatch_to_node(
-        &state,
-        Some(node_id),
-        Request::AgentInfo,
-    )
-    .await;
+    let result =
+        crate::dispatcher::dispatch_to_node(&state, Some(node_id), Request::AgentInfo).await;
     let elapsed_ms = started.elapsed().as_millis();
     match result {
         Ok(RpcResponse::AgentInfo(info)) => html_pill_ok(&format!(

@@ -98,12 +98,7 @@ pub async fn get_stats(
     };
 
     // Always fetch the list of enrolled nodes from the master.
-    let all_nodes = match hyperion_rpc_client::call(
-        &state.agent_socket,
-        Request::NodesList,
-    )
-    .await
-    {
+    let all_nodes = match hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await {
         Ok(RpcResponse::NodesList(v)) => v,
         _ => Vec::new(),
     };
@@ -191,7 +186,10 @@ pub async fn get_stats(
     };
 
     let spark_load = build_sparkline(
-        history.samples.iter().map(|s| (s.at, s.loadavg_1m_x100 as f64 / 100.0)),
+        history
+            .samples
+            .iter()
+            .map(|s| (s.at, s.loadavg_1m_x100 as f64 / 100.0)),
         "load",
         |v| format!("{v:.2}"),
     );
@@ -208,12 +206,18 @@ pub async fn get_stats(
         |v| format!("{:.0}%", v),
     );
     let spark_bw = build_sparkline(
-        history.samples.iter().map(|s| (s.at, s.total_bw_out_24h as f64)),
+        history
+            .samples
+            .iter()
+            .map(|s| (s.at, s.total_bw_out_24h as f64)),
         "bw",
         |v| fmt_bytes(&(v as i64)),
     );
     let spark_reqs = build_sparkline(
-        history.samples.iter().map(|s| (s.at, s.total_requests_24h as f64)),
+        history
+            .samples
+            .iter()
+            .map(|s| (s.at, s.total_requests_24h as f64)),
         "reqs",
         |v| format!("{}", v as i64),
     );
@@ -287,12 +291,7 @@ async fn aggregate_cluster_stats(
         let s = state.clone();
         let id = n.node_id.clone();
         handles.push(tokio::spawn(async move {
-            let r = crate::dispatcher::dispatch_to_node(
-                &s,
-                Some(&id),
-                Request::ClusterStats,
-            )
-            .await;
+            let r = crate::dispatcher::dispatch_to_node(&s, Some(&id), Request::ClusterStats).await;
             (id, r)
         }));
     }
@@ -417,8 +416,16 @@ where
         };
     }
     let values: Vec<f64> = pts.iter().map(|(_, v)| *v).collect();
-    let max = values.iter().copied().fold(f64::NEG_INFINITY, f64::max).max(0.0);
-    let min = values.iter().copied().fold(f64::INFINITY, f64::min).min(max);
+    let max = values
+        .iter()
+        .copied()
+        .fold(f64::NEG_INFINITY, f64::max)
+        .max(0.0);
+    let min = values
+        .iter()
+        .copied()
+        .fold(f64::INFINITY, f64::min)
+        .min(max);
     let range = (max - min).max(1e-9);
     let n = pts.len() as f64;
     let dx = W / (n - 1.0);
@@ -540,7 +547,10 @@ pub fn fmt_bytes(n: &i64) -> String {
 ///
 /// `extractor` projects the bucket to a single i64 (disk, bw_out,
 /// requests, etc.). Empty inputs return an empty string.
-pub fn sparkline_svg(buckets: &[hyperion_types::HostingUsageBucket], extractor: fn(&hyperion_types::HostingUsageBucket) -> i64) -> String {
+pub fn sparkline_svg(
+    buckets: &[hyperion_types::HostingUsageBucket],
+    extractor: fn(&hyperion_types::HostingUsageBucket) -> i64,
+) -> String {
     if buckets.len() < 2 {
         return String::new();
     }
@@ -571,10 +581,18 @@ pub fn sparkline_svg(buckets: &[hyperion_types::HostingUsageBucket], extractor: 
 }
 
 /// Convenience projections used by the Stats card.
-pub fn bucket_disk(b: &hyperion_types::HostingUsageBucket) -> i64 { b.disk_used_bytes }
-pub fn bucket_bw_in(b: &hyperion_types::HostingUsageBucket) -> i64 { b.bw_in_bytes }
-pub fn bucket_bw_out(b: &hyperion_types::HostingUsageBucket) -> i64 { b.bw_out_bytes }
-pub fn bucket_requests(b: &hyperion_types::HostingUsageBucket) -> i64 { b.php_requests }
+pub fn bucket_disk(b: &hyperion_types::HostingUsageBucket) -> i64 {
+    b.disk_used_bytes
+}
+pub fn bucket_bw_in(b: &hyperion_types::HostingUsageBucket) -> i64 {
+    b.bw_in_bytes
+}
+pub fn bucket_bw_out(b: &hyperion_types::HostingUsageBucket) -> i64 {
+    b.bw_out_bytes
+}
+pub fn bucket_requests(b: &hyperion_types::HostingUsageBucket) -> i64 {
+    b.php_requests
+}
 
 /// 0-decimal percent display. Returns "?" if total == 0.
 pub fn fmt_percent(num: &i64, total: &i64) -> String {
@@ -687,42 +705,42 @@ pub fn fmt_short_id(s: &str) -> String {
 /// so we don't lose information.
 pub fn fmt_action_label(s: &str) -> &str {
     match s {
-        "hosting.create"             => "Created hosting",
-        "hosting.delete"             => "Deleted hosting",
-        "hosting.suspend"            => "Suspended",
-        "hosting.resume"             => "Resumed",
-        "hosting.set_vhost_options"  => "Vhost options",
-        "hosting.set_wp_debug"       => "WP debug toggled",
-        "hosting.set_redis"          => "Redis toggled",
+        "hosting.create" => "Created hosting",
+        "hosting.delete" => "Deleted hosting",
+        "hosting.suspend" => "Suspended",
+        "hosting.resume" => "Resumed",
+        "hosting.set_vhost_options" => "Vhost options",
+        "hosting.set_wp_debug" => "WP debug toggled",
+        "hosting.set_redis" => "Redis toggled",
         "hosting.rotate_redis_password" => "Redis password rotated",
-        "hosting.file.write"         => "File saved",
-        "hosting.file.delete"        => "File deleted",
-        "hosting.file.mkdir"         => "Folder created",
-        "hosting.file.rename"        => "File renamed",
-        "hosting.set_limits"         => "Limits updated",
-        "hosting.acme_email.set"     => "ACME email set",
-        "wp.install"                 => "WordPress installed",
-        "wp.plugin.action"           => "WordPress plugin",
-        "wp.theme.action"            => "WordPress theme",
-        "wp.reset_password"          => "WP password reset",
-        "db.reset_password"          => "DB password reset",
-        "ftp.set_password"           => "FTP password set",
-        "ftp.disable"                => "FTP disabled",
-        "cert.issue"                 => "Cert issued",
-        "cert.renew"                 => "Cert renewed",
-        "cert.renew.attempt"         => "Cert renew attempted",
-        "backup.now"                 => "Backup taken",
-        "backup.restore"             => "Backup restored",
-        "service.install.start"      => "Service install started",
-        "service.install.finish"     => "Service install finished",
-        "service.restart"            => "Service restarted",
-        "agent.config.update"        => "Agent config updated",
-        "web.user.create"            => "User created",
-        "web.user.set_role"          => "User role changed",
-        "web.user.2fa_disabled"      => "2FA disabled",
-        "node.enroll"                => "Node enrolled",
-        "node.revoke"                => "Node revoked",
-        "hosting.migration.move"     => "Hosting migrated",
+        "hosting.file.write" => "File saved",
+        "hosting.file.delete" => "File deleted",
+        "hosting.file.mkdir" => "Folder created",
+        "hosting.file.rename" => "File renamed",
+        "hosting.set_limits" => "Limits updated",
+        "hosting.acme_email.set" => "ACME email set",
+        "wp.install" => "WordPress installed",
+        "wp.plugin.action" => "WordPress plugin",
+        "wp.theme.action" => "WordPress theme",
+        "wp.reset_password" => "WP password reset",
+        "db.reset_password" => "DB password reset",
+        "ftp.set_password" => "FTP password set",
+        "ftp.disable" => "FTP disabled",
+        "cert.issue" => "Cert issued",
+        "cert.renew" => "Cert renewed",
+        "cert.renew.attempt" => "Cert renew attempted",
+        "backup.now" => "Backup taken",
+        "backup.restore" => "Backup restored",
+        "service.install.start" => "Service install started",
+        "service.install.finish" => "Service install finished",
+        "service.restart" => "Service restarted",
+        "agent.config.update" => "Agent config updated",
+        "web.user.create" => "User created",
+        "web.user.set_role" => "User role changed",
+        "web.user.2fa_disabled" => "2FA disabled",
+        "node.enroll" => "Node enrolled",
+        "node.revoke" => "Node revoked",
+        "hosting.migration.move" => "Hosting migrated",
         "hosting.rotate_wp_debug_log" => "debug.log rotated",
         // Unknown / new — strip the prefix for a less technical look.
         other => other,
@@ -745,13 +763,19 @@ mod tests {
     #[test]
     fn build_sparkline_single_sample_returns_placeholder() {
         // 1 sample = no line to draw (need at least 2 endpoints).
-        let s = build_sparkline(std::iter::once((1700_000_000_i64, 1.0)), "mem", |v| format!("{v}"));
+        let s = build_sparkline(std::iter::once((1700_000_000_i64, 1.0)), "mem", |v| {
+            format!("{v}")
+        });
         assert!(!s.has_data);
     }
 
     #[test]
     fn build_sparkline_two_samples_renders_line() {
-        let s = build_sparkline([(1_700_000_000_i64, 1.0), (1_700_000_060, 3.0)].into_iter(), "load", |v| format!("{v:.1}"));
+        let s = build_sparkline(
+            [(1_700_000_000_i64, 1.0), (1_700_000_060, 3.0)].into_iter(),
+            "load",
+            |v| format!("{v:.1}"),
+        );
         assert!(s.has_data);
         // Two points → one M + one L.
         assert!(s.path_d.starts_with('M'), "path must start with Move");
@@ -773,7 +797,12 @@ mod tests {
         // All samples equal → range collapses to 0; must not produce
         // NaN/Inf in path data.
         let s = build_sparkline(
-            [(1_700_000_000_i64, 5.0), (1_700_000_060, 5.0), (1_700_000_120, 5.0)].into_iter(),
+            [
+                (1_700_000_000_i64, 5.0),
+                (1_700_000_060, 5.0),
+                (1_700_000_120, 5.0),
+            ]
+            .into_iter(),
             "load",
             |v| format!("{v}"),
         );
@@ -790,7 +819,12 @@ mod tests {
         // when total=0 (we coerce to 0.0). Make sure negatives
         // don't break the path.
         let s = build_sparkline(
-            [(1_700_000_000_i64, -1.0), (1_700_000_060, 0.0), (1_700_000_120, 1.0)].into_iter(),
+            [
+                (1_700_000_000_i64, -1.0),
+                (1_700_000_060, 0.0),
+                (1_700_000_120, 1.0),
+            ]
+            .into_iter(),
             "load",
             |v| format!("{v:.1}"),
         );

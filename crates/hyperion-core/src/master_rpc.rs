@@ -102,8 +102,8 @@ impl MasterRpcSigner {
 }
 
 fn load_signing_key(path: &Path) -> Result<SigningKey, MasterRpcKeyError> {
-    let raw = std::fs::read(path)
-        .map_err(|e| MasterRpcKeyError::Read(path.display().to_string(), e))?;
+    let raw =
+        std::fs::read(path).map_err(|e| MasterRpcKeyError::Read(path.display().to_string(), e))?;
     if raw.len() != SECRET_KEY_LENGTH {
         return Err(MasterRpcKeyError::WrongLength(
             path.display().to_string(),
@@ -168,7 +168,8 @@ pub fn verify_signature(
     let mut sig_buf = [0u8; 64];
     sig_buf.copy_from_slice(sig_bytes);
     let sig = ed25519_dalek::Signature::from_bytes(&sig_buf);
-    pk.verify(payload, &sig).map_err(|_| "signature verify failed")
+    pk.verify(payload, &sig)
+        .map_err(|_| "signature verify failed")
 }
 
 // ============================================================
@@ -298,8 +299,7 @@ pub fn verify_envelope(
     let env_bytes = STANDARD_NO_PAD
         .decode(&auth.envelope_b64)
         .map_err(|_| "envelope base64")?;
-    let env: SignedEnvelope =
-        serde_json::from_slice(&env_bytes).map_err(|_| "envelope parse")?;
+    let env: SignedEnvelope = serde_json::from_slice(&env_bytes).map_err(|_| "envelope parse")?;
     // 3. Bind to receiver — refuse requests addressed to a
     //    different node, even if signed validly.
     if env.node_id != expected_node_id {

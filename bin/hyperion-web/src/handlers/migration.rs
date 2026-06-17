@@ -58,10 +58,7 @@ pub async fn get_bundle_file(
     if !bundle_id.starts_with("mig_") || bundle_id.len() != 4 + 26 {
         return Ok((StatusCode::NOT_FOUND, "not found").into_response());
     }
-    if !bundle_id[4..]
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric())
-    {
+    if !bundle_id[4..].chars().all(|c| c.is_ascii_alphanumeric()) {
         return Ok((StatusCode::NOT_FOUND, "not found").into_response());
     }
     if !ALLOWED_FILES.contains(&filename.as_str()) {
@@ -69,11 +66,7 @@ pub async fn get_bundle_file(
     }
 
     // Verify signature.
-    let exp = match hyperion_auth::bundle_sig::verify(
-        state.csrf_key.as_ref(),
-        &bundle_id,
-        &q.t,
-    ) {
+    let exp = match hyperion_auth::bundle_sig::verify(state.csrf_key.as_ref(), &bundle_id, &q.t) {
         Ok(e) => e,
         Err(reason) => {
             tracing::warn!(bundle_id, reason, "migration download: bad token");
@@ -113,19 +106,28 @@ pub async fn get_bundle_file(
     } else {
         "application/gzip"
     };
+    use axum::http::HeaderValue;
     let mut resp = body.into_response();
     let h = resp.headers_mut();
-    h.insert(header::CONTENT_TYPE, ct.parse().unwrap_or_else(|_| "application/octet-stream".parse().unwrap()));
-    h.insert(header::CONTENT_LENGTH, len.to_string().parse().unwrap_or_else(|_| "0".parse().unwrap()));
+    // `ct` and the cache-control value are static + always-valid → from_static
+    // is infallible. The length + filename headers can't realistically fail
+    // either, but fall back to a static value rather than unwrap.
+    h.insert(header::CONTENT_TYPE, HeaderValue::from_static(ct));
+    h.insert(
+        header::CONTENT_LENGTH,
+        len.to_string()
+            .parse()
+            .unwrap_or_else(|_| HeaderValue::from_static("0")),
+    );
     h.insert(
         header::CONTENT_DISPOSITION,
         format!("attachment; filename=\"{filename}\"")
             .parse()
-            .unwrap_or_else(|_| "attachment".parse().unwrap()),
+            .unwrap_or_else(|_| HeaderValue::from_static("attachment")),
     );
     h.insert(
         header::CACHE_CONTROL,
-        "private, no-store".parse().unwrap_or_else(|_| "private".parse().unwrap()),
+        HeaderValue::from_static("private, no-store"),
     );
     Ok(resp)
 }
@@ -189,8 +191,7 @@ pub async fn post_import_from_url(
     let token = form.token.trim().to_string();
     if base.is_empty() || token.is_empty() {
         return Ok(
-            Redirect::to("/hostings/import?error=both+URL+and+token+are+required")
-                .into_response(),
+            Redirect::to("/hostings/import?error=both+URL+and+token+are+required").into_response(),
         );
     }
     let resp = hyperion_rpc_client::call(
@@ -206,7 +207,11 @@ pub async fn post_import_from_url(
     match resp {
         RpcResponse::HostingImportFromUrl(r) => {
             // Redirect straight to the imported hosting's detail page.
-            let url = format!("/hostings/{}?flash=Imported+{}+bytes", urlencode(&r.domain), r.restored_bytes);
+            let url = format!(
+                "/hostings/{}?flash=Imported+{}+bytes",
+                urlencode(&r.domain),
+                r.restored_bytes
+            );
             Ok(Redirect::to(&url).into_response())
         }
         RpcResponse::Error(e) => Ok(Redirect::to(&format!(

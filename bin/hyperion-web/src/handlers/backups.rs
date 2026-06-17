@@ -39,8 +39,7 @@ pub async fn get_backups(
     if !ctx.is_admin_or_higher() {
         return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
     }
-    let resp =
-        hyperion_rpc_client::call(&state.agent_socket, Request::BackupTargetList).await?;
+    let resp = hyperion_rpc_client::call(&state.agent_socket, Request::BackupTargetList).await?;
     let targets = match resp {
         RpcResponse::BackupTargetList(v) => v,
         _ => Vec::new(),
@@ -85,11 +84,21 @@ pub struct BackupTargetForm {
     pub enabled: Option<String>,
 }
 
-fn default_kind() -> String { "s3".into() }
-fn default_region() -> String { "us-east-1".into() }
-fn default_daily() -> i64 { 7 }
-fn default_weekly() -> i64 { 4 }
-fn default_monthly() -> i64 { 12 }
+fn default_kind() -> String {
+    "s3".into()
+}
+fn default_region() -> String {
+    "us-east-1".into()
+}
+fn default_daily() -> i64 {
+    7
+}
+fn default_weekly() -> i64 {
+    4
+}
+fn default_monthly() -> i64 {
+    12
+}
 
 pub async fn post_upsert(
     State(state): State<SharedState>,
@@ -144,11 +153,8 @@ pub async fn post_delete(
     if !ctx.is_admin_or_higher() {
         return Err(AppError::Forbidden);
     }
-    let _ = hyperion_rpc_client::call(
-        &state.agent_socket,
-        Request::BackupTargetDelete { id },
-    )
-    .await?;
+    let _ =
+        hyperion_rpc_client::call(&state.agent_socket, Request::BackupTargetDelete { id }).await?;
     Ok(Redirect::to("/settings/backups?flash=Target+deleted").into_response())
 }
 
@@ -158,14 +164,12 @@ pub async fn post_probe(
     AxPath(id): AxPath<i64>,
 ) -> Result<Response, AppError> {
     if !ctx.is_admin_or_higher() {
-        return Ok(Html(
-            "<div class=\"pill err\">admin role required</div>".to_string(),
-        )
-        .into_response());
+        return Ok(
+            Html("<div class=\"pill err\">admin role required</div>".to_string()).into_response(),
+        );
     }
     let resp =
-        hyperion_rpc_client::call(&state.agent_socket, Request::BackupTargetProbe { id })
-            .await?;
+        hyperion_rpc_client::call(&state.agent_socket, Request::BackupTargetProbe { id }).await?;
     let html = match resp {
         RpcResponse::BackupTargetProbe(p) => {
             let cls = if p.ok { "pill ok" } else { "pill err" };

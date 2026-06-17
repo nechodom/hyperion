@@ -9,8 +9,7 @@ use hyperion_rpc::codec::{Request, Response as RpcResponse};
 use hyperion_rpc::wire::AgentInfo;
 use hyperion_rpc::AuditEntryWire;
 use hyperion_types::{
-    ClusterStats, DashboardAlert, HostingSummary, NodeMetricsHistory, ServicesHealth,
-    UpdateStatus,
+    ClusterStats, DashboardAlert, HostingSummary, NodeMetricsHistory, ServicesHealth, UpdateStatus,
 };
 
 /// Truncate a git SHA to the first 12 chars (or fewer if the SHA is
@@ -65,7 +64,9 @@ pub async fn get_dashboard(
         ),
         hyperion_rpc_client::call(
             &state.agent_socket,
-            Request::UpdateCheck { force_refresh: false }
+            Request::UpdateCheck {
+                force_refresh: false
+            }
         ),
     );
     let cluster = match cluster_res {
@@ -96,12 +97,18 @@ pub async fn get_dashboard(
     let update_latest_short = short_sha(&update_status.latest_sha);
     let samples_in_window = history.samples.len();
     let spark_load = build_sparkline(
-        history.samples.iter().map(|s| (s.at, s.loadavg_1m_x100 as f64 / 100.0)),
+        history
+            .samples
+            .iter()
+            .map(|s| (s.at, s.loadavg_1m_x100 as f64 / 100.0)),
         "load",
         |v| format!("{v:.2}"),
     );
     let spark_bw = build_sparkline(
-        history.samples.iter().map(|s| (s.at, s.total_bw_out_24h as f64)),
+        history
+            .samples
+            .iter()
+            .map(|s| (s.at, s.total_bw_out_24h as f64)),
         "bw",
         |v| crate::handlers::stats::fmt_bytes(&(v as i64)),
     );
@@ -165,20 +172,16 @@ async fn fetch(state: &SharedState) -> (Option<AgentInfo>, Vec<HostingSummary>, 
 async fn fetch_recent_multi_node(state: &SharedState) -> Vec<HostingSummary> {
     // Master's own hostings — tag with the LOCAL sentinel so the
     // dashboard's node-chip rendering keeps working.
-    let mut all: Vec<HostingSummary> = match hyperion_rpc_client::call(
-        &state.agent_socket,
-        Request::HostingList,
-    )
-    .await
-    {
-        Ok(RpcResponse::HostingList(mut v)) => {
-            for r in &mut v {
-                r.node_id = Some(crate::dispatcher::LOCAL_NODE_SENTINEL.to_string());
+    let mut all: Vec<HostingSummary> =
+        match hyperion_rpc_client::call(&state.agent_socket, Request::HostingList).await {
+            Ok(RpcResponse::HostingList(mut v)) => {
+                for r in &mut v {
+                    r.node_id = Some(crate::dispatcher::LOCAL_NODE_SENTINEL.to_string());
+                }
+                v
             }
-            v
-        }
-        _ => Vec::new(),
-    };
+            _ => Vec::new(),
+        };
     // Each enrolled remote node, best-effort.
     let nodes: Vec<hyperion_types::NodeSummary> =
         match hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await {
@@ -187,8 +190,7 @@ async fn fetch_recent_multi_node(state: &SharedState) -> Vec<HostingSummary> {
         };
     for n in nodes {
         if let Ok(RpcResponse::HostingList(mut remote)) =
-            crate::dispatcher::dispatch_to_node(state, Some(&n.node_id), Request::HostingList)
-                .await
+            crate::dispatcher::dispatch_to_node(state, Some(&n.node_id), Request::HostingList).await
         {
             for r in &mut remote {
                 r.node_id = Some(n.node_id.clone());

@@ -96,9 +96,12 @@ pub async fn systemctl_status_rich(unit: &str) -> UnitStatus {
     let out = tokio::process::Command::new("/usr/bin/systemctl")
         .args([
             "show",
-            "-p", "ActiveState",
-            "-p", "SubState",
-            "-p", "UnitFileState",
+            "-p",
+            "ActiveState",
+            "-p",
+            "SubState",
+            "-p",
+            "UnitFileState",
             "--value",
             "--no-pager",
             unit,
@@ -134,8 +137,7 @@ pub async fn systemctl_status_rich(unit: &str) -> UnitStatus {
     );
     let enabled = matches!(
         unit_file_state.as_str(),
-        "enabled" | "enabled-runtime" | "alias" | "static"
-            | "indirect" | "generated" | "transient"
+        "enabled" | "enabled-runtime" | "alias" | "static" | "indirect" | "generated" | "transient"
     );
     let sub = if sub_state.is_empty() {
         "?".into()
@@ -416,10 +418,7 @@ mod tests {
         assert_eq!(strip_ansi(""), "");
         // Multi-byte UTF-8 around an escape sequence — characters either
         // side of the escape survive.
-        assert_eq!(
-            strip_ansi("\x1b[31mčeština\x1b[0m"),
-            "čeština"
-        );
+        assert_eq!(strip_ansi("\x1b[31mčeština\x1b[0m"), "čeština");
         // Bare ESC with no terminator: consume to end of string rather
         // than panicking.
         assert_eq!(strip_ansi("nginx\x1b["), "nginx");
@@ -445,7 +444,8 @@ mod tests {
     /// it. This locks in the parse rule that fixes that.
     #[test]
     fn templated_instance_matches_postgresql_at_15_main() {
-        let stdout = "  postgresql@15-main.service    loaded active running PostgreSQL Cluster 15-main\n";
+        let stdout =
+            "  postgresql@15-main.service    loaded active running PostgreSQL Cluster 15-main\n";
         assert!(templated_instance_present(stdout, "postgresql"));
     }
 

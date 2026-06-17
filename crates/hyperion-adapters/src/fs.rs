@@ -72,11 +72,8 @@ pub async fn ensure_ancestors_traversable(leaf: &Path) {
                 let mode = md.permissions().mode() & 0o777;
                 let new_mode = mode | 0o011;
                 if new_mode != mode {
-                    if let Err(e) = fs::set_permissions(
-                        p,
-                        std::fs::Permissions::from_mode(new_mode),
-                    )
-                    .await
+                    if let Err(e) =
+                        fs::set_permissions(p, std::fs::Permissions::from_mode(new_mode)).await
                     {
                         tracing::warn!(
                             path = %p.display(),
@@ -95,7 +92,7 @@ pub async fn ensure_ancestors_traversable(leaf: &Path) {
                     }
                 }
             }
-            Ok(_) => break, // not a dir → can't traverse further sensibly
+            Ok(_) => break,  // not a dir → can't traverse further sensibly
             Err(_) => break, // path missing or unreadable
         }
         current = p.parent();
@@ -185,8 +182,8 @@ mod tests {
     #[tokio::test]
     async fn ensure_ancestors_traversable_adds_world_x() {
         let root = tempfile::tempdir().expect("tempdir");
-        let mid = root.path().join("hyperion");        // simulate /var/lib/hyperion
-        let leaf = mid.join("acme-challenges");        // simulate the subdir
+        let mid = root.path().join("hyperion"); // simulate /var/lib/hyperion
+        let leaf = mid.join("acme-challenges"); // simulate the subdir
         std::fs::create_dir_all(&leaf).expect("mkdir");
         std::fs::set_permissions(&mid, std::fs::Permissions::from_mode(0o700))
             .expect("chmod mid 0700");
@@ -195,10 +192,24 @@ mod tests {
 
         ensure_ancestors_traversable(&leaf).await;
 
-        let mid_mode = std::fs::metadata(&mid).expect("md mid").permissions().mode() & 0o777;
-        let leaf_mode = std::fs::metadata(&leaf).expect("md leaf").permissions().mode() & 0o777;
-        assert_eq!(mid_mode, 0o711, "parent must have world-x added (0700 → 0711)");
-        assert_eq!(leaf_mode, 0o755, "leaf already had world-x, must NOT be widened further");
+        let mid_mode = std::fs::metadata(&mid)
+            .expect("md mid")
+            .permissions()
+            .mode()
+            & 0o777;
+        let leaf_mode = std::fs::metadata(&leaf)
+            .expect("md leaf")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mid_mode, 0o711,
+            "parent must have world-x added (0700 → 0711)"
+        );
+        assert_eq!(
+            leaf_mode, 0o755,
+            "leaf already had world-x, must NOT be widened further"
+        );
     }
 
     /// Idempotent: running twice produces the same result and doesn't
@@ -237,8 +248,11 @@ mod tests {
         // owner stays rwx (7), group stays r (4) + we add x → 5, others gets x (1).
         // But wait — our helper OR-s in 0o011 = 0o001 for others AND 0o010 for group.
         // 0o740 | 0o011 = 0o751.
-        assert_eq!(m, 0o751,
-            "owner stays rwx, group adds x (so it can traverse too), others adds x. got {:o}", m);
+        assert_eq!(
+            m, 0o751,
+            "owner stays rwx, group adds x (so it can traverse too), others adds x. got {:o}",
+            m
+        );
     }
 
     #[tokio::test]

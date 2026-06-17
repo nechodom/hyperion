@@ -198,11 +198,7 @@ pub async fn post_edit_save(
 /// cheaper + gives a nicer error.
 fn require_write(ctx: &AuthCtx) -> Option<Response> {
     if ctx.is_read_only() {
-        return Some((
-            StatusCode::FORBIDDEN,
-            "viewer role cannot modify files",
-        )
-            .into_response());
+        return Some((StatusCode::FORBIDDEN, "viewer role cannot modify files").into_response());
     }
     None
 }
@@ -479,7 +475,11 @@ pub async fn get_download(
     )
     .await?;
     match resp {
-        RpcResponse::HostingFileDownload { rel_path, bytes_b64, mime } => {
+        RpcResponse::HostingFileDownload {
+            rel_path,
+            bytes_b64,
+            mime,
+        } => {
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(bytes_b64.as_bytes())
                 .map_err(|e| AppError::Internal(format!("b64: {e}")))?;

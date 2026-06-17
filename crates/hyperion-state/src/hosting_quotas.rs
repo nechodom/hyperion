@@ -99,18 +99,12 @@ pub async fn upsert(
     Ok(())
 }
 
-pub async fn mark_applied(
-    pool: &SqlitePool,
-    hosting_id: &str,
-    now: i64,
-) -> Result<(), StateError> {
-    sqlx::query(
-        "UPDATE hosting_quotas SET applied_at = ?, last_error = NULL WHERE hosting_id = ?",
-    )
-    .bind(now)
-    .bind(hosting_id)
-    .execute(pool)
-    .await?;
+pub async fn mark_applied(pool: &SqlitePool, hosting_id: &str, now: i64) -> Result<(), StateError> {
+    sqlx::query("UPDATE hosting_quotas SET applied_at = ?, last_error = NULL WHERE hosting_id = ?")
+        .bind(now)
+        .bind(hosting_id)
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -185,7 +179,9 @@ mod tests {
         assert!(r.last_error.is_none());
 
         // mark_failed records the error without clearing the policy.
-        mark_failed(&p, "h1", "quotaon disabled", 3000).await.expect("mf");
+        mark_failed(&p, "h1", "quotaon disabled", 3000)
+            .await
+            .expect("mf");
         let r = read(&p, "h1").await.expect("read");
         assert_eq!(r.last_error.as_deref(), Some("quotaon disabled"));
         // applied_at stays — last successful application is still

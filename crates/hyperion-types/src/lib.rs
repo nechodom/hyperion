@@ -23,8 +23,7 @@ pub use cert::{CertInfo, CertOverviewItem, CertRenewOutcome, CertRenewResult, Pa
 pub use db::{DbProvision, DbSummary};
 pub use dns::{CertIssueRequest, DnsCheckResult};
 pub use hosting::{
-    HostingDetail, HostingState, HostingSummary, SftpStatus, VhostOptions, WpExtras,
-    WpRedisConfig,
+    HostingDetail, HostingState, HostingSummary, SftpStatus, VhostOptions, WpExtras, WpRedisConfig,
 };
 pub use ids::{AgentId, HostingId, SecretId};
 pub use jobs::{
@@ -41,16 +40,13 @@ pub use profile::{HostingProfile, ProfileApply, ProfileInput, WpAssetSummary};
 pub use spf::SpfCheckResult;
 pub use stats::{
     AcmeConfigView, AgentConfigView, BackupRemoteConfigView, BackupRetentionConfigView,
-    ClusterConfigView, ClusterStats, DashboardAlert, EmailConfigView, EmailLogEntry,
-    FirewallPort, FirewallView,
-    HostingFileContent,
+    ClusterConfigView, ClusterStats, DashboardAlert, EmailConfigView, EmailLogEntry, FirewallPort,
+    FirewallView, FsDiagnostics, FsFixStep, FtpAccountSummary, HostingFileContent,
     HostingFileEntry, HostingStats, MonitorConfigView, MonitorHistory, MonitorOverviewItem,
-    MonitorSamplePoint, NodeMetricPoint, NodeMetricsHistory, NodeStats, NodeSummary,
-    FsDiagnostics, FsFixStep,
-    FtpAccountSummary, MtaDiagnostics, MtaPortProbe, NodeUpdateStatus, NotificationFeed, NotificationView,
-    SiteEmailLogEntry, TrashEntry,
-    ServiceHealth, ServiceInstallStatus, ServicesHealth, SlackConfigView, SmtpAutodetect,
-    UpdateStatus, Web2faEnrollment, WebHostingAccess, WebLoginResult, WebUserSummary,
+    MonitorSamplePoint, MtaDiagnostics, MtaPortProbe, NodeMetricPoint, NodeMetricsHistory,
+    NodeStats, NodeSummary, NodeUpdateStatus, NotificationFeed, NotificationView, ServiceHealth,
+    ServiceInstallStatus, ServicesHealth, SiteEmailLogEntry, SlackConfigView, SmtpAutodetect,
+    TrashEntry, UpdateStatus, Web2faEnrollment, WebHostingAccess, WebLoginResult, WebUserSummary,
     WebVerify2faResult,
 };
 pub use wp::{

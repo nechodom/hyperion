@@ -152,12 +152,15 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
-        Request::HostingSetWpDebug { sel, enabled, log, display } => {
-            match api.hosting_set_wp_debug(sel, enabled, log, display).await {
-                Ok(v) => Response::HostingSetWpDebug(v),
-                Err(e) => Response::Error(e),
-            }
-        }
+        Request::HostingSetWpDebug {
+            sel,
+            enabled,
+            log,
+            display,
+        } => match api.hosting_set_wp_debug(sel, enabled, log, display).await {
+            Ok(v) => Response::HostingSetWpDebug(v),
+            Err(e) => Response::Error(e),
+        },
         Request::HostingSetRedis { sel, enabled } => {
             match api.hosting_set_redis(sel, enabled).await {
                 Ok(v) => Response::HostingSetRedis(v),
@@ -194,12 +197,14 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(_) => Response::HostingClearExpiry,
             Err(e) => Response::Error(e),
         },
-        Request::HostingKvSet { hosting_id, key, value } => {
-            match api.hosting_kv_set(hosting_id, key, value).await {
-                Ok(_) => Response::HostingKvSet,
-                Err(e) => Response::Error(e),
-            }
-        }
+        Request::HostingKvSet {
+            hosting_id,
+            key,
+            value,
+        } => match api.hosting_kv_set(hosting_id, key, value).await {
+            Ok(_) => Response::HostingKvSet,
+            Err(e) => Response::Error(e),
+        },
         Request::HostingKvList { hosting_id } => match api.hosting_kv_list(hosting_id).await {
             Ok(v) => Response::HostingKvList(v),
             Err(e) => Response::Error(e),
@@ -316,12 +321,10 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::QuotaGet(v),
             Err(e) => Response::Error(e),
         },
-        Request::QuotaEnableKernel { hosting } => {
-            match api.quota_enable_kernel(hosting).await {
-                Ok(v) => Response::QuotaEnableKernel(v),
-                Err(e) => Response::Error(e),
-            }
-        }
+        Request::QuotaEnableKernel { hosting } => match api.quota_enable_kernel(hosting).await {
+            Ok(v) => Response::QuotaEnableKernel(v),
+            Err(e) => Response::Error(e),
+        },
         Request::QuotaSet {
             hosting,
             disk_soft_kib,
@@ -379,22 +382,32 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::CertIssueAcme(v),
             Err(e) => Response::Error(e),
         },
-        Request::CertDns01Begin { sel, staging, provider } => {
-            match api.cert_dns01_begin(sel, staging, provider).await {
-                Ok((completed, record_name, values)) => Response::CertDns01Begin {
-                    completed,
-                    record_name,
-                    values,
-                },
-                Err(e) => Response::Error(e),
-            }
-        }
+        Request::CertDns01Begin {
+            sel,
+            staging,
+            provider,
+        } => match api.cert_dns01_begin(sel, staging, provider).await {
+            Ok((completed, record_name, values)) => Response::CertDns01Begin {
+                completed,
+                record_name,
+                values,
+            },
+            Err(e) => Response::Error(e),
+        },
         Request::CertDns01Finish { sel } => match api.cert_dns01_finish(sel).await {
             Ok(v) => Response::CertDns01Finish(v),
             Err(e) => Response::Error(e),
         },
-        Request::CertDns01BeginDomain { domain, email, staging, provider } => {
-            match api.cert_dns01_begin_domain(domain, email, staging, provider).await {
+        Request::CertDns01BeginDomain {
+            domain,
+            email,
+            staging,
+            provider,
+        } => {
+            match api
+                .cert_dns01_begin_domain(domain, email, staging, provider)
+                .await
+            {
                 Ok((completed, record_name, values)) => Response::CertDns01BeginDomain {
                     completed,
                     record_name,
@@ -540,17 +553,12 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
         Request::WpAssetReinstallAll {
             asset_id,
             force_activate,
-        } => match api
-            .wp_asset_reinstall_all(asset_id, force_activate)
-            .await
-        {
-            Ok((installed_ok, installed_failed, failure_tail)) => {
-                Response::WpAssetReinstallAll {
-                    installed_ok,
-                    installed_failed,
-                    failure_tail,
-                }
-            }
+        } => match api.wp_asset_reinstall_all(asset_id, force_activate).await {
+            Ok((installed_ok, installed_failed, failure_tail)) => Response::WpAssetReinstallAll {
+                installed_ok,
+                installed_failed,
+                failure_tail,
+            },
             Err(e) => Response::Error(e),
         },
         Request::WpThemeList { hosting } => match api.wp_theme_list(hosting).await {
@@ -571,24 +579,27 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::VulnFindingsList(v),
             Err(e) => Response::Error(e),
         },
-        Request::WpStagingCreate { sel, staging_domain } => {
-            match api.wp_staging_create(sel, staging_domain).await {
-                Ok(staging_domain) => Response::WpStagingCreate { staging_domain },
-                Err(e) => Response::Error(e),
-            }
-        }
-        Request::WpStagingPush { sel, staging_domain } => {
-            match api.wp_staging_push(sel, staging_domain).await {
-                Ok(_) => Response::WpStagingPush,
-                Err(e) => Response::Error(e),
-            }
-        }
-        Request::NodeUpdateRun { do_apt, do_hyperion } => {
-            match api.node_update_run(do_apt, do_hyperion).await {
-                Ok(started_at) => Response::NodeUpdateRun { started_at },
-                Err(e) => Response::Error(e),
-            }
-        }
+        Request::WpStagingCreate {
+            sel,
+            staging_domain,
+        } => match api.wp_staging_create(sel, staging_domain).await {
+            Ok(staging_domain) => Response::WpStagingCreate { staging_domain },
+            Err(e) => Response::Error(e),
+        },
+        Request::WpStagingPush {
+            sel,
+            staging_domain,
+        } => match api.wp_staging_push(sel, staging_domain).await {
+            Ok(_) => Response::WpStagingPush,
+            Err(e) => Response::Error(e),
+        },
+        Request::NodeUpdateRun {
+            do_apt,
+            do_hyperion,
+        } => match api.node_update_run(do_apt, do_hyperion).await {
+            Ok(started_at) => Response::NodeUpdateRun { started_at },
+            Err(e) => Response::Error(e),
+        },
         Request::NodeUpdateStatus => match api.node_update_status().await {
             Ok(s) => Response::NodeUpdateStatus(s),
             Err(e) => Response::Error(e),
@@ -607,7 +618,10 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::HostingExport(v),
             Err(e) => Response::Error(e),
         },
-        Request::HostingMigrationFetchBundleFile { bundle_id, filename } => {
+        Request::HostingMigrationFetchBundleFile {
+            bundle_id,
+            filename,
+        } => {
             match api
                 .hosting_migration_fetch_bundle_file(bundle_id, filename)
                 .await
@@ -680,16 +694,17 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok((cleared, output)) => Response::MtaQueueClear { cleared, output },
             Err(e) => Response::Error(e),
         },
-        Request::PanelProvision { hostname, skip_dns_check } => {
-            match api.panel_provision(hostname, skip_dns_check).await {
-                Ok((status, message, panel_url)) => Response::PanelProvision {
-                    status,
-                    message,
-                    panel_url,
-                },
-                Err(e) => Response::Error(e),
-            }
-        }
+        Request::PanelProvision {
+            hostname,
+            skip_dns_check,
+        } => match api.panel_provision(hostname, skip_dns_check).await {
+            Ok((status, message, panel_url)) => Response::PanelProvision {
+                status,
+                message,
+                panel_url,
+            },
+            Err(e) => Response::Error(e),
+        },
         Request::PanelCertStatus => match api.panel_cert_status().await {
             Ok(v) => Response::PanelCertStatus(v),
             Err(e) => Response::Error(e),
@@ -743,12 +758,14 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::WpPluginList(v),
             Err(e) => Response::Error(e),
         },
-        Request::WpPluginAction { hosting, slug, action } => {
-            match api.wp_plugin_action(hosting, slug, action).await {
-                Ok(v) => Response::WpPluginAction(v),
-                Err(e) => Response::Error(e),
-            }
-        }
+        Request::WpPluginAction {
+            hosting,
+            slug,
+            action,
+        } => match api.wp_plugin_action(hosting, slug, action).await {
+            Ok(v) => Response::WpPluginAction(v),
+            Err(e) => Response::Error(e),
+        },
         Request::BackupDelete { backup_id } => match api.backup_delete(backup_id).await {
             Ok(()) => Response::BackupDelete,
             Err(e) => Response::Error(e),
@@ -761,12 +778,14 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(code) => Response::EmailSendTest { smtp_code: code },
             Err(e) => Response::Error(e),
         },
-        Request::WebLogin { username, password, client_ip } => {
-            match api.web_login(username, password, client_ip).await {
-                Ok(v) => Response::WebLogin(v),
-                Err(e) => Response::Error(e),
-            }
-        }
+        Request::WebLogin {
+            username,
+            password,
+            client_ip,
+        } => match api.web_login(username, password, client_ip).await {
+            Ok(v) => Response::WebLogin(v),
+            Err(e) => Response::Error(e),
+        },
         Request::WebVerify2fa { user_id, code } => match api.web_verify_2fa(user_id, code).await {
             Ok(v) => Response::WebVerify2fa(v),
             Err(e) => Response::Error(e),
@@ -779,29 +798,36 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::WebUserGet(v),
             Err(e) => Response::Error(e),
         },
-        Request::WebUserCreate { username, email, password, role } => {
-            match api.web_user_create(username, email, password, role).await {
-                Ok(id) => Response::WebUserCreate { id },
-                Err(e) => Response::Error(e),
-            }
-        }
-        Request::WebUserSetPassword { user_id, new_password } => {
-            match api.web_user_set_password(user_id, new_password).await {
-                Ok(()) => Response::WebUserSetPassword,
-                Err(e) => Response::Error(e),
-            }
-        }
-        Request::WebUserSetRole { user_id, role } => match api.web_user_set_role(user_id, role).await
-        {
-            Ok(()) => Response::WebUserSetRole,
+        Request::WebUserCreate {
+            username,
+            email,
+            password,
+            role,
+        } => match api.web_user_create(username, email, password, role).await {
+            Ok(id) => Response::WebUserCreate { id },
             Err(e) => Response::Error(e),
         },
-        Request::WebUserSetLocked { user_id, locked, reason } => {
-            match api.web_user_set_locked(user_id, locked, reason).await {
-                Ok(()) => Response::WebUserSetLocked,
+        Request::WebUserSetPassword {
+            user_id,
+            new_password,
+        } => match api.web_user_set_password(user_id, new_password).await {
+            Ok(()) => Response::WebUserSetPassword,
+            Err(e) => Response::Error(e),
+        },
+        Request::WebUserSetRole { user_id, role } => {
+            match api.web_user_set_role(user_id, role).await {
+                Ok(()) => Response::WebUserSetRole,
                 Err(e) => Response::Error(e),
             }
         }
+        Request::WebUserSetLocked {
+            user_id,
+            locked,
+            reason,
+        } => match api.web_user_set_locked(user_id, locked, reason).await {
+            Ok(()) => Response::WebUserSetLocked,
+            Err(e) => Response::Error(e),
+        },
         Request::WebUserDelete { user_id } => match api.web_user_delete(user_id).await {
             Ok(()) => Response::WebUserDelete,
             Err(e) => Response::Error(e),
@@ -820,7 +846,12 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(()) => Response::Web2faDisable,
             Err(e) => Response::Error(e),
         },
-        Request::WebGrantHostingAccess { user_id, hosting_id, level, granted_by } => {
+        Request::WebGrantHostingAccess {
+            user_id,
+            hosting_id,
+            level,
+            granted_by,
+        } => {
             match api
                 .web_grant_hosting_access(user_id, hosting_id, level, granted_by)
                 .await
@@ -829,12 +860,13 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
-        Request::WebRevokeHostingAccess { user_id, hosting_id } => {
-            match api.web_revoke_hosting_access(user_id, hosting_id).await {
-                Ok(()) => Response::WebRevokeHostingAccess,
-                Err(e) => Response::Error(e),
-            }
-        }
+        Request::WebRevokeHostingAccess {
+            user_id,
+            hosting_id,
+        } => match api.web_revoke_hosting_access(user_id, hosting_id).await {
+            Ok(()) => Response::WebRevokeHostingAccess,
+            Err(e) => Response::Error(e),
+        },
         Request::WebListHostingAccess { hosting_id } => {
             match api.web_list_hosting_access(hosting_id).await {
                 Ok(v) => Response::WebListHostingAccess(v),
@@ -863,12 +895,14 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
-        Request::HostingFileWrite { sel, rel_path, bytes_b64 } => {
-            match api.hosting_file_write(sel, rel_path, bytes_b64).await {
-                Ok(()) => Response::HostingFileWrite,
-                Err(e) => Response::Error(e),
-            }
-        }
+        Request::HostingFileWrite {
+            sel,
+            rel_path,
+            bytes_b64,
+        } => match api.hosting_file_write(sel, rel_path, bytes_b64).await {
+            Ok(()) => Response::HostingFileWrite,
+            Err(e) => Response::Error(e),
+        },
         Request::HostingFileDelete { sel, rel_path } => {
             match api.hosting_file_delete(sel, rel_path).await {
                 Ok(()) => Response::HostingFileDelete,
@@ -895,13 +929,15 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(f) => Response::AvatarFilename(f),
             Err(e) => Response::Error(e),
         },
-        Request::AvatarSet { user_id, filename } => {
-            match api.avatar_set(user_id, filename).await {
-                Ok(()) => Response::AvatarSet,
-                Err(e) => Response::Error(e),
-            }
-        }
-        Request::EmailChangeRequest { user_id, new_email, current_password } => {
+        Request::AvatarSet { user_id, filename } => match api.avatar_set(user_id, filename).await {
+            Ok(()) => Response::AvatarSet,
+            Err(e) => Response::Error(e),
+        },
+        Request::EmailChangeRequest {
+            user_id,
+            new_email,
+            current_password,
+        } => {
             match api
                 .email_change_request(user_id, new_email, current_password)
                 .await
@@ -916,23 +952,33 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
-        Request::EmailChangeCancel { user_id } => {
-            match api.email_change_cancel(user_id).await {
-                Ok(()) => Response::EmailChangeCancel,
-                Err(e) => Response::Error(e),
-            }
-        }
+        Request::EmailChangeCancel { user_id } => match api.email_change_cancel(user_id).await {
+            Ok(()) => Response::EmailChangeCancel,
+            Err(e) => Response::Error(e),
+        },
         Request::MonitorGet { sel } => match api.monitor_get(sel).await {
             Ok((config, history)) => Response::MonitorGet { config, history },
             Err(e) => Response::Error(e),
         },
         Request::MonitorSet {
-            sel, enabled, url_path, interval_secs, alert_after_fails,
-            alert_email, alert_slack_webhook, alert_webhook_url,
+            sel,
+            enabled,
+            url_path,
+            interval_secs,
+            alert_after_fails,
+            alert_email,
+            alert_slack_webhook,
+            alert_webhook_url,
         } => match api
             .monitor_set(
-                sel, enabled, url_path, interval_secs, alert_after_fails,
-                alert_email, alert_slack_webhook, alert_webhook_url,
+                sel,
+                enabled,
+                url_path,
+                interval_secs,
+                alert_after_fails,
+                alert_email,
+                alert_slack_webhook,
+                alert_webhook_url,
             )
             .await
         {
@@ -953,25 +999,36 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             },
             Err(e) => Response::Error(e),
         },
-        Request::BackupRestore { sel, archive_path, mode } => {
-            match api.backup_restore(sel, archive_path, mode).await {
-                Ok(_) => Response::BackupRestore,
-                Err(e) => Response::Error(e),
-            }
-        }
-        Request::BackupFetchChunk { backup_id, offset, len } => {
-            match api.backup_fetch_chunk(backup_id, offset, len).await {
-                Ok((data_b64, total_size, filename, eof)) => Response::BackupFetchChunk {
-                    data_b64,
-                    total_size,
-                    filename,
-                    eof,
-                },
-                Err(e) => Response::Error(e),
-            }
-        }
-        Request::BackupRestoreAsNew { sel, archive_path, new_domain } => {
-            match api.backup_restore_as_new(sel, archive_path, new_domain).await {
+        Request::BackupRestore {
+            sel,
+            archive_path,
+            mode,
+        } => match api.backup_restore(sel, archive_path, mode).await {
+            Ok(_) => Response::BackupRestore,
+            Err(e) => Response::Error(e),
+        },
+        Request::BackupFetchChunk {
+            backup_id,
+            offset,
+            len,
+        } => match api.backup_fetch_chunk(backup_id, offset, len).await {
+            Ok((data_b64, total_size, filename, eof)) => Response::BackupFetchChunk {
+                data_b64,
+                total_size,
+                filename,
+                eof,
+            },
+            Err(e) => Response::Error(e),
+        },
+        Request::BackupRestoreAsNew {
+            sel,
+            archive_path,
+            new_domain,
+        } => {
+            match api
+                .backup_restore_as_new(sel, archive_path, new_domain)
+                .await
+            {
                 Ok((hosting_id, domain)) => Response::BackupRestoreAsNew { hosting_id, domain },
                 Err(e) => Response::Error(e),
             }
@@ -985,10 +1042,7 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
         Request::NotificationsMarkRead {
             user_id,
             notification_id,
-        } => match api
-            .notifications_mark_read(user_id, notification_id)
-            .await
-        {
+        } => match api.notifications_mark_read(user_id, notification_id).await {
             Ok(()) => Response::NotificationsMarkRead,
             Err(e) => Response::Error(e),
         },
@@ -1047,11 +1101,17 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::CertOverview(v),
             Err(e) => Response::Error(e),
         },
-        Request::NodeSetLabel { node_id, label } => match api.node_set_label(node_id, label).await {
-            Ok(()) => Response::NodeLabelUpdated,
-            Err(e) => Response::Error(e),
-        },
-        Request::NodeSetDrain { node_id, drain, reason } => {
+        Request::NodeSetLabel { node_id, label } => {
+            match api.node_set_label(node_id, label).await {
+                Ok(()) => Response::NodeLabelUpdated,
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::NodeSetDrain {
+            node_id,
+            drain,
+            reason,
+        } => {
             // actor_uid is captured at the RPC boundary via the
             // master_rpc envelope's signing identity; for local
             // panel calls we pass 0 and the audit row will show
@@ -1062,15 +1122,13 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
-        Request::NodeRemove { node_id, force } => {
-            match api.node_remove(node_id, force, 0).await {
-                Ok((removed, hostings_blocking)) => Response::NodeRemoved {
-                    removed,
-                    hostings_blocking,
-                },
-                Err(e) => Response::Error(e),
-            }
-        }
+        Request::NodeRemove { node_id, force } => match api.node_remove(node_id, force, 0).await {
+            Ok((removed, hostings_blocking)) => Response::NodeRemoved {
+                removed,
+                hostings_blocking,
+            },
+            Err(e) => Response::Error(e),
+        },
         Request::WpResetPassword {
             sel,
             wp_user,
@@ -1099,22 +1157,28 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(s) => Response::SftpStatus(s),
             Err(e) => Response::Error(e),
         },
-        Request::SftpSet { sel, enabled, public_keys } => {
-            match api.sftp_set(sel, enabled, public_keys).await {
-                Ok(s) => Response::SftpSet(s),
-                Err(e) => Response::Error(e),
-            }
-        }
+        Request::SftpSet {
+            sel,
+            enabled,
+            public_keys,
+        } => match api.sftp_set(sel, enabled, public_keys).await {
+            Ok(s) => Response::SftpSet(s),
+            Err(e) => Response::Error(e),
+        },
         Request::BanList { hosting_id } => match api.ban_list(hosting_id).await {
             Ok(v) => Response::BanList(v),
             Err(e) => Response::Error(e),
         },
-        Request::BanAdd { ip, hosting_id, reason, ttl_secs, source } => {
-            match api.ban_add(ip, hosting_id, reason, ttl_secs, source).await {
-                Ok(_) => Response::BanAdd,
-                Err(e) => Response::Error(e),
-            }
-        }
+        Request::BanAdd {
+            ip,
+            hosting_id,
+            reason,
+            ttl_secs,
+            source,
+        } => match api.ban_add(ip, hosting_id, reason, ttl_secs, source).await {
+            Ok(_) => Response::BanAdd,
+            Err(e) => Response::Error(e),
+        },
         Request::BanRemove { ip } => match api.ban_remove(ip).await {
             Ok(_) => Response::BanRemove,
             Err(e) => Response::Error(e),
@@ -1143,22 +1207,26 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(_) => Response::ProfileDelete,
             Err(e) => Response::Error(e),
         },
-        Request::ProfileApply { sel, profile_id, skip_wp_items } => {
-            match api.profile_apply(sel, profile_id, skip_wp_items).await {
-                Ok(v) => Response::ProfileApply(v),
-                Err(e) => Response::Error(e),
-            }
-        }
+        Request::ProfileApply {
+            sel,
+            profile_id,
+            skip_wp_items,
+        } => match api.profile_apply(sel, profile_id, skip_wp_items).await {
+            Ok(v) => Response::ProfileApply(v),
+            Err(e) => Response::Error(e),
+        },
         Request::ProfileGetApply { sel } => match api.profile_get_apply(sel).await {
             Ok(v) => Response::ProfileGetApply(v),
             Err(e) => Response::Error(e),
         },
-        Request::ProfileWpItemInstall { sel, item_kind, line } => {
-            match api.profile_wp_item_install(sel, item_kind, line).await {
-                Ok((label, activated)) => Response::ProfileWpItemInstalled { label, activated },
-                Err(e) => Response::Error(e),
-            }
-        }
+        Request::ProfileWpItemInstall {
+            sel,
+            item_kind,
+            line,
+        } => match api.profile_wp_item_install(sel, item_kind, line).await {
+            Ok((label, activated)) => Response::ProfileWpItemInstalled { label, activated },
+            Err(e) => Response::Error(e),
+        },
     }
 }
 
@@ -1195,7 +1263,9 @@ mod tests {
             })
         }
         async fn hosting_create(&self, _: HostingCreateReq) -> Result<HostingCreated, RpcError> {
-            Err(RpcError::Internal { message: "not supported by this agent".into() })
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
         }
         async fn hosting_list(&self) -> Result<Vec<HostingSummary>, RpcError> {
             Ok(vec![])
@@ -1285,10 +1355,7 @@ mod tests {
         ) -> Result<hyperion_types::WpExtras, RpcError> {
             Ok(hyperion_types::WpExtras::default())
         }
-        async fn hosting_rotate_wp_debug_log(
-            &self,
-            _: HostingSelector,
-        ) -> Result<(), RpcError> {
+        async fn hosting_rotate_wp_debug_log(&self, _: HostingSelector) -> Result<(), RpcError> {
             Ok(())
         }
         async fn hosting_usage(
@@ -1374,11 +1441,7 @@ mod tests {
         ) -> Result<Vec<hyperion_types::WebSessionView>, RpcError> {
             Ok(Vec::new())
         }
-        async fn web_session_revoke(
-            &self,
-            _: String,
-            _: i64,
-        ) -> Result<bool, RpcError> {
+        async fn web_session_revoke(&self, _: String, _: i64) -> Result<bool, RpcError> {
             Ok(true)
         }
         async fn audit_list(&self, _: i64) -> Result<Vec<AuditEntryWire>, RpcError> {
@@ -1394,18 +1457,10 @@ mod tests {
         async fn hosting_get_expiry(&self, _: HostingSelector) -> Result<HostingExpiry, RpcError> {
             Ok(HostingExpiry::defaults())
         }
-        async fn hosting_kv_set(
-            &self,
-            _: String,
-            _: String,
-            _: String,
-        ) -> Result<(), RpcError> {
+        async fn hosting_kv_set(&self, _: String, _: String, _: String) -> Result<(), RpcError> {
             Ok(())
         }
-        async fn hosting_kv_list(
-            &self,
-            _: String,
-        ) -> Result<Vec<(String, String)>, RpcError> {
+        async fn hosting_kv_list(&self, _: String) -> Result<Vec<(String, String)>, RpcError> {
             Ok(vec![])
         }
         async fn hosting_clear_expiry(&self, _: HostingSelector) -> Result<(), RpcError> {
@@ -1418,7 +1473,9 @@ mod tests {
             Ok(0)
         }
         async fn backup_now(&self, _: HostingSelector) -> Result<BackupRunWire, RpcError> {
-            Err(RpcError::Internal { message: "not supported by this agent".into() })
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
         }
         async fn backup_list(
             &self,
@@ -1428,7 +1485,9 @@ mod tests {
             Ok(vec![])
         }
         async fn invite_create(&self, _: String, _: i64) -> Result<NodeInviteMint, RpcError> {
-            Err(RpcError::Internal { message: "not supported by this agent".into() })
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
         }
         async fn invite_list(&self) -> Result<Vec<NodeInviteSummary>, RpcError> {
             Ok(vec![])
@@ -1437,7 +1496,9 @@ mod tests {
             Ok(())
         }
         async fn cert_issue(&self, _: Domain) -> Result<CertInfo, RpcError> {
-            Err(RpcError::Internal { message: "not supported by this agent".into() })
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
         }
         async fn cert_renew_all(&self) -> Result<Vec<CertRenewResult>, RpcError> {
             Ok(vec![])
@@ -1447,29 +1508,34 @@ mod tests {
             _: HostingSelector,
             _: WpInstallRequest,
         ) -> Result<WpInstallStatus, RpcError> {
-            Err(RpcError::Internal { message: "not supported by this agent".into() })
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
         }
-        async fn wp_status(
-            &self,
-            _: HostingSelector,
-        ) -> Result<Option<WpInstallStatus>, RpcError> {
+        async fn wp_status(&self, _: HostingSelector) -> Result<Option<WpInstallStatus>, RpcError> {
             Ok(None)
         }
         async fn dns_check(&self, _: Domain) -> Result<DnsCheckResult, RpcError> {
-            Err(RpcError::Internal { message: "not supported by this agent".into() })
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
         }
         async fn dns_spf_check(
             &self,
             _: Domain,
         ) -> Result<hyperion_types::SpfCheckResult, RpcError> {
-            Err(RpcError::Internal { message: "not supported by this agent".into() })
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
         }
         async fn cert_issue_acme(
             &self,
             _: HostingSelector,
             _: CertIssueRequest,
         ) -> Result<CertInfo, RpcError> {
-            Err(RpcError::Internal { message: "not supported by this agent".into() })
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
         }
         async fn cert_dns01_begin(
             &self,
@@ -1477,13 +1543,14 @@ mod tests {
             _: bool,
             _: String,
         ) -> Result<(bool, String, Vec<String>), RpcError> {
-            Err(RpcError::Internal { message: "not supported by this agent".into() })
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
         }
-        async fn cert_dns01_finish(
-            &self,
-            _: HostingSelector,
-        ) -> Result<CertInfo, RpcError> {
-            Err(RpcError::Internal { message: "not supported by this agent".into() })
+        async fn cert_dns01_finish(&self, _: HostingSelector) -> Result<CertInfo, RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
         }
         async fn cert_dns01_begin_domain(
             &self,
@@ -1492,10 +1559,14 @@ mod tests {
             _: bool,
             _: String,
         ) -> Result<(bool, String, Vec<String>), RpcError> {
-            Err(RpcError::Internal { message: "not supported by this agent".into() })
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
         }
         async fn cert_dns01_finish_domain(&self, _: Domain) -> Result<CertInfo, RpcError> {
-            Err(RpcError::Internal { message: "not supported by this agent".into() })
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
         }
         async fn cert_upload(
             &self,
@@ -1504,16 +1575,24 @@ mod tests {
             _: String,
             _: Option<String>,
         ) -> Result<CertInfo, RpcError> {
-            Err(RpcError::Internal { message: "not supported by this agent".into() })
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
         }
         async fn hosting_stats(&self, _: HostingSelector) -> Result<HostingStats, RpcError> {
-            Err(RpcError::Internal { message: "not supported by this agent".into() })
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
         }
         async fn node_stats(&self) -> Result<NodeStats, RpcError> {
-            Err(RpcError::Internal { message: "not supported by this agent".into() })
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
         }
         async fn cluster_stats(&self) -> Result<ClusterStats, RpcError> {
-            Err(RpcError::Internal { message: "not supported by this agent".into() })
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
         }
         async fn node_metrics_history(
             &self,
@@ -1563,9 +1642,7 @@ mod tests {
         ) -> Result<(i64, bool), RpcError> {
             Ok((0, false))
         }
-        async fn wp_asset_list(
-            &self,
-        ) -> Result<Vec<hyperion_types::WpAssetSummary>, RpcError> {
+        async fn wp_asset_list(&self) -> Result<Vec<hyperion_types::WpAssetSummary>, RpcError> {
             Ok(vec![])
         }
         async fn wp_asset_delete(&self, _: i64) -> Result<(), RpcError> {
@@ -1648,10 +1725,7 @@ mod tests {
         ) -> Result<(), RpcError> {
             Ok(())
         }
-        async fn update_check(
-            &self,
-            _: bool,
-        ) -> Result<hyperion_types::UpdateStatus, RpcError> {
+        async fn update_check(&self, _: bool) -> Result<hyperion_types::UpdateStatus, RpcError> {
             Ok(hyperion_types::UpdateStatus::default())
         }
         async fn hosting_export(
@@ -1729,9 +1803,7 @@ mod tests {
         async fn ftp_verify_login(&self, _: String, _: String) -> Result<bool, RpcError> {
             Ok(true)
         }
-        async fn email_smtp_autodetect(
-            &self,
-        ) -> Result<hyperion_types::SmtpAutodetect, RpcError> {
+        async fn email_smtp_autodetect(&self) -> Result<hyperion_types::SmtpAutodetect, RpcError> {
             Ok(hyperion_types::SmtpAutodetect::default())
         }
         async fn mta_diagnostics(&self) -> Result<hyperion_types::MtaDiagnostics, RpcError> {
@@ -1800,12 +1872,7 @@ mod tests {
         ) -> Result<(), RpcError> {
             Ok(())
         }
-        async fn job_finish(
-            &self,
-            _: String,
-            _: bool,
-            _: Option<String>,
-        ) -> Result<(), RpcError> {
+        async fn job_finish(&self, _: String, _: bool, _: Option<String>) -> Result<(), RpcError> {
             Ok(())
         }
         async fn wp_plugin_list(
@@ -1954,18 +2021,10 @@ mod tests {
         ) -> Result<(), RpcError> {
             Ok(())
         }
-        async fn hosting_file_delete(
-            &self,
-            _: HostingSelector,
-            _: String,
-        ) -> Result<(), RpcError> {
+        async fn hosting_file_delete(&self, _: HostingSelector, _: String) -> Result<(), RpcError> {
             Ok(())
         }
-        async fn hosting_file_mkdir(
-            &self,
-            _: HostingSelector,
-            _: String,
-        ) -> Result<(), RpcError> {
+        async fn hosting_file_mkdir(&self, _: HostingSelector, _: String) -> Result<(), RpcError> {
             Ok(())
         }
         async fn hosting_file_rename(
@@ -2004,8 +2063,13 @@ mod tests {
         async fn monitor_get(
             &self,
             _: HostingSelector,
-        ) -> Result<(hyperion_types::MonitorConfigView, hyperion_types::MonitorHistory), RpcError>
-        {
+        ) -> Result<
+            (
+                hyperion_types::MonitorConfigView,
+                hyperion_types::MonitorHistory,
+            ),
+            RpcError,
+        > {
             Ok((
                 hyperion_types::MonitorConfigView::default(),
                 hyperion_types::MonitorHistory::default(),
@@ -2089,11 +2153,7 @@ mod tests {
         async fn cron_list(&self, _: HostingSelector) -> Result<String, RpcError> {
             Ok(String::new())
         }
-        async fn cron_replace(
-            &self,
-            _: HostingSelector,
-            _: String,
-        ) -> Result<(), RpcError> {
+        async fn cron_replace(&self, _: HostingSelector, _: String) -> Result<(), RpcError> {
             Ok(())
         }
         async fn enroll_consume(
@@ -2127,17 +2187,10 @@ mod tests {
         ) -> Result<(), RpcError> {
             Ok(())
         }
-        async fn node_remove(
-            &self,
-            _: String,
-            _: bool,
-            _: i64,
-        ) -> Result<(bool, i64), RpcError> {
+        async fn node_remove(&self, _: String, _: bool, _: i64) -> Result<(bool, i64), RpcError> {
             Ok((true, 0))
         }
-        async fn cert_overview(
-            &self,
-        ) -> Result<Vec<hyperion_types::CertOverviewItem>, RpcError> {
+        async fn cert_overview(&self) -> Result<Vec<hyperion_types::CertOverviewItem>, RpcError> {
             Ok(Vec::new())
         }
         async fn nodes_list(&self) -> Result<Vec<NodeSummary>, RpcError> {
@@ -2151,11 +2204,7 @@ mod tests {
         ) -> Result<(), RpcError> {
             Ok(())
         }
-        async fn db_reset_password(
-            &self,
-            _: HostingSelector,
-            _: String,
-        ) -> Result<(), RpcError> {
+        async fn db_reset_password(&self, _: HostingSelector, _: String) -> Result<(), RpcError> {
             Ok(())
         }
         async fn ftp_set_password(
@@ -2208,17 +2257,23 @@ mod tests {
             Ok(vec![])
         }
         async fn profile_get(&self, _: i64) -> Result<HostingProfile, RpcError> {
-            Err(RpcError::Internal { message: "not supported by this agent".into() })
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
         }
         async fn profile_create(&self, _: ProfileInput) -> Result<HostingProfile, RpcError> {
-            Err(RpcError::Internal { message: "not supported by this agent".into() })
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
         }
         async fn profile_update(
             &self,
             _: i64,
             _: ProfileInput,
         ) -> Result<HostingProfile, RpcError> {
-            Err(RpcError::Internal { message: "not supported by this agent".into() })
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
         }
         async fn profile_delete(&self, _: i64) -> Result<(), RpcError> {
             Ok(())
@@ -2229,7 +2284,9 @@ mod tests {
             _: i64,
             _: bool,
         ) -> Result<ProfileApply, RpcError> {
-            Err(RpcError::Internal { message: "not supported by this agent".into() })
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
         }
         async fn profile_get_apply(
             &self,

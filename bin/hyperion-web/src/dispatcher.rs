@@ -228,10 +228,7 @@ async fn resolve_node_endpoint(
     } else {
         ip
     };
-    Ok(format!(
-        "https://{host_part}:{}",
-        DEFAULT_AGENT_RPC_PORT
-    ))
+    Ok(format!("https://{host_part}:{}", DEFAULT_AGENT_RPC_PORT))
 }
 
 impl From<DispatchError> for crate::error::AppError {
@@ -240,9 +237,10 @@ impl From<DispatchError> for crate::error::AppError {
         match e {
             DispatchError::Local(ClientError::Io(io)) => AppError::Rpc(io.to_string()),
             DispatchError::Remote(re) => AppError::Rpc(re.to_string()),
-            DispatchError::NodeUnreachable { node_id, kind } => {
-                AppError::NodeUnreachable { node_id, hint: kind }
-            }
+            DispatchError::NodeUnreachable { node_id, kind } => AppError::NodeUnreachable {
+                node_id,
+                hint: kind,
+            },
             DispatchError::UnknownNode(n) => AppError::BadRequest(format!(
                 "node {n} is not enrolled — pick a different target"
             )),

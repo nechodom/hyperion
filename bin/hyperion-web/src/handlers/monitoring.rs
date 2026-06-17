@@ -62,12 +62,9 @@ pub async fn get_monitoring(
         .await
         .unwrap_or_default();
     for n in workers {
-        if let Ok(RpcResponse::MonitorOverview(rows)) = crate::dispatcher::dispatch_to_node(
-            &state,
-            Some(&n.node_id),
-            Request::MonitorOverview,
-        )
-        .await
+        if let Ok(RpcResponse::MonitorOverview(rows)) =
+            crate::dispatcher::dispatch_to_node(&state, Some(&n.node_id), Request::MonitorOverview)
+                .await
         {
             let mut rows = rows;
             for r in &mut rows {

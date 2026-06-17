@@ -146,9 +146,7 @@ struct RedirectVhostTpl<'a> {
 }
 
 pub fn render_redirect(input: &RedirectVhostInput<'_>) -> Result<String, AdapterError> {
-    if !(input.redirect_url.starts_with("http://")
-        || input.redirect_url.starts_with("https://"))
-    {
+    if !(input.redirect_url.starts_with("http://") || input.redirect_url.starts_with("https://")) {
         return Err(AdapterError::Other(format!(
             "redirect_url must start with http:// or https://, got {}",
             input.redirect_url
@@ -161,7 +159,10 @@ pub fn render_redirect(input: &RedirectVhostInput<'_>) -> Result<String, Adapter
     if input.redirect_url.chars().any(|c| {
         c.is_whitespace()
             || c.is_control()
-            || matches!(c, '\'' | '"' | '$' | '\\' | '`' | '{' | '}' | ';' | '<' | '>')
+            || matches!(
+                c,
+                '\'' | '"' | '$' | '\\' | '`' | '{' | '}' | ';' | '<' | '>'
+            )
     }) {
         return Err(AdapterError::Other(
             "redirect_url contains characters that aren't valid in a URL".into(),
@@ -169,7 +170,10 @@ pub fn render_redirect(input: &RedirectVhostInput<'_>) -> Result<String, Adapter
     }
     let target = input.redirect_url.trim_end_matches('/').to_string();
     let (http_t, https_t) = if input.redirect_preserve_path {
-        (format!("{target}$request_uri"), format!("{target}$request_uri"))
+        (
+            format!("{target}$request_uri"),
+            format!("{target}$request_uri"),
+        )
     } else {
         (target.clone(), target.clone())
     };
@@ -339,7 +343,12 @@ pub fn render_suspended(input: &SuspendedInput<'_>) -> Result<String, AdapterErr
         .reason_message
         .chars()
         .map(|c| if c.is_control() { ' ' } else { c })
-        .filter(|c| !matches!(c, '\'' | '"' | '$' | '\\' | '`' | '{' | '}' | ';' | '<' | '>'))
+        .filter(|c| {
+            !matches!(
+                c,
+                '\'' | '"' | '$' | '\\' | '`' | '{' | '}' | ';' | '<' | '>'
+            )
+        })
         .take(300)
         .collect();
     let tpl = SuspendedTpl {
@@ -377,8 +386,7 @@ pub fn render(input: &VhostInput<'_>) -> Result<String, AdapterError> {
         key_path: input.key_path,
         acme_challenge_root: input.acme_challenge_root,
         hosting_id: input.hosting_id,
-        basic_auth_enabled: input.options.basic_auth_enabled
-            && input.options.basic_auth_set,
+        basic_auth_enabled: input.options.basic_auth_enabled && input.options.basic_auth_set,
         hsts_max_age: input.options.hsts_max_age,
         custom_nginx_snippet: &input.options.custom_nginx_snippet,
         maintenance_mode: input.options.maintenance_mode,
@@ -456,7 +464,9 @@ pub async fn write_vhost(paths: &Paths, input: &VhostInput<'_>) -> Result<(), Ad
 /// hosting. Lives in conf.d so nginx picks it up at the http{}
 /// level (server{}-level fastcgi_cache_path is a config error).
 fn cache_zone_file(hosting_id: &str) -> PathBuf {
-    PathBuf::from(format!("/etc/nginx/conf.d/hyperion-cache-{hosting_id}.conf"))
+    PathBuf::from(format!(
+        "/etc/nginx/conf.d/hyperion-cache-{hosting_id}.conf"
+    ))
 }
 
 fn render_cache_zone(hosting_id: &str) -> String {
@@ -488,7 +498,9 @@ pub async fn write_htpasswd(
     bcrypt_hash: &str,
 ) -> Result<(), AdapterError> {
     if user.is_empty() {
-        return Err(AdapterError::Other("basic auth user cannot be empty".into()));
+        return Err(AdapterError::Other(
+            "basic auth user cannot be empty".into(),
+        ));
     }
     if user.contains(':') || user.contains('\n') {
         return Err(AdapterError::Other(
@@ -578,9 +590,7 @@ pub async fn reload() -> Result<(), AdapterError> {
                 // fails the unit either doesn't exist (not
                 // installed) or fails to come up (bad config /
                 // port conflict) — both worth surfacing verbatim.
-                if let Err(start_err) =
-                    cmd::run("/usr/bin/systemctl", &["start", "nginx"]).await
-                {
+                if let Err(start_err) = cmd::run("/usr/bin/systemctl", &["start", "nginx"]).await {
                     let s = start_err.to_string();
                     if s.contains("not loaded") || s.contains("not found") {
                         return Err(AdapterError::Command {
@@ -603,11 +613,7 @@ pub async fn reload() -> Result<(), AdapterError> {
                     // last 30 journalctl lines so the operator
                     // sees the actual cause instead of just the
                     // useless "Job for nginx.service failed" wrapper.
-                    let nginx_test = capture_diagnostics(
-                        "/usr/sbin/nginx",
-                        &["-t"],
-                    )
-                    .await;
+                    let nginx_test = capture_diagnostics("/usr/sbin/nginx", &["-t"]).await;
                     let journal = capture_diagnostics(
                         "/usr/bin/journalctl",
                         &["-u", "nginx.service", "-n", "30", "--no-pager"],
@@ -778,7 +784,8 @@ fn is_valid_user_token(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 32
         && !s.starts_with('-')
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
 /// Self-heal companion: if `/etc/nginx/nginx.conf` lists a `user`

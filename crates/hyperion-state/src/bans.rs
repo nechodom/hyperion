@@ -148,16 +148,32 @@ mod tests {
     #[tokio::test]
     async fn ban_lifecycle() {
         let pool = open_memory().await.expect("open");
-        add_or_refresh(&pool, "1.2.3.4", Some("h1"), "brute force", "auto", 100, 3700)
-            .await
-            .expect("add");
+        add_or_refresh(
+            &pool,
+            "1.2.3.4",
+            Some("h1"),
+            "brute force",
+            "auto",
+            100,
+            3700,
+        )
+        .await
+        .expect("add");
         assert!(is_active(&pool, "1.2.3.4", 200).await.unwrap());
         assert_eq!(list_active(&pool, 200).await.unwrap().len(), 1);
 
         // Refresh keeps a single active row.
-        add_or_refresh(&pool, "1.2.3.4", Some("h1"), "brute force", "auto", 300, 4000)
-            .await
-            .expect("refresh");
+        add_or_refresh(
+            &pool,
+            "1.2.3.4",
+            Some("h1"),
+            "brute force",
+            "auto",
+            300,
+            4000,
+        )
+        .await
+        .expect("refresh");
         assert_eq!(list_active(&pool, 350).await.unwrap().len(), 1);
 
         // Expiry sweep.

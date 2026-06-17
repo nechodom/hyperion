@@ -106,11 +106,7 @@ pub async fn ensure_socket_dirs() {
             );
             continue;
         }
-        let _ = tokio::fs::set_permissions(
-            &dir,
-            std::fs::Permissions::from_mode(0o755),
-        )
-        .await;
+        let _ = tokio::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).await;
     }
 }
 
@@ -152,11 +148,8 @@ pub async fn ensure_pool(input: &PoolInput<'_>) -> Result<PathBuf, AdapterError>
     } else {
         // Force 0755 even if the dir already existed — defends against
         // an operator who restricted it manually.
-        let _ = tokio::fs::set_permissions(
-            &sock_parent,
-            std::fs::Permissions::from_mode(0o755),
-        )
-        .await;
+        let _ =
+            tokio::fs::set_permissions(&sock_parent, std::fs::Permissions::from_mode(0o755)).await;
     }
 
     let body = render(input)?;

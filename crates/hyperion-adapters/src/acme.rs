@@ -171,10 +171,7 @@ pub async fn issue_http01(req: IssueRequest<'_>) -> Result<CertInfo, AdapterErro
         .collect();
     names.sort();
     names.dedup();
-    let identifiers: Vec<Identifier> = names
-        .iter()
-        .map(|n| Identifier::Dns(n.clone()))
-        .collect();
+    let identifiers: Vec<Identifier> = names.iter().map(|n| Identifier::Dns(n.clone())).collect();
 
     // Retry new_order on transient rate-limits (Boulder "Service busy"
     // load-shed). Exponential backoff 15s → 30s → 60s — never silent.
@@ -210,8 +207,8 @@ pub async fn issue_http01(req: IssueRequest<'_>) -> Result<CertInfo, AdapterErro
     {
         let mut authorizations = order.authorizations();
         while let Some(result) = authorizations.next().await {
-            let mut authz = result
-                .map_err(|e| AdapterError::Acme(format!("authorization: {e}")))?;
+            let mut authz =
+                result.map_err(|e| AdapterError::Acme(format!("authorization: {e}")))?;
             match authz.status {
                 AuthorizationStatus::Pending => {}
                 AuthorizationStatus::Valid => continue,
@@ -233,11 +230,9 @@ pub async fn issue_http01(req: IssueRequest<'_>) -> Result<CertInfo, AdapterErro
             // systemd ever sets UMask=0077 on the agent service, files
             // would be 0o600 and nginx (www-data) couldn't read the
             // token even though it could traverse the dir.
-            if let Err(e) = tokio::fs::set_permissions(
-                &token_path,
-                std::fs::Permissions::from_mode(0o644),
-            )
-            .await
+            if let Err(e) =
+                tokio::fs::set_permissions(&token_path, std::fs::Permissions::from_mode(0o644))
+                    .await
             {
                 tracing::warn!(error=%e, path=%token_path.display(), "chmod 0644 on challenge token failed");
             }
@@ -328,12 +323,7 @@ pub async fn issue_http01(req: IssueRequest<'_>) -> Result<CertInfo, AdapterErro
         0o644,
     )
     .await?;
-    crate::fs::atomic_write(
-        &domain_dir.join("privkey.pem"),
-        key_pem.as_bytes(),
-        0o600,
-    )
-    .await?;
+    crate::fs::atomic_write(&domain_dir.join("privkey.pem"), key_pem.as_bytes(), 0o600).await?;
 
     // 9. Cleanup challenge files.
     cleanup_challenges(&written).await;
@@ -446,8 +436,7 @@ pub async fn dns01_begin(
         .collect();
     names.sort();
     names.dedup();
-    let identifiers: Vec<Identifier> =
-        names.iter().map(|n| Identifier::Dns(n.clone())).collect();
+    let identifiers: Vec<Identifier> = names.iter().map(|n| Identifier::Dns(n.clone())).collect();
 
     let mut order = {
         let new_order = NewOrder::new(identifiers.as_slice());
@@ -564,9 +553,7 @@ pub async fn dns01_finish(domain: &str, certs_root: &str) -> Result<CertInfo, Ad
                         attempt += 1;
                         tokio::time::sleep(backoff_for(attempt)).await;
                     }
-                    Err(e) => {
-                        return Err(AdapterError::Acme(rate_limit_message("set_ready", &e)))
-                    }
+                    Err(e) => return Err(AdapterError::Acme(rate_limit_message("set_ready", &e))),
                 }
             }
         }
@@ -606,7 +593,12 @@ pub async fn dns01_finish(domain: &str, certs_root: &str) -> Result<CertInfo, Ad
 
     let not_after = parse_not_after(&cert_chain_pem)
         .unwrap_or_else(|| hyperion_types::now_secs() + 90 * 24 * 3600);
-    let sans: Vec<String> = session.names.iter().filter(|n| *n != domain).cloned().collect();
+    let sans: Vec<String> = session
+        .names
+        .iter()
+        .filter(|n| *n != domain)
+        .cloned()
+        .collect();
     Ok(CertInfo {
         domain: domain.to_string(),
         sans,
@@ -627,21 +619,23 @@ pub async fn dns01_finish(domain: &str, certs_root: &str) -> Result<CertInfo, Ad
 /// won't clear in seconds and we should surface them to the operator
 /// rather than silently waste ACME calls retrying.
 fn is_transient_rate_limit(e: &instant_acme::Error) -> bool {
-    let instant_acme::Error::Api(p) = e else { return false };
+    let instant_acme::Error::Api(p) = e else {
+        return false;
+    };
     // The rateLimited URN covers many distinct cases; we only want to
     // retry the ones that are clearly transient. Boulder's load-shed
     // path returns HTTP 503 with "Service busy" in detail. Durable
     // limits return 429.
-    let is_rate_limited =
-        p.r#type.as_deref() == Some("urn:ietf:params:acme:error:rateLimited");
+    let is_rate_limited = p.r#type.as_deref() == Some("urn:ietf:params:acme:error:rateLimited");
     if !is_rate_limited {
         return false;
     }
     // Treat 503 OR a "service busy" / "try again" detail as transient.
     let status_503 = matches!(p.status, Some(503));
     let detail = p.detail.as_deref().unwrap_or("").to_ascii_lowercase();
-    let says_busy =
-        detail.contains("service busy") || detail.contains("try again") || detail.contains("retry later");
+    let says_busy = detail.contains("service busy")
+        || detail.contains("try again")
+        || detail.contains("retry later");
     status_503 || says_busy
 }
 
@@ -649,7 +643,9 @@ fn is_transient_rate_limit(e: &instant_acme::Error) -> bool {
 /// when we can detect a known failure mode. Operator-facing.
 fn rate_limit_message(stage: &str, e: &instant_acme::Error) -> String {
     use instant_acme::Error as E;
-    let E::Api(p) = e else { return format!("{stage}: {e}") };
+    let E::Api(p) = e else {
+        return format!("{stage}: {e}");
+    };
     let urn = p.r#type.as_deref().unwrap_or("");
     let base = format!("{stage}: {e}");
     if urn == "urn:ietf:params:acme:error:rateLimited" {
@@ -785,8 +781,10 @@ mod tests {
             Some("Service busy; retry later."),
         );
         let err = instant_acme::Error::Api(p);
-        assert!(is_transient_rate_limit(&err),
-                "Service busy 503 must be classified as transient");
+        assert!(
+            is_transient_rate_limit(&err),
+            "Service busy 503 must be classified as transient"
+        );
     }
 
     /// Per-account-per-hostname failedAuthorization or duplicate-cert
@@ -800,17 +798,27 @@ mod tests {
             Some("too many failed authorizations recently"),
         );
         let err = instant_acme::Error::Api(p);
-        assert!(!is_transient_rate_limit(&err),
-                "429 hard rate limit must NOT be classified as transient");
+        assert!(
+            !is_transient_rate_limit(&err),
+            "429 hard rate limit must NOT be classified as transient"
+        );
     }
 
     /// Non-rate-limit errors (badNonce, accountDoesNotExist, malformed,
     /// connection errors) are never the retry path's responsibility.
     #[test]
     fn non_rate_limit_errors_are_not_transient() {
-        let p = mk_problem("urn:ietf:params:acme:error:badNonce", Some(400), Some("bad"));
+        let p = mk_problem(
+            "urn:ietf:params:acme:error:badNonce",
+            Some(400),
+            Some("bad"),
+        );
         assert!(!is_transient_rate_limit(&instant_acme::Error::Api(p)));
-        let p2 = mk_problem("urn:ietf:params:acme:error:malformed", Some(400), Some("nope"));
+        let p2 = mk_problem(
+            "urn:ietf:params:acme:error:malformed",
+            Some(400),
+            Some("nope"),
+        );
         assert!(!is_transient_rate_limit(&instant_acme::Error::Api(p2)));
         let e3 = instant_acme::Error::Str("transport failed");
         assert!(!is_transient_rate_limit(&e3));
@@ -829,8 +837,14 @@ mod tests {
         );
         let m = rate_limit_message("set_ready", &instant_acme::Error::Api(p));
         assert!(m.contains("set_ready"), "stage name preserved");
-        assert!(m.contains("staging"), "must mention the staging escape hatch");
-        assert!(m.contains("60 minutes") || m.contains("hour"), "must mention wait time");
+        assert!(
+            m.contains("staging"),
+            "must mention the staging escape hatch"
+        );
+        assert!(
+            m.contains("60 minutes") || m.contains("hour"),
+            "must mention wait time"
+        );
     }
 
     /// Backoff: must strictly increase, and never return zero / sub-second

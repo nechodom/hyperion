@@ -80,10 +80,7 @@ pub async fn call_remote(
     let nonce = ulid::Ulid::new().to_string();
     let auth = sign_envelope(signer, target_node_id, &body, ts, &nonce);
     let header = format!("Authorization: Bearer {}", auth.to_header_value());
-    let url = format!(
-        "{}/agent-rpc",
-        endpoint_base.trim_end_matches('/')
-    );
+    let url = format!("{}/agent-rpc", endpoint_base.trim_end_matches('/'));
 
     let mut args: Vec<String> = vec!["-fsS".into()];
     args.push("--max-time".into());
@@ -125,7 +122,7 @@ pub async fn call_remote(
             stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
         });
     }
-    let resp: Response = serde_json::from_slice(&out.stdout)
-        .map_err(|e| RemoteClientError::Parse(e.to_string()))?;
+    let resp: Response =
+        serde_json::from_slice(&out.stdout).map_err(|e| RemoteClientError::Parse(e.to_string()))?;
     Ok(resp)
 }

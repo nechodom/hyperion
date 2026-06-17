@@ -72,18 +72,20 @@ pub async fn get_emails(
     // Fetch a generous page — 200 covers a few days of activity on a
     // busy node without paginating yet. Distinguish "no rows" from
     // "agent errored" so the template can surface the right hint.
-    let (raw, rpc_error): (Vec<EmailLogEntry>, Option<String>) =
-        match hyperion_rpc_client::call(
-            &state.agent_socket,
-            Request::EmailLogList { hosting_id, limit: 200 },
-        )
-        .await
-        {
-            Ok(RpcResponse::EmailLogList(r)) => (r, None),
-            Ok(RpcResponse::Error(e)) => (vec![], Some(e.to_string())),
-            Ok(_) => (vec![], Some("unexpected agent response".into())),
-            Err(e) => (vec![], Some(format!("rpc: {e}"))),
-        };
+    let (raw, rpc_error): (Vec<EmailLogEntry>, Option<String>) = match hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::EmailLogList {
+            hosting_id,
+            limit: 200,
+        },
+    )
+    .await
+    {
+        Ok(RpcResponse::EmailLogList(r)) => (r, None),
+        Ok(RpcResponse::Error(e)) => (vec![], Some(e.to_string())),
+        Ok(_) => (vec![], Some("unexpected agent response".into())),
+        Err(e) => (vec![], Some(format!("rpc: {e}"))),
+    };
     // Apply UI-only kind/state filters in memory — the agent doesn't
     // need a new RPC variant for this. Cheap at 200 rows.
     let rows: Vec<EmailLogEntry> = raw
