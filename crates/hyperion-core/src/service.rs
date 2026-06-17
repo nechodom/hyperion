@@ -484,10 +484,7 @@ async fn check_spf_authorizes(
         // "does my IP pass" not "would a strict receiver bounce".
         let tok_l = tok.to_ascii_lowercase();
         let (qualifier, mech) = match tok_l.chars().next() {
-            Some('+') | Some('-') | Some('~') | Some('?') => {
-                let q = tok_l.chars().next().unwrap();
-                (q, &tok_l[1..])
-            }
+            Some(q @ ('+' | '-' | '~' | '?')) => (q, &tok_l[1..]),
             _ => ('+', tok_l.as_str()),
         };
 
@@ -641,10 +638,7 @@ async fn check_spf_authorizes_no_recurse(
     for tok in &tokens {
         let tok_l = tok.to_ascii_lowercase();
         let (qualifier, mech) = match tok_l.chars().next() {
-            Some('+') | Some('-') | Some('~') | Some('?') => {
-                let q = tok_l.chars().next().unwrap();
-                (q, &tok_l[1..])
-            }
+            Some(q @ ('+' | '-' | '~' | '?')) => (q, &tok_l[1..]),
             _ => ('+', tok_l.as_str()),
         };
         if mech == "all" {
@@ -3093,14 +3087,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
         // ─── htpasswd write (before persist, so a failed bcrypt is
         //     surfaced before we change DB state) ─────────────────────
-        let pw_provided = basic_auth_password
-            .as_deref()
-            .map(|s| !s.is_empty())
-            .unwrap_or(false);
+        let pw_nonempty = basic_auth_password.as_deref().filter(|s| !s.is_empty());
+        let pw_provided = pw_nonempty.is_some();
         let mut new_hash_for_db: Option<String> = None;
-        if pw_provided {
-            // Unwrap safe — pw_provided implies Some(non-empty).
-            let pw = basic_auth_password.as_deref().unwrap();
+        if let Some(pw) = pw_nonempty {
             // Cost 10 — same as nginx auth_basic_user_file examples;
             // bcrypt-12 starts noticeably hurting RPS on the first
             // request after a worker boot.
@@ -14946,8 +14936,7 @@ pub(crate) async fn detect_wp_install_on_disk(root_dir: &str) -> Option<String> 
         };
         let quote_char = after_eq.chars().next();
         let inside = match quote_char {
-            Some('\'') | Some('"') => {
-                let q = quote_char.unwrap();
+            Some(q @ ('\'' | '"')) => {
                 let s = &after_eq[1..];
                 match s.find(q) {
                     Some(end) => &s[..end],
