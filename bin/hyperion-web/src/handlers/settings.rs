@@ -413,7 +413,9 @@ pub async fn post_config(
         let resp = crate::dispatcher::dispatch_to_node(
             &state,
             node_target,
-            Request::EmailConfigSet { fields },
+            Request::EmailConfigSet {
+                fields: fields.into(),
+            },
         )
         .await
         .map_err(AppError::from)?;
@@ -433,7 +435,7 @@ pub async fn post_config(
         &state.agent_socket,
         Request::AgentConfigUpdate {
             section: form.section.clone(),
-            fields,
+            fields: fields.into(),
         },
     )
     .await

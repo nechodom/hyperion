@@ -628,7 +628,7 @@ pub async fn post_toggle_test_node(
         &state.agent_socket,
         Request::AgentConfigUpdate {
             section: "cluster".to_string(),
-            fields,
+            fields: fields.into(),
         },
     )
     .await?;

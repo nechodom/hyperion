@@ -69,6 +69,62 @@ impl std::fmt::Debug for RedactedPem {
     }
 }
 
+/// A `field → value` config map carried in an RPC request. On the wire it is
+/// exactly its inner `BTreeMap` (`#[serde(transparent)]`), but its `Debug`
+/// masks the VALUE of any secret-looking key (password / secret / token /
+/// passphrase / webhook / key) so the `debug!(?req, "received request")` at
+/// the socket boundary can't spill an SMTP password, S3 secret key, or Slack
+/// webhook into the agent log. Non-secret keys (section names, hosts, ports,
+/// booleans) still print, which keeps the log useful for config writes. Use
+/// [`RedactedFields::into_inner`] to get the map back; a `BTreeMap` converts
+/// in via `Into`.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(transparent)]
+pub struct RedactedFields(pub std::collections::BTreeMap<String, String>);
+
+impl RedactedFields {
+    pub fn into_inner(self) -> std::collections::BTreeMap<String, String> {
+        self.0
+    }
+
+    /// True when the key names a credential whose value must not be logged.
+    /// Deliberately broad (substring match): over-redaction only costs a
+    /// little debug visibility, while a missed secret costs a log leak.
+    fn is_secret_key(key: &str) -> bool {
+        let k = key.to_ascii_lowercase();
+        [
+            "password",
+            "secret",
+            "token",
+            "passphrase",
+            "webhook",
+            "key",
+        ]
+        .iter()
+        .any(|needle| k.contains(needle))
+    }
+}
+
+impl From<std::collections::BTreeMap<String, String>> for RedactedFields {
+    fn from(m: std::collections::BTreeMap<String, String>) -> Self {
+        RedactedFields(m)
+    }
+}
+
+impl std::fmt::Debug for RedactedFields {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut m = f.debug_map();
+        for (k, v) in &self.0 {
+            if Self::is_secret_key(k) {
+                m.entry(k, &"<redacted>");
+            } else {
+                m.entry(k, v);
+            }
+        }
+        m.finish()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
 pub enum Request {
@@ -414,15 +470,17 @@ pub enum Request {
         /// "acme" | "email" | "slack" | "backup_remote" | "backup_retention"
         section: String,
         /// Field → string-encoded value. Service knows the expected
-        /// types per (section, field) and parses accordingly.
-        fields: std::collections::BTreeMap<String, String>,
+        /// types per (section, field) and parses accordingly. Wrapped so
+        /// the request `Debug` masks secret values (S3 keys, Slack webhook).
+        fields: RedactedFields,
     },
     /// Set THIS node's `[email]` config and apply it (writes agent.toml,
     /// reconfigures postfix live, schedules a self-restart to refresh the
     /// agent's in-memory config). Dispatchable to any node — that's how the
-    /// panel edits per-node mail without SSH.
+    /// panel edits per-node mail without SSH. `fields` is redacted in `Debug`
+    /// so the SMTP password can't leak into the worker's request log.
     EmailConfigSet {
-        fields: std::collections::BTreeMap<String, String>,
+        fields: RedactedFields,
     },
     /// Compare the running binary's git SHA against the upstream
     /// `rolling` release tag's SHA. Cached agent-side for an hour
@@ -1614,6 +1672,65 @@ mod tests {
         );
         let back: Request = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(req, back, "CertUpload must round-trip through serde");
+    }
+
+    #[test]
+    fn email_config_set_debug_redacts_password_but_serde_preserves_it() {
+        // EmailConfigSet is dispatched to workers, whose rpc-server logs
+        // `debug!(?req)`. The SMTP password rides in `fields` and must be
+        // masked in Debug — but the wire form must still carry it so the
+        // node can write agent.toml. Non-secret keys (host) stay visible.
+        let mut map = std::collections::BTreeMap::new();
+        map.insert("smtp_host".to_string(), "smtp.postmarkapp.com".to_string());
+        map.insert(
+            "smtp_password".to_string(),
+            "hunter2-SUPERSECRET".to_string(),
+        );
+        let req = Request::EmailConfigSet {
+            fields: map.clone().into(),
+        };
+
+        let dbg = format!("{req:?}");
+        assert!(
+            !dbg.contains("hunter2-SUPERSECRET"),
+            "SMTP password leaked into Debug: {dbg}"
+        );
+        assert!(
+            dbg.contains("<redacted>"),
+            "Debug should mark the password redacted: {dbg}"
+        );
+        assert!(
+            dbg.contains("smtp.postmarkapp.com"),
+            "non-secret host should stay visible for debugging: {dbg}"
+        );
+
+        // Wire form is `#[serde(transparent)]` → identical to the bare map,
+        // and carries the real password to the node.
+        let json = serde_json::to_string(&req).expect("serialize");
+        assert!(
+            json.contains("hunter2-SUPERSECRET"),
+            "wire form must preserve the password"
+        );
+        let back: Request = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(req, back, "EmailConfigSet must round-trip through serde");
+    }
+
+    #[test]
+    fn redacted_fields_is_wire_compatible_with_bare_map() {
+        // Transparent encoding means an old/peer serialization of a plain
+        // BTreeMap deserializes straight into RedactedFields — so changing
+        // the field type can't break a mixed-version master↔worker pair.
+        let mut map = std::collections::BTreeMap::new();
+        map.insert("section".to_string(), "email".to_string());
+        let bare = serde_json::to_string(&map).expect("serialize map");
+        let fields: RedactedFields = serde_json::from_str(&bare).expect("into RedactedFields");
+        assert_eq!(fields.into_inner(), map);
+        // S3 secret + slack webhook keys are masked too (used by AgentConfigUpdate).
+        assert!(RedactedFields::is_secret_key("secret_access_key"));
+        assert!(RedactedFields::is_secret_key("slack_webhook"));
+        assert!(RedactedFields::is_secret_key("api_token"));
+        assert!(!RedactedFields::is_secret_key("smtp_host"));
+        assert!(!RedactedFields::is_secret_key("from_address"));
     }
 
     #[tokio::test]

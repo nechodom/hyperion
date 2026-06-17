@@ -605,12 +605,13 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Err(e) => Response::Error(e),
         },
         Request::AgentConfigUpdate { section, fields } => {
-            match api.agent_config_update(section, fields).await {
+            match api.agent_config_update(section, fields.into_inner()).await {
                 Ok(()) => Response::AgentConfigUpdate,
                 Err(e) => Response::Error(e),
             }
         }
-        Request::EmailConfigSet { fields } => match api.email_config_set(fields).await {
+        Request::EmailConfigSet { fields } => match api.email_config_set(fields.into_inner()).await
+        {
             Ok(()) => Response::EmailConfigSet,
             Err(e) => Response::Error(e),
         },
