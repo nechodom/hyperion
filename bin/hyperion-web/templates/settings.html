@@ -821,7 +821,7 @@
   <div class="card">
     <h2 style="font-size:0.95rem;margin:0 0 0.6rem">
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
-      Test nodes &amp; staging sites
+      Step 1 · Mark test nodes &amp; set the auto-domain
     </h2>
     <p class="text-soft small" style="margin:0 0 0.4rem">
       Mark some nodes as <strong>test-only</strong> for staging / preview work.
@@ -921,7 +921,7 @@
   {# Node-level wildcard certs — one *.<base> per test node, reused by
      every auto-subdomain it spins up. Issued here, not per site. #}
   <div class="card" style="margin-top:1rem">
-    <h2 style="font-size:0.95rem;margin:0 0 0.35rem">Test-node wildcard certificates</h2>
+    <h2 style="font-size:0.95rem;margin:0 0 0.35rem">Step 2 · Test-node wildcard certificates</h2>
     <p class="text-soft small" style="margin:0 0 0.8rem">
       Issue ONE <code>*.&lt;base&gt;</code> cert per test node and every auto-subdomain it
       creates reuses it — instant HTTPS, no per-site Let's Encrypt rate-limit hits.

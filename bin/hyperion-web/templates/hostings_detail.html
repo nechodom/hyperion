@@ -869,6 +869,35 @@
 
 <p class="text-soft small" style="text-align:right;margin:0 0 0.6rem" data-role-min="admin"><a href="/certs">All certificates across the cluster →</a></p>
 
+{# Domains live here next to the certificate that covers them — add an alias,
+   then re-issue the cert below so HTTPS covers the new name. #}
+<div class="card hover">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+    Domains
+  </h2>
+  <p class="text-soft" style="margin:0 0 0.75rem">
+    Primary domain <code>{{ detail.domain }}</code> is fixed (recreate the
+    hosting to change it). Aliases are additional names served by this site.
+  </p>
+  <form method="post" action="/hostings/aliases" autocomplete="off"
+        data-role-min="operator">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+    <input type="hidden" name="target_node" value="{{ target_node }}">
+    <div class="field">
+      <label for="aliases_edit">Alias domains <span class="hint">comma / space / newline separated — leave empty to remove all</span></label>
+      <textarea id="aliases_edit" name="aliases" rows="2"
+                placeholder="www.example.com, m.example.com">{{ detail.aliases.join(", ") }}</textarea>
+    </div>
+    <p class="text-soft small" style="margin:0 0 0.6rem">
+      Saving rewrites the nginx <code>server_name</code> and reloads. New aliases
+      aren't covered by HTTPS until you <strong>re-issue the certificate below</strong>.
+    </p>
+    <button class="btn small primary" type="submit">Save aliases</button>
+  </form>
+</div>
+
 {% if let Some(cert) = detail.cert %}
 <div class="card hover">
   <h2>
@@ -1705,6 +1734,7 @@
 </div>
 {% endif %}
 
+<div class="settings-group-label" style="text-transform:uppercase;font-size:0.72rem;letter-spacing:0.06em;color:var(--text-soft);font-weight:700;margin:0.2rem 0 0.5rem;opacity:0.85">HTTP &amp; access layer</div>
 <div class="card hover">
   <h2>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
@@ -1887,6 +1917,7 @@
   </form>
 </div>
 
+<div class="settings-group-label" style="text-transform:uppercase;font-size:0.72rem;letter-spacing:0.06em;color:var(--text-soft);font-weight:700;margin:1.2rem 0 0.5rem;opacity:0.85">Performance &amp; resource limits</div>
 <div class="card hover">
   <h2>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="9" y1="9" x2="15" y2="9"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
@@ -2037,6 +2068,7 @@
   </p>
 </div>
 
+<div class="settings-group-label" style="text-transform:uppercase;font-size:0.72rem;letter-spacing:0.06em;color:var(--text-soft);font-weight:700;margin:1.2rem 0 0.5rem;opacity:0.85">Lifecycle &amp; billing</div>
 <div class="card hover">
   <h2>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
@@ -2204,6 +2236,11 @@
 </div><!-- /tab-settings -->
 
 <div class="tab-panel" id="tab-ftp">
+<p class="text-soft small" style="margin:0 0 0.8rem">
+  Editing files in the browser? Use the <a href="/hostings/{{ detail.id.as_str() }}/files"><strong>Files</strong></a>
+  manager (button in the page header). FTP/SFTP below is for desktop clients
+  (FileZilla, Cyberduck) and CI/CD uploads.
+</p>
 <div class="card hover">
   <h2>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
@@ -2789,33 +2826,6 @@
 
 {% if is_super_admin %}
 <div class="tab-panel" id="tab-access">
-<div class="card">
-  <h2>
-    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
-    Domains &amp; aliases
-  </h2>
-  <p class="text-soft" style="margin:0 0 0.75rem">
-    Primary domain <code>{{ detail.domain }}</code> is fixed (recreate the
-    hosting to change it). Aliases are additional names served by this site.
-  </p>
-  <form method="post" action="/hostings/aliases" autocomplete="off"
-        data-role-min="operator">
-    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
-    <input type="hidden" name="target_node" value="{{ target_node }}">
-    <div class="field">
-      <label for="aliases_edit">Alias domains <span class="hint">comma / space / newline separated — leave empty to remove all</span></label>
-      <textarea id="aliases_edit" name="aliases" rows="2"
-                placeholder="www.example.com, m.example.com">{{ detail.aliases.join(", ") }}</textarea>
-    </div>
-    <p class="text-soft small" style="margin:0 0 0.6rem">
-      Saving rewrites the nginx <code>server_name</code> and reloads. New aliases
-      are not covered by HTTPS until you re-issue the certificate from the
-      <a href="#ssl">SSL tab</a>.
-    </p>
-    <button class="btn small primary" type="submit">Save aliases</button>
-  </form>
-</div>
 <div class="card">
   <h2>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="7" r="4"/><path d="M3 21v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2"/></svg>
