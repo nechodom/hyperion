@@ -1221,6 +1221,7 @@ fn print_pretty(resp: &Response) {
         Response::ServiceRestart => println!("service restarted"),
         Response::ServiceInstall => println!("service installed"),
         Response::AgentConfigUpdate => println!("agent.toml updated"),
+        Response::EmailConfigSet => println!("email config set + applied (agent restarting)"),
         Response::UpdateCheck(s) => {
             println!("update check:");
             println!("  current: {}", s.current_sha);

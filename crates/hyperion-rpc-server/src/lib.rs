@@ -610,6 +610,10 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::EmailConfigSet { fields } => match api.email_config_set(fields).await {
+            Ok(()) => Response::EmailConfigSet,
+            Err(e) => Response::Error(e),
+        },
         Request::UpdateCheck { force_refresh } => match api.update_check(force_refresh).await {
             Ok(v) => Response::UpdateCheck(v),
             Err(e) => Response::Error(e),
@@ -1721,6 +1725,12 @@ mod tests {
         async fn agent_config_update(
             &self,
             _: String,
+            _: std::collections::BTreeMap<String, String>,
+        ) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn email_config_set(
+            &self,
             _: std::collections::BTreeMap<String, String>,
         ) -> Result<(), RpcError> {
             Ok(())

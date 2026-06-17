@@ -815,6 +815,28 @@ pub struct MtaDiagnostics {
     /// Empty when the log doesn't exist (fresh install) or we
     /// can't read it (rare permissions issue).
     pub recent_log_tail: Vec<String>,
+
+    // ── This node's editable `[email]` config, read from its own
+    //    agent.toml so the Settings → Mail form can pre-fill per node.
+    //    The password is never sent back (only `cfg_password_set`).
+    #[serde(default)]
+    pub cfg_enabled: bool,
+    #[serde(default)]
+    pub cfg_smtp_host: String,
+    #[serde(default)]
+    pub cfg_smtp_port: i64,
+    #[serde(default)]
+    pub cfg_smtp_user: String,
+    #[serde(default)]
+    pub cfg_from_address: String,
+    #[serde(default)]
+    pub cfg_from_name: String,
+    #[serde(default)]
+    pub cfg_security: String,
+    #[serde(default)]
+    pub cfg_default_to: String,
+    #[serde(default)]
+    pub cfg_password_set: bool,
 }
 
 /// What we know about whether Hyperion is up-to-date. Returned by

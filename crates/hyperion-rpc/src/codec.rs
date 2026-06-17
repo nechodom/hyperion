@@ -417,6 +417,13 @@ pub enum Request {
         /// types per (section, field) and parses accordingly.
         fields: std::collections::BTreeMap<String, String>,
     },
+    /// Set THIS node's `[email]` config and apply it (writes agent.toml,
+    /// reconfigures postfix live, schedules a self-restart to refresh the
+    /// agent's in-memory config). Dispatchable to any node — that's how the
+    /// panel edits per-node mail without SSH.
+    EmailConfigSet {
+        fields: std::collections::BTreeMap<String, String>,
+    },
     /// Compare the running binary's git SHA against the upstream
     /// `rolling` release tag's SHA. Cached agent-side for an hour
     /// so the dashboard banner doesn't hammer the GitHub API.
@@ -1239,6 +1246,7 @@ pub enum Response {
     /// Current update job state + the last ~8 kB of stdout/stderr.
     NodeUpdateStatus(hyperion_types::NodeUpdateStatus),
     AgentConfigUpdate,
+    EmailConfigSet,
     UpdateCheck(hyperion_types::UpdateStatus),
     HostingExport(hyperion_types::HostingMigrationBundle),
     HostingMigrationFetchBundleFile {

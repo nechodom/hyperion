@@ -53,6 +53,9 @@ struct SettingsTpl<'a> {
     /// failure (card renders "unknown" and offers a Reconfigure
     /// button — operator at least sees the slot exists).
     mta: hyperion_types::MtaDiagnostics,
+    /// Which node the Mail tab is currently editing ("" / "local" = master).
+    /// The `mta` diagnostics + the form pre-fill are for THIS node.
+    mail_node: String,
     error: Option<String>,
     flash: Option<String>,
     flash_error: Option<String>,
@@ -79,6 +82,10 @@ pub struct SettingsQuery {
     flash: Option<String>,
     #[serde(default)]
     flash_error: Option<String>,
+    /// Node whose [email] config the Mail tab should show/edit.
+    /// "" / "local" = master. Drives the per-node MtaDiagnostics fetch.
+    #[serde(default)]
+    mail_node: String,
 }
 
 pub async fn get_settings(
@@ -86,7 +93,7 @@ pub async fn get_settings(
     ctx: AuthCtx,
     axum::extract::Query(q): axum::extract::Query<SettingsQuery>,
 ) -> Result<Response, AppError> {
-    let (config_res, update_res, emails_res, mta_res) = tokio::join!(
+    let (config_res, update_res, emails_res) = tokio::join!(
         hyperion_rpc_client::call(&state.agent_socket, Request::AgentConfigView),
         hyperion_rpc_client::call(
             &state.agent_socket,
@@ -101,7 +108,6 @@ pub async fn get_settings(
                 limit: 5
             },
         ),
-        hyperion_rpc_client::call(&state.agent_socket, Request::MtaDiagnostics),
     );
     let (config, error) = match config_res {
         Ok(RpcResponse::AgentConfigView(c)) => (c, None),
@@ -120,10 +126,22 @@ pub async fn get_settings(
         Ok(RpcResponse::EmailLogList(rows)) => rows,
         _ => vec![],
     };
-    let mta: hyperion_types::MtaDiagnostics = match mta_res {
-        Ok(RpcResponse::MtaDiagnostics(d)) => d,
-        _ => hyperion_types::MtaDiagnostics::default(),
+    // The Mail tab edits ONE node's [email] config at a time. Fetch that
+    // node's MTA diagnostics + config over the signed channel (master = local
+    // socket). The form pre-fills from `mta.cfg_*`.
+    let mail_node = q.mail_node.trim().to_string();
+    let mail_target = if mail_node.is_empty() || mail_node == "local" {
+        None
+    } else {
+        Some(mail_node.as_str())
     };
+    let mta: hyperion_types::MtaDiagnostics =
+        match crate::dispatcher::dispatch_to_node(&state, mail_target, Request::MtaDiagnostics)
+            .await
+        {
+            Ok(RpcResponse::MtaDiagnostics(d)) => d,
+            _ => hyperion_types::MtaDiagnostics::default(),
+        };
     // Enrolled nodes — for the "send test from <node>" dropdown.
     // Best-effort: NodesList failure → empty Vec → dropdown shows
     // only the master option.
@@ -176,6 +194,7 @@ pub async fn get_settings(
         wildcard_nodes,
         raw_toml,
         mta,
+        mail_node,
         error,
         flash: q.flash,
         flash_error: q.flash_error,
@@ -371,6 +390,45 @@ pub async fn post_config(
     // this form actually declared via `_checkboxes`; cross-form
     // synthesis is the bug Kevin hit.
     synthesize_unchecked_checkboxes(&mut fields, &declared_checkboxes);
+
+    // `target_node` (present only on the Mail form) selects which node this
+    // save targets. Pull it out before the fields are persisted to agent.toml.
+    let target_node_raw = fields.remove("target_node").unwrap_or_default();
+
+    // The email section is PER-NODE: dispatch EmailConfigSet to the chosen node
+    // (master = local socket). It writes that node's agent.toml, applies
+    // postfix live, and self-restarts the node's agent. Every other section
+    // stays master-only (local write + web-driven restart, below).
+    if form.section == "email" {
+        let node_target: Option<&str> =
+            if target_node_raw.trim().is_empty() || target_node_raw == "local" {
+                None
+            } else {
+                Some(target_node_raw.trim())
+            };
+        let node_q = match node_target {
+            Some(n) => format!("&mail_node={}", urlencode(n)),
+            None => String::new(),
+        };
+        let resp = crate::dispatcher::dispatch_to_node(
+            &state,
+            node_target,
+            Request::EmailConfigSet { fields },
+        )
+        .await
+        .map_err(AppError::from)?;
+        let dest = match resp {
+            RpcResponse::EmailConfigSet => format!(
+                "/settings?flash=Mail+settings+saved+%26+applied+%E2%80%94+agent+restarting+%28~5s%29{node_q}#mail"
+            ),
+            RpcResponse::Error(e) => {
+                format!("/settings?flash_error={}{node_q}#mail", urlencode(&e.to_string()))
+            }
+            _ => return Err(AppError::Internal("unexpected response".into())),
+        };
+        return Ok(Redirect::to(&dest).into_response());
+    }
+
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
         Request::AgentConfigUpdate {
@@ -774,6 +832,31 @@ fn email_test_ip(headers: &HeaderMap, peer: SocketAddr) -> std::net::IpAddr {
 #[derive(Deserialize)]
 pub struct MtaTestForm {
     pub to: String,
+    /// Which node to act on. "" / "local" = master. The MTA card shows
+    /// the selected node's diagnostics, so its buttons target it too.
+    #[serde(default)]
+    pub target_node: String,
+}
+
+/// Body for the button-only MTA actions (queue flush/clear, reconfigure).
+/// Carries just the Mail-tab node selector so the action runs on the same
+/// node whose diagnostics are on screen.
+#[derive(Deserialize, Default)]
+pub struct NodeActionForm {
+    #[serde(default)]
+    pub target_node: String,
+}
+
+/// Resolve a Mail-tab `target_node` value into a dispatch target + the
+/// redirect query suffix that keeps the operator on that node's Mail view.
+/// "" / "local" → master (local socket, no suffix).
+fn mail_node_target(raw: &str) -> (Option<String>, String) {
+    let t = raw.trim();
+    if t.is_empty() || t == "local" {
+        (None, String::new())
+    } else {
+        (Some(t.to_string()), format!("&mail_node={}", urlencode(t)))
+    }
 }
 
 /// POST /settings/mta-queue-flush — `postqueue -f` to retry all
@@ -782,11 +865,16 @@ pub struct MtaTestForm {
 pub async fn post_mta_queue_flush(
     State(state): State<SharedState>,
     ctx: AuthCtx,
+    Form(form): Form<NodeActionForm>,
 ) -> Result<Response, AppError> {
     if !ctx.is_admin_or_higher() {
         return Ok(Redirect::to("/settings?flash_error=admin+role+required#mail").into_response());
     }
-    let resp = hyperion_rpc_client::call(&state.agent_socket, Request::MtaQueueFlush).await?;
+    let (target, node_q) = mail_node_target(&form.target_node);
+    let resp =
+        crate::dispatcher::dispatch_to_node(&state, target.as_deref(), Request::MtaQueueFlush)
+            .await
+            .map_err(AppError::from)?;
     match resp {
         RpcResponse::MtaQueueFlush { attempted, output } => {
             let msg = if attempted == 0 {
@@ -803,10 +891,13 @@ pub async fn post_mta_queue_flush(
                      check the log tail for the reason · {tail}"
                 )
             };
-            Ok(Redirect::to(&format!("/settings?flash={}#mail", urlencode(&msg))).into_response())
+            Ok(
+                Redirect::to(&format!("/settings?flash={}{node_q}#mail", urlencode(&msg)))
+                    .into_response(),
+            )
         }
         RpcResponse::Error(e) => Ok(Redirect::to(&format!(
-            "/settings?flash_error={}#mail",
+            "/settings?flash_error={}{node_q}#mail",
             urlencode(&format!("queue flush failed: {e}"))
         ))
         .into_response()),
@@ -819,11 +910,16 @@ pub async fn post_mta_queue_flush(
 pub async fn post_mta_queue_clear(
     State(state): State<SharedState>,
     ctx: AuthCtx,
+    Form(form): Form<NodeActionForm>,
 ) -> Result<Response, AppError> {
     if !ctx.is_admin_or_higher() {
         return Ok(Redirect::to("/settings?flash_error=admin+role+required#mail").into_response());
     }
-    let resp = hyperion_rpc_client::call(&state.agent_socket, Request::MtaQueueClear).await?;
+    let (target, node_q) = mail_node_target(&form.target_node);
+    let resp =
+        crate::dispatcher::dispatch_to_node(&state, target.as_deref(), Request::MtaQueueClear)
+            .await
+            .map_err(AppError::from)?;
     match resp {
         RpcResponse::MtaQueueClear { cleared, output: _ } => {
             let msg = if cleared == 0 {
@@ -831,10 +927,13 @@ pub async fn post_mta_queue_clear(
             } else {
                 format!("Queue clear · {cleared} message(s) discarded")
             };
-            Ok(Redirect::to(&format!("/settings?flash={}#mail", urlencode(&msg))).into_response())
+            Ok(
+                Redirect::to(&format!("/settings?flash={}{node_q}#mail", urlencode(&msg)))
+                    .into_response(),
+            )
         }
         RpcResponse::Error(e) => Ok(Redirect::to(&format!(
-            "/settings?flash_error={}#mail",
+            "/settings?flash_error={}{node_q}#mail",
             urlencode(&format!("queue clear failed: {e}"))
         ))
         .into_response()),
@@ -849,6 +948,7 @@ pub async fn post_mta_queue_clear(
 pub async fn post_mta_reconfigure(
     State(state): State<SharedState>,
     ctx: AuthCtx,
+    Form(form): Form<NodeActionForm>,
 ) -> Result<Response, AppError> {
     if !ctx.is_admin_or_higher() {
         return Ok(Redirect::to(
@@ -856,17 +956,24 @@ pub async fn post_mta_reconfigure(
         )
         .into_response());
     }
-    let resp = hyperion_rpc_client::call(&state.agent_socket, Request::MtaReconfigure).await?;
+    let (target, node_q) = mail_node_target(&form.target_node);
+    let resp =
+        crate::dispatcher::dispatch_to_node(&state, target.as_deref(), Request::MtaReconfigure)
+            .await
+            .map_err(AppError::from)?;
     match resp {
         RpcResponse::MtaReconfigure { mode } => {
             let msg = match mode.as_str() {
                 "skipped" => "postfix not installed — install it from /services first".to_string(),
                 m => format!("postfix reconfigured: now in {m} mode"),
             };
-            Ok(Redirect::to(&format!("/settings?flash={}#mail", urlencode(&msg))).into_response())
+            Ok(
+                Redirect::to(&format!("/settings?flash={}{node_q}#mail", urlencode(&msg)))
+                    .into_response(),
+            )
         }
         RpcResponse::Error(e) => Ok(Redirect::to(&format!(
-            "/settings?flash_error={}#mail",
+            "/settings?flash_error={}{node_q}#mail",
             urlencode(&format!("MTA reconfigure failed: {e}"))
         ))
         .into_response()),
@@ -909,9 +1016,14 @@ pub async fn post_mta_test(
                 .into_response(),
         );
     }
-    let resp =
-        hyperion_rpc_client::call(&state.agent_socket, Request::MtaTestSend { to: to.clone() })
-            .await?;
+    let (target, node_q) = mail_node_target(&form.target_node);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        target.as_deref(),
+        Request::MtaTestSend { to: to.clone() },
+    )
+    .await
+    .map_err(AppError::from)?;
     match resp {
         RpcResponse::MtaTestSend { exit_code, output } => {
             if exit_code == 0 {
@@ -921,7 +1033,7 @@ pub async fn post_mta_test(
                      on this node for delivery progress."
                 );
                 Ok(
-                    Redirect::to(&format!("/settings?flash={}#mail", urlencode(&msg)))
+                    Redirect::to(&format!("/settings?flash={}{node_q}#mail", urlencode(&msg)))
                         .into_response(),
                 )
             } else {
@@ -932,14 +1044,15 @@ pub async fn post_mta_test(
                     trimmed.chars().take(180).collect()
                 };
                 let msg = format!("sendmail exit {exit_code}: {tail}");
-                Ok(
-                    Redirect::to(&format!("/settings?flash_error={}#mail", urlencode(&msg)))
-                        .into_response(),
-                )
+                Ok(Redirect::to(&format!(
+                    "/settings?flash_error={}{node_q}#mail",
+                    urlencode(&msg)
+                ))
+                .into_response())
             }
         }
         RpcResponse::Error(e) => Ok(Redirect::to(&format!(
-            "/settings?flash_error={}#mail",
+            "/settings?flash_error={}{node_q}#mail",
             urlencode(&e.to_string())
         ))
         .into_response()),

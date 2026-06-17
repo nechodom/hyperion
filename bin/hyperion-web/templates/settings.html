@@ -115,12 +115,26 @@
    ========================================================== #}
 <div class="tab-panel" id="tab-mail">
   <div class="card">
+    {# Per-node: each node has its own [email] in agent.toml. Pick a node to
+       view + edit its mail config; saving writes + applies on THAT node. #}
+    {% if !nodes.is_empty() %}
+    <div class="field" style="max-width:24rem;margin:0 0 1rem">
+      <label for="mail_node_sel">Configuring node</label>
+      <select id="mail_node_sel" onchange="location.href='/settings?mail_node='+encodeURIComponent(this.value)+'#mail'">
+        <option value="local" {% if mail_node.is_empty() || mail_node == "local" %}selected{% endif %}>master (this node)</option>
+        {% for n in nodes %}
+        <option value="{{ n.node_id }}" {% if mail_node == n.node_id %}selected{% endif %}>{{ n.label }}{% if let Some(ip) = n.public_ip.as_ref() %} — {{ ip }}{% endif %}</option>
+        {% endfor %}
+      </select>
+      <p class="text-soft small" style="margin:0.3rem 0 0">Saving applies + reloads mail on the selected node (its agent restarts ~5 s after save).</p>
+    </div>
+    {% endif %}
     <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:1rem">
       <h2 style="margin:0">
         <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
         SMTP relay
       </h2>
-      {% if config.email.enabled %}<span class="pill ok">enabled</span>
+      {% if mta.cfg_enabled %}<span class="pill ok">enabled</span>
       {% else %}<span class="pill warn">disabled</span>{% endif %}
       <span class="grow"></span>
       <button type="button" class="btn small" id="email-autodetect">
@@ -136,41 +150,43 @@
     <form method="post" action="/settings/config" autocomplete="off">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <input type="hidden" name="section" value="email">
+      {# Which node this save targets ("" = master). Mirrors the selector above. #}
+      <input type="hidden" name="target_node" value="{{ mail_node }}">
       {# _checkboxes lists boolean fields THIS form owns. Synth-false
          applies only here. Without it, unchecking + saving was a
          no-op; with section-wide synth, saving here would silently
          reset other sections' checkboxes. #}
       <input type="hidden" name="_checkboxes" value="enabled">
       <label class="field-checkbox" style="font-weight:600">
-        <input type="checkbox" name="enabled" value="true" {% if config.email.enabled %}checked{% endif %}>
+        <input type="checkbox" name="enabled" value="true" {% if mta.cfg_enabled %}checked{% endif %}>
         Enable SMTP relay
       </label>
       <div class="field-row" style="margin-top:0.5rem">
         <div class="field" style="flex:2">
           <label for="smtp_host">Relay host</label>
-          <input id="smtp_host" name="smtp_host" type="text" value="{{ config.email.smtp_host|e }}" placeholder="smtp.postmarkapp.com">
+          <input id="smtp_host" name="smtp_host" type="text" value="{{ mta.cfg_smtp_host|e }}" placeholder="smtp.postmarkapp.com">
         </div>
         <div class="field" style="width:6rem">
           <label for="smtp_port">Port</label>
-          <input id="smtp_port" name="smtp_port" type="number" min="1" max="65535" value="{{ config.email.smtp_port }}">
+          <input id="smtp_port" name="smtp_port" type="number" min="1" max="65535" value="{{ mta.cfg_smtp_port }}">
         </div>
         <div class="field" style="width:8rem">
           <label for="security">Encryption</label>
           <select id="security" name="security">
-            <option value="starttls" {% if config.email.security == "starttls" %}selected{% endif %}>STARTTLS</option>
-            <option value="tls" {% if config.email.security == "tls" %}selected{% endif %}>TLS</option>
-            <option value="plain" {% if config.email.security == "plain" %}selected{% endif %}>none</option>
+            <option value="starttls" {% if mta.cfg_security == "starttls" %}selected{% endif %}>STARTTLS</option>
+            <option value="tls" {% if mta.cfg_security == "tls" %}selected{% endif %}>TLS</option>
+            <option value="plain" {% if mta.cfg_security == "plain" %}selected{% endif %}>none</option>
           </select>
         </div>
       </div>
       <div class="field-row">
         <div class="field" style="flex:1">
           <label for="smtp_user">Username</label>
-          <input id="smtp_user" name="smtp_user" type="text" value="{{ config.email.smtp_user|e }}">
+          <input id="smtp_user" name="smtp_user" type="text" value="{{ mta.cfg_smtp_user|e }}">
         </div>
         <div class="field" style="flex:1">
           <label for="smtp_password">Password
-            {% if config.email.smtp_password_set %}<span class="text-soft">— stored; leave blank to keep</span>{% endif %}
+            {% if mta.cfg_password_set %}<span class="text-soft">— stored; leave blank to keep</span>{% endif %}
           </label>
           <input id="smtp_password" name="smtp_password" type="password" autocomplete="new-password" value="">
         </div>
@@ -178,22 +194,22 @@
       <div class="field-row">
         <div class="field" style="flex:1">
           <label for="from_name">Sender name</label>
-          <input id="from_name" name="from_name" type="text" value="{{ config.email.from_name|e }}" placeholder="Hyperion">
+          <input id="from_name" name="from_name" type="text" value="{{ mta.cfg_from_name|e }}" placeholder="Hyperion">
         </div>
         <div class="field" style="flex:1">
           <label for="from_address">Sender address</label>
-          <input id="from_address" name="from_address" type="email" value="{{ config.email.from_address|e }}" placeholder="notifications@your-domain.cz">
+          <input id="from_address" name="from_address" type="email" value="{{ mta.cfg_from_address|e }}" placeholder="notifications@your-domain.cz">
         </div>
       </div>
       <div class="field">
-        <label for="default_to">Default recipient <span class="hint">cluster-wide notifications without a hosting-specific owner</span></label>
-        <input id="default_to" name="default_to" type="email" value="{{ config.email.default_to|e }}">
+        <label for="default_to">Default recipient <span class="hint">notifications on this node without a hosting-specific owner</span></label>
+        <input id="default_to" name="default_to" type="email" value="{{ mta.cfg_default_to|e }}">
       </div>
       <button type="submit" class="btn primary">Save mail settings</button>
     </form>
   </div>
 
-  {% if config.email.enabled %}
+  {% if mta.cfg_enabled %}
   <div class="card" style="margin-top:1rem">
     <h2>
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="3 11 22 2 13 21 11 13 3 11"/></svg>
@@ -204,16 +220,16 @@
       <div class="field" style="margin:0;min-width:14rem">
         <label for="test_from_node">From node</label>
         <select id="test_from_node" name="target_node" style="margin:0">
-          <option value="local" selected>master (this node)</option>
+          <option value="local" {% if mail_node.is_empty() || mail_node == "local" %}selected{% endif %}>master (this node)</option>
           {% for n in nodes %}
-          <option value="{{ n.node_id }}">{{ n.label }}{% if let Some(ip) = n.public_ip.as_ref() %} — {{ ip }}{% endif %}</option>
+          <option value="{{ n.node_id }}" {% if mail_node == n.node_id %}selected{% endif %}>{{ n.label }}{% if let Some(ip) = n.public_ip.as_ref() %} — {{ ip }}{% endif %}</option>
           {% endfor %}
         </select>
       </div>
       <div class="field" style="margin:0;flex:1;min-width:15rem">
         <label for="test_to">To</label>
         <input id="test_to" type="email" name="to" placeholder="you@example.cz" required
-               value="{% if !config.email.default_to.is_empty() %}{{ config.email.default_to }}{% endif %}"
+               value="{% if !mta.cfg_default_to.is_empty() %}{{ mta.cfg_default_to }}{% endif %}"
                style="margin:0">
       </div>
       <button class="btn primary" type="submit">Send test</button>
@@ -432,6 +448,7 @@
       <div class="row" style="gap:0.5rem;margin-top:0.8rem;flex-wrap:wrap">
         <form method="post" action="/settings/mta-queue-flush" style="margin:0">
           <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+          <input type="hidden" name="target_node" value="{{ mail_node }}">
           <button class="btn small" type="submit"
                   title="Tell postfix to retry every deferred message right now (postqueue -f). Useful after fixing the underlying connectivity issue.">
             <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/><path d="M20.49 15a9 9 0 0 1-14.85 3.36L1 14"/></svg>
@@ -444,6 +461,7 @@
               data-confirm-confirm-label="Discard all"
               data-confirm-variant="danger">
           <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+          <input type="hidden" name="target_node" value="{{ mail_node }}">
           <button class="btn small ghost" type="submit"
                   title="postsuper -d ALL — discard every queued message. Destructive.">
             <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
@@ -456,6 +474,7 @@
       <div class="row" style="gap:0.5rem;margin-top:1rem;flex-wrap:wrap">
         <form method="post" action="/settings/mta-reconfigure" style="margin:0">
           <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+          <input type="hidden" name="target_node" value="{{ mail_node }}">
           <button class="btn" type="submit"
                   title="Re-apply postfix config from current [email] settings without restarting the agent">
             <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/><path d="M20.49 15a9 9 0 0 1-14.85 3.36L1 14"/></svg>
@@ -465,13 +484,14 @@
         <form method="post" action="/settings/mta-test"
               style="display:flex;gap:0.5rem;align-items:flex-end;flex-wrap:wrap;margin:0;flex:1">
           <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+          <input type="hidden" name="target_node" value="{{ mail_node }}">
           <div class="field" style="margin:0;flex:1;min-width:14rem">
             <label for="mta_test_to" style="font-size:0.78rem">
               Send a test via /usr/sbin/sendmail
             </label>
             <input id="mta_test_to" name="to" type="email" required
                    placeholder="you@example.cz" style="margin:0"
-                   value="{% if !config.email.default_to.is_empty() %}{{ config.email.default_to }}{% endif %}">
+                   value="{% if !mta.cfg_default_to.is_empty() %}{{ mta.cfg_default_to }}{% endif %}">
           </div>
           <button class="btn primary" type="submit">Send via sendmail</button>
         </form>

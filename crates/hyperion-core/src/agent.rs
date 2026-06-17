@@ -664,6 +664,12 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     ) -> Result<(), RpcError> {
         self.svc.agent_config_update(section, fields).await
     }
+    async fn email_config_set(
+        &self,
+        fields: std::collections::BTreeMap<String, String>,
+    ) -> Result<(), RpcError> {
+        self.svc.email_config_set(fields).await
+    }
 
     async fn update_check(
         &self,

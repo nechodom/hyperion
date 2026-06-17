@@ -418,6 +418,13 @@ pub trait AgentApi: Send + Sync + 'static {
         fields: std::collections::BTreeMap<String, String>,
     ) -> Result<(), RpcError>;
 
+    /// Set + apply THIS node's `[email]` config (write agent.toml, reconfigure
+    /// postfix, self-restart). Dispatchable to any node for per-node mail.
+    async fn email_config_set(
+        &self,
+        fields: std::collections::BTreeMap<String, String>,
+    ) -> Result<(), RpcError>;
+
     /// Compare the running binary's git SHA against the upstream
     /// `rolling` release. Cached agent-side; pass `force_refresh: true`
     /// to bypass the cache.

@@ -10720,6 +10720,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             Err(_) => Vec::new(),
         };
 
+        // This node's editable [email] config, read fresh from its agent.toml
+        // so the Settings → Mail form pre-fills the right values per node.
+        let email_view = self
+            .agent_config_path
+            .as_ref()
+            .map(|p| load_email_section(p))
+            .unwrap_or_default();
+
         Ok(hyperion_types::MtaDiagnostics {
             mode,
             sendmail_executable,
@@ -10737,6 +10745,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             outbound_port_25_msg,
             outbound_smtp_probes,
             recent_log_tail,
+            cfg_password_set: !email_view.smtp_password.is_empty(),
+            cfg_enabled: email_view.enabled,
+            cfg_smtp_host: email_view.smtp_host,
+            cfg_smtp_port: email_view.smtp_port,
+            cfg_smtp_user: email_view.smtp_user,
+            cfg_from_address: email_view.from_address,
+            cfg_from_name: email_view.from_name,
+            cfg_security: email_view.security,
+            cfg_default_to: email_view.default_to,
         })
     }
 
@@ -11655,14 +11672,41 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         if !hyperion_adapters::postfix::is_installed().await {
             return Ok("skipped".to_string());
         }
-        match self.email_config.as_ref() {
-            Some(cfg) if !cfg.smtp_host.trim().is_empty() => {
+        // Read the [email] section fresh from agent.toml so a config the
+        // operator JUST saved (via AgentConfigUpdate) is applied here without
+        // needing an agent restart — this is the per-node apply path. Falls
+        // back to the in-memory snapshot only when no config path is wired.
+        let disk = self
+            .agent_config_path
+            .as_ref()
+            .map(|p| load_email_section(p));
+        let relay_cfg: Option<hyperion_adapters::email::EmailConfig> = match disk {
+            Some(e) if e.enabled && !e.smtp_host.trim().is_empty() => {
+                Some(hyperion_adapters::email::EmailConfig {
+                    smtp_host: e.smtp_host,
+                    smtp_port: e.smtp_port.clamp(1, 65535) as u16,
+                    smtp_user: e.smtp_user,
+                    smtp_password: e.smtp_password,
+                    from_address: e.from_address,
+                    from_name: e.from_name,
+                    security: e.security,
+                })
+            }
+            Some(_) => None, // present but disabled / no host → direct MX
+            None => self
+                .email_config
+                .as_ref()
+                .filter(|c| !c.smtp_host.trim().is_empty())
+                .cloned(),
+        };
+        match relay_cfg.as_ref() {
+            Some(cfg) => {
                 hyperion_adapters::postfix::ensure_relay_config(cfg)
                     .await
                     .map_err(|e| RpcError::Internal_with(format!("postfix relay: {e}")))?;
                 Ok("smart-host".to_string())
             }
-            _ => {
+            None => {
                 let fqdn = tokio::process::Command::new("/bin/hostname")
                     .arg("-f")
                     .output()
@@ -11939,6 +11983,44 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             "ok",
         )
         .await;
+        Ok(())
+    }
+
+    /// Set THIS node's `[email]` config and apply it. Unlike the generic
+    /// `agent_config_update` (master-only, restarted by hyperion-web), this is
+    /// dispatchable to any node over the signed channel — it writes the node's
+    /// own agent.toml, applies postfix live (no restart needed for PHP mail()),
+    /// then schedules a short delayed self-restart so the agent's in-memory
+    /// email config (used for Hyperion's own notifications) also refreshes. The
+    /// delay lets this RPC's response return before the agent bounces.
+    pub async fn email_config_set(
+        &self,
+        fields: std::collections::BTreeMap<String, String>,
+    ) -> Result<(), RpcError> {
+        self.agent_config_update("email".to_string(), fields)
+            .await?;
+        // Apply postfix immediately from the just-written agent.toml.
+        let _ = self.mta_reconfigure().await;
+        // Schedule a self-restart so self.email_config (loaded at boot) is also
+        // refreshed. Detached + delayed: same approach hyperion-web uses for
+        // the master, but done agent-side so it works on workers too.
+        tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            match tokio::process::Command::new("/usr/bin/systemctl")
+                .args(["restart", "hyperion-agent"])
+                .output()
+                .await
+            {
+                Ok(o) if o.status.success() => {
+                    tracing::info!("self-restart after email config set: ok")
+                }
+                Ok(o) => tracing::error!(
+                    stderr = %String::from_utf8_lossy(&o.stderr).trim(),
+                    "self-restart after email config set failed — restart hyperion-agent manually"
+                ),
+                Err(e) => tracing::error!(error = %e, "self-restart spawn failed"),
+            }
+        });
         Ok(())
     }
 
@@ -15525,6 +15607,55 @@ fn quota_report_shows_on(out: &str) -> bool {
 /// a clear message, not a panic. ext-family filesystems get the full
 /// remount + quotacheck + quotaon; XFS quotas only come up at mount time,
 /// so there we update fstab and ask for a reboot.
+/// Minimal view of agent.toml's `[email]` section, read fresh from disk.
+#[derive(Default)]
+struct EmailTomlView {
+    enabled: bool,
+    smtp_host: String,
+    smtp_port: i64,
+    smtp_user: String,
+    smtp_password: String,
+    from_address: String,
+    from_name: String,
+    security: String,
+    default_to: String,
+}
+
+/// Read the `[email]` section straight from agent.toml so callers see the
+/// CURRENT on-disk config — not the value loaded into the process at startup.
+/// Lets `mta_reconfigure` apply a just-saved config without an agent restart,
+/// and lets `mta_diagnostics` pre-fill the Settings → Mail form per node.
+fn load_email_section(path: &std::path::Path) -> EmailTomlView {
+    let doc = match crate::config_persist::load(path) {
+        Ok(d) => d,
+        Err(_) => return EmailTomlView::default(),
+    };
+    let t = doc.as_table().get("email");
+    let s = |k: &str| {
+        t.and_then(|x| x.get(k))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+    EmailTomlView {
+        enabled: t
+            .and_then(|x| x.get("enabled"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        smtp_host: s("smtp_host"),
+        smtp_port: t
+            .and_then(|x| x.get("smtp_port"))
+            .and_then(|v| v.as_integer())
+            .unwrap_or(0),
+        smtp_user: s("smtp_user"),
+        smtp_password: s("smtp_password"),
+        from_address: s("from_address"),
+        from_name: s("from_name"),
+        security: s("security"),
+        default_to: s("default_to"),
+    }
+}
+
 /// Ensure the `quota` user-space tools are installed (quotaon / quotacheck /
 /// setquota ship in Debian's `quota` package, absent from a base install).
 /// Installs on demand via apt — assumes root (the caller already checked).
