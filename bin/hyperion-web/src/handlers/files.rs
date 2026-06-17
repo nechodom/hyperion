@@ -151,10 +151,10 @@ pub async fn post_edit_save(
         return Ok(r);
     }
     let sel = parse_selector_public(&form.selector)?;
-    let owner_node = crate::handlers::hostings::find_hosting_anywhere(&state, sel.clone())
-        .await
-        .ok()
-        .and_then(|(_d, n)| n);
+    let owner_node = match authorize_file_write(&state, &ctx, &sel).await {
+        Ok(n) => n,
+        Err(resp) => return Ok(resp),
+    };
     let bytes_b64 = base64::engine::general_purpose::STANDARD.encode(form.content.as_bytes());
     let resp = crate::dispatcher::dispatch_to_node(
         &state,
@@ -203,6 +203,29 @@ fn require_write(ctx: &AuthCtx) -> Option<Response> {
     None
 }
 
+/// Resolve a file-manager selector's owner node AND enforce that the caller has
+/// **manage** access to that specific hosting.
+///
+/// SECURITY: the write handlers (edit-save / delete / mkdir / rename / upload)
+/// previously only checked `require_write` (= "not the viewer role"), so any
+/// tenant-scoped operator or customer could write/delete/upload into ANY
+/// hosting's tree just by passing a different selector — e.g. overwrite a
+/// victim's `wp-config.php` or drop a PHP webshell into another tenant's site
+/// (→ RCE). The READ handlers already gate with `require_hosting_access`; this
+/// brings the writes to parity (manage level). On any failure it returns the
+/// Response to send (Forbidden / NotFound), mirroring `require_hosting_access`.
+async fn authorize_file_write(
+    state: &SharedState,
+    ctx: &AuthCtx,
+    sel: &hyperion_rpc::wire::HostingSelector,
+) -> Result<Option<String>, Response> {
+    let (detail, owner_node) = crate::handlers::hostings::find_hosting_anywhere(state, sel.clone())
+        .await
+        .map_err(|e| e.into_response())?;
+    require_hosting_access(state, ctx, detail.id.as_str(), true).await?;
+    Ok(owner_node)
+}
+
 fn redirect_back(selector: &str, rel_path: &str, flash: &str) -> Response {
     let q = format!(
         "?path={}&flash={}",
@@ -234,10 +257,10 @@ pub async fn post_delete(
         return Ok(r);
     }
     let sel = parse_selector_public(&form.selector)?;
-    let owner_node = crate::handlers::hostings::find_hosting_anywhere(&state, sel.clone())
-        .await
-        .ok()
-        .and_then(|(_d, n)| n);
+    let owner_node = match authorize_file_write(&state, &ctx, &sel).await {
+        Ok(n) => n,
+        Err(resp) => return Ok(resp),
+    };
     let resp = crate::dispatcher::dispatch_to_node(
         &state,
         owner_node.as_deref(),
@@ -276,10 +299,10 @@ pub async fn post_mkdir(
         return Ok(redirect_back(&form.selector, &form.dir, "Invalid name"));
     }
     let sel = parse_selector_public(&form.selector)?;
-    let owner_node = crate::handlers::hostings::find_hosting_anywhere(&state, sel.clone())
-        .await
-        .ok()
-        .and_then(|(_d, n)| n);
+    let owner_node = match authorize_file_write(&state, &ctx, &sel).await {
+        Ok(n) => n,
+        Err(resp) => return Ok(resp),
+    };
     let rel_path = if form.dir.is_empty() {
         form.name.clone()
     } else {
@@ -330,10 +353,10 @@ pub async fn post_rename(
         format!("{}/{}", parent, form.to_name)
     };
     let sel = parse_selector_public(&form.selector)?;
-    let owner_node = crate::handlers::hostings::find_hosting_anywhere(&state, sel.clone())
-        .await
-        .ok()
-        .and_then(|(_d, n)| n);
+    let owner_node = match authorize_file_write(&state, &ctx, &sel).await {
+        Ok(n) => n,
+        Err(resp) => return Ok(resp),
+    };
     let resp = crate::dispatcher::dispatch_to_node(
         &state,
         owner_node.as_deref(),
@@ -365,6 +388,12 @@ pub async fn post_upload(
         return Ok(r);
     }
     let sel = parse_selector_public(&selector)?;
+    // Authorize (manage access to THIS hosting) before reading the up-to-100 MB
+    // multipart body, so an unauthorized cross-tenant upload is rejected early.
+    let owner_node = match authorize_file_write(&state, &ctx, &sel).await {
+        Ok(n) => n,
+        Err(resp) => return Ok(resp),
+    };
     let mut dir = String::new();
     let mut filename: Option<String> = None;
     let mut bytes: Vec<u8> = Vec::new();
@@ -424,10 +453,6 @@ pub async fn post_upload(
         format!("{}/{}", dir.trim_end_matches('/'), fname)
     };
     let bytes_b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    let owner_node = crate::handlers::hostings::find_hosting_anywhere(&state, sel.clone())
-        .await
-        .ok()
-        .and_then(|(_d, n)| n);
     let resp = crate::dispatcher::dispatch_to_node(
         &state,
         owner_node.as_deref(),

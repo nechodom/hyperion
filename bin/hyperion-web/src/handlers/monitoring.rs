@@ -30,12 +30,13 @@ pub async fn get_monitoring(
     State(state): State<SharedState>,
     ctx: AuthCtx,
 ) -> Result<Response, AppError> {
-    // Read-level guard — viewers + customers might want this
-    // overview too. We don't filter by per-hosting access here
-    // since the page summarises cluster health, but RBAC could
-    // be added if needed later.
-    if !ctx.is_authenticated() {
-        return Ok(axum::response::Redirect::to("/login").into_response());
+    // Cluster-wide overview: it fans out across every node and lists EVERY
+    // tenant's hostings (domain, node, health). The rows are not filtered by
+    // per-hosting access, so a tenant-scoped role (operator/customer/viewer)
+    // would enumerate other tenants' inventory here. Restrict to admin+;
+    // tenant-scoped users still get per-hosting monitoring on each detail page.
+    if !ctx.is_admin_or_higher() {
+        return Ok(axum::response::Redirect::to("/").into_response());
     }
 
     let mut items: Vec<MonitorOverviewItem> = Vec::new();

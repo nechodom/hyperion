@@ -93,6 +93,13 @@ pub async fn get_settings(
     ctx: AuthCtx,
     axum::extract::Query(q): axum::extract::Query<SettingsQuery>,
 ) -> Result<Response, AppError> {
+    // Cluster/agent configuration, node topology, and the recent outbound-email
+    // log across ALL hostings. Every POST under /settings is admin-gated, but
+    // the GET page was reachable by any logged-in user (the nav only hides the
+    // link). Tenant-scoped roles must not read it.
+    if !ctx.is_admin_or_higher() {
+        return Ok(Redirect::to("/").into_response());
+    }
     let (config_res, update_res, emails_res) = tokio::join!(
         hyperion_rpc_client::call(&state.agent_socket, Request::AgentConfigView),
         hyperion_rpc_client::call(
@@ -576,8 +583,12 @@ pub struct PanelProvisionForm {
 /// single <div> whose contents the page swaps in place.
 pub async fn get_panel_cert_status(
     State(state): State<SharedState>,
-    _ctx: AuthCtx,
+    ctx: AuthCtx,
 ) -> Result<Response, AppError> {
+    // Panel-cert issuance progress is admin chrome (polled from /settings).
+    if !ctx.is_admin_or_higher() {
+        return Err(AppError::Forbidden);
+    }
     let snap = match hyperion_rpc_client::call(&state.agent_socket, Request::PanelCertStatus).await
     {
         Ok(RpcResponse::PanelCertStatus(v)) => v,

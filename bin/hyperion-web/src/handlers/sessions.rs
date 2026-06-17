@@ -100,14 +100,22 @@ pub async fn post_revoke(
         Some(s) => s,
         None => return Ok(Redirect::to("/login").into_response()),
     };
-    // The agent stores `user_id` per row; calling list_for_user
-    // would let us double-check ownership before revoking. For
-    // simplicity we always pass `revoked_by = session.user_id`
-    // and let the agent decide — a malicious POST trying to
-    // revoke someone else's sid still requires CSRF + a valid
-    // session, and even then the agent could be extended to
-    // gate by ownership. Today's threat model: operators are
-    // trusted but might want to kill their own active sessions.
+    // Ownership check: the agent's revoke matches on `sid` alone, so without
+    // this any authenticated user who learns another user's session id could
+    // force-log them out (horizontal IDOR). Confirm the sid belongs to the
+    // caller before revoking it.
+    let own = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::WebSessionList {
+            user_id: session.user_id,
+        },
+    )
+    .await?;
+    let owns_sid =
+        matches!(own, RpcResponse::WebSessionList(ref v) if v.iter().any(|s| s.sid == form.sid));
+    if !owns_sid {
+        return Err(AppError::Forbidden);
+    }
     let _ = hyperion_rpc_client::call(
         &state.agent_socket,
         Request::WebSessionRevoke {

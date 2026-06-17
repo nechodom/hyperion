@@ -51,6 +51,16 @@ pub async fn get_dashboard(
     ctx: AuthCtx,
 ) -> Result<Response, AppError> {
     let (info, recent, error) = fetch(&state).await;
+    // Tenant-scoped roles (operator/customer/viewer) land on this shared page
+    // too. They must NOT see other tenants' hostings or a cluster-wide audit
+    // feed here: filter the hosting cards to their grants and (below) suppress
+    // the cluster blocks. Admin+ keeps the full cluster view.
+    let is_tenant = ctx.is_tenant_scoped();
+    let recent = if is_tenant {
+        crate::handlers::hostings::filter_by_access(&state, &ctx, recent).await
+    } else {
+        recent
+    };
     // Fetch all the dashboard inputs in parallel — they're independent
     // and the page renders against whatever survives.
     let (cluster_res, activity_res, alerts_res, health_res, history_res, update_res) = tokio::join!(
@@ -93,6 +103,13 @@ pub async fn get_dashboard(
         Ok(RpcResponse::UpdateCheck(u)) => u,
         _ => UpdateStatus::default(),
     };
+    // Suppress cluster-wide blocks for tenant-scoped roles — these aggregate
+    // across all tenants (cluster stats, the global audit feed, cluster alerts).
+    let (cluster, activity, alerts) = if is_tenant {
+        (None, Vec::new(), Vec::new())
+    } else {
+        (cluster, activity, alerts)
+    };
     let update_current_short = short_sha(&update_status.current_sha);
     let update_latest_short = short_sha(&update_status.latest_sha);
     let samples_in_window = history.samples.len();
@@ -118,7 +135,13 @@ pub async fn get_dashboard(
     // above), so this is a free pass through the same data.
     let mut hosting_domains: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
-    if let Ok(RpcResponse::HostingList(all)) =
+    if is_tenant {
+        // Tenant-scoped: only map the domains they're allowed to see (from the
+        // already access-filtered `recent`), never the full cluster list.
+        for h in &recent {
+            hosting_domains.insert(h.id.as_str().to_string(), h.domain.clone());
+        }
+    } else if let Ok(RpcResponse::HostingList(all)) =
         hyperion_rpc_client::call(&state.agent_socket, Request::HostingList).await
     {
         for h in all {

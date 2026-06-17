@@ -47,10 +47,12 @@ pub async fn get_trash(
     ctx: AuthCtx,
     axum::extract::Query(q): axum::extract::Query<TrashQuery>,
 ) -> Result<Response, AppError> {
-    // Cluster admin chrome — viewers + customers can't see the
-    // /trash overview. Operator role can (they're the ones who
-    // probably hit Delete by mistake and want to restore).
-    if ctx.is_read_only() {
+    // Cluster-wide admin chrome: this list spans EVERY tenant's deleted
+    // hostings and the actions run the irreversible hard-delete pipeline with
+    // no per-entry ownership check. `is_read_only()` only excludes the `viewer`
+    // role, which let tenant-scoped operators AND customers see + purge other
+    // tenants' trash. Restrict to admin+.
+    if !ctx.is_admin_or_higher() {
         return Ok(Redirect::to("/").into_response());
     }
 
@@ -127,7 +129,7 @@ pub async fn post_trash_restore(
     ctx: AuthCtx,
     Form(form): Form<TrashActionForm>,
 ) -> Result<Response, AppError> {
-    if ctx.is_read_only() {
+    if !ctx.is_admin_or_higher() {
         return Err(AppError::Forbidden);
     }
     let sel = crate::handlers::hostings::parse_selector_public(&form.selector)?;
@@ -160,7 +162,7 @@ pub async fn post_trash_purge(
     ctx: AuthCtx,
     Form(form): Form<TrashActionForm>,
 ) -> Result<Response, AppError> {
-    if ctx.is_read_only() {
+    if !ctx.is_admin_or_higher() {
         return Err(AppError::Forbidden);
     }
     let sel = crate::handlers::hostings::parse_selector_public(&form.selector)?;
@@ -205,11 +207,9 @@ pub async fn get_trash_count(
     State(state): State<SharedState>,
     ctx: AuthCtx,
 ) -> axum::response::Response {
-    // Same role gate as the page itself (get_trash uses is_read_only):
-    // operators CAN see /trash, so they need the badge count too. The
-    // old is_admin_or_higher gate gave operators the page but a silent
-    // 0 badge.
-    if ctx.is_read_only() {
+    // Same admin+ gate as the page itself — tenant-scoped roles don't get the
+    // cluster trash badge (they can't open the page either).
+    if !ctx.is_admin_or_higher() {
         return axum::Json(serde_json::json!({"count": 0})).into_response();
     }
     let mut total = 0usize;
