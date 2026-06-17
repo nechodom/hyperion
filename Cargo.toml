@@ -65,6 +65,10 @@ url = "2"
 http-body-util = "0.1"
 x509-parser = "0.16"
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1-rustls-tls", "builder", "ring"] }
+# Safe, sandboxed archive extraction for backup restore (replaces a bare
+# `tar -xzf` that honoured malicious `../`/symlink members while running as root).
+tar = "0.4"
+flate2 = "1"
 
 [profile.release]
 strip = "symbols"

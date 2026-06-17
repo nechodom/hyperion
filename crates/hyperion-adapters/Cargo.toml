@@ -27,6 +27,8 @@ x509-parser.workspace = true
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
 rustls-pemfile = "2"
 lettre.workspace = true
+tar.workspace = true
+flate2.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -49,9 +49,20 @@ pub async fn make_archive(
     }
     let archive_str = archive_path.display().to_string();
     let source_root_str = source_root.display().to_string();
+    // `--` ends option parsing so a `source_subdir` that ever begins with `-`
+    // can't be reinterpreted as a tar flag (tar's --use-compress-program /
+    // --to-command / --checkpoint-action=exec would be RCE as root). Callers
+    // pass the literal "htdocs" today; this keeps it safe for future callers.
     cmd::run(
         "/usr/bin/tar",
-        &["-czf", &archive_str, "-C", &source_root_str, source_subdir],
+        &[
+            "-czf",
+            &archive_str,
+            "-C",
+            &source_root_str,
+            "--",
+            source_subdir,
+        ],
     )
     .await?;
     let meta = tokio::fs::metadata(archive_path).await?;
@@ -72,6 +83,8 @@ pub async fn dump_mariadb(db_name: &str, path: &Path) -> Result<u64, AdapterErro
             "--routines",
             "--triggers",
             "--events",
+            // `--` so a db name beginning with `-` can't become a client option.
+            "--",
             db_name,
         ])
         .output()
@@ -134,11 +147,107 @@ pub async fn restore_archive(archive: &Path, target_root: &Path) -> Result<u64, 
         )));
     }
     tokio::fs::create_dir_all(target_root).await?;
-    let archive_str = archive.display().to_string();
-    let target_str = target_root.display().to_string();
-    cmd::run("/usr/bin/tar", &["-xzf", &archive_str, "-C", &target_str]).await?;
-    let meta = tokio::fs::metadata(archive).await?;
-    Ok(meta.len())
+    let archive = archive.to_path_buf();
+    let target_root = target_root.to_path_buf();
+    // Extraction is synchronous (flate2 + tar) and security-sensitive, so run it
+    // on a blocking thread with full member validation.
+    tokio::task::spawn_blocking(move || extract_tar_gz_sandboxed(&archive, &target_root))
+        .await
+        .map_err(|e| AdapterError::Other(format!("restore task join: {e}")))?
+}
+
+/// Extract a gzip-compressed tar over `target_root`, refusing any member that
+/// would escape the root.
+///
+/// SECURITY: backup archives can be fully attacker-controlled — a tenant can
+/// upload a `.tar.gz` to restore over their own hosting, and cross-node /clone
+/// imports download a bundle whose integrity digest the attacker also controls.
+/// This runs as **root** on the worker, so a bare `tar -xzf` honouring `../`
+/// members, absolute paths, or a symlink-then-write-through-it sequence would be
+/// an arbitrary root-level file write (→ full node + cross-tenant compromise).
+/// We therefore:
+///   * reject members with absolute paths or any `..`/root/prefix component;
+///   * reject symlink/hardlink members whose target is absolute or contains `..`;
+///   * re-check the joined destination stays under the canonical root, and rely
+///     on `tar`'s own `unpack_in` escape guard as a second layer;
+///   * NOT preserve permissions/ownership from the archive, so a crafted
+///     setuid-root file or attacker uid can't be planted (the service layer
+///     re-chowns the restored tree to the hosting's own user afterwards).
+fn extract_tar_gz_sandboxed(archive: &Path, target_root: &Path) -> Result<u64, AdapterError> {
+    use std::path::Component;
+
+    let archive_len = std::fs::metadata(archive)?.len();
+    let target_canon = std::fs::canonicalize(target_root)
+        .map_err(|e| AdapterError::Other(format!("restore target canonicalize: {e}")))?;
+
+    let file = std::fs::File::open(archive)?;
+    let gz = flate2::read::GzDecoder::new(file);
+    let mut ar = tar::Archive::new(gz);
+    // Do NOT trust archive-recorded perms/owner/setuid bits.
+    ar.set_preserve_permissions(false);
+    ar.set_preserve_mtime(true);
+    ar.set_overwrite(true);
+
+    let entries = ar
+        .entries()
+        .map_err(|e| AdapterError::Other(format!("restore read entries: {e}")))?;
+    for entry in entries {
+        let mut entry = entry.map_err(|e| AdapterError::Other(format!("restore entry: {e}")))?;
+        let path = entry
+            .path()
+            .map_err(|e| AdapterError::Other(format!("restore member path: {e}")))?
+            .into_owned();
+
+        let unsafe_component = |p: &Path| {
+            p.is_absolute()
+                || p.components().any(|c| {
+                    matches!(
+                        c,
+                        Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                    )
+                })
+        };
+        if unsafe_component(&path) {
+            return Err(AdapterError::Other(format!(
+                "refused unsafe archive member: {}",
+                path.display()
+            )));
+        }
+        // Symlink/hardlink targets must also stay inside the root.
+        if matches!(
+            entry.header().entry_type(),
+            tar::EntryType::Symlink | tar::EntryType::Link
+        ) {
+            if let Ok(Some(link)) = entry.link_name() {
+                if unsafe_component(&link) {
+                    return Err(AdapterError::Other(format!(
+                        "refused unsafe link member: {} -> {}",
+                        path.display(),
+                        link.display()
+                    )));
+                }
+            }
+        }
+        // Belt-and-braces: the joined path must remain under the canonical root.
+        if !target_canon.join(&path).starts_with(&target_canon) {
+            return Err(AdapterError::Other(format!(
+                "archive member escapes target root: {}",
+                path.display()
+            )));
+        }
+        // `unpack_in` applies its own traversal guard and returns Ok(false) if it
+        // would have written outside the destination.
+        let unpacked = entry
+            .unpack_in(&target_canon)
+            .map_err(|e| AdapterError::Other(format!("restore unpack: {e}")))?;
+        if !unpacked {
+            return Err(AdapterError::Other(format!(
+                "tar refused member as out-of-bounds: {}",
+                path.display()
+            )));
+        }
+    }
+    Ok(archive_len)
 }
 
 /// Restore a `mariadb-dump` SQL dump file into the named DB. Drops +
@@ -152,7 +261,8 @@ pub async fn restore_mariadb_dump(db_name: &str, sql_path: &Path) -> Result<(), 
         )));
     }
     let sql_bytes = tokio::fs::read(sql_path).await?;
-    crate::cmd::run_with_stdin("/usr/bin/mariadb", &[db_name], &sql_bytes).await?;
+    // `--` so a db name beginning with `-` can't become a mariadb client option.
+    crate::cmd::run_with_stdin("/usr/bin/mariadb", &["--", db_name], &sql_bytes).await?;
     Ok(())
 }
 
@@ -297,5 +407,88 @@ mod tests {
         let p = d.path().join("d.sql");
         let _ = dump_mariadb("information_schema", &p).await.expect("dump");
         assert!(p.exists());
+    }
+
+    #[tokio::test]
+    async fn restore_archive_round_trips_a_clean_tree() {
+        let d = tempfile::tempdir().expect("dir");
+        let src = d.path().join("source");
+        std::fs::create_dir_all(src.join("htdocs/sub")).expect("mkdir");
+        std::fs::write(src.join("htdocs/index.php"), b"<?php echo 1;").expect("w");
+        std::fs::write(src.join("htdocs/sub/a.txt"), b"hello").expect("w");
+        let archive = d.path().join("b.tar.gz");
+        make_archive(&src, "htdocs", &archive)
+            .await
+            .expect("archive");
+
+        let target = d.path().join("restore");
+        std::fs::create_dir_all(&target).expect("mkdir target");
+        let n = restore_archive(&archive, &target).await.expect("restore");
+        assert!(n > 0);
+        assert_eq!(
+            std::fs::read(target.join("htdocs/index.php")).expect("read"),
+            b"<?php echo 1;"
+        );
+        assert_eq!(
+            std::fs::read(target.join("htdocs/sub/a.txt")).expect("read"),
+            b"hello"
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_archive_refuses_parent_traversal_symlink() {
+        // The `tar` crate's Builder refuses to *write* a `..` in a regular
+        // member path, so we exercise the same `ParentDir` guard via a symlink
+        // whose target escapes upward (link names are not sanitised on write).
+        let d = tempfile::tempdir().expect("dir");
+        let archive = d.path().join("evil.tar.gz");
+        {
+            let f = std::fs::File::create(&archive).expect("create");
+            let gz = flate2::write::GzEncoder::new(f, flate2::Compression::default());
+            let mut b = tar::Builder::new(gz);
+            let mut h = tar::Header::new_gnu();
+            h.set_size(0);
+            h.set_entry_type(tar::EntryType::Symlink);
+            h.set_mode(0o777);
+            h.set_cksum();
+            b.append_link(&mut h, "htdocs/evil", "../../../../etc/cron.d/x")
+                .expect("append link");
+            b.finish().expect("finish");
+        }
+        let target = d.path().join("victim/inner");
+        std::fs::create_dir_all(&target).expect("mkdir");
+        let res = restore_archive(&archive, &target).await;
+        assert!(res.is_err(), "`..` symlink target must be refused");
+        assert!(
+            !target.join("evil").exists(),
+            "escaping symlink should not have been created"
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_archive_refuses_absolute_symlink_member() {
+        let d = tempfile::tempdir().expect("dir");
+        let archive = d.path().join("evil2.tar.gz");
+        {
+            let f = std::fs::File::create(&archive).expect("create");
+            let gz = flate2::write::GzEncoder::new(f, flate2::Compression::default());
+            let mut b = tar::Builder::new(gz);
+            let mut h = tar::Header::new_gnu();
+            h.set_size(0);
+            h.set_entry_type(tar::EntryType::Symlink);
+            h.set_mode(0o777);
+            h.set_cksum();
+            b.append_link(&mut h, "htdocs/evil", "/etc/passwd")
+                .expect("append link");
+            b.finish().expect("finish");
+        }
+        let target = d.path().join("victim");
+        std::fs::create_dir_all(&target).expect("mkdir");
+        let res = restore_archive(&archive, &target).await;
+        assert!(res.is_err(), "absolute symlink member must be refused");
+        assert!(
+            !target.join("evil").exists(),
+            "escaping symlink should not have been created"
+        );
     }
 }

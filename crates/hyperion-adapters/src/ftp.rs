@@ -14,6 +14,18 @@ use crate::{cmd, AdapterError};
 /// Set / replace the Linux password for `user` via `chpasswd`. Used
 /// after generating a fresh FTP password so the client can connect.
 pub async fn set_user_password(user: &str, password: &str) -> Result<(), AdapterError> {
+    // chpasswd reads ONE "user:password" record per line from stdin. A newline
+    // (or carriage return) in either field would inject a *second* record —
+    // e.g. a password of "x\nroot:owned" would also reset root, since the agent
+    // runs as root. `:` in the user would likewise split the record. Reject any
+    // such control character before building the line. (`user` is already a
+    // validated SystemUserName upstream; this is defence-in-depth + covers the
+    // operator-supplied password.)
+    if user.contains([':', '\n', '\r', '\0']) || password.contains(['\n', '\r', '\0']) {
+        return Err(AdapterError::Other(
+            "ftp user/password contains an illegal control character".into(),
+        ));
+    }
     // chpasswd reads "user:password\n" from stdin.
     let line = format!("{}:{}\n", user, password);
     cmd::run_with_stdin("/usr/sbin/chpasswd", &[], line.as_bytes()).await?;

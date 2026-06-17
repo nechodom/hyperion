@@ -70,6 +70,27 @@ pub async fn ensure_relay_config(cfg: &EmailConfig) -> Result<(), AdapterError> 
             "postfix relay: smtp_host is empty — cannot configure smart-host".into(),
         ));
     }
+    // `smtp_host` is interpolated into `relayhost=[host]:port` (a postconf arg)
+    // and into the sasl_passwd map body. Restrict it to hostname/IP characters
+    // so it can't carry whitespace/newlines that corrupt the map or smuggle a
+    // second postconf token — parity with the direct-delivery path's myhostname
+    // check. `smtp_user` lands in `host  user:password`, so reject `:`/controls.
+    let host = cfg.smtp_host.trim();
+    if !host
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':'))
+    {
+        return Err(AdapterError::Other(
+            "postfix relay: smtp_host has invalid characters".into(),
+        ));
+    }
+    if cfg.smtp_user.contains([':', '\n', '\r', '\0', ' ', '\t'])
+        || cfg.smtp_password.contains(['\n', '\r', '\0'])
+    {
+        return Err(AdapterError::Other(
+            "postfix relay: smtp_user/smtp_password contains an illegal character".into(),
+        ));
+    }
 
     // Port defaults to 587 (submission) which is the right choice
     // for STARTTLS / explicit-TLS. For implicit TLS (port 465) the
