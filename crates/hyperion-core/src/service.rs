@@ -14816,19 +14816,40 @@ async fn probe_http(url: &str) -> HttpProbeResult {
 /// channel. Best-effort — returns the curl exit status as Result so
 /// the caller can log without taking down the tick.
 async fn http_post_json(url: &str, json_body: &str) -> Result<(), String> {
+    // SSRF guard: the webhook URL is operator/tenant-supplied (monitor alert
+    // webhooks are set via require_hosting_access(write), i.e. by tenant-scoped
+    // operators), and these target EXTERNAL services (Slack, etc.). Resolve the
+    // host and refuse loopback/private/link-local destinations (e.g. the cloud
+    // metadata endpoint 169.254.169.254), then pin curl to the validated IP via
+    // `--resolve` so it can't re-resolve to something internal (DNS rebinding).
+    // We also drop `-L` (no redirect-following) + cap redirects + restrict the
+    // protocol, closing the redirect-to-internal pivot.
+    let resolve = ssrf_guard_resolve(url).await?;
+    let mut args: Vec<String> = vec![
+        "-sSk".into(),
+        "--max-redirs".into(),
+        "0".into(),
+        "--proto".into(),
+        "=https,http".into(),
+        "--max-time".into(),
+        "10".into(),
+    ];
+    for r in &resolve {
+        args.push("--resolve".into());
+        args.push(r.clone());
+    }
+    args.extend([
+        "-H".into(),
+        "Content-Type: application/json".into(),
+        "-X".into(),
+        "POST".into(),
+        "-d".into(),
+        json_body.to_string(),
+        url.to_string(),
+    ]);
+    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let out = tokio::process::Command::new("/usr/bin/curl")
-        .args([
-            "-skL",
-            "--max-time",
-            "10",
-            "-H",
-            "Content-Type: application/json",
-            "-X",
-            "POST",
-            "-d",
-            json_body,
-            url,
-        ])
+        .args(&arg_refs)
         .output()
         .await
         .map_err(|e| e.to_string())?;
@@ -14840,6 +14861,74 @@ async fn http_post_json(url: &str, json_body: &str) -> Result<(), String> {
             out.status,
             String::from_utf8_lossy(&out.stderr)
         ))
+    }
+}
+
+/// Resolve `url`'s host and reject internal/loopback/link-local destinations,
+/// returning `host:port:ip` strings for curl `--resolve` so the connection is
+/// pinned to the validated address (defeats DNS rebinding). SSRF guard for
+/// operator-supplied outbound URLs (e.g. alert webhooks).
+async fn ssrf_guard_resolve(url: &str) -> Result<Vec<String>, String> {
+    let parsed = url::Url::parse(url).map_err(|e| format!("invalid url: {e}"))?;
+    match parsed.scheme() {
+        "http" | "https" => {}
+        other => return Err(format!("unsupported url scheme: {other}")),
+    }
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "url has no host".to_string())?
+        .to_string();
+    let port = parsed.port_or_known_default().unwrap_or(443);
+    let addrs: Vec<std::net::IpAddr> = match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => vec![ip],
+        Err(_) => tokio::net::lookup_host((host.as_str(), port))
+            .await
+            .map_err(|e| format!("dns resolve {host}: {e}"))?
+            .map(|sa| sa.ip())
+            .collect(),
+    };
+    if addrs.is_empty() {
+        return Err(format!("{host} did not resolve"));
+    }
+    for ip in &addrs {
+        if is_internal_ip(ip) {
+            return Err(format!(
+                "refusing outbound request to internal address {ip} ({host})"
+            ));
+        }
+    }
+    Ok(addrs
+        .iter()
+        .map(|ip| format!("{host}:{port}:{ip}"))
+        .collect())
+}
+
+/// True for IP ranges an outbound webhook must never reach — loopback,
+/// RFC1918 private, link-local (incl. 169.254.169.254 cloud metadata),
+/// CGNAT, unspecified, and the IPv6 equivalents (ULA, link-local, mapped).
+fn is_internal_ip(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            v4.is_private()
+                || v4.is_loopback()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || v4.is_unspecified()
+                || v4.octets()[0] == 0
+                // 100.64.0.0/10 carrier-grade NAT
+                || (v4.octets()[0] == 100 && (64..=127).contains(&v4.octets()[1]))
+        }
+        std::net::IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || (v6.segments()[0] & 0xfe00) == 0xfc00 // ULA fc00::/7
+                || (v6.segments()[0] & 0xffc0) == 0xfe80 // link-local fe80::/10
+                || v6
+                    .to_ipv4_mapped()
+                    .map(|m| is_internal_ip(&std::net::IpAddr::V4(m)))
+                    .unwrap_or(false)
+        }
     }
 }
 
@@ -16295,6 +16384,59 @@ mod tests {
     use hyperion_types::{CertInfo, DbProvision};
     use hyperion_validate::Domain;
     use mockall::predicate::*;
+
+    // ============================================================
+    //  SSRF guard for outbound webhook URLs (is_internal_ip /
+    //  ssrf_guard_resolve). Blocks loopback/private/link-local +
+    //  the cloud metadata endpoint; pins curl to the validated IP.
+    // ============================================================
+
+    #[test]
+    fn is_internal_ip_blocks_loopback_private_and_metadata() {
+        use std::net::IpAddr;
+        let blocked = [
+            "127.0.0.1",
+            "10.1.2.3",
+            "192.168.0.5",
+            "172.16.9.9",
+            "169.254.169.254", // cloud metadata
+            "100.64.0.1",      // CGNAT
+            "0.0.0.0",
+            "::1",
+            "fe80::1",
+            "fc00::1",
+            "::ffff:127.0.0.1", // v4-mapped loopback
+        ];
+        for s in blocked {
+            let ip: IpAddr = s.parse().expect("ip");
+            assert!(is_internal_ip(&ip), "{s} should be internal");
+        }
+        let public = ["1.1.1.1", "8.8.8.8", "9.9.9.9", "2606:4700:4700::1111"];
+        for s in public {
+            let ip: IpAddr = s.parse().expect("ip");
+            assert!(!is_internal_ip(&ip), "{s} should be public");
+        }
+    }
+
+    #[tokio::test]
+    async fn ssrf_guard_rejects_internal_and_bad_scheme() {
+        // Literal internal IP — rejected without DNS.
+        assert!(
+            ssrf_guard_resolve("http://169.254.169.254/latest/meta-data")
+                .await
+                .is_err()
+        );
+        assert!(ssrf_guard_resolve("https://127.0.0.1:8080/x")
+            .await
+            .is_err());
+        // Non-http scheme.
+        assert!(ssrf_guard_resolve("file:///etc/passwd").await.is_err());
+        // A public literal IP resolves to a pinned --resolve entry.
+        let pins = ssrf_guard_resolve("https://1.1.1.1/hook")
+            .await
+            .expect("public ip ok");
+        assert_eq!(pins, vec!["1.1.1.1:443:1.1.1.1".to_string()]);
+    }
 
     // ============================================================
     //  Kernel-quota enablement: pure fstab-splice + quotaon parse.
