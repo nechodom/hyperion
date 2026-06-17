@@ -133,7 +133,7 @@
     <div class="field">
       <label for="copy_to">Target node</label>
       <select id="copy_to" name="target_node">
-        <option value="">Same node ({{ target_node|e }})</option>
+        <option value="">Same node{% if !target_node.is_empty() %} — {{ target_node|e }}{% endif %}</option>
         {% if !target_node.is_empty() %}
         <option value="local">master (this node)</option>
         {% endif %}
@@ -199,7 +199,7 @@
 .choice-title { font-weight:650; font-size:0.98rem; }
 .choice-desc { margin:0.25rem 0 0; color:var(--text-soft); font-size:0.88rem; line-height:1.5; }
 .next-steps { margin-top:1.1rem; font-size:0.9rem; }
-.next-steps strong { display:block; margin:0.6rem 0 0.3rem; }
+.next-steps > strong { display:block; margin:0.6rem 0 0.3rem; }
 .next-steps ol { margin:0; padding-left:1.25rem; line-height:1.65; color:var(--text-soft); }
 </style>
 <script>

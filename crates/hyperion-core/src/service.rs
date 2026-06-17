@@ -15525,6 +15525,41 @@ fn quota_report_shows_on(out: &str) -> bool {
 /// a clear message, not a panic. ext-family filesystems get the full
 /// remount + quotacheck + quotaon; XFS quotas only come up at mount time,
 /// so there we update fstab and ask for a reboot.
+/// Ensure the `quota` user-space tools are installed (quotaon / quotacheck /
+/// setquota ship in Debian's `quota` package, absent from a base install).
+/// Installs on demand via apt — assumes root (the caller already checked).
+/// Returns a clear, actionable message on failure instead of letting the
+/// downstream commands fail with a bare "No such file or directory".
+async fn ensure_quota_tools() -> Result<(), String> {
+    let have = |p: &str| std::path::Path::new(p).exists();
+    if have("/usr/sbin/quotaon") && have("/usr/sbin/quotacheck") {
+        return Ok(());
+    }
+    tracing::info!("quota tools missing — installing the `quota` package via apt-get");
+    let result = tokio::process::Command::new("/usr/bin/apt-get")
+        .args(["install", "-y", "--no-install-recommends", "quota"])
+        .env("DEBIAN_FRONTEND", "noninteractive")
+        .output()
+        .await;
+    match result {
+        Ok(o) if o.status.success() && have("/usr/sbin/quotaon") => Ok(()),
+        Ok(o) => {
+            let err = String::from_utf8_lossy(&o.stderr);
+            let detail = if err.trim().is_empty() {
+                format!("exit {}", o.status.code().unwrap_or(-1))
+            } else {
+                err.trim().to_string()
+            };
+            Err(format!(
+                "the `quota` package isn't installed and auto-install failed ({detail}). Install it manually on the node: sudo apt-get install quota"
+            ))
+        }
+        Err(e) => Err(format!(
+            "couldn't run apt-get to install the `quota` package: {e}. Install it manually on the node: sudo apt-get install quota"
+        )),
+    }
+}
+
 async fn enable_kernel_quotas(home_path: &str) -> hyperion_types::QuotaEnableSummary {
     use hyperion_types::QuotaEnableSummary as Summary;
     let fail = |message: String, mount_point: String, fs_type: String| Summary {
@@ -15554,6 +15589,15 @@ async fn enable_kernel_quotas(home_path: &str) -> hyperion_types::QuotaEnableSum
             String::new(),
             String::new(),
         );
+    }
+
+    // 0b. The quota user-space tools (quotaon / quotacheck / setquota) live in
+    // the Debian `quota` package, which isn't part of a base install — without
+    // it the steps below fail with "No such file or directory" (and a reboot
+    // never fixes it). This feature is meant to be automatic, so install the
+    // package on demand before we touch fstab.
+    if let Err(e) = ensure_quota_tools().await {
+        return fail(e, String::new(), String::new());
     }
 
     // 1. Discover the mount carrying home_path (longest matching mountpoint).
