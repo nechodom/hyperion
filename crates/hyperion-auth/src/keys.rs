@@ -37,7 +37,17 @@ pub fn load_or_init(path: &Path) -> io::Result<[u8; 32]> {
     use rand::RngCore;
     rand::thread_rng().fill_bytes(&mut bytes);
     let encoded = B64.encode(bytes);
-    std::fs::write(path, encoded)?;
+    // Create at 0600 before writing — this is the session/CSRF-signing key, so
+    // close the brief world-readable window the old write()-then-chmod() left.
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    f.write_all(encoded.as_bytes())?;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
     Ok(bytes)
 }

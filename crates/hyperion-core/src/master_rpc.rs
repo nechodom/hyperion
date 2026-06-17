@@ -122,11 +122,23 @@ fn init_signing_key(path: &Path) -> Result<SigningKey, MasterRpcKeyError> {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    std::fs::write(path, key.to_bytes())
+    // Create the file already at 0600 BEFORE writing any bytes — anyone with
+    // read on this file can impersonate the master to every enrolled node. The
+    // old write()-then-chmod() left a brief window where the key existed at the
+    // umask default (often 0644), racing a local unprivileged reader.
+    use std::io::Write as _;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
         .map_err(|e| MasterRpcKeyError::Write(path.display().to_string(), e))?;
-    // 0600 — anyone with read on this file can impersonate the
-    // master to any enrolled node, so be strict.
-    use std::os::unix::fs::PermissionsExt;
+    f.write_all(&key.to_bytes())
+        .map_err(|e| MasterRpcKeyError::Write(path.display().to_string(), e))?;
+    // Defensive: tighten perms if the file pre-existed looser (mode() above
+    // only applies to a freshly-created file).
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
         .map_err(|e| MasterRpcKeyError::Chmod(path.display().to_string(), e))?;
     tracing::info!(
@@ -168,7 +180,9 @@ pub fn verify_signature(
     let mut sig_buf = [0u8; 64];
     sig_buf.copy_from_slice(sig_bytes);
     let sig = ed25519_dalek::Signature::from_bytes(&sig_buf);
-    pk.verify(payload, &sig)
+    // verify_strict rejects non-canonical R/S (signature malleability) and
+    // small-order keys — the recommended default for ed25519-dalek.
+    pk.verify_strict(payload, &sig)
         .map_err(|_| "signature verify failed")
 }
 
