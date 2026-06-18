@@ -67,7 +67,10 @@ impl Server {
 
 async fn handle_conn(mut stream: UnixStream, api: Arc<dyn AgentApi>) -> std::io::Result<()> {
     let req: Request = read_frame(&mut stream).await?;
-    debug!(?req, "received request");
+    // Log the method name ONLY — never `?req`, whose Debug would format params
+    // that can carry plaintext secrets (passwords, tokens, S3 keys, webhooks,
+    // incl. ones nested in request structs).
+    debug!(method = <&'static str>::from(&req), "received request");
     let resp = dispatch(api, req).await;
     write_frame(&mut stream, &resp).await?;
     Ok(())

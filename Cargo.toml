@@ -69,6 +69,9 @@ lettre = { version = "0.11", default-features = false, features = ["smtp-transpo
 # `tar -xzf` that honoured malicious `../`/symlink members while running as root).
 tar = "0.4"
 flate2 = "1"
+# Variant-name derive so the rpc-server can log a request's method WITHOUT
+# formatting its params (which can carry plaintext secrets).
+strum = { version = "0.26", features = ["derive"] }
 
 [profile.release]
 strip = "symbols"

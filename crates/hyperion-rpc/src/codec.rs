@@ -125,7 +125,11 @@ impl std::fmt::Debug for RedactedFields {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+// `IntoStaticStr` gives `<&'static str>::from(&req)` = the variant name, so the
+// rpc-server can log WHICH request arrived without formatting its params via
+// `Debug` (params can carry plaintext secrets — passwords, tokens, S3 keys,
+// webhooks — that `debug!(?req)` would otherwise spill into the agent log).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, strum::IntoStaticStr)]
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
 pub enum Request {
     AgentInfo,
@@ -1741,6 +1745,26 @@ mod tests {
             .expect("write len");
         let result: std::io::Result<Request> = read_frame(&mut b).await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn request_method_name_is_safe_to_log() {
+        // The rpc-server logs `<&'static str>::from(&req)` instead of `?req`.
+        // It must yield the variant name and NEVER any param value — including
+        // secrets nested in the params map.
+        let mut map = std::collections::BTreeMap::new();
+        map.insert("smtp_password".to_string(), "TOPSECRETvalue".to_string());
+        let req = Request::AgentConfigUpdate {
+            section: "email".into(),
+            fields: map.into(),
+        };
+        let name: &'static str = (&req).into();
+        assert_eq!(name, "AgentConfigUpdate");
+        assert!(
+            !name.contains("TOPSECRET"),
+            "method name must not carry param secrets"
+        );
+        assert_eq!(<&'static str>::from(&Request::HostingList), "HostingList");
     }
 
     #[test]
