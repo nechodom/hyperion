@@ -4182,6 +4182,7 @@ pub async fn find_hosting_anywhere(
         Ok(RpcResponse::NodesList(v)) => v,
         _ => Vec::new(),
     };
+    let mut node_problem: Option<AppError> = None;
     for n in nodes {
         let r = crate::dispatcher::dispatch_to_node(
             state,
@@ -4191,9 +4192,19 @@ pub async fn find_hosting_anywhere(
         .await;
         match r {
             Ok(RpcResponse::HostingGet(d)) => return Ok((d, Some(n.node_id))),
-            Ok(RpcResponse::Error(_)) => continue, // not on this node
-            _ => continue,
+            Ok(_) => continue, // not on this node (NotFound / other)
+            Err(e) => {
+                // Node unreachable / errored — remember it. If the hosting
+                // turns up on no node BUT one was down, that outage is the
+                // likely reason; surfacing "node X is down" beats a misleading
+                // 404 that makes operators think the site was deleted.
+                node_problem = Some(AppError::from(e));
+                continue;
+            }
         }
+    }
+    if let Some(e) = node_problem {
+        return Err(e);
     }
     Err(AppError::NotFound)
 }
@@ -4283,7 +4294,7 @@ pub struct CheckDomainQuery {
     pub domain: String,
 }
 
-async fn list_hostings(state: &SharedState) -> Result<Vec<HostingSummary>, String> {
+pub(crate) async fn list_hostings(state: &SharedState) -> Result<Vec<HostingSummary>, String> {
     // 1. Master's own hostings (always included).
     let local_resp = hyperion_rpc_client::call(&state.agent_socket, Request::HostingList)
         .await

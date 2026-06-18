@@ -111,11 +111,13 @@ pub async fn get_search(
         return Ok(Json(SearchResp::default()).into_response());
     }
 
-    // Fan out — both calls are cheap (read-only RPC against the local
-    // agent socket) and independent. Run them in parallel; whichever
-    // fails just contributes an empty list.
+    // Hostings come from the CLUSTER-WIDE aggregator (master + every enrolled
+    // worker), not the master-local socket — otherwise ⌘K can't find any site
+    // provisioned on a worker, even though /hostings lists it. Users are
+    // master-only (auth lives on the master), so that stays a local call.
+    // Run both in parallel; whichever fails contributes an empty list.
     let (hostings_res, users_res) = tokio::join!(
-        hyperion_rpc_client::call(&state.agent_socket, RpcRequest::HostingList),
+        crate::handlers::hostings::list_hostings(&state),
         hyperion_rpc_client::call(&state.agent_socket, RpcRequest::WebUserList),
     );
 
@@ -124,7 +126,7 @@ pub async fn get_search(
     // Hostings: rank by domain. Active hostings get a small bonus so
     // suspended / failed sites of the same name don't outrank the
     // live one the operator is most likely after.
-    if let Ok(RpcResponse::HostingList(rows)) = hostings_res {
+    if let Ok(rows) = hostings_res {
         // Tenant-scoped roles (operator/viewer/customer) must only see
         // domains they hold an access grant for — otherwise the command
         // palette enumerates every domain in the cluster, bypassing the

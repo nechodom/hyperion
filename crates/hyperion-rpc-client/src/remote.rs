@@ -85,6 +85,12 @@ pub async fn call_remote(
     let mut args: Vec<String> = vec!["-fsS".into()];
     args.push("--max-time".into());
     args.push(opts.timeout_secs.to_string());
+    // Cap the response the master buffers in RAM so one malicious or buggy
+    // worker can't OOM the whole panel (the inbound agent path is bounded by
+    // MAX_FRAME, but this outbound client path was not). 192 MiB sits above
+    // MAX_FRAME (128 MiB) + base64 overhead; curl exits 63 past it.
+    args.push("--max-filesize".into());
+    args.push((192 * 1024 * 1024).to_string());
     if !opts.verify_tls {
         args.push("-k".into());
     }

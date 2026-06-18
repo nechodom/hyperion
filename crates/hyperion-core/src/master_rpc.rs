@@ -42,7 +42,7 @@
 //! transport encryption only, not authentication.
 
 use base64::{engine::general_purpose::STANDARD_NO_PAD, Engine};
-use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey, SECRET_KEY_LENGTH};
+use ed25519_dalek::{Signer, SigningKey, VerifyingKey, SECRET_KEY_LENGTH};
 use std::path::Path;
 use std::sync::Arc;
 
