@@ -144,6 +144,17 @@
         {% endfor %}
       </select>
     </div>
+    <label class="field-check" style="display:flex;gap:0.5rem;align-items:flex-start">
+      <input type="checkbox" name="issue_cert" value="true" checked style="margin-top:0.2rem">
+      <span>
+        Issue an HTTPS certificate automatically
+        <span class="text-soft small" style="display:block">
+          Runs once the copy lands — but only if the new domain's DNS already
+          points to the target node. If it doesn't yet, the copy still
+          succeeds and you can issue the cert later from the SSL tab.
+        </span>
+      </span>
+    </label>
     <button class="btn primary" type="submit">Copy site →</button>
   </form>
   <div class="card-section next-steps">
@@ -152,6 +163,7 @@
       <li>A duplicate is created at the new domain (its own files + database).</li>
       <li>You're taken to a <strong>live progress</strong> page.</li>
       <li>For WordPress sites the URLs are rewritten to the new domain automatically.</li>
+      <li>If DNS already points here, an <strong>HTTPS certificate</strong> is issued for the new domain.</li>
       <li>The original keeps running, completely untouched.</li>
     </ol>
   </div>

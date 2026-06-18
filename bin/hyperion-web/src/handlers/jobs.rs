@@ -184,6 +184,10 @@ pub async fn post_job_retry(
                     .and_then(|v| v.as_str())
                     .unwrap_or_default()
                     .to_string(),
+                issue_cert: payload
+                    .get("issue_cert")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
             };
             crate::handlers::hostings::post_hosting_clone(
                 State(state),

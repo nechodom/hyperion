@@ -5765,6 +5765,12 @@ pub struct HostingCloneForm {
     /// matches the original migration form.
     #[serde(default)]
     pub source_node: String,
+    /// When set, try to issue an HTTPS (Let's Encrypt HTTP-01) certificate for
+    /// `new_domain` once the clone lands — but ONLY if the domain's DNS already
+    /// resolves to the target node. A miss is not a failure; it's reported and
+    /// the operator can issue later from the SSL tab.
+    #[serde(default)]
+    pub issue_cert: bool,
 }
 
 pub async fn post_hosting_clone(
@@ -5821,6 +5827,7 @@ pub async fn post_hosting_clone(
         "new_domain": new_domain,
         "source_node": form.source_node,
         "target_node": target_node_str,
+        "issue_cert": form.issue_cert,
     });
     let actor_uid = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
     let actor_label = ctx.username.clone();
@@ -5830,6 +5837,7 @@ pub async fn post_hosting_clone(
     let clone_source = form.source_node.clone();
     let clone_target = target_node_str.clone();
     let clone_new_domain = new_domain.clone();
+    let clone_issue_cert = form.issue_cert;
 
     let job_id = crate::handlers::jobs::spawn_job(
         state.clone(),
@@ -5850,6 +5858,7 @@ pub async fn post_hosting_clone(
                 clone_new_domain,
                 master_url,
                 bundle_ttl,
+                clone_issue_cert,
             )
             .await;
         },
@@ -5880,6 +5889,7 @@ async fn run_clone_job(
     new_domain: String,
     master_url: String,
     bundle_ttl: i64,
+    issue_cert: bool,
 ) {
     let source_dispatch = if source_local {
         None
@@ -6046,19 +6056,95 @@ async fn run_clone_job(
         "hosting clone completed"
     );
 
+    // ---- Optional: issue an HTTPS cert for the new domain ----
+    // HTTP-01 needs the domain to resolve to the TARGET node, so we gate on a
+    // DnsCheck against that node first. A miss (DNS not pointed yet) is NOT a
+    // clone failure — we note it and the operator can issue later from the SSL
+    // tab once DNS propagates. Dispatched to the target node (where the site +
+    // its nginx now live).
+    let cert_note = if issue_cert {
+        issue_clone_cert(&state, &target_node, &new_domain, &reporter).await
+    } else {
+        String::new()
+    };
+
     reporter
         .step(
             &format!(
-                "Done — clone live at {} (id {}) on {}",
+                "Done — clone live at {} (id {}) on {}{}",
                 new_domain,
                 new_id.as_str(),
-                target_node
+                target_node,
+                cert_note
             ),
             100,
             "clone ok\n",
         )
         .await;
     reporter.finish(true, None).await;
+}
+
+/// Best-effort HTTPS issuance for a freshly-cloned domain. Returns a short
+/// suffix for the final job step ("" when issuance wasn't attempted/needed).
+/// Never fails the clone — every branch returns a note instead.
+async fn issue_clone_cert(
+    state: &SharedState,
+    target_node: &str,
+    new_domain: &str,
+    reporter: &crate::handlers::jobs::JobReporter,
+) -> String {
+    let Ok(domain) = Domain::parse(new_domain) else {
+        // The import already succeeded, so the domain was valid there; if it
+        // somehow doesn't reparse, just skip silently.
+        return String::new();
+    };
+    reporter
+        .step(
+            &format!("Checking DNS for {new_domain} before issuing HTTPS"),
+            85,
+            "",
+        )
+        .await;
+    let dns = crate::dispatcher::dispatch_to_node(
+        state,
+        Some(target_node),
+        Request::DnsCheck {
+            domain: domain.clone(),
+        },
+    )
+    .await;
+    match dns {
+        Ok(RpcResponse::DnsCheck(r)) if r.matches => {
+            reporter
+                .step(
+                    &format!("DNS points here — issuing HTTPS certificate for {new_domain}"),
+                    92,
+                    &format!("{}\n", r.note),
+                )
+                .await;
+            match crate::dispatcher::dispatch_to_node(
+                state,
+                Some(target_node),
+                Request::CertIssue { domain },
+            )
+            .await
+            {
+                Ok(RpcResponse::CertIssue(_)) => format!(" · HTTPS issued for {new_domain}"),
+                Ok(RpcResponse::Error(e)) => format!(" · HTTPS skipped — issuance failed: {e}"),
+                Ok(_) => " · HTTPS skipped — unexpected response".to_string(),
+                Err(e) => format!(" · HTTPS skipped — dispatch failed: {e}"),
+            }
+        }
+        Ok(RpcResponse::DnsCheck(r)) => format!(
+            " · HTTPS skipped — DNS for {new_domain} doesn't point to this node yet ({}); \
+             issue it from the SSL tab once DNS propagates",
+            r.note
+        ),
+        Ok(RpcResponse::Error(e)) => {
+            format!(" · HTTPS skipped — DNS check failed: {e}")
+        }
+        _ => " · HTTPS skipped — DNS check unavailable".to_string(),
+    }
 }
 
 #[derive(serde::Deserialize)]
