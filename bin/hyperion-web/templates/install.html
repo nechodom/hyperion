@@ -225,9 +225,10 @@
     </p>
     <div class="node-grid">
     {# Server-side pre-tagged: each `nodes` entry is `(NodeSummary,
-       is_test)` so the template doesn't need to do string-search
-       inside the loop. askama destructures the tuple as `(n, is_test)`. #}
-    {% for (n, is_test) in nodes %}
+       is_test, version_skew)` so the template doesn't string-search or
+       version-compare inside the loop. askama destructures the tuple
+       as `(n, is_test, version_skew)`. #}
+    {% for (n, is_test, version_skew) in nodes %}
       {# One card per node. No tables; everything is a flex column
          that grows downwards instead of right, so 6 actions don't
          spill off the viewport and the "Remove" panel doesn't have
@@ -244,7 +245,11 @@
               {% if n.is_drained %}
               <span class="pill" style="background:#64748b;color:white" title="{% if !n.drain_reason.is_empty() %}{{ n.drain_reason }}{% else %}Maintenance — auto-placer skips new work here{% endif %}">DRAINED</span>
               {% endif %}
+              {% if version_skew %}
+              <span class="pill" style="background:var(--warn);color:white" title="This worker's agent ({{ n.agent_version }}) is a different version from the master. Old agents may not support newer features — use Update node below to bring it in sync.">⚠ v{{ n.agent_version }} · out of sync</span>
+              {% else %}
               <span class="pill" style="background:var(--surface-2);color:var(--text-soft)">v{{ n.agent_version }}</span>
+              {% endif %}
             </div>
           </div>
           <code class="node-card__id" title="Immutable enrollment identifier">{{ n.node_id }}</code>

@@ -22,11 +22,14 @@ struct InstallTpl<'a> {
     htmx_version: &'static str,
     master_url: &'a str,
     invites: Vec<NodeInviteSummary>,
-    /// Each entry is `(node, is_test)` so the template can render a
-    /// TEST chip without doing string-search inside the loop —
-    /// askama doesn't parse Rust closures so we pre-resolve this
-    /// on the server side.
-    nodes: Vec<(NodeSummary, bool)>,
+    /// Each entry is `(node, is_test, version_skew)` so the template
+    /// can render the TEST chip + an "agent out of date" warning
+    /// without doing string-search or version-compare inside the loop
+    /// — askama doesn't parse Rust closures so we pre-resolve these on
+    /// the server side. `version_skew` is true when the worker's agent
+    /// version differs from the master's (an old agent may not speak
+    /// newer RPCs → confusing failures; the pill nudges an Update).
+    nodes: Vec<(NodeSummary, bool, bool)>,
     just_minted: Option<NodeInviteMint>,
     error: Option<String>,
     csrf_create: String,
@@ -47,10 +50,11 @@ struct InstallTpl<'a> {
     csrf_token: String,
 }
 
-/// Wrap `fetch_nodes` + the cluster test-node CSV into a single
-/// `Vec<(NodeSummary, is_test)>` so the template renders chips
-/// without string-searching in the loop.
-async fn fetch_nodes_with_test_flag(state: &SharedState) -> Vec<(NodeSummary, bool)> {
+/// Wrap `fetch_nodes` + the cluster test-node CSV + a master-version
+/// comparison into a single `Vec<(NodeSummary, is_test, version_skew)>`
+/// so the template renders chips without string-searching or
+/// version-comparing in the loop.
+async fn fetch_nodes_with_test_flag(state: &SharedState) -> Vec<(NodeSummary, bool, bool)> {
     let nodes = fetch_nodes(state).await.unwrap_or_default();
     let test_csv = fetch_cluster_test_node_ids(state).await;
     let test_set: std::collections::HashSet<String> = test_csv
@@ -58,13 +62,32 @@ async fn fetch_nodes_with_test_flag(state: &SharedState) -> Vec<(NodeSummary, bo
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
+    // Master's own agent version — the yardstick for "out of date".
+    // Best-effort: if we can't read it, skew is reported as false for
+    // every node (no false alarms).
+    let master_ver = fetch_master_agent_version(state).await;
     nodes
         .into_iter()
         .map(|n| {
             let is_test = test_set.contains(&n.node_id);
-            (n, is_test)
+            // Only flag when BOTH versions are known and differ — an
+            // empty worker version (pre-version schema) isn't "skewed".
+            let version_skew = match &master_ver {
+                Some(mv) => !mv.is_empty() && !n.agent_version.is_empty() && &n.agent_version != mv,
+                None => false,
+            };
+            (n, is_test, version_skew)
         })
         .collect()
+}
+
+/// Master's own agent version via a local `AgentInfo` RPC. `None` on
+/// any failure so the caller treats version skew as unknown (no pill).
+async fn fetch_master_agent_version(state: &SharedState) -> Option<String> {
+    match hyperion_rpc_client::call(&state.agent_socket, Request::AgentInfo).await {
+        Ok(RpcResponse::AgentInfo(info)) => Some(info.version),
+        _ => None,
+    }
 }
 
 pub async fn get_install(
