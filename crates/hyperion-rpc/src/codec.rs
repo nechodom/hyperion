@@ -1088,6 +1088,12 @@ pub enum Request {
         node_id: String,
         secret: String,
         agent_version: String,
+        /// Worker's inbound-listener TLS SPKI pin (curl --pinnedpubkey
+        /// form). `#[serde(default)]` so older agents that don't send it
+        /// (and the enroll path) parse fine — the master keeps any
+        /// previously-recorded pin via COALESCE. Block C, warn-only.
+        #[serde(default)]
+        tls_spki_pin: Option<String>,
     },
     WpResetPassword {
         sel: HostingSelector,

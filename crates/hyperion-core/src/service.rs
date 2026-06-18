@@ -7276,6 +7276,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 public_ip: r.public_ip,
                 enrolled_at: r.enrolled_at,
                 last_seen_at: r.last_seen_at,
+                tls_spki_pin: r.tls_spki_pin,
             })
             .collect())
     }
@@ -7352,6 +7353,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         node_id: String,
         secret: String,
         agent_version: String,
+        tls_spki_pin: Option<String>,
     ) -> Result<(), RpcError> {
         // Compute the candidate hash unconditionally — the same
         // amount of crypto work happens regardless of node_id state.
@@ -7397,6 +7399,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             &node_id,
             now_secs(),
             Some(&agent_version),
+            tls_spki_pin.as_deref(),
         )
         .await
         .map_err(|e| RpcError::Internal_with(format!("touch: {e}")))?;

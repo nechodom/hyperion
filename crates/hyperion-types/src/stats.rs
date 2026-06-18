@@ -84,6 +84,12 @@ pub struct NodeSummary {
     /// Optional operator note shown next to the "drained" pill.
     #[serde(default)]
     pub drain_reason: String,
+    /// Worker's inbound TLS SPKI pin (curl --pinnedpubkey form) as last
+    /// reported on a heartbeat. `None` until first reported (or the agent
+    /// predates Block C / has remote_rpc disabled). `#[serde(default)]`
+    /// so workers on the older wire format still deserialize.
+    #[serde(default)]
+    pub tls_spki_pin: Option<String>,
 }
 
 /// Cluster-wide aggregate. Today single-node = node_stats[0]; later

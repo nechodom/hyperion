@@ -358,8 +358,21 @@ async fn clear_invite_token_in_config(path: &std::path::Path) -> Result<(), Stri
 /// `verify_tls` mirrors `EnrollmentConfig::verify_tls` — default
 /// off so self-signed master certs work. The bearer secret is the
 /// auth; TLS is just encryption-in-transit.
-pub async fn heartbeat_loop(state_file: std::path::PathBuf, period_secs: u64, verify_tls: bool) {
+pub async fn heartbeat_loop(
+    state_file: std::path::PathBuf,
+    period_secs: u64,
+    verify_tls: bool,
+    inbound_cert: std::path::PathBuf,
+) {
     let agent_version = env!("CARGO_PKG_VERSION");
+    // Our inbound-listener TLS SPKI pin, reported to the master on every
+    // heartbeat so it can (warn-only today, enforce later) tell whether
+    // the cert presented on RPC connections matches what we say it is.
+    // Computed lazily and cached: the cert is auto-provisioned by the
+    // inbound listener, which may still be starting on the first tick.
+    // `None` when remote_rpc is disabled (no cert) — the master simply
+    // records no pin for this node, which is fine.
+    let mut tls_spki_pin: Option<String> = None;
     let period = std::time::Duration::from_secs(period_secs);
     let mut interval = tokio::time::interval(period);
     // First tick fires immediately — skip it so we wait one period after
@@ -371,11 +384,15 @@ pub async fn heartbeat_loop(state_file: std::path::PathBuf, period_secs: u64, ve
             Some(p) if !p.secret.is_empty() => p,
             _ => continue, // not enrolled yet, or pre-secret deploy
         };
+        if tls_spki_pin.is_none() {
+            tls_spki_pin = hyperion_core::tls_pin::spki_pin_from_cert_file(&inbound_cert).await;
+        }
         let url = format!("{}/api/heartbeat", p.master_url.trim_end_matches('/'));
         let body = match serde_json::to_string(&serde_json::json!({
             "node_id": p.node_id,
             "secret": p.secret,
             "agent_version": agent_version,
+            "tls_spki_pin": tls_spki_pin,
         })) {
             Ok(b) => b,
             Err(e) => {

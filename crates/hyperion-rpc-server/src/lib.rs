@@ -1101,7 +1101,11 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             node_id,
             secret,
             agent_version,
-        } => match api.node_heartbeat(node_id, secret, agent_version).await {
+            tls_spki_pin,
+        } => match api
+            .node_heartbeat(node_id, secret, agent_version, tls_spki_pin)
+            .await
+        {
             Ok(master_rpc_pubkey) => Response::NodeHeartbeat { master_rpc_pubkey },
             Err(e) => Response::Error(e),
         },
@@ -2203,6 +2207,7 @@ mod tests {
             _: String,
             _: String,
             _: String,
+            _: Option<String>,
         ) -> Result<Option<String>, RpcError> {
             Ok(None)
         }

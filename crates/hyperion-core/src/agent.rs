@@ -1204,9 +1204,10 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         node_id: String,
         secret: String,
         agent_version: String,
+        tls_spki_pin: Option<String>,
     ) -> Result<Option<String>, RpcError> {
         self.svc
-            .node_heartbeat(node_id, secret, agent_version)
+            .node_heartbeat(node_id, secret, agent_version, tls_spki_pin)
             .await?;
         Ok(self.svc.master_rpc_pubkey_b64())
     }

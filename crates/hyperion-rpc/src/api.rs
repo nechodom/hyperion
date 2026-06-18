@@ -826,6 +826,7 @@ pub trait AgentApi: Send + Sync + 'static {
         node_id: String,
         secret: String,
         agent_version: String,
+        tls_spki_pin: Option<String>,
     ) -> Result<Option<String>, RpcError>;
 
     /// List enrolled nodes (master-side `nodes` table).

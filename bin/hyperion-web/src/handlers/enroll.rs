@@ -167,6 +167,10 @@ pub struct HeartbeatRequest {
     pub secret: String,
     #[serde(default)]
     pub agent_version: String,
+    /// Worker's inbound TLS SPKI pin (Block C, warn-only). `#[serde(default)]`
+    /// so older agents that don't send it still post valid heartbeats.
+    #[serde(default)]
+    pub tls_spki_pin: Option<String>,
 }
 
 pub async fn post_heartbeat(
@@ -194,6 +198,7 @@ pub async fn post_heartbeat(
             node_id: req.node_id,
             secret: req.secret,
             agent_version: req.agent_version,
+            tls_spki_pin: req.tls_spki_pin,
         },
     )
     .await?;

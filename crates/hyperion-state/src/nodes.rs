@@ -15,6 +15,11 @@ pub struct NodeRow {
     pub public_ip: Option<String>,
     pub enrolled_via: String,
     pub secret_hash: String,
+    /// Worker's inbound-listener TLS SPKI pin (curl --pinnedpubkey form),
+    /// reported on each heartbeat. `None` until the first heartbeat that
+    /// carries it (or for nodes whose agent predates Block C). Warn-only
+    /// today; the basis for `--pinnedpubkey` enforcement later.
+    pub tls_spki_pin: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -46,9 +51,10 @@ pub async fn get_by_node_id(
         Option<String>,
         String,
         String,
+        Option<String>,
     )> = sqlx::query_as(
         "SELECT id, node_id, label, master_url, enrolled_at, last_seen_at,
-                agent_version, public_ip, enrolled_via, secret_hash
+                agent_version, public_ip, enrolled_via, secret_hash, tls_spki_pin
          FROM nodes WHERE node_id = ?",
     )
     .bind(node_id)
@@ -66,6 +72,7 @@ pub async fn get_by_node_id(
             public_ip,
             enrolled_via,
             secret_hash,
+            tls_spki_pin,
         )| NodeRow {
             id,
             node_id,
@@ -77,6 +84,7 @@ pub async fn get_by_node_id(
             public_ip,
             enrolled_via,
             secret_hash,
+            tls_spki_pin,
         },
     ))
 }
@@ -114,9 +122,10 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<NodeRow>, StateError> {
         Option<String>,
         String,
         String,
+        Option<String>,
     )> = sqlx::query_as(
         "SELECT id, node_id, label, master_url, enrolled_at, last_seen_at,
-                agent_version, public_ip, enrolled_via, secret_hash
+                agent_version, public_ip, enrolled_via, secret_hash, tls_spki_pin
          FROM nodes ORDER BY enrolled_at DESC",
     )
     .fetch_all(pool)
@@ -135,6 +144,7 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<NodeRow>, StateError> {
                 public_ip,
                 enrolled_via,
                 secret_hash,
+                tls_spki_pin,
             )| NodeRow {
                 id,
                 node_id,
@@ -146,6 +156,7 @@ pub async fn list(pool: &SqlitePool) -> Result<Vec<NodeRow>, StateError> {
                 public_ip,
                 enrolled_via,
                 secret_hash,
+                tls_spki_pin,
             },
         )
         .collect())
@@ -156,13 +167,20 @@ pub async fn touch_last_seen(
     node_id: &str,
     now: i64,
     version: Option<&str>,
+    tls_spki_pin: Option<&str>,
 ) -> Result<(), StateError> {
+    // COALESCE on both optional columns: a heartbeat that omits the pin
+    // (older agent, or remote_rpc disabled so there's no cert) keeps any
+    // previously-recorded value rather than nulling it.
     sqlx::query(
-        "UPDATE nodes SET last_seen_at = ?, agent_version = COALESCE(?, agent_version)
+        "UPDATE nodes SET last_seen_at = ?,
+                          agent_version = COALESCE(?, agent_version),
+                          tls_spki_pin  = COALESCE(?, tls_spki_pin)
          WHERE node_id = ?",
     )
     .bind(now)
     .bind(version)
+    .bind(tls_spki_pin)
     .bind(node_id)
     .execute(pool)
     .await?;
@@ -324,11 +342,18 @@ mod tests {
             secret_hash: "h".into(),
         };
         insert(&pool, &n, 100).await.expect("insert");
-        touch_last_seen(&pool, "n1", 200, Some("0.2.0"))
+        touch_last_seen(&pool, "n1", 200, Some("0.2.0"), Some("sha256//abc="))
             .await
             .expect("touch");
         let l = list(&pool).await.expect("list");
         assert_eq!(l[0].last_seen_at, 200);
         assert_eq!(l[0].agent_version, "0.2.0");
+        assert_eq!(l[0].tls_spki_pin.as_deref(), Some("sha256//abc="));
+        // Omitting the pin on a later heartbeat must NOT null it (COALESCE).
+        touch_last_seen(&pool, "n1", 300, Some("0.2.0"), None)
+            .await
+            .expect("touch2");
+        let l2 = list(&pool).await.expect("list2");
+        assert_eq!(l2[0].tls_spki_pin.as_deref(), Some("sha256//abc="));
     }
 }

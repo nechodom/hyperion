@@ -724,8 +724,11 @@ async fn main() -> anyhow::Result<()> {
     {
         let path = state_file.clone();
         let verify = cfg.enrollment.verify_tls;
+        // Same cert the inbound listener serves — the heartbeat reports
+        // its SPKI pin so the master can detect cert changes (Block C).
+        let inbound_cert = cfg.remote_rpc.tls_cert_file.clone();
         tokio::spawn(async move {
-            enroll::heartbeat_loop(path, 60, verify).await;
+            enroll::heartbeat_loop(path, 60, verify, inbound_cert).await;
         });
     }
 

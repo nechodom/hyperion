@@ -250,6 +250,9 @@
               {% else %}
               <span class="pill" style="background:var(--surface-2);color:var(--text-soft)">v{{ n.agent_version }}</span>
               {% endif %}
+              {% if let Some(pin) = n.tls_spki_pin %}
+              <span class="pill" style="background:var(--surface-2);color:var(--text-soft)" title="Inbound TLS cert SPKI pin reported by this node — curl --pinnedpubkey sha256//{{ pin }}. Recorded for warn-only change detection; enforcement is a later flip.">🔒 TLS pin on file</span>
+              {% endif %}
             </div>
           </div>
           <code class="node-card__id" title="Immutable enrollment identifier">{{ n.node_id }}</code>
