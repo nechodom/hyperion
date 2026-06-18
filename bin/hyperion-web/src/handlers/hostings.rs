@@ -1077,6 +1077,19 @@ pub async fn post_create(
                 // since WP-content profiles trigger the path above).
                 // Synchronous because there's no wp-cli I/O to wait
                 // on, just a quick limits + expiry update.
+                // Resolve the profile on the master (master-only table) so the
+                // apply works even when `target` is a worker.
+                let resolved_profile = match hyperion_rpc_client::call(
+                    &state.agent_socket,
+                    Request::ProfileGet {
+                        id: form.profile_id,
+                    },
+                )
+                .await
+                {
+                    Ok(RpcResponse::ProfileGet(p)) => Some(p),
+                    _ => None,
+                };
                 let apply = crate::dispatcher::dispatch_to_node(
                     &state,
                     target,
@@ -1084,6 +1097,7 @@ pub async fn post_create(
                         sel: HostingSelector::Id(created.id.clone()),
                         profile_id: form.profile_id,
                         skip_wp_items: false,
+                        profile: resolved_profile,
                     },
                 )
                 .await;
@@ -6641,6 +6655,23 @@ pub(crate) async fn run_profile_apply_phase(
             "profile_apply — PHP limits, expiry policy, price snapshot…\n",
         )
         .await;
+    // Resolve the profile on the master (hosting_profiles is master-only) and
+    // pass it inline, so the apply works even when the hosting lives on a
+    // worker (which has no profiles in its own DB). Reused below for WP items.
+    let profile = match hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::ProfileGet { id: profile_id },
+    )
+    .await
+    {
+        Ok(RpcResponse::ProfileGet(p)) => p,
+        _ => {
+            return Err(
+                "Couldn't read the profile from the master — re-run from the Profile tab."
+                    .to_string(),
+            )
+        }
+    };
     let apply = crate::dispatcher::dispatch_to_node(
         state,
         target,
@@ -6648,6 +6679,7 @@ pub(crate) async fn run_profile_apply_phase(
             sel: HostingSelector::Id(hosting_id.clone()),
             profile_id,
             skip_wp_items: true,
+            profile: Some(profile.clone()),
         },
     )
     .await;
@@ -6667,21 +6699,8 @@ pub(crate) async fn run_profile_apply_phase(
         }
     }
 
-    // Profiles live in the MASTER's DB — read the line lists from
-    // the local socket regardless of where the hosting lives.
-    let profile = match hyperion_rpc_client::call(
-        &state.agent_socket,
-        Request::ProfileGet { id: profile_id },
-    )
-    .await
-    {
-        Ok(RpcResponse::ProfileGet(p)) => p,
-        _ => {
-            return Err(
-                "Limits applied, but reading the profile back failed — plugins/themes were NOT installed. Re-run from the Profile tab.".to_string(),
-            );
-        }
-    };
+    // `profile` was already fetched from the master above (and passed inline to
+    // the apply); reuse it for the plugin/theme line list.
     let items = profile_wp_lines(&profile.wp_plugins, &profile.wp_themes);
     let total = items.len();
     if total == 0 {

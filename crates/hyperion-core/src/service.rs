@@ -6605,9 +6605,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         sel: HostingSelector,
         profile_id: i64,
         skip_wp_items: bool,
+        profile: Option<hyperion_types::HostingProfile>,
     ) -> Result<ProfileApply, RpcError> {
         let detail = self.get(sel).await?;
-        let p = self.profile_get(profile_id).await?;
+        // The master passes the resolved profile inline (the table is
+        // master-only). Fall back to a local lookup only when none was supplied
+        // (i.e. this node IS the master, or an old caller) — on a worker that
+        // would 404, which is the multi-node bug this closes.
+        let p = match profile {
+            Some(p) => p,
+            None => self.profile_get(profile_id).await?,
+        };
 
         // Push limits.
         let mut limits = hyperion_types::HostingLimits::defaults();

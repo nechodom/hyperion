@@ -1158,6 +1158,12 @@ pub enum Request {
         /// everything-in-one behaviour.
         #[serde(default)]
         skip_wp_items: bool,
+        /// The resolved profile, supplied by the master. `hosting_profiles`
+        /// only lives in the master's DB, so a worker can't look it up by id —
+        /// the master passes it inline. `None` (old callers) → the node falls
+        /// back to its local DB (correct only when the node IS the master).
+        #[serde(default)]
+        profile: Option<hyperion_types::HostingProfile>,
     },
     ProfileGetApply {
         sel: HostingSelector,

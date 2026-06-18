@@ -1341,8 +1341,11 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         sel: HostingSelector,
         profile_id: i64,
         skip_wp_items: bool,
+        profile: Option<hyperion_types::HostingProfile>,
     ) -> Result<ProfileApply, RpcError> {
-        self.svc.profile_apply(sel, profile_id, skip_wp_items).await
+        self.svc
+            .profile_apply(sel, profile_id, skip_wp_items, profile)
+            .await
     }
     async fn profile_get_apply(
         &self,

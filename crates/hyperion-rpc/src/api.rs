@@ -885,6 +885,7 @@ pub trait AgentApi: Send + Sync + 'static {
         sel: HostingSelector,
         profile_id: i64,
         skip_wp_items: bool,
+        profile: Option<hyperion_types::HostingProfile>,
     ) -> Result<ProfileApply, RpcError>;
     /// Return the profile-apply row for a hosting, if any.
     async fn profile_get_apply(

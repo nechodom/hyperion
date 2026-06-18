@@ -1223,7 +1223,11 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             sel,
             profile_id,
             skip_wp_items,
-        } => match api.profile_apply(sel, profile_id, skip_wp_items).await {
+            profile,
+        } => match api
+            .profile_apply(sel, profile_id, skip_wp_items, profile)
+            .await
+        {
             Ok(v) => Response::ProfileApply(v),
             Err(e) => Response::Error(e),
         },
@@ -2310,6 +2314,7 @@ mod tests {
             _: HostingSelector,
             _: i64,
             _: bool,
+            _: Option<hyperion_types::HostingProfile>,
         ) -> Result<ProfileApply, RpcError> {
             Err(RpcError::Internal {
                 message: "not supported by this agent".into(),
