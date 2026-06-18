@@ -83,8 +83,16 @@ pub async fn load_persisted(path: &std::path::Path) -> Option<PersistedNodeId> {
 }
 
 pub async fn ensure_enrolled(cfg: EnrollmentConfig) -> Result<(), String> {
-    if cfg.state_file.exists() {
-        tracing::debug!(path=%cfg.state_file.display(), "node already enrolled, skipping");
+    // Already enrolled AND no fresh invite_token configured → nothing to
+    // do. A NON-blank token on an *already-enrolled* node is the operator's
+    // explicit "re-enroll me" signal (Block B): enroll_now then presents
+    // our existing node-id.json identity (prior_node_id + prior_secret) so
+    // the master REUSES our node_id instead of orphaning our hostings, and
+    // blanks the token afterward. Without this trigger the reuse path was
+    // unreachable — enrollment only ever ran when node-id.json was absent,
+    // where there is no prior identity to present.
+    if cfg.state_file.exists() && cfg.token.trim().is_empty() {
+        tracing::debug!(path=%cfg.state_file.display(), "node already enrolled, no fresh token — skipping");
         return Ok(());
     }
     // Don't hammer the master if it's unreachable on first boot — give

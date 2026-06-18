@@ -694,12 +694,14 @@ async fn main() -> anyhow::Result<()> {
         // install leaves the node in a permanent zombie state until the
         // operator restarts hyperion-agent.
         //
-        // Loop exits cleanly once node-id.json exists (either we
-        // enrolled successfully, or `hctl enroll` ran on the side).
+        // Loop exits cleanly once we're enrolled AND no fresh invite_token
+        // remains. A non-blank token on an already-enrolled node is the
+        // Block B re-enroll trigger (see ensure_enrolled) — let it through
+        // so enroll_now can present our existing identity for id reuse.
         tokio::spawn(async move {
             let mut consecutive_failures = 0u32;
             loop {
-                if enr.state_file.exists() {
+                if enr.state_file.exists() && enr.token.trim().is_empty() {
                     if consecutive_failures > 0 {
                         tracing::info!("enrollment succeeded out-of-band, exiting retry loop");
                     }

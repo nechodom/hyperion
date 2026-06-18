@@ -7416,16 +7416,23 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok((effective_node_id, secret_plain))
     }
 
-    /// Decide which `node_id` a (re-)enrollment should land on:
-    /// - no prior id → the freshly-minted `candidate` (today's behavior).
-    /// - prior id presented but FREE (no such row) → adopt it. Enables
-    ///   master-side recovery (DB restored without this node) without a
-    ///   victim, since the id isn't in use.
+    /// Decide which `node_id` a (re-)enrollment should land on. Reuse is
+    /// granted ONLY on proven continuity:
     /// - prior id IN USE + `prior_secret` matches (constant-time) → reuse
-    ///   it: proven continuity, so the box keeps its identity + hostings.
-    /// - prior id in use + wrong/empty secret → the fresh `candidate`.
-    ///   Anti-hijack: you can never take over an in-use node without its
-    ///   secret; the worst a bad token-holder can do is get a new id.
+    ///   it: the box keeps its identity + hostings, secret is re-minted.
+    /// - everything else (no prior id, an UNKNOWN prior id, or an in-use
+    ///   id with a wrong/empty secret) → the freshly-minted `candidate`.
+    ///
+    /// There is deliberately NO "adopt a free id" path. `node_remove
+    /// --force` leaves a node_id free in the `nodes` table while its
+    /// hostings still reference it; secret-lessly adopting that id would
+    /// let any invite-token holder who knows the (non-secret, UI-rendered)
+    /// id claim it, point an attacker public_ip at it, and then receive
+    /// the master's SIGNED management RPCs for those hostings (the Block C
+    /// TLS pin is warn-only, so nothing blocks it). So we require the
+    /// per-node secret for EVERY reuse. Recovering hostings after a node
+    /// was removed / the master DB restored is instead an explicit,
+    /// authenticated operator action: `hctl node reassign`.
     ///
     /// Constant-time secret compare (mirrors node_heartbeat) so callers
     /// can't time-probe which node_ids exist.
@@ -7443,9 +7450,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .await
             .map_err(|e| RpcError::Internal_with(format!("node lookup: {e}")))?;
         let row = match existing {
+            // Unknown prior id → fresh. NEVER adopt secret-lessly: that was
+            // a node-takeover vector (see the doc comment above).
             None => {
-                tracing::info!(node = prior_id, "re-enroll: adopting free prior node_id");
-                return Ok(prior_id.to_string());
+                tracing::warn!(
+                    node = prior_id,
+                    "re-enroll: presented a prior node_id the master does not know — \
+                     issuing a FRESH id (no secret-less adoption)"
+                );
+                return Ok(candidate.to_string());
             }
             Some(r) => r,
         };
@@ -16975,6 +16988,128 @@ mod tests {
         tokio::fs::write(&p, b"{}").await.unwrap();
         let s = svc_with_state_file(Some(p)).await;
         assert!(s.is_worker_node());
+    }
+
+    // ============================================================
+    //  Block B idempotent re-enrollment identity resolution.
+    //  SECURITY: a presented prior_node_id is reused ONLY on a
+    //  matching secret — never adopted secret-lessly (that was a
+    //  node-takeover vector).
+    // ============================================================
+
+    #[tokio::test]
+    async fn reenroll_never_adopts_unknown_id_without_secret() {
+        let pool = open_memory().await.expect("db");
+        let s = svc(pool, MockAdapterPort::new());
+        let mint = s.invite_create("n".into(), 3600).await.expect("invite");
+        // Present a prior_node_id the master has never seen + a garbage secret.
+        let (effective, _secret) = s
+            .enroll_consume(
+                mint.token.clone(),
+                "1.2.3.4".into(),
+                "candidate_fresh".into(),
+                "label".into(),
+                "v1".into(),
+                Some("9.9.9.9".into()),
+                Some("ghost-node".into()),
+                Some("garbage".into()),
+            )
+            .await
+            .expect("enroll");
+        assert_eq!(
+            effective, "candidate_fresh",
+            "must NOT adopt the unknown 'ghost-node' id — fresh candidate only"
+        );
+        assert!(
+            hyperion_state::nodes::get_by_node_id(&s.pool, "ghost-node")
+                .await
+                .unwrap()
+                .is_none(),
+            "the unknown id must never materialize as a node row"
+        );
+    }
+
+    #[tokio::test]
+    async fn reenroll_reuses_id_when_secret_matches() {
+        let pool = open_memory().await.expect("db");
+        let s = svc(pool, MockAdapterPort::new());
+        let m1 = s.invite_create("n".into(), 3600).await.expect("i1");
+        let (id1, secret1) = s
+            .enroll_consume(
+                m1.token.clone(),
+                "1.2.3.4".into(),
+                "cand_1".into(),
+                "label".into(),
+                "v1".into(),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("e1");
+        assert_eq!(id1, "cand_1");
+        // Re-enroll presenting that id + the CORRECT secret → reuse same id.
+        let m2 = s.invite_create("n".into(), 3600).await.expect("i2");
+        let (id2, secret2) = s
+            .enroll_consume(
+                m2.token.clone(),
+                "1.2.3.4".into(),
+                "cand_2".into(),
+                "label".into(),
+                "v2".into(),
+                None,
+                Some(id1.clone()),
+                Some(secret1.clone()),
+            )
+            .await
+            .expect("e2");
+        assert_eq!(id2, "cand_1", "reused the prior id, not the new candidate");
+        assert_ne!(secret2, secret1, "secret re-minted on reuse");
+        assert_eq!(
+            hyperion_state::nodes::list(&s.pool).await.unwrap().len(),
+            1,
+            "no duplicate node row on reuse"
+        );
+    }
+
+    #[tokio::test]
+    async fn reenroll_with_wrong_secret_gets_fresh_id() {
+        let pool = open_memory().await.expect("db");
+        let s = svc(pool, MockAdapterPort::new());
+        let m1 = s.invite_create("n".into(), 3600).await.expect("i1");
+        let (id1, _s1) = s
+            .enroll_consume(
+                m1.token.clone(),
+                "1.2.3.4".into(),
+                "cand_1".into(),
+                "label".into(),
+                "v1".into(),
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect("e1");
+        let m2 = s.invite_create("n".into(), 3600).await.expect("i2");
+        let (id2, _s2) = s
+            .enroll_consume(
+                m2.token.clone(),
+                "1.2.3.4".into(),
+                "cand_2".into(),
+                "label".into(),
+                "v2".into(),
+                None,
+                Some(id1.clone()),
+                Some("WRONG".into()),
+            )
+            .await
+            .expect("e2");
+        assert_eq!(id2, "cand_2", "wrong secret → fresh id, no takeover");
+        assert_eq!(
+            hyperion_state::nodes::list(&s.pool).await.unwrap().len(),
+            2,
+            "two distinct node rows — the in-use one was not hijacked"
+        );
     }
 
     // ============================================================
