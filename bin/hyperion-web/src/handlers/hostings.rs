@@ -2074,6 +2074,44 @@ pub struct BackupNowForm {
     pub target_node: String,
 }
 
+/// Resolve the master's enabled S3 backup targets into upload-ready form
+/// (secret read inline from its 0600 file — hyperion-web runs as root with
+/// ReadWritePaths=/etc/hyperion). These ride in the `BackupNow` request so the
+/// OWNING node — master OR worker — can push the backup off-site even though
+/// the `backup_targets` table only lives in the master's DB. Best-effort: a
+/// target whose secret file can't be read is skipped.
+pub(crate) async fn resolve_s3_targets(state: &SharedState) -> Vec<hyperion_types::S3BackupTarget> {
+    let rows = match hyperion_rpc_client::call(&state.agent_socket, Request::BackupTargetList).await
+    {
+        Ok(RpcResponse::BackupTargetList(v)) => v,
+        _ => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for r in rows {
+        if !r.enabled || r.kind != "s3" {
+            continue;
+        }
+        let Some(path) = r.secret_key_id.as_deref() else {
+            continue;
+        };
+        let secret = match tokio::fs::read_to_string(path).await {
+            Ok(s) => s.trim().to_string(),
+            Err(_) => continue,
+        };
+        out.push(hyperion_types::S3BackupTarget {
+            name: r.name,
+            endpoint: r.endpoint,
+            bucket: r.bucket,
+            region: r.region,
+            access_key_id: r.access_key_id,
+            secret_access_key: secret,
+            age_recipient: r.age_recipient,
+            retention_daily: r.retention_daily,
+        });
+    }
+    out
+}
+
 pub async fn post_backup_now(
     State(state): State<SharedState>,
     ctx: AuthCtx,
@@ -2084,8 +2122,10 @@ pub async fn post_backup_now(
         Err(r) => return Ok(r),
     };
     let target = node_target(&form.target_node);
+    let s3_targets = resolve_s3_targets(&state).await;
     let resp =
-        crate::dispatcher::dispatch_to_node(&state, target, Request::BackupNow { sel }).await?;
+        crate::dispatcher::dispatch_to_node(&state, target, Request::BackupNow { sel, s3_targets })
+            .await?;
     let sel_url = urlencoding(&form.selector);
     match resp {
         RpcResponse::BackupNow(_) => {
@@ -5463,6 +5503,13 @@ pub async fn post_bulk(
     let activate = matches!(form.activate.as_deref(), Some("on" | "true" | "1"));
     let mut ok = 0;
     let mut errs: Vec<String> = vec![];
+    // Resolve S3 targets once for the whole bulk run (only the backup action
+    // uses them); each backup dispatch carries them to the owning node.
+    let bulk_s3_targets = if form.action == "backup" {
+        resolve_s3_targets(&state).await
+    } else {
+        Vec::new()
+    };
     for sel_str in &form.selected {
         let sel = match parse_selector(sel_str) {
             Ok(s) => s,
@@ -5489,7 +5536,10 @@ pub async fn post_bulk(
                 },
             },
             "resume" => Request::HostingResume(sel),
-            "backup" => Request::BackupNow { sel },
+            "backup" => Request::BackupNow {
+                sel,
+                s3_targets: bulk_s3_targets.clone(),
+            },
             "delete" => Request::HostingDelete {
                 sel,
                 opts: hyperion_rpc::wire::DeleteOpts {

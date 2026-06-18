@@ -394,8 +394,12 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.scheduler_tick().await
     }
 
-    async fn backup_now(&self, sel: HostingSelector) -> Result<BackupRunWire, RpcError> {
-        self.svc.backup_now(sel).await
+    async fn backup_now(
+        &self,
+        sel: HostingSelector,
+        s3_targets: Vec<hyperion_types::S3BackupTarget>,
+    ) -> Result<BackupRunWire, RpcError> {
+        self.svc.backup_now(sel, s3_targets).await
     }
 
     async fn backup_list(

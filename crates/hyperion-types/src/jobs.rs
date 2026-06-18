@@ -119,6 +119,39 @@ pub struct BackupTargetView {
     pub updated_at: i64,
 }
 
+/// A backup S3 target RESOLVED for upload — the secret is inline (read from
+/// its 0600 file on the master). Travels in the `BackupNow` request so a
+/// worker can push its backup off-site even though the `backup_targets` table
+/// only lives in the master's DB. The request is signed + TLS-encrypted
+/// master→worker, and the rpc-server logs method names only, so the secret
+/// neither leaks on the wire nor into logs. `Debug` masks the secret anyway.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct S3BackupTarget {
+    pub name: String,
+    pub endpoint: String,
+    pub bucket: String,
+    pub region: String,
+    pub access_key_id: String,
+    pub secret_access_key: String,
+    pub age_recipient: Option<String>,
+    pub retention_daily: i64,
+}
+
+impl std::fmt::Debug for S3BackupTarget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("S3BackupTarget")
+            .field("name", &self.name)
+            .field("endpoint", &self.endpoint)
+            .field("bucket", &self.bucket)
+            .field("region", &self.region)
+            .field("access_key_id", &self.access_key_id)
+            .field("secret_access_key", &"<redacted>")
+            .field("age_recipient", &self.age_recipient)
+            .field("retention_daily", &self.retention_daily)
+            .finish()
+    }
+}
+
 /// Outcome of a "test connection" probe — operator clicks the
 /// button on /settings/backups; the agent does a PUT + DELETE
 /// round-trip against the configured target and reports.

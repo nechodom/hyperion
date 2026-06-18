@@ -219,6 +219,12 @@ pub enum Request {
     SchedulerTick,
     BackupNow {
         sel: HostingSelector,
+        /// Enabled S3 targets resolved on the master (secrets inline) — the
+        /// node uploads to these after the local backup. Empty for internal /
+        /// transient backups. `#[serde(default)]` so a pre-field master/worker
+        /// pair stays compatible.
+        #[serde(default)]
+        s3_targets: Vec<hyperion_types::S3BackupTarget>,
     },
     BackupList {
         sel: HostingSelector,

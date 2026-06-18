@@ -224,7 +224,7 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             },
             Err(e) => Response::Error(e),
         },
-        Request::BackupNow { sel } => match api.backup_now(sel).await {
+        Request::BackupNow { sel, s3_targets } => match api.backup_now(sel, s3_targets).await {
             Ok(v) => Response::BackupNow(v),
             Err(e) => Response::Error(e),
         },
@@ -1484,7 +1484,11 @@ mod tests {
         async fn scheduler_tick(&self) -> Result<i64, RpcError> {
             Ok(0)
         }
-        async fn backup_now(&self, _: HostingSelector) -> Result<BackupRunWire, RpcError> {
+        async fn backup_now(
+            &self,
+            _: HostingSelector,
+            _: Vec<hyperion_types::S3BackupTarget>,
+        ) -> Result<BackupRunWire, RpcError> {
             Err(RpcError::Internal {
                 message: "not supported by this agent".into(),
             })

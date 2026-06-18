@@ -218,7 +218,11 @@ pub trait AgentApi: Send + Sync + 'static {
     /// every `[scheduler] tick_interval` seconds in the background.
     async fn scheduler_tick(&self) -> Result<i64, RpcError>;
 
-    async fn backup_now(&self, sel: HostingSelector) -> Result<BackupRunWire, RpcError>;
+    async fn backup_now(
+        &self,
+        sel: HostingSelector,
+        s3_targets: Vec<hyperion_types::S3BackupTarget>,
+    ) -> Result<BackupRunWire, RpcError>;
     async fn backup_list(
         &self,
         sel: HostingSelector,

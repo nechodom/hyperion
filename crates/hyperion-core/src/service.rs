@@ -3948,6 +3948,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     pub async fn backup_now(
         &self,
         sel: HostingSelector,
+        s3_targets: Vec<hyperion_types::S3BackupTarget>,
     ) -> Result<hyperion_types::BackupRunWire, RpcError> {
         let detail = self.get(sel).await?;
         let backup_root = self.paths.backup_root.clone();
@@ -4129,7 +4130,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     files.push(p.clone());
                 }
                 files.push(manifest_path);
-                self.push_backup_to_s3(&detail, &files).await;
+                self.push_backup_to_s3(&detail, &files, &s3_targets).await;
             }
             Err(e) => {
                 // Remove any partial/truncated files a failed run (e.g. ENOSPC)
@@ -4163,45 +4164,26 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(run_to_wire(r))
     }
 
-    /// Push the just-made backup files to every enabled S3 target. Best-effort:
-    /// reads each target's secret from its 0600 file, uploads each file
-    /// (age-encrypted + streamed when a recipient is set), prunes the remote to
-    /// the newest `retention_daily` backups, and records one audit row per
-    /// target. Never errors — the local backup already succeeded.
+    /// Push the just-made backup files to every S3 target the master resolved
+    /// and passed in (secret inline). Works the same whether this node is the
+    /// master or a worker — the targets table only lives on the master, so the
+    /// targets travel in the BackupNow request rather than being read from this
+    /// node's (possibly empty) DB. Best-effort: uploads each file (age-encrypted
+    /// + streamed when a recipient is set), prunes the remote to the newest
+    /// `retention_daily` backups, and audits one row per target. Never errors.
     async fn push_backup_to_s3(
         &self,
         detail: &hyperion_types::HostingDetail,
         files: &[std::path::PathBuf],
+        targets: &[hyperion_types::S3BackupTarget],
     ) {
-        let targets = match hyperion_state::backup_targets::list(&self.pool).await {
-            Ok(t) => t,
-            Err(e) => {
-                tracing::warn!(error=%e, "backup_targets list failed — skipping S3 push");
-                return;
-            }
-        };
-        for row in targets.into_iter().filter(|r| r.enabled && r.kind == "s3") {
-            let secret = match row.secret_key_id.as_deref() {
-                Some(path) => match tokio::fs::read_to_string(path).await {
-                    Ok(s) => s.trim().to_string(),
-                    Err(e) => {
-                        self.audit_s3(detail, &row.name, false, &format!("secret unreadable: {e}"))
-                            .await;
-                        continue;
-                    }
-                },
-                None => {
-                    self.audit_s3(detail, &row.name, false, "no secret stored for target")
-                        .await;
-                    continue;
-                }
-            };
+        for row in targets {
             let target = hyperion_adapters::backup::S3UploadTarget {
                 endpoint: &row.endpoint,
                 bucket: &row.bucket,
                 region: &row.region,
                 access_key_id: &row.access_key_id,
-                secret_access_key: &secret,
+                secret_access_key: &row.secret_access_key,
                 age_recipient: row.age_recipient.as_deref(),
             };
             // Keys live under <system_user>/ ; the trailing slash keeps the
@@ -5551,7 +5533,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
         // Reuse backup_now to produce the archive — it's already the
         // most-tested code path for "snapshot this hosting to disk".
-        let run = self.backup_now(sel.clone()).await?;
+        // Internal/transient safety backup — local only (no off-site targets).
+        let run = self.backup_now(sel.clone(), Vec::new()).await?;
         let archive_path_str = run
             .archive_path
             .as_ref()
@@ -13984,7 +13967,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
         // 1. Snapshot prod (also our restore source).
         let run = self
-            .backup_now(HostingSelector::Id(prod.id.clone()))
+            .backup_now(HostingSelector::Id(prod.id.clone()), Vec::new())
             .await?;
         let archive = run
             .archive_path
@@ -14085,11 +14068,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
         // 1. Pre-push safety backup of prod (so a bad push is recoverable).
         let _ = self
-            .backup_now(HostingSelector::Id(prod.id.clone()))
+            .backup_now(HostingSelector::Id(prod.id.clone()), Vec::new())
             .await?;
         // 2. Snapshot staging — our push source.
         let run = self
-            .backup_now(HostingSelector::Id(staging.id.clone()))
+            .backup_now(HostingSelector::Id(staging.id.clone()), Vec::new())
             .await?;
         let archive = run
             .archive_path
