@@ -8118,6 +8118,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 target: e.target,
                 payload_json: e.payload_json,
                 result: e.result,
+                // Master tags this after a cross-node fan-in; the agent
+                // can't know its own cluster label.
+                node: None,
             })
             .collect())
     }

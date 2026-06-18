@@ -1622,6 +1622,12 @@ pub struct AuditEntryWire {
     pub target: Option<String>,
     pub payload_json: String,
     pub result: String,
+    /// Which node this entry came from, as a display label. The agent
+    /// leaves this `None` (it doesn't know its own cluster label); the
+    /// master TAGS it after a cross-node fan-in so /audit can show a node
+    /// column. `#[serde(default)]` keeps older agents' entries parseable.
+    #[serde(default)]
+    pub node: Option<String>,
 }
 
 pub async fn write_frame<W, T>(w: &mut W, value: &T) -> std::io::Result<()>

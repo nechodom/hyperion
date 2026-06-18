@@ -110,6 +110,7 @@
           <tr>
             <th>ID</th>
             <th>Time</th>
+            <th>Node</th>
             <th>Actor</th>
             <th>Action</th>
             <th>Target</th>
@@ -121,6 +122,7 @@
           <tr>
             <td><code>{{ r.id }}</code></td>
             <td class="muted numeric" title="{{ r.ts }}">{{ crate::handlers::stats::fmt_ago(r.ts) }}</td>
+            <td>{% if let Some(node) = r.node %}<span class="pill" style="background:var(--surface-2);color:var(--text-soft)">{{ node }}</span>{% else %}<span class="text-soft">—</span>{% endif %}</td>
             <td><strong>{{ r.actor_label }}</strong></td>
             <td><code>{{ r.action }}</code></td>
             <td>{% if let Some(t) = r.target %}<code>{{ t }}</code>{% else %}<span class="text-soft">—</span>{% endif %}</td>

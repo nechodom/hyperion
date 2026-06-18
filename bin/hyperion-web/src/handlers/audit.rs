@@ -91,12 +91,43 @@ pub async fn get_audit(
         );
     }
     let limit = q.limit.clamp(1, 1000);
+    // Cluster-wide audit fan-in. The master's own log PLUS every worker's:
+    // a worker agent audits the operations executed on it (master-
+    // dispatched + its own scheduled jobs / renewals / bans), which were
+    // otherwise invisible on this page. Each entry is tagged with the node
+    // it came from; the merged set is sorted by ts desc and truncated to
+    // `limit`. NOTE: per-node audit hash chains are NOT merged — chain
+    // verification (the Verify-chain button) stays per-node / master-only.
     let resp = hyperion_rpc_client::call(&state.agent_socket, Request::AuditList { limit }).await?;
-    let all = match resp {
+    let mut all = match resp {
         RpcResponse::AuditList(v) => v,
         RpcResponse::Error(e) => return Err(AppError::Rpc(e.to_string())),
         _ => return Err(AppError::Internal("unexpected response".into())),
     };
+    for e in &mut all {
+        e.node = Some("master".to_string());
+    }
+    // Workers, best-effort (one slow/offline node never blocks the page —
+    // see dispatcher::fan_out).
+    let workers = crate::handlers::hostings::fetch_remote_nodes(&state)
+        .await
+        .unwrap_or_default();
+    for (n, resp) in crate::dispatcher::fan_out(&state, workers, Request::AuditList { limit }).await
+    {
+        if let RpcResponse::AuditList(mut remote) = resp {
+            let label = if n.label.is_empty() {
+                n.node_id.clone()
+            } else {
+                n.label.clone()
+            };
+            for e in &mut remote {
+                e.node = Some(label.clone());
+            }
+            all.extend(remote);
+        }
+    }
+    all.sort_by(|a, b| b.ts.cmp(&a.ts));
+    all.truncate(limit as usize);
     let total_count = all.len();
 
     let needle = q.q.trim().to_lowercase();
