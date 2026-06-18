@@ -103,6 +103,7 @@
       <thead>
         <tr>
           <th>Sent</th>
+          <th>Node</th>
           <th>Kind</th>
           <th>State</th>
           <th>To</th>
@@ -115,6 +116,7 @@
       {% for e in rows %}
         <tr>
           <td class="muted numeric" title="{{ e.sent_at }}">{{ crate::handlers::stats::fmt_ago(e.sent_at) }}</td>
+          <td>{% if let Some(node) = e.node %}<span class="pill" style="background:var(--surface-2);color:var(--text-soft)">{{ node }}</span>{% else %}<span class="text-soft">—</span>{% endif %}</td>
           <td><span class="tag">{{ e.kind }}</span></td>
           <td>
             {% if e.state == "ok" %}

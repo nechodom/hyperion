@@ -6084,6 +6084,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 error: r.error,
                 smtp_code: r.smtp_code,
                 sent_at: r.sent_at,
+                // Master tags this after a cross-node fan-in.
+                node: None,
             })
             .collect())
     }

@@ -594,6 +594,12 @@ pub struct EmailLogEntry {
     pub error: Option<String>,
     pub smtp_code: Option<String>,
     pub sent_at: i64,
+    /// Node this entry came from, as a display label. The agent leaves it
+    /// `None`; the master tags it after a cross-node fan-in so the
+    /// cluster-wide /emails page can show a node column. `#[serde(default)]`
+    /// keeps older agents' entries parseable.
+    #[serde(default)]
+    pub node: Option<String>,
 }
 
 /// Per-hosting FTP account summary: who can log in, when their

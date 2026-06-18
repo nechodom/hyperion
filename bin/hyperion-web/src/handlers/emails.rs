@@ -72,20 +72,43 @@ pub async fn get_emails(
     // Fetch a generous page — 200 covers a few days of activity on a
     // busy node without paginating yet. Distinguish "no rows" from
     // "agent errored" so the template can surface the right hint.
-    let (raw, rpc_error): (Vec<EmailLogEntry>, Option<String>) = match hyperion_rpc_client::call(
-        &state.agent_socket,
-        Request::EmailLogList {
-            hosting_id,
-            limit: 200,
-        },
-    )
-    .await
-    {
-        Ok(RpcResponse::EmailLogList(r)) => (r, None),
-        Ok(RpcResponse::Error(e)) => (vec![], Some(e.to_string())),
-        Ok(_) => (vec![], Some("unexpected agent response".into())),
-        Err(e) => (vec![], Some(format!("rpc: {e}"))),
+    //
+    // Cluster-wide fan-in: outbound mail from sites is logged on the node
+    // that SENT it, so a worker's sites' mail is invisible from the
+    // master-local log. Fetch master + every worker (best-effort), tag
+    // each entry with its node, merge + sort by sent_at desc, cap at 200.
+    let req = Request::EmailLogList {
+        hosting_id,
+        limit: 200,
     };
+    let (mut raw, rpc_error): (Vec<EmailLogEntry>, Option<String>) =
+        match hyperion_rpc_client::call(&state.agent_socket, req.clone()).await {
+            Ok(RpcResponse::EmailLogList(r)) => (r, None),
+            Ok(RpcResponse::Error(e)) => (vec![], Some(e.to_string())),
+            Ok(_) => (vec![], Some("unexpected agent response".into())),
+            Err(e) => (vec![], Some(format!("rpc: {e}"))),
+        };
+    for e in &mut raw {
+        e.node = Some("master".to_string());
+    }
+    let workers = crate::handlers::hostings::fetch_remote_nodes(&state)
+        .await
+        .unwrap_or_default();
+    for (n, resp) in crate::dispatcher::fan_out(&state, workers, req).await {
+        if let RpcResponse::EmailLogList(mut remote) = resp {
+            let label = if n.label.is_empty() {
+                n.node_id.clone()
+            } else {
+                n.label.clone()
+            };
+            for e in &mut remote {
+                e.node = Some(label.clone());
+            }
+            raw.extend(remote);
+        }
+    }
+    raw.sort_by(|a, b| b.sent_at.cmp(&a.sent_at));
+    raw.truncate(200);
     // Apply UI-only kind/state filters in memory — the agent doesn't
     // need a new RPC variant for this. Cheap at 200 rows.
     let rows: Vec<EmailLogEntry> = raw
