@@ -222,6 +222,9 @@ pub async fn post_reset_password(
         Request::WebUserSetPassword {
             user_id: form.user_id,
             new_password: form.new_password,
+            // Admin reset: already gated by is_super_admin above, so no
+            // current-password re-auth (the admin doesn't know the target's).
+            current_password: None,
         },
     )
     .await

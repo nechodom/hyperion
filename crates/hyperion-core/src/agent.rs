@@ -924,8 +924,11 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         &self,
         user_id: i64,
         new_password: String,
+        current_password: Option<String>,
     ) -> Result<(), RpcError> {
-        self.svc.web_user_set_password(user_id, new_password).await
+        self.svc
+            .web_user_set_password(user_id, new_password, current_password)
+            .await
     }
     async fn web_user_set_role(&self, user_id: i64, role: String) -> Result<(), RpcError> {
         self.svc.web_user_set_role(user_id, role).await

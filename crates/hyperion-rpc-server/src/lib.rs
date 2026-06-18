@@ -818,7 +818,11 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
         Request::WebUserSetPassword {
             user_id,
             new_password,
-        } => match api.web_user_set_password(user_id, new_password).await {
+            current_password,
+        } => match api
+            .web_user_set_password(user_id, new_password, current_password)
+            .await
+        {
             Ok(()) => Response::WebUserSetPassword,
             Err(e) => Response::Error(e),
         },
@@ -1949,7 +1953,12 @@ mod tests {
         ) -> Result<i64, RpcError> {
             Ok(0)
         }
-        async fn web_user_set_password(&self, _: i64, _: String) -> Result<(), RpcError> {
+        async fn web_user_set_password(
+            &self,
+            _: i64,
+            _: String,
+            _: Option<String>,
+        ) -> Result<(), RpcError> {
             Ok(())
         }
         async fn web_user_set_role(&self, _: i64, _: String) -> Result<(), RpcError> {

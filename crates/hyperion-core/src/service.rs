@@ -9201,11 +9201,32 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         &self,
         user_id: i64,
         new_password: String,
+        current_password: Option<String>,
     ) -> Result<(), RpcError> {
         if new_password.len() < 8 {
             return Err(RpcError::Validation {
                 message: "password must be at least 8 characters".into(),
             });
+        }
+        // Self-service changes carry the current password and must re-verify it
+        // (a stolen session shouldn't be able to silently take over the account
+        // by setting a new password). Admin resets pass `None` — the admin is
+        // already authorized at the web layer.
+        if let Some(current) = current_password {
+            let user = hyperion_state::web_users::get_by_id(&self.pool, user_id)
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("get user: {e}")))?
+                .ok_or_else(|| RpcError::NotFound {
+                    kind: "web_user".into(),
+                    id: user_id.to_string(),
+                })?;
+            let ok = hyperion_auth::verify_password(&current, &user.password_hash)
+                .map_err(|e| RpcError::Internal_with(format!("verify: {e}")))?;
+            if !ok {
+                return Err(RpcError::Validation {
+                    message: "current password is incorrect".into(),
+                });
+            }
         }
         let phc = hyperion_auth::hash_password(&new_password)
             .map_err(|e| RpcError::Internal_with(format!("hash: {e}")))?;

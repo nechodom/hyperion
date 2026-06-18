@@ -827,10 +827,15 @@ pub enum Request {
         password: String,
         role: String,
     },
-    /// Force-set a user's password (admin reset). super_admin only.
+    /// Set a user's password. `current_password` is `Some` for a self-service
+    /// change (the service re-verifies it) and `None` for a super_admin reset
+    /// (already authorized at the web layer). The value is a secret but the
+    /// rpc-server logs only the method name, so it never reaches the log.
     WebUserSetPassword {
         user_id: i64,
         new_password: String,
+        #[serde(default)]
+        current_password: Option<String>,
     },
     /// Change role. super_admin only.
     WebUserSetRole {
@@ -1745,6 +1750,33 @@ mod tests {
             .expect("write len");
         let result: std::io::Result<Request> = read_frame(&mut b).await;
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn web_user_set_password_current_is_wire_optional() {
+        // Self-service: current_password present, round-trips.
+        let req = Request::WebUserSetPassword {
+            user_id: 7,
+            new_password: "newpw1234".into(),
+            current_password: Some("oldpw".into()),
+        };
+        let json = serde_json::to_string(&req).expect("ser");
+        let back: Request = serde_json::from_str(&json).expect("de");
+        assert_eq!(req, back);
+        // Old wire form (no current_password field) must still deserialize to
+        // `None` so a mixed-version master/worker pair keeps working.
+        let old = r#"{"method":"web_user_set_password","params":{"user_id":7,"new_password":"x"}}"#;
+        let parsed: Request = serde_json::from_str(old).expect("old de");
+        assert_eq!(
+            parsed,
+            Request::WebUserSetPassword {
+                user_id: 7,
+                new_password: "x".into(),
+                current_password: None,
+            }
+        );
+        // The logged method name carries no param value.
+        assert_eq!(<&'static str>::from(&req), "WebUserSetPassword");
     }
 
     #[test]

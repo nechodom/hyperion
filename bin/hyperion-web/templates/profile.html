@@ -179,11 +179,12 @@
   <h2 style="margin:0 0 0.6rem">Change password</h2>
   <form method="post" action="/profile/password" autocomplete="off" style="display:flex;flex-direction:column;gap:0.4rem">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-    <input type="password" name="new_password" placeholder="new password" minlength="8" required>
-    <input type="password" name="new_password_confirm" placeholder="repeat password" minlength="8" required>
+    <input type="password" name="current_password" placeholder="current password" autocomplete="current-password" required>
+    <input type="password" name="new_password" placeholder="new password" minlength="8" autocomplete="new-password" required>
+    <input type="password" name="new_password_confirm" placeholder="repeat password" minlength="8" autocomplete="new-password" required>
     <button type="submit" class="btn small primary" style="align-self:flex-start">Change password</button>
   </form>
-  <p class="text-soft small" style="margin-top:0.4rem">Min 8 characters. You'll stay logged in — no need to re-authenticate.</p>
+  <p class="text-soft small" style="margin-top:0.4rem">Min 8 characters. Enter your current password to confirm — your other signed-in devices will be signed out.</p>
 </div>
 
 <div class="card" style="margin-top:1rem">

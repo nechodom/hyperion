@@ -629,6 +629,7 @@ pub trait AgentApi: Send + Sync + 'static {
         &self,
         user_id: i64,
         new_password: String,
+        current_password: Option<String>,
     ) -> Result<(), RpcError>;
     async fn web_user_set_role(&self, user_id: i64, role: String) -> Result<(), RpcError>;
     async fn web_user_set_locked(

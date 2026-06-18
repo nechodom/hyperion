@@ -258,6 +258,7 @@ pub async fn post_2fa_disable(
 
 #[derive(Deserialize)]
 pub struct ChangePwForm {
+    current_password: String,
     new_password: String,
     new_password_confirm: String,
 }
@@ -279,13 +280,23 @@ pub async fn post_change_password(
         Request::WebUserSetPassword {
             user_id: session.user_id,
             new_password: form.new_password,
+            // Re-authenticate: the service verifies this before changing the
+            // password, so a stolen session alone can't take over the account.
+            current_password: Some(form.current_password),
         },
     )
     .await
     .map_err(AppError::from)?;
     match resp {
         RpcResponse::WebUserSetPassword => {
-            Ok(Redirect::to("/profile?flash=password+changed").into_response())
+            // Boot any attacker: a changed password invalidates every OTHER
+            // session (a stolen cookie must not survive). Keep the caller's
+            // current session so they aren't bounced to /login.
+            revoke_other_sessions(&state, session.user_id, &session.sid).await;
+            Ok(
+                Redirect::to("/profile?flash=password+changed+%E2%80%94+other+sessions+signed+out")
+                    .into_response(),
+            )
         }
         RpcResponse::Error(e) => Ok(Redirect::to(&format!(
             "/profile?error={}",
@@ -293,6 +304,29 @@ pub async fn post_change_password(
         ))
         .into_response()),
         _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+/// Revoke all of a user's sessions except `keep_sid`. Best-effort — used after
+/// a password change so a stolen cookie can't outlive the reset, while the
+/// caller's own session stays alive.
+async fn revoke_other_sessions(state: &SharedState, user_id: i64, keep_sid: &str) {
+    let Ok(RpcResponse::WebSessionList(list)) =
+        hyperion_rpc_client::call(&state.agent_socket, Request::WebSessionList { user_id }).await
+    else {
+        return;
+    };
+    for s in list {
+        if s.sid != keep_sid && !s.is_revoked() {
+            let _ = hyperion_rpc_client::call(
+                &state.agent_socket,
+                Request::WebSessionRevoke {
+                    sid: s.sid,
+                    revoked_by: user_id,
+                },
+            )
+            .await;
+        }
     }
 }
 
