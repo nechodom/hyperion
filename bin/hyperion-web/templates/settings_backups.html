@@ -18,8 +18,14 @@
 
 <div class="flash info" style="margin-bottom:1rem">
   <div class="flash-body">
-    <strong>Scheduler is not running yet.</strong> This release ships the configuration layer + reachability probe so you can wire your bucket today.
-    The hourly upload tick + retention pruning + weekly test-restore land in a follow-up commit. For now you can run a manual backup from the hosting detail page (which writes a local tarball under <code>/var/lib/hyperion/backups</code> — the off-site upload starts once the runner ships).
+    <strong>How it runs.</strong> Every time a hosting backup completes (manual, from the
+    hosting detail page) the agent also pushes it to each <em>enabled</em> S3 target here —
+    archive + DB dump + manifest. With an <strong>age recipient</strong> set, each object is
+    encrypted client-side and streamed (<code>age → aws</code>, no temp file), so the off-site
+    copy needs no extra local disk. After uploading, the remote is pruned to the newest
+    <strong>“keep daily”</strong> backups per hosting.
+    Requires <code>apt install awscli</code> (and <code>age</code> for encryption) on each node.
+    <span class="hint">Note: the weekly/monthly tiers below currently map to “keep newest = daily”; full grandfather-father-son tiering is a later refinement.</span>
   </div>
 </div>
 

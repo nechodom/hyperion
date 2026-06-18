@@ -3964,6 +3964,42 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .as_ref()
             .map(|_| archive_dir.join(format!("{}-{}.sql", detail.domain, ts)));
 
+        // Disk preflight: if the backup volume is too tight, fail fast with a
+        // clear, actionable message BEFORE `tar` writes a truncated archive
+        // that eats the last free bytes. Conservative on purpose — when free
+        // space is this low you want to refuse, not gamble on compression.
+        // Unknown sizes (df/du failed) ⇒ skip the check rather than block.
+        {
+            let htdocs = std::path::PathBuf::from(&self.paths.home_root)
+                .join(&detail.system_user)
+                .join(&detail.domain)
+                .join("htdocs");
+            if let (Some(src), Some(avail)) = (
+                dir_size_bytes(&htdocs).await,
+                fs_avail_bytes(std::path::Path::new(&backup_root)).await,
+            ) {
+                // Room for ~the full source (incompressible assets barely
+                // shrink) + 256 MiB for the SQL dump and tar's working set.
+                let need = src.saturating_add(256 * 1024 * 1024);
+                if avail < need {
+                    let msg = format!(
+                        "not enough disk space: backup of {} needs ~{} MiB but only {} MiB \
+                         is free on the backup volume — prune old backups or free space first",
+                        detail.domain,
+                        need / 1_048_576,
+                        avail / 1_048_576
+                    );
+                    hyperion_state::backups::mark_failed(&self.pool, run_id, &msg, now_secs())
+                        .await
+                        .map_err(|e| RpcError::Internal_with(format!("mark_failed: {e}")))?;
+                    return Err(RpcError::ProvisioningFailed {
+                        stage: "backup".into(),
+                        reason: msg,
+                    });
+                }
+            }
+        }
+
         // Run the backup. Failures roll the row to 'failed'.
         let result: Result<(u64, Option<u64>), String> = async {
             // 1. Archive htdocs (parent of htdocs)
@@ -4082,8 +4118,26 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                         tracing::warn!(domain=%detail.domain, note=%note, "remote backup push failed");
                     }
                 }
+
+                // Off-site S3 push to every enabled target (encrypted with age
+                // when a recipient is set, streamed so it needs no extra local
+                // disk). Best-effort — never rolls back the local backup.
+                let manifest_path =
+                    archive_dir.join(format!("{}-{}.manifest.json", detail.domain, ts));
+                let mut files: Vec<std::path::PathBuf> = vec![archive_path.clone()];
+                if let Some(p) = db_dump_path.as_ref() {
+                    files.push(p.clone());
+                }
+                files.push(manifest_path);
+                self.push_backup_to_s3(&detail, &files).await;
             }
             Err(e) => {
+                // Remove any partial/truncated files a failed run (e.g. ENOSPC)
+                // left behind, so a failed backup doesn't keep eating disk.
+                let _ = tokio::fs::remove_file(&archive_path).await;
+                if let Some(p) = db_dump_path.as_ref() {
+                    let _ = tokio::fs::remove_file(p).await;
+                }
                 let trimmed: String = e.chars().take(2000).collect();
                 hyperion_state::backups::mark_failed(&self.pool, run_id, &trimmed, now_secs())
                     .await
@@ -4107,6 +4161,101 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             message: "row vanished after write (concurrent delete?)".into(),
         })?;
         Ok(run_to_wire(r))
+    }
+
+    /// Push the just-made backup files to every enabled S3 target. Best-effort:
+    /// reads each target's secret from its 0600 file, uploads each file
+    /// (age-encrypted + streamed when a recipient is set), prunes the remote to
+    /// the newest `retention_daily` backups, and records one audit row per
+    /// target. Never errors — the local backup already succeeded.
+    async fn push_backup_to_s3(
+        &self,
+        detail: &hyperion_types::HostingDetail,
+        files: &[std::path::PathBuf],
+    ) {
+        let targets = match hyperion_state::backup_targets::list(&self.pool).await {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::warn!(error=%e, "backup_targets list failed — skipping S3 push");
+                return;
+            }
+        };
+        for row in targets.into_iter().filter(|r| r.enabled && r.kind == "s3") {
+            let secret = match row.secret_key_id.as_deref() {
+                Some(path) => match tokio::fs::read_to_string(path).await {
+                    Ok(s) => s.trim().to_string(),
+                    Err(e) => {
+                        self.audit_s3(detail, &row.name, false, &format!("secret unreadable: {e}"))
+                            .await;
+                        continue;
+                    }
+                },
+                None => {
+                    self.audit_s3(detail, &row.name, false, "no secret stored for target")
+                        .await;
+                    continue;
+                }
+            };
+            let target = hyperion_adapters::backup::S3UploadTarget {
+                endpoint: &row.endpoint,
+                bucket: &row.bucket,
+                region: &row.region,
+                access_key_id: &row.access_key_id,
+                secret_access_key: &secret,
+                age_recipient: row.age_recipient.as_deref(),
+            };
+            // Keys live under <system_user>/ ; the trailing slash keeps the
+            // prune listing scoped to exactly this hosting's objects.
+            let prefix = format!("{}/", detail.system_user);
+            let mut ok = true;
+            let mut notes: Vec<String> = Vec::new();
+            for f in files {
+                let fname = f.file_name().and_then(|n| n.to_str()).unwrap_or("backup");
+                let key = format!("{prefix}{fname}");
+                if let Err(e) = hyperion_adapters::backup::upload_s3(f, &key, &target).await {
+                    ok = false;
+                    notes.push(format!("{fname}: {e}"));
+                }
+            }
+            if ok && row.retention_daily > 0 {
+                match hyperion_adapters::backup::s3_prune_keep_latest(
+                    &prefix,
+                    row.retention_daily as usize,
+                    &target,
+                )
+                .await
+                {
+                    Ok(n) if n > 0 => notes.push(format!("pruned {n} old object(s)")),
+                    Ok(_) => {}
+                    Err(e) => notes.push(format!("prune skipped: {e}")),
+                }
+            }
+            let summary = if notes.is_empty() {
+                "uploaded".to_string()
+            } else {
+                notes.join("; ")
+            };
+            if !ok {
+                tracing::warn!(domain=%detail.domain, target=%row.name, note=%summary, "S3 backup push failed");
+            }
+            self.audit_s3(detail, &row.name, ok, &summary).await;
+        }
+    }
+
+    async fn audit_s3(
+        &self,
+        detail: &hyperion_types::HostingDetail,
+        target_name: &str,
+        ok: bool,
+        note: &str,
+    ) {
+        self.append_audit(
+            "hosting.backup.s3",
+            Some(detail.id.as_str()),
+            &serde_json::json!({ "target": target_name, "note": note }).to_string(),
+            if ok { "ok" } else { "failed" },
+        )
+        .await;
     }
 
     /// Drop backup archives older than `retention.max_age_days` from disk
@@ -15789,6 +15938,43 @@ fn load_email_section(path: &std::path::Path) -> EmailTomlView {
 /// Installs on demand via apt — assumes root (the caller already checked).
 /// Returns a clear, actionable message on failure instead of letting the
 /// downstream commands fail with a bare "No such file or directory".
+/// Available bytes on the filesystem that holds `path`, via `df -P -B1`.
+/// `None` on any exec/parse failure — the caller treats unknown as "don't
+/// block the backup".
+async fn fs_avail_bytes(path: &std::path::Path) -> Option<u64> {
+    let out = tokio::process::Command::new("/usr/bin/df")
+        .args(["-P", "-B1", "--", &path.display().to_string()])
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    // `df -P` output: a header line, then one data line whose 4th column is
+    // "Available" (in 1-byte blocks because of -B1).
+    let text = String::from_utf8_lossy(&out.stdout);
+    let line = text.lines().nth(1)?;
+    line.split_whitespace().nth(3)?.parse::<u64>().ok()
+}
+
+/// Apparent size in bytes of the tree at `path`, via `du -sb`. Capped by a
+/// 60 s timeout so a huge/slow tree can't stall a backup; `None` on
+/// failure/timeout (caller treats unknown as "don't block").
+async fn dir_size_bytes(path: &std::path::Path) -> Option<u64> {
+    let fut = tokio::process::Command::new("/usr/bin/du")
+        .args(["-sb", "--", &path.display().to_string()])
+        .output();
+    let out = tokio::time::timeout(std::time::Duration::from_secs(60), fut)
+        .await
+        .ok()?
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.split_whitespace().next()?.parse::<u64>().ok()
+}
+
 async fn ensure_quota_tools() -> Result<(), String> {
     let have = |p: &str| std::path::Path::new(p).exists();
     if have("/usr/sbin/quotaon") && have("/usr/sbin/quotacheck") {

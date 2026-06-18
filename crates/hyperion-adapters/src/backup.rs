@@ -326,6 +326,266 @@ pub async fn upload_remote(file: &Path, upload: &RemoteUpload<'_>) -> Result<Str
     Ok(url)
 }
 
+// ── S3-compatible off-site upload (Wasabi / B2 / Minio / AWS) ────────────────
+
+const AWS_BIN: &str = "/usr/bin/aws";
+const AGE_BIN: &str = "/usr/bin/age";
+
+/// A resolved S3 destination — the secret is already read from its 0600 file,
+/// so this is the upload-ready view. `age_recipient` set ⇒ the object is
+/// age-encrypted client-side, STREAMED (`age | aws`) so no plaintext-encrypted
+/// copy ever touches local disk (matters when the disk is tight).
+pub struct S3UploadTarget<'a> {
+    pub endpoint: &'a str,
+    pub bucket: &'a str,
+    pub region: &'a str,
+    pub access_key_id: &'a str,
+    pub secret_access_key: &'a str,
+    pub age_recipient: Option<&'a str>,
+}
+
+/// Confirm the CLIs the runner shells out to are installed, with a friendly
+/// message pointing at the apt packages. `need_age` only when encrypting.
+pub fn ensure_s3_tools(need_age: bool) -> Result<(), AdapterError> {
+    if !Path::new(AWS_BIN).exists() {
+        return Err(AdapterError::Other(format!(
+            "{AWS_BIN} not found — run `apt install awscli` on this node to enable S3 backups"
+        )));
+    }
+    if need_age && !Path::new(AGE_BIN).exists() {
+        return Err(AdapterError::Other(format!(
+            "{AGE_BIN} not found — run `apt install age` (the target has an age recipient set)"
+        )));
+    }
+    Ok(())
+}
+
+/// `aws s3 cp` argv. Credentials NEVER ride here — they go via env so they
+/// can't leak to `/proc/<pid>/cmdline`. `src` is "-" for a stdin stream or a
+/// local path.
+fn aws_s3_cp_args(src: &str, remote_uri: &str, endpoint: &str) -> Vec<String> {
+    vec![
+        "--endpoint-url".into(),
+        endpoint.to_string(),
+        "s3".into(),
+        "cp".into(),
+        "--only-show-errors".into(),
+        src.to_string(),
+        remote_uri.to_string(),
+    ]
+}
+
+fn aws_env(t: &S3UploadTarget<'_>) -> [(&'static str, String); 3] {
+    [
+        ("AWS_ACCESS_KEY_ID", t.access_key_id.to_string()),
+        ("AWS_SECRET_ACCESS_KEY", t.secret_access_key.to_string()),
+        (
+            "AWS_DEFAULT_REGION",
+            if t.region.trim().is_empty() {
+                "us-east-1".to_string()
+            } else {
+                t.region.to_string()
+            },
+        ),
+    ]
+}
+
+/// Upload one local file to `s3://<bucket>/<remote_key>`. When the target has
+/// an age recipient the object is encrypted on the fly (`.age` is appended to
+/// the key) by streaming `age -o - <file> | aws s3 cp - <uri>` — no temp file.
+/// Returns the final object key.
+pub async fn upload_s3(
+    local_file: &Path,
+    remote_key: &str,
+    t: &S3UploadTarget<'_>,
+) -> Result<String, AdapterError> {
+    use std::process::Stdio;
+    let recipient = t.age_recipient.map(str::trim).filter(|r| !r.is_empty());
+    ensure_s3_tools(recipient.is_some())?;
+
+    let key = match recipient {
+        Some(_) => format!("{}.age", remote_key.trim_start_matches('/')),
+        None => remote_key.trim_start_matches('/').to_string(),
+    };
+    let remote_uri = format!("s3://{}/{}", t.bucket.trim_matches('/'), key);
+    let env = aws_env(t);
+
+    if let Some(recipient) = recipient {
+        // Stream: age reads the archive, writes ciphertext to stdout; aws reads
+        // that on stdin. age stderr → null so a chatty stderr can't deadlock the
+        // pipe; its exit code is the source of truth.
+        let infile = std::fs::File::open(local_file)
+            .map_err(|e| AdapterError::Other(format!("open {}: {e}", local_file.display())))?;
+        let mut age = tokio::process::Command::new(AGE_BIN)
+            .args(["-r", recipient, "-o", "-"])
+            .stdin(Stdio::from(infile))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| AdapterError::Other(format!("spawn age: {e}")))?;
+        let age_out = age
+            .stdout
+            .take()
+            .ok_or_else(|| AdapterError::Other("age stdout unavailable".into()))?;
+        let age_stdio: Stdio = age_out
+            .try_into()
+            .map_err(|e| AdapterError::Other(format!("age stdout → stdio: {e}")))?;
+        let args = aws_s3_cp_args("-", &remote_uri, t.endpoint);
+        let mut cmd = tokio::process::Command::new(AWS_BIN);
+        cmd.args(&args).stdin(age_stdio);
+        for (k, v) in &env {
+            cmd.env(k, v);
+        }
+        let aws_out = cmd
+            .output()
+            .await
+            .map_err(|e| AdapterError::Other(format!("spawn aws: {e}")))?;
+        let age_status = age
+            .wait()
+            .await
+            .map_err(|e| AdapterError::Other(format!("wait age: {e}")))?;
+        if !age_status.success() {
+            return Err(AdapterError::Other(format!(
+                "age encryption failed (exit {:?})",
+                age_status.code()
+            )));
+        }
+        if !aws_out.status.success() {
+            return Err(AdapterError::Other(format!(
+                "aws upload failed: {}",
+                String::from_utf8_lossy(&aws_out.stderr).trim()
+            )));
+        }
+    } else {
+        let src = local_file
+            .to_str()
+            .ok_or_else(|| AdapterError::Other("file path not utf8".into()))?;
+        let args = aws_s3_cp_args(src, &remote_uri, t.endpoint);
+        let mut cmd = tokio::process::Command::new(AWS_BIN);
+        cmd.args(&args);
+        for (k, v) in &env {
+            cmd.env(k, v);
+        }
+        let out = cmd
+            .output()
+            .await
+            .map_err(|e| AdapterError::Other(format!("spawn aws: {e}")))?;
+        if !out.status.success() {
+            return Err(AdapterError::Other(format!(
+                "aws upload failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+    }
+    Ok(key)
+}
+
+/// Extract the unix-timestamp a backup file was named with. Files are
+/// `<domain>-<unixts>.<ext>[.age]` (the ts follows the LAST dash, before the
+/// first dot), so this is robust to dashes/dots inside the domain.
+fn parse_backup_ts(key: &str) -> Option<i64> {
+    let name = key.rsplit('/').next().unwrap_or(key);
+    let after_dash = name.rsplit_once('-')?.1;
+    let digits: String = after_dash
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    digits.parse::<i64>().ok()
+}
+
+/// Remote retention: keep the newest `keep` backup timestamps under `prefix`,
+/// deleting every object belonging to older ones. `keep == 0` ⇒ no-op (keep
+/// everything). Best-effort: parse/list failures return an error the caller
+/// downgrades to a note — never fatal to the backup itself. Returns the number
+/// of objects deleted.
+pub async fn s3_prune_keep_latest(
+    prefix: &str,
+    keep: usize,
+    t: &S3UploadTarget<'_>,
+) -> Result<u64, AdapterError> {
+    if keep == 0 {
+        return Ok(0);
+    }
+    let env = aws_env(t);
+    let prefix = prefix.trim_start_matches('/');
+    let mut cmd = tokio::process::Command::new(AWS_BIN);
+    cmd.args([
+        "--endpoint-url",
+        t.endpoint,
+        "s3api",
+        "list-objects-v2",
+        "--bucket",
+        t.bucket,
+        "--prefix",
+        prefix,
+        "--output",
+        "json",
+    ]);
+    for (k, v) in &env {
+        cmd.env(k, v);
+    }
+    let out = cmd
+        .output()
+        .await
+        .map_err(|e| AdapterError::Other(format!("spawn aws list: {e}")))?;
+    if !out.status.success() {
+        return Err(AdapterError::Other(format!(
+            "aws list-objects failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    let listing: serde_json::Value = serde_json::from_slice(&out.stdout)
+        .map_err(|e| AdapterError::Other(format!("parse list-objects json: {e}")))?;
+    let contents = listing
+        .get("Contents")
+        .and_then(|c| c.as_array())
+        .cloned()
+        .unwrap_or_default();
+    // (key, ts) for every object that parses a ts.
+    let mut keyed: Vec<(String, i64)> = contents
+        .iter()
+        .filter_map(|o| {
+            let key = o.get("Key").and_then(|k| k.as_str())?.to_string();
+            let ts = parse_backup_ts(&key)?;
+            Some((key, ts))
+        })
+        .collect();
+    if keyed.is_empty() {
+        return Ok(0);
+    }
+    // Distinct timestamps, newest first; everything past the keep window dies.
+    let mut tss: Vec<i64> = keyed.iter().map(|(_, ts)| *ts).collect();
+    tss.sort_unstable_by(|a, b| b.cmp(a));
+    tss.dedup();
+    let doomed: std::collections::HashSet<i64> = tss.into_iter().skip(keep).collect();
+    if doomed.is_empty() {
+        return Ok(0);
+    }
+    keyed.retain(|(_, ts)| doomed.contains(ts));
+    let mut deleted = 0u64;
+    for (key, _) in &keyed {
+        let mut dc = tokio::process::Command::new(AWS_BIN);
+        dc.args([
+            "--endpoint-url",
+            t.endpoint,
+            "s3api",
+            "delete-object",
+            "--bucket",
+            t.bucket,
+            "--key",
+            key,
+        ]);
+        for (k, v) in &env {
+            dc.env(k, v);
+        }
+        match dc.output().await {
+            Ok(o) if o.status.success() => deleted += 1,
+            _ => { /* best-effort; leave it for the next run */ }
+        }
+    }
+    Ok(deleted)
+}
+
 /// Restore a `pg_dump -Fc` archive (custom format) into `db_name`.
 pub async fn restore_postgres_dump(db_name: &str, dump_path: &Path) -> Result<(), AdapterError> {
     if !dump_path.exists() {
@@ -362,6 +622,36 @@ pub fn engine_str(engine: DbProvision) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_backup_ts_handles_dashes_and_extensions() {
+        assert_eq!(
+            parse_backup_ts("user/my-site.cz-1700000000.tar.gz"),
+            Some(1700000000)
+        );
+        assert_eq!(
+            parse_backup_ts("user/my-site.cz-1700000000.tar.gz.age"),
+            Some(1700000000)
+        );
+        assert_eq!(parse_backup_ts("a-1.cz-1699999999.sql"), Some(1699999999));
+        assert_eq!(
+            parse_backup_ts("user/site.cz-1700000000.manifest.json"),
+            Some(1700000000)
+        );
+        assert_eq!(parse_backup_ts("no-timestamp-here.txt"), None);
+    }
+
+    #[test]
+    fn aws_cp_args_carry_endpoint_and_never_secrets() {
+        let args = aws_s3_cp_args("-", "s3://b/k.age", "https://s3.example.com");
+        assert!(args.iter().any(|a| a == "--endpoint-url"));
+        assert!(args.contains(&"https://s3.example.com".to_string()));
+        assert!(args.contains(&"s3://b/k.age".to_string()));
+        // Credentials must travel via env, never argv.
+        assert!(!args
+            .iter()
+            .any(|a| a.contains("SECRET") || a.starts_with("AKIA")));
+    }
 
     #[tokio::test]
     async fn manifest_round_trip() {
