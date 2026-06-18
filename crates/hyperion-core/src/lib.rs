@@ -13,6 +13,7 @@ pub mod master_rpc;
 pub mod real_adapter;
 pub mod secrets;
 pub mod service;
+pub mod tls_pin;
 pub mod wp_updates;
 
 pub use agent::AgentImpl;
