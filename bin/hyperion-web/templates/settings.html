@@ -815,7 +815,7 @@
     <form method="post" action="/settings/config" autocomplete="off">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <input type="hidden" name="section" value="cluster">
-      <input type="hidden" name="_checkboxes" value="enforce_admin_2fa">
+      <input type="hidden" name="_checkboxes" value="enforce_admin_2fa,enforce_worker_cert_pinning">
       <label class="field-checkbox" style="font-weight:600">
         <input type="checkbox" name="enforce_admin_2fa" value="true"
                {% if config.cluster.enforce_admin_2fa %}checked{% endif %}>
@@ -826,6 +826,21 @@
         the enrolment card and can't use the rest of the panel until they set it
         up. Operators and viewers are unaffected. Turn it off only temporarily
         (e.g. during a migration) — applies within ~30 s, no restart needed.
+      </p>
+      <label class="field-checkbox" style="font-weight:600">
+        <input type="checkbox" name="enforce_worker_cert_pinning" value="true"
+               {% if config.cluster.enforce_worker_cert_pinning %}checked{% endif %}>
+        Enforce worker TLS certificate pinning
+      </label>
+      <p class="text-soft small" style="margin:0.4rem 0 0.8rem;line-height:1.55">
+        When on, the master refuses any RPC to a worker whose TLS cert doesn't
+        match the SPKI pin that worker reported on its heartbeat (a hardening
+        against a man-in-the-middle on the master→worker channel). <strong>Turn
+        this on only after</strong> the per-node pins on <a href="/install">Nodes</a>
+        show <em>🔒 TLS pin on file</em> and you've seen no <code>warn-only</code>
+        pin-mismatch warnings in the logs — a stale pin would block management of
+        that worker until its next heartbeat. Workers that haven't reported a pin
+        yet are never blocked. Applies within ~30 s, no restart needed.
       </p>
       <button type="submit" class="btn primary">Save security settings</button>
     </form>

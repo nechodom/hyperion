@@ -15357,6 +15357,10 @@ fn read_cluster_section(cfg_path: Option<&std::path::Path>) -> hyperion_types::C
         .and_then(|s| s.get("enforce_admin_2fa"))
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
+    let enforce_worker_cert_pinning = section
+        .and_then(|s| s.get("enforce_worker_cert_pinning"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     hyperion_types::ClusterConfigView {
         master_accepts_hostings: accept,
         test_node_ids,
@@ -15367,6 +15371,7 @@ fn read_cluster_section(cfg_path: Option<&std::path::Path>) -> hyperion_types::C
         trash_retention_days,
         audit_retention_days,
         enforce_admin_2fa,
+        enforce_worker_cert_pinning,
     }
 }
 
@@ -15416,7 +15421,8 @@ fn parse_agent_section_fields(
             ("cluster", "master_accepts_hostings")
             | ("cluster", "test_wp_no_index")
             | ("cluster", "trash_enabled")
-            | ("cluster", "enforce_admin_2fa") => {
+            | ("cluster", "enforce_admin_2fa")
+            | ("cluster", "enforce_worker_cert_pinning") => {
                 crate::config_persist::FieldValue::Bool(parse_bool(v)?)
             }
             ("cluster", "test_node_ids")

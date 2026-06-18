@@ -319,6 +319,18 @@ pub struct ClusterConfigView {
     /// during a migration) without rebuilding.
     #[serde(default = "default_true")]
     pub enforce_admin_2fa: bool,
+
+    /// When true, the master passes `curl --pinnedpubkey sha256//<pin>`
+    /// on every RPC to a worker that has REPORTED a TLS SPKI pin (Block C
+    /// enforce phase) — a presented cert that doesn't match the pin makes
+    /// the RPC fail. Defaults to OFF: enforcement is a deliberate flip the
+    /// operator makes only AFTER the warn-only phase has confirmed pins
+    /// are stable (no spurious mismatch warnings), otherwise a stale pin
+    /// would break master→worker RPC. Nodes that have not yet reported a
+    /// pin are never enforced (nothing to pin against), so a brand-new
+    /// worker is still reachable until its first heartbeat.
+    #[serde(default)]
+    pub enforce_worker_cert_pinning: bool,
 }
 
 fn default_true() -> bool {
@@ -339,6 +351,9 @@ impl Default for ClusterConfigView {
             trash_retention_days: 30,
             audit_retention_days: 0, // 0 = keep forever
             enforce_admin_2fa: true,
+            // OFF by default — enforcement is an explicit operator flip
+            // after the warn-only phase confirms pins are stable.
+            enforce_worker_cert_pinning: false,
         }
     }
 }

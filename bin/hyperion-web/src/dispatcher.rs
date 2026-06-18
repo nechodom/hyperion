@@ -170,8 +170,18 @@ async fn dispatch_remote(
         .as_ref()
         .ok_or(DispatchError::NoSigner)?;
     let (endpoint, reported_pin) = resolve_node_endpoint(state, node_id).await?;
+    // Block C enforce phase: when the cluster toggle is on AND this node
+    // has a heartbeat-reported pin, pin it for real (curl --pinnedpubkey).
+    // Short-circuit so we only read the toggle when there's a pin to
+    // enforce — a node with no reported pin is never enforced (still
+    // reachable), so a brand-new worker isn't locked out pre-heartbeat.
+    let pinned_pubkey = match &reported_pin {
+        Some(pin) if cluster_enforces_cert_pinning(state).await => Some(pin.clone()),
+        _ => None,
+    };
     let opts = RemoteCallOpts {
         timeout_secs: timeout_for_request(&req),
+        pinned_pubkey,
         ..RemoteCallOpts::default()
     };
     match call_remote_with_observed_pin(&endpoint, signer, node_id, req, opts).await {
@@ -290,6 +300,17 @@ async fn resolve_node_endpoint(
         format!("https://{host_part}:{}", DEFAULT_AGENT_RPC_PORT),
         reported_pin,
     ))
+}
+
+/// Read the cluster `enforce_worker_cert_pinning` toggle (agent.toml
+/// `[cluster]`, surfaced via AgentConfigView). FAIL-SAFE: any read
+/// failure returns `false` (never enforce), so a flaky config read can't
+/// accidentally lock the master out of its workers.
+async fn cluster_enforces_cert_pinning(state: &SharedState) -> bool {
+    match call(&state.agent_socket, Request::AgentConfigView).await {
+        Ok(Response::AgentConfigView(c)) => c.cluster.enforce_worker_cert_pinning,
+        _ => false,
+    }
 }
 
 /// Warn-only TLS pin check (Block C). Compares the SPKI pin the worker

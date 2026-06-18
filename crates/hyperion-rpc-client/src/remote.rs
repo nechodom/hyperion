@@ -53,6 +53,16 @@ pub struct RemoteCallOpts {
     /// Always true today; left here as a hook for the future when
     /// the master pins a cert fingerprint from enrollment.
     pub verify_tls: bool,
+    /// When `Some`, ENFORCE this SPKI pin (the base64 value, no
+    /// `sha256//` prefix) via `curl --pinnedpubkey sha256//<value>`:
+    /// the connection fails unless the worker presents a cert whose
+    /// public key matches. Works alongside `-k` (the pin is checked
+    /// independently of CA validation), which is exactly right for the
+    /// self-signed worker certs. `None` = no pin enforcement (warn-only
+    /// observation still happens). Block C enforce phase — the
+    /// dispatcher only sets this when the cluster toggle is on AND the
+    /// node has a reported pin.
+    pub pinned_pubkey: Option<String>,
 }
 
 impl Default for RemoteCallOpts {
@@ -60,6 +70,7 @@ impl Default for RemoteCallOpts {
         Self {
             timeout_secs: 30,
             verify_tls: false,
+            pinned_pubkey: None,
         }
     }
 }
@@ -143,6 +154,13 @@ pub async fn call_remote_with_observed_pin(
     args.push("\n__HYPERION_CURL_CERTS__\n%{certs}".into());
     if !opts.verify_tls {
         args.push("-k".into());
+    }
+    // ENFORCED cert pin (Block C enforce phase). Compatible with -k:
+    // curl still fails the connection if the presented cert's SPKI
+    // doesn't match, independent of CA validation.
+    if let Some(pin) = &opts.pinned_pubkey {
+        args.push("--pinnedpubkey".into());
+        args.push(format!("sha256//{pin}"));
     }
     args.push("-X".into());
     args.push("POST".into());
