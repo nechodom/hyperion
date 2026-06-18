@@ -13,7 +13,7 @@ use hyperion_rpc::codec::{read_frame, write_frame, Request, Response};
 use std::path::Path;
 use tokio::net::UnixStream;
 
-pub use remote::{call_remote, RemoteCallOpts, RemoteClientError};
+pub use remote::{call_remote, call_remote_with_observed_pin, RemoteCallOpts, RemoteClientError};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ClientError {

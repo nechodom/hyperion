@@ -64,10 +64,36 @@ impl Default for RemoteCallOpts {
     }
 }
 
+/// Marker curl's `-w %{certs}` output is prefixed with so we can split
+/// the certificate chain off the end of stdout from the JSON response
+/// body. JSON (our `Response`) is UTF-8 and never contains this token,
+/// so the split is unambiguous.
+const CERT_MARKER: &[u8] = b"\n__HYPERION_CURL_CERTS__\n";
+
+/// Split curl stdout (response body, optionally followed by the marker +
+/// PEM cert chain) into `(body, certs_pem)`. When the marker is absent —
+/// older curl without `%{certs}`, or no cert captured — the whole buffer
+/// is the body and `certs_pem` is `None`. Pure + total: never panics.
+fn split_body_and_certs(stdout: &[u8]) -> (&[u8], Option<&str>) {
+    match stdout
+        .windows(CERT_MARKER.len())
+        .position(|w| w == CERT_MARKER)
+    {
+        Some(pos) => {
+            let body = &stdout[..pos];
+            let certs = &stdout[pos + CERT_MARKER.len()..];
+            (body, std::str::from_utf8(certs).ok().map(str::trim))
+        }
+        None => (stdout, None),
+    }
+}
+
 /// Sign + POST + decode. `endpoint_base` should be the full base URL
 /// of the target node's inbound listener, e.g. `https://1.2.3.4:9443`
 /// — caller is responsible for the IP + port lookup, this function
-/// only signs and ships.
+/// only signs and ships. Thin wrapper over
+/// [`call_remote_with_observed_pin`] that discards the observed pin —
+/// kept stable for callers (integration tests) that don't pin.
 pub async fn call_remote(
     endpoint_base: &str,
     signer: &Arc<MasterRpcSigner>,
@@ -75,6 +101,25 @@ pub async fn call_remote(
     req: Request,
     opts: RemoteCallOpts,
 ) -> Result<Response, RemoteClientError> {
+    call_remote_with_observed_pin(endpoint_base, signer, target_node_id, req, opts)
+        .await
+        .map(|(resp, _pin)| resp)
+}
+
+/// Like [`call_remote`] but also returns the SPKI pin of the leaf
+/// certificate the worker actually presented on this connection
+/// (curl `--pinnedpubkey` form), captured via `-w %{certs}`. `None`
+/// when the cert couldn't be captured or parsed (older curl, parse
+/// failure) — best-effort, never affects the RPC result. The dispatcher
+/// compares it (warn-only) against the pin the worker reported over its
+/// authenticated heartbeat to detect a MITM / unreported cert rotation.
+pub async fn call_remote_with_observed_pin(
+    endpoint_base: &str,
+    signer: &Arc<MasterRpcSigner>,
+    target_node_id: &str,
+    req: Request,
+    opts: RemoteCallOpts,
+) -> Result<(Response, Option<String>), RemoteClientError> {
     let body = serde_json::to_vec(&req).map_err(|e| RemoteClientError::Serialize(e.to_string()))?;
     let ts = chrono::Utc::now().timestamp();
     let nonce = ulid::Ulid::new().to_string();
@@ -91,6 +136,11 @@ pub async fn call_remote(
     // MAX_FRAME (128 MiB) + base64 overhead; curl exits 63 past it.
     args.push("--max-filesize".into());
     args.push((192 * 1024 * 1024).to_string());
+    // Append the presented cert chain (PEM) after the body so we can pin
+    // it. `%{certs}` needs curl ≥ 7.88 (Debian 12 ships 7.88.1); on older
+    // curl this yields no usable cert and we degrade to no observed pin.
+    args.push("--write-out".into());
+    args.push("\n__HYPERION_CURL_CERTS__\n%{certs}".into());
     if !opts.verify_tls {
         args.push("-k".into());
     }
@@ -128,7 +178,43 @@ pub async fn call_remote(
             stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
         });
     }
+    let (body_bytes, certs_pem) = split_body_and_certs(&out.stdout);
     let resp: Response =
-        serde_json::from_slice(&out.stdout).map_err(|e| RemoteClientError::Parse(e.to_string()))?;
-    Ok(resp)
+        serde_json::from_slice(body_bytes).map_err(|e| RemoteClientError::Parse(e.to_string()))?;
+    // Best-effort pin of the leaf cert. Failure here must never fail the
+    // call — the RPC already succeeded.
+    let observed_pin = match certs_pem {
+        Some(pem) if !pem.is_empty() => hyperion_core::tls_pin::spki_pin_from_cert_pem(pem).await,
+        _ => None,
+    };
+    Ok((resp, observed_pin))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_no_marker_is_all_body() {
+        let (body, certs) = split_body_and_certs(b"{\"ok\":true}");
+        assert_eq!(body, b"{\"ok\":true}");
+        assert_eq!(certs, None);
+    }
+
+    #[test]
+    fn split_extracts_certs_after_marker() {
+        let raw = b"{\"ok\":true}\n__HYPERION_CURL_CERTS__\n-----BEGIN CERTIFICATE-----\nAAA\n-----END CERTIFICATE-----\n";
+        let (body, certs) = split_body_and_certs(raw);
+        assert_eq!(body, b"{\"ok\":true}");
+        assert!(certs.unwrap().starts_with("-----BEGIN CERTIFICATE-----"));
+    }
+
+    #[test]
+    fn split_empty_certs_after_marker() {
+        let raw = b"{\"ok\":true}\n__HYPERION_CURL_CERTS__\n";
+        let (body, certs) = split_body_and_certs(raw);
+        assert_eq!(body, b"{\"ok\":true}");
+        // trimmed empty string — caller treats as no pin.
+        assert_eq!(certs, Some(""));
+    }
 }

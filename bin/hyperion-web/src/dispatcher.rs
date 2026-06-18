@@ -10,7 +10,9 @@
 
 use crate::state::SharedState;
 use hyperion_rpc::codec::{Request, Response};
-use hyperion_rpc_client::{call, call_remote, ClientError, RemoteCallOpts, RemoteClientError};
+use hyperion_rpc_client::{
+    call, call_remote_with_observed_pin, ClientError, RemoteCallOpts, RemoteClientError,
+};
 
 /// Default port the agent's inbound listener binds. Mirrors
 /// `RemoteRpcSection::default().bind`. When a per-node endpoint
@@ -167,13 +169,16 @@ async fn dispatch_remote(
         .master_rpc_signer
         .as_ref()
         .ok_or(DispatchError::NoSigner)?;
-    let endpoint = resolve_node_endpoint(state, node_id).await?;
+    let (endpoint, reported_pin) = resolve_node_endpoint(state, node_id).await?;
     let opts = RemoteCallOpts {
         timeout_secs: timeout_for_request(&req),
         ..RemoteCallOpts::default()
     };
-    match call_remote(&endpoint, signer, node_id, req, opts).await {
-        Ok(resp) => Ok(resp),
+    match call_remote_with_observed_pin(&endpoint, signer, node_id, req, opts).await {
+        Ok((resp, observed_pin)) => {
+            warn_on_pin_mismatch(node_id, reported_pin.as_deref(), observed_pin.as_deref());
+            Ok(resp)
+        }
         Err(RemoteClientError::HttpError { code, stderr }) => {
             // Upgrade TCP-layer failures to NodeUnreachable so the
             // operator gets an actionable themed error page and the
@@ -253,11 +258,14 @@ pub async fn fan_out(
 
 /// Look up the target node's public IP from the master's `nodes`
 /// table (via the local agent's `NodesList` RPC) and build the
-/// `https://<ip>:9443` base URL.
+/// `https://<ip>:9443` base URL. Also returns the node's last
+/// heartbeat-reported TLS SPKI pin (if any) so the caller can compare
+/// it against the cert actually presented on the connection (Block C
+/// warn-only mismatch detection).
 async fn resolve_node_endpoint(
     state: &SharedState,
     node_id: &str,
-) -> Result<String, DispatchError> {
+) -> Result<(String, Option<String>), DispatchError> {
     let list_resp = call(&state.agent_socket, Request::NodesList).await?;
     let nodes = match list_resp {
         Response::NodesList(v) => v,
@@ -267,6 +275,7 @@ async fn resolve_node_endpoint(
         .into_iter()
         .find(|n| n.node_id == node_id)
         .ok_or_else(|| DispatchError::UnknownNode(node_id.to_string()))?;
+    let reported_pin = node.tls_spki_pin.clone();
     let ip = node
         .public_ip
         .filter(|s| !s.is_empty())
@@ -277,7 +286,41 @@ async fn resolve_node_endpoint(
     } else {
         ip
     };
-    Ok(format!("https://{host_part}:{}", DEFAULT_AGENT_RPC_PORT))
+    Ok((
+        format!("https://{host_part}:{}", DEFAULT_AGENT_RPC_PORT),
+        reported_pin,
+    ))
+}
+
+/// Warn-only TLS pin check (Block C). Compares the SPKI pin the worker
+/// reported over its authenticated heartbeat (`reported`) against the
+/// pin of the cert it actually presented on this RPC connection
+/// (`observed`). A mismatch means the connection's cert differs from
+/// what the authenticated worker claims — a possible MITM, or the
+/// worker rotated its inbound cert and hasn't heartbeated since. We
+/// only LOG (loudly): pinning is not enforced yet, so legitimate RPC is
+/// never blocked. Pins are public cert fingerprints — safe to log. No
+/// worker IP is logged (only the operator-facing node id).
+fn warn_on_pin_mismatch(node_id: &str, reported: Option<&str>, observed: Option<&str>) {
+    match (reported, observed) {
+        (Some(r), Some(o)) if r != o => {
+            tracing::warn!(
+                node = node_id,
+                reported_pin = r,
+                observed_pin = o,
+                "SECURITY (warn-only): worker presented a TLS cert whose SPKI pin \
+                 does not match the one it reported over heartbeat — possible MITM \
+                 or an unreported cert rotation. Pinning is NOT enforced yet, so \
+                 this request was allowed."
+            );
+        }
+        (Some(_), Some(_)) => {
+            tracing::trace!(node = node_id, "worker TLS pin matches reported");
+        }
+        // No reported pin yet (pre-heartbeat / older agent) or no observed
+        // pin (older curl / parse failure) → nothing to compare.
+        _ => {}
+    }
 }
 
 impl From<DispatchError> for crate::error::AppError {
