@@ -18,6 +18,12 @@ use hyperion_validate::Domain;
 pub trait AgentApi: Send + Sync + 'static {
     async fn agent_info(&self) -> Result<AgentInfo, RpcError>;
 
+    /// Clear the pinned `master_rpc_pubkey` in node-id.json so the next
+    /// heartbeat re-adopts the master's current key (operator escape
+    /// hatch after a deliberate master-key rotation). Returns the key
+    /// that was cleared, if any. No-op-ish on a master / unenrolled node.
+    async fn agent_repin(&self) -> Result<Option<String>, RpcError>;
+
     async fn hosting_create(&self, req: HostingCreateReq) -> Result<HostingCreated, RpcError>;
     async fn hosting_list(&self) -> Result<Vec<HostingSummary>, RpcError>;
     async fn hosting_get(&self, sel: HostingSelector) -> Result<HostingDetail, RpcError>;

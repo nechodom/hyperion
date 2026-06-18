@@ -133,6 +133,10 @@ impl std::fmt::Debug for RedactedFields {
 #[serde(tag = "method", content = "params", rename_all = "snake_case")]
 pub enum Request {
     AgentInfo,
+    /// Operator escape hatch (Block B re-pin): clear the pinned
+    /// master_rpc_pubkey so the next heartbeat re-adopts the master's
+    /// current key after a deliberate master-key rotation.
+    AgentRepin,
     HostingCreate(HostingCreateReq),
     HostingList,
     HostingGet(HostingSelector),
@@ -1203,6 +1207,11 @@ pub enum Request {
 #[serde(tag = "method", content = "result", rename_all = "snake_case")]
 pub enum Response {
     AgentInfo(AgentInfo),
+    /// Result of AgentRepin: the master_rpc_pubkey that was cleared
+    /// (`None` if nothing was pinned).
+    AgentRepin {
+        cleared: Option<String>,
+    },
     HostingCreate(HostingCreated),
     HostingList(Vec<HostingSummary>),
     HostingGet(HostingDetail),

@@ -86,6 +86,10 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::AgentInfo(v),
             Err(e) => Response::Error(e),
         },
+        Request::AgentRepin => match api.agent_repin().await {
+            Ok(cleared) => Response::AgentRepin { cleared },
+            Err(e) => Response::Error(e),
+        },
         Request::HostingCreate(r) => match api.hosting_create(r).await {
             Ok(v) => Response::HostingCreate(v),
             Err(e) => Response::Error(e),
@@ -1293,6 +1297,9 @@ mod tests {
                 master_url: None,
                 enrolled_at: None,
             })
+        }
+        async fn agent_repin(&self) -> Result<Option<String>, RpcError> {
+            Ok(None)
         }
         async fn hosting_create(&self, _: HostingCreateReq) -> Result<HostingCreated, RpcError> {
             Err(RpcError::Internal {

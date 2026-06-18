@@ -36,6 +36,18 @@ enum Cmd {
         #[arg(long, default_value_t = 50)]
         limit: i64,
     },
+    /// Node-side agent maintenance.
+    #[command(subcommand)]
+    Agent(AgentCmd),
+}
+
+#[derive(Subcommand, Debug)]
+enum AgentCmd {
+    /// Clear the pinned master_rpc_pubkey so the next heartbeat re-adopts
+    /// the master's CURRENT key. Use this on a worker after you have
+    /// deliberately rotated the master's remote-RPC key — the agent
+    /// otherwise refuses a silently-changed key (anti-MITM).
+    Repin,
 }
 
 #[derive(Subcommand, Debug)]
@@ -204,6 +216,7 @@ async fn main() -> anyhow::Result<()> {
 async fn call(cli: &Cli) -> anyhow::Result<Response> {
     let req = match &cli.cmd {
         Cmd::Info => Request::AgentInfo,
+        Cmd::Agent(AgentCmd::Repin) => Request::AgentRepin,
         Cmd::Hosting(HostingCmd::Create {
             domain,
             aliases,
@@ -336,6 +349,15 @@ fn print_pretty(resp: &Response) {
                 }
             }
         }
+        Response::AgentRepin { cleared } => match cleared {
+            Some(pk) => println!(
+                "✓ cleared pinned master key (was {pk}); the next heartbeat (≤60s) will \
+                 re-pin the master's current key"
+            ),
+            None => println!(
+                "✓ no master key was pinned; the next heartbeat will pin the master's current key"
+            ),
+        },
         Response::HostingCreate(c) => {
             println!("✓ created {} (id={})", c.system_user, c.id);
             println!("  root: {}", c.root_dir);

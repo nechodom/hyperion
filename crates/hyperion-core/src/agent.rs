@@ -94,6 +94,43 @@ async fn read_node_state(path: &std::path::Path) -> (Option<String>, Option<Stri
     }
 }
 
+/// Clear the pinned `master_rpc_pubkey` in node-id.json so the NEXT
+/// heartbeat re-adopts whatever key the master currently presents (TOFU
+/// re-pin). This is the operator's escape hatch after a *deliberate*
+/// master key rotation: the agent otherwise refuses a silently-changed
+/// key (anti-MITM). Returns the key that was cleared, if any.
+///
+/// Parses as a generic JSON object so every other field (node_id,
+/// secret, master_url, enrolled_at, …) is preserved untouched. Atomic
+/// write (tmp → chmod 0600 → rename) keeps the 0600 perms + avoids a
+/// torn read by the heartbeat / inbound-RPC loops that re-read this file.
+async fn clear_pinned_pubkey_in_file(path: &std::path::Path) -> Result<Option<String>, String> {
+    let bytes = tokio::fs::read(path)
+        .await
+        .map_err(|e| format!("read {}: {e}", path.display()))?;
+    let mut v: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|e| format!("parse {}: {e}", path.display()))?;
+    let obj = v
+        .as_object_mut()
+        .ok_or_else(|| "node-id.json is not a JSON object".to_string())?;
+    let cleared = obj
+        .get("master_rpc_pubkey")
+        .and_then(|x| x.as_str())
+        .map(String::from);
+    obj.insert("master_rpc_pubkey".to_string(), serde_json::Value::Null);
+    let serialized = serde_json::to_vec_pretty(&v).map_err(|e| format!("serialize: {e}"))?;
+    let tmp = path.with_extension("json.tmp");
+    tokio::fs::write(&tmp, &serialized)
+        .await
+        .map_err(|e| format!("write {}: {e}", tmp.display()))?;
+    use std::os::unix::fs::PermissionsExt;
+    let _ = tokio::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600)).await;
+    tokio::fs::rename(&tmp, path)
+        .await
+        .map_err(|e| format!("rename {} → {}: {e}", tmp.display(), path.display()))?;
+    Ok(cleared)
+}
+
 fn hostname_or_unknown() -> String {
     std::process::Command::new("hostname")
         .output()
@@ -118,6 +155,17 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
             master_url,
             enrolled_at,
         })
+    }
+
+    async fn agent_repin(&self) -> Result<Option<String>, RpcError> {
+        let cleared = clear_pinned_pubkey_in_file(&self.node_state_file)
+            .await
+            .map_err(|message| RpcError::Internal { message })?;
+        tracing::warn!(
+            had_pin = cleared.is_some(),
+            "operator cleared pinned master_rpc_pubkey (repin) — next heartbeat will re-adopt the master's current key"
+        );
+        Ok(cleared)
     }
 
     async fn hosting_create(&self, req: HostingCreateReq) -> Result<HostingCreated, RpcError> {
@@ -1374,5 +1422,42 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc
             .profile_wp_item_install(sel, &item_kind, &line)
             .await
+    }
+}
+
+#[cfg(test)]
+mod repin_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn repin_clears_pubkey_preserving_other_fields() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("node-id.json");
+        let original = serde_json::json!({
+            "node_id": "node_abc",
+            "master_url": "https://m",
+            "secret": "s3cr3t",
+            "enrolled_at": 1_700_000_000_i64,
+            "master_rpc_pubkey": "PINNED_KEY"
+        });
+        tokio::fs::write(&path, serde_json::to_vec(&original).expect("ser"))
+            .await
+            .expect("write");
+
+        let cleared = clear_pinned_pubkey_in_file(&path).await.expect("clear");
+        assert_eq!(cleared.as_deref(), Some("PINNED_KEY"));
+
+        let after: serde_json::Value =
+            serde_json::from_slice(&tokio::fs::read(&path).await.expect("read")).expect("parse");
+        assert!(after["master_rpc_pubkey"].is_null(), "pubkey nulled");
+        // Every other field survives untouched.
+        assert_eq!(after["node_id"], "node_abc");
+        assert_eq!(after["secret"], "s3cr3t");
+        assert_eq!(after["master_url"], "https://m");
+        assert_eq!(after["enrolled_at"], 1_700_000_000_i64);
+
+        // Idempotent: a second clear finds nothing pinned.
+        let again = clear_pinned_pubkey_in_file(&path).await.expect("clear2");
+        assert_eq!(again, None);
     }
 }
