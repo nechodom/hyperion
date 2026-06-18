@@ -57,6 +57,17 @@ fn classify_curl_failure(code: Option<i32>) -> Option<&'static str> {
         Some(28) => Some("Timed out waiting for the worker to respond"),
         Some(35) => Some("TLS handshake failed (agent's cert is not valid yet)"),
         Some(56) => Some("Connection reset by the worker mid-handshake"),
+        Some(60) => Some("Worker TLS certificate not trusted"),
+        // Block C enforce phase: curl exits 90 when --pinnedpubkey is set
+        // and the presented cert's public key doesn't match the pin. This
+        // is THE failure mode of enabling enforcement against a worker
+        // whose cert has changed — make it actionable instead of a raw
+        // "agent rejected" page.
+        Some(90) => Some(
+            "TLS certificate pin mismatch — the worker's cert no longer matches the SPKI \
+             pin it reported. Restart the worker's agent so it re-reports its pin, or turn \
+             off Enforce worker TLS certificate pinning in Settings → Cluster.",
+        ),
         _ => None,
     }
 }

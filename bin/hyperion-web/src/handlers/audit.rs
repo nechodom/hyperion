@@ -126,8 +126,10 @@ pub async fn get_audit(
             all.extend(remote);
         }
     }
-    all.sort_by(|a, b| b.ts.cmp(&a.ts));
-    all.truncate(limit as usize);
+    // total_count + the action dropdown are built from the FULL merged set
+    // (every node's rows), NOT a truncated window — otherwise once the
+    // master's own rows fill the most-recent `limit`, worker rows + their
+    // action types would vanish from the count and the dropdown.
     let total_count = all.len();
 
     let needle = q.q.trim().to_lowercase();
@@ -151,7 +153,12 @@ pub async fn get_audit(
     let since_label = q.since.trim().to_string();
     let cutoff = since_cutoff(hyperion_types::now_secs(), &since_label);
 
-    let rows: Vec<AuditEntryWire> = all
+    // Filter the FULL merged set FIRST, then sort + truncate. Doing it the
+    // other way (truncate to the `limit` most-recent, then filter) would
+    // silently drop matching worker entries that fall outside the global
+    // most-recent window — so a filtered/searched query could return
+    // nothing even though the workers genuinely returned matches.
+    let mut filtered: Vec<AuditEntryWire> = all
         .into_iter()
         .filter(|r| match cutoff {
             Some(c) => r.ts >= c,
@@ -180,7 +187,12 @@ pub async fn get_audit(
         })
         .filter(|r| result_filter.is_empty() || r.result.to_lowercase() == result_filter)
         .collect();
-    let filtered_count = rows.len();
+    // `filtered_count` = total matches across the cluster (pre-truncate);
+    // `rows` = the `limit` most-recent of those, which is what we display.
+    let filtered_count = filtered.len();
+    filtered.sort_by(|a, b| b.ts.cmp(&a.ts));
+    filtered.truncate(limit as usize);
+    let rows: Vec<AuditEntryWire> = filtered;
     let csrf_token = super::session_csrf_token(&state, &ctx);
     let tpl = AuditTpl {
         username: &ctx.username,

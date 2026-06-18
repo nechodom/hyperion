@@ -107,15 +107,16 @@ pub async fn get_emails(
             raw.extend(remote);
         }
     }
-    raw.sort_by(|a, b| b.sent_at.cmp(&a.sent_at));
-    raw.truncate(200);
-    // Apply UI-only kind/state filters in memory — the agent doesn't
-    // need a new RPC variant for this. Cheap at 200 rows.
-    let rows: Vec<EmailLogEntry> = raw
+    // Apply UI-only kind/state filters across the FULL merged set FIRST,
+    // THEN sort + cap — truncating before filtering would drop matching
+    // worker rows that fall outside the global most-recent 200.
+    let mut rows: Vec<EmailLogEntry> = raw
         .into_iter()
         .filter(|r| q.kind.is_empty() || r.kind == q.kind)
         .filter(|r| q.state.is_empty() || r.state == q.state)
         .collect();
+    rows.sort_by(|a, b| b.sent_at.cmp(&a.sent_at));
+    rows.truncate(200);
     let total = rows.len();
     let ok_count = rows.iter().filter(|r| r.state == "ok").count();
     let failed_count = rows.iter().filter(|r| r.state == "failed").count();
