@@ -71,14 +71,8 @@ pub async fn get_certs(
     if let Ok(RpcResponse::NodesList(nodes)) =
         hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await
     {
-        for n in nodes {
-            if let Ok(RpcResponse::CertOverview(mut items)) = crate::dispatcher::dispatch_to_node(
-                &state,
-                Some(n.node_id.as_str()),
-                Request::CertOverview,
-            )
-            .await
-            {
+        for (n, resp) in crate::dispatcher::fan_out(&state, nodes, Request::CertOverview).await {
+            if let RpcResponse::CertOverview(mut items) = resp {
                 for item in items.iter_mut() {
                     item.node_id = n.label.clone();
                 }

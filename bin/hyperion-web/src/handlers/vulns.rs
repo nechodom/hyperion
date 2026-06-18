@@ -51,14 +51,9 @@ pub async fn get_vulns(
     if let Ok(RpcResponse::NodesList(nodes)) =
         hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await
     {
-        for n in nodes {
-            if let Ok(RpcResponse::VulnFindingsList(items)) = crate::dispatcher::dispatch_to_node(
-                &state,
-                Some(n.node_id.as_str()),
-                Request::VulnFindingsList,
-            )
-            .await
-            {
+        for (n, resp) in crate::dispatcher::fan_out(&state, nodes, Request::VulnFindingsList).await
+        {
+            if let RpcResponse::VulnFindingsList(items) = resp {
                 for mut it in items {
                     it.node_id = n.label.clone();
                     all.push(it);

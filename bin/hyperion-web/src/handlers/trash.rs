@@ -84,11 +84,8 @@ pub async fn get_trash(
     let workers = crate::handlers::hostings::fetch_remote_nodes(&state)
         .await
         .unwrap_or_default();
-    for n in workers {
-        if let Ok(RpcResponse::TrashList(rows)) =
-            crate::dispatcher::dispatch_to_node(&state, Some(&n.node_id), Request::TrashList).await
-        {
-            let mut rows = rows;
+    for (n, resp) in crate::dispatcher::fan_out(&state, workers, Request::TrashList).await {
+        if let RpcResponse::TrashList(mut rows) = resp {
             for r in &mut rows {
                 r.node_id = n.node_id.clone();
             }
@@ -224,14 +221,10 @@ pub async fn get_trash_count(
         hyperion_rpc_client::call(&state.agent_socket, hyperion_rpc::codec::Request::NodesList)
             .await
     {
-        for n in nodes {
-            if let Ok(RpcResponse::TrashList(rows)) = crate::dispatcher::dispatch_to_node(
-                &state,
-                Some(&n.node_id),
-                hyperion_rpc::codec::Request::TrashList,
-            )
-            .await
-            {
+        for (_, resp) in
+            crate::dispatcher::fan_out(&state, nodes, hyperion_rpc::codec::Request::TrashList).await
+        {
+            if let RpcResponse::TrashList(rows) = resp {
                 total += rows.len();
             }
         }

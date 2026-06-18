@@ -202,6 +202,55 @@ async fn dispatch_remote(
     }
 }
 
+/// Broadcast one request to many worker nodes **concurrently** and
+/// collect the responses. This is the cluster-aggregation workhorse:
+/// pages like /hostings, the dashboard, /certs, /bans, /vulns,
+/// /monitoring and /trash all need to "ask every node the same
+/// question and merge the answers".
+///
+/// Doing this serially (the old `for n in nodes { dispatch().await }`)
+/// meant one slow or wedged worker stalled the *entire* page for up to
+/// its full per-RPC timeout, and N slow workers stacked additively.
+/// Here the wall-clock is bounded by the **slowest single** node, not
+/// the sum. Each task gets a cheap `Arc`-clone of `state`.
+///
+/// Best-effort by design: a node that errors, times out, or returns an
+/// unexpected shape is logged and omitted — the page still renders with
+/// whatever nodes answered. The returned pairs are sorted by `node_id`
+/// so the merged output is deterministic regardless of which task
+/// finishes first. Each pair carries the full `NodeSummary` so callers
+/// can tag rows with either `node_id` or the human `label`.
+pub async fn fan_out(
+    state: &SharedState,
+    nodes: Vec<hyperion_types::NodeSummary>,
+    req: Request,
+) -> Vec<(hyperion_types::NodeSummary, Response)> {
+    let mut set: tokio::task::JoinSet<Option<(hyperion_types::NodeSummary, Response)>> =
+        tokio::task::JoinSet::new();
+    for n in nodes {
+        let st = state.clone();
+        let r = req.clone();
+        set.spawn(async move {
+            let nid = n.node_id.clone();
+            match dispatch_to_node(&st, Some(nid.as_str()), r).await {
+                Ok(resp) => Some((n, resp)),
+                Err(e) => {
+                    tracing::warn!(node = %nid, error = %e, "fan_out: node excluded");
+                    None
+                }
+            }
+        });
+    }
+    let mut out: Vec<(hyperion_types::NodeSummary, Response)> = Vec::new();
+    while let Some(joined) = set.join_next().await {
+        if let Ok(Some(pair)) = joined {
+            out.push(pair);
+        }
+    }
+    out.sort_by(|a, b| a.0.node_id.cmp(&b.0.node_id));
+    out
+}
+
 /// Look up the target node's public IP from the master's `nodes`
 /// table (via the local agent's `NodesList` RPC) and build the
 /// `https://<ip>:9443` base URL.

@@ -4369,23 +4369,15 @@ pub(crate) async fn list_hostings(state: &SharedState) -> Result<Vec<HostingSumm
         _ => Vec::new(), // failed lookup — fall back to master-only
     };
     let mut all = local;
-    for n in nodes {
-        match crate::dispatcher::dispatch_to_node(state, Some(&n.node_id), Request::HostingList)
-            .await
-        {
-            Ok(RpcResponse::HostingList(mut remote)) => {
-                for r in &mut remote {
-                    r.node_id = Some(n.node_id.clone());
-                }
-                all.extend(remote);
+    // Query every worker CONCURRENTLY (see dispatcher::fan_out): one slow or
+    // wedged node no longer stalls the whole /hostings (+ search + domain-check)
+    // page — wall-clock is bounded by the slowest single node, not the sum.
+    for (n, resp) in crate::dispatcher::fan_out(state, nodes, Request::HostingList).await {
+        if let RpcResponse::HostingList(mut remote) = resp {
+            for r in &mut remote {
+                r.node_id = Some(n.node_id.clone());
             }
-            Ok(RpcResponse::Error(e)) => {
-                tracing::warn!(node=%n.node_id, error=%e, "remote hosting list refused");
-            }
-            Ok(_) => {}
-            Err(e) => {
-                tracing::warn!(node=%n.node_id, error=%e, "remote hosting list unreachable");
-            }
+            all.extend(remote);
         }
     }
     Ok(all)

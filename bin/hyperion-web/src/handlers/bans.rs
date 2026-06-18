@@ -84,14 +84,10 @@ pub async fn get_bans(
     if let Ok(RpcResponse::NodesList(nodes)) =
         hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await
     {
-        for n in nodes {
-            if let Ok(RpcResponse::BanList(bans)) = crate::dispatcher::dispatch_to_node(
-                &state,
-                Some(n.node_id.as_str()),
-                Request::BanList { hosting_id: None },
-            )
-            .await
-            {
+        for (n, resp) in
+            crate::dispatcher::fan_out(&state, nodes, Request::BanList { hosting_id: None }).await
+        {
+            if let RpcResponse::BanList(bans) = resp {
                 push(&mut rows, n.node_id.as_str(), &n.label, bans);
             }
         }
