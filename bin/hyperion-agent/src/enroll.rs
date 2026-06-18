@@ -425,22 +425,43 @@ pub async fn heartbeat_loop(state_file: std::path::PathBuf, period_secs: u64, ve
         match result {
             Ok(out) if out.status.success() => {
                 tracing::debug!(node = %p.node_id, master = %p.master_url, "heartbeat ok");
-                // Master's heartbeat ack may carry the master's
-                // remote-RPC pubkey — pick it up so already-enrolled
-                // nodes (which won't go through enroll again) end up
-                // holding it within one tick of the master being
-                // upgraded.
+                // The heartbeat ack may carry the master's remote-RPC pubkey.
+                // This key is THE trust anchor for the signed master→node RPC
+                // channel — whoever's key we hold can issue privileged RPCs to
+                // us. The ack arrives over `curl -k` (unverified TLS) and is
+                // itself unauthenticated, so we PIN it: adopt it only on first
+                // receipt (when we don't have one yet), and REFUSE any later
+                // heartbeat that presents a different key. Otherwise an on-path
+                // attacker who can spoof one heartbeat response would swap our
+                // anchor and then sign arbitrary RPCs to this node. Rotating
+                // the master key is therefore a deliberate operator action:
+                // re-enrol the node (which re-establishes the anchor through
+                // the operator-typed install flow).
                 if let Some(new_pk) = parse_heartbeat_pubkey(&out.stdout) {
-                    if p.master_rpc_pubkey.as_deref() != Some(new_pk.as_str()) {
-                        let mut updated = p.clone();
-                        updated.master_rpc_pubkey = Some(new_pk);
-                        if let Err(e) = atomically_persist(&state_file, &updated).await {
-                            tracing::warn!(
-                                error=%e,
-                                "persisting master_rpc_pubkey to node-id.json failed"
+                    match decide_pubkey_pin(p.master_rpc_pubkey.as_deref(), &new_pk) {
+                        PubkeyPin::Refuse => {
+                            tracing::error!(
+                                node = %p.node_id,
+                                "SECURITY: heartbeat presented a master_rpc_pubkey \
+                                 different from the pinned one — REFUSING. If you \
+                                 rotated the master key, re-enrol this node; \
+                                 otherwise this may be an on-path attack."
                             );
-                        } else {
-                            tracing::info!("picked up master_rpc_pubkey from heartbeat ack");
+                        }
+                        PubkeyPin::Keep => { /* same key already pinned — nothing to do */ }
+                        PubkeyPin::Adopt => {
+                            let mut updated = p.clone();
+                            updated.master_rpc_pubkey = Some(new_pk);
+                            if let Err(e) = atomically_persist(&state_file, &updated).await {
+                                tracing::warn!(
+                                    error=%e,
+                                    "persisting master_rpc_pubkey to node-id.json failed"
+                                );
+                            } else {
+                                tracing::info!(
+                                    "pinned master_rpc_pubkey from heartbeat ack (first receipt)"
+                                );
+                            }
                         }
                     }
                 }
@@ -455,6 +476,31 @@ pub async fn heartbeat_loop(state_file: std::path::PathBuf, period_secs: u64, ve
             }
             Err(e) => tracing::warn!(error=%e, "heartbeat curl failed"),
         }
+    }
+}
+
+/// Outcome of comparing a heartbeat-presented master pubkey against the one
+/// we've pinned. See [`decide_pubkey_pin`].
+#[derive(Debug, PartialEq, Eq)]
+enum PubkeyPin {
+    /// No key pinned yet — adopt this one (first value wins).
+    Adopt,
+    /// Already pinned to the same key — no-op.
+    Keep,
+    /// Already pinned to a DIFFERENT key — refuse (possible on-path attack).
+    Refuse,
+}
+
+/// Trust-on-first-use decision for the master's remote-RPC pubkey. We pin the
+/// first key we see and refuse any later heartbeat that presents a different
+/// one, because the heartbeat channel is unauthenticated (`curl -k`) and the
+/// key is the trust anchor for every privileged master→node RPC. Rotation is a
+/// deliberate operator action (re-enrol the node).
+fn decide_pubkey_pin(pinned: Option<&str>, presented: &str) -> PubkeyPin {
+    match pinned {
+        Some(p) if p != presented => PubkeyPin::Refuse,
+        Some(_) => PubkeyPin::Keep,
+        None => PubkeyPin::Adopt,
     }
 }
 
@@ -511,6 +557,16 @@ async fn fetch_public_ip() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pubkey_pin_first_wins_and_refuses_silent_rotation() {
+        // Not pinned yet → adopt the first key we see.
+        assert_eq!(decide_pubkey_pin(None, "KEY_A"), PubkeyPin::Adopt);
+        // Same key on a later heartbeat → no-op.
+        assert_eq!(decide_pubkey_pin(Some("KEY_A"), "KEY_A"), PubkeyPin::Keep);
+        // A DIFFERENT key (the on-path-attack case) → refuse, never adopt.
+        assert_eq!(decide_pubkey_pin(Some("KEY_A"), "KEY_B"), PubkeyPin::Refuse);
+    }
 
     #[test]
     fn https_fallback_triggers_on_tls_signature_errors() {
