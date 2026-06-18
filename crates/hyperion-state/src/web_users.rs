@@ -457,6 +457,31 @@ pub async fn consume_backup_code(
     Ok(r.rows_affected() == 1)
 }
 
+/// Atomically record an accepted TOTP step, rejecting replays.
+///
+/// Sets `totp_last_step = step` only when the stored value is NULL or strictly
+/// less than `step`. Returns `true` iff the row was updated (i.e. this step is
+/// newly accepted). A second attempt with the same (or an older) code's step
+/// affects 0 rows → `false`, which the caller treats as an invalid code. The
+/// comparison happens inside the UPDATE, so two concurrent logins with the same
+/// code can't both win.
+pub async fn consume_totp_step(
+    pool: &SqlitePool,
+    user_id: i64,
+    step: i64,
+) -> Result<bool, StateError> {
+    let r = sqlx::query(
+        "UPDATE web_users SET totp_last_step = ? \
+         WHERE id = ? AND (totp_last_step IS NULL OR totp_last_step < ?)",
+    )
+    .bind(step)
+    .bind(user_id)
+    .bind(step)
+    .execute(pool)
+    .await?;
+    Ok(r.rows_affected() == 1)
+}
+
 pub async fn count_unused_backup_codes(pool: &SqlitePool, user_id: i64) -> Result<i64, StateError> {
     let (n,): (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM web_user_backup_codes WHERE user_id = ? AND used_at IS NULL",
@@ -856,6 +881,22 @@ mod tests {
         )
         .await
         .expect("insert")
+    }
+
+    #[tokio::test]
+    async fn consume_totp_step_rejects_replay_and_older_steps() {
+        let pool = open_memory().await.expect("open");
+        let id = fresh_user(&pool, "twofa").await;
+        // First use of a step is accepted.
+        assert!(consume_totp_step(&pool, id, 100).await.expect("q"));
+        // Replaying the SAME step (a code captured in its window) is refused.
+        assert!(!consume_totp_step(&pool, id, 100).await.expect("q"));
+        // An OLDER step (a code from the prior window) is refused.
+        assert!(!consume_totp_step(&pool, id, 99).await.expect("q"));
+        // A strictly newer step is accepted.
+        assert!(consume_totp_step(&pool, id, 101).await.expect("q"));
+        // And now 101 is itself consumed.
+        assert!(!consume_totp_step(&pool, id, 101).await.expect("q"));
     }
 
     #[tokio::test]

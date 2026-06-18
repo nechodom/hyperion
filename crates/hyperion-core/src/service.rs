@@ -9078,8 +9078,20 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .totp_secret_base32
                 .as_deref()
                 .ok_or_else(|| RpcError::Internal_with("missing totp secret".into()))?;
-            hyperion_auth::verify_code(secret, trimmed)
+            // Replay protection: verify_code_step returns the matched absolute
+            // time-step; consume_totp_step atomically accepts it only if it's
+            // newer than the last one used, so a code captured in its ~90s
+            // window can't be replayed (RFC 6238 §5.2).
+            match hyperion_auth::verify_code_step(secret, trimmed)
                 .map_err(|e| RpcError::Internal_with(format!("totp verify: {e}")))?
+            {
+                Some(step) => {
+                    hyperion_state::web_users::consume_totp_step(&self.pool, user.id, step)
+                        .await
+                        .map_err(|e| RpcError::Internal_with(format!("totp step: {e}")))?
+                }
+                None => false,
+            }
         } else {
             // Backup code path.
             let h = hyperion_auth::hash_backup_code(trimmed);
@@ -9529,13 +9541,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .ok_or_else(|| RpcError::Validation {
                 message: "no pending 2FA enrollment".into(),
             })?;
-        let ok =
-            hyperion_auth::verify_code(secret, code.trim()).map_err(|e| RpcError::Validation {
+        let step = match hyperion_auth::verify_code_step(secret, code.trim()).map_err(|e| {
+            RpcError::Validation {
                 message: format!("invalid code: {e}"),
-            })?;
-        if !ok {
-            return Ok(false);
-        }
+            }
+        })? {
+            Some(s) => s,
+            None => return Ok(false),
+        };
         hyperion_state::web_users::set_totp(
             &self.pool,
             user_id,
@@ -9545,6 +9558,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         )
         .await
         .map_err(|e| RpcError::Internal_with(format!("confirm: {e}")))?;
+        // Record the step used to confirm enrolment so the same code can't be
+        // replayed at the first login.
+        hyperion_state::web_users::consume_totp_step(&self.pool, user_id, step)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("totp step: {e}")))?;
         self.append_audit(
             "web.user.2fa_enrolled",
             None,

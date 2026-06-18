@@ -22,5 +22,5 @@ pub use session::{
 };
 pub use totp::{
     code_at, generate_backup_codes, generate_secret_base32, hash_backup_code, otpauth_url,
-    verify_code, verify_code_at, TotpError,
+    verify_code, verify_code_at, verify_code_step, verify_code_step_at, TotpError,
 };

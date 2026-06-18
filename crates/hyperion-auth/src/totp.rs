@@ -87,6 +87,30 @@ pub fn verify_code(secret_base32: &str, supplied: &str) -> Result<bool, TotpErro
 
 /// Same as `verify_code` but with an explicit clock — used by tests.
 pub fn verify_code_at(secret_base32: &str, supplied: &str, now: u64) -> Result<bool, TotpError> {
+    Ok(verify_code_step_at(secret_base32, supplied, now)?.is_some())
+}
+
+/// Verify and return the matched ABSOLUTE time-step (unix_secs / 30) on
+/// success, or `None` if no candidate in the ±1-step window matched.
+///
+/// Callers persist the returned step and reject any later code whose step is
+/// `<=` the stored one. That is what stops a captured code being replayed
+/// within its ~90 s validity window (RFC 6238 §5.2: the verifier MUST NOT
+/// accept a previously accepted code).
+pub fn verify_code_step(secret_base32: &str, supplied: &str) -> Result<Option<i64>, TotpError> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    verify_code_step_at(secret_base32, supplied, now)
+}
+
+/// Step-returning verify with an explicit clock — used by tests.
+pub fn verify_code_step_at(
+    secret_base32: &str,
+    supplied: &str,
+    now: u64,
+) -> Result<Option<i64>, TotpError> {
     if supplied.len() != DIGITS as usize {
         return Err(TotpError::CodeLength(supplied.len()));
     }
@@ -98,10 +122,10 @@ pub fn verify_code_at(secret_base32: &str, supplied: &str, now: u64) -> Result<b
         let candidate_ts = (now as i64 + step * TIME_STEP_SECS as i64).max(0) as u64;
         let candidate = code_at(secret_base32, candidate_ts)?;
         if supplied_bytes.ct_eq(candidate.as_bytes()).unwrap_u8() == 1 {
-            return Ok(true);
+            return Ok(Some((candidate_ts / TIME_STEP_SECS) as i64));
         }
     }
-    Ok(false)
+    Ok(None)
 }
 
 /// Generate N backup codes. Returns (plaintext_to_show, hashes_to_store).
@@ -232,6 +256,31 @@ mod tests {
         assert!(verify_code_at(&secret, &next, now).expect("v next"));
         // Outside ±1 step window must be rejected.
         assert!(!verify_code_at(&secret, &two_ago, now).expect("v 2ago"));
+    }
+
+    #[test]
+    fn verify_code_step_returns_absolute_step() {
+        let secret = generate_secret_base32();
+        let now: u64 = 1_700_000_000;
+        let current = code_at(&secret, now).expect("now");
+        let step = verify_code_step_at(&secret, &current, now)
+            .expect("verify")
+            .expect("matched");
+        assert_eq!(step, (now / TIME_STEP_SECS) as i64);
+        // A code from a window two steps later (outside ±1 skew of `now`)
+        // verifies at `later` with a strictly greater step — what the
+        // replay guard relies on for monotonicity.
+        let later = now + 60;
+        let code2 = code_at(&secret, later).expect("later");
+        let step2 = verify_code_step_at(&secret, &code2, later)
+            .expect("verify")
+            .expect("matched");
+        assert!(step2 > step, "later code yields a greater step");
+        // A non-matching code → None (no step).
+        let wrong = code_at(&secret, now - 120).expect("old");
+        assert!(verify_code_step_at(&secret, &wrong, now)
+            .expect("verify")
+            .is_none());
     }
 
     #[test]
