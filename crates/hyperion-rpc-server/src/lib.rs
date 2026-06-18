@@ -1087,11 +1087,23 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             label,
             agent_version,
             public_ip,
+            prior_node_id,
+            prior_secret,
         } => match api
-            .enroll_consume(token, caller_ip, node_id, label, agent_version, public_ip)
+            .enroll_consume(
+                token,
+                caller_ip,
+                node_id,
+                label,
+                agent_version,
+                public_ip,
+                prior_node_id,
+                prior_secret,
+            )
             .await
         {
-            Ok((secret, master_rpc_pubkey)) => Response::EnrollConsume {
+            Ok((node_id, secret, master_rpc_pubkey)) => Response::EnrollConsume {
+                node_id,
                 secret,
                 master_rpc_pubkey,
             },
@@ -2199,8 +2211,10 @@ mod tests {
             _: String,
             _: String,
             _: Option<String>,
-        ) -> Result<(String, Option<String>), RpcError> {
-            Ok(("test-secret".into(), None))
+            _: Option<String>,
+            _: Option<String>,
+        ) -> Result<(String, String, Option<String>), RpcError> {
+            Ok(("test-node".into(), "test-secret".into(), None))
         }
         async fn node_heartbeat(
             &self,

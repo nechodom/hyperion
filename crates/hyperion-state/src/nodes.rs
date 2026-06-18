@@ -110,6 +110,51 @@ pub async fn insert(pool: &SqlitePool, n: &NewNode, now: i64) -> Result<i64, Sta
     Ok(row.0)
 }
 
+/// Insert a freshly-enrolled node, OR — when `node_id` already exists —
+/// update it in place: re-mint its secret hash and refresh
+/// label/master_url/agent_version/public_ip/last_seen. `enrolled_at` is
+/// deliberately NOT touched on the update path so the original
+/// enrollment time survives a re-enroll.
+///
+/// This backs idempotent (re-)enrollment (Block B): a box that proves
+/// continuity (matching prior secret) or adopts a currently-free id
+/// keeps its `node_id` instead of orphaning into a brand-new row. The
+/// reuse-vs-fresh decision lives in the service layer; by the time we
+/// get here `node_id` is already the EFFECTIVE id to write.
+pub async fn upsert_enrollment(
+    pool: &SqlitePool,
+    n: &NewNode,
+    now: i64,
+) -> Result<i64, StateError> {
+    let row: (i64,) = sqlx::query_as(
+        r#"INSERT INTO nodes
+           (node_id, label, master_url, enrolled_at, last_seen_at,
+            agent_version, public_ip, enrolled_via, secret_hash)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(node_id) DO UPDATE SET
+              label         = excluded.label,
+              master_url    = COALESCE(excluded.master_url, nodes.master_url),
+              last_seen_at  = excluded.last_seen_at,
+              agent_version = excluded.agent_version,
+              public_ip     = excluded.public_ip,
+              enrolled_via  = excluded.enrolled_via,
+              secret_hash   = excluded.secret_hash
+           RETURNING id"#,
+    )
+    .bind(&n.node_id)
+    .bind(&n.label)
+    .bind(&n.master_url)
+    .bind(now)
+    .bind(now)
+    .bind(&n.agent_version)
+    .bind(&n.public_ip)
+    .bind(&n.enrolled_via_hash)
+    .bind(&n.secret_hash)
+    .fetch_one(pool)
+    .await?;
+    Ok(row.0)
+}
+
 pub async fn list(pool: &SqlitePool) -> Result<Vec<NodeRow>, StateError> {
     let rows: Vec<(
         i64,
@@ -355,5 +400,58 @@ mod tests {
             .expect("touch2");
         let l2 = list(&pool).await.expect("list2");
         assert_eq!(l2[0].tls_spki_pin.as_deref(), Some("sha256//abc="));
+    }
+
+    #[tokio::test]
+    async fn upsert_reuses_id_and_preserves_enrolled_at() {
+        let pool = open_memory().await.expect("open");
+        let mut n = NewNode {
+            node_id: "n-reuse".into(),
+            label: "first".into(),
+            master_url: Some("https://m1".into()),
+            agent_version: "0.1.0".into(),
+            public_ip: Some("1.1.1.1".into()),
+            enrolled_via_hash: "tok1".into(),
+            secret_hash: "hash-a".into(),
+        };
+        let id1 = upsert_enrollment(&pool, &n, 100).await.expect("insert");
+        // Re-enroll the SAME node_id with a new secret + fields at a later time.
+        n.label = "renamed".into();
+        n.secret_hash = "hash-b".into();
+        n.public_ip = Some("2.2.2.2".into());
+        let id2 = upsert_enrollment(&pool, &n, 500).await.expect("upsert");
+        assert_eq!(id1, id2, "same row id — reused, not a new row");
+        let l = list(&pool).await.expect("list");
+        assert_eq!(l.len(), 1, "no duplicate row");
+        let row = get_by_node_id(&pool, "n-reuse")
+            .await
+            .expect("get")
+            .unwrap();
+        assert_eq!(
+            row.enrolled_at, 100,
+            "enrolled_at preserved across re-enroll"
+        );
+        assert_eq!(row.last_seen_at, 500, "last_seen bumped");
+        assert_eq!(row.secret_hash, "hash-b", "secret re-minted");
+        assert_eq!(row.label, "renamed");
+        assert_eq!(row.public_ip.as_deref(), Some("2.2.2.2"));
+    }
+
+    #[tokio::test]
+    async fn upsert_adopts_free_id() {
+        // Adopting a node_id that doesn't exist yet == a plain insert.
+        let pool = open_memory().await.expect("open");
+        let n = NewNode {
+            node_id: "adopt-me".into(),
+            label: "l".into(),
+            master_url: None,
+            agent_version: "0.1.0".into(),
+            public_ip: None,
+            enrolled_via_hash: "t".into(),
+            secret_hash: "h".into(),
+        };
+        upsert_enrollment(&pool, &n, 100).await.expect("adopt");
+        let row = get_by_node_id(&pool, "adopt-me").await.expect("get");
+        assert!(row.is_some());
     }
 }

@@ -42,6 +42,14 @@ struct EnrollRequest<'a> {
     label: &'a str,
     agent_version: &'a str,
     public_ip: Option<String>,
+    /// Block B idempotent re-enrollment: our existing identity from
+    /// node-id.json, if any, so the master can reuse our node_id instead
+    /// of minting a fresh one + orphaning the old row. Omitted (skipped)
+    /// on a true first enrollment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prior_node_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prior_secret: Option<&'a str>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -129,11 +137,24 @@ pub async fn enroll_now(cfg: &EnrollmentConfig) -> Result<(), String> {
     let agent_version = env!("CARGO_PKG_VERSION");
     let public_ip = fetch_public_ip().await;
     let base = cfg.master_url.trim_end_matches('/').to_string();
+    // Block B: if we still hold a node-id.json, present that identity so a
+    // re-enroll reuses our node_id (continuity proven by the secret) rather
+    // than orphaning us into a new row. `prior` must outlive the borrow in
+    // EnrollRequest, so bind it here.
+    let prior = load_persisted(&cfg.state_file).await;
+    let (prior_node_id, prior_secret) = match prior.as_ref() {
+        Some(p) if !p.node_id.is_empty() && !p.secret.is_empty() => {
+            (Some(p.node_id.as_str()), Some(p.secret.as_str()))
+        }
+        _ => (None, None),
+    };
     let body = serde_json::to_string(&EnrollRequest {
         token: &cfg.token,
         label: &cfg.label,
         agent_version,
         public_ip,
+        prior_node_id,
+        prior_secret,
     })
     .map_err(|e| format!("serialize: {e}"))?;
 

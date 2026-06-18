@@ -805,6 +805,9 @@ pub trait AgentApi: Send + Sync + 'static {
     /// `Some` when the master has a master-RPC signing key
     /// configured, `None` on dev / not-yet-upgraded setups (node
     /// treats `None` as "remote RPC unavailable from this master").
+    /// Returns `(effective_node_id, secret, master_rpc_pubkey)`. The
+    /// effective id is normally the minted candidate, but on an
+    /// idempotent re-enroll it's the reused/adopted prior id.
     #[allow(clippy::too_many_arguments)]
     async fn enroll_consume(
         &self,
@@ -814,7 +817,9 @@ pub trait AgentApi: Send + Sync + 'static {
         label: String,
         agent_version: String,
         public_ip: Option<String>,
-    ) -> Result<(String, Option<String>), RpcError>;
+        prior_node_id: Option<String>,
+        prior_secret: Option<String>,
+    ) -> Result<(String, String, Option<String>), RpcError>;
 
     /// Master-side heartbeat: verifies (node_id, secret) and bumps
     /// the node's last_seen_at + agent_version. Returns the master's

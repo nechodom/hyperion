@@ -878,10 +878,12 @@ fn print_pretty(resp: &Response) {
         Response::CronList(s) => print!("{s}"),
         Response::CronReplace => println!("✓ crontab updated"),
         Response::EnrollConsume {
+            node_id,
             secret,
             master_rpc_pubkey,
         } => {
             println!("✓ node enrolled");
+            println!("  node_id: {node_id}");
             println!("  secret: {secret}");
             if let Some(pk) = master_rpc_pubkey {
                 println!("  master_rpc_pubkey: {pk}");

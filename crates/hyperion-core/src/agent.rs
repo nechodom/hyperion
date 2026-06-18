@@ -1191,12 +1191,23 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         label: String,
         agent_version: String,
         public_ip: Option<String>,
-    ) -> Result<(String, Option<String>), RpcError> {
-        let secret = self
+        prior_node_id: Option<String>,
+        prior_secret: Option<String>,
+    ) -> Result<(String, String, Option<String>), RpcError> {
+        let (effective_node_id, secret) = self
             .svc
-            .enroll_consume(token, caller_ip, node_id, label, agent_version, public_ip)
+            .enroll_consume(
+                token,
+                caller_ip,
+                node_id,
+                label,
+                agent_version,
+                public_ip,
+                prior_node_id,
+                prior_secret,
+            )
             .await?;
-        Ok((secret, self.svc.master_rpc_pubkey_b64()))
+        Ok((effective_node_id, secret, self.svc.master_rpc_pubkey_b64()))
     }
 
     async fn node_heartbeat(

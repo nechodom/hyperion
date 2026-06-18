@@ -7293,16 +7293,37 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         label: String,
         agent_version: String,
         public_ip: Option<String>,
-    ) -> Result<String, RpcError> {
+        prior_node_id: Option<String>,
+        prior_secret: Option<String>,
+    ) -> Result<(String, String), RpcError> {
         if token.trim().is_empty() {
             return Err(RpcError::Validation {
                 message: "empty token".into(),
             });
         }
+        // Decide the EFFECTIVE node_id BEFORE consuming the invite, so the
+        // invite's consumed-by-node_id reflects the real identity. Block B
+        // idempotent re-enrollment: a box that still has node-id.json
+        // presents prior_node_id + prior_secret.
+        let effective_node_id = self
+            .resolve_enrollment_identity(
+                &node_id,
+                prior_node_id.as_deref(),
+                prior_secret.as_deref(),
+            )
+            .await?;
+        let reused_identity = effective_node_id != node_id;
+
         let now = now_secs();
-        let ok = hyperion_state::invites::consume(&self.pool, &token, &caller_ip, &node_id, now)
-            .await
-            .map_err(|e| RpcError::Internal_with(format!("consume: {e}")))?;
+        let ok = hyperion_state::invites::consume(
+            &self.pool,
+            &token,
+            &caller_ip,
+            &effective_node_id,
+            now,
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("consume: {e}")))?;
         if !ok {
             return Err(RpcError::Validation {
                 message: "invite token invalid, expired, or already consumed".into(),
@@ -7310,14 +7331,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
         let hash = hyperion_state::invites::hash_token(&token);
         // Mint a 32-byte per-node secret. Plaintext returned to the caller
-        // exactly once; master persists only the BLAKE3 hash.
+        // exactly once; master persists only the BLAKE3 hash. On a reuse
+        // this re-mints (rotates) the secret.
         let mut secret_bytes = [0u8; 32];
         use rand::RngCore;
         rand::thread_rng().fill_bytes(&mut secret_bytes);
         let secret_plain = hex::encode(secret_bytes);
         let secret_hash = hex::encode(blake3::hash(secret_plain.as_bytes()).as_bytes());
         let row = hyperion_state::nodes::NewNode {
-            node_id: node_id.clone(),
+            node_id: effective_node_id.clone(),
             label,
             master_url: None,
             agent_version,
@@ -7325,17 +7347,83 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             enrolled_via_hash: hash,
             secret_hash,
         };
-        hyperion_state::nodes::insert(&self.pool, &row, now)
+        // Upsert: fresh/adopt → insert; reuse → in-place update keeping
+        // enrolled_at. Prevents the duplicate-node-row orphaning that a
+        // plain insert caused on every re-enroll.
+        hyperion_state::nodes::upsert_enrollment(&self.pool, &row, now)
             .await
-            .map_err(|e| RpcError::Internal_with(format!("nodes insert: {e}")))?;
+            .map_err(|e| RpcError::Internal_with(format!("nodes upsert: {e}")))?;
         self.append_audit(
             "node.enroll",
-            Some(&node_id),
-            &serde_json::json!({"label": row.label, "caller_ip": caller_ip}).to_string(),
+            Some(&effective_node_id),
+            &serde_json::json!({
+                "label": row.label,
+                "caller_ip": caller_ip,
+                "reused_identity": reused_identity,
+            })
+            .to_string(),
             "ok",
         )
         .await;
-        Ok(secret_plain)
+        Ok((effective_node_id, secret_plain))
+    }
+
+    /// Decide which `node_id` a (re-)enrollment should land on:
+    /// - no prior id → the freshly-minted `candidate` (today's behavior).
+    /// - prior id presented but FREE (no such row) → adopt it. Enables
+    ///   master-side recovery (DB restored without this node) without a
+    ///   victim, since the id isn't in use.
+    /// - prior id IN USE + `prior_secret` matches (constant-time) → reuse
+    ///   it: proven continuity, so the box keeps its identity + hostings.
+    /// - prior id in use + wrong/empty secret → the fresh `candidate`.
+    ///   Anti-hijack: you can never take over an in-use node without its
+    ///   secret; the worst a bad token-holder can do is get a new id.
+    ///
+    /// Constant-time secret compare (mirrors node_heartbeat) so callers
+    /// can't time-probe which node_ids exist.
+    async fn resolve_enrollment_identity(
+        &self,
+        candidate: &str,
+        prior_node_id: Option<&str>,
+        prior_secret: Option<&str>,
+    ) -> Result<String, RpcError> {
+        let prior_id = match prior_node_id.map(str::trim).filter(|s| !s.is_empty()) {
+            Some(p) => p,
+            None => return Ok(candidate.to_string()),
+        };
+        let existing = hyperion_state::nodes::get_by_node_id(&self.pool, prior_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("node lookup: {e}")))?;
+        let row = match existing {
+            None => {
+                tracing::info!(node = prior_id, "re-enroll: adopting free prior node_id");
+                return Ok(prior_id.to_string());
+            }
+            Some(r) => r,
+        };
+        let supplied = prior_secret.unwrap_or("");
+        let supplied_hash = hex::encode(blake3::hash(supplied.as_bytes()).as_bytes());
+        let a = supplied_hash.as_bytes();
+        let b = row.secret_hash.as_bytes();
+        let n = a.len().max(b.len());
+        let mut diff: u8 = (a.len() ^ b.len()) as u8;
+        for i in 0..n {
+            diff |= a.get(i).copied().unwrap_or(0) ^ b.get(i).copied().unwrap_or(0);
+        }
+        if diff == 0 && !supplied.is_empty() {
+            tracing::info!(
+                node = prior_id,
+                "re-enroll: reusing node_id (continuity proven)"
+            );
+            Ok(prior_id.to_string())
+        } else {
+            tracing::warn!(
+                node = prior_id,
+                "re-enroll: prior node_id is in use but the presented secret does not \
+                 match — issuing a FRESH id instead (no takeover)"
+            );
+            Ok(candidate.to_string())
+        }
     }
 
     /// Master-side: verify a node's heartbeat (constant-time secret

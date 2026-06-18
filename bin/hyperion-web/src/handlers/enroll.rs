@@ -51,6 +51,14 @@ pub struct EnrollRequest {
     pub agent_version: String,
     #[serde(default)]
     pub public_ip: Option<String>,
+    /// Block B idempotent re-enrollment: the node_id + per-node secret the
+    /// re-enrolling box already had on disk. The master reuses the id on a
+    /// matching secret, adopts a free id, else mints fresh. `serde(default)`
+    /// keeps first-time enrollers (no prior identity) working.
+    #[serde(default)]
+    pub prior_node_id: Option<String>,
+    #[serde(default)]
+    pub prior_secret: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -102,19 +110,23 @@ pub async fn post_enroll(
         })
         .unwrap_or_else(|| "unknown".to_string());
 
-    let node_id = format!("node_{}", ulid::Ulid::new());
+    // Candidate id for a fresh enrollment; the master may instead reuse the
+    // box's prior id (idempotent re-enroll) and echo that back.
+    let candidate_node_id = format!("node_{}", ulid::Ulid::new());
     let outcome = consume_and_register(
         &state,
         &req.token,
         &caller_ip,
-        &node_id,
+        &candidate_node_id,
         &label,
         &req.agent_version,
         req.public_ip.as_deref(),
+        req.prior_node_id.as_deref(),
+        req.prior_secret.as_deref(),
     )
     .await;
     match outcome {
-        Ok((secret, master_rpc_pubkey)) => {
+        Ok((node_id, secret, master_rpc_pubkey)) => {
             let master_url = derive_master_from_headers(&headers, &state);
             Ok(Json(EnrollResponse {
                 node_id,
@@ -136,7 +148,9 @@ async fn consume_and_register(
     label: &str,
     agent_version: &str,
     public_ip: Option<&str>,
-) -> Result<(String, Option<String>), String> {
+    prior_node_id: Option<&str>,
+    prior_secret: Option<&str>,
+) -> Result<(String, String, Option<String>), String> {
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
         Request::EnrollConsume {
@@ -146,15 +160,18 @@ async fn consume_and_register(
             label: label.to_string(),
             agent_version: agent_version.to_string(),
             public_ip: public_ip.map(String::from),
+            prior_node_id: prior_node_id.map(String::from),
+            prior_secret: prior_secret.map(String::from),
         },
     )
     .await
     .map_err(|e| format!("rpc: {e}"))?;
     match resp {
         RpcResponse::EnrollConsume {
+            node_id,
             secret,
             master_rpc_pubkey,
-        } => Ok((secret, master_rpc_pubkey)),
+        } => Ok((node_id, secret, master_rpc_pubkey)),
         RpcResponse::Error(e) => Err(e.to_string()),
         _ => Err("unexpected response".into()),
     }

@@ -1052,6 +1052,15 @@ pub enum Request {
         label: String,
         agent_version: String,
         public_ip: Option<String>,
+        /// Block B idempotent re-enrollment: the node_id + per-node secret
+        /// the re-enrolling box already had on disk (node-id.json), if
+        /// any. The master reuses the id on a matching secret (continuity)
+        /// or adopts a free id; otherwise it mints a fresh one. `#[serde(
+        /// default)]` so older agents that don't send these still enroll.
+        #[serde(default)]
+        prior_node_id: Option<String>,
+        #[serde(default)]
+        prior_secret: Option<String>,
     },
     NodesList,
     /// Cluster-wide certificate inventory — every cert this agent
@@ -1513,6 +1522,14 @@ pub enum Response {
     CronList(String),
     CronReplace,
     EnrollConsume {
+        /// The EFFECTIVE node_id the master assigned. Usually the freshly
+        /// minted candidate, but on an idempotent re-enroll it's the
+        /// reused/adopted prior id. The node persists THIS, not the id it
+        /// presented. `#[serde(default)]` keeps older masters (that don't
+        /// echo it) parseable — the node then falls back to the id it
+        /// already had / the response's own node_id field.
+        #[serde(default)]
+        node_id: String,
         secret: String,
         /// Base64 (no-pad) of the master's Ed25519 public key for
         /// the master→node remote-RPC channel. `None` on masters
