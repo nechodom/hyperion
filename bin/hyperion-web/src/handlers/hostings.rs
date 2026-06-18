@@ -819,6 +819,45 @@ pub async fn post_create(
             "Master is in control-plane-only mode (Settings → Cluster). Pick a worker node from the dropdown.",
         ));
     }
+    // Server-side cluster-wide duplicate-domain guard. The wizard runs a
+    // live /hostings/check-domain preflight, but that's advisory only — a
+    // hand-crafted POST, a stale form, or two operators racing the same
+    // domain would otherwise create duplicate vhosts on two nodes (nginx
+    // server_name collision → whichever box DNS points at answers, the
+    // other silently shadows, and certs/limits diverge). Re-check here
+    // against the (now-parallel, ~fast) cluster list and refuse before
+    // dispatching HostingCreate. Mirrors get_check_domain's primary-domain
+    // match. Fail OPEN on a list error: a transient master-agent hiccup
+    // shouldn't block legitimate creates, and the agent still rejects a
+    // same-node duplicate.
+    match list_hostings(&state).await {
+        Ok(rows) => {
+            if let Some(dup) = rows
+                .iter()
+                .find(|r| r.domain.eq_ignore_ascii_case(req.domain.as_str()))
+            {
+                let where_ = match dup.node_id.as_deref() {
+                    Some(crate::dispatcher::LOCAL_NODE_SENTINEL) | None => {
+                        "the master node".to_string()
+                    }
+                    Some(n) => format!("node {n}"),
+                };
+                return Ok(render_new_error(
+                    &ctx,
+                    &csrf_token,
+                    &form,
+                    &format!(
+                        "A hosting for {} already exists on {}. Pick a different domain.",
+                        dup.domain, where_
+                    ),
+                ));
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error=%e, domain=%req.domain.as_str(),
+                "post_create: cluster duplicate-domain check skipped (list failed) — proceeding");
+        }
+    }
     // Loud breadcrumb so the operator can verify in journalctl which
     // node a create attempt was actually dispatched to. The dispatcher
     // also logs, but having both lets us tell apart "form submitted
