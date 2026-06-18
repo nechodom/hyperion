@@ -7536,17 +7536,38 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // without re-prompting for the secret on every edit).
         let now = now_secs();
         let secret_path = if let Some(plaintext) = secret_key.as_deref() {
-            let pseudo_id = id.unwrap_or(0);
-            let path = format!("/etc/hyperion/secrets/backup-{pseudo_id}.key");
-            // Best-effort write; failure is non-fatal — the row
-            // gets stored without a secret path, the UI shows
-            // "secret never persisted" and the runner refuses.
-            if let Err(e) = write_secret_file(&path, plaintext.as_bytes()).await {
-                tracing::warn!(path = %path, error = %e, "backup secret write failed");
+            // Random filename — it must NOT depend on the row id. For a NEW
+            // target the id is unknown here, and the old code reused
+            // `backup-0.key` (id.unwrap_or(0)), so every newly-created target
+            // overwrote the previous one's secret and both rows pointed at the
+            // same file → wrong credentials. A fresh ULID-named file per write
+            // makes multi-target collision impossible.
+            let fresh = format!(
+                "/etc/hyperion/secrets/backup-{}.key",
+                ulid::Ulid::new().to_string().to_ascii_lowercase()
+            );
+            // Best-effort write; failure is non-fatal — the row gets stored
+            // without a secret path, the UI shows "secret never persisted" and
+            // the runner refuses.
+            if let Err(e) = write_secret_file(&fresh, plaintext.as_bytes()).await {
+                tracing::warn!(path = %fresh, error = %e, "backup secret write failed");
             }
-            Some(path)
+            // Replacing a secret on an existing target: best-effort remove the
+            // old secret file so stale credentials don't linger on disk.
+            if let Some(existing_id) = id {
+                if let Ok(Some(old)) =
+                    hyperion_state::backup_targets::get(&self.pool, existing_id).await
+                {
+                    if let Some(oldpath) = old.secret_key_id {
+                        if oldpath != fresh {
+                            let _ = tokio::fs::remove_file(&oldpath).await;
+                        }
+                    }
+                }
+            }
+            Some(fresh)
         } else if let Some(existing_id) = id {
-            // Re-read existing row to preserve its secret_key_id.
+            // No new secret on update → keep the existing path.
             hyperion_state::backup_targets::get(&self.pool, existing_id)
                 .await
                 .map_err(|e| RpcError::Internal_with(format!("backup_target get: {e}")))?
@@ -7594,6 +7615,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     }
 
     pub async fn backup_target_delete(&self, id: i64) -> Result<(), RpcError> {
+        // Best-effort: shred the on-disk secret file too, so deleting a target
+        // doesn't leave its S3 credentials lying in /etc/hyperion/secrets.
+        if let Ok(Some(row)) = hyperion_state::backup_targets::get(&self.pool, id).await {
+            if let Some(path) = row.secret_key_id {
+                let _ = tokio::fs::remove_file(&path).await;
+            }
+        }
         hyperion_state::backup_targets::delete(&self.pool, id)
             .await
             .map_err(|e| RpcError::Internal_with(format!("backup_target delete: {e}")))?;
