@@ -873,6 +873,14 @@ pub trait AgentApi: Send + Sync + 'static {
         actor_uid: i64,
     ) -> Result<(bool, i64), RpcError>;
 
+    /// Re-point hostings from a dead `from_node_id` onto the enrolled
+    /// `to_node_id` (Block B orphan adoption). Returns rows moved.
+    async fn node_reassign_hostings(
+        &self,
+        from_node_id: String,
+        to_node_id: String,
+    ) -> Result<i64, RpcError>;
+
     /// Compute operator alerts (cert expiring, failed hostings, stale
     /// backups, high load) at request time.
     async fn dashboard_alerts(&self) -> Result<Vec<DashboardAlert>, RpcError>;

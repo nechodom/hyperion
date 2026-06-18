@@ -39,6 +39,9 @@ enum Cmd {
     /// Node-side agent maintenance.
     #[command(subcommand)]
     Agent(AgentCmd),
+    /// Cluster node registry maintenance (run on the master).
+    #[command(subcommand)]
+    Node(NodeCmd),
 }
 
 #[derive(Subcommand, Debug)]
@@ -48,6 +51,21 @@ enum AgentCmd {
     /// deliberately rotated the master's remote-RPC key — the agent
     /// otherwise refuses a silently-changed key (anti-MITM).
     Repin,
+}
+
+#[derive(Subcommand, Debug)]
+enum NodeCmd {
+    /// Re-point hostings from a dead node id onto a live one (orphan
+    /// adoption). Use after a box re-enrolled under a new id so its
+    /// hostings still carry the old, now-removed id. Run on the master.
+    Reassign {
+        /// The dead/old node id the hostings currently reference.
+        #[arg(long)]
+        from: String,
+        /// The live, enrolled node id to move them to (the same box).
+        #[arg(long)]
+        to: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -217,6 +235,10 @@ async fn call(cli: &Cli) -> anyhow::Result<Response> {
     let req = match &cli.cmd {
         Cmd::Info => Request::AgentInfo,
         Cmd::Agent(AgentCmd::Repin) => Request::AgentRepin,
+        Cmd::Node(NodeCmd::Reassign { from, to }) => Request::NodeReassignHostings {
+            from_node_id: from.clone(),
+            to_node_id: to.clone(),
+        },
         Cmd::Hosting(HostingCmd::Create {
             domain,
             aliases,
@@ -348,6 +370,9 @@ fn print_pretty(resp: &Response) {
                     );
                 }
             }
+        }
+        Response::NodeHostingsReassigned { moved } => {
+            println!("✓ reassigned {moved} hosting(s) to the target node");
         }
         Response::AgentRepin { cleared } => match cleared {
             Some(pk) => println!(

@@ -1161,6 +1161,13 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             },
             Err(e) => Response::Error(e),
         },
+        Request::NodeReassignHostings {
+            from_node_id,
+            to_node_id,
+        } => match api.node_reassign_hostings(from_node_id, to_node_id).await {
+            Ok(moved) => Response::NodeHostingsReassigned { moved },
+            Err(e) => Response::Error(e),
+        },
         Request::WpResetPassword {
             sel,
             wp_user,
@@ -2246,6 +2253,9 @@ mod tests {
         }
         async fn node_remove(&self, _: String, _: bool, _: i64) -> Result<(bool, i64), RpcError> {
             Ok((true, 0))
+        }
+        async fn node_reassign_hostings(&self, _: String, _: String) -> Result<i64, RpcError> {
+            Ok(0)
         }
         async fn cert_overview(&self) -> Result<Vec<hyperion_types::CertOverviewItem>, RpcError> {
             Ok(Vec::new())

@@ -316,6 +316,29 @@ pub async fn count_hostings_on_node(pool: &SqlitePool, node_id: &str) -> Result<
     Ok(n)
 }
 
+/// Re-point every (non-trashed) hosting routed to `from_node_id` over to
+/// `to_node_id`. Block B orphan adoption: when a box re-enrolled under a
+/// new id (so its hostings still carry the dead old id), the operator
+/// re-points them to the live id of the SAME physical box so the master
+/// routes management RPCs there again. Returns the number of rows moved.
+///
+/// Trashed rows are left alone (headed for purge). The caller is
+/// responsible for the policy check that `to_node_id` is a live node and
+/// genuinely hosts these sites' files.
+pub async fn reassign_hostings(
+    pool: &SqlitePool,
+    from_node_id: &str,
+    to_node_id: &str,
+) -> Result<u64, StateError> {
+    let n = sqlx::query("UPDATE hostings SET node_id = ? WHERE node_id = ? AND state != 'trashed'")
+        .bind(to_node_id)
+        .bind(from_node_id)
+        .execute(pool)
+        .await?
+        .rows_affected();
+    Ok(n)
+}
+
 /// Rename a node's display label without touching its `node_id`
 /// (the immutable enrollment identifier). The label is what shows
 /// up in dashboard dropdowns, the test-domain template token, the
@@ -435,6 +458,48 @@ mod tests {
         assert_eq!(row.secret_hash, "hash-b", "secret re-minted");
         assert_eq!(row.label, "renamed");
         assert_eq!(row.public_ip.as_deref(), Some("2.2.2.2"));
+    }
+
+    #[tokio::test]
+    async fn reassign_moves_matching_hostings() {
+        let pool = open_memory().await.expect("open");
+        // FK target for hostings.system_user_id.
+        sqlx::query(
+            "INSERT INTO system_users (id, name, uid, home_dir, created_at) \
+             VALUES (1, 'u', 1001, '/home/u', 0)",
+        )
+        .execute(&pool)
+        .await
+        .expect("user");
+        for (id, domain, node) in [
+            ("h1", "a.test", "old"),
+            ("h2", "b.test", "old"),
+            ("h3", "c.test", "keep"),
+        ] {
+            sqlx::query(
+                "INSERT INTO hostings \
+                 (id, domain, state, system_user_id, root_dir, created_at, updated_at, node_id) \
+                 VALUES (?, ?, 'active', 1, ?, 0, 0, ?)",
+            )
+            .bind(id)
+            .bind(domain)
+            .bind(format!("/srv/{id}"))
+            .bind(node)
+            .execute(&pool)
+            .await
+            .expect("insert hosting");
+        }
+        let moved = reassign_hostings(&pool, "old", "new")
+            .await
+            .expect("reassign");
+        assert_eq!(moved, 2, "only the two 'old' rows move");
+        assert_eq!(count_hostings_on_node(&pool, "old").await.expect("c"), 0);
+        assert_eq!(count_hostings_on_node(&pool, "new").await.expect("c"), 2);
+        assert_eq!(
+            count_hostings_on_node(&pool, "keep").await.expect("c"),
+            1,
+            "unrelated node untouched"
+        );
     }
 
     #[tokio::test]

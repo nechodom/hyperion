@@ -1304,6 +1304,16 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.node_remove(&node_id, force, actor_uid).await
     }
 
+    async fn node_reassign_hostings(
+        &self,
+        from_node_id: String,
+        to_node_id: String,
+    ) -> Result<i64, RpcError> {
+        self.svc
+            .node_reassign_hostings(&from_node_id, &to_node_id)
+            .await
+    }
+
     async fn wp_reset_password(
         &self,
         sel: HostingSelector,

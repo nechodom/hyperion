@@ -7246,6 +7246,54 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok((removed, count))
     }
 
+    /// Block B orphan adoption: re-point every (non-trashed) hosting
+    /// routed to `from_node_id` onto the live `to_node_id`. The intended
+    /// use is "a box re-enrolled under a new id, so its hostings still
+    /// carry the dead old id — move them to the new id of the SAME box".
+    /// `to_node_id` must be an enrolled node (else we'd just re-orphan
+    /// onto another dead id). Returns the number of hostings moved.
+    /// Audited. The operator is responsible for ensuring the target node
+    /// genuinely holds these sites' files.
+    pub async fn node_reassign_hostings(
+        &self,
+        from_node_id: &str,
+        to_node_id: &str,
+    ) -> Result<i64, RpcError> {
+        let from = from_node_id.trim();
+        let to = to_node_id.trim();
+        if from.is_empty() || to.is_empty() {
+            return Err(RpcError::Validation {
+                message: "from/to node id must be non-empty".into(),
+            });
+        }
+        if from == to {
+            return Err(RpcError::Validation {
+                message: "from and to node are the same".into(),
+            });
+        }
+        let to_exists = hyperion_state::nodes::get_by_node_id(&self.pool, to)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("node lookup: {e}")))?
+            .is_some();
+        if !to_exists {
+            return Err(RpcError::Validation {
+                message: format!("target node {to} is not enrolled — pick a live node"),
+            });
+        }
+        let moved = hyperion_state::nodes::reassign_hostings(&self.pool, from, to)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("reassign: {e}")))?
+            as i64;
+        self.append_audit(
+            "node.reassign_hostings",
+            Some(to),
+            &serde_json::json!({"from": from, "to": to, "moved": moved}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(moved)
+    }
+
     /// List enrolled nodes (master-side view).
     pub async fn nodes_list(&self) -> Result<Vec<hyperion_types::NodeSummary>, RpcError> {
         let rows = hyperion_state::nodes::list(&self.pool)

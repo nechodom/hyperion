@@ -1097,6 +1097,14 @@ pub enum Request {
         #[serde(default)]
         force: bool,
     },
+    /// Block B orphan adoption: re-point every hosting routed to
+    /// `from_node_id` onto the (enrolled) `to_node_id`. Used after a box
+    /// re-enrolled under a new id so its hostings still carry the dead
+    /// old id.
+    NodeReassignHostings {
+        from_node_id: String,
+        to_node_id: String,
+    },
     NodeHeartbeat {
         node_id: String,
         secret: String,
@@ -1561,6 +1569,10 @@ pub enum Response {
     NodeRemoved {
         removed: bool,
         hostings_blocking: i64,
+    },
+    /// Result of NodeReassignHostings: how many hostings were re-pointed.
+    NodeHostingsReassigned {
+        moved: i64,
     },
     NodeHeartbeat {
         /// Same as EnrollConsume — included on every heartbeat ack
