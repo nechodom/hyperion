@@ -93,6 +93,15 @@ pub struct WpPluginListResponse {
     /// `auto_update_plugins` flag from `wp_installs` — the bulk
     /// switch in the Hosting Detail UI.
     pub bulk_auto_update: bool,
+    /// Set when the live `wp plugin list` lookup FAILED (wp-cli couldn't
+    /// bootstrap WordPress — e.g. a database connection error, a PHP
+    /// fatal/notice corrupting the JSON, or a permissions problem). The
+    /// web layer puts the reason here instead of silently returning an
+    /// empty list, so the panel can show "couldn't list plugins" with the
+    /// cause rather than a misleading "no plugins installed". `None` on a
+    /// successful lookup (including a genuinely empty install).
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 /// One outdated installed component (plugin / theme). The "defender" is
@@ -227,6 +236,10 @@ pub struct WpThemeListResponse {
     /// WpPluginListResponse so the UI can reuse a header.
     pub wp_version: String,
     pub updates_pending: i64,
+    /// Set when the live `wp theme list` lookup FAILED — same semantics as
+    /// `WpPluginListResponse::error`. `None` on success.
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 /// Whitelisted theme actions exposed via the web UI. Mirrors

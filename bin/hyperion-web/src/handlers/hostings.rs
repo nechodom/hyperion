@@ -1595,7 +1595,30 @@ pub async fn get_detail(
             .await
             {
                 Ok(RpcResponse::WpPluginList(r)) => r,
-                _ => hyperion_types::WpPluginListResponse::default(),
+                // Surface the real failure instead of swallowing it into an
+                // empty list (which the panel renders as "no plugins
+                // installed"). WP core files exist on disk (wp_status is
+                // Some), but the live `wp plugin list` couldn't run — almost
+                // always a DB connection / PHP error during WordPress
+                // bootstrap, or a permissions problem.
+                Ok(RpcResponse::Error(e)) => {
+                    tracing::warn!(hosting=?sel_id, error=%e, "wp plugin list failed");
+                    hyperion_types::WpPluginListResponse {
+                        error: Some(e.to_string()),
+                        ..Default::default()
+                    }
+                }
+                Ok(_) => hyperion_types::WpPluginListResponse {
+                    error: Some("unexpected response from the agent".into()),
+                    ..Default::default()
+                },
+                Err(e) => {
+                    tracing::warn!(hosting=?sel_id, error=%e, "wp plugin list dispatch failed");
+                    hyperion_types::WpPluginListResponse {
+                        error: Some(e.to_string()),
+                        ..Default::default()
+                    }
+                }
             }
         } else {
             hyperion_types::WpPluginListResponse::default()
@@ -1613,7 +1636,25 @@ pub async fn get_detail(
             .await
             {
                 Ok(RpcResponse::WpThemeList(r)) => r,
-                _ => hyperion_types::WpThemeListResponse::default(),
+                // Same as plugins: surface the failure instead of an empty list.
+                Ok(RpcResponse::Error(e)) => {
+                    tracing::warn!(hosting=?sel_id, error=%e, "wp theme list failed");
+                    hyperion_types::WpThemeListResponse {
+                        error: Some(e.to_string()),
+                        ..Default::default()
+                    }
+                }
+                Ok(_) => hyperion_types::WpThemeListResponse {
+                    error: Some("unexpected response from the agent".into()),
+                    ..Default::default()
+                },
+                Err(e) => {
+                    tracing::warn!(hosting=?sel_id, error=%e, "wp theme list dispatch failed");
+                    hyperion_types::WpThemeListResponse {
+                        error: Some(e.to_string()),
+                        ..Default::default()
+                    }
+                }
             }
         } else {
             hyperion_types::WpThemeListResponse::default()

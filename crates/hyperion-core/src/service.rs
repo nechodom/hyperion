@@ -5055,6 +5055,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             wp_version,
             updates_pending,
             bulk_auto_update,
+            error: None,
         })
     }
 
@@ -5136,6 +5137,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             themes,
             wp_version,
             updates_pending,
+            error: None,
         })
     }
 

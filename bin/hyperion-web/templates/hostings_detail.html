@@ -1326,7 +1326,14 @@
     {% endif %}
   </div>
 
-  {% if wp_plugins.plugins.is_empty() %}
+  {% if let Some(err) = wp_plugins.error %}
+    <div class="empty" style="padding:1.5rem 1rem">
+      <p style="color:var(--danger);font-weight:600;margin:0 0 .35rem">Couldn't list plugins</p>
+      <p class="muted" style="margin:0 0 .5rem">WordPress core is present on disk, but <code>wp plugin list</code> failed when it tried to start WordPress — usually a database-connection problem or a PHP error during bootstrap, not a missing plugin.</p>
+      <p class="muted mono" style="margin:0 0 .5rem;white-space:pre-wrap;word-break:break-word">{{ err }}</p>
+      <p class="muted" style="margin:0">Run this on the node to see the underlying cause:<br><code>sudo -u &lt;system_user&gt; /usr/local/bin/wp --path=&lt;document_root&gt; plugin list</code></p>
+    </div>
+  {% else if wp_plugins.plugins.is_empty() %}
     <div class="empty" style="padding:1.5rem 1rem">
       <p class="muted">No plugins installed yet. Use <strong>Install plugin</strong> above to add one from wordpress.org or a .zip URL.</p>
     </div>
@@ -1634,7 +1641,14 @@
     {% endif %}
   </div>
 
-  {% if wp_themes.themes.is_empty() %}
+  {% if let Some(err) = wp_themes.error %}
+    <div class="empty" style="padding:1.5rem 1rem">
+      <p style="color:var(--danger);font-weight:600;margin:0 0 .35rem">Couldn't list themes</p>
+      <p class="muted" style="margin:0 0 .5rem">WordPress core is present on disk, but <code>wp theme list</code> failed when it tried to start WordPress — usually a database-connection problem or a PHP error during bootstrap, not a missing theme.</p>
+      <p class="muted mono" style="margin:0 0 .5rem;white-space:pre-wrap;word-break:break-word">{{ err }}</p>
+      <p class="muted" style="margin:0">Run this on the node to see the underlying cause:<br><code>sudo -u &lt;system_user&gt; /usr/local/bin/wp --path=&lt;document_root&gt; theme list</code></p>
+    </div>
+  {% else if wp_themes.themes.is_empty() %}
     <div class="empty" style="padding:1.5rem 1rem">
       <p class="muted">No themes detected. Use <strong>Install theme</strong> above to add one from wordpress.org, a URL, or the asset library.</p>
     </div>
