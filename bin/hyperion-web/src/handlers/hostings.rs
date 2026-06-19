@@ -5895,7 +5895,7 @@ pub async fn post_hosting_clone(
     let new_domain = form.new_domain.trim().to_string();
     if new_domain.is_empty() {
         return Ok(Redirect::to(&format!(
-            "/hostings/{}?flash_error=Pick+a+target+domain+for+the+clone#clone",
+            "/hostings/{}?flash_error=Enter+a+domain+for+the+copy#clone",
             sel_url
         ))
         .into_response());
@@ -6384,7 +6384,7 @@ pub async fn post_migration_move(
     let target = form.target_node.trim();
     if target.is_empty() {
         return Ok(Redirect::to(&format!(
-            "/hostings/{}?flash_error=Pick+a+target+node+for+migration#migration",
+            "/hostings/{}?flash_error=Pick+a+destination+node+first#migration",
             sel_url
         ))
         .into_response());

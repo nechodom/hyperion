@@ -604,7 +604,7 @@ pub async fn post_toggle_test_node(
     Form(form): Form<TestNodeForm>,
 ) -> Result<Response, AppError> {
     if !ctx.is_super_admin() {
-        return Ok(Redirect::to("/install?flash_error=super_admin+required").into_response());
+        return Ok(Redirect::to("/install?flash_error=Owner+role+required").into_response());
     }
     let node_id = form.node_id.trim();
     if node_id.is_empty() {
