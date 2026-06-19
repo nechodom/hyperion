@@ -5984,6 +5984,27 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         } else {
             to
         };
+        // Apply the operator's editable email wording (defaults "{subject}"
+        // / "{body}" are pass-through). Rendered text is what we send AND
+        // log, so the email log shows exactly what the recipient received.
+        let tmpls = read_notifications_section(self.agent_config_path.as_deref());
+        let time = fmt_notif_time(now_secs());
+        let panel = self.notify_panel_url();
+        let subject_rendered = render_template(
+            &tmpls.email_subject_template,
+            &[("subject", subject), ("time", &time)],
+        );
+        let body_rendered = render_template(
+            &tmpls.email_body_template,
+            &[
+                ("body", body),
+                ("time", &time),
+                ("panel", &panel),
+                ("kind", kind),
+            ],
+        );
+        let subject = subject_rendered.as_str();
+        let body = body_rendered.as_str();
         match hyperion_adapters::email::send_text(cfg, to, subject, body).await {
             Ok(code) => {
                 self.append_audit(
@@ -6389,6 +6410,18 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// Send a Slack incoming-webhook message. Specific webhook URL
     /// wins over `slack_default_webhook`. Best-effort: failures are
     /// audit-logged but never propagate to the caller.
+    /// Panel URL for `{panel}` in notification templates —
+    /// `https://<panel_hostname>` from `[cluster]`, or empty when unset.
+    fn notify_panel_url(&self) -> String {
+        let host = read_cluster_section(self.agent_config_path.as_deref()).panel_hostname;
+        let host = host.trim();
+        if host.is_empty() {
+            String::new()
+        } else {
+            format!("https://{host}")
+        }
+    }
+
     pub(crate) async fn notify_slack(&self, specific: Option<&str>, message: &str) {
         let url = specific
             .filter(|s| !s.trim().is_empty())
@@ -6397,6 +6430,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let Some(url) = url else {
             return;
         };
+        // Apply the operator's editable Slack wording (default "{message}"
+        // is pass-through, so output is unchanged unless customised).
+        let tmpls = read_notifications_section(self.agent_config_path.as_deref());
+        let time = fmt_notif_time(now_secs());
+        let panel = self.notify_panel_url();
+        let rendered = render_template(
+            &tmpls.slack_template,
+            &[("message", message), ("time", &time), ("panel", &panel)],
+        );
+        let message = rendered.as_str();
         let body = serde_json::json!({"text": message}).to_string();
         let out = tokio::process::Command::new("/usr/bin/curl")
             .args([
@@ -10842,6 +10885,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             backup_remote: backup_remote_view,
             backup_retention: backup_retention_view,
             cluster: cluster_view,
+            notifications: read_notifications_section(self.agent_config_path.as_deref()),
         })
     }
 
@@ -15305,6 +15349,72 @@ fn is_internal_ip(ip: &std::net::IpAddr) -> bool {
 /// default (`master_accepts_hostings = true`) on parse failure or
 /// missing file/section so an out-of-date agent.toml never breaks
 /// the settings page.
+/// Substitute `{key}` tokens in `tmpl` with the matching value. Single
+/// pass (substituted values are NOT re-scanned, so a value containing
+/// `{time}` won't itself get expanded), UTF-8 safe, and unknown `{tokens}`
+/// are left verbatim so an operator's typo is visible in the output
+/// rather than silently dropped. Backs the editable notification wording.
+fn render_template(tmpl: &str, fields: &[(&str, &str)]) -> String {
+    let mut out = String::with_capacity(tmpl.len() + 32);
+    let mut rest = tmpl;
+    while let Some(open) = rest.find('{') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        if let Some(close) = after.find('}') {
+            let key = &after[..close];
+            if let Some((_, val)) = fields.iter().find(|(k, _)| *k == key) {
+                out.push_str(val);
+                rest = &after[close + 1..];
+                continue;
+            }
+        }
+        // Not a closed, known placeholder — emit the literal '{' and move on.
+        out.push('{');
+        rest = after;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Format a unix timestamp for embedding in a notification template.
+fn fmt_notif_time(secs: i64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0)
+        .map(|dt| dt.format("%Y-%m-%d %H:%M UTC").to_string())
+        .unwrap_or_default()
+}
+
+/// Read the operator-editable `[notifications]` message templates from
+/// agent.toml. Missing file / section / keys fall back to the
+/// pass-through defaults, so wording is unchanged until customised.
+fn read_notifications_section(
+    cfg_path: Option<&std::path::Path>,
+) -> hyperion_types::NotificationTemplatesView {
+    let def = hyperion_types::NotificationTemplatesView::default();
+    let Some(path) = cfg_path else {
+        return def;
+    };
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return def;
+    };
+    let Ok(doc) = raw.parse::<toml_edit::DocumentMut>() else {
+        return def;
+    };
+    let section = doc.get("notifications");
+    let get = |key: &str, fallback: &str| -> String {
+        section
+            .and_then(|s| s.get(key))
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(fallback)
+            .to_string()
+    };
+    hyperion_types::NotificationTemplatesView {
+        slack_template: get("slack_template", &def.slack_template),
+        email_subject_template: get("email_subject_template", &def.email_subject_template),
+        email_body_template: get("email_body_template", &def.email_body_template),
+    }
+}
+
 fn read_cluster_section(cfg_path: Option<&std::path::Path>) -> hyperion_types::ClusterConfigView {
     let Some(path) = cfg_path else {
         return hyperion_types::ClusterConfigView::default();
@@ -15447,6 +15557,15 @@ fn parse_agent_section_fields(
                     )));
                 }
                 crate::config_persist::FieldValue::Int(n)
+            }
+            // [notifications] — editable Slack + email message wording.
+            ("notifications", "slack_template")
+            | ("notifications", "email_subject_template")
+            | ("notifications", "email_body_template") => {
+                if v.len() > 4000 {
+                    return Err(bad("template too long (max 4000 characters)".into()));
+                }
+                crate::config_persist::FieldValue::Str(v.clone())
             }
             // Reject anything else.
             _ => {
@@ -17121,6 +17240,30 @@ mod tests {
             2,
             "two distinct node rows — the in-use one was not hijacked"
         );
+    }
+
+    #[test]
+    fn render_template_substitutes_and_preserves() {
+        // Default pass-through.
+        assert_eq!(render_template("{message}", &[("message", "hi")]), "hi");
+        // Multiple placeholders.
+        assert_eq!(
+            render_template("[{sev}] {t}", &[("sev", "warn"), ("t", "Disk low")]),
+            "[warn] Disk low"
+        );
+        // Unknown token left verbatim so an operator typo is visible.
+        assert_eq!(
+            render_template("{nope} {message}", &[("message", "x")]),
+            "{nope} x"
+        );
+        // A substituted value is NOT re-scanned (no accidental re-expansion).
+        assert_eq!(
+            render_template("{body}", &[("body", "see {time}"), ("time", "T")]),
+            "see {time}"
+        );
+        // Lone/unclosed brace + literal text preserved.
+        assert_eq!(render_template("a { b", &[]), "a { b");
+        assert_eq!(render_template("100% {x}", &[("x", "ok")]), "100% ok");
     }
 
     // ============================================================

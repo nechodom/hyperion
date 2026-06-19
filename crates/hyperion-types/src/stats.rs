@@ -241,6 +241,38 @@ pub struct AgentConfigView {
     /// deserializing.
     #[serde(default)]
     pub cluster: ClusterConfigView,
+    /// Operator-editable wording for the Slack + email messages Hyperion
+    /// sends (alerts, reminders, test sends). `#[serde(default)]` keeps
+    /// older agents parseable; the defaults are pass-through so wording
+    /// is unchanged until the operator edits a template.
+    #[serde(default)]
+    pub notifications: NotificationTemplatesView,
+}
+
+/// Editable templates for outbound notification wording. Each is a string
+/// with `{placeholder}` tokens substituted at send time. Defaults are
+/// pass-through (the raw message/subject/body), so behaviour is identical
+/// to no templating until the operator customises one.
+///
+/// Placeholders:
+/// - Slack: `{message}`, `{time}`, `{panel}`
+/// - Email subject: `{subject}`, `{time}`
+/// - Email body: `{body}`, `{time}`, `{panel}`, `{kind}`
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NotificationTemplatesView {
+    pub slack_template: String,
+    pub email_subject_template: String,
+    pub email_body_template: String,
+}
+
+impl Default for NotificationTemplatesView {
+    fn default() -> Self {
+        Self {
+            slack_template: "{message}".into(),
+            email_subject_template: "{subject}".into(),
+            email_body_template: "{body}".into(),
+        }
+    }
 }
 
 /// Cluster-placement preferences for the master web UI.

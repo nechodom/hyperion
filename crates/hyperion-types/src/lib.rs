@@ -44,10 +44,10 @@ pub use stats::{
     FirewallView, FsDiagnostics, FsFixStep, FtpAccountSummary, HostingFileContent,
     HostingFileEntry, HostingStats, MonitorConfigView, MonitorHistory, MonitorOverviewItem,
     MonitorSamplePoint, MtaDiagnostics, MtaPortProbe, NodeMetricPoint, NodeMetricsHistory,
-    NodeStats, NodeSummary, NodeUpdateStatus, NotificationFeed, NotificationView, ServiceHealth,
-    ServiceInstallStatus, ServicesHealth, SiteEmailLogEntry, SlackConfigView, SmtpAutodetect,
-    TrashEntry, UpdateStatus, Web2faEnrollment, WebHostingAccess, WebLoginResult, WebUserSummary,
-    WebVerify2faResult,
+    NodeStats, NodeSummary, NodeUpdateStatus, NotificationFeed, NotificationTemplatesView,
+    NotificationView, ServiceHealth, ServiceInstallStatus, ServicesHealth, SiteEmailLogEntry,
+    SlackConfigView, SmtpAutodetect, TrashEntry, UpdateStatus, Web2faEnrollment, WebHostingAccess,
+    WebLoginResult, WebUserSummary, WebVerify2faResult,
 };
 pub use wp::{
     HostingVulnSummary, WpInstallRequest, WpInstallStatus, WpPlugin, WpPluginAction,

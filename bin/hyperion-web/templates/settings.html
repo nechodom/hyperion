@@ -585,7 +585,126 @@
       <button type="submit" class="btn primary">Save Slack webhook</button>
     </form>
   </div>
+
+  {# ───── Message templates: editable Slack + email wording with a
+     live preview. Defaults are pass-through, so wording is unchanged
+     until you customise a template. ───── #}
+  <div class="card">
+    <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.4rem">
+      <h2 style="margin:0">
+        <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+        Message templates
+      </h2>
+    </div>
+    <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">
+      Customise the wording of the Slack and email messages Hyperion sends
+      (alerts, reminders, test sends). Type a template and watch the preview
+      update with sample data. Leave a template empty to use the default
+      pass-through wording. Insert a placeholder in
+      <code>{curly braces}</code>; an unknown one is shown as-is so a typo
+      is easy to spot.
+    </p>
+
+    <form method="post" action="/settings/config" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="notifications">
+
+      <div class="field">
+        <label for="nt_slack">Slack message
+          <span class="hint">placeholders: <code>{message}</code> <code>{time}</code> <code>{panel}</code></span>
+        </label>
+        <textarea id="nt_slack" name="slack_template" rows="3"
+                  style="width:100%;font-family:var(--font-mono);font-size:0.85rem"
+                  placeholder="{message}">{{ config.notifications.slack_template }}</textarea>
+        <div class="text-soft small" style="margin:0.3rem 0 0.1rem">Preview</div>
+        <div id="nt_slack_preview" style="white-space:pre-wrap;background:var(--surface-2);border-radius:var(--radius-xs);padding:0.55rem 0.7rem;font-size:0.85rem;min-height:1.4rem"></div>
+      </div>
+
+      <div class="field" style="margin-top:1rem">
+        <label for="nt_subject">Email subject
+          <span class="hint">placeholders: <code>{subject}</code> <code>{time}</code></span>
+        </label>
+        <input id="nt_subject" name="email_subject_template" type="text"
+               style="font-family:var(--font-mono);font-size:0.85rem"
+               placeholder="{subject}" value="{{ config.notifications.email_subject_template }}">
+        <div class="text-soft small" style="margin:0.3rem 0 0.1rem">Preview</div>
+        <div id="nt_subject_preview" style="background:var(--surface-2);border-radius:var(--radius-xs);padding:0.45rem 0.7rem;font-size:0.85rem;font-weight:600;min-height:1.3rem"></div>
+      </div>
+
+      <div class="field" style="margin-top:1rem">
+        <label for="nt_body">Email body
+          <span class="hint">placeholders: <code>{body}</code> <code>{time}</code> <code>{panel}</code> <code>{kind}</code></span>
+        </label>
+        <textarea id="nt_body" name="email_body_template" rows="5"
+                  style="width:100%;font-family:var(--font-mono);font-size:0.85rem"
+                  placeholder="{body}">{{ config.notifications.email_body_template }}</textarea>
+        <div class="text-soft small" style="margin:0.3rem 0 0.1rem">Preview</div>
+        <div id="nt_body_preview" style="white-space:pre-wrap;background:var(--surface-2);border-radius:var(--radius-xs);padding:0.55rem 0.7rem;font-size:0.85rem;min-height:2.2rem"></div>
+      </div>
+
+      <p class="text-soft small" style="margin:0.9rem 0 0.8rem;line-height:1.5">
+        Applies within ~30&nbsp;s, no restart needed. The rendered text is
+        what gets sent and what the <a href="/emails">email log</a> records,
+        so the log always shows exactly what the recipient received.
+      </p>
+      <button type="submit" class="btn primary">Save message templates</button>
+    </form>
+  </div>
 </div>
+
+<script>
+// Live preview for the notification message templates. Mirrors the
+// server-side single-pass {key} substitution (unknown tokens are left
+// verbatim, substituted values are NOT re-scanned).
+(function () {
+  function hypRender(tmpl, fields) {
+    var out = '', rest = tmpl;
+    while (true) {
+      var open = rest.indexOf('{');
+      if (open === -1) { out += rest; break; }
+      out += rest.slice(0, open);
+      var after = rest.slice(open + 1);
+      var close = after.indexOf('}');
+      if (close !== -1) {
+        var key = after.slice(0, close);
+        if (Object.prototype.hasOwnProperty.call(fields, key)) {
+          out += fields[key];
+          rest = after.slice(close + 1);
+          continue;
+        }
+      }
+      out += '{';
+      rest = after;
+    }
+    return out;
+  }
+  var sample = {
+    message: 'Backup of example.com failed: not enough free disk space.',
+    subject: 'Backup failed — example.com',
+    body: 'The scheduled backup of example.com did not finish.\nReason: not enough free disk space on the node.',
+    time: '2026-06-19 03:00 UTC',
+    panel: 'https://panel.example.com',
+    kind: 'backup'
+  };
+  function setPreview(id, text) {
+    var el = document.getElementById(id);
+    if (el) el.textContent = text.length ? text : '(empty)';
+  }
+  function update() {
+    var slack = document.getElementById('nt_slack');
+    var subj = document.getElementById('nt_subject');
+    var body = document.getElementById('nt_body');
+    if (slack) setPreview('nt_slack_preview', hypRender(slack.value, { message: sample.message, time: sample.time, panel: sample.panel }));
+    if (subj) setPreview('nt_subject_preview', hypRender(subj.value, { subject: sample.subject, time: sample.time }));
+    if (body) setPreview('nt_body_preview', hypRender(body.value, { body: sample.body, time: sample.time, panel: sample.panel, kind: sample.kind }));
+  }
+  ['nt_slack', 'nt_subject', 'nt_body'].forEach(function (id) {
+    var el = document.getElementById(id);
+    if (el) el.addEventListener('input', update);
+  });
+  update();
+})();
+</script>
 
 {# ==========================================================
    BACKUPS — remote target + retention policy
