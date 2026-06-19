@@ -19,8 +19,30 @@ fn hostname_or_unknown() -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+/// The version token the agent reports to the master: the 12-char build SHA
+/// (stamped by build.rs), falling back to CARGO_PKG_VERSION only for dev
+/// builds outside a git checkout. This is the SINGLE source of the value —
+/// `AgentInfo`, enroll, and heartbeat all call it, so the `nodes.agent_version`
+/// column behind the cluster version-skew pill carries a real, comparable SHA
+/// instead of the useless hardcoded "0.1.0".
+pub(crate) fn agent_version() -> String {
+    let short: String = env!("HYPERION_GIT_SHA").chars().take(12).collect();
+    if short == "dev-unknown" || short.is_empty() {
+        env!("CARGO_PKG_VERSION").to_string()
+    } else {
+        short
+    }
+}
+
+/// `--version` output: crate version + the git SHA stamped at build time
+/// (build.rs). The bare CARGO_PKG_VERSION is a useless "0.1.0" for every
+/// build, so we append the SHA — this is what lets `update.sh` (and a human)
+/// verify exactly which commit the installed binary was built from, and is the
+/// same SHA the agent reports to the master for the cluster version-skew pill.
+const HYPERION_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("HYPERION_GIT_SHA"));
+
 #[derive(Parser, Debug)]
-#[command(name = "hyperion-agent", version, about = "hyperion agent daemon")]
+#[command(name = "hyperion-agent", version = HYPERION_VERSION, about = "hyperion agent daemon")]
 struct Cli {
     /// Path to the agent.toml config file.
     #[arg(long, default_value = "/etc/hyperion/agent.toml")]
@@ -734,20 +756,9 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
-    // Pass the resolved state_file path so agent_info() can read
-    // enrollment state without re-deriving it. `with_version`
-    // stamps the build-time git SHA so /install + the connectivity
-    // test see the actual deployed revision instead of the
-    // hardcoded Cargo.toml version (which never changes).
-    let agent_version: String = {
-        let short: String = env!("HYPERION_GIT_SHA").chars().take(12).collect();
-        if short == "dev-unknown" || short.is_empty() {
-            // Fallback for dev builds outside a git checkout.
-            env!("CARGO_PKG_VERSION").to_string()
-        } else {
-            short
-        }
-    };
+    // `with_version` stamps the build-time git SHA (see agent_version) so
+    // /install + the connectivity test see the actual deployed revision.
+    let agent_version: String = agent_version();
     let agent: Arc<dyn hyperion_rpc::AgentApi> = Arc::new(
         hyperion_core::AgentImpl::with_state_file(svc, state_file.clone())
             .with_version(agent_version),

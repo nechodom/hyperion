@@ -1,8 +1,6 @@
 //! Capture the current git HEAD SHA at build time so the running binary can
-//! report exactly which commit it was built from (`hyperion-agent --version`),
-//! report it to the master for the cluster version-skew pill, and let
-//! update.sh verify what it installed. Mirrors hyperion-web / hctl build.rs —
-//! keep them in sync.
+//! report exactly which commit it was built from (`hyperion-web --version`).
+//! Mirrors hyperion-agent / hctl build.rs — keep them in sync.
 //!
 //! Precedence: `HYPERION_GIT_SHA` env (CI / update.sh set this) →
 //! `GITHUB_SHA` (GitHub Actions default) → `git rev-parse HEAD`
@@ -34,8 +32,7 @@ fn main() {
     // ...and when the local checkout moves. Watching ONLY .git/HEAD is a bug:
     // a new commit on the SAME branch leaves HEAD as "ref: refs/heads/<b>"
     // unchanged — the ref file under .git/refs is what moves (or packed-refs
-    // once refs are packed). Without this the embedded SHA goes stale across
-    // commits on a dev machine. Paths are relative to this package dir.
+    // once refs are packed). Paths are relative to this package dir.
     println!("cargo:rerun-if-changed=../../.git/HEAD");
     println!("cargo:rerun-if-changed=../../.git/packed-refs");
     if let Ok(head) = std::fs::read_to_string("../../.git/HEAD") {

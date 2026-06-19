@@ -9,8 +9,13 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+/// `--version` output: crate version + git SHA stamped at build time
+/// (build.rs). See hyperion-agent's HYPERION_VERSION for the rationale —
+/// update.sh compares this against the agent's to catch a half-applied update.
+const HYPERION_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("HYPERION_GIT_SHA"));
+
 #[derive(Parser, Debug)]
-#[command(name = "hyperion-web", version, about = "hyperion web admin UI")]
+#[command(name = "hyperion-web", version = HYPERION_VERSION, about = "hyperion web admin UI")]
 struct Cli {
     /// Path to web.toml config.
     #[arg(long, default_value = "/etc/hyperion/web.toml")]

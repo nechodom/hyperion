@@ -47,6 +47,12 @@ jobs:
           cache-on-failure: true
 
       - name: Build release binaries
+        # Stamp the exact commit into the binaries (build.rs reads this env
+        # first). Without it the build.rs git-fallback would still work in CI,
+        # but being explicit guarantees `--version` and the published VERSION
+        # asset agree, which is what update.sh's staleness guard relies on.
+        env:
+          HYPERION_GIT_SHA: ${{ github.sha }}
         run: |
           cargo build --release \
             --bin hyperion-agent \
@@ -60,8 +66,14 @@ jobs:
           cp target/release/hyperion-agent dist/
           cp target/release/hyperion-web   dist/
           cp target/release/hctl           dist/
+          # VERSION = the exact commit these binaries were built from. update.sh
+          # fetches just this tiny file to decide whether the rolling release is
+          # current with the node's source HEAD before trusting the pre-built
+          # binaries (a 12 MB download) — closing the "pulled mid-CI-build, got a
+          # commit behind" race.
+          printf '%s\n' "${{ github.sha }}" > dist/VERSION
           ( cd dist && sha256sum hyperion-agent hyperion-web hctl > SHA256SUMS )
-          cat dist/SHA256SUMS
+          cat dist/SHA256SUMS dist/VERSION
 
       - name: Compute version metadata
         id: meta
@@ -101,6 +113,7 @@ jobs:
             dist/hyperion-web
             dist/hctl
             dist/SHA256SUMS
+            dist/VERSION
           draft: false
           prerelease: false
           make_latest: true

@@ -8,8 +8,12 @@ use hyperion_validate::{Domain, SystemUserName};
 use std::path::PathBuf;
 use std::str::FromStr;
 
+/// `--version` output: crate version + git SHA stamped at build time
+/// (build.rs). See hyperion-agent's HYPERION_VERSION for the rationale.
+const HYPERION_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("HYPERION_GIT_SHA"));
+
 #[derive(Parser, Debug)]
-#[command(name = "hctl", version, about = "hyperion CLI")]
+#[command(name = "hctl", version = HYPERION_VERSION, about = "hyperion CLI")]
 struct Cli {
     /// Path to hyperion-agent's Unix socket.
     #[arg(long, default_value = "/run/hyperion.sock")]

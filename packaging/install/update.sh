@@ -152,6 +152,35 @@ if [[ "$PREV" != "$NEW" && -z "${HYPERION_REEXEC:-}" ]]; then
 fi
 unset HYPERION_REEXEC
 
+HEAD_FULL=$(git rev-parse HEAD)
+
+#-------- 2b. Staleness guard: does the rolling release match our source? --
+# CI rebuilds the pre-built release on every push to main, but that build
+# takes a few minutes. Update during that window (or before CI runs) and the
+# release is a commit BEHIND the source you just checked out — installing it
+# silently runs OLD code under a banner that says the new SHA. That bit us:
+# the agent stayed on the prior parser while the panel showed a bug the new
+# code already fixed. CI now ships a VERSION marker (= the exact commit the
+# binaries were built from); compare it to our HEAD and fall back to a source
+# build when they disagree, so the install always matches what you checked out.
+if (( DO_BUILD && PREFER_PREBUILT )); then
+  REL_VERSION=$(curl -fsSL --max-time 30 \
+    "https://github.com/$RELEASE_REPO/releases/download/$RELEASE_TAG/VERSION" 2>/dev/null \
+    | tr -d '[:space:]' || true)
+  if [[ -z "$REL_VERSION" ]]; then
+    warn "The @$RELEASE_TAG release has no VERSION marker (it predates version stamping)."
+    warn "  Can't confirm the pre-built binaries match your source — proceeding with them."
+    warn "  Re-run once CI has republished, or pass --from-source to build locally instead."
+  elif [[ "$REL_VERSION" != "$HEAD_FULL" ]]; then
+    log "Rolling release is at ${REL_VERSION:0:12}; your source is at ${HEAD_FULL:0:12}."
+    log "  Pre-built binaries aren't built from your checkout (CI still building, or the"
+    log "  release lagged) — building from source so the install matches your HEAD."
+    PREFER_PREBUILT=0
+  else
+    log "Rolling release matches your source (${HEAD_FULL:0:12}) — using pre-built binaries."
+  fi
+fi
+
 #-------- 3. Install binaries — prefer GitHub release, fall back to local build
 PREBUILT_OK=0
 if (( DO_BUILD && PREFER_PREBUILT )); then
@@ -231,7 +260,11 @@ if (( DO_BUILD && PREBUILT_OK == 0 )); then
     fail "cargo not found and no usable pre-built release. Re-run install-master.sh."
   fi
   log "Building release binaries from source ..."
-  cargo build --release \
+  # Stamp the exact checked-out commit into the binaries. build.rs reads this
+  # env first, and `rerun-if-env-changed=HYPERION_GIT_SHA` forces a rebuild if
+  # a previous incremental build had baked a different SHA — so a source build
+  # can never embed a stale commit.
+  HYPERION_GIT_SHA="$HEAD_FULL" cargo build --release \
     --bin hyperion-agent --bin hyperion-web --bin hctl --quiet
   log "Installing binaries ..."
   install -m 0755 target/release/hyperion-agent /usr/sbin/hyperion-agent
@@ -688,9 +721,45 @@ check_agent_serving() {
 (( HAVE_AGENT )) && check_agent_serving
 (( HAVE_WEB   )) && check_active hyperion-web
 
+#-------- 7b. Verify installed binaries match the source ------------------
+# Final safety net behind the staleness guard. Each binary embeds its build
+# commit (`--version`); confirm what's on disk was built from the commit we
+# checked out, and that web + agent are the SAME build. Catches a VERSION-less
+# release we proceeded with, a cargo cache that didn't recompile, --no-build
+# leaving stale binaries, or a half-applied update (web moved, agent didn't).
+bin_sha() { "$1" --version 2>/dev/null | grep -oE '[0-9a-f]{40}' | head -n1 || true; }
+AGENT_SHA=""; WEB_SHA=""
+[[ -x /usr/sbin/hyperion-agent ]] && AGENT_SHA=$(bin_sha /usr/sbin/hyperion-agent)
+(( HAVE_WEB )) && [[ -x /usr/sbin/hyperion-web ]] && WEB_SHA=$(bin_sha /usr/sbin/hyperion-web)
+if (( DO_BUILD )); then
+  skew=0
+  if [[ -n "$AGENT_SHA" && "$AGENT_SHA" != "$HEAD_FULL" ]]; then
+    warn "hyperion-agent on disk is built from ${AGENT_SHA:0:12}, but your source is ${HEAD_FULL:0:12}."
+    skew=1
+  fi
+  if [[ -n "$WEB_SHA" && "$WEB_SHA" != "$HEAD_FULL" ]]; then
+    warn "hyperion-web on disk is built from ${WEB_SHA:0:12}, but your source is ${HEAD_FULL:0:12}."
+    skew=1
+  fi
+  if [[ -n "$AGENT_SHA" && -n "$WEB_SHA" && "$AGENT_SHA" != "$WEB_SHA" ]]; then
+    warn "hyperion-agent (${AGENT_SHA:0:12}) and hyperion-web (${WEB_SHA:0:12}) are DIFFERENT builds (skew)."
+    skew=1
+  fi
+  if (( skew )); then
+    warn "Installed binaries don't match your checkout — rebuild locally with:"
+    warn "    sudo $0 --from-source"
+    HEALTHY=0
+  elif [[ -n "$AGENT_SHA" ]]; then
+    log "Verified: installed binaries match source ${HEAD_FULL:0:12}."
+  fi
+fi
+
 echo
 echo "============================================================"
 echo "  Hyperion update — $PREV → $NEW"
+# The build SHA the binary ACTUALLY reports — not just the source HEAD — so a
+# skew (the bug this guard exists for) is visible at a glance, not hidden.
+[[ -n "$AGENT_SHA" ]] && echo "  built from:     ${AGENT_SHA:0:12}"
 (( HAVE_AGENT )) && echo "  hyperion-agent: $(systemctl is-active hyperion-agent)"
 (( HAVE_WEB   )) && echo "  hyperion-web:   $(systemctl is-active hyperion-web)"
 echo "============================================================"

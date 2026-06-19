@@ -142,7 +142,9 @@ pub async fn enroll_with_retry(cfg: &EnrollmentConfig) -> Result<(), String> {
 /// the common case where the operator pasted http:// but the master
 /// listens on https only.
 pub async fn enroll_now(cfg: &EnrollmentConfig) -> Result<(), String> {
-    let agent_version = env!("CARGO_PKG_VERSION");
+    // Real build SHA, not the hardcoded "0.1.0" — this populates the master's
+    // nodes.agent_version column (cluster version-skew pill). See agent_version.
+    let agent_version = crate::agent_version();
     let public_ip = fetch_public_ip().await;
     let base = cfg.master_url.trim_end_matches('/').to_string();
     // Block B: if we still hold a node-id.json, present that identity so a
@@ -159,7 +161,7 @@ pub async fn enroll_now(cfg: &EnrollmentConfig) -> Result<(), String> {
     let body = serde_json::to_string(&EnrollRequest {
         token: &cfg.token,
         label: &cfg.label,
-        agent_version,
+        agent_version: &agent_version,
         public_ip,
         prior_node_id,
         prior_secret,
@@ -393,7 +395,9 @@ pub async fn heartbeat_loop(
     verify_tls: bool,
     inbound_cert: std::path::PathBuf,
 ) {
-    let agent_version = env!("CARGO_PKG_VERSION");
+    // Real build SHA (not "0.1.0") so the master's nodes.agent_version — and
+    // thus the cluster version-skew pill — reflects the deployed commit.
+    let agent_version = crate::agent_version();
     // Our inbound-listener TLS SPKI pin, reported to the master on every
     // heartbeat so it can (warn-only today, enforce later) tell whether
     // the cert presented on RPC connections matches what we say it is.
