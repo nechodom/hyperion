@@ -8146,7 +8146,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         )
         .await;
         match kernel_result {
-            Ok(()) => {
+            Ok(QuotaApply::Applied) => {
                 let _ = hyperion_state::hosting_quotas::mark_applied(
                     &self.pool,
                     detail.id.as_str(),
@@ -8168,6 +8168,24 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 )
                 .await;
             }
+            Ok(QuotaApply::NoOp) => {
+                // No disk cap to push (and quotas aren't active) — setquota
+                // never ran, so DON'T stamp applied_at ("last applied to
+                // kernel"). Clear any stale error from a prior failed apply.
+                let _ = hyperion_state::hosting_quotas::mark_cleared(
+                    &self.pool,
+                    detail.id.as_str(),
+                    now,
+                )
+                .await;
+                self.append_audit(
+                    "hosting.quota.set",
+                    Some(detail.id.as_str()),
+                    &serde_json::json!({ "disk": "no cap (no-op)" }).to_string(),
+                    "ok",
+                )
+                .await;
+            }
             Err(e) => {
                 let _ = hyperion_state::hosting_quotas::mark_failed(
                     &self.pool,
@@ -8176,14 +8194,18 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     now,
                 )
                 .await;
+                // A "pending reboot" deferral is not a hard failure — audit it
+                // distinctly so the trail doesn't read as a kernel rejection.
+                let status = if e.starts_with(QUOTA_PENDING_REBOOT_PREFIX) {
+                    "pending"
+                } else {
+                    "failed"
+                };
                 self.append_audit(
                     "hosting.quota.set",
                     Some(detail.id.as_str()),
-                    &serde_json::json!({
-                        "error": e,
-                    })
-                    .to_string(),
-                    "failed",
+                    &serde_json::json!({ "error": e }).to_string(),
+                    status,
                 )
                 .await;
             }
@@ -8205,6 +8227,60 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             last_error: row.last_error,
             updated_at: row.updated_at,
         })
+    }
+
+    /// Re-push every stored disk cap into the kernel at agent boot. Without
+    /// this, a cap saved while quotas needed a node reboot to activate is never
+    /// re-applied: after the reboot the subsystem comes up (via fstab) but the
+    /// per-user `setquota` limit was never written, so the hosting is silently
+    /// uncapped until someone re-saves the form. Mirrors `bans_reapply_on_boot`.
+    /// Best-effort per hosting; returns how many caps were (re)applied.
+    pub async fn quotas_reapply_on_boot(&self) -> Result<i64, RpcError> {
+        let rows = hyperion_state::hosting_quotas::list_with_caps(&self.pool)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("quota list: {e}")))?;
+        let mut applied = 0i64;
+        for row in rows {
+            // Resolve the hosting's user + home dir; skip if it's gone.
+            let detail = match self
+                .get(HostingSelector::Id(HostingId(row.hosting_id.clone())))
+                .await
+            {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+            let now = now_secs();
+            match apply_disk_quota(
+                &detail.system_user,
+                &detail.root_dir,
+                row.disk_soft_kib,
+                row.disk_hard_kib,
+            )
+            .await
+            {
+                Ok(QuotaApply::Applied) => {
+                    let _ = hyperion_state::hosting_quotas::mark_applied(
+                        &self.pool,
+                        &row.hosting_id,
+                        now,
+                    )
+                    .await;
+                    applied += 1;
+                }
+                // A capped row can't legitimately be a no-op; ignore.
+                Ok(QuotaApply::NoOp) => {}
+                Err(e) => {
+                    let _ = hyperion_state::hosting_quotas::mark_failed(
+                        &self.pool,
+                        &row.hosting_id,
+                        &e,
+                        now,
+                    )
+                    .await;
+                }
+            }
+        }
+        Ok(applied)
     }
 
     // ============================================================
@@ -16469,12 +16545,29 @@ trait RpcErrorExt {
 /// `… is on`). A previous bespoke scan here looked for the literal
 /// `user quotas on`, which modern quota-tools never print (`user quota on … is
 /// on`), so it false-negatived and refused setquota even when quotas were on.
+/// Outcome of a successful `apply_disk_quota`. Distinguishes a real `setquota`
+/// push from a no-op so the caller doesn't stamp `applied_at` (i.e. claim "last
+/// applied to kernel") when nothing actually ran.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QuotaApply {
+    /// `setquota` ran — the cap (or its removal) is live in the kernel.
+    Applied,
+    /// No disk cap requested and quotas aren't active — nothing to do.
+    NoOp,
+}
+
+/// Prefix that marks a "saved, pending a node reboot" error so the web boundary
+/// can render it as an amber "activates after reboot" notice rather than a red
+/// "kernel rejected it" failure. The boot reconciler (`quotas_reapply_on_boot`)
+/// re-pushes the cap once the reboot brings the subsystem up.
+const QUOTA_PENDING_REBOOT_PREFIX: &str = "kernel quotas need a reboot to finish activating";
+
 async fn apply_disk_quota(
     user: &str,
     home_dir: &str,
     soft_kib: i64,
     hard_kib: i64,
-) -> Result<(), String> {
+) -> Result<QuotaApply, String> {
     let mount = mount_point_for(home_dir).await;
     let on = match &mount {
         Some(mp) => ext_quota_on(mp).await,
@@ -16484,8 +16577,15 @@ async fn apply_disk_quota(
     let wants_cap = soft_kib > 0 || hard_kib > 0;
     if !wants_cap && !on {
         // Nothing to enforce and nothing enabled to clear — success no-op.
-        return Ok(());
+        // (No setquota ran, so the caller must NOT stamp applied_at.)
+        return Ok(QuotaApply::NoOp);
     }
+
+    // The filesystem to target with setquota. Resolved from the home dir, or
+    // from enable_kernel_quotas when we had to bring quotas up. We NEVER fall
+    // back to `setquota -a` (every quota-enabled fs) — that would broadcast a
+    // per-user cap onto unrelated mounts.
+    let mut target_mount = mount.clone();
 
     if wants_cap && !on {
         // Bring kernel quotas up so the cap is actually enforceable.
@@ -16496,7 +16596,7 @@ async fn apply_disk_quota(
         if !summary.ok {
             return Err(if summary.requires_reboot {
                 format!(
-                    "kernel quotas need a reboot to finish activating — {} The limit is saved and will be enforced after the node reboots.",
+                    "{QUOTA_PENDING_REBOOT_PREFIX} — {} The limit is saved and will be enforced after the node reboots.",
                     summary.message
                 )
             } else {
@@ -16506,29 +16606,30 @@ async fn apply_disk_quota(
                 )
             });
         }
+        if target_mount.as_deref().unwrap_or("").is_empty() && !summary.mount_point.is_empty() {
+            target_mount = Some(summary.mount_point);
+        }
     }
 
-    // Target the specific mount when we resolved it; fall back to `-a` (every
-    // quota-enabled filesystem) only when the mount is unknown.
-    let mut args: Vec<String> = vec![
-        "-u".into(),
-        user.to_string(),
-        soft_kib.to_string(),
-        hard_kib.to_string(),
-        "0".into(),
-        "0".into(),
-    ];
-    match &mount {
-        Some(mp) => args.push(mp.clone()),
-        None => args.push("-a".into()),
-    }
+    let mount_arg = match target_mount {
+        Some(mp) if !mp.is_empty() => mp,
+        _ => return Err("couldn't determine which filesystem to apply the disk quota to".into()),
+    };
     let out = tokio::process::Command::new("/usr/sbin/setquota")
-        .args(&args)
+        .args([
+            "-u",
+            user,
+            &soft_kib.to_string(),
+            &hard_kib.to_string(),
+            "0",
+            "0",
+            &mount_arg,
+        ])
         .output()
         .await
         .map_err(|e| format!("spawn setquota: {e}"))?;
     if out.status.success() {
-        Ok(())
+        Ok(QuotaApply::Applied)
     } else {
         let stderr = String::from_utf8_lossy(&out.stderr);
         let stdout = String::from_utf8_lossy(&out.stdout);
@@ -17156,7 +17257,7 @@ async fn enable_kernel_quotas(home_path: &str) -> hyperion_types::QuotaEnableSum
                 requires_reboot: false,
                 fs_type,
                 mount_point,
-                message: "XFS kernel quotas are already active — disk caps will be enforced."
+                message: "XFS kernel quotas are already active on this filesystem — set a disk limit below to enforce a per-hosting cap."
                     .into(),
             };
         }
@@ -17184,7 +17285,7 @@ async fn enable_kernel_quotas(home_path: &str) -> hyperion_types::QuotaEnableSum
             requires_reboot: false,
             fs_type,
             mount_point,
-            message: "Kernel quotas are already active — disk caps will be enforced.".into(),
+            message: "Kernel quotas are already active on this filesystem — set a disk limit below to enforce a per-hosting cap.".into(),
         };
     }
 
@@ -17255,7 +17356,7 @@ async fn enable_kernel_quotas(home_path: &str) -> hyperion_types::QuotaEnableSum
             requires_reboot: false,
             fs_type,
             mount_point,
-            message: "Kernel quotas are now active — disk caps will be enforced.".into(),
+            message: "Kernel quotas are now active — set a disk limit below to enforce a per-hosting cap.".into(),
         }
     } else if ext4_has_quota_feature(&device).await == Some(false) {
         // Accounting didn't start AND the on-disk `quota` feature is absent: a

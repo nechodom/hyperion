@@ -564,6 +564,16 @@ async fn main() -> anyhow::Result<()> {
                 Ok(_) => {}
                 Err(e) => tracing::warn!(error=%e, "startup: ban re-apply failed"),
             }
+            // Re-push stored disk caps into the kernel ONCE at startup. A cap
+            // saved while quotas needed a reboot to activate is otherwise never
+            // written: the reboot brings the subsystem up (fstab) but the
+            // per-user setquota limit was never applied. This delivers on the
+            // "enforced after the node reboots" promise.
+            match tick_svc.quotas_reapply_on_boot().await {
+                Ok(n) if n > 0 => tracing::info!(quotas = n, "startup: re-applied disk caps"),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error=%e, "startup: quota re-apply failed"),
+            }
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(5 * 60));
             interval.tick().await; // skip the immediate first tick
             loop {

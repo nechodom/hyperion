@@ -6349,6 +6349,12 @@ pub async fn post_quota_set(
     // it must read as an error, not "Quota saved" in green.
     let (param, msg) = match resp {
         RpcResponse::QuotaApplied(v) => match v.last_error.as_deref() {
+            // A "pending reboot" deferral is NOT a rejection — the cap is saved
+            // and the boot reconciler pushes it once the node reboots. Say so
+            // honestly instead of "the kernel rejected it".
+            Some(err) if err.starts_with("kernel quotas need a reboot") => {
+                ("flash_error", format!("Quota saved — {err}"))
+            }
             Some(err) => (
                 "flash_error",
                 format!("Quota saved, but NOT enforced — the kernel rejected it: {err}"),

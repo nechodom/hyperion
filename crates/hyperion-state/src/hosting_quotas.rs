@@ -129,6 +129,59 @@ pub async fn mark_failed(
     Ok(())
 }
 
+/// Mark a row as "nothing to enforce": clears both `applied_at` and
+/// `last_error`. Used when a save requests no disk cap (0/0) on a node where
+/// quotas aren't active — `setquota` never ran, so the row must not claim
+/// "last applied to kernel", and any stale error from a prior attempt is moot.
+pub async fn mark_cleared(pool: &SqlitePool, hosting_id: &str, now: i64) -> Result<(), StateError> {
+    sqlx::query(
+        "UPDATE hosting_quotas SET applied_at = NULL, last_error = NULL, updated_at = ? WHERE hosting_id = ?",
+    )
+    .bind(now)
+    .bind(hosting_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Every row that carries a disk cap (soft OR hard > 0). Drives the boot-time
+/// reconciler that re-pushes caps into the kernel after a reboot brought the
+/// quota subsystem up. Mirrors `bans::list_active`.
+pub async fn list_with_caps(pool: &SqlitePool) -> Result<Vec<QuotaRow>, StateError> {
+    let rows: Vec<(
+        String,
+        i64,
+        i64,
+        i64,
+        i64,
+        i64,
+        Option<i64>,
+        Option<String>,
+        i64,
+    )> = sqlx::query_as(
+        r#"SELECT hosting_id, disk_soft_kib, disk_hard_kib, mem_limit_mib,
+                  bw_soft_mib, bw_hard_mib, applied_at, last_error, updated_at
+             FROM hosting_quotas
+            WHERE disk_soft_kib > 0 OR disk_hard_kib > 0"#,
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(h, ds, dh, mem, bws, bwh, app, err, upd)| QuotaRow {
+            hosting_id: h,
+            disk_soft_kib: ds,
+            disk_hard_kib: dh,
+            mem_limit_mib: mem,
+            bw_soft_mib: bws,
+            bw_hard_mib: bwh,
+            applied_at: app,
+            last_error: err,
+            updated_at: upd,
+        })
+        .collect())
+}
+
 pub async fn delete(pool: &SqlitePool, hosting_id: &str) -> Result<(), StateError> {
     sqlx::query("DELETE FROM hosting_quotas WHERE hosting_id = ?")
         .bind(hosting_id)
@@ -207,5 +260,51 @@ mod tests {
         assert_eq!(r.disk_soft_kib, 0);
         assert_eq!(r.disk_hard_kib, 0);
         assert!(r.applied_at.is_none());
+    }
+
+    #[tokio::test]
+    async fn list_with_caps_only_returns_capped_rows() {
+        let p = fresh().await;
+        // h1 has a disk cap → listed; a second hosting with no disk cap → not.
+        upsert(&p, "h1", 100_000, 200_000, 0, 0, 0, 1000)
+            .await
+            .expect("upsert h1");
+        sqlx::query(
+            r#"INSERT INTO system_users (id, name, uid, home_dir, shell, created_at)
+               VALUES (2, 'site_h2', 1002, '/home/site_h2', '/usr/sbin/nologin', 0)"#,
+        )
+        .execute(&p)
+        .await
+        .expect("seed user h2");
+        sqlx::query(
+            r#"INSERT INTO hostings (id, domain, system_user_id, root_dir, state, created_at, updated_at)
+               VALUES ('h2', 'b.cz', 2, '/home/site_h2/b.cz', 'active', 0, 0)"#,
+        )
+        .execute(&p)
+        .await
+        .expect("seed host h2");
+        upsert(&p, "h2", 0, 0, 512, 0, 0, 1000) // mem-only, no disk cap
+            .await
+            .expect("upsert h2");
+
+        let caps = list_with_caps(&p).await.expect("list");
+        assert_eq!(caps.len(), 1, "only the disk-capped row is returned");
+        assert_eq!(caps[0].hosting_id, "h1");
+    }
+
+    #[tokio::test]
+    async fn mark_cleared_nulls_applied_and_error() {
+        let p = fresh().await;
+        upsert(&p, "h1", 100_000, 200_000, 0, 0, 0, 1000)
+            .await
+            .expect("upsert");
+        mark_applied(&p, "h1", 2000).await.expect("ma");
+        mark_failed(&p, "h1", "boom", 2500).await.expect("mf");
+        // Now clear: a 0/0 no-op save should wipe both applied_at and last_error.
+        mark_cleared(&p, "h1", 3000).await.expect("mc");
+        let r = read(&p, "h1").await.expect("read");
+        assert!(r.applied_at.is_none(), "applied_at cleared");
+        assert!(r.last_error.is_none(), "last_error cleared");
+        assert_eq!(r.updated_at, 3000);
     }
 }

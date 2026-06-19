@@ -2053,12 +2053,21 @@
     </div>
   {% endif %}
   {% if let Some(err) = quota.policy.last_error.as_ref() %}
-    <div class="flash error" style="margin-bottom:0.8rem">
-      <div class="flash-body">
-        <strong>The kernel rejected the last apply — disk caps aren't being enforced.</strong>
-        <div class="text-soft small" style="margin-top:0.3rem">{{ err }}</div>
+    {% if err.starts_with("kernel quotas need a reboot") %}
+      <div class="flash warn" style="margin-bottom:0.8rem">
+        <div class="flash-body">
+          <strong>A reboot is needed to finish enabling kernel quotas.</strong>
+          <div class="text-soft small" style="margin-top:0.3rem">The cap is saved and will be enforced automatically after the node reboots. {{ err }}</div>
+        </div>
       </div>
-    </div>
+    {% else %}
+      <div class="flash error" style="margin-bottom:0.8rem">
+        <div class="flash-body">
+          <strong>The kernel rejected the last apply — disk caps aren't being enforced.</strong>
+          <div class="text-soft small" style="margin-top:0.3rem">{{ err }}</div>
+        </div>
+      </div>
+    {% endif %}
   {% endif %}
   <div class="row" style="margin-bottom:0.8rem;gap:1.4rem">
     <span><strong>Current disk usage:</strong> {{ quota.current_disk_kib / 1024 }} MiB</span>
