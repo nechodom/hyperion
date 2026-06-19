@@ -17171,6 +17171,23 @@ async fn enable_kernel_quotas(home_path: &str) -> hyperion_types::QuotaEnableSum
         };
     }
 
+    // 3b. Already active? Then there's nothing to do — and running the
+    // remount/quotacheck/quotaon dance below would only emit confusing errors:
+    // on a filesystem using the ext4 *quota feature* (internal/journaled
+    // quotas), quotacheck refuses ("quota for users is enabled … might damage")
+    // and `quotaon` fails EBUSY ("Device or resource busy") precisely because
+    // quotas are ALREADY on. Detect that up front via the canonical probe and
+    // report success cleanly. setquota -u works against this state.
+    if ext_quota_on(&mount_point).await {
+        return Summary {
+            ok: true,
+            requires_reboot: false,
+            fs_type,
+            mount_point,
+            message: "Kernel quotas are already active — disk caps will be enforced.".into(),
+        };
+    }
+
     // 4. ext-family: remount to load the quota option, then build + turn on.
     if !already_mounted {
         let (remount_ok, remount_msg) = quota_run_cmd(
