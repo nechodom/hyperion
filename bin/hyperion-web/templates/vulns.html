@@ -1,11 +1,11 @@
 {% extends "base.html" %}
-{% block title %}WP updates · hyperion{% endblock %}
+{% block title %}WordPress updates · hyperion{% endblock %}
 {% block main %}
 
 <div class="page-header">
   <div>
     <h1>WordPress updates</h1>
-    <div class="subtitle">Every site with outdated plugins/themes from the last daily defender sweep, across the cluster. Safe minor/patch updates are applied automatically; majors are listed for review.</div>
+    <div class="subtitle">Every site across the cluster with outdated plugins or themes, from the last daily defender sweep. Safe minor and patch updates are applied automatically; major updates are listed here for review.</div>
   </div>
 </div>
 
@@ -27,14 +27,14 @@
 <div class="card no-pad-table">
   {% if rows.is_empty() %}
     <div class="empty" style="padding:2.5rem">
-      <p class="muted">Every WordPress site across the fleet is up to date. 🎉</p>
-      <p class="text-soft small">Sites are swept daily. Safe minor/patch updates auto-apply; major updates show up here and notify admins.</p>
+      <p class="muted">Every WordPress site across the cluster is up to date.</p>
+      <p class="text-soft small">Sites are swept daily. Safe minor and patch updates apply automatically; major updates appear here and notify administrators.</p>
     </div>
   {% else %}
     <div class="table-wrap">
       <table>
         <thead><tr>
-          <th>Site</th><th>Node</th><th>Behind</th><th>Components</th><th class="right">Scanned</th>
+          <th>Site</th><th>Node</th><th>Updates</th><th>Components</th><th class="right">Scanned</th>
         </tr></thead>
         <tbody>
         {% for r in rows %}

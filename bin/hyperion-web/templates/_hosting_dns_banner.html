@@ -10,7 +10,7 @@
       <strong>DNS OK</strong> ·
       {% if !dns.resolved_a.is_empty() %}A → <code>{{ dns.resolved_a.join(", ") }}</code>{% endif %}
       {% if !dns.resolved_aaaa.is_empty() %}{% if !dns.resolved_a.is_empty() %} · {% endif %}AAAA → <code>{{ dns.resolved_aaaa.join(", ") }}</code>{% endif %}
-      <span class="text-soft small">— resolves here, cert issuance should succeed</span>
+      <span class="text-soft small">— resolves to this node, so certificate issuance should succeed</span>
     </div>
   </div>
 {% else %}
@@ -24,11 +24,11 @@
         DNS points to
         {% if !dns.resolved_a.is_empty() %}A=<code>{{ dns.resolved_a.join(", ") }}</code>{% endif %}
         {% if !dns.resolved_aaaa.is_empty() %}{% if !dns.resolved_a.is_empty() %}, {% endif %}AAAA=<code>{{ dns.resolved_aaaa.join(", ") }}</code>{% endif %}
-        but we're
+        but this node is
         {% if let Some(ip) = dns.our_public_ipv4.as_ref() %}<code>{{ ip }}</code>{% endif %}
         {% if let Some(ip6) = dns.our_public_ipv6.as_ref() %} / <code>{{ ip6 }}</code>{% endif %}.
       {% endif %}
-      <span class="text-soft small">— ACME issuance will fail until this is fixed.</span>
+      <span class="text-soft small">— certificate issuance will fail until the record points here.</span>
     </div>
   </div>
 {% endif %}

@@ -23,13 +23,13 @@
       {% if job.kind == "migration" || job.kind == "hosting_clone" || job.kind == "profile_apply" %}
         <form method="post" action="/jobs/{{ job.id }}/retry" style="display:inline"
               data-confirm-title="Retry {{ job.kind }} for {% if let Some(t) = job.target %}{{ t }}{% else %}this job{% endif %}?"
-              data-confirm-body="Hyperion will re-run the original payload from this job ({{ job.kind }}) as a fresh job. You'll be redirected to the new job's progress page."
-              data-confirm-confirm-label="Retry"
+              data-confirm-body="Hyperion re-runs this job's original payload ({{ job.kind }}) as a fresh job. You'll be taken to the new job's progress page."
+              data-confirm-confirm-label="Retry job"
               data-confirm-variant="primary">
           <input type="hidden" name="_csrf" value="{{ csrf_token }}">
           <button class="btn primary" type="submit">
             <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
-            Retry
+            Retry job
           </button>
         </form>
       {% endif %}

@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Email log · hyperion{% endblock %}
+{% block title %}Email log · Hyperion{% endblock %}
 {% block main %}
 
 {% if let Some(err) = rpc_error %}
@@ -10,10 +10,11 @@
     {% if err.contains("no such table") || err.contains("email_log") %}
     <div style="margin-top:0.4rem">
       The <code>email_log</code> table doesn't exist on this node yet —
-      migration 017 wasn't applied. You probably ran <code>update.sh</code>
-      but didn't restart the agent. On the node:
+      migration 017 hasn't been applied. This usually means
+      <code>update.sh</code> ran without restarting the agent. Restart it on
+      the node:
       <code style="display:block;padding:0.4rem 0.6rem;margin-top:0.3rem;background:var(--bg-2);border-radius:var(--radius-xs)">sudo systemctl restart hyperion-agent</code>
-      Then reload this page — the table is created automatically at startup.
+      Then reload this page. The table is created automatically at startup.
     </div>
     {% endif %}
   </div>
@@ -24,9 +25,9 @@
   <div>
     <h1>Email log</h1>
     <div class="subtitle">
-      Every outbound email the agent sent — including test sends, monitor
-      alerts, cert reminders, backup failures, and billing notifications.
-      Cluster-wide events (no hosting attribution) appear here only.
+      Every outbound email the agent sent — test sends, monitor alerts,
+      certificate reminders, backup failures, and billing notifications.
+      Cluster-wide events with no hosting attribution appear here only.
     </div>
   </div>
   <span class="grow"></span>
@@ -43,7 +44,7 @@
     <div class="search-input">
       <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
       <input type="search" name="hosting" value="{{ filter_hosting|e }}"
-             placeholder="Filter by hosting id (or leave blank for all)"
+             placeholder="Filter by hosting ID, or leave blank for all"
              autocomplete="off" spellcheck="false">
       <kbd class="search-hint">/</kbd>
     </div>
@@ -84,16 +85,20 @@
     <div class="empty-illustration">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
     </div>
-    <h3>No emails match this filter</h3>
+    {% if filter_kind.is_empty() && filter_state.is_empty() && filter_hosting.is_empty() %}
+    <h3>No emails sent yet</h3>
     <p>
-      {% if filter_kind.is_empty() && filter_state.is_empty() && filter_hosting.is_empty() %}
-        The agent hasn't sent any emails yet. Go to
-        <a href="/settings#email">Settings</a> and click <strong>Send test</strong>
-        to confirm your SMTP relay works.
-      {% else %}
-        Try removing filters above, or run a fresh test send from <a href="/settings#email">Settings</a>.
-      {% endif %}
+      The agent hasn't sent any email. Open
+      <a href="/settings#email">Settings</a> and choose <strong>Send test</strong>
+      to confirm your SMTP relay works.
     </p>
+    {% else %}
+    <h3>No emails match these filters</h3>
+    <p>
+      Try removing the filters above, or run a fresh test send from
+      <a href="/settings#email">Settings</a>.
+    </p>
+    {% endif %}
   </div>
 </div>
 {% else %}
@@ -158,8 +163,8 @@
 
 <p class="text-soft small" style="margin-top:1rem">
   Showing the last 200 email events from this node, newest first.
-  Bodies are persisted as a 200-character preview only — full bodies
-  are never stored, so passwords / reset tokens that appear later in
-  the message text stay out of the log.
+  Only a 200-character preview of each body is stored. Full bodies are
+  never kept, so passwords and reset tokens that appear later in the
+  message text stay out of the log.
 </p>
 {% endblock %}

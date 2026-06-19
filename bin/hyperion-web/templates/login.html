@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Sign in · hyperion</title>
+  <title>Sign in · Hyperion</title>
   <link rel="stylesheet" href="/static/app.css?v={{ css_version }}">
   <meta name="color-scheme" content="light dark">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%236366f1'/%3E%3Cpath d='M9 9 L9 23 M9 16 L17 16 M17 9 L17 23 M21 14 L24 14 L24 23 M21 11 L21 14' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E">
@@ -17,12 +17,12 @@
         </div>
         <h1>Hosting control,<br>without the bloat.</h1>
         <p class="lede">
-          One admin panel. Many sites. Multiple nodes.
-          Auto HTTPS, one-click WordPress, free forever.
+          One control panel for every hosting across all your nodes.
+          Automatic HTTPS and one-step WordPress, built in.
         </p>
         <ul class="features">
-          <li>Self-hosted on your Debian boxes</li>
-          <li>Cluster-aware — scale across nodes from day one</li>
+          <li>Self-hosted on your own Debian machines</li>
+          <li>Cluster-aware — manage the master and every node from one place</li>
           <li>Open source · AGPL-3.0</li>
         </ul>
       </div>
@@ -36,19 +36,19 @@
           <span style="color:var(--brand-accent);text-shadow:0 0 18px color-mix(in oklab,var(--brand-accent) 60%,transparent)">HY</span><span style="color:var(--text-soft);font-weight:500">·</span>PERION
         </div>
         <h2>Welcome back</h2>
-        <div class="subtitle">Sign in to manage your sites and nodes.</div>
+        <div class="subtitle">Sign in to manage your hostings and nodes.</div>
         {% if let Some(e) = error %}
           <div class="flash error">
             <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
             <div class="flash-body">
               {% if e == "invalid" %}
-                Invalid username or password.
+                Incorrect username or password. Check both and try again.
               {% else if e == "expired" %}
-                Your sign-in session expired. Please log in again.
+                Your sign-in session expired. Sign in again to continue.
               {% else if e == "locked" %}
-                Account is locked. Contact an administrator.
+                This account is locked. Contact an administrator to unlock it.
               {% else if e == "csrf" %}
-                Your form expired (CSRF). Please log in again and retry the action.
+                This form expired before it was submitted. Sign in again and retry.
               {% else %}
                 {{ e }}
               {% endif %}

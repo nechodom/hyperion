@@ -6,9 +6,9 @@
     <h1>Hostings</h1>
     <div class="subtitle">
       {% if rows.len() == total_count %}
-        {{ total_count }} site{% if total_count != 1 %}s{% endif %} managed by this agent.
+        {{ total_count }} hosting{% if total_count != 1 %}s{% endif %} across the cluster.
       {% else %}
-        Showing <strong>{{ rows.len() }}</strong> of {{ total_count }} site{% if total_count != 1 %}s{% endif %}.
+        Showing <strong>{{ rows.len() }}</strong> of {{ total_count }} hosting{% if total_count != 1 %}s{% endif %}.
       {% endif %}
     </div>
   </div>
@@ -16,11 +16,11 @@
   <div class="actions">
     <a href="/hostings/import" class="btn">
       <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
-      Import a site
+      Import hosting
     </a>
     <a href="/hostings/new" class="btn primary header-action-new">
       <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-      New hosting
+      Create hosting
     </a>
   </div>
 </div>
@@ -87,8 +87,8 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
     </div>
     <h3>No hostings yet</h3>
-    <p>Create one to provision nginx + PHP-FPM + a database + a TLS cert in one step.</p>
-    <a href="/hostings/new" class="btn primary">Create first hosting</a>
+    <p>Create one to provision nginx, PHP-FPM, a database, and a TLS certificate in a single step.</p>
+    <a href="/hostings/new" class="btn primary">Create your first hosting</a>
   </div>
 </div>
 {% else %}
@@ -114,7 +114,7 @@
     <span class="grow"></span>
     {% if !wp_assets.is_empty() %}
     <details class="inline-action" style="position:relative">
-      <summary class="btn small" style="list-style:none;cursor:pointer" id="bulk-install-summary" data-bulk-summary="install_asset">+ Install WP asset</summary>
+      <summary class="btn small" style="list-style:none;cursor:pointer" id="bulk-install-summary" data-bulk-summary="install_asset">Install WordPress asset</summary>
       <div style="position:absolute;right:0;z-index:10;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:0.7rem;margin-top:0.4rem;box-shadow:var(--shadow);min-width:24rem">
         <div class="field" style="margin:0">
           <label for="bulk-asset-select">Asset
@@ -142,8 +142,8 @@
                   data-bulk="install_asset" disabled>Install on selected</button>
         </div>
         <p class="text-soft small" style="margin:0.5rem 0 0;font-size:0.78rem">
-          Runs <code>wp install --force</code> on every selected hosting (parallel per node).
-          Hostings without WordPress are skipped with an error in the flash.
+          Runs <code>wp install --force</code> on every selected hosting, in parallel per node.
+          Hostings without WordPress are skipped and reported in the result message.
         </p>
       </div>
     </details>
@@ -151,7 +151,7 @@
     {# HTML5 `form` attribute lets these submit-buttons (type=button + JS-driven, see script at the bottom) and below the checkboxes belong to the bulk form even though they're outside it in the DOM. #}
     <button type="button" form="bulk-form" class="btn small" data-bulk="suspend" disabled>Suspend</button>
     <button type="button" form="bulk-form" class="btn small" data-bulk="resume" disabled>Resume</button>
-    <button type="button" form="bulk-form" class="btn small" data-bulk="backup" disabled>Backup now</button>
+    <button type="button" form="bulk-form" class="btn small" data-bulk="backup" disabled>Back up now</button>
     <button type="button" form="bulk-form" class="btn small danger" data-bulk="delete" disabled>Delete</button>
   </div>
   <div class="table-wrap">
@@ -240,7 +240,7 @@
                  handlers/hostings.rs. Operator sees prod vs test
                  at a glance instead of memorising node IDs. #}
               {% if is_test %}
-              <span class="tag" title="Provisioned on a test node — not a production site"
+              <span class="tag" title="Provisioned on a test node — staging only, not a production site"
                     style="background:var(--warn);color:white;border-color:transparent;font-size:0.62rem;font-weight:700;letter-spacing:0.05em;margin-left:0.2rem;padding:0.1rem 0.35rem">
                 TEST
               </span>
@@ -251,7 +251,7 @@
                  paused. The site itself may still be serving traffic if
                  nginx + FPM on the worker are up; we just can't see /
                  manage it from here until the agent comes back. #}
-              <span class="tag" title="This node's hyperion-agent hasn't checked in for 5+ minutes. The site may still be serving traffic, but we can't run management RPCs against it (backups, cert renew, monitor probes are paused) until the agent comes back."
+              <span class="tag" title="This node's hyperion-agent hasn't checked in for over 5 min. The site may still be serving traffic, but the master can't run management tasks against it — backups, certificate renewal, and monitor probes are paused until the agent reconnects."
                     style="background:var(--danger);color:white;border-color:transparent;font-size:0.62rem;font-weight:700;letter-spacing:0.05em;margin-left:0.2rem;padding:0.1rem 0.35rem">
                 NODE OFFLINE
               </span>
@@ -260,7 +260,7 @@
               {# Operator-toggled maintenance: nginx returns 503 for every
                  request (ACME challenges still served). Flip off via
                  the Vhost options card on the hosting detail page. #}
-              <span class="tag" title="Maintenance mode is ON — nginx returns 503 for every request. ACME challenges and the hosting's underlying services (FPM, DB) keep running. Toggle off via the hosting detail page → Vhost options."
+              <span class="tag" title="Maintenance mode is on — nginx returns HTTP 503 for every request. ACME challenges and the hosting's underlying services (PHP-FPM, database) keep running. Turn it off from the hosting detail page, under Vhost options."
                     style="background:var(--accent);color:white;border-color:transparent;font-size:0.62rem;font-weight:700;letter-spacing:0.05em;margin-left:0.2rem;padding:0.1rem 0.35rem">
                 MAINTENANCE
               </span>
@@ -275,8 +275,8 @@
               <a class="btn small" href="/hostings/{{ r.id.as_str() }}">View</a>
               <form method="post" action="/hostings/delete" style="display:inline"
                     data-confirm-title="Delete {{ r.domain }}"
-                    data-confirm-body="Files, database, system user and nginx vhost will be removed. This is permanent — type the domain to confirm. External DNS records are NOT touched."
-                    data-confirm-confirm-label="Delete"
+                    data-confirm-body="Files, database, system user, and nginx vhost will be removed. This is permanent — type the domain to confirm. External DNS records are not touched."
+                    data-confirm-confirm-label="Delete permanently"
                     data-confirm-variant="danger"
                     data-confirm-require="{{ r.domain }}">
                 <input type="hidden" name="_csrf" value="{{ csrf_token }}">

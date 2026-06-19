@@ -94,7 +94,7 @@
       <a class="nav-link {% if active == "vulns" %}active{% endif %}" href="/vulns"
          data-role-min="admin">
         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
-        WP updates
+        WordPress updates
       </a>
       <a class="nav-link {% if active == "bans" %}active{% endif %}" href="/bans"
          data-role-min="admin">
@@ -150,7 +150,7 @@
              rendering is intentionally avoided to keep this Tpl
              field-free (every template extends base.html — adding
              a role field to all of them is a much bigger edit). #}
-          <div class="user-role" id="sidebar-role">loading…</div>
+          <div class="user-role" id="sidebar-role">Loading…</div>
         </div>
         {# Notification bell — populated by /api/notifications/feed.
            Dropdown lives in a portal at the bottom of body (after
@@ -291,7 +291,7 @@ document.addEventListener('click', function (ev) {
   input.type = 'text';
   setTimeout(() => { input.type = 'password'; }, 8000);
   const orig = btn.textContent;
-  btn.textContent = 'Generated · revealed for 8s';
+  btn.textContent = 'Generated · revealed for 8 s';
   setTimeout(() => { btn.textContent = orig; }, 8000);
 });
 
@@ -378,10 +378,10 @@ document.addEventListener('click', function (ev) {
   // Auto-surface HTMX errors as red toasts.
   document.addEventListener('htmx:responseError', (ev) => {
     const code = ev.detail?.xhr?.status ?? '???';
-    window.toast(`Request failed (${code}). Check audit log.`, 'error');
+    window.toast(`Request failed (${code}). Try again, or check the audit log for details.`, 'error');
   });
   document.addEventListener('htmx:sendError', () => {
-    window.toast('Network error — couldn’t reach the server.', 'error');
+    window.toast('Network error — couldn’t reach the server. Check your connection and try again.', 'error');
   });
 
   // Translate ?flash= / ?flash_error= query params into toasts on page load
@@ -445,7 +445,7 @@ document.addEventListener('click', function (ev) {
   function render() {
     list.innerHTML = '';
     if (items.length === 0) {
-      list.innerHTML = '<li class="cmdk-empty">No matches. Try a different query.</li>';
+      list.innerHTML = '<li class="cmdk-empty">No matches. Try a different search.</li>';
       return;
     }
     let lastGroup = '';
@@ -991,13 +991,13 @@ function isShortcutContext(ev) {
 <div class="bell-dropdown" id="bell-dropdown" role="dialog" aria-label="Notifications" hidden>
   <div class="bell-header">
     <strong>Notifications</strong>
-    <button type="button" class="bell-mark-all" id="bell-mark-all">Mark all read</button>
+    <button type="button" class="bell-mark-all" id="bell-mark-all">Mark all as read</button>
   </div>
   <ul class="bell-list" id="bell-list">
     <li class="bell-empty">Loading…</li>
   </ul>
   <div class="bell-footer">
-    <a href="/notifications">View all</a>
+    <a href="/notifications">View all notifications</a>
   </div>
 </div>
 
@@ -1075,7 +1075,7 @@ function isShortcutContext(ev) {
         headers: { 'accept': 'application/json' },
       });
       if (!r.ok) {
-        if (!silent) toast?.('Failed to load notifications', 'error');
+        if (!silent) toast?.('Couldn’t load notifications. Try again in a moment.', 'error');
         return;
       }
       const j = await r.json();

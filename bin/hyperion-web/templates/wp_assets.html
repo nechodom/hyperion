@@ -1,12 +1,12 @@
 {% extends "base.html" %}
-{% block title %}WP asset library · hyperion{% endblock %}
+{% block title %}WordPress asset library · Hyperion{% endblock %}
 {% block main %}
 <div class="page-header">
   <div>
     <h1>WordPress asset library</h1>
     <div class="subtitle">
-      Upload custom plugin / theme ZIPs and reference them from hosting profiles via
-      <code>@asset:&lt;id&gt;</code>. Stored on this server under
+      Upload custom plugin or theme ZIPs and reference them from hosting profiles with
+      <code>@asset:&lt;id&gt;</code>. Files are stored on this server under
       <code>/var/lib/hyperion/wp-assets/</code>.
     </div>
   </div>
@@ -38,7 +38,7 @@
     Upload a ZIP
   </h2>
   <p class="text-soft small" style="margin:0 0 0.8rem">
-    Max 50 MB. ZIPs are deduped on SHA-256 — re-uploading the same bytes returns the existing entry instead of writing a second copy.
+    Up to 50 MB. ZIPs are deduplicated by SHA-256, so re-uploading the same bytes returns the existing entry instead of writing a second copy.
   </p>
   {# CSRF token rides in the URL query string for multipart forms —
      the check_csrf middleware deliberately doesn't buffer multipart
@@ -58,7 +58,7 @@
       <input id="upload_file" type="file" name="file" accept=".zip,application/zip" required
              style="margin:0">
     </div>
-    <button class="btn primary" type="submit">Upload</button>
+    <button class="btn primary" type="submit">Upload ZIP</button>
   </form>
 </div>
 
@@ -70,8 +70,8 @@
   </h2>
   {% if assets.is_empty() %}
     <div class="empty">
-      <p>No assets uploaded yet. Use the form above to add a plugin or theme ZIP.</p>
-      <p class="text-soft small">Once uploaded, copy the <strong>@asset:&lt;id&gt;</strong> reference into a profile's <strong>Plugins</strong> or <strong>Themes</strong> textarea. Applying the profile to a WordPress hosting then runs <code>wp plugin install /var/lib/hyperion/wp-assets/&lt;id&gt;/&lt;file&gt; --force</code>.</p>
+      <p>No assets yet. Upload a plugin or theme ZIP above to add one.</p>
+      <p class="text-soft small">Once uploaded, copy the <strong>@asset:&lt;id&gt;</strong> reference into a profile's <strong>Plugins</strong> or <strong>Themes</strong> field. Applying that profile to a WordPress hosting then runs <code>wp plugin install /var/lib/hyperion/wp-assets/&lt;id&gt;/&lt;file&gt; --force</code>.</p>
     </div>
   {% else %}
   <div class="table-wrap">
@@ -82,8 +82,8 @@
           <th>Kind</th>
           <th>Original filename</th>
           <th class="numeric">Size</th>
-          <th title="Number of profiles referencing this asset via @asset:&lt;id&gt;">In profiles</th>
-          <th title="Number of one-off installs from the WordPress tab (excludes profile-driven installs)">Installs</th>
+          <th title="Profiles that reference this asset via @asset:&lt;id&gt;">In profiles</th>
+          <th title="One-off installs from the WordPress tab; excludes profile-driven installs">Installs</th>
           <th>Uploaded</th>
           <th>Reference</th>
           <th class="right">Actions</th>
@@ -106,7 +106,7 @@
           <td class="numeric">{{ a.size_bytes / 1024 }} KB</td>
           <td>
             {% if a.profile_refs == 0 %}
-              <span class="text-soft small">— <em title="Not referenced by any profile">orphan</em></span>
+              <span class="text-soft small">— <em title="Not referenced by any profile">unused</em></span>
             {% else %}
               <span class="pill ok" style="font-size:0.72rem">{{ a.profile_refs }}</span>
             {% endif %}
@@ -141,7 +141,7 @@
                        onchange="if(this.files.length){this.form.submit()}">
                 <button type="button" class="btn small"
                         onclick="document.getElementById('replace-input-{{ a.id }}').click()"
-                        title="Upload a new ZIP for this asset (keeps id)">
+                        title="Upload a new ZIP for this asset, keeping the same id">
                   Replace ZIP
                 </button>
               </form>
@@ -151,19 +151,19 @@
               {% if a.install_count > 0 %}
               <form method="post" action="/profiles/wp-assets/reinstall-all" style="display:inline"
                     data-confirm-title="Re-install on {{ a.install_count }} hosting(s)"
-                    data-confirm-body="The current bytes of {{ a.original_name }} will be pushed to every hosting that previously had this asset installed (via wp install --force). The original per-row activate flag is preserved. Sequential — may take a minute per hosting."
+                    data-confirm-body="The current contents of {{ a.original_name }} are pushed to every hosting that already has this asset installed, using wp install --force. The original per-hosting activate setting is kept. This runs one hosting at a time and may take about a minute each."
                     data-confirm-confirm-label="Re-install everywhere"
                     data-confirm-variant="primary">
                 <input type="hidden" name="_csrf" value="{{ csrf_upload }}">
                 <input type="hidden" name="id" value="{{ a.id }}">
                 <input type="hidden" name="activate_mode" value="">
-                <button class="btn small primary" type="submit">Re-install on {{ a.install_count }}</button>
+                <button class="btn small primary" type="submit">Re-install on {{ a.install_count }} hosting(s)</button>
               </form>
               {% endif %}
               <form method="post" action="/profiles/wp-assets/delete" style="display:inline"
                     data-confirm-title="Delete asset"
-                    data-confirm-body="The ZIP {{ a.original_name }} will be removed from disk. {{ a.profile_refs }} profile reference(s) will fail at next apply; {{ a.install_count }} hosting install(s) stay in place (only the library entry is removed)."
-                    data-confirm-confirm-label="Delete asset"
+                    data-confirm-body="The ZIP {{ a.original_name }} is removed from disk. {{ a.profile_refs }} profile reference(s) will fail the next time those profiles are applied. {{ a.install_count }} existing hosting install(s) stay in place — only the library entry is removed."
+                    data-confirm-confirm-label="Delete permanently"
                     data-confirm-variant="danger">
                 <input type="hidden" name="_csrf" value="{{ csrf_delete }}">
                 <input type="hidden" name="id" value="{{ a.id }}">
@@ -182,10 +182,10 @@
 <div class="card muted" style="margin-top:1rem">
   <h2 style="font-size:0.95rem;margin:0 0 0.6rem">How this works</h2>
   <ul class="text-soft small" style="margin:0;padding-left:1.2rem;line-height:1.65">
-    <li>Upload a plugin or theme ZIP. Hyperion validates the ZIP magic bytes, dedupes on SHA-256, and stores the file under <code>/var/lib/hyperion/wp-assets/&lt;id&gt;/&lt;sanitized-filename&gt;</code>.</li>
-    <li>Open a hosting profile's edit page (<a href="/profiles">Profiles</a> → Edit) and add lines like <code>@asset:7!</code> to the <strong>Plugins</strong> or <strong>Themes</strong> textarea.</li>
-    <li>Trailing <code>!</code> on the line means "also activate after install".</li>
-    <li>When the profile is applied to a WordPress-enabled hosting, the agent shells out to <code>wp plugin install &lt;path&gt; --force</code> (or <code>wp theme install</code>) under that hosting's system user. <code>--force</code> replaces an existing install — handy when you upload a newer ZIP under the same internal slug.</li>
+    <li>Upload a plugin or theme ZIP. Hyperion validates the ZIP's magic bytes, deduplicates by SHA-256, and stores the file under <code>/var/lib/hyperion/wp-assets/&lt;id&gt;/&lt;sanitized-filename&gt;</code>.</li>
+    <li>Open a hosting profile's edit page (<a href="/profiles">Profiles</a> → Edit) and add lines like <code>@asset:7!</code> to the <strong>Plugins</strong> or <strong>Themes</strong> field.</li>
+    <li>A trailing <code>!</code> on the line also activates the asset after install.</li>
+    <li>When the profile is applied to a WordPress-enabled hosting, the agent runs <code>wp plugin install &lt;path&gt; --force</code> (or <code>wp theme install</code>) as that hosting's system user. <code>--force</code> replaces an existing install, which is useful when you upload a newer ZIP under the same internal slug.</li>
     <li>Profiles can mix uploaded assets with WordPress.org slugs (<code>akismet</code>, <code>yoast-seo</code>) in the same list.</li>
   </ul>
 </div>

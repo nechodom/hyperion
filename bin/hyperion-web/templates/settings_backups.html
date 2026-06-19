@@ -5,27 +5,28 @@
   <div>
     <h1>Backup targets</h1>
     <div class="subtitle">
-      Off-site destinations for scheduled hosting backups. Generic S3-compatible (Wasabi, Backblaze B2, Minio, AWS).
-      Operator-supplied credentials + an age public key for client-side encryption.
-      The FTP/FTPS/SFTP single-target push (live today) + local retention live on
+      Off-site destinations for scheduled hosting backups, on any S3-compatible
+      storage (Wasabi, Backblaze B2, MinIO, AWS). Each target holds your
+      credentials and an age public key for client-side encryption. The
+      single-target FTP/FTPS/SFTP push and local retention live on
       <a href="/settings#backups">Settings → Backups</a>.
     </div>
   </div>
   <div>
-    <a href="/settings" class="btn ghost">← Settings</a>
+    <a href="/settings" class="btn ghost">← Back to settings</a>
   </div>
 </div>
 
 <div class="flash info" style="margin-bottom:1rem">
   <div class="flash-body">
-    <strong>How it runs.</strong> Every time a hosting backup completes (manual, from the
-    hosting detail page) the agent also pushes it to each <em>enabled</em> S3 target here —
-    archive + DB dump + manifest. With an <strong>age recipient</strong> set, each object is
+    <strong>How it runs.</strong> Whenever a hosting backup completes (manually, from the
+    hosting detail page), the agent also pushes it to every <em>enabled</em> S3 target here —
+    archive, database dump, and manifest. With an <strong>age recipient</strong> set, each object is
     encrypted client-side and streamed (<code>age → aws</code>, no temp file), so the off-site
-    copy needs no extra local disk. After uploading, the remote is pruned to the newest
+    copy needs no extra local disk. After upload, the remote is pruned to the newest
     <strong>“keep daily”</strong> backups per hosting.
-    Requires <code>apt install awscli</code> (and <code>age</code> for encryption) on each node.
-    <span class="hint">Note: the weekly/monthly tiers below currently map to “keep newest = daily”; full grandfather-father-son tiering is a later refinement.</span>
+    Each node needs the AWS CLI (<code>apt install awscli</code>), plus <code>age</code> for encryption.
+    <span class="hint">Note: the weekly and monthly tiers below currently map to “keep newest = daily”. Full grandfather-father-son tiering is a later refinement.</span>
   </div>
 </div>
 
@@ -37,9 +38,9 @@
         <th>Name</th>
         <th>Endpoint / bucket</th>
         <th>Retention <span class="text-soft small">(daily / weekly / monthly)</span></th>
-        <th>age</th>
+        <th>Encryption</th>
         <th>Enabled</th>
-        <th>Probe</th>
+        <th>Test</th>
         <th></th>
       </tr>
     </thead>
@@ -72,16 +73,17 @@
                   hx-post="/settings/backups/{{ t.id }}/probe"
                   hx-vals='{"_csrf": "{{ csrf_token }}"}'
                   hx-target="#probe-{{ t.id }}"
-                  hx-swap="innerHTML">
-            Probe
+                  hx-swap="innerHTML"
+                  title="Check credentials and bucket reachability">
+            Test connection
           </button>
           <span id="probe-{{ t.id }}" style="margin-left:0.4rem"></span>
         </td>
         <td>
           <form method="post" action="/settings/backups/{{ t.id }}/delete" style="display:inline"
                 data-confirm-title="Delete backup target {{ t.name }}?"
-                data-confirm-body="Existing backup_runs that reference this target stay in the history (target_id becomes NULL). The secret file under /etc/hyperion/secrets/ is NOT removed — clean that up manually."
-                data-confirm-confirm-label="Delete"
+                data-confirm-body="Backup runs that reference this target stay in the history (their target link is cleared). The secret file under /etc/hyperion/secrets/ is left in place — remove it manually if you no longer need it."
+                data-confirm-confirm-label="Delete permanently"
                 data-confirm-variant="danger">
             <input type="hidden" name="_csrf" value="{{ csrf_token }}">
             <button class="btn small danger" type="submit">Delete</button>
@@ -95,20 +97,20 @@
 {% endif %}
 
 <div class="card">
-  <h2>Add / edit target</h2>
+  <h2>Add or edit a target</h2>
   <form method="post" action="/settings/backups/upsert" style="margin-top:0.6rem">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <input type="hidden" name="id" value="">
     <div class="field-row">
       <div class="field">
-        <label>Name <span class="hint">unique short label</span></label>
+        <label>Name <span class="hint">short, unique label</span></label>
         <input name="name" type="text" required placeholder="wasabi-eu">
       </div>
       <div class="field">
         <label>Kind</label>
         <select name="kind">
-          <option value="s3" selected>s3</option>
-          <option value="local-dir">local-dir</option>
+          <option value="s3" selected>S3-compatible</option>
+          <option value="local-dir">Local directory</option>
         </select>
       </div>
     </div>
@@ -132,12 +134,12 @@
         <input name="access_key_id" type="text" required placeholder="AKIA…">
       </div>
       <div class="field">
-        <label>Secret key <span class="hint">written to /etc/hyperion/secrets/backup-&lt;id&gt;.key (0600)</span></label>
-        <input name="secret_key" type="password" placeholder="paste once, never echoed back">
+        <label>Secret key <span class="hint">stored at /etc/hyperion/secrets/backup-&lt;id&gt;.key (0600)</span></label>
+        <input name="secret_key" type="password" placeholder="Paste once; it is never shown again">
       </div>
     </div>
     <div class="field">
-      <label>age public recipient <span class="hint">blank = no encryption (NOT recommended)</span></label>
+      <label>age public recipient <span class="hint">leave blank for no encryption (not recommended)</span></label>
       <input name="age_recipient" type="text" placeholder="age1xy…">
     </div>
     <div class="field-row">
@@ -157,14 +159,14 @@
     <div class="field">
       <label style="display:flex;align-items:center;gap:0.4rem">
         <input type="checkbox" name="enabled" value="on" checked>
-        Enabled (scheduler will use this target)
+        Enabled — the scheduler pushes backups to this target
       </label>
     </div>
     <button class="btn primary" type="submit">Save target</button>
   </form>
   <p class="text-soft small" style="margin-top:0.8rem">
-    The agent shells out to <code>aws --endpoint-url=…</code> at upload time, so install the AWS CLI on every node:
-    <code>apt install awscli</code>. For age encryption, install <code>age</code>.
+    The agent calls <code>aws --endpoint-url=…</code> at upload time, so install the AWS CLI on every node
+    (<code>apt install awscli</code>). For age encryption, also install <code>age</code>.
   </p>
 </div>
 {% endblock %}

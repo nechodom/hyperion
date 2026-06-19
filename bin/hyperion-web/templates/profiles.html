@@ -1,16 +1,16 @@
 {% extends "base.html" %}
-{% block title %}Profiles · hyperion{% endblock %}
+{% block title %}Profiles · Hyperion{% endblock %}
 {% block main %}
 <div class="page-header">
   <div>
     <h1>Profiles</h1>
-    <div class="subtitle">Pre-defined templates of limits, expiry policy, pricing, notifications, and WordPress plugins/themes. Apply to any hosting in one click.</div>
+    <div class="subtitle">Reusable templates of resource limits, expiry policy, pricing, notifications, and WordPress plugins and themes. Apply one to any hosting to set all of these at once.</div>
   </div>
   <span class="grow"></span>
   <div class="actions">
     <a href="/profiles/wp-assets" class="btn ghost">
       <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-      WP asset library
+      WordPress asset library
     </a>
   </div>
 </div>
@@ -26,7 +26,7 @@
   <h2 style="padding:1.4rem 1.5rem 0">Existing profiles</h2>
   {% if profiles.is_empty() %}
     <div class="empty">
-      <p>No profiles yet — define one below for your standard plan tiers (Basic, Pro, Enterprise) and apply them to hostings.</p>
+      <p>No profiles yet. Create one below for each of your standard plan tiers (for example Basic, Pro, Enterprise), then apply it to hostings.</p>
     </div>
   {% else %}
   <div class="table-wrap">
@@ -34,7 +34,7 @@
       <thead>
         <tr>
           <th>Name</th>
-          <th>PHP mem</th>
+          <th>PHP memory</th>
           <th>Disk</th>
           <th>Price</th>
           <th>Expiry grace</th>
@@ -65,7 +65,7 @@
                 <input type="hidden" name="_csrf" value="{{ csrf_clone }}">
                 <input type="hidden" name="id" value="{{ p.id }}">
                 <button class="btn small" type="submit"
-                        title="Create a new profile pre-filled with these settings — useful when you want a variant.">
+                        title="Create a new profile pre-filled with these settings — useful for a variant">
                   Duplicate
                 </button>
               </form>
@@ -91,7 +91,7 @@
 <div class="card hover">
   <h2>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-    Create a new profile
+    New profile
   </h2>
   <form method="post" action="/profiles/create">
     <input type="hidden" name="_csrf" value="{{ csrf_create }}">
@@ -113,7 +113,7 @@
         <input id="p_php_memory" name="php_memory_mb" type="number" min="16" max="8192" value="256">
       </div>
       <div class="field">
-        <label for="p_php_exec">PHP max_exec <span class="hint">sec</span></label>
+        <label for="p_php_exec">PHP max execution time <span class="hint">seconds</span></label>
         <input id="p_php_exec" name="php_max_exec_secs" type="number" min="1" max="3600" value="60">
       </div>
     </div>
@@ -133,23 +133,23 @@
         <input id="p_db_max" name="db_max_connections" type="number" min="1" max="1000" value="50">
       </div>
       <div class="field">
-        <label for="p_disk">Disk limit <span class="hint">MB · blank = unlimited</span></label>
+        <label for="p_disk">Disk limit <span class="hint">MB · leave blank for unlimited</span></label>
         <input id="p_disk" name="disk_hard_mb" type="number" min="0" placeholder="2048">
       </div>
     </div>
     <div class="field">
-      <label for="p_bw">Monthly bandwidth <span class="hint">MB · blank = unlimited</span></label>
+      <label for="p_bw">Monthly bandwidth <span class="hint">MB · leave blank for unlimited</span></label>
       <input id="p_bw" name="bw_monthly_mb" type="number" min="0" placeholder="10000">
     </div>
 
     <h2 style="font-size:0.95rem;margin:1.5rem 0 0.6rem">Expiration policy</h2>
     <div class="field-row">
       <div class="field">
-        <label for="p_grace">Grace period <span class="hint">days after expiry → auto-delete</span></label>
+        <label for="p_grace">Grace period <span class="hint">days after expiry before auto-delete</span></label>
         <input id="p_grace" name="expiry_grace_days" type="number" min="0" max="365" value="30">
       </div>
       <div class="field">
-        <label for="p_off">Warning offsets <span class="hint">days before expiry, comma-sep</span></label>
+        <label for="p_off">Warning offsets <span class="hint">days before expiry, comma-separated</span></label>
         <input id="p_off" name="expiry_warning_offsets" type="text" value="30,7,1">
       </div>
     </div>
@@ -165,19 +165,19 @@
         <input id="p_currency" name="price_currency" type="text" maxlength="3" placeholder="CZK" style="text-transform:uppercase">
       </div>
       <div class="field">
-        <label for="p_interval">Interval</label>
+        <label for="p_interval">Billing interval</label>
         <select id="p_interval" name="price_interval">
-          <option value="">none</option>
-          <option value="monthly">monthly</option>
-          <option value="quarterly">quarterly</option>
-          <option value="yearly">yearly</option>
+          <option value="">No interval</option>
+          <option value="monthly">Monthly</option>
+          <option value="quarterly">Quarterly</option>
+          <option value="yearly">Yearly</option>
         </select>
       </div>
     </div>
 
     <h2 style="font-size:0.95rem;margin:1.5rem 0 0.6rem">Notifications <span class="muted" style="font-weight:400;font-size:0.82rem">— optional</span></h2>
     <div class="field">
-      <label for="p_slack">Slack incoming webhook URL <span class="hint">overrides the global default</span></label>
+      <label for="p_slack">Slack incoming webhook URL <span class="hint">overrides the global default for hostings on this profile</span></label>
       <input id="p_slack" name="slack_webhook" type="url" placeholder="https://hooks.slack.com/services/T.../B.../...">
     </div>
 
@@ -188,13 +188,13 @@
        "WordPress Pro"–style profiles where you always want a
        specific PHP + MariaDB. #}
     <h2 style="font-size:0.95rem;margin:1.5rem 0 0.6rem">
-      Wizard defaults <span class="muted" style="font-weight:400;font-size:0.82rem">— pre-fills the new-hosting form when this profile is picked</span>
+      Wizard defaults <span class="muted" style="font-weight:400;font-size:0.82rem">— pre-fill the new-hosting form when this profile is picked</span>
     </h2>
     <div class="field-row" style="margin-bottom:1rem">
       <div class="field" style="flex:1">
         <label for="p_default_php_version">Pre-fill PHP version</label>
         <select id="p_default_php_version" name="default_php_version">
-          <option value="">— no preference —</option>
+          <option value="">No preference</option>
           <option value="8.1">PHP 8.1</option>
           <option value="8.2">PHP 8.2</option>
           <option value="8.3">PHP 8.3</option>
@@ -204,21 +204,21 @@
       <div class="field" style="flex:1">
         <label for="p_default_db_engine">Pre-fill database</label>
         <select id="p_default_db_engine" name="default_db_engine">
-          <option value="">— no preference —</option>
+          <option value="">No preference</option>
           <option value="mariadb">MariaDB</option>
           <option value="postgres">PostgreSQL</option>
-          <option value="none">No DB (static / static-with-PHP)</option>
+          <option value="none">No database (static, or static with PHP)</option>
         </select>
       </div>
     </div>
 
     <h2 style="font-size:0.95rem;margin:1.5rem 0 0.6rem">
-      WordPress plugins + themes <span class="muted" style="font-weight:400;font-size:0.82rem">— installed when this profile is applied to a WP-enabled hosting</span>
+      WordPress plugins and themes <span class="muted" style="font-weight:400;font-size:0.82rem">— installed when this profile is applied to a WordPress hosting</span>
     </h2>
     <p class="text-soft small" style="margin:0 0 0.7rem;line-height:1.55">
-      One item per line. WordPress.org slug (<code>akismet</code>) or
-      <code>@asset:&lt;id&gt;</code> for uploaded ZIPs (see <a href="/profiles/wp-assets">asset library</a>).
-      Trailing <code>!</code> = also activate.
+      One item per line — a WordPress.org slug (<code>akismet</code>) or
+      <code>@asset:&lt;id&gt;</code> for an uploaded ZIP (see the <a href="/profiles/wp-assets">asset library</a>).
+      A trailing <code>!</code> also activates the item after install.
     </p>
     <div class="field-row">
       <div class="field" style="flex:1">

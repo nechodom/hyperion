@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Import hosting · hyperion{% endblock %}
+{% block title %}Import hosting · Hyperion{% endblock %}
 {% block main %}
 
 <nav class="breadcrumbs" aria-label="Breadcrumb">
@@ -11,7 +11,7 @@
 <div class="page-header">
   <div>
     <h1>Import hosting from another node</h1>
-    <div class="subtitle">Paste the URL + token that <strong>Export migration bundle</strong> printed on the source node. This node will download the archive directly and provision an identical hosting here.</div>
+    <div class="subtitle">Paste the base URL and token that <strong>Export a transfer file</strong> produced on the source node. This node downloads the transfer file directly and provisions an identical hosting here.</div>
   </div>
 </div>
 
@@ -31,13 +31,13 @@
 <div class="card hover">
   <h2>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>
-    Bundle URL
+    Transfer file location
   </h2>
-  <p class="muted">On the source node, open the hosting detail → <strong>Migration</strong> tab → click <strong>Export migration bundle</strong>. The result page prints a base URL and a token — paste both here.</p>
+  <p class="muted">On the source node, open the hosting, choose <strong>Move or copy</strong> → <strong>Export a transfer file</strong>, then create the file. The result page shows a base URL and a token — paste both here.</p>
   <form method="post" action="/hostings/migration/import-from-url" autocomplete="off"
         data-confirm-title="Import hosting"
-        data-confirm-body="A new hosting will be provisioned on this node and the archive will be restored into it. The source hosting is not affected."
-        data-confirm-confirm-label="Import"
+        data-confirm-body="A new hosting is provisioned on this node and the archive is restored into it. The source hosting is not affected."
+        data-confirm-confirm-label="Import hosting"
         data-confirm-variant="primary">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <div class="field">
@@ -47,7 +47,7 @@
              style="font-family:var(--font-mono);font-size:0.88rem">
     </div>
     <div class="field">
-      <label for="token">Token <span class="hint">expires 1h after the source generated it</span></label>
+      <label for="token">Token <span class="hint">expires 1 h after the source generated it</span></label>
       <input id="token" name="token" type="text" required
              placeholder="AAAA.BBBB"
              spellcheck="false" autocapitalize="off"
@@ -55,7 +55,7 @@
     </div>
     <button class="btn primary" type="submit">
       <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
-      Import bundle
+      Import hosting
     </button>
   </form>
 </div>
@@ -66,13 +66,13 @@
     What happens next
   </h2>
   <ol style="margin:0;padding-left:1.25rem;font-size:0.92rem;line-height:1.7">
-    <li>This node downloads <code>manifest.json</code> + <code>archive.tar.gz</code> from the source via the signed URL.</li>
-    <li>BLAKE3 of the archive is verified against the manifest — a corrupted transfer is refused.</li>
-    <li>A fresh hosting is provisioned with the source's domain, aliases, PHP version, DB engine.</li>
-    <li>The archive (htdocs + DB dump) is restored.</li>
-    <li>You'll be redirected to the new hosting's detail page.</li>
-    <li>Update DNS to point at this node; click <strong>Issue Cert</strong> when LE-ready (private keys never travel across nodes).</li>
-    <li>On the source: <code>hctl hosting delete &lt;domain&gt;</code> once you've verified the imported site works.</li>
+    <li>This node downloads <code>manifest.json</code> and <code>archive.tar.gz</code> from the source over the signed URL.</li>
+    <li>The archive's BLAKE3 digest is checked against the manifest, so a corrupted transfer is refused.</li>
+    <li>A fresh hosting is provisioned with the source's domain, aliases, PHP version, and database engine.</li>
+    <li>The archive (htdocs plus the database dump) is restored.</li>
+    <li>You're taken to the new hosting's detail page.</li>
+    <li>Point DNS at this node, then click <strong>Issue certificate</strong> once it resolves. Private keys never travel between nodes.</li>
+    <li>On the source, run <code>hctl hosting delete &lt;domain&gt;</code> once you've confirmed the imported site works.</li>
   </ol>
 </div>
 {% endblock %}

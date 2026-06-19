@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}{{ detail.domain }} · hyperion{% endblock %}
+{% block title %}{{ detail.domain }} · Hyperion{% endblock %}
 {% block main %}
 
 <div class="breadcrumbs">
@@ -22,9 +22,9 @@
       <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
     </svg>
     <strong style="font-size:0.95rem">Post-create setup</strong>
-    <span class="text-soft small">cert / WordPress / profile — running in the background</span>
+    <span class="text-soft small">Certificate, WordPress and profile — running in the background</span>
     <span class="grow"></span>
-    <a class="btn small ghost" href="/jobs/{{ job_id }}">Full job log →</a>
+    <a class="btn small ghost" href="/jobs/{{ job_id }}">View full job log →</a>
   </div>
   <div id="wp-install-progress"
        hx-get="/jobs/{{ job_id }}/progress"
@@ -37,13 +37,13 @@
      button is needed for the happy path. #}
   <div id="wp-install-failed-row" hidden style="margin-top:0.7rem">
     <button type="button" class="btn" onclick="location.href=location.pathname + '#wordpress'; location.reload()">
-      Reload to inspect
+      Reload to inspect the result
     </button>
   </div>
   <p class="text-soft small" style="margin:0.7rem 0 0;line-height:1.5">
     The credentials below are valid <strong>immediately</strong> — copy them
     while the install runs. Each plugin and theme gets its own ✓/✗ line
-    in the log above. The page refreshes itself the moment setup finishes.
+    in the log above. This page refreshes itself the moment setup finishes.
   </p>
 </div>
 <script>
@@ -97,7 +97,7 @@
       </div>
       <h2 style="margin:0.25rem 0 0;font-size:1.25rem">Credentials for {{ detail.domain }}</h2>
       <p class="text-soft" style="margin:0.3rem 0 0;font-size:0.82rem">
-        These are shown only on this page. <strong>Copy them now</strong> — they
+        Shown only on this page. <strong>Copy them now</strong> — they
         are not stored anywhere recoverable in plain text.
       </p>
     </div>
@@ -190,8 +190,8 @@
   <div class="creds-footnote">
     <kbd>Tip</kbd> These stay on screen — across the post-install
     reload too — until you dismiss them. Save them to your password
-    manager, then click below. The DB password is not recoverable;
-    use the "Reset password" form below if you lose it.
+    manager, then dismiss the panel. The database password is not
+    recoverable; if you lose it, reset it on the Overview tab.
   </div>
   <div style="margin-top:0.9rem;display:flex;justify-content:flex-end">
     <button type="button" class="btn small" data-creds-dismiss>
@@ -327,7 +327,7 @@
            on the detail page during a planned outage should see "yes
            this is on purpose" immediately, not have to scroll to find
            the Vhost options card. #}
-        <span class="pill" title="Maintenance mode is ON — nginx returns 503 for every request. Flip off in Vhost options below."
+        <span class="pill" title="Maintenance mode is on — nginx returns 503 for every request. Turn it off under Settings → Vhost options"
               style="background:var(--accent);color:white;border-color:transparent;font-weight:700;letter-spacing:0.04em">
           MAINTENANCE
         </span>
@@ -362,8 +362,8 @@
     {% else if detail.state.as_str() == "active" %}
       <form method="post" action="/hostings/suspend" style="display:inline"
             data-confirm-title="Suspend {{ detail.domain }}"
-            data-confirm-body="Visitors will see HTTP 503 until you resume the hosting."
-            data-confirm-confirm-label="Suspend"
+            data-confirm-body="Visitors will see an HTTP 503 page until you resume the hosting. PHP-FPM stops and the database user is locked. This is fully reversible."
+            data-confirm-confirm-label="Suspend hosting"
             data-confirm-variant="primary">
         <input type="hidden" name="_csrf" value="{{ csrf_suspend }}">
         <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
@@ -434,7 +434,7 @@
 {% if let Some(e) = cert_error %}
   <div class="flash error">
     <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-    <div class="flash-body"><strong>Cert issuance failed:</strong> {{ e }}</div>
+    <div class="flash-body"><strong>Certificate issuance failed:</strong> {{ e }}</div>
   </div>
 {% endif %}
 {% if let Some(m) = restore_flash %}
@@ -581,7 +581,7 @@
       <span class="text-soft" style="font-size:0.85rem">{{ h.score }}/100</span>
     </div>
     <h2 style="margin:0;font-size:1.05rem">Health</h2>
-    {% if h.todo > 0 %}<span class="pill warn" style="font-size:0.65rem">{{ h.todo }} to fix</span>{% else %}<span class="pill ok" style="font-size:0.65rem">all good</span>{% endif %}
+    {% if h.todo > 0 %}<span class="pill warn" style="font-size:0.65rem">{{ h.todo }} to fix</span>{% else %}<span class="pill ok" style="font-size:0.65rem">all clear</span>{% endif %}
   </div>
   <ul style="list-style:none;margin:0;padding:0;display:grid;gap:0.4rem">
     {% for c in h.checks %}
@@ -611,25 +611,25 @@
         {% if detail.vhost_options.waf_enabled %}<span class="pill ok">WAF on</span>{% else %}<span class="pill warn">WAF off</span>{% endif %}
         {% if !detail.vhost_options.wp_admin_allowlist.trim().is_empty() %}<span class="pill ok">admin lock</span>{% endif %}
       </div>
-      <a class="text-soft small" href="#settings">Configure on Settings →</a>
+      <a class="text-soft small" href="#settings">Configure in Settings →</a>
     </div>
     <div style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.7rem">
       <div class="text-soft small" style="margin-bottom:0.35rem">WordPress updates</div>
-      <div class="text-soft small" style="margin-bottom:0.45rem">Outdated plugins / themes, auto-patched</div>
-      <a class="text-soft small" href="#wordpress">Open WordPress tab →</a>
+      <div class="text-soft small" style="margin-bottom:0.45rem">Outdated plugins and themes, auto-patched</div>
+      <a class="text-soft small" href="#wordpress">Open the WordPress tab →</a>
     </div>
     <div style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.7rem">
       <div class="text-soft small" style="margin-bottom:0.35rem">Brute-force bans</div>
-      <div class="text-soft small" style="margin-bottom:0.45rem">Auto wp-login / xmlrpc / SSH bans</div>
-      <a class="text-soft small" href="#settings">Manage on Settings →</a>
+      <div class="text-soft small" style="margin-bottom:0.45rem">Automatic wp-login, xmlrpc and SSH bans</div>
+      <a class="text-soft small" href="#settings">Manage in Settings →</a>
     </div>
   </div>
   {# Cluster-wide context: the cards above act on THIS site; these jump to the
      all-sites views so the operator isn't stranded on one hosting. #}
   <div class="text-soft small" style="margin-top:0.85rem;display:flex;flex-wrap:wrap;gap:0.35rem 1rem;align-items:center">
     <span style="opacity:0.7">Across the cluster:</span>
-    <a href="/vulns">All sites' WP updates →</a>
-    <a href="/bans">All node bans →</a>
+    <a href="/vulns">WordPress updates, all sites →</a>
+    <a href="/bans">Bans on every node →</a>
     <a href="/firewall">Firewall posture →</a>
     <a href="/audit?q={{ detail.domain }}">This site's audit trail →</a>
     <a href="/emails?hosting={{ detail.id.as_str() }}">Email log →</a>
@@ -645,13 +645,13 @@
     <dt>Node</dt>
     <dd>
       {% if let Some(n) = detail.node_id %}
-        <span class="tag node-chip" title="Hyperion node this hosting was provisioned on">
+        <span class="tag node-chip" title="The node this hosting was provisioned on">
           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" style="margin-right:0.25rem;vertical-align:-1px"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
           <code style="font-size:inherit">{{ n }}</code>
         </span>
-        <a href="/install" class="text-soft" style="font-size:0.78rem;margin-left:0.4rem">manage nodes →</a>
+        <a href="/install" class="text-soft" style="font-size:0.78rem;margin-left:0.4rem">Manage nodes →</a>
       {% else %}
-        <span class="text-soft">— (legacy row; will fill on next agent restart)</span>
+        <span class="text-soft">— (legacy row; fills in on the next agent restart)</span>
       {% endif %}
     </dd>
     <dt>System user</dt><dd><code>{{ detail.system_user }}</code></dd>
@@ -668,8 +668,8 @@
           <form method="post" action="/hostings/set-php-version"
                 style="display:inline-flex;gap:0.4rem;align-items:center;margin:0"
                 data-confirm-title="Change PHP version"
-                data-confirm-body="The PHP-FPM pool for this site will be torn down and re-created on the chosen version. Expect a few hundred ms of 502s while the new pool starts. Persisted PHP limits (memory, max_children, etc.) carry over."
-                data-confirm-confirm-label="Switch"
+                data-confirm-body="The PHP-FPM pool for this site is torn down and re-created on the chosen version. Expect a few hundred ms of 502s while the new pool starts. Persisted PHP limits (memory, max_children and so on) carry over."
+                data-confirm-confirm-label="Switch version"
                 data-confirm-variant="primary">
             {# Session-wide CSRF token — the middleware accepts the same
                session token for any path without a dedicated csrf_*
@@ -739,10 +739,10 @@
 
   <div class="card-section">
     <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Reset database password</h2>
-    <p class="muted" style="margin:0 0 0.8rem;font-size:0.85rem">Generate a new strong password and update both the DB grant + the persisted secret.</p>
+    <p class="muted" style="margin:0 0 0.8rem;font-size:0.85rem">Generate a new strong password and update both the database grant and the stored secret.</p>
     <form method="post" action="/hostings/db/reset-password" autocomplete="off"
           data-confirm-title="Reset database password"
-          data-confirm-body="A new password will be generated for {{ db.db_user }}. Active connections may drop and any app config referencing the old password will stop working until updated."
+          data-confirm-body="A new password is generated for {{ db.db_user }}. Active connections may drop, and any app config that references the old password stops working until you update it."
           data-confirm-confirm-label="Reset password"
           data-confirm-variant="danger">
       <input type="hidden" name="_csrf" value="{{ csrf_db_reset }}">
@@ -797,14 +797,14 @@
       {% endif %}
     </div>
     <div>
-      <div class="text-soft small">BW in · 24h</div>
+      <div class="text-soft small">Bandwidth in · 24h</div>
       <div style="font-size:1.3rem;font-weight:600;margin:0.15rem 0 0.3rem">{{ crate::handlers::stats::fmt_bytes(s.bw_in_bytes_24h) }}</div>
       {% if usage_buckets.len() >= 2 %}
         <div style="color:var(--text-dim)">{{ crate::handlers::stats::sparkline_svg(usage_buckets, crate::handlers::stats::bucket_bw_in)|safe }}</div>
       {% endif %}
     </div>
     <div>
-      <div class="text-soft small">BW out · 24h</div>
+      <div class="text-soft small">Bandwidth out · 24h</div>
       <div style="font-size:1.3rem;font-weight:600;margin:0.15rem 0 0.3rem">{{ crate::handlers::stats::fmt_bytes(s.bw_out_bytes_24h) }}</div>
       {% if usage_buckets.len() >= 2 %}
         <div style="color:var(--success)">{{ crate::handlers::stats::sparkline_svg(usage_buckets, crate::handlers::stats::bucket_bw_out)|safe }}</div>
@@ -827,7 +827,7 @@
 
   <p class="muted" style="font-size:0.82rem;margin-top:0.8rem;margin-bottom:0">
     Sparklines normalise each metric to its own 48-hour max — they show shape, not absolute scale.
-    Numbers come from the agent's 5-minute sampler (du on the hosting tree + tail-parse of nginx access.log).
+    Numbers come from the agent's 5-minute sampler (du on the hosting tree, plus a tail-parse of the nginx access.log).
   </p>
 </div>
 {% endif %}
@@ -877,8 +877,8 @@
     Domains
   </h2>
   <p class="text-soft" style="margin:0 0 0.75rem">
-    Primary domain <code>{{ detail.domain }}</code> is fixed (recreate the
-    hosting to change it). Aliases are additional names served by this site.
+    The primary domain <code>{{ detail.domain }}</code> is fixed — recreate the
+    hosting to change it. Aliases are additional names served by this site.
   </p>
   <form method="post" action="/hostings/aliases" autocomplete="off"
         data-role-min="operator">
@@ -908,7 +908,7 @@
     <dt>Issuer</dt><dd>
       <span class="tag">{{ cert.issuer }}</span>
       {% if cert.issuer == "self-signed" %}
-        <span class="muted" style="margin-left:0.5rem;font-size:0.82rem">— browsers will warn until a real cert is issued below.</span>
+        <span class="muted" style="margin-left:0.5rem;font-size:0.82rem">— browsers will warn until you issue a trusted certificate below.</span>
       {% endif %}
     </dd>
     <dt>Domain</dt><dd>{{ cert.domain }}</dd>
@@ -920,9 +920,9 @@
   </dl>
 
   <div class="card-section">
-    <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Issue a real Let's Encrypt certificate</h2>
+    <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Issue a trusted Let's Encrypt certificate</h2>
     <p class="muted" style="margin:0 0 1rem;font-size:0.88rem">
-      First check that DNS for <code>{{ detail.domain }}</code> resolves to this server. The cert flow refuses to start otherwise.
+      First confirm that DNS for <code>{{ detail.domain }}</code> resolves to this server. Issuance refuses to start otherwise.
     </p>
 
     <div id="dns-result" style="background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.85rem 1rem;margin-bottom:1rem">
@@ -941,8 +941,8 @@
     </form>
 
     <form method="post" action="/hostings/cert/issue"
-          data-confirm-title="Issue real Let's Encrypt certificate"
-          data-confirm-body="Hyperion will request a production HTTPS cert for {{ detail.domain }} from Let's Encrypt. Make sure DNS A/AAAA records point at this server first or the issue will fail."
+          data-confirm-title="Issue a trusted Let's Encrypt certificate"
+          data-confirm-body="Hyperion requests a production HTTPS certificate for {{ detail.domain }} from Let's Encrypt. Point the domain's DNS A/AAAA records at this server first, or issuance will fail."
           data-confirm-confirm-label="Issue certificate"
           data-confirm-variant="primary">
       <input type="hidden" name="_csrf" value="{{ csrf_cert_issue }}">
@@ -950,12 +950,12 @@
       <label class="field-checkbox">
         <input type="checkbox" name="staging" value="on" checked>
         Use Let's Encrypt <strong>staging</strong> first (recommended)
-        <span class="muted" style="margin-left:0.4rem;font-size:0.82rem">— untrusted CA but no rate limits</span>
+        <span class="muted" style="margin-left:0.4rem;font-size:0.82rem">— untrusted CA, but no rate limits</span>
       </label>
       <label class="field-checkbox">
         <input type="checkbox" name="require_dns_match" value="off">
-        <strong>Override</strong> DNS pre-check
-        <span class="muted" style="margin-left:0.4rem;font-size:0.82rem">— issue anyway (will probably fail)</span>
+        <strong>Skip</strong> the DNS pre-check
+        <span class="muted" style="margin-left:0.4rem;font-size:0.82rem">— issue anyway, even if DNS doesn't resolve here (likely to fail)</span>
       </label>
       <button class="btn primary" type="submit" style="margin-top:0.7rem">
         <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
@@ -967,14 +967,14 @@
 
     <h2 style="font-size:0.95rem;margin:0 0 0.35rem">Wildcard certificate (DNS-01)</h2>
     <p class="text-soft" style="margin:0 0 0.7rem;font-size:0.85rem">
-      Issue <code>{{ detail.domain }}</code> + <code>*.{{ detail.domain }}</code>
-      via a DNS challenge. You'll be shown <code>TXT</code> records to publish,
-      then click continue to validate. Requires control of the domain's DNS.
+      Issue <code>{{ detail.domain }}</code> and <code>*.{{ detail.domain }}</code>
+      via a DNS challenge. Hyperion shows you <code>TXT</code> records to publish,
+      then you continue to validate. Requires control of the domain's DNS.
     </p>
     <p class="text-soft small" style="margin:-0.3rem 0 0.7rem;padding:0.5rem 0.7rem;background:var(--surface-1);border-radius:6px">
       On a <strong>test node</strong>? Issue one <code>*.&lt;base&gt;</code> wildcard for the
-      whole node in <a href="/settings#testnodes">Settings → Test nodes</a> instead — every
-      auto-subdomain reuses it (this per-site cert isn't needed there).
+      whole node under <a href="/settings#testnodes">Settings → Test nodes</a> instead — every
+      auto-subdomain reuses it, so this per-site certificate isn't needed there.
     </p>
     <form method="post" action="/hostings/cert/dns01/begin">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
@@ -982,13 +982,13 @@
       <label class="field-checkbox">
         <input type="checkbox" name="staging" value="on">
         Use Let's Encrypt <strong>staging</strong> first
-        <span class="muted" style="margin-left:0.4rem;font-size:0.82rem">— untrusted but no rate limits</span>
+        <span class="muted" style="margin-left:0.4rem;font-size:0.82rem">— untrusted, but no rate limits</span>
       </label>
       <div class="field" style="margin:0.5rem 0">
         <label for="dns01_provider">DNS provider</label>
         <select id="dns01_provider" name="provider">
-          <option value="manual">Manual (show me the TXT records)</option>
-          <option value="cloudflare">Cloudflare (automatic — needs API token)</option>
+          <option value="manual">Manual — show me the TXT records to publish</option>
+          <option value="cloudflare">Cloudflare — automatic, needs an API token</option>
         </select>
       </div>
       <button class="btn" type="submit" style="margin-top:0.4rem">
@@ -1007,7 +1007,7 @@
   <h2 style="font-size:0.95rem;margin:0 0 0.35rem">Upload a custom certificate</h2>
   <p class="text-soft" style="margin:0 0 0.85rem;font-size:0.88rem">
     Paste a PEM certificate and its private key — for a private CA, a
-    pre-purchased cert, or a self-signed bootstrap. Hyperion verifies the
+    pre-purchased certificate, or a self-signed bootstrap. Hyperion verifies the
     key matches the certificate and that it covers
     <code>{{ detail.domain }}</code>{% if !detail.aliases.is_empty() %} and its aliases{% endif %},
     then installs it and <strong>disables automatic renewal</strong> for
@@ -1049,9 +1049,9 @@
 <div class="card" style="margin-top:1rem">
   <h2 style="font-size:0.95rem;margin:0 0 0.35rem">ACME contact email</h2>
   <p class="text-soft" style="margin:0 0 0.85rem">
-    Let's Encrypt sends expiry warnings + ToS updates here. Leave blank to
-    use the agent-wide default from <code>/etc/hyperion/agent.toml</code>
-    <code>[acme] contact_email</code>.
+    Let's Encrypt sends expiry warnings and terms-of-service updates here.
+    Leave blank to use the agent-wide default from
+    <code>/etc/hyperion/agent.toml</code> <code>[acme] contact_email</code>.
   </p>
   <form method="post" action="/hostings/acme-email" autocomplete="off"
         style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
@@ -1061,7 +1061,7 @@
            placeholder="ops@customer.cz (leave blank to clear)"
            value="{% if let Some(e) = detail.acme_contact_email %}{{ e|e }}{% endif %}"
            style="flex:1;min-width:16rem;margin:0">
-    <button class="btn small primary" type="submit">Save</button>
+    <button class="btn small primary" type="submit">Save contact email</button>
     {% if let Some(_) = detail.acme_contact_email %}
       <span class="pill ok">override active</span>
     {% else %}
@@ -1086,13 +1086,13 @@
       <dt>WP version</dt><dd><span class="tag">{{ wp.wp_version }}</span></dd>
       <dt>Installed</dt><dd class="muted numeric" title="{{ wp.installed_at }}">{{ crate::handlers::stats::fmt_ago(wp.installed_at) }}</dd>
     </dl>
-    <p class="muted" style="font-size:0.85rem;margin-top:0.7rem">To reinstall, drop the row from <code>wp_installs</code> and clear the DB tables first.</p>
+    <p class="muted" style="font-size:0.85rem;margin-top:0.7rem">To reinstall, drop the row from <code>wp_installs</code> and clear the database tables first.</p>
 
     <div class="card-section">
       <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Reset admin password</h2>
       <form method="post" action="/hostings/wp/reset-password" autocomplete="off"
             data-confirm-title="Reset WordPress admin password"
-            data-confirm-body="A new random password will be generated for the WP admin account. Existing browser sessions stay logged in."
+            data-confirm-body="A new random password is generated for the WordPress admin account. Existing browser sessions stay signed in."
             data-confirm-confirm-label="Reset password"
             data-confirm-variant="danger">
         <input type="hidden" name="_csrf" value="{{ csrf_wp_reset }}">
@@ -1114,9 +1114,9 @@
       </form>
     </div>
   {% else if detail.database.is_none() %}
-    <p class="muted">This hosting has no database. WordPress needs MariaDB — delete this hosting from the Danger tab and create a new one with MariaDB selected in the wizard.</p>
+    <p class="muted">This hosting has no database. WordPress needs MariaDB — delete the hosting from the Danger tab, then create a new one with MariaDB selected in the wizard.</p>
   {% else if detail.state.as_str() != "active" %}
-    <p class="muted">Hosting must be <strong>active</strong> before installing WordPress (current state: <code>{{ detail.state.as_str() }}</code>).</p>
+    <p class="muted">The hosting must be <strong>active</strong> before you can install WordPress (current state: <code>{{ detail.state.as_str() }}</code>).</p>
   {% else %}
     <form method="post" action="/hostings/wp/install" autocomplete="off">
       <input type="hidden" name="_csrf" value="{{ csrf_wp_install }}">
@@ -1200,15 +1200,15 @@
     Staging site
   </h2>
   <p class="muted" style="margin:-0.3rem 0 0.85rem;font-size:0.85rem">
-    Spin up a <code>{{ staging_domain }}</code> copy to test plugin /
-    theme updates safely, then push it back over production. Push takes a
-    <strong>pre-push backup of production first</strong>, so a bad push is
+    Spin up a <code>{{ staging_domain }}</code> copy to test plugin and
+    theme updates safely, then push it back over production. A push takes a
+    <strong>backup of production first</strong>, so a bad push is
     always recoverable from the Backups tab.
   </p>
   <form method="post" action="/hostings/wp/staging/create"
         data-confirm-title="Create staging copy"
-        data-confirm-body="A staging copy ({{ staging_domain }}) will be created with a copy of this site's files + database. WordPress URLs are rewritten to the staging hostname."
-        data-confirm-confirm-label="Create staging">
+        data-confirm-body="A staging copy ({{ staging_domain }}) is created with a copy of this site's files and database. WordPress URLs are rewritten to the staging hostname."
+        data-confirm-confirm-label="Create staging copy">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
     <div class="field" style="max-width:26rem;margin-bottom:0.7rem">
@@ -1217,7 +1217,7 @@
              value="{{ staging_domain }}" placeholder="staging.{{ detail.domain }}"
              autocapitalize="off" autocomplete="off" spellcheck="false">
       <span class="muted hint">Must already resolve to this server — its own DNS
-        record, or a <code>*.{{ detail.domain }}</code> wildcard. Leave as-is for the default.</span>
+        record, or a <code>*.{{ detail.domain }}</code> wildcard. Leave it as-is for the default.</span>
     </div>
     <div class="row" style="gap:0.5rem;flex-wrap:wrap">
       <button class="btn" type="submit">Create / refresh staging</button>
@@ -1226,7 +1226,7 @@
   <div class="row" style="gap:0.5rem;flex-wrap:wrap;margin-top:0.7rem">
     <form method="post" action="/hostings/wp/staging/push" style="display:inline"
           data-confirm-title="Push staging to production"
-          data-confirm-body="{{ staging_domain }}'s files + database will OVERWRITE production {{ detail.domain }}. A pre-push backup of production is taken first. This cannot be undone except by restoring that backup."
+          data-confirm-body="The files and database from {{ staging_domain }} will OVERWRITE production {{ detail.domain }}. A backup of production is taken first. This can only be undone by restoring that backup."
           data-confirm-confirm-label="Push to production"
           data-confirm-variant="danger">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
@@ -1328,7 +1328,7 @@
 
   {% if wp_plugins.plugins.is_empty() %}
     <div class="empty" style="padding:1.5rem 1rem">
-      <p class="muted">No plugins installed yet. Use <strong>Install plugin</strong> above to add one from wordpress.org or upload a .zip URL.</p>
+      <p class="muted">No plugins installed yet. Use <strong>Install plugin</strong> above to add one from wordpress.org or a .zip URL.</p>
     </div>
   {% else %}
   <div class="table-wrap" style="margin:0 -1.5rem">
@@ -1439,10 +1439,10 @@
     Debug
   </h2>
   <p class="muted small">
-    Flips <code>WP_DEBUG</code>, <code>WP_DEBUG_LOG</code> and
+    Toggles <code>WP_DEBUG</code>, <code>WP_DEBUG_LOG</code> and
     <code>WP_DEBUG_DISPLAY</code> in <code>wp-config.php</code>.
-    <strong>Turn off when finished</strong> — display=on leaks
-    paths and SQL to visitors.
+    <strong>Turn it off when you're finished</strong> — displaying errors
+    leaks paths and SQL to visitors.
   </p>
   {% if wp_extras_flash %}
   <div class="flash success" role="status"><svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg><div class="flash-body">WP settings applied.</div></div>
@@ -1474,7 +1474,7 @@
       <label>
         <input type="checkbox" name="display" value="on"
                {% if detail.wp_extras.wp_debug_display %}checked{% endif %}>
-        Display errors on the page (NEVER on production)
+        Display errors on the page (never on production)
       </label>
     </div>
     <button class="btn primary" type="submit">Apply debug settings</button>
@@ -1483,7 +1483,7 @@
   {% if detail.wp_extras.wp_debug_log_size_bytes > 0 %}
   <p class="muted small" style="margin-top:1rem">
     <strong>debug.log size:</strong> {{ detail.wp_extras.wp_debug_log_size_bytes }} bytes
-    (last sampled at scheduler tick)
+    (sampled on the last scheduler tick)
   </p>
   <form method="post" action="/hostings/wp/debug-log/rotate" style="display:inline">
     <input type="hidden" name="_csrf" value="{{ csrf_wp_debug_rotate }}">
@@ -1514,11 +1514,11 @@
   {% endif %}
   <p class="muted small">
     Per-hosting Redis ACL on the local <code>redis-server</code>.
-    When enabled, the agent allocates a dedicated DB slot + writes
+    When enabled, the agent allocates a dedicated DB slot and writes the
     <code>WP_REDIS_*</code> constants into wp-config.php. You still
     need to install the
     <a href="https://wordpress.org/plugins/redis-cache/" target="_blank" rel="noopener">Redis Object Cache</a>
-    plugin from WP admin → Plugins yourself — Hyperion only wires the connection details into <code>wp-config.php</code>.
+    plugin yourself from WP admin → Plugins — Hyperion only wires the connection details into <code>wp-config.php</code>.
   </p>
   {% if detail.wp_extras.redis_enabled %}
   <p class="muted small">
@@ -1535,7 +1535,7 @@
     <button class="btn"
             data-confirm
             data-confirm-title="Disable Redis"
-            data-confirm-body="WP_REDIS_* constants will be removed from wp-config.php and the Redis ACL user will be deleted. The Redis Object Cache plugin will fall back to a no-op (or DB-only cache, depending on configuration). Cached items currently in Redis will be lost — but they're cached items, so that's fine."
+            data-confirm-body="The WP_REDIS_* constants are removed from wp-config.php and the Redis ACL user is deleted. The Redis Object Cache plugin falls back to a no-op (or a database-only cache, depending on configuration). Items currently cached in Redis are lost — but they're only cached items, so that's safe."
             data-confirm-confirm-label="Disable Redis"
             data-confirm-variant="danger"
             type="submit">Disable Redis</button>
@@ -1720,7 +1720,7 @@
 {% if vhost_saved %}
 <div class="flash success" role="status">
   <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
-  <div class="flash-body">Vhost options saved. New configuration is live.</div>
+  <div class="flash-body">Vhost options saved. The new configuration is live.</div>
 </div>
 {% endif %}
 {% if let Some(e) = vhost_error %}
@@ -1741,7 +1741,7 @@
     Vhost options
   </h2>
   <p class="muted small">
-    Toggles that map directly to the nginx vhost. Every save validates
+    Toggles that map directly to the nginx vhost. Every save is validated
     with <code>nginx -t</code> before the new config is committed; on
     failure the previous vhost stays active and the error is shown
     above.
@@ -1800,8 +1800,8 @@
       </select>
       <p class="muted small">
         HSTS tells browsers to refuse plain HTTP for this domain. Once a browser
-        sees the header it remembers for max-age seconds, so values above 1 day
-        are essentially permanent — to undo, leave HSTS at 0 for that long.
+        sees the header it remembers for the full max-age, so values above one day
+        are effectively permanent — to undo, you must serve max-age 0 for that long.
       </p>
     </div>
 
@@ -1812,7 +1812,7 @@
       Return 503 for every request <span class="hint">ACME challenges still work</span>
     </label>
     <p class="muted small">
-      Use during deploys or DB restores. Browsers see a generic "we'll be back"
+      Use during deploys or database restores. Browsers see a generic "we'll be back"
       page; Let's Encrypt renewals continue because the
       <code>/.well-known/acme-challenge/</code> path bypasses the 503.
     </p>
@@ -1924,7 +1924,7 @@
     PHP-FPM &amp; DB limits
   </h2>
   <p class="muted small" style="margin-top:-0.4rem;margin-bottom:0.9rem">
-    Per-hosting PHP-FPM pool tuning + advisory caps (surfaced as alerts).
+    Per-hosting PHP-FPM pool tuning, plus advisory caps surfaced as alerts.
     Kernel-enforced disk quota lives in the <strong>Disk &amp; bandwidth quota</strong>
     card below.
   </p>
@@ -1989,14 +1989,14 @@
     Disk &amp; bandwidth quota
   </h2>
   <p class="muted small" style="margin-top:-0.4rem;margin-bottom:0.9rem">
-    Hard disk caps pushed into the kernel via <code>setquota</code> (blocks writes
-    at the limit). Bandwidth here is informational + alert-driven.
+    Hard disk caps pushed into the kernel via <code>setquota</code> (writes are blocked
+    at the limit). Bandwidth here is informational and alert-driven.
   </p>
   {% if !quota.quotas_enabled_on_fs %}
     <div class="flash warn" style="margin-bottom:0.8rem">
       <div class="flash-body">
         <strong>Kernel quotas aren't enabled on this node's filesystem.</strong>
-        Disk usage below comes from <code>du</code>; <code>setquota</code> won't
+        Disk usage below comes from <code>du</code>; <code>setquota</code> can't
         enforce caps until the kernel quota subsystem is on.
         <div style="margin-top:0.6rem" data-role-min="admin">
           <form method="post" action="/hostings/quota/enable-kernel" style="display:inline"
@@ -2007,7 +2007,7 @@
             <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
             <button class="btn small primary" type="submit">Enable kernel quotas automatically</button>
           </form>
-          <span class="text-soft small" style="margin-left:0.5rem">Edits <code>/etc/fstab</code> + remounts; a reboot may be needed if the filesystem is busy.</span>
+          <span class="text-soft small" style="margin-left:0.5rem">Edits <code>/etc/fstab</code> and remounts; a reboot may be needed if the filesystem is busy.</span>
         </div>
         <details style="margin-top:0.5rem">
           <summary style="cursor:pointer" class="text-soft small">Or enable it manually</summary>
@@ -2063,8 +2063,8 @@
     </button>
   </form>
   <p class="text-soft small" style="margin:0.8rem 0 0">
-    Disk caps push into the kernel via <code>setquota -u</code>. Hard cap blocks writes with ENOSPC; soft cap triggers the grace period.
-    Bandwidth is informational + alert-driven (no kernel enforcement). Memory landed on next FPM pool rebuild.
+    Disk caps push into the kernel via <code>setquota -u</code>. The hard cap blocks writes with ENOSPC; the soft cap starts the grace period.
+    Bandwidth is informational and alert-driven (no kernel enforcement). The memory limit takes effect on the next FPM pool rebuild.
   </p>
 </div>
 
@@ -2085,7 +2085,7 @@
       <button class="btn small" type="submit">Clear expiry</button>
     </form>
   {% else %}
-    <p class="muted">No expiry set — hosting will never auto-suspend.</p>
+    <p class="muted">No expiry set — this hosting will never auto-suspend.</p>
   {% endif %}
   <form method="post" action="/hostings/expiry/set" style="margin-top:1rem">
     <input type="hidden" name="_csrf" value="{{ csrf_expiry_set }}">
@@ -2128,19 +2128,19 @@
   </h2>
   <p class="muted" style="font-size:0.85rem;margin-top:-0.4rem;margin-bottom:0.8rem">
     {% if let Some(name) = applied_profile_name %}
-      Currently applied: <strong>{{ name }}</strong>. Re-applying refreshes limits, expiry policy + pricing snapshot.
+      Currently applied: <strong>{{ name }}</strong>. Re-applying refreshes the limits, expiry policy and pricing snapshot.
     {% else %}
-      Pick a profile to push limits + expiry policy + pricing in one step.
+      Pick a profile to push limits, expiry policy and pricing in one step.
     {% endif %}
-    <a href="/profiles" style="margin-left:0.4rem">manage profiles →</a>
+    <a href="/profiles" style="margin-left:0.4rem">Manage profiles →</a>
   </p>
   {% if profiles.is_empty() %}
     <p class="muted">No profiles defined yet. <a href="/profiles">Create one</a> first.</p>
   {% else %}
     <form method="post" action="/profiles/apply"
           data-confirm-title="Apply hosting profile"
-          data-confirm-body="Current limits, expiry policy and price snapshot for {{ detail.domain }} will be overwritten by the chosen profile."
-          data-confirm-confirm-label="Apply"
+          data-confirm-body="The current limits, expiry policy and price snapshot for {{ detail.domain }} will be overwritten by the chosen profile."
+          data-confirm-confirm-label="Apply profile"
           data-confirm-variant="primary">
       <input type="hidden" name="_csrf" value="{{ csrf_profile_apply }}">
       <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
@@ -2238,7 +2238,7 @@
 <div class="tab-panel" id="tab-ftp">
 <p class="text-soft small" style="margin:0 0 0.8rem">
   Editing files in the browser? Use the <a href="/hostings/{{ detail.id.as_str() }}/files"><strong>Files</strong></a>
-  manager (button in the page header). FTP/SFTP below is for desktop clients
+  manager (the button in the page header). The FTP and SFTP options below are for desktop clients
   (FileZilla, Cyberduck) and CI/CD uploads.
 </p>
 <div class="card hover">
@@ -2247,7 +2247,7 @@
     FTP access
   </h2>
   <p class="muted" style="font-size:0.85rem;margin-top:-0.4rem;margin-bottom:0.8rem">
-    Give the client FTP/FTPS credentials for <code>{{ detail.system_user }}</code> — vsftpd authenticates against the system user and chroots them to <code>/home/{{ detail.system_user }}</code>.
+    Give the client FTP/FTPS credentials for <code>{{ detail.system_user }}</code>. vsftpd authenticates against the system user and chroots them to <code>/home/{{ detail.system_user }}</code>.
   </p>
 
   {% if let Some(m) = ftp_flash %}<div class="flash success" style="margin-bottom:1rem"><div class="flash-body">{{ m }}</div></div>{% endif %}
@@ -2398,10 +2398,10 @@
       <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
       Run backup now
     </button>
-    <span class="muted" style="font-size:0.85rem;margin-left:0.4rem">Archives htdocs + dumps DB to <code>/var/lib/hyperion/backups/local/{{ detail.system_user }}/</code></span>
+    <span class="muted" style="font-size:0.85rem;margin-left:0.4rem">Archives htdocs and dumps the database to <code>/var/lib/hyperion/backups/local/{{ detail.system_user }}/</code></span>
   </form>
   {% if backups.is_empty() %}
-    <p class="muted" style="font-size:0.9rem">No backups recorded yet.</p>
+    <p class="muted" style="font-size:0.9rem">No backups yet. Run a backup to capture the files and database.</p>
   {% else %}
     <div class="table-wrap" style="border-top:1px solid var(--border);margin-top:1rem">
       <table>
@@ -2477,8 +2477,8 @@
   <div class="card-section">
     <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Restore from a .tar.gz upload</h2>
     <p class="muted" style="margin:0 0 1rem;font-size:0.85rem">
-      Upload a previously-taken archive (max 2 GiB). Saved to
-      <code>/var/lib/hyperion/backups/incoming/</code> then restored.
+      Upload a previously taken archive (max 2 GiB). It is saved to
+      <code>/var/lib/hyperion/backups/incoming/</code>, then restored.
     </p>
     {# CSRF token rides in the action URL because multipart bodies
        aren't parsed by the middleware (it would buffer the whole
@@ -2503,7 +2503,7 @@
   <div class="card-section">
     <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Restore from a custom archive path</h2>
     <p class="muted" style="margin:0 0 1rem;font-size:0.85rem">
-      For archives already on disk under one of the backup roots.
+      For archives already on disk under one of the backup roots. Give the full path to the archive.
     </p>
     <form method="post" action="/hostings/restore"
           data-confirm-title="Restore from archive"
@@ -2526,17 +2526,17 @@
   <div class="card-section">
     <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Restore into a new domain</h2>
     <p class="muted" style="margin:0 0 1rem;font-size:0.85rem">
-      Spin up a <strong>brand-new hosting</strong> from a backup archive
-      (mirroring this site's PHP version, database engine and kind). For
+      Create a <strong>brand-new hosting</strong> from a backup archive,
+      mirroring this site's PHP version, database engine and kind. For
       WordPress sites the URL is rewritten to the new domain
       automatically (<code>wp search-replace</code>). The original is left
-      untouched — handy for staging copies or recovering a single site
+      untouched — handy for staging copies, or for recovering a single site
       under a different name. Issue a certificate on the new hosting once
       its DNS resolves.
     </p>
     <form method="post" action="/hostings/restore-as-new"
           data-confirm-title="Restore into a new domain"
-          data-confirm-body="A new hosting will be created and the selected archive restored into it. The source hosting is not modified."
+          data-confirm-body="A new hosting is created and the selected archive is restored into it. The source hosting is not modified."
           data-confirm-confirm-label="Create &amp; restore">
       <input type="hidden" name="_csrf" value="{{ csrf_restore_as_new }}">
       <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
@@ -2567,11 +2567,11 @@
     Cron jobs
   </h2>
   <p class="muted" style="font-size:0.85rem;margin-top:-0.4rem;margin-bottom:0.8rem">
-    Crontab for system user <code>{{ detail.system_user }}</code>. Standard cron syntax. Lines with backticks are refused for safety.
+    Crontab for system user <code>{{ detail.system_user }}</code>, in standard cron syntax. Lines containing backticks are refused for safety.
   </p>
   <form method="post" action="/hostings/cron"
         data-confirm-title="Replace crontab"
-        data-confirm-body="The crontab for {{ detail.system_user }} will be overwritten with the contents below."
+        data-confirm-body="The crontab for {{ detail.system_user }} is overwritten with the contents below."
         data-confirm-confirm-label="Save crontab"
         data-confirm-variant="primary">
     <input type="hidden" name="_csrf" value="{{ csrf_cron }}">
@@ -2600,17 +2600,17 @@
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
     Logs
   </h2>
-  <p class="muted" style="font-size:0.85rem;margin-top:-0.4rem;margin-bottom:0.7rem">Tail the hosting's nginx logs without SSHing into the box.</p>
+  <p class="muted" style="font-size:0.85rem;margin-top:-0.4rem;margin-bottom:0.7rem">Tail this hosting's nginx logs without opening an SSH session.</p>
   <div class="row" style="margin:0 0 0.7rem;gap:0.5rem;align-items:center;flex-wrap:wrap">
-    <input id="log-filter" class="input" type="search" placeholder="Filter lines… (instant, client-side)"
+    <input id="log-filter" class="input" type="search" placeholder="Filter lines (instant, client-side)…"
            style="flex:1;min-width:12rem;font-size:0.85rem" autocomplete="off">
     <label style="display:flex;align-items:center;gap:0.35rem;font-size:0.85rem" class="text-soft">
-      <input id="log-follow" type="checkbox"> Follow (live, 3s)
+      <input id="log-follow" type="checkbox"> Follow (live, every 3 s)
     </label>
     <span id="log-filter-count" class="text-soft small"></span>
   </div>
   <div id="logs-output" style="background:var(--bg-2);border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.85rem 1rem">
-    <span class="muted">Click a button below to fetch.</span>
+    <span class="muted">Choose a log below to load it.</span>
   </div>
   <div class="row" style="margin-top:0.7rem">
     <form hx-post="/hostings/logs" hx-target="#logs-output" hx-swap="innerHTML"
@@ -2708,7 +2708,7 @@
     </h2>
     <div>
       {% if detail.state.as_str() == "suspended" %}
-        <span class="pill warn">paused — hosting is suspended</span>
+        <span class="pill warn">paused — hosting suspended</span>
       {% else if monitor_config.enabled %}
         {% if monitor_config.alert_state == "alerting" %}
           <span class="pill err">ALERTING — last {{ monitor_config.consecutive_fails }} probes failed</span>
@@ -2724,7 +2724,7 @@
   {% if detail.state.as_str() == "suspended" %}
   <div class="flash warn" style="margin-bottom:0.8rem">
     <div class="flash-body">
-      <strong>Monitor paused.</strong> The hosting is suspended — nginx serves a 503 page on every request, so probing would always fail and spam alerts. Probing automatically resumes when you click <a href="#overview">Resume</a>.
+      <strong>Monitoring paused.</strong> This hosting is suspended — nginx serves a 503 page on every request, so probes would always fail and spam alerts. Probing resumes automatically once you <a href="#overview">resume the hosting</a>.
     </div>
   </div>
   {% endif %}
@@ -2741,10 +2741,10 @@
       {% endfor %}
     </div>
     <p class="text-soft small" style="margin:0 0 1rem">
-      {{ monitor_history.samples.len() }} recent samples — bar height encodes response time, red = failed probe.
+      {{ monitor_history.samples.len() }} recent samples — bar height encodes response time; red is a failed probe.
     </p>
   {% else %}
-    <p class="text-soft small">No samples yet. Save settings and wait one tick, or click "Probe now".</p>
+    <p class="text-soft small">No samples yet. Save your settings and wait one interval, or use "Probe now" below.</p>
   {% endif %}
 
   <form method="post" action="/hostings/monitor/set" autocomplete="off">
@@ -2763,7 +2763,7 @@
                placeholder="/" value="{{ monitor_config.url_path }}">
       </div>
       <div class="field" style="width:9rem">
-        <label for="m_interval">Interval (sec)</label>
+        <label for="m_interval">Interval <span class="hint">seconds</span></label>
         <input id="m_interval" name="interval_secs" type="number"
                min="60" max="3600" value="{{ monitor_config.interval_secs }}">
       </div>
@@ -2776,7 +2776,7 @@
 
     <h3 style="font-size:0.95rem;margin:1rem 0 0.4rem">Alert channels</h3>
     <p class="text-soft small" style="margin:0 0 0.6rem">
-      Configure any combination. Channels with no value are skipped.
+      Configure any combination — channels left blank are skipped.
       Email requires <code>[email]</code> configured in agent.toml.
     </p>
     <div class="field">
@@ -2805,13 +2805,13 @@
     </div>
 
     <div class="btn-group" style="margin-top:1rem">
-      <button type="submit" class="btn primary">Save</button>
+      <button type="submit" class="btn primary">Save monitoring</button>
     </div>
   </form>
 
   <div class="card-section" style="margin-top:1rem">
     <h3 style="font-size:0.95rem;margin:0 0 0.5rem">Probe now</h3>
-    <p class="text-soft small" style="margin:0 0 0.5rem">Fire one probe immediately. Records a sample regardless of the enabled flag.</p>
+    <p class="text-soft small" style="margin:0 0 0.5rem">Run one probe immediately. Records a sample even when monitoring is disabled.</p>
     <form method="post" action="/hostings/monitor/probe" style="display:inline">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
@@ -2832,9 +2832,9 @@
     Per-user access
   </h2>
   <p class="text-soft" style="margin:0 0 0.85rem">
-    Owner + Administrator already see every hosting. This grants
+    Owners and Administrators already see every hosting. This grants
     <strong>manage</strong> (full CRUD) or <strong>read-only</strong>
-    access for specific users to this hosting. Other hostings are unaffected.
+    access to this hosting for specific users. Other hostings are unaffected.
   </p>
 
   <form method="post" action="/hostings/access/grant" autocomplete="off"
@@ -2844,7 +2844,7 @@
     <div class="field" style="margin:0">
       <label for="grant_user">User</label>
       <select id="grant_user" name="user_id" required>
-        <option value="">— pick a user —</option>
+        <option value="">— choose a user —</option>
         {% for u in users_for_access %}
           <option value="{{ u.id }}">{{ u.username }} ({{ crate::handlers::role_label(u.role.as_str()) }})</option>
         {% endfor %}
@@ -2853,15 +2853,15 @@
     <div class="field" style="margin:0">
       <label for="grant_level">Level</label>
       <select id="grant_level" name="level">
-        <option value="manage">manage (full CRUD)</option>
-        <option value="read">read (view only)</option>
+        <option value="manage">Manage (full CRUD)</option>
+        <option value="read">Read (view only)</option>
       </select>
     </div>
-    <button type="submit" class="btn primary">Grant</button>
+    <button type="submit" class="btn primary">Grant access</button>
   </form>
 
   {% if access_grants.is_empty() %}
-    <p class="text-soft small">No grants yet.</p>
+    <p class="text-soft small">No users have been granted access to this hosting yet.</p>
   {% else %}
   <div class="table-wrap">
     <table>
@@ -2911,11 +2911,11 @@
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
     Email log
   </h2>
-  <p class="muted">Last 50 emails the agent sent on behalf of this hosting (alerts, cert reminders, monitor down/up, billing notifications). See the <a href="/emails?hosting={{ detail.id.as_str() }}">full cluster email log filtered to this site →</a>, or configure delivery in <a href="/settings#email">Settings → Email</a>.</p>
+  <p class="muted">The last 50 emails the agent sent on behalf of this hosting (alerts, certificate reminders, monitor down/up, billing notifications). See the <a href="/emails?hosting={{ detail.id.as_str() }}">full cluster email log filtered to this site →</a>, or configure delivery in <a href="/settings#email">Settings → Email</a>.</p>
 
   {% if email_log.is_empty() %}
     <div class="empty" style="padding:1.5rem 1rem">
-      <p class="muted">No emails have been sent for this hosting yet. Configure SMTP in <a href="/settings#email">Settings</a> and the next monitor alert / cert renewal will appear here.</p>
+      <p class="muted">No emails sent for this hosting yet. Configure SMTP in <a href="/settings#email">Settings</a>, and the next monitor alert or certificate renewal will appear here.</p>
     </div>
   {% else %}
   <div class="table-wrap" style="margin:0 -1.5rem">
@@ -2973,18 +2973,18 @@
   </h2>
   <p class="muted">
     Outbound mail captured by the local <code>sendmail_path</code> wrapper —
-    every <code>mail()</code> / <code>wp_mail()</code> the PHP site sends gets
+    every <code>mail()</code> and <code>wp_mail()</code> the PHP site sends is
     logged here. The wrapper writes to
     <code>/var/lib/hyperion/site-mail/{{ detail.system_user }}.jsonl</code>
     and forwards to the real sendmail, so delivery is unaffected. The log
-    rotates at 10 MB; we read the most recent 50 entries.
+    rotates at 10 MB; the most recent 50 entries are shown.
   </p>
 
   {% if site_emails.is_empty() %}
     <div class="empty" style="padding:1.5rem 1rem">
       <p class="muted">
-        No outbound mail captured yet. The wrapper is configured via this hosting's
-        FPM pool (php_admin_value[sendmail_path]); if you've just installed Hyperion,
+        No outbound mail captured yet. The wrapper is configured through this hosting's
+        FPM pool (php_admin_value[sendmail_path]). If you've recently installed Hyperion,
         restart php-fpm so the new value takes effect.
       </p>
     </div>
@@ -3029,9 +3029,9 @@
     Move or copy this site
   </h2>
   <p class="text-soft" style="margin:0 0 1rem">
-    Moving this site to another node, making a copy under a new domain, or
-    exporting it to an off-cluster server all live in one guided place now —
-    each option spells out exactly what happens to the original and what to do
+    Moving this site to another node, making a copy under a new domain, and
+    exporting it to an off-cluster server now live in one guided place. Each
+    option spells out exactly what happens to the original and what to do
     next.
   </p>
   <a class="btn primary" href="/hostings/transfer/{{ detail.id.as_str() }}">
@@ -3053,12 +3053,12 @@
     Danger zone
   </h2>
   <p class="muted">Deleting removes the hosting's site, files, databases, and Linux user.
-  Suspending serves a 503 page, stops PHP-FPM, locks the DB user, kills running processes — fully reversible.</p>
+  Suspending serves a 503 page, stops PHP-FPM, locks the database user, and kills running processes — and is fully reversible.</p>
   <form method="post" action="/hostings/delete" class="row gap-md"
         style="margin-top:0.5rem"
         data-confirm-title="Delete {{ detail.domain }}"
-        data-confirm-body="Files, database, system user and nginx vhost will be removed. This is permanent — restore is only possible from a backup. Type the domain to confirm. External DNS records are NOT touched."
-        data-confirm-confirm-label="Delete hosting"
+        data-confirm-body="The files, database, system user and nginx vhost are removed. This is permanent — recovery is only possible from a backup. External DNS records are not touched. Type the domain to confirm."
+        data-confirm-confirm-label="Delete permanently"
         data-confirm-variant="danger"
         data-confirm-require="{{ detail.domain }}">
     <input type="hidden" name="_csrf" value="{{ csrf_delete }}">

@@ -5,9 +5,9 @@
   <div>
     <h1>Stats <span class="text-soft" style="font-weight:400;font-size:0.7em">· {{ current_label }}</span></h1>
     <div class="subtitle">
-      Cluster + per-node + per-hosting snapshots, sampled every 5 minutes.
+      Cluster, per-node, and per-hosting snapshots, sampled every 5 min.
       {% if samples_in_window >= 2 %}
-        · Charts cover the last <strong>{{ window_minutes }}</strong> minutes ({{ samples_in_window }} samples).
+        · Charts cover the last <strong>{{ window_minutes }}</strong> min ({{ samples_in_window }} samples).
       {% endif %}
     </div>
   </div>
@@ -18,19 +18,19 @@
        the chosen node — so the sparklines reflect that node's /proc
        data, not just the master's. #}
     <form method="get" action="/stats" style="display:flex;gap:0.4rem;align-items:center">
-      <label for="node-switcher" class="text-soft small">View on node:</label>
+      <label for="node-switcher" class="text-soft small">View node</label>
       <select id="node-switcher" name="node"
               onchange="this.form.submit()"
               style="min-width:14rem">
         <option value="" {% if current_node.is_empty() || current_node == "cluster" %}selected{% endif %}>Σ Cluster (all nodes)</option>
-        <option value="local" {% if current_node == "local" %}selected{% endif %}>master (this node)</option>
+        <option value="local" {% if current_node == "local" %}selected{% endif %}>The master (this node)</option>
         {% for n in all_nodes %}
         <option value="{{ n.node_id }}" {% if current_node == n.node_id %}selected{% endif %}>
           {{ n.label }}{% if let Some(ip) = n.public_ip.as_ref() %} — {{ ip }}{% endif %}
         </option>
         {% endfor %}
       </select>
-      <noscript><button class="btn small" type="submit">Go</button></noscript>
+      <noscript><button class="btn small" type="submit">View node</button></noscript>
     </form>
   </div>
   {% endif %}
@@ -49,10 +49,10 @@
   {% if !all_nodes.is_empty() %}
   <div style="padding:0.7rem 1rem;margin-bottom:1rem;border-radius:8px;background:var(--surface-1);border-left:4px solid var(--accent);font-size:0.88rem;line-height:1.55">
     <strong>Σ Cluster view.</strong>
-    Totals below are summed across the master + {{ all_nodes.len() }} enrolled
-    {% if all_nodes.len() == 1 %}node{% else %}nodes{% endif %} (load + memory
-    sparklines show the master only — switch the dropdown to a node to see
-    that node's history).
+    Totals below are summed across the master and {{ all_nodes.len() }} enrolled
+    {% if all_nodes.len() == 1 %}node{% else %}nodes{% endif %}. Load and memory
+    sparklines show the master only — switch the dropdown to a node to see that
+    node's history.
   </div>
   {% endif %}
 {% endif %}
@@ -100,20 +100,20 @@
     </div>
 
     <div class="kpi-card bw">
-      <div class="kpi-label">BW out · 24h</div>
+      <div class="kpi-label">Bandwidth out · 24 h</div>
       <div class="kpi-value">{{ crate::handlers::stats::fmt_bytes(c.total_bw_out_24h) }}</div>
-      <div class="kpi-meta">parsed from nginx access.log</div>
+      <div class="kpi-meta">parsed from nginx access logs</div>
     </div>
 
     <div class="kpi-card reqs">
-      <div class="kpi-label">Requests · 24h</div>
+      <div class="kpi-label">Requests · 24 h</div>
       <div class="kpi-value">{{ c.total_requests_24h }}</div>
       <div class="kpi-meta">across all hostings</div>
     </div>
 
     {% if let Some(n) = selected_node %}
       <div class="kpi-card load">
-        <div class="kpi-label">Load avg · 1m</div>
+        <div class="kpi-label">Load avg · 1 m</div>
         <div class="kpi-value">{{ crate::handlers::stats::fmt_load(n.loadavg_1m_x100) }}</div>
         <div class="kpi-meta">uptime {{ crate::handlers::stats::fmt_uptime(n.uptime_secs) }}</div>
       </div>
@@ -131,7 +131,7 @@
           {% if n.mem_total_kib > 0 %}
             {{ crate::handlers::stats::fmt_bytes(n.mem_used_kib * 1024) }} / {{ crate::handlers::stats::fmt_bytes(n.mem_total_kib * 1024) }}
           {% else %}
-            no sample yet
+            No sample yet
           {% endif %}
         </div>
       </div>
@@ -142,7 +142,7 @@
   <div class="spark-grid">
     <div class="spark-card spark-{{ spark_load.kind }}">
       <div class="spark-head">
-        <span class="spark-title">Load avg · 1m</span>
+        <span class="spark-title">Load avg · 1 m</span>
         <span class="spark-now">{{ spark_load.latest_label }}</span>
       </div>
       {% if spark_load.has_data %}
@@ -152,7 +152,7 @@
           <path class="spark-line" d="{{ spark_load.path_d }}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
       {% else %}
-        <div class="spark-empty">need at least 2 samples — wait one more tick</div>
+        <div class="spark-empty">Needs at least 2 samples — wait one more tick</div>
       {% endif %}
       <div class="spark-foot">
         <span><span class="spark-foot-label">avg</span> {{ spark_load.avg_label }}</span>
@@ -172,7 +172,7 @@
           <path class="spark-line" d="{{ spark_mem.path_d }}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
       {% else %}
-        <div class="spark-empty">need at least 2 samples — wait one more tick</div>
+        <div class="spark-empty">Needs at least 2 samples — wait one more tick</div>
       {% endif %}
       <div class="spark-foot">
         <span><span class="spark-foot-label">avg</span> {{ spark_mem.avg_label }}</span>
@@ -192,7 +192,7 @@
           <path class="spark-line" d="{{ spark_bw.path_d }}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
       {% else %}
-        <div class="spark-empty">need at least 2 samples — wait one more tick</div>
+        <div class="spark-empty">Needs at least 2 samples — wait one more tick</div>
       {% endif %}
       <div class="spark-foot">
         <span><span class="spark-foot-label">avg</span> {{ spark_bw.avg_label }}</span>
@@ -212,7 +212,7 @@
           <path class="spark-line" d="{{ spark_reqs.path_d }}" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
         </svg>
       {% else %}
-        <div class="spark-empty">need at least 2 samples — wait one more tick</div>
+        <div class="spark-empty">Needs at least 2 samples — wait one more tick</div>
       {% endif %}
       <div class="spark-foot">
         <span><span class="spark-foot-label">avg</span> {{ spark_reqs.avg_label }}</span>
@@ -232,7 +232,7 @@
         </div>
       </div>
       <span class="pill {% if n.agent_online %}ok{% else %}err{% endif %}">
-        {% if n.agent_online %}online{% else %}offline{% endif %}
+        {% if n.agent_online %}ONLINE{% else %}OFFLINE{% endif %}
       </span>
     </div>
     <div class="kv-grid">
@@ -241,9 +241,9 @@
       <div><span class="text-soft">Suspended</span><strong>{{ n.hostings_suspended }}</strong></div>
       <div><span class="text-soft">Failed</span><strong>{{ n.hostings_failed }}</strong></div>
       <div><span class="text-soft">Disk</span><strong>{{ crate::handlers::stats::fmt_bytes(n.total_disk_bytes) }}</strong></div>
-      <div><span class="text-soft">BW out · 24h</span><strong>{{ crate::handlers::stats::fmt_bytes(n.total_bw_out_24h) }}</strong></div>
-      <div><span class="text-soft">Requests · 24h</span><strong>{{ n.total_requests_24h }}</strong></div>
-      <div><span class="text-soft">Load avg · 1m</span><strong>{{ crate::handlers::stats::fmt_load(n.loadavg_1m_x100) }}</strong></div>
+      <div><span class="text-soft">Bandwidth out · 24 h</span><strong>{{ crate::handlers::stats::fmt_bytes(n.total_bw_out_24h) }}</strong></div>
+      <div><span class="text-soft">Requests · 24 h</span><strong>{{ n.total_requests_24h }}</strong></div>
+      <div><span class="text-soft">Load avg · 1 m</span><strong>{{ crate::handlers::stats::fmt_load(n.loadavg_1m_x100) }}</strong></div>
       <div><span class="text-soft">Uptime</span><strong>{{ crate::handlers::stats::fmt_uptime(n.uptime_secs) }}</strong></div>
       <div><span class="text-soft">Last sample</span><strong>{{ crate::handlers::stats::fmt_ago(n.sampled_at) }}</strong></div>
     </div>
@@ -256,7 +256,7 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
       </div>
       <h3>No stats yet</h3>
-      <p>The sampler runs every 5 minutes. Wait one tick.</p>
+      <p>The sampler runs every 5 min. Wait one tick for the first snapshot.</p>
     </div>
   </div>
 {% endif %}

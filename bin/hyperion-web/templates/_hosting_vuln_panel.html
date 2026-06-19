@@ -6,7 +6,7 @@
   <h2>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
     WordPress updates
-    {% if scan.feed_unavailable %}<span class="pill warn" style="margin-left:0.4rem;font-size:0.65rem">couldn't check</span>
+    {% if scan.feed_unavailable %}<span class="pill warn" style="margin-left:0.4rem;font-size:0.65rem">check failed</span>
     {% else if scan.findings.is_empty() %}<span class="pill ok" style="margin-left:0.4rem;font-size:0.65rem">up to date</span>
     {% else %}<span class="pill warn" style="margin-left:0.4rem;font-size:0.65rem">{{ scan.findings.len() }} outdated</span>{% endif %}
   </h2>
@@ -18,29 +18,30 @@
     <input type="hidden" name="enabled" value="{% if auto_update_enabled %}off{% else %}on{% endif %}">
     <label style="display:flex;align-items:center;gap:0.5rem;font-size:0.85rem;cursor:pointer">
       <input type="checkbox" {% if auto_update_enabled %}checked{% endif %} onchange="this.form.submit()">
-      Auto-apply safe <strong>minor/patch</strong> updates daily
-      <span class="text-soft small">— majors are left for you to review</span>
+      Apply safe <strong>minor and patch</strong> updates daily
+      <span class="text-soft small">— major updates are left for you to review</span>
     </label>
   </form>
 
   {% if scan.feed_unavailable %}
     <p class="muted" style="margin:-0.1rem 0 0.5rem;font-size:0.85rem">
-      Couldn't enumerate this site's plugins/themes — a broken WordPress
-      install or a permissions problem, not a clean result. Fix WP, then re-scan.
+      Couldn't read this site's plugins and themes. This usually means a broken
+      WordPress install or a file-permission problem — not a clean result. Repair
+      WordPress, then scan again.
     </p>
-    <button class="btn small" hx-get="vuln-panel" hx-target="closest .card" hx-swap="outerHTML">Retry</button>
+    <button class="btn small" hx-get="vuln-panel" hx-target="closest .card" hx-swap="outerHTML">Scan again</button>
   {% else %}
     {% if scan.auto_updated > 0 %}
-      <p class="text-soft small" style="margin:-0.1rem 0 0.5rem">✓ Auto-updated {{ scan.auto_updated }} component(s) on the last daily sweep.</p>
+      <p class="text-soft small" style="margin:-0.1rem 0 0.5rem">✓ Updated {{ scan.auto_updated }} component(s) automatically in the last daily run.</p>
     {% endif %}
     {% if scan.findings.is_empty() %}
       <p class="text-soft" style="font-size:0.9rem">
-        Everything is up to date. Checked {{ scan.checked }} plugin(s) + theme(s).
+        Everything is up to date. Checked {{ scan.checked }} plugin(s) and theme(s).
       </p>
     {% else %}
       <p class="muted" style="margin:-0.1rem 0 0.6rem;font-size:0.82rem">
         {{ scan.findings.len() }} of {{ scan.checked }} components have updates available.
-        Manage individual plugins/themes from the lists above.
+        Manage individual plugins and themes from the lists above.
       </p>
       <div style="display:flex;flex-direction:column;gap:0.5rem">
         {% for f in scan.findings %}
@@ -56,15 +57,15 @@
           </div>
           <div style="font-size:0.85rem;margin-top:0.25rem">
             <code>{{ f.installed_version }}</code> → <code>{{ f.patched_version }}</code>
-            {% if !f.auto_updatable %}<span class="text-soft small"> · major upgrade — review before applying</span>{% endif %}
+            {% if !f.auto_updatable %}<span class="text-soft small"> · major update — review before applying</span>{% endif %}
           </div>
         </div>
         {% endfor %}
       </div>
     {% endif %}
     <div style="margin-top:0.7rem;display:flex;gap:0.7rem;align-items:center;flex-wrap:wrap">
-      <button class="btn small" hx-get="vuln-panel" hx-target="closest .card" hx-swap="outerHTML">Re-scan</button>
-      <a class="text-soft small" href="/vulns" data-role-min="admin">All WordPress updates across the cluster →</a>
+      <button class="btn small" hx-get="vuln-panel" hx-target="closest .card" hx-swap="outerHTML">Scan again</button>
+      <a class="text-soft small" href="/vulns" data-role-min="admin">View all WordPress updates across the cluster →</a>
     </div>
   {% endif %}
 </div>

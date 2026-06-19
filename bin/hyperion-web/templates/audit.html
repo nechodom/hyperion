@@ -1,11 +1,11 @@
 {% extends "base.html" %}
-{% block title %}Audit log · hyperion{% endblock %}
+{% block title %}Audit log · Hyperion{% endblock %}
 {% block main %}
 <div class="page-header">
   <div>
     <h1>Audit log</h1>
     <div class="subtitle">
-      Tamper-evident hash chain ·
+      Tamper-evident hash chain of every administrative action ·
       {% if filtered_count == total_count %}
         <strong>{{ total_count }}</strong> entries
       {% else %}
@@ -19,7 +19,7 @@
   <form method="get" action="/audit"
         style="display:grid;grid-template-columns:1fr auto auto auto;gap:0.5rem 0.75rem;align-items:center">
     <input type="search" name="q" value="{{ q|e }}"
-           placeholder="Search action, target, actor, or payload…"
+           placeholder="Search by action, target, actor, or payload…"
            autofocus
            style="margin:0">
     <select name="action" style="min-width:11rem;margin:0">
@@ -41,13 +41,13 @@
     <!-- second row: time-range chips. Submitting any of these is a
          plain link with the current q/action/result preserved. -->
     <div style="grid-column:1/-1;display:flex;flex-wrap:wrap;gap:0.4rem;align-items:center;padding-top:0.15rem">
-      <span class="text-soft small" style="margin-right:0.2rem">Time:</span>
+      <span class="text-soft small" style="margin-right:0.2rem">Time</span>
       <a class="chip {% if since_filter.is_empty() %}chip-on{% endif %}"
          href="/audit?q={{ q|e }}&action={{ action_filter|e }}&result={{ result_filter|e }}">All time</a>
       <a class="chip {% if since_filter == "1h" %}chip-on{% endif %}"
          href="/audit?q={{ q|e }}&action={{ action_filter|e }}&result={{ result_filter|e }}&since=1h">Last hour</a>
       <a class="chip {% if since_filter == "24h" %}chip-on{% endif %}"
-         href="/audit?q={{ q|e }}&action={{ action_filter|e }}&result={{ result_filter|e }}&since=24h">Last 24h</a>
+         href="/audit?q={{ q|e }}&action={{ action_filter|e }}&result={{ result_filter|e }}&since=24h">Last 24 h</a>
       <a class="chip {% if since_filter == "7d" %}chip-on{% endif %}"
          href="/audit?q={{ q|e }}&action={{ action_filter|e }}&result={{ result_filter|e }}&since=7d">Last 7 days</a>
       <a class="chip {% if since_filter == "30d" %}chip-on{% endif %}"
@@ -55,9 +55,9 @@
 
       <span style="flex:1"></span>
 
-      <span class="text-soft small" style="margin-right:0.2rem">Quick:</span>
+      <span class="text-soft small" style="margin-right:0.2rem">Quick filters</span>
       <a class="chip" href="/audit?result=failed">Failed only</a>
-      <a class="chip" href="/audit?action=cert.issue.acme">Cert issues</a>
+      <a class="chip" href="/audit?action=cert.issue.acme">Certificate issues</a>
       <a class="chip" href="/audit?action=hosting.create">Hosting creates</a>
       <a class="chip" href="/audit?action=hosting.delete">Hosting deletes</a>
 
@@ -83,9 +83,9 @@
     Verify chain
   </button>
   <span class="text-soft small">
-    Walks every row + recomputes BLAKE3 — flags tampering or DB corruption.
+    Recomputes the hash of every entry and checks the chain. Flags any tampering or database corruption.
   </span>
-  <span id="audit-chain-spinner" class="htmx-indicator text-soft small">checking…</span>
+  <span id="audit-chain-spinner" class="htmx-indicator text-soft small">Checking…</span>
   <span id="audit-chain-result" style="margin-left:auto"></span>
 </div>
 
@@ -97,10 +97,10 @@
       </div>
       {% if total_count == 0 %}
         <h3>No audit entries yet</h3>
-        <p>The audit log fills as you provision, suspend, back up, and delete hostings.</p>
+        <p>The log fills as you create, suspend, back up, and delete hostings.</p>
       {% else %}
-        <h3>No entries match the current filter</h3>
-        <p>{{ total_count }} {% if total_count == 1 %}entry exists{% else %}entries exist{% endif %} in the log but none survived the filter. <a href="/audit">Reset filter</a> to see them.</p>
+        <h3>No entries match these filters</h3>
+        <p>{{ total_count }} {% if total_count == 1 %}entry exists{% else %}entries exist{% endif %} in the log, but none match the current filters. <a href="/audit">Reset filters</a> to see them all.</p>
       {% endif %}
     </div>
   {% else %}

@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}New hosting · hyperion{% endblock %}
+{% block title %}New hosting · Hyperion{% endblock %}
 {% block main %}
 <div class="breadcrumbs">
   <a href="/hostings">Hostings</a>
@@ -8,9 +8,9 @@
 </div>
 <div class="page-header">
   <div>
-    <h1>Provision a new hosting</h1>
+    <h1>Create a hosting</h1>
     <div class="subtitle">
-      nginx vhost · PHP-FPM pool · database · TLS — laid down atomically.
+      nginx vhost, PHP-FPM pool, database, and TLS certificate — provisioned atomically.
     </div>
   </div>
   <span class="grow"></span>
@@ -34,11 +34,11 @@
     <line x1="12" y1="22.08" x2="12" y2="12"/>
   </svg>
   <div style="flex:1">
-    <div class="text-soft small" style="margin-bottom:0.15rem">Will be provisioned on</div>
+    <div class="text-soft small" style="margin-bottom:0.15rem">Will be created on</div>
     <strong id="target-banner-name" style="font-size:1.05rem">master (this node)</strong>
     <span id="target-banner-detail" class="text-soft small" style="margin-left:0.5rem"></span>
   </div>
-  <a href="#target-node" class="btn small ghost" onclick="document.getElementById('target_node').focus(); return false;">Change</a>
+  <a href="#target-node" class="btn small ghost" onclick="document.getElementById('target_node').focus(); return false;">Change node</a>
 </div>
 {% endif %}
 
@@ -53,9 +53,9 @@
    visible; without JS the whole form renders top-to-bottom which
    is the original behaviour. #}
 <ol class="wizard-stepper" id="wizard-stepper" style="display:none">
-  <li data-step="1" class="active"><span class="num">1</span> Where</li>
-  <li data-step="2"><span class="num">2</span> What</li>
-  <li data-step="3"><span class="num">3</span> Domain</li>
+  <li data-step="1" class="active"><span class="num">1</span> Placement</li>
+  <li data-step="2"><span class="num">2</span> Type</li>
+  <li data-step="3"><span class="num">3</span> Domain &amp; TLS</li>
   <li data-step="4"><span class="num">4</span> WordPress</li>
 </ol>
 
@@ -74,7 +74,7 @@
       Target node
     </h2>
     <div class="field">
-      <label for="target_node">Which node should host this site?</label>
+      <label for="target_node">Which node should host this hosting?</label>
       <select id="target_node" name="target_node">
         {# Auto-placement — picks the best-fit node by current load,
            memory pressure, and hosting count. Falls back to master
@@ -83,7 +83,7 @@
                 data-label="auto (best-fit)"
                 data-detail="picks the node with the lowest load / memory / hosting count"
                 {% if target_node_in == "auto" %}selected{% endif %}>
-          ★  auto — pick best-fit by current load (recommended)
+          ★  Auto — pick the best-fit node by current load (recommended)
         </option>
         {# Master option only when [cluster] master_accepts_hostings
            is true (default). Operator can turn it off in Settings →
@@ -107,14 +107,14 @@
       </select>
       {% if !master_accepts_hostings %}
       <p class="text-soft small" style="margin:0.3rem 0 0">
-        <strong>Master is in control-plane-only mode.</strong> Hostings are provisioned on worker nodes only. Change this in <a href="/settings#cluster">Settings → Cluster</a>.
+        <strong>The master is in control-plane-only mode.</strong> Hostings run on worker nodes only. Change this in <a href="/settings#cluster">Settings → Cluster</a>.
       </p>
       {% endif %}
       <p class="text-soft small" style="margin:0.3rem 0 0">
-        Remote nodes are reached via signed HTTPS RPC (port 9443).
-        The node must have <code>[remote_rpc] enabled = true</code> in
-        its agent.toml and the port has to be open in its firewall.
-        <strong>Verify in journalctl after submit:</strong>
+        Worker nodes are reached over signed HTTPS RPC (port 9443).
+        The node needs <code>[remote_rpc] enabled = true</code> in its
+        agent.toml, and the port must be open in its firewall.
+        <strong>To trace a dispatch after you submit:</strong>
         <code>journalctl -u hyperion-web -g 'dispatch'</code>
       </p>
     </div>
@@ -142,7 +142,7 @@
         <input type="radio" name="profile_radio" value="0" checked>
         <div class="profile-card-body">
           <div class="profile-name">None / custom</div>
-          <div class="profile-meta">Use raw defaults; tune limits later from the detail page.</div>
+          <div class="profile-meta">Start from defaults and tune limits later from the hosting's detail page.</div>
         </div>
       </label>
       {% for p in profiles %}
@@ -180,12 +180,12 @@
                data-wp-plugins / data-wp-themes (raw fields) and
                recomputes the same logic to lock the checkbox. #}
             {% if !p.wp_plugins.is_empty() %}
-              <span class="profile-wp-badge" title="Profile installs WP plugins after provisioning">
+              <span class="profile-wp-badge" title="Installs WordPress plugins after provisioning">
                 WP plugins
               </span>
             {% endif %}
             {% if !p.wp_themes.is_empty() %}
-              <span class="profile-wp-badge" title="Profile installs WP themes after provisioning">
+              <span class="profile-wp-badge" title="Installs WordPress themes after provisioning">
                 WP themes
               </span>
             {% endif %}
@@ -193,7 +193,7 @@
           {% if !p.wp_plugins.is_empty() || !p.wp_themes.is_empty() %}
           <div class="profile-meta" style="margin-top:0.35rem;color:var(--accent);font-weight:500">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:0.2rem"><polyline points="20 6 9 17 4 12"/></svg>
-            WordPress install is required for this profile
+            This profile requires a WordPress install
           </div>
           {% endif %}
         </div>
@@ -202,8 +202,8 @@
     </div>
     {% if profiles.is_empty() %}
     <p class="text-soft small" style="margin:0.5rem 0 0">
-      No profiles defined yet. Create one in <a href="/profiles">/profiles</a>
-      to bundle PHP / DB / WP-plugin / theme stamps under a friendly name.
+      No profiles yet. <a href="/profiles">Create a profile</a> to bundle
+      PHP, database, plugin, and theme defaults under one name and reuse them across hostings.
     </p>
     {% endif %}
     </div><!-- /wizard-step 1 -->
@@ -214,27 +214,27 @@
       Hosting type
     </h2>
     <div class="field">
-      <label for="kind">What kind of site is this?</label>
+      <label for="kind">What kind of hosting is this?</label>
       <select id="kind" name="kind"
               onchange="document.getElementById('proxy-row').style.display=this.value==='reverse_proxy'?'block':'none';
                        document.getElementById('redirect-row').style.display=this.value==='redirect'?'block':'none';
                        document.getElementById('php-row').style.display=this.value==='php'?'block':'none';
                        document.getElementById('db-row').style.display=this.value==='php'?'block':'none';">
-        <option value="php" selected>PHP site (nginx + PHP-FPM + optional DB)</option>
-        <option value="static">Static HTML/CSS/JS only (nginx serves files)</option>
-        <option value="reverse_proxy">Reverse proxy to upstream URL (Node, Python, container, etc.)</option>
-        <option value="redirect">Permanent / temporary redirect to another URL</option>
+        <option value="php" selected>PHP site — nginx, PHP-FPM, and an optional database</option>
+        <option value="static">Static files — nginx serves HTML, CSS, and JS only</option>
+        <option value="reverse_proxy">Reverse proxy — forward to an upstream app (Node, Python, a container)</option>
+        <option value="redirect">Redirect — send every request to another URL</option>
       </select>
     </div>
     <div class="field" id="proxy-row" style="display:none">
-      <label for="proxy_upstream_url">Upstream URL <span class="hint">required for reverse proxy</span></label>
+      <label for="proxy_upstream_url">Upstream URL <span class="hint">required for a reverse proxy</span></label>
       <input id="proxy_upstream_url" name="proxy_upstream_url" type="url"
              placeholder="http://localhost:3000 or http://10.0.0.5:8080"
              value="{{ proxy_upstream_url_in|e }}">
       <p class="text-soft small" style="margin:0.3rem 0 0">
-        nginx will <code>proxy_pass</code> every request to this URL.
-        WebSocket upgrade is enabled by default. Standard headers
-        (<code>X-Real-IP</code>, <code>X-Forwarded-For</code>, <code>Host</code>) are set.
+        nginx forwards every request to this URL with <code>proxy_pass</code>.
+        WebSocket upgrades are enabled, and the standard
+        <code>X-Real-IP</code>, <code>X-Forwarded-For</code>, and <code>Host</code> headers are set.
       </p>
     </div>
     <div id="redirect-row" style="display:none">
@@ -244,12 +244,12 @@
                placeholder="https://www.example.com">
         <p class="text-soft small" style="margin:0.3rem 0 0">
           Every request to this domain is sent to the target URL. No files, PHP,
-          or database are provisioned.
+          or database are created.
         </p>
       </div>
       <div class="field-row">
         <div class="field" style="width:12rem">
-          <label for="redirect_code">Type</label>
+          <label for="redirect_code">Redirect type</label>
           <select id="redirect_code" name="redirect_code">
             <option value="301" selected>301 — permanent</option>
             <option value="302">302 — temporary</option>
@@ -258,7 +258,7 @@
         <div class="field" style="flex:1">
           <label class="field-checkbox" style="margin-top:1.7rem">
             <input type="checkbox" name="redirect_preserve_path" value="on">
-            Preserve the request path (append <code>/foo?bar</code> to the target)
+            Preserve the request path (append <code>/foo?bar</code> to the target URL)
           </label>
         </div>
       </div>
@@ -275,19 +275,19 @@
        is a test node + cluster.test_domain_template is set. JS
        hides it when target is a prod node. Server validates anyway. #}
     <div class="field test-only-field" id="test_site_name_field" style="display:none">
-      <label for="test_site_name">Test-site short name <span class="hint">letters / digits / dash, lowercase</span></label>
+      <label for="test_site_name">Test-site short name <span class="hint">lowercase letters, digits, and dashes</span></label>
       <input id="test_site_name" name="test_site_name" type="text"
              value="" placeholder="blog" autocomplete="off"
              pattern="[a-z0-9][a-z0-9-]{0,30}[a-z0-9]?" maxlength="32">
       <p class="text-soft small" style="margin:0.3rem 0 0">
-        Final domain auto-fills below from the cluster template (see
-        Settings → Cluster → Test nodes).
+        The full domain is built from the test-node template (Settings →
+        Cluster → Test nodes).
         <strong>Preview:</strong> <code id="test_domain_preview" style="color:var(--text-soft)">—</code>
       </p>
     </div>
 
     <div class="field" id="domain_field">
-      <label for="domain">Primary domain <span class="hint">root hostname, e.g. <code>example.com</code></span></label>
+      <label for="domain">Primary domain <span class="hint">root hostname, for example <code>example.com</code></span></label>
       <input id="domain" name="domain" type="text" required autofocus
              value="{{ domain_in|e }}" placeholder="example.com">
       {# Live preflight — JS at the bottom of this template debounces
@@ -322,7 +322,7 @@
           <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
           Check now
         </button>
-        <span class="text-soft small">Verifies the primary domain resolves to this node's public IP.</span>
+        <span class="text-soft small">Confirms the primary domain resolves to the target node's public IP.</span>
       </div>
       <div id="dns-create-result"></div>
       {# Auto-check trigger: HTMX listens for a custom `dnsblur` event
@@ -349,11 +349,12 @@
         Issue a Let's Encrypt certificate right after provisioning
       </label>
       <p class="text-soft small" style="margin:0.4rem 0 0;line-height:1.5">
-        Only tick this when the DNS preflight above shows a match —
+        Enable this only when the DNS preflight above shows a match.
         Let's Encrypt validates over HTTP, so the domain must already
-        resolve to the target node. Until a real cert lands, the site
-        serves a self-signed bootstrap cert (you can issue later from
-        the hosting's SSL tab). Progress shows live on the next page.
+        resolve to the target node. Until a trusted certificate lands,
+        the site serves a self-signed bootstrap certificate — you can
+        issue one later from the hosting's SSL tab. Progress shows live
+        on the next page.
       </p>
     </div>
 
@@ -405,10 +406,10 @@
       </label>
       <p class="text-soft small" style="margin:0.4rem 0 0;line-height:1.5">
         Hyperion downloads the latest WordPress core, seeds the database,
-        creates the admin user, and (if a profile is picked) installs
-        every plugin and theme it lists. You'll see a live progress card
-        on the hosting page while it runs — usually 10–60 seconds depending
-        on plugin count.
+        creates the admin user, and — if a profile is selected — installs
+        every plugin and theme it lists. A live progress card appears on
+        the hosting page while it runs, usually 10–60 s depending on
+        plugin count.
       </p>
       <p id="install-wp-forced-notice"
          style="display:none;margin:0.4rem 0 0;padding:0.55rem 0.75rem;
@@ -416,8 +417,8 @@
                 border:1px solid color-mix(in oklab, var(--accent) 35%, transparent);
                 border-radius:6px;font-size:0.85rem;color:var(--text)">
         <strong>Required by the selected profile.</strong> WordPress is installed automatically
-        so the profile's plugins and themes have somewhere to land. To skip the WP install
-        entirely, change the profile back to <em>None / custom</em> in step 1.
+        so the profile's plugins and themes have somewhere to land. To skip the WordPress install,
+        change the profile back to <em>None / custom</em> in step 1.
       </p>
       <div id="wp-fields" style="display:none;grid-template-columns:1fr 1fr;gap:0.5rem;margin-top:0.6rem">
         <div class="field" style="margin:0">
@@ -433,8 +434,8 @@
           <input id="wp_admin_email" name="wp_admin_email" type="email" placeholder="you@example.cz">
         </div>
         <div class="field" style="margin:0">
-          <label for="wp_admin_password">Admin password <span class="hint">leave blank or &lt; 8 chars and we'll generate a strong one + show it once on the next page</span></label>
-          <input id="wp_admin_password" name="wp_admin_password" type="text" minlength="0" placeholder="≥ 8 chars or leave blank to auto-generate">
+          <label for="wp_admin_password">Admin password <span class="hint">leave blank (or under 8 chars) to auto-generate a strong one, shown once on the next page</span></label>
+          <input id="wp_admin_password" name="wp_admin_password" type="text" minlength="0" placeholder="At least 8 characters, or leave blank to auto-generate">
         </div>
         <div class="field" style="margin:0">
           <label for="wp_title">Site title (optional)</label>
@@ -454,10 +455,10 @@
         </div>
       </div>
       <p class="text-soft small" style="margin-top:0.4rem">
-        Pick a non-obvious admin username — <code>admin</code> is the
-        first guess every brute-forcer tries. WordPress is installed
-        at the site root after provisioning and you'll see the admin
-        credentials in the credentials panel.
+        Choose a non-obvious admin username — <code>admin</code> is the
+        first guess every brute-force attack tries. WordPress is installed
+        at the site root after provisioning, and the admin credentials
+        appear in the hosting's credentials panel.
       </p>
     </div>
 
@@ -470,7 +471,7 @@
         <button class="btn primary" type="button" id="wizard-next">Next →</button>
         <button class="btn primary lg" type="submit" id="provision-submit" style="display:none">
           <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
-          <span id="provision-submit-label">Provision</span>
+          <span id="provision-submit-label">Create hosting</span>
         </button>
       </div>
     </div>
@@ -495,7 +496,7 @@
     const detail = opt.dataset.detail || '';
     if (bannerName) bannerName.textContent = label;
     if (bannerDetail) bannerDetail.textContent = detail ? '· ' + detail : '';
-    if (submitLabel) submitLabel.textContent = 'Provision on ' + label;
+    if (submitLabel) submitLabel.textContent = 'Create on ' + label;
     // Visual cue: when targeting a remote node, switch the banner
     // accent to indicate "this is going somewhere non-default".
     if (banner) {
@@ -613,15 +614,15 @@
       }
       if (j.exists) {
         resultDiv.style.color = 'var(--danger)';
-        const where = j.node && j.node !== 'local' ? ' on node ' + j.node : ' on master';
+        const where = j.node && j.node !== 'local' ? ' on node ' + j.node : ' on the master';
         resultDiv.innerHTML =
           '⚠ <strong>' + escape(j.domain) + '</strong> already exists' +
           escape(where) + ' (state: ' + escape(j.state || 'unknown') + ').' +
-          ' Pick a different domain or delete the existing hosting first.';
+          ' Choose a different domain, or delete the existing hosting first.';
         domainInput.classList.add('domain-taken');
       } else {
         resultDiv.style.color = 'var(--success)';
-        resultDiv.textContent = '✓ available — no hosting in the cluster claims this domain';
+        resultDiv.textContent = '✓ Available — no hosting in the cluster claims this domain';
         domainInput.classList.remove('domain-taken');
       }
     } catch (_) { /* aborted or network failure — swallow */ }
@@ -949,13 +950,13 @@
     What happens next
   </h2>
   <ol style="margin:0;padding-left:1.25rem;font-size:0.92rem;line-height:1.7">
-    <li>Linux user created with chroot-style home.</li>
-    <li>Directory tree laid out under <code>/home/{user}/{domain}</code>.</li>
-    <li>PHP-FPM pool rendered and the service reloaded.</li>
-    <li>Database + DB user provisioned, password returned <em>once</em>.</li>
-    <li>TLS cert issued; nginx vhost goes live.</li>
+    <li>A Linux user is created with a chroot-style home.</li>
+    <li>The directory tree is laid out under <code>/home/{user}/{domain}</code>.</li>
+    <li>The PHP-FPM pool is rendered and the service is reloaded.</li>
+    <li>The database and its user are created; the password is shown <em>once</em>.</li>
+    <li>The TLS certificate is issued and the nginx vhost goes live.</li>
   </ol>
-  <p class="muted" style="font-size:0.85rem;margin-top:1rem;margin-bottom:0">Any step that fails triggers LIFO rollback — the system never half-creates a hosting.</p>
+  <p class="muted" style="font-size:0.85rem;margin-top:1rem;margin-bottom:0">If any step fails, Hyperion rolls back the earlier ones in reverse order — a hosting is never left half-created.</p>
 </div>
 </div>
 

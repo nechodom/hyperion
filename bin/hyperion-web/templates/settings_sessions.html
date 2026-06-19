@@ -5,22 +5,22 @@
   <div>
     <h1>Active sessions</h1>
     <div class="subtitle">
-      Every login mints a row here. Revoke any that look suspicious —
-      a revoked cookie can NOT be used to authenticate, even if it's
+      Every sign-in creates a row here. Revoke any you don't recognize.
+      A revoked session cookie can no longer authenticate, even if it is
       still cryptographically valid.
     </div>
   </div>
   <div>
-    <a href="/profile" class="btn ghost">← My profile</a>
+    <a href="/profile" class="btn ghost">← Back to profile</a>
   </div>
 </div>
 
 {% if rows.is_empty() %}
   <div class="card empty">
-    <div class="empty-title">No session rows for this account</div>
+    <div class="empty-title">No sessions recorded for this account yet</div>
     <p class="text-soft small">
-      Your current cookie was minted before the session ledger landed.
-      Re-login to start tracking active sessions here.
+      Your current cookie predates session tracking. Sign in again to start
+      recording active sessions here.
     </p>
   </div>
 {% else %}
@@ -28,9 +28,9 @@
     <table class="data-table data-table--cards">
       <thead>
         <tr>
-          <th>SID</th>
-          <th>IP</th>
-          <th>User-Agent</th>
+          <th>Session</th>
+          <th>IP address</th>
+          <th>Browser</th>
           <th>Created</th>
           <th>Last seen</th>
           <th>State</th>
@@ -63,13 +63,13 @@
               {% if !r.is_revoked %}
                 <form method="post" action="/settings/sessions/revoke" style="margin:0"
                       {% if r.is_current %}
-                        data-confirm-title="Revoke YOUR current session?"
-                        data-confirm-body="This will log you out immediately. Use this only if you want to drop your cookie deliberately (e.g. before stepping away from a shared screen). For other devices, prefer revoking the other rows."
-                        data-confirm-confirm-label="Revoke + log out"
+                        data-confirm-title="Revoke your current session?"
+                        data-confirm-body="This signs you out immediately. Use it only to drop your own cookie on purpose, for example before stepping away from a shared screen. To sign out another device, revoke that device's row instead."
+                        data-confirm-confirm-label="Revoke and sign out"
                         data-confirm-variant="danger"
                       {% else %}
                         data-confirm-title="Revoke this session?"
-                        data-confirm-body="The cookie tied to SID {{ r.sid }} from {{ r.ip }} will be killed on next request. The user (you, on another device) will have to log in again."
+                        data-confirm-body="The cookie for session {{ r.sid }} from {{ r.ip }} stops working on its next request. Whoever holds it (you, on another device) will have to sign in again."
                         data-confirm-confirm-label="Revoke"
                         data-confirm-variant="danger"
                       {% endif %}>

@@ -17,7 +17,7 @@
   <dl class="kv">
     <dt>Existing TXT</dt>
     <dd>
-      {% if sp.existing.is_empty() %}<span class="text-soft">none — emails from this hosting will be flagged as spam</span>
+      {% if sp.existing.is_empty() %}<span class="text-soft">none — without an SPF record, mail from this hosting is likely to be marked as spam</span>
       {% else %}{% for e in sp.existing %}<code style="font-size:0.78rem;display:block;margin-bottom:0.2rem;word-break:break-all">{{ e }}</code>{% endfor %}{% endif %}
     </dd>
     {% if sp.status != "matches" %}
@@ -26,11 +26,11 @@
         <code style="font-size:0.82rem;display:block;padding:0.5rem;background:var(--bg-2);border-radius:var(--radius-xs);word-break:break-all">{{ sp.suggested }}</code>
         <div class="muted" style="font-size:0.78rem;margin-top:0.4rem">
           {% if sp.status == "missing" %}
-            Add this as a <code>TXT</code> record on the apex of <code>{{ domain }}</code> in your DNS provider, then re-check.
+            Add this as a <code>TXT</code> record on the apex of <code>{{ domain }}</code> at your DNS provider, then check again.
           {% else if sp.status == "multiple" %}
-            <strong>RFC 7208 §3.2 forbids more than one SPF record.</strong> Receivers fall back to <em>permerror</em> and refuse mail. Merge the existing records into one (combine their mechanisms), then re-check.
+            <strong>RFC 7208 §3.2 forbids more than one SPF record.</strong> Receivers fall back to <em>permerror</em> and reject mail. Merge the existing records into one by combining their mechanisms, then check again.
           {% else %}
-            Your existing SPF doesn't list our IP. Either replace it with the suggested record, or add <code>{% if let Some(ip) = sp.our_public_ipv4 %}ip4:{{ ip }}{% else %}ip4:&lt;our IPv4&gt;{% endif %}</code> as an extra mechanism before the trailing <code>~all</code>.
+            Your current SPF record doesn't list this node's IP. Either replace it with the suggested record, or add <code>{% if let Some(ip) = sp.our_public_ipv4 %}ip4:{{ ip }}{% else %}ip4:&lt;node IPv4&gt;{% endif %}</code> as an extra mechanism before the trailing <code>~all</code>, then check again.
           {% endif %}
         </div>
       </dd>

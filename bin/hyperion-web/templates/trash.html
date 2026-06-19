@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Trash · hyperion{% endblock %}
+{% block title %}Trash · Hyperion{% endblock %}
 {% block main %}
 
 <div class="page-header">
@@ -7,11 +7,11 @@
     <h1>Trash</h1>
     <div class="subtitle">
       {% if trash_enabled %}
-        Soft-deleted hostings — files / DB / user preserved until purged.
-        Retention: <strong>{{ retention_days }} days</strong>.
+        Soft-deleted hostings. Files, database, and system user are
+        preserved until purged. Retention: <strong>{{ retention_days }} days</strong>.
       {% else %}
-        <span class="text-soft">Trash is currently OFF</span> — deletes are immediate + permanent.
-        Turn this on in <a href="/settings#cluster">Settings → Cluster</a> to soft-delete instead.
+        <span class="text-soft">Trash is currently off</span> — deletes are immediate and permanent.
+        Turn it on in <a href="/settings#cluster">Settings → Cluster</a> to soft-delete instead.
       {% endif %}
     </div>
   </div>
@@ -39,9 +39,9 @@
     <h3>Trash is empty</h3>
     <p class="text-soft">
       {% if trash_enabled %}
-        Deleted hostings will land here for {{ retention_days }} days before the scheduler hard-deletes them.
+        Deleted hostings stay here for {{ retention_days }} days, then the scheduler removes them permanently.
       {% else %}
-        Enable the trash toggle in Settings → Cluster to soft-delete instead of hard-delete.
+        Turn on trash in <a href="/settings#cluster">Settings → Cluster</a> to soft-delete hostings instead of removing them immediately.
       {% endif %}
     </p>
   </div>
@@ -78,18 +78,18 @@
                 <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                 <input type="hidden" name="selector" value="{{ e.domain }}">
                 <input type="hidden" name="target_node" value="{{ e.node_id }}">
-                <button class="btn small" type="submit" title="Bring this hosting back online">Restore</button>
+                <button class="btn small" type="submit" title="Restore this hosting and bring it back online">Restore</button>
               </form>
               <form method="post" action="/trash/purge" style="display:inline;margin:0"
                     data-confirm-title="Permanently delete {{ e.domain }}"
-                    data-confirm-body="Files, database, system user and certs will be removed NOW. This skips the retention window. Type the domain to confirm — there is no undo."
+                    data-confirm-body="Files, database, system user, and certificates will be removed now, skipping the retention window. This cannot be undone. Type the domain to confirm."
                     data-confirm-confirm-label="Delete permanently"
                     data-confirm-variant="danger"
                     data-confirm-require="{{ e.domain }}">
                 <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                 <input type="hidden" name="selector" value="{{ e.domain }}">
                 <input type="hidden" name="target_node" value="{{ e.node_id }}">
-                <button class="btn small danger" type="submit" title="Skip the retention window and delete now">Delete</button>
+                <button class="btn small danger" type="submit" title="Skip the retention window and delete now">Delete permanently</button>
               </form>
             </div>
           </td>

@@ -11,7 +11,7 @@
   <p class="muted" style="margin:-0.3rem 0 0.75rem;font-size:0.85rem">
     Key-only, chrooted SFTP — no password, no shell. The customer lands in
     their site root and can upload to <code>htdocs</code>. Safer than FTP:
-    nothing crosses the wire in clear text.
+    nothing crosses the wire in plain text.
   </p>
 
   {% if !error.is_empty() %}
@@ -23,7 +23,7 @@
     <dt>Connect</dt>
     <dd><code style="font-size:0.82rem">sftp {{ sftp.system_user }}@{{ sftp.host_hint }}</code> <span class="text-soft">(port 22)</span></dd>
     <dt>Lands in</dt>
-    <dd><span class="text-soft">site root — <code>cd htdocs</code> to reach the web files</span></dd>
+    <dd><span class="text-soft">site root — run <code>cd htdocs</code> to reach the web files</span></dd>
   </dl>
   {% endif %}
 
@@ -44,10 +44,10 @@
 {% endfor %}</textarea>
     </div>
     <p class="muted small" style="margin:0 0 0.6rem">
-      Paste the customer's <strong>public</strong> key(s) (the
-      <code>.pub</code> file). Invalid lines are rejected with an error.
-      Disabling removes them from the server and drops SSH group access.
+      Paste the customer's <strong>public</strong> key(s) — the contents of the
+      <code>.pub</code> file. Invalid lines are rejected with an error.
+      Turning SFTP off removes the keys from the server and revokes SSH group access.
     </p>
-    <button class="btn primary" type="submit">Save SFTP settings</button>
+    <button class="btn primary" type="submit">Save changes</button>
   </form>
 </div>

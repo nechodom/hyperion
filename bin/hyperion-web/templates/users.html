@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Admin users · hyperion{% endblock %}
+{% block title %}Admin users · Hyperion{% endblock %}
 {% block main %}
 <div class="page-header">
   <div>
@@ -41,7 +41,7 @@
     <div class="field" style="margin:0">
       <label for="new_password">Initial password</label>
       <input id="new_password" name="password" type="text" required minlength="8"
-             placeholder="≥ 8 characters">
+             placeholder="At least 8 characters">
     </div>
     <div class="field" style="margin:0">
       <label for="new_role">Role</label>
@@ -53,14 +53,14 @@
         <option value="super_admin">Owner</option>
       </select>
     </div>
-    <button class="btn primary" type="submit" style="height:fit-content">Create</button>
+    <button class="btn primary" type="submit" style="height:fit-content">Create user</button>
   </form>
   <p class="text-soft small" style="margin-top:0.4rem">
-    <strong>Owner</strong> = full control incl. user management ·
-    <strong>Administrator</strong> = full control except user management ·
-    <strong>Operator</strong> = internal staff with CRUD on assigned hostings ·
-    <strong>Customer</strong> = end-user / tenant — slim nav, only their own hostings ·
-    <strong>Read-only</strong> = read-only on assigned hostings.
+    <strong>Owner</strong> — full control, including user management ·
+    <strong>Administrator</strong> — full control except user management ·
+    <strong>Operator</strong> — internal staff who can manage their assigned hostings ·
+    <strong>Customer</strong> — end user with a slim nav, sees only their own hostings ·
+    <strong>Read-only</strong> — view-only on assigned hostings.
   </p>
 </div>
 
@@ -73,7 +73,7 @@
           <th>Role</th>
           <th>2FA</th>
           <th>Status</th>
-          <th>Last login</th>
+          <th>Last sign-in</th>
           <th class="right">Actions</th>
         </tr>
       </thead>
@@ -95,7 +95,7 @@
                 <option value="admin" {% if u.role == "admin" %}selected{% endif %}>Administrator</option>
                 <option value="super_admin" {% if u.role == "super_admin" %}selected{% endif %}>Owner</option>
               </select>
-              <button type="submit" class="btn small">Set</button>
+              <button type="submit" class="btn small">Save role</button>
             </form>
           </td>
           <td>
@@ -136,24 +136,24 @@
                     <button type="submit" class="btn small">Unlock</button>
                   {% else %}
                     <input type="hidden" name="locked" value="true">
-                    <input name="reason" placeholder="reason" style="width:8rem;margin:0">
-                    <button type="submit" class="btn small">Lock</button>
+                    <input name="reason" placeholder="Reason (optional)" style="width:8rem;margin:0">
+                    <button type="submit" class="btn small">Lock account</button>
                   {% endif %}
                 </form>
                 <form method="post" action="/admin/users/password" autocomplete="off"
                       data-confirm-title="Reset user password"
-                      data-confirm-body="The user's current password will be replaced with the value you typed. Existing browser sessions stay logged in until they expire."
+                      data-confirm-body="The user's current password will be replaced with the value you typed. Existing browser sessions stay signed in until they expire."
                       data-confirm-confirm-label="Reset password"
                       data-confirm-variant="danger"
                       style="display:flex;gap:0.3rem;align-items:center">
                   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                   <input type="hidden" name="user_id" value="{{ u.id }}">
-                  <input name="new_password" type="text" placeholder="new password" minlength="8" required style="width:10rem;margin:0">
+                  <input name="new_password" type="text" placeholder="New password" minlength="8" required style="width:10rem;margin:0">
                   <button type="submit" class="btn small">Reset</button>
                 </form>
                 <form method="post" action="/admin/users/delete"
                       data-confirm-title="Delete user"
-                      data-confirm-body="The user will lose access immediately and all their sessions will be invalidated. Hostings they owned are unaffected."
+                      data-confirm-body="The user loses access immediately and all their sessions are revoked. This cannot be undone. Hostings they owned are unaffected."
                       data-confirm-confirm-label="Delete user"
                       data-confirm-variant="danger"
                       style="display:inline">
@@ -172,8 +172,9 @@
 </div>
 
 <p class="text-soft small" style="margin-top:1rem">
-  Each user can enable TOTP 2FA from their <a href="/profile">profile</a>.
-  Operator, Customer and Read-only roles see only the hostings explicitly
-  granted to them via the Access tab on each hosting's detail page.
+  Each user can enable TOTP two-factor authentication from their
+  <a href="/profile">profile</a>. Operator, Customer, and Read-only users
+  see only the hostings explicitly granted to them on the Access tab of
+  each hosting's detail page.
 </p>
 {% endblock %}

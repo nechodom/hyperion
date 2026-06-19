@@ -9,9 +9,9 @@
         {% if job.state == "running" %}
           <span class="spinner-inline"></span>
         {% else if job.state == "done" %}
-          <span class="pill ok">done</span>
+          <span class="pill ok">DONE</span>
         {% else if job.state == "failed" %}
-          <span class="pill err">failed</span>
+          <span class="pill err">FAILED</span>
         {% else %}
           <span class="pill">{{ job.state }}</span>
         {% endif %}
@@ -48,7 +48,7 @@
      `is_running` kept referenced for the no-op below to stay explicit. #}
   {% if !job.log_tail.is_empty() %}
     <details style="margin-top:0.9rem" open data-running="{{ is_running }}">
-      <summary class="text-soft small">Log tail ({{ job.log_tail.len() }} bytes)</summary>
+      <summary class="text-soft small">Log tail · {{ job.log_tail.len() }} bytes</summary>
       <pre class="log-tail" style="margin-top:0.4rem;max-height:30rem;overflow:auto">{{ job.log_tail }}</pre>
     </details>
   {% endif %}
@@ -59,7 +59,7 @@
     </p>
   {% else if job.state == "failed" %}
     <p class="text-soft small" style="margin-top:0.7rem">
-      ✗ Failed after {{ elapsed }}. Re-run the operation from the source page to retry.
+      ✗ Failed after {{ elapsed }}. Check the log tail above, then re-run the operation from the source page to retry.
     </p>
   {% endif %}
 </div>

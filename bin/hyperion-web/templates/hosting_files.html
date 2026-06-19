@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Files · {{ domain }} · hyperion{% endblock %}
+{% block title %}Files · {{ domain }} · Hyperion{% endblock %}
 {% block main %}
 <div class="breadcrumbs">
   <a href="/hostings">Hostings</a>
@@ -13,9 +13,9 @@
   <div>
     <h1>Files · {{ domain }}</h1>
     <div class="subtitle">
-      Browser scoped to <code>htdocs/</code>. Path traversal +
-      symlinks refused at the agent layer.
-      {% if !can_write %}<span class="text-soft">(viewer role — read only)</span>{% endif %}
+      This browser is scoped to <code>htdocs/</code>. The agent refuses
+      path traversal and symlinks.
+      {% if !can_write %}<span class="text-soft">(Read-only role — viewing only)</span>{% endif %}
     </div>
   </div>
 </div>
@@ -39,16 +39,16 @@
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <input type="hidden" name="selector" value="{{ selector }}">
     <input type="hidden" name="dir" value="{{ rel_path }}">
-    <input type="text" name="name" placeholder="new directory name" pattern="[^/\\\\\0]+" required style="width:14rem;font-size:0.85rem">
-    <button class="btn small" type="submit">+ New folder</button>
+    <input type="text" name="name" placeholder="New folder name" pattern="[^/\\\\\0]+" required style="width:14rem;font-size:0.85rem">
+    <button class="btn small" type="submit">Create folder</button>
   </form>
   <form method="post" action="/hostings/{{ selector }}/files/upload?_csrf={{ csrf_token }}"
         enctype="multipart/form-data" style="display:flex;gap:0.4rem;align-items:center;margin:0">
     <input type="hidden" name="dir" value="{{ rel_path }}">
     <input type="file" name="file" required style="font-size:0.85rem">
-    <button class="btn small primary" type="submit">Upload</button>
+    <button class="btn small primary" type="submit">Upload file</button>
   </form>
-  <span class="text-soft small">Max 64 MiB. Existing file with same name will be overwritten.</span>
+  <span class="text-soft small">Up to 64 MiB. A file with the same name is overwritten.</span>
 </div>
 {% endif %}
 
@@ -74,8 +74,8 @@
       <div class="empty-illustration">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
       </div>
-      <h3>Empty directory</h3>
-      <p>Drop files into <code>{{ domain }}/htdocs</code> via FTP, SCP, or wp-cli to see them here.</p>
+      <h3>This folder is empty</h3>
+      <p>Upload a file above, or add files to <code>{{ domain }}/htdocs</code> over FTP, SCP, or wp-cli to see them here.</p>
     </div>
   {% else %}
     <div class="table-wrap">
@@ -135,15 +135,15 @@
                     <a class="btn small" href="/hostings/{{ selector }}/files/download?path={{ e.rel_path|e }}" title="Download">↓</a>
                   {% endif %}
                   {% if can_write %}
-                    <button type="button" class="btn small row-menu-toggle" title="More" aria-haspopup="true">⋯</button>
+                    <button type="button" class="btn small row-menu-toggle" title="More actions" aria-haspopup="true">⋯</button>
                     <div class="row-menu-pop" hidden>
                       <button type="button" class="row-menu-item" data-rename
                               data-current="{{ e.name }}"
                               data-from="{{ e.rel_path }}">Rename…</button>
                       <form method="post" action="/hostings/files/delete" style="margin:0"
                             data-confirm-title="Delete {{ e.name }}"
-                            data-confirm-body="This {{ e.kind }} will be removed. Directories must be empty. Permanent — no undo button."
-                            data-confirm-confirm-label="Delete"
+                            data-confirm-body="This {{ e.kind }} will be removed permanently. There is no undo, and folders must be empty before they can be deleted."
+                            data-confirm-confirm-label="Delete permanently"
                             data-confirm-variant="danger"
                             data-confirm-require="{{ e.name }}">
                         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
@@ -183,7 +183,7 @@
   </div>
   {% if v.truncated %}
     <div class="flash warn">
-      <div class="flash-body">File is larger than the 1 MiB inline cap — only a partial preview is rendered. Use scp/sftp for the full contents.</div>
+      <div class="flash-body">This file is larger than the 1 MiB inline limit, so only the start is shown. Use scp or sftp to get the full contents.</div>
     </div>
   {% endif %}
   {% if edit_mode %}
@@ -199,7 +199,7 @@
                 style="width:100%;box-sizing:border-box;margin:0;padding:0.85rem;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-md);min-height:60vh;max-height:75vh;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:0.82rem;line-height:1.5;resize:vertical">{{ v.content }}</textarea>
       <div style="display:flex;gap:0.5rem;margin-top:0.6rem;justify-content:flex-end">
         <a class="btn" href="/hostings/{{ selector }}/files?path={{ rel_path|e }}&file={{ v.rel_path|e }}">Cancel</a>
-        <button class="btn primary" type="submit">Save</button>
+        <button class="btn primary" type="submit">Save changes</button>
       </div>
     </form>
   {% else %}

@@ -6,11 +6,10 @@
   <div>
     <h1>Firewall</h1>
     <div class="subtitle">
-      Each node's firewall posture at a glance — <strong>open ports</strong>
-      (with the "why" attached, so you don't have to remember <code>9443</code>
-      from <code>8443</code>), <strong>active brute-force bans</strong>, and
-      node health. Port templates + a custom <code>nft</code> generator are
-      at the bottom.
+      Each node's firewall posture at a glance: <strong>open ports</strong>
+      with the reason each one is open, <strong>active brute-force bans</strong>,
+      and node health. Port templates and a custom <code>nft</code> snippet
+      generator are at the bottom of the page.
     </div>
   </div>
 </div>
@@ -25,7 +24,7 @@
   <div class="kpi-card">
     <div class="kpi-label">IPs banned (cluster)</div>
     <div class="kpi-value">{{ summary.ban_total }}</div>
-    <div class="text-soft small">{{ summary.ban_auto }} auto · {{ summary.ban_manual }} manual · <a href="/bans">view all →</a></div>
+    <div class="text-soft small">{{ summary.ban_auto }} auto · {{ summary.ban_manual }} manual · <a href="/bans">View all bans →</a></div>
   </div>
   <div class="kpi-card">
     <div class="kpi-label">Open ports (cluster)</div>
@@ -35,8 +34,8 @@
 
 {% if nodes.is_empty() %}
   <div class="card empty">
-    <h3>No nodes</h3>
-    <p class="text-soft">No master or enrolled workers — nothing to query.</p>
+    <h3>No nodes yet</h3>
+    <p class="text-soft">No master or enrolled workers to query. Enrol a node from <a href="/install">Install</a> to see its firewall posture here.</p>
   </div>
 {% else %}
   {# Per-node cards — service-health-style. Each open port is its
@@ -56,7 +55,7 @@
           <span class="tag" title="Backend used to read the ruleset on this node">{{ n.view.backend }}</span>
           <span class="text-soft small">· {{ n.view.ports.len() }} open port{% if n.view.ports.len() != 1 %}s{% endif %}</span>
           {% if n.ban_total > 0 %}<span class="pill err" title="IPs currently dropped by nftables">{{ n.ban_total }} banned</span>{% else %}<span class="pill ok">0 banned</span>{% endif %}
-          {% if n.drained %}<span class="pill warn" title="Drained — intentionally quiet, not offline">drained</span>{% endif %}
+          {% if n.drained %}<span class="pill warn" title="Drained — intentionally quiet, not offline">DRAINED</span>{% endif %}
         {% endif %}
       </h2>
 
@@ -81,26 +80,25 @@
 
       {% if n.unreachable %}
         <p class="text-soft">
-          Could not reach this node's agent over RPC. The page renders
-          the rest of the cluster best-effort; retry the page or
-          check <a href="/install">/install</a> for the node's last
-          heartbeat.
+          Could not reach this node's agent over RPC. The rest of the
+          cluster is still shown. Reload the page to retry, or check the
+          node's last heartbeat on <a href="/install">Install</a>.
         </p>
       {% else if n.view.ports.is_empty() && n.view.raw.is_empty() %}
         <div class="flash warn" style="margin:0.4rem 0 0.6rem;padding:0.55rem 0.85rem">
           <div class="flash-body">
-            <strong>No firewall configured</strong> — the kernel
-            default-accepts on every port. On a freshly-imaged Debian
-            box this is the OOTB state. Lock down with
+            <strong>No firewall configured.</strong> The kernel
+            accepts traffic on every port by default — the normal state
+            of a freshly imaged Debian box. Lock it down with
             <code>nft</code> using one of the templates below.
             {% if !n.view.error.is_empty() %}<br><br><strong>Probe error:</strong> <code>{{ n.view.error }}</code>{% endif %}
           </div>
         </div>
       {% else if n.view.ports.is_empty() %}
         <p class="text-soft small" style="margin:0.4rem 0">
-          The parser didn't recognise any explicit accept rules. This
-          can happen on exotic configs (port ranges, named sets,
-          chains we don't introspect). The raw ruleset below is
+          No explicit accept rules were recognised. This can happen with
+          uncommon configurations (port ranges, named sets, or chains
+          Hyperion does not introspect). The raw ruleset below is
           authoritative — scan it for "accept" / "ACCEPT" lines.
         </p>
       {% else %}
@@ -112,7 +110,7 @@
                 <th style="text-align:left;padding:0.4rem 0.6rem;width:6rem">Port</th>
                 <th style="text-align:left;padding:0.4rem 0.6rem;width:4.5rem">Proto</th>
                 <th style="text-align:left;padding:0.4rem 0.6rem;width:8rem">Category</th>
-                <th style="text-align:left;padding:0.4rem 0.6rem">Reason / service</th>
+                <th style="text-align:left;padding:0.4rem 0.6rem">Reason or service</th>
               </tr>
             </thead>
             <tbody>
@@ -137,7 +135,7 @@
                 </td>
                 <td style="padding:0.5rem 0.6rem">
                   {% if p.label == "Unknown" %}
-                    <span class="text-soft" style="font-style:italic">no match in well-known port table</span>
+                    <span class="text-soft" style="font-style:italic">No match in the well-known port table</span>
                   {% else %}
                     {{ p.label }}
                   {% endif %}
@@ -151,7 +149,7 @@
         {% if !n.view.error.is_empty() %}
           <div class="flash warn" style="margin-top:0.6rem;padding:0.45rem 0.7rem">
             <div class="flash-body">
-              <strong>Parser note:</strong> <code>{{ n.view.error }}</code>
+              <strong>Parser note</strong> — <code>{{ n.view.error }}</code>
             </div>
           </div>
         {% endif %}
@@ -181,13 +179,12 @@
     Port templates
   </h2>
   <p class="text-soft small" style="margin:0 0 1rem">
-    Common port sets you typically open together. Each template
-    can be <strong>applied directly</strong> on any reachable node
-    (writes to our own <code>inet hyperion</code> nft table — your
-    existing rules stay intact + the change persists to
-    <code>/etc/nftables.conf</code> for reboot survival). Use
-    <em>Show snippet</em> if you prefer to copy-paste over SSH
-    instead.
+    Common port sets that are typically opened together. Each template
+    can be <strong>applied directly</strong> on any reachable node. It
+    writes to Hyperion's own <code>inet hyperion</code> nft table, so
+    your existing rules stay intact, and the change persists to
+    <code>/etc/nftables.conf</code> to survive a reboot. Use
+    <em>Show snippet</em> if you prefer to copy and paste over SSH.
   </p>
   <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(22rem,1fr));gap:0.85rem">
     {% for t in templates %}
@@ -215,7 +212,7 @@
             <input type="hidden" name="template_id" value="{{ t.apply_id }}">
             <input type="hidden" name="target_node" value="{{ tgt.node_id }}">
             <button type="submit" class="btn small"
-                    {% if !tgt.applyable %}disabled title="Node unreachable — Apply skipped"{% endif %}>
+                    {% if !tgt.applyable %}disabled title="Node unreachable — cannot apply"{% endif %}>
               {{ tgt.label }}
             </button>
           </form>
@@ -224,8 +221,8 @@
         </div>
       {% else %}
         <p class="text-soft small" style="margin:0.5rem 0;font-style:italic">
-          Snippet-only — needs operator input
-          (e.g. <code>&lt;MASTER_IP&gt;</code> substitution).
+          Snippet only — needs a value from you first
+          (for example, substituting <code>&lt;MASTER_IP&gt;</code>).
         </p>
       {% endif %}
 
@@ -278,10 +275,10 @@
     Open a custom port
   </h2>
   <p class="text-soft small" style="margin:0 0 1rem">
-    Generates the exact <code>nft add rule</code> command for an
-    arbitrary port. We deliberately don't apply it from the panel —
-    a typo could lock you out of SSH on a remote box. Copy, verify,
-    SSH in, paste.
+    Generates the exact <code>nft add rule</code> command for any port.
+    Hyperion deliberately does not apply it for you — a typo could lock
+    you out of SSH on a remote box. Copy the command, verify it, then
+    SSH in and paste.
   </p>
   <div style="display:grid;grid-template-columns:1fr 1fr 2fr auto;gap:0.6rem;align-items:end;max-width:48rem">
     <div class="field" style="margin:0">
@@ -296,10 +293,10 @@
       </select>
     </div>
     <div class="field" style="margin:0">
-      <label for="fw-reason">Reason (comment)</label>
+      <label for="fw-reason">Reason (added as a comment)</label>
       <input id="fw-reason" type="text" placeholder="myapp backend" style="margin:0">
     </div>
-    <button type="button" class="btn primary" id="fw-gen">Generate</button>
+    <button type="button" class="btn primary" id="fw-gen">Generate snippet</button>
   </div>
   <div id="fw-snippet-wrap" hidden style="margin-top:1rem">
     <p class="text-soft small" style="margin:0 0 0.4rem">

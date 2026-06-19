@@ -1,13 +1,13 @@
 {% extends "base.html" %}
-{% block title %}Notifications · hyperion{% endblock %}
+{% block title %}Notifications · Hyperion{% endblock %}
 {% block main %}
 <div class="page-header">
   <div>
     <h1>Notifications</h1>
     <div class="subtitle">
-      Full archive — the bell dropdown shows only the last 10.
-      Cert renewals, backup status, hosting failures, migration
-      results all flow here.
+      Full archive — the bell menu shows only the last 10. Certificate
+      renewals, backup status, hosting failures, and transfer results
+      all flow here.
     </div>
   </div>
   <div>
@@ -24,14 +24,14 @@
     <label style="display:flex;gap:0.4rem;align-items:center">
       <span class="text-soft small">Kind</span>
       <select name="kind" class="input" style="min-width:14rem">
-        <option value="" {% if kind_filter.is_empty() %}selected{% endif %}>(all)</option>
+        <option value="" {% if kind_filter.is_empty() %}selected{% endif %}>All kinds</option>
         {% for k in known_kinds %}
           <option value="{{ k.0|e }}" {% if k.1 %}selected{% endif %}>{{ k.0 }}</option>
         {% endfor %}
       </select>
     </label>
     <button type="submit" class="btn">Apply</button>
-    <a href="/notifications" class="btn ghost">Clear</a>
+    <a href="/notifications" class="btn ghost">Reset</a>
     <span style="margin-left:auto" class="text-soft small">
       {{ items.len() }} notification{% if items.len() != 1 %}s{% endif %}
     </span>
@@ -47,19 +47,19 @@
       <h3>No notifications match this kind</h3>
       <p class="text-soft">
         Try a different kind, or
-        <a href="/notifications">clear the filter</a>
+        <a href="/notifications">reset the filter</a>
         to see all notifications.
       </p>
     {% else %}
       <h3>No notifications yet</h3>
       <p class="text-soft">
-        Hyperion posts here when a cert renews or expires soon, a backup
-        succeeds / fails, monitoring trips an alert, a hosting flips
-        state, or a cluster event happens.
+        Hyperion posts here when a certificate renews or expires soon, a
+        backup succeeds or fails, monitoring trips an alert, a hosting
+        changes state, or a cluster event occurs.
       </p>
       <p class="text-soft small" style="margin-top:0.6rem">
-        Want them by email or Slack too?
-        Configure the channels in <a href="/settings#tab-notifications">Settings → Notifications</a>.
+        To also receive these by email or Slack, set up the channels in
+        <a href="/settings#tab-notifications">Settings → Notifications</a>.
       </p>
     {% endif %}
   </div>

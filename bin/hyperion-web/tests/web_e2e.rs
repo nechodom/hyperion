@@ -908,9 +908,14 @@ async fn login_2fa_renders_friendly_invalid_error() {
         .await
         .expect("call");
     let body = body_string(resp).await;
+    // Friendly, human message — never the raw "invalid" error code.
     assert!(
-        body.contains("Wrong code"),
-        "expected friendly 'Wrong code' message, got body: {body}"
+        body.contains("That code didn't match"),
+        "expected the friendly invalid-code message, got body: {body}"
+    );
+    assert!(
+        !body.contains(">invalid<"),
+        "the raw error code must not be dumped into the page"
     );
 }
 

@@ -5,7 +5,7 @@
   <div>
     <h1>Background jobs</h1>
     <div class="subtitle">
-      Live progress for migrations, installs, backups, cert renewals and other long-running ops.
+      Live progress for transfers, installs, backups, certificate renewals, and other long-running operations.
     </div>
   </div>
 </div>
@@ -46,8 +46,8 @@
       </select>
     </label>
     <div style="display:flex;gap:0.5rem;justify-content:flex-end">
-      <button type="submit" class="btn">Apply</button>
-      <a href="/jobs" class="btn ghost">Clear</a>
+      <button type="submit" class="btn">Apply filters</button>
+      <a href="/jobs" class="btn ghost">Clear filters</a>
     </div>
   </form>
 </div>
@@ -67,9 +67,9 @@
     {% else %}
       <h3>No background jobs yet</h3>
       <p class="text-soft">
-        Jobs appear here when you start a migration, install a service,
-        run a backup, renew a cert, or trigger anything else that takes
-        more than a few seconds. Each row shows a live progress bar.
+        Jobs appear here when you start a transfer, install a service,
+        run a backup, renew a certificate, or trigger anything else that
+        takes more than a few seconds. Each row shows a live progress bar.
       </p>
       <div style="margin-top:0.9rem;display:flex;gap:0.5rem;justify-content:center;flex-wrap:wrap">
         <a class="btn" href="/hostings/new">Create hosting</a>
@@ -111,18 +111,18 @@
             </td>
             <td>
               {% if j.state == "running" %}
-                <span class="pill warn">running</span>
+                <span class="pill warn">RUNNING</span>
               {% else if j.state == "done" %}
-                <span class="pill ok">done</span>
+                <span class="pill ok">DONE</span>
               {% else if j.state == "failed" %}
-                <span class="pill err">failed</span>
+                <span class="pill err">FAILED</span>
               {% else %}
                 <span class="pill">{{ j.state }}</span>
               {% endif %}
             </td>
             <td>{{ j.actor_label }}</td>
             <td><span class="text-soft small">{{ j.started_at }}</span></td>
-            <td><a href="/jobs/{{ j.id }}" class="btn small">View</a></td>
+            <td><a href="/jobs/{{ j.id }}" class="btn small">View job</a></td>
           </tr>
         {% endfor %}
       </tbody>

@@ -5,9 +5,9 @@
   <div>
     <h1>Settings</h1>
     <div class="subtitle">
-      Live view of <code>/etc/hyperion/agent.toml</code> (passwords + tokens hidden).
-      Edits are written atomically and a <code>.bak</code> is kept;
-      the running agent picks them up after a restart.
+      Live view of <code>/etc/hyperion/agent.toml</code> (passwords and tokens hidden).
+      Edits are written atomically with a <code>.bak</code> kept alongside.
+      The running agent applies them after a restart.
     </div>
   </div>
 </div>
@@ -90,7 +90,7 @@
     {% if config.backup_remote.enabled %}<span class="tab-badge" style="background:var(--success);color:white">●</span>
     {% else %}<span class="tab-badge" style="background:var(--surface-2)">local</span>{% endif %}
   </a>
-  <a class="tab" data-tab="cluster" href="#cluster" role="tab" title="Control-panel domain, hosting placement policy, and 2FA policy">
+  <a class="tab" data-tab="cluster" href="#cluster" role="tab" title="Panel domain, hosting placement, and security policy">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
     Control plane
   </a>
@@ -119,14 +119,14 @@
        view + edit its mail config; saving writes + applies on THAT node. #}
     {% if !nodes.is_empty() %}
     <div class="field" style="max-width:24rem;margin:0 0 1rem">
-      <label for="mail_node_sel">Configuring node</label>
+      <label for="mail_node_sel">Configure node</label>
       <select id="mail_node_sel" onchange="location.href='/settings?mail_node='+encodeURIComponent(this.value)+'#mail'">
-        <option value="local" {% if mail_node.is_empty() || mail_node == "local" %}selected{% endif %}>master (this node)</option>
+        <option value="local" {% if mail_node.is_empty() || mail_node == "local" %}selected{% endif %}>The master (this node)</option>
         {% for n in nodes %}
         <option value="{{ n.node_id }}" {% if mail_node == n.node_id %}selected{% endif %}>{{ n.label }}{% if let Some(ip) = n.public_ip.as_ref() %} — {{ ip }}{% endif %}</option>
         {% endfor %}
       </select>
-      <p class="text-soft small" style="margin:0.3rem 0 0">Saving applies + reloads mail on the selected node (its agent restarts ~5 s after save).</p>
+      <p class="text-soft small" style="margin:0.3rem 0 0">Each node has its own mail config. Saving applies and reloads mail on the selected node; its agent restarts about 5 s later.</p>
     </div>
     {% endif %}
     <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:1rem">
@@ -139,11 +139,11 @@
       <span class="grow"></span>
       <button type="button" class="btn small" id="email-autodetect">
         <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-        Probe local SMTP relay
+        Detect local SMTP relay
       </button>
     </div>
     <p class="text-soft small" style="margin:0 0 1rem">
-      Probes <code>localhost:25</code> and <code>localhost:587</code> for a local postfix/exim that's already accepting mail, and pre-fills the form below.
+      Checks <code>localhost:25</code> and <code>localhost:587</code> for a local postfix or exim that already accepts mail, then pre-fills the form below.
     </p>
     <div id="email-autodetect-result"></div>
 
@@ -202,7 +202,7 @@
         </div>
       </div>
       <div class="field">
-        <label for="default_to">Default recipient <span class="hint">notifications on this node without a hosting-specific owner</span></label>
+        <label for="default_to">Default recipient <span class="hint">where this node's notifications go when no hosting owner applies</span></label>
         <input id="default_to" name="default_to" type="email" value="{{ mta.cfg_default_to|e }}">
       </div>
       <button type="submit" class="btn primary">Save mail settings</button>
@@ -232,10 +232,10 @@
                value="{% if !mta.cfg_default_to.is_empty() %}{{ mta.cfg_default_to }}{% endif %}"
                style="margin:0">
       </div>
-      <button class="btn primary" type="submit">Send test</button>
+      <button class="btn primary" type="submit">Send test email</button>
     </form>
     <p class="text-soft small" style="margin:0.6rem 0 0">
-      The selected node opens a TCP connection to its own SMTP relay (each node has its own <code>[email]</code> section in <code>agent.toml</code>). The flash banner shows the relay's SMTP response code — 250 means queued.
+      The selected node opens a TCP connection to its own SMTP relay (each node has its own <code>[email]</code> section in <code>agent.toml</code>). The flash banner shows the relay's SMTP response code; 250 means the message was queued.
     </p>
   </div>
 
@@ -288,15 +288,15 @@
     </div>
     <p class="text-soft small" style="margin:0 0 1rem">
       Site <code>mail()</code> goes through <code>/usr/sbin/sendmail</code> → postfix.
-      Hyperion configures postfix automatically at agent boot based on the <code>[email]</code>
-      section above (smart-host when a relay is set, direct MX otherwise).
+      Hyperion configures postfix automatically when the agent boots, based on the <code>[email]</code>
+      section above: smart-host when a relay is set, direct MX otherwise.
     </p>
 
     {% if mta.mode == "not-installed" %}
       <div class="alert alert-warn" role="alert" style="margin-bottom:0.8rem">
         Postfix is not installed on this node. Install it from
-        <a href="/services">/services → postfix → Install</a>; the agent will
-        configure it on the next boot.
+        <a href="/services">Service health → postfix → Install</a>, and the agent will
+        configure it on its next boot.
       </div>
     {% else %}
       <dl class="kv" style="margin:0">
@@ -317,9 +317,9 @@
           {% else %}
             <span class="pill warn" style="margin-left:0.5rem">not a FQDN</span>
             <span class="text-soft small" style="display:block;margin-top:0.25rem">
-              Most receivers reject HELO without a dotted hostname.
-              Fix with <code>hostnamectl set-hostname &lt;name&gt;.&lt;domain&gt;</code>
-              then click <strong>Reconfigure</strong> below.
+              Most receivers reject a HELO without a dotted hostname.
+              Set one with <code>hostnamectl set-hostname &lt;name&gt;.&lt;domain&gt;</code>,
+              then click <strong>Reconfigure postfix</strong> below.
             </span>
           {% endif %}
         </dd>
@@ -364,25 +364,25 @@
             {% match mta.outbound_port_25_ok %}
             {% when Some with (false) %}
               <div class="alert alert-warn" role="status" style="margin-top:0.6rem">
-                <strong>Port 25 is blocked → direct MX delivery isn't possible from this node.</strong>
-                Every receiving mail server listens on port 25 only, so postfix can't
-                connect to them.
+                <strong>Port 25 is blocked, so direct MX delivery isn't possible from this node.</strong>
+                Receiving mail servers accept delivery on port 25 only, so postfix can't
+                reach them.
                 <ul style="margin:0.4rem 0 0;padding-left:1.2rem;font-size:0.9rem;line-height:1.55">
                   {% for probe in mta.outbound_smtp_probes %}
                     {% if probe.reachable && probe.port != 25 %}
                     <li>
-                      <strong>:{{ probe.port }} is open</strong> — set up a smart-host
-                      on port {{ probe.port }}. Fill in the SMTP relay form above with
+                      <strong>Port {{ probe.port }} is open</strong> — set up a smart-host
+                      on it. Fill in the SMTP relay form above with
                       a host that accepts authenticated submission on this port
-                      (your own postfix on another VPS with port 25 outbound, or any
-                      submission-accepting host you control). Agent re-applies postfix
-                      config to smart-host mode automatically on next restart.
+                      (your own postfix on another VPS with outbound port 25, or any
+                      submission host you control). The agent re-applies the postfix
+                      config in smart-host mode on its next restart.
                     </li>
                     {% endif %}
                   {% endfor %}
                   <li>
-                    Ask your ISP / hosting provider to unblock outbound TCP/25.
-                    Most will (after a verification step) for legitimate mail use.
+                    Ask your ISP or hosting provider to unblock outbound TCP/25.
+                    Most will, after a verification step, for legitimate mail use.
                   </li>
                 </ul>
               </div>
@@ -419,10 +419,10 @@
          stuck + why. Hidden when empty so the card stays tidy. #}
       {% if mta.mailq_total > 0 %}
       <div class="alert alert-warn" role="alert" style="margin-top:0.8rem">
-        <strong>{{ mta.mailq_total }} message(s) deferred in postfix queue.</strong>
-        Most common reason: outbound TCP/25 blocked by your hosting provider
+        <strong>{{ mta.mailq_total }} message(s) deferred in the postfix queue.</strong>
+        The most common cause is outbound TCP/25 blocked by your hosting provider
         (see the row above). Other possibilities: PTR mismatch, recipient
-        rejected for SPF, recipient MX timeout.
+        rejected on SPF, or a recipient MX timeout.
       </div>
       <details open style="margin-top:0.8rem">
         <summary style="cursor:pointer;font-weight:600;font-size:0.85rem;color:var(--text-dim)">
@@ -450,22 +450,22 @@
           <input type="hidden" name="_csrf" value="{{ csrf_token }}">
           <input type="hidden" name="target_node" value="{{ mail_node }}">
           <button class="btn small" type="submit"
-                  title="Tell postfix to retry every deferred message right now (postqueue -f). Useful after fixing the underlying connectivity issue.">
+                  title="Tell postfix to retry every deferred message now (postqueue -f) — use after fixing the underlying connectivity issue">
             <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/><path d="M20.49 15a9 9 0 0 1-14.85 3.36L1 14"/></svg>
-            Flush queue (retry now)
+            Retry queue now
           </button>
         </form>
         <form method="post" action="/settings/mta-queue-clear" style="margin:0"
-              data-confirm-title="Discard {{ mta.mailq_total }} queued message(s)"
-              data-confirm-body="postsuper -d ALL removes every message in postfix's queue. Use this only when the messages are unrecoverable (wrong recipient, dead domain, etc.). This cannot be undone."
+              data-confirm-title="Discard {{ mta.mailq_total }} queued message(s)?"
+              data-confirm-body="postsuper -d ALL removes every message from the postfix queue. Use it only when the messages are unrecoverable (wrong recipient, dead domain, and so on). This cannot be undone."
               data-confirm-confirm-label="Discard all"
               data-confirm-variant="danger">
           <input type="hidden" name="_csrf" value="{{ csrf_token }}">
           <input type="hidden" name="target_node" value="{{ mail_node }}">
           <button class="btn small ghost" type="submit"
-                  title="postsuper -d ALL — discard every queued message. Destructive.">
+                  title="postsuper -d ALL — discard every queued message (destructive)">
             <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
-            Clear queue ({{ mta.mailq_total }})
+            Discard queue ({{ mta.mailq_total }})
           </button>
         </form>
       </div>
@@ -476,7 +476,7 @@
           <input type="hidden" name="_csrf" value="{{ csrf_token }}">
           <input type="hidden" name="target_node" value="{{ mail_node }}">
           <button class="btn" type="submit"
-                  title="Re-apply postfix config from current [email] settings without restarting the agent">
+                  title="Re-apply the postfix config from the current [email] settings without restarting the agent">
             <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10"/><path d="M20.49 15a9 9 0 0 1-14.85 3.36L1 14"/></svg>
             Reconfigure postfix
           </button>
@@ -487,7 +487,7 @@
           <input type="hidden" name="target_node" value="{{ mail_node }}">
           <div class="field" style="margin:0;flex:1;min-width:14rem">
             <label for="mta_test_to" style="font-size:0.78rem">
-              Send a test via /usr/sbin/sendmail
+              Send a test through /usr/sbin/sendmail
             </label>
             <input id="mta_test_to" name="to" type="email" required
                    placeholder="you@example.cz" style="margin:0"
@@ -497,11 +497,11 @@
         </form>
       </div>
       <p class="text-soft small" style="margin:0.6rem 0 0">
-        <strong>Reconfigure</strong> re-runs the same self-heal the agent does at boot — picks
-        smart-host or direct-MX based on the <code>[email]</code> section above.
-        <strong>Send via sendmail</strong> exercises the same pipe that PHP <code>mail()</code>
-        from hosted sites uses — wrapper → postfix → relay/MX. Exit 0 means postfix queued it;
-        delivery state shows up in <code>/var/log/mail.log</code> a few seconds later.
+        <strong>Reconfigure postfix</strong> re-runs the same self-heal the agent does at boot:
+        it picks smart-host or direct-MX based on the <code>[email]</code> section above.
+        <strong>Send via sendmail</strong> exercises the same path that PHP <code>mail()</code>
+        from hosted sites uses (wrapper → postfix → relay/MX). Exit 0 means postfix queued the message;
+        the delivery result appears in <code>/var/log/mail.log</code> a few seconds later.
       </p>
     {% endif %}
   </div>
@@ -509,11 +509,11 @@
   <div class="card muted" style="margin-top:1rem">
     <h2 style="font-size:0.95rem;margin:0 0 0.6rem">How outbound mail works</h2>
     <ul class="text-soft small" style="margin:0;padding-left:1.2rem;line-height:1.7">
-      <li><strong>Relay host</strong> — pick a real provider (Postmark, Mailgun, SendGrid, Brevo, AWS SES, Gmail SMTP) or point at a local postfix that's been configured to relay outbound. Direct-from-VPS sends to public mailboxes almost always land in spam.</li>
-      <li><strong>SPF</strong> — the recipient's mail server checks if your relay's IP is on the From-address domain's permitted-sender list. Set up via a DNS TXT record on your domain; Hyperion shows per-hosting SPF analysis on each hosting's detail page.</li>
-      <li><strong>Sender address</strong> — must be a domain you control AND whose SPF includes your relay. Auto-detect tries to derive a sensible default from <code>/etc/mailname</code>.</li>
+      <li><strong>Relay host</strong> — pick a real provider (Postmark, Mailgun, SendGrid, Brevo, AWS SES, Gmail SMTP) or point at a local postfix configured to relay outbound. Sending directly from a VPS to public mailboxes almost always lands in spam.</li>
+      <li><strong>SPF</strong> — the recipient's mail server checks whether your relay's IP is on the From-address domain's permitted-sender list. Set this up with a DNS TXT record on your domain; Hyperion shows per-hosting SPF analysis on each hosting's detail page.</li>
+      <li><strong>Sender address</strong> — must use a domain you control whose SPF includes your relay. Detection derives a sensible default from <code>/etc/mailname</code>.</li>
       <li><strong>Per-node</strong> — each worker has its own <code>[email]</code> section in its own <code>agent.toml</code>. Pick a node in the From dropdown above to verify that node's outbound path.</li>
-      <li><strong>Every send is logged</strong> at <a href="/emails">/emails</a> with the full SMTP response — so you can tell "queued" (250) from "rejected by relay" (550) without leaving the UI.</li>
+      <li><strong>Every send is logged</strong> at <a href="/emails">Emails</a> with the full SMTP response, so you can tell "queued" (250) from "rejected by relay" (550) without leaving the panel.</li>
     </ul>
   </div>
 </div>
@@ -546,11 +546,11 @@
   <div class="card muted" style="margin-top:1rem">
     <h2 style="font-size:0.95rem;margin:0 0 0.6rem">How HTTPS issuing works</h2>
     <ul class="text-soft small" style="margin:0;padding-left:1.2rem;line-height:1.7">
-      <li>Each hosting starts with a <strong>self-signed cert</strong> right after provisioning — enough for nginx to come up.</li>
-      <li>When <code>http://&lt;domain&gt;</code> resolves to this server, you can issue a real <strong>Let's Encrypt cert</strong> from the hosting's detail page → SSL tab.</li>
-      <li>Hyperion uses <strong>HTTP-01</strong> (file under <code>{{ config.acme.challenge_dir }}/&lt;token&gt;</code>) — no DNS API integration needed.</li>
-      <li>Certs auto-renew 30 days before expiry; failures alert via Slack / email.</li>
-      <li>Per-hosting contact email overrides this one on the hosting detail page.</li>
+      <li>Each hosting starts with a <strong>self-signed certificate</strong> right after provisioning — enough for nginx to come up.</li>
+      <li>Once <code>http://&lt;domain&gt;</code> resolves to this server, you can issue a real <strong>Let's Encrypt certificate</strong> from the hosting's detail page → SSL tab.</li>
+      <li>Hyperion uses the <strong>HTTP-01</strong> challenge (a file under <code>{{ config.acme.challenge_dir }}/&lt;token&gt;</code>), so no DNS API integration is needed.</li>
+      <li>Certificates auto-renew 30 days before expiry; failures alert via Slack or email.</li>
+      <li>A per-hosting contact email, set on the hosting detail page, overrides this one.</li>
     </ul>
   </div>
 </div>
@@ -573,14 +573,14 @@
       <input type="hidden" name="section" value="slack">
       <div class="field">
         <label for="default_webhook">Default Slack incoming webhook URL
-          {% if config.slack.default_webhook_set %}<span class="text-soft">— stored; type a new URL to replace, leave blank to clear</span>{% endif %}
+          {% if config.slack.default_webhook_set %}<span class="text-soft">— stored; enter a new URL to replace it, or leave blank to clear</span>{% endif %}
         </label>
         <input id="default_webhook" name="default_webhook" type="url"
                placeholder="https://hooks.slack.com/services/T…/B…/…"
                value="">
       </div>
       <p class="text-soft small" style="margin:0 0 0.8rem">
-        Cluster-wide alerts (backup failures, cert renewals, monitor down/up, billing reminders) are posted here. Per-hosting webhooks override this one — set them on each hosting's detail page.
+        Cluster-wide alerts (backup failures, certificate renewals, monitor down/up, billing reminders) post here. A per-hosting webhook, set on the hosting's detail page, overrides this one.
       </p>
       <button type="submit" class="btn primary">Save Slack webhook</button>
     </form>
@@ -600,9 +600,9 @@
     <div class="flash-body">
       Backups always land on local disk first. For an off-site copy you have
       two destination types, both pushed immediately after each backup: the
-      <strong>FTP/FTPS/SFTP</strong> push below, or
-      <strong>S3-compatible multi-target</strong> storage with age encryption
-      at <a href="/settings/backups">Settings → Backup targets</a>.
+      single-target <strong>FTP/FTPS/SFTP</strong> push below, or
+      <strong>S3-compatible</strong> storage with age encryption and multiple
+      targets at <a href="/settings/backups">Settings → Backup targets</a>.
     </div>
   </div>
 
@@ -616,7 +616,7 @@
       {% else %}<span class="pill warn">local only</span>{% endif %}
     </div>
     <p class="text-soft small" style="margin:0 0 1rem">
-      Backups always land on local disk first (under <code>/var/lib/hyperion/backups/local</code>). Optionally Hyperion can also push a copy to an off-site FTP/FTPS/SFTP server immediately after the local backup finishes.
+      Backups always land on local disk first, under <code>/var/lib/hyperion/backups/local</code>. Hyperion can also push a copy to an off-site FTP/FTPS/SFTP server as soon as the local backup finishes.
     </p>
     <form method="post" action="/settings/config" autocomplete="off">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
@@ -685,7 +685,7 @@
         </div>
       </div>
       <p class="text-soft small" style="margin:0.4rem 0 0.8rem">
-        Backups older than <strong>max age</strong> are pruned after every new backup completes, but at least <strong>keep latest N</strong> per hosting are always retained (so an old hosting that nobody touches for months still has the last few backups around when you need them).
+        After every new backup completes, backups older than <strong>max age</strong> are pruned — but at least <strong>keep latest N</strong> per hosting are always retained. So a hosting nobody has touched for months still keeps its last few backups for when you need them.
       </p>
       <button type="submit" class="btn primary">Save retention policy</button>
     </form>
@@ -711,19 +711,19 @@
     <p class="text-soft small" style="margin:0 0 0.6rem;line-height:1.55">
       The control panel is reachable at
       <strong><a href="https://{{ config.cluster.panel_hostname }}:8443" target="_blank" rel="noopener">https://{{ config.cluster.panel_hostname }}:8443</a></strong>
-      (also on port 443 if you've fronted the panel via nginx). Save the form below with a new hostname to migrate; the existing vhost stays in place until the next nginx reload after a different hostname lands.
+      (also on port 443 if you front the panel with nginx). To move it, save the form below with a new hostname; the existing vhost stays in place until the next nginx reload after a different hostname lands.
     </p>
     <p class="text-soft small" style="margin:0 0 0.6rem;line-height:1.55;padding:0.55rem 0.75rem;background:color-mix(in oklab,var(--success) 8%,transparent);border-left:3px solid var(--success);border-radius:4px">
-      <strong>🔒 Raw-IP access is auto-disabled.</strong> Requests
-      hitting the panel via <code>https://&lt;ip&gt;:8443</code>
-      get a 308 redirect to <code>https://{{ config.cluster.panel_hostname }}:8443</code>.
-      The hostname is mandatory once you've set it. Loopback
+      <strong>🔒 Raw-IP access is disabled automatically.</strong> A request
+      that reaches the panel at <code>https://&lt;ip&gt;:8443</code>
+      gets a 308 redirect to <code>https://{{ config.cluster.panel_hostname }}:8443</code>.
+      Once set, the hostname is required. Loopback
       (<code>localhost</code> / <code>127.0.0.1</code>) stays open
-      for local health probes + SSH-tunnel debug.
+      for local health probes and SSH-tunnel debugging.
     </p>
     {% else %}
     <p class="text-soft small" style="margin:0 0 0.6rem;line-height:1.55">
-      Right now the panel is only reachable via the raw IP + port (e.g. <code>https://1.2.3.4:8443</code>) with a self-signed cert. Bind it to a real hostname below: the agent will write the nginx vhost, generate a temporary self-signed cert so nginx starts, then trigger a Let's Encrypt issuance in the background.
+      Right now the panel is reachable only by raw IP and port (for example <code>https://1.2.3.4:8443</code>) with a self-signed certificate. Bind it to a real hostname below: the agent writes the nginx vhost, generates a temporary self-signed certificate so nginx starts, then triggers a Let's Encrypt issuance in the background.
     </p>
     {% endif %}
     <form method="post" action="/settings/panel-provision" autocomplete="off">
@@ -739,27 +739,27 @@
                required>
         <p class="text-soft small" style="margin:0.3rem 0 0;line-height:1.55">
           The A / AAAA record for this name <strong>must point to this server</strong>
-          before submitting (the agent does a DNS preflight unless you tick the
+          before you submit (the agent runs a DNS preflight unless you tick the
           override below). After provisioning, your URL becomes
-          <code>https://&lt;hostname&gt;:8443</code> — bookmark the new URL, the
-          old IP-based URL stays working but won't have a trusted cert.
+          <code>https://&lt;hostname&gt;:8443</code>. Bookmark it: the
+          old IP-based URL keeps working but won't have a trusted certificate.
         </p>
       </div>
 
       <label class="field-checkbox" style="margin:0.4rem 0 0.6rem">
         <input type="checkbox" name="skip_dns_check" value="on">
-        Skip DNS preflight <span class="text-soft small">— record propagated but cache is stale</span>
+        Skip DNS preflight <span class="text-soft small">— use when the record has propagated but a cache is stale</span>
       </label>
 
       <button type="submit" class="btn primary">Provision panel hostname</button>
       <p class="text-soft small" style="margin:0.6rem 0 0;line-height:1.55">
         <strong>What happens:</strong>
         (1) DNS preflight,
-        (2) <code>cluster.panel_hostname</code> persists to agent.toml,
-        (3) nginx vhost lands at <code>/etc/nginx/sites-enabled/hyperion-panel.conf</code>
-        with a self-signed cert so the reload doesn't fail,
-        (4) nginx <code>-t</code> + reload,
-        (5) Let's Encrypt issuance kicks off in the background — the
+        (2) <code>cluster.panel_hostname</code> is saved to agent.toml,
+        (3) the nginx vhost lands at <code>/etc/nginx/sites-enabled/hyperion-panel.conf</code>
+        with a self-signed certificate so the reload doesn't fail,
+        (4) nginx <code>-t</code> and reload,
+        (5) Let's Encrypt issuance starts in the background — the
         live progress bar below tracks it.
       </p>
     </form>
@@ -773,7 +773,7 @@
     <div style="margin-top:1rem;padding:0.85rem 1rem;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius-sm)">
       <div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.4rem">
         <svg class="h-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-        <strong style="font-size:0.92rem">Live cert issuance</strong>
+        <strong style="font-size:0.92rem">Live certificate issuance</strong>
       </div>
       <div id="panel-cert-status"
            hx-get="/settings/panel-cert-status"
@@ -799,9 +799,9 @@
         Allow new hostings to be created on the master node
       </label>
       <p class="text-soft small" style="margin:0.4rem 0 0.8rem;line-height:1.55">
-        Uncheck this if the master should be a <strong>control plane only</strong> and all hostings live on workers.
+        Turn this off to make the master a <strong>control plane only</strong>, with every hosting living on a worker.
         <br>
-        With this off, the Target-node dropdown on /hostings/new hides the master option, and creating directly via <code>hctl</code> on the master will be refused. Existing hostings on the master stay where they are — the toggle only affects new creates.
+        While off, the target-node dropdown in the create wizard hides the master option, and creating directly with <code>hctl</code> on the master is refused. Existing hostings on the master stay put — this toggle affects new creates only.
       </p>
       <button type="submit" class="btn primary">Save cluster settings</button>
     </form>
@@ -819,13 +819,13 @@
       <label class="field-checkbox" style="font-weight:600">
         <input type="checkbox" name="enforce_admin_2fa" value="true"
                {% if config.cluster.enforce_admin_2fa %}checked{% endif %}>
-        Require 2FA for admin &amp; super-admin accounts
+        Require 2FA for Administrator and Owner accounts
       </label>
       <p class="text-soft small" style="margin:0.4rem 0 0.8rem;line-height:1.55">
-        When on, an admin who signs in without 2FA enrolled is sent straight to
-        the enrolment card and can't use the rest of the panel until they set it
-        up. Operators and viewers are unaffected. Turn it off only temporarily
-        (e.g. during a migration) — applies within ~30 s, no restart needed.
+        When on, an Administrator or Owner who signs in without 2FA enrolled is sent straight to
+        the enrollment card and can't reach the rest of the panel until they set it
+        up. Operators and read-only users are unaffected. Turn it off only briefly,
+        for example during a server move. Applies within about 30 s; no restart needed.
       </p>
       <label class="field-checkbox" style="font-weight:600">
         <input type="checkbox" name="enforce_worker_cert_pinning" value="true"
@@ -833,14 +833,14 @@
         Enforce worker TLS certificate pinning
       </label>
       <p class="text-soft small" style="margin:0.4rem 0 0.8rem;line-height:1.55">
-        When on, the master refuses any RPC to a worker whose TLS cert doesn't
-        match the SPKI pin that worker reported on its heartbeat (a hardening
-        against a man-in-the-middle on the master→worker channel). <strong>Turn
+        When on, the master refuses any RPC to a worker whose TLS certificate doesn't
+        match the SPKI pin that worker reported on its heartbeat. This hardens the
+        master→worker channel against a man-in-the-middle. <strong>Turn
         this on only after</strong> the per-node pins on <a href="/install">Nodes</a>
-        show <em>🔒 TLS pin on file</em> and you've seen no <code>warn-only</code>
-        pin-mismatch warnings in the logs — a stale pin would block management of
+        show <em>🔒 TLS pin on file</em> and you have seen no <code>warn-only</code>
+        pin-mismatch warnings in the logs: a stale pin blocks management of
         that worker until its next heartbeat. Workers that haven't reported a pin
-        yet are never blocked. Applies within ~30 s, no restart needed.
+        yet are never blocked. Applies within about 30 s; no restart needed.
       </p>
       <button type="submit" class="btn primary">Save security settings</button>
     </form>
@@ -858,17 +858,16 @@
       Step 1 · Mark test nodes &amp; set the auto-domain
     </h2>
     <p class="text-soft small" style="margin:0 0 0.4rem">
-      Mark some nodes as <strong>test-only</strong> for staging / preview work.
-      Hostings created on a test node get an auto-generated subdomain
-      (so you can't accidentally squat a real customer's domain there),
-      and the wizard refuses to put a production domain on a test node
-      (and vice versa).
+      Mark nodes as <strong>test-only</strong> for staging and preview work.
+      Hostings created on a test node get an auto-generated subdomain,
+      so you can't accidentally take over a real customer's domain there.
+      The create wizard also refuses to put a production domain on a test node,
+      and vice versa.
     </p>
     <p class="text-soft small" style="margin:0 0 0.8rem;font-style:italic">
-      <strong>Tip:</strong> the easier way to mark a node as test is on
-      <a href="/install">/install</a> — each row has a one-click toggle.
-      This card is the manual fallback if you want to bulk-edit or paste
-      a CSV.
+      <strong>Tip:</strong> the quickest way to mark a node as test is on the
+      <a href="/install">Nodes</a> page — each row has a one-click toggle.
+      Use this card when you want to bulk-edit or paste a list.
     </p>
     <form method="post" action="/settings/config" autocomplete="off">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
@@ -879,7 +878,7 @@
       <input type="hidden" name="_checkboxes" value="test_wp_no_index">
 
       <div class="field">
-        <label>Test nodes <span class="hint">tick which nodes should be treated as test</span></label>
+        <label>Test nodes <span class="hint">tick the nodes to treat as test-only</span></label>
         {# Hidden input the form actually submits — built from the
            checkboxes below by JS. Server-side stays unchanged
            (parses CSV from agent.toml). #}
@@ -888,8 +887,8 @@
         <div id="test-node-checkboxes" class="row" style="flex-direction:column;gap:0.4rem;padding:0.6rem;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--surface-1)">
           {% if nodes.is_empty() %}
             <p class="text-soft small" style="margin:0">
-              No remote nodes enrolled yet. Enrol nodes on
-              <a href="/install">/install</a>; they'll appear here as checkboxes.
+              No worker nodes enrolled yet. Enroll nodes on the
+              <a href="/install">Nodes</a> page and they'll appear here as checkboxes.
             </p>
           {% else %}
             {% for n in nodes %}
@@ -907,31 +906,31 @@
           {% endif %}
         </div>
         <p class="text-soft small" style="margin:0.3rem 0 0">
-          The easier way: on <a href="/install">/install</a> each row has a
-          "Mark as test" button that does the same thing. No checkbox
-          ticked = test-node feature is off (every node is treated as production).
+          Quicker option: on the <a href="/install">Nodes</a> page each row has a
+          "Mark as test" button that does the same thing. With no node ticked, the
+          test-node feature is off and every node is treated as production.
         </p>
       </div>
 
       <div class="field">
-        <label for="test_domain_template">Auto-domain template <span class="hint">used when creating a hosting on a test node</span></label>
+        <label for="test_domain_template">Auto-domain template <span class="hint">applied when creating a hosting on a test node</span></label>
         <input id="test_domain_template" name="test_domain_template" type="text" autocomplete="off"
                value="{{ config.cluster.test_domain_template }}"
                placeholder="e.g. {name}.{node}.staging.example.com">
         <p class="text-soft small" style="margin:0.3rem 0 0">
-          Two tokens get substituted:
-          <code>{name}</code> = the short name the operator types in the wizard,
-          <code>{node}</code> = the target node's ID.
-          Result is lower-cased.
+          Two tokens are substituted:
+          <code>{name}</code> is the short name the operator types in the wizard, and
+          <code>{node}</code> is the target node's ID.
+          The result is lower-cased.
         </p>
         <p class="text-soft small" style="margin:0.5rem 0 0;padding:0.55rem 0.75rem;background:var(--surface-1);border-radius:6px">
-          <strong>Example.</strong> Template
-          <code>{name}.{node}.staging.example.com</code>,
-          operator types <code>blog</code> in the wizard,
-          target node is <code>lab-01</code>
-          → final domain <code>blog.lab-01.staging.example.com</code>.
+          <strong>Example.</strong> With template
+          <code>{name}.{node}.staging.example.com</code>, an
+          operator who types <code>blog</code> in the wizard
+          on node <code>lab-01</code>
+          gets the domain <code>blog.lab-01.staging.example.com</code>.
           <br>
-          Make sure you have a wildcard DNS record (e.g.
+          Add a wildcard DNS record (for example
           <code>*.staging.example.com</code> → your test-node IP)
           so the auto-generated subdomains resolve.
         </p>
@@ -940,12 +939,12 @@
       <label class="field-checkbox" style="font-weight:600">
         <input type="checkbox" name="test_wp_no_index" value="true"
                {% if config.cluster.test_wp_no_index %}checked{% endif %}>
-        Discourage search engines for WordPress installs on test nodes
+        Discourage search engines on WordPress installs on test nodes
       </label>
       <p class="text-soft small" style="margin:0.3rem 0 0.8rem">
         Sets <code>blog_public = 0</code> in WordPress right after a fresh
-        install on a test node — Google &amp; friends are asked not to index.
-        Operator can flip it later in WP admin → Settings → Reading.
+        install on a test node, asking search engines not to index it.
+        You can change this later in WP admin → Settings → Reading.
       </p>
 
       <button type="submit" class="btn primary">Save test-node settings</button>
@@ -957,14 +956,14 @@
   <div class="card" style="margin-top:1rem">
     <h2 style="font-size:0.95rem;margin:0 0 0.35rem">Step 2 · Test-node wildcard certificates</h2>
     <p class="text-soft small" style="margin:0 0 0.8rem">
-      Issue ONE <code>*.&lt;base&gt;</code> cert per test node and every auto-subdomain it
-      creates reuses it — instant HTTPS, no per-site Let's Encrypt rate-limit hits.
-      Renews automatically via Cloudflare. Status &amp; expiry live on the
+      Issue one <code>*.&lt;base&gt;</code> certificate per test node, and every auto-subdomain it
+      creates reuses it — instant HTTPS, with no per-site Let's Encrypt rate-limit hits.
+      It renews automatically via Cloudflare. Status and expiry live on the
       <a href="/certs">Certificates page</a>.
     </p>
     {% if wildcard_nodes.is_empty() %}
       <p class="text-soft small empty" style="margin:0">
-        No test nodes yet — tick a node above and set an auto-domain template first.
+        No test nodes yet. Tick a node above and set an auto-domain template first.
       </p>
     {% else %}
       <div class="table-wrap">
@@ -986,7 +985,7 @@
                   <button class="btn small" type="submit" name="provider" value="manual"
                           title="Show the TXT records to publish, then validate">Manual DNS</button>
                   <button class="btn small primary" type="submit" name="provider" value="cloudflare"
-                          title="Publish + validate via the node's Cloudflare token">Cloudflare</button>
+                          title="Publish and validate with the node's Cloudflare token">Cloudflare</button>
                 </form>
               </td>
             </tr>
@@ -995,9 +994,9 @@
         </table>
       </div>
       <p class="text-soft small" style="margin:0.6rem 0 0">
-        Requires control of the base domain's DNS. Cloudflare needs a token on the node
-        (<code>/etc/hyperion/cloudflare.token</code>, Zone:Read + DNS:Edit); Manual walks
-        you through the TXT records.
+        Both options require control of the base domain's DNS. Cloudflare needs a token on the node
+        (<code>/etc/hyperion/cloudflare.token</code>, with Zone:Read + DNS:Edit); Manual DNS walks
+        you through the TXT records by hand.
       </p>
     {% endif %}
   </div>
@@ -1005,10 +1004,10 @@
   <div class="card muted" style="margin-top:1rem">
     <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Multi-node tips</h2>
     <ul class="text-soft small" style="margin:0;padding-left:1.2rem;line-height:1.7">
-      <li><strong><a href="/install">Nodes &amp; install</a></strong> page lists enrolled workers, lets you mint invite tokens for new ones, run a connectivity test, and trigger remote apt/hyperion updates.</li>
-      <li><strong>Updates</strong> — pick any enrolled node from <a href="/install">/install</a> → click <em>Update…</em> → tick <em>System packages</em> and/or <em>Hyperion</em> → log streams live in the row.</li>
-      <li><strong>Stats</strong> at <a href="/stats">/stats</a> default to the <em>cluster total</em>: hostings, disk and bandwidth summed across master + all workers. Switch the dropdown to a node to see per-node sparklines.</li>
-      <li><strong>Service health</strong> at <a href="/services">/services</a> shows each node's systemd units. Click <em>Install</em> to apt-install a missing service — output streams live (no more "dpkg returned an error" with no detail).</li>
+      <li>The <strong><a href="/install">Nodes</a></strong> page lists enrolled workers, mints invite tokens for new ones, runs a connectivity test, and triggers remote apt and Hyperion updates.</li>
+      <li><strong>Updates</strong> — on the <a href="/install">Nodes</a> page, pick any enrolled node, click <em>Update…</em>, tick <em>System packages</em> and/or <em>Hyperion</em>, and the log streams live in the row.</li>
+      <li><strong>Stats</strong> at <a href="/stats">Stats</a> default to the <em>cluster total</em>: hostings, disk, and bandwidth summed across the master and all workers. Switch the dropdown to a node for its own sparklines.</li>
+      <li><strong>Service health</strong> at <a href="/services">Services</a> shows each node's systemd units. Click <em>Install</em> to apt-install a missing service; the output streams live, with the full error instead of a bare "dpkg returned an error".</li>
     </ul>
   </div>
 </div>
@@ -1027,11 +1026,11 @@
       Trash / soft-delete
     </h2>
     <p class="text-soft small" style="margin:0 0 0.8rem">
-      When on, deleting a hosting moves it to <a href="/trash">/trash</a>:
-      nginx serves 503, FPM stops, DB user is locked, OS user is locked,
-      but files / DB / certs / user are preserved. After the retention
-      window the scheduler runs the hard-delete pipeline automatically.
-      Off (the default) = immediate hard-delete as before.
+      When on, deleting a hosting moves it to <a href="/trash">Trash</a>:
+      nginx serves 503, FPM stops, and the database and OS users are locked,
+      but the files, database, certificates, and user are preserved. After the retention
+      window, the scheduler runs the permanent-delete pipeline automatically.
+      When off (the default), deletes are permanent immediately, as before.
     </p>
     <form method="post" action="/settings/config" autocomplete="off">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
@@ -1054,9 +1053,9 @@
                min="1" max="365" step="1"
                value="{{ config.cluster.trash_retention_days }}">
         <p class="text-soft small" style="margin:0.3rem 0 0">
-          The scheduler hard-deletes any trashed hosting older than this.
-          Operators can also Restore (un-trash) or Delete permanently
-          from /trash before the timer expires.
+          The scheduler permanently deletes any trashed hosting older than this.
+          Before the timer expires, you can still Restore a hosting or Delete it
+          permanently from <a href="/trash">Trash</a>.
         </p>
       </div>
 
@@ -1072,11 +1071,11 @@
     <p class="text-soft small" style="margin:0 0 0.8rem;line-height:1.55">
       The audit log records every state-changing operation as a
       tamper-evident BLAKE3 hash chain. Without retention it grows
-      indefinitely; on a busy cluster that's tens of MB / month.
-      Set a window (days) below to auto-purge older entries — the
-      chain anchors itself at the oldest surviving row so
+      indefinitely — on a busy cluster, tens of MB per month.
+      Set a window in days below to purge older entries automatically; the
+      chain re-anchors at the oldest surviving row, so
       <code>verify_chain</code> still works on what's left.
-      <strong>0 (the default) = keep forever.</strong>
+      <strong>0 (the default) keeps everything forever.</strong>
     </p>
     <form method="post" action="/settings/config" autocomplete="off">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
@@ -1088,11 +1087,11 @@
                min="0" max="3650" step="1"
                value="{{ config.cluster.audit_retention_days }}">
         <p class="text-soft small" style="margin:0.3rem 0 0;line-height:1.55">
-          Typical: <code>90</code> for compliance-light setups,
-          <code>365</code> for tighter rules, <code>0</code> if you
-          download <code>/audit?export=csv</code> off-cluster and
-          want everything kept locally. Purges run during the normal
-          scheduler tick (~60s cadence) — no extra cron job.
+          Typical values: <code>90</code> for compliance-light setups,
+          <code>365</code> for tighter rules, or <code>0</code> if you
+          export <code>/audit?export=csv</code> off-cluster and
+          want everything kept locally. Purges run on the normal
+          scheduler tick (about every 60 s); no extra cron job is needed.
         </p>
       </div>
       <button type="submit" class="btn primary">Save audit retention</button>
@@ -1110,7 +1109,7 @@
       Raw agent.toml
     </h2>
     <p class="text-soft small" style="margin:0 0 0.8rem">
-      Read-only snapshot of what the agent has loaded into memory. Passwords and tokens are replaced with <code>«set»</code> markers. Edit on disk with <code>sudo $EDITOR /etc/hyperion/agent.toml</code> + <code>systemctl restart hyperion-agent</code> to apply.
+      Read-only snapshot of what the agent currently holds in memory. Passwords and tokens are shown as <code>«set»</code> markers. To edit on disk, run <code>sudo $EDITOR /etc/hyperion/agent.toml</code>, then <code>systemctl restart hyperion-agent</code> to apply.
     </p>
     <pre style="background:var(--surface-1);border-radius:6px;padding:0.9rem 1rem;font-size:0.78rem;line-height:1.55;overflow:auto;max-height:36rem">{{ raw_toml }}</pre>
   </div>
@@ -1121,7 +1120,7 @@
 <div class="flash warn" style="margin-top:1rem">
   <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
   <div class="flash-body">
-    Edits are written to <code>/etc/hyperion/agent.toml</code> with comments preserved (atomic write + <code>.bak</code> backup). The running agent keeps its old in-memory config until you restart it — use the <strong>Restart</strong> button on <a href="/services" style="color:inherit;text-decoration:underline">Service health</a> or run <code>systemctl restart hyperion-agent</code> on this node.
+    Edits are written to <code>/etc/hyperion/agent.toml</code> with comments preserved (atomic write plus a <code>.bak</code> backup). The running agent keeps its old in-memory config until you restart it. Use the <strong>Restart</strong> button on <a href="/services" style="color:inherit;text-decoration:underline">Service health</a>, or run <code>systemctl restart hyperion-agent</code> on this node.
   </div>
 </div>
 

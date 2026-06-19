@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Edit profile · {{ profile.name }} · hyperion{% endblock %}
+{% block title %}Edit profile · {{ profile.name }} · Hyperion{% endblock %}
 {% block main %}
 <div class="breadcrumbs">
   <a href="/profiles">Profiles</a>
@@ -9,13 +9,13 @@
 <div class="page-header">
   <div>
     <h1>Edit profile: {{ profile.name }}</h1>
-    <div class="subtitle">Changes apply only to hostings you (re-)apply this profile to from now on. Already-applied hostings keep their current values until re-applied.</div>
+    <div class="subtitle">Changes apply only to hostings you apply this profile to from now on. Hostings that already use it keep their current values until you re-apply.</div>
   </div>
   <span class="grow"></span>
   <div class="actions">
     <a href="/profiles" class="btn ghost">
       <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
-      Back
+      Back to profiles
     </a>
   </div>
 </div>
@@ -48,7 +48,7 @@
         <input id="p_php_memory" name="php_memory_mb" type="number" min="16" max="8192" value="{{ profile.php_memory_mb }}">
       </div>
       <div class="field">
-        <label for="p_php_exec">PHP max_exec <span class="hint">sec</span></label>
+        <label for="p_php_exec">PHP max execution time <span class="hint">seconds</span></label>
         <input id="p_php_exec" name="php_max_exec_secs" type="number" min="1" max="3600" value="{{ profile.php_max_exec_secs }}">
       </div>
     </div>
@@ -68,23 +68,23 @@
         <input id="p_db_max" name="db_max_connections" type="number" min="1" max="1000" value="{{ profile.db_max_connections }}">
       </div>
       <div class="field">
-        <label for="p_disk">Disk limit <span class="hint">MB · blank = unlimited</span></label>
+        <label for="p_disk">Disk limit <span class="hint">MB · leave blank for unlimited</span></label>
         <input id="p_disk" name="disk_hard_mb" type="number" min="0" value="{% if let Some(m) = profile.disk_hard_mb %}{{ m }}{% endif %}">
       </div>
     </div>
     <div class="field">
-      <label for="p_bw">Monthly bandwidth <span class="hint">MB · blank = unlimited</span></label>
+      <label for="p_bw">Monthly bandwidth <span class="hint">MB · leave blank for unlimited</span></label>
       <input id="p_bw" name="bw_monthly_mb" type="number" min="0" value="{% if let Some(m) = profile.bw_monthly_mb %}{{ m }}{% endif %}">
     </div>
 
     <h2 style="font-size:0.95rem;margin:1.5rem 0 0.6rem">Expiration policy</h2>
     <div class="field-row">
       <div class="field">
-        <label for="p_grace">Grace period <span class="hint">days after expiry → auto-delete</span></label>
+        <label for="p_grace">Grace period <span class="hint">days after expiry before auto-delete</span></label>
         <input id="p_grace" name="expiry_grace_days" type="number" min="0" max="365" value="{{ profile.expiry_grace_days }}">
       </div>
       <div class="field">
-        <label for="p_off">Warning offsets <span class="hint">days before expiry, comma-sep</span></label>
+        <label for="p_off">Warning offsets <span class="hint">days before expiry, comma-separated</span></label>
         <input id="p_off" name="expiry_warning_offsets" type="text" value="{{ profile.expiry_warning_offsets }}">
       </div>
     </div>
@@ -100,19 +100,19 @@
         <input id="p_currency" name="price_currency" type="text" maxlength="3" value="{% if let Some(c) = profile.price_currency %}{{ c }}{% endif %}" style="text-transform:uppercase">
       </div>
       <div class="field">
-        <label for="p_interval">Interval</label>
+        <label for="p_interval">Billing interval</label>
         <select id="p_interval" name="price_interval">
-          <option value="">none</option>
-          <option value="monthly"   {% if let Some(iv) = profile.price_interval %}{% if iv == "monthly"   %}selected{% endif %}{% endif %}>monthly</option>
-          <option value="quarterly" {% if let Some(iv) = profile.price_interval %}{% if iv == "quarterly" %}selected{% endif %}{% endif %}>quarterly</option>
-          <option value="yearly"    {% if let Some(iv) = profile.price_interval %}{% if iv == "yearly"    %}selected{% endif %}{% endif %}>yearly</option>
+          <option value="">No interval</option>
+          <option value="monthly"   {% if let Some(iv) = profile.price_interval %}{% if iv == "monthly"   %}selected{% endif %}{% endif %}>Monthly</option>
+          <option value="quarterly" {% if let Some(iv) = profile.price_interval %}{% if iv == "quarterly" %}selected{% endif %}{% endif %}>Quarterly</option>
+          <option value="yearly"    {% if let Some(iv) = profile.price_interval %}{% if iv == "yearly"    %}selected{% endif %}{% endif %}>Yearly</option>
         </select>
       </div>
     </div>
 
     <h2 style="font-size:0.95rem;margin:1.5rem 0 0.6rem">Notifications <span class="muted" style="font-weight:400;font-size:0.82rem">— optional</span></h2>
     <div class="field">
-      <label for="p_slack">Slack incoming webhook URL <span class="hint">overrides the global default</span></label>
+      <label for="p_slack">Slack incoming webhook URL <span class="hint">overrides the global default for hostings on this profile</span></label>
       <input id="p_slack" name="slack_webhook" type="url" value="{% if let Some(w) = profile.slack_webhook %}{{ w }}{% endif %}" placeholder="https://hooks.slack.com/services/T.../B.../...">
     </div>
 
@@ -121,13 +121,13 @@
        picks this profile. Both optional; blank = "no preference,
        wizard keeps its global defaults". #}
     <h2 style="font-size:0.95rem;margin:1.5rem 0 0.6rem">
-      Wizard defaults <span class="muted" style="font-weight:400;font-size:0.82rem">— pre-fills the new-hosting form when this profile is picked</span>
+      Wizard defaults <span class="muted" style="font-weight:400;font-size:0.82rem">— pre-fill the new-hosting form when this profile is picked</span>
     </h2>
     <div class="field-row" style="margin-bottom:1rem">
       <div class="field" style="flex:1">
         <label for="p_default_php_version">Pre-fill PHP version</label>
         <select id="p_default_php_version" name="default_php_version">
-          <option value=""{% if profile.default_php_version.is_none() %} selected{% endif %}>— no preference —</option>
+          <option value=""{% if profile.default_php_version.is_none() %} selected{% endif %}>No preference</option>
           {% for v in ["8.1", "8.2", "8.3", "8.4"] %}
           <option value="{{ v }}"
                   {% if let Some(cur) = profile.default_php_version.as_ref() %}{% if cur == v %} selected{% endif %}{% endif %}>
@@ -139,8 +139,8 @@
       <div class="field" style="flex:1">
         <label for="p_default_db_engine">Pre-fill database</label>
         <select id="p_default_db_engine" name="default_db_engine">
-          <option value=""{% if profile.default_db_engine.is_none() %} selected{% endif %}>— no preference —</option>
-          {% for (val, label) in [("mariadb", "MariaDB"), ("postgres", "PostgreSQL"), ("none", "No DB (static)")] %}
+          <option value=""{% if profile.default_db_engine.is_none() %} selected{% endif %}>No preference</option>
+          {% for (val, label) in [("mariadb", "MariaDB"), ("postgres", "PostgreSQL"), ("none", "No database (static)")] %}
           <option value="{{ val }}"
                   {% if let Some(cur) = profile.default_db_engine.as_ref() %}{% if cur == val %} selected{% endif %}{% endif %}>
             {{ label }}
@@ -151,14 +151,14 @@
     </div>
 
     <h2 style="font-size:0.95rem;margin:1.5rem 0 0.6rem">
-      WordPress plugins + themes <span class="muted" style="font-weight:400;font-size:0.82rem">— installed when this profile is applied to a WP-enabled hosting</span>
+      WordPress plugins and themes <span class="muted" style="font-weight:400;font-size:0.82rem">— installed when this profile is applied to a WordPress hosting</span>
     </h2>
     <p class="text-soft small" style="margin:0 0 0.7rem;line-height:1.55">
-      One item per line. Each line is either:
-      a WordPress.org <strong>slug</strong> (<code>akismet</code>, <code>yoast-seo</code>),
-      or <code>@asset:&lt;id&gt;</code> to install from an uploaded ZIP
-      — see the <a href="/profiles/wp-assets">asset library</a> for IDs.
-      Trailing <code>!</code> means "also activate after install".
+      One item per line. Each line is either
+      a WordPress.org <strong>slug</strong> (<code>akismet</code>, <code>yoast-seo</code>)
+      or <code>@asset:&lt;id&gt;</code> to install from an uploaded ZIP —
+      see the <a href="/profiles/wp-assets">asset library</a> for IDs.
+      A trailing <code>!</code> also activates the item after install.
       Lines starting with <code>#</code> are comments.
     </p>
     <div class="field-row">

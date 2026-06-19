@@ -5,8 +5,8 @@
   <div>
     <h1>Certificates</h1>
     <div class="subtitle">
-      Cluster-wide TLS inventory. Expiring soonest first — click a domain to jump to its hosting.
-      Test-node wildcard certs are issued in <a href="/settings#testnodes">Settings → Test nodes</a>.
+      Cluster-wide TLS certificate inventory, expiring soonest first. Click a domain to jump to its hosting.
+      Test-node wildcard certificates are issued in <a href="/settings#testnodes">Settings → Test nodes</a>.
     </div>
   </div>
   <span class="grow"></span>
@@ -17,13 +17,13 @@
        click ad-hoc when you want a force-sweep outside the regular
        scheduler tick (e.g. after fixing a broken ACME setup). #}
     <form method="post" action="/certs/renew-all" style="display:inline"
-          data-confirm-title="Renew all eligible certs"
-          data-confirm-body="Sweeps every node and runs the renewal logic on every cert currently in the renewal window (default <30 days to expiry). Certs outside the window are skipped — no-op, no API calls to ACME. Output streams to /jobs as cert_renew."
+          data-confirm-title="Renew all eligible certificates"
+          data-confirm-body="Sweeps every node and renews each certificate currently in its renewal window (within 30 days of expiry by default). Certificates outside the window are skipped, with no calls to the ACME provider. Progress streams to Jobs as cert_renew."
           data-confirm-confirm-label="Renew now"
           data-confirm-variant="primary">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <button class="btn primary" type="submit"
-              {% if rows.is_empty() %}disabled title="No certs to renew"{% endif %}>
+              {% if rows.is_empty() %}disabled title="No certificates to renew"{% endif %}>
         <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
         Renew all eligible
       </button>
@@ -50,17 +50,17 @@
   <div class="kpi-card" style="{% if expired > 0 %}border-color:var(--danger){% endif %}">
     <div class="kpi-label">Expired</div>
     <div class="kpi-value">{{ expired }}</div>
-    <div class="kpi-meta">already past not_after</div>
+    <div class="kpi-meta">past expiry date</div>
   </div>
   <div class="kpi-card" style="{% if critical > 0 %}border-color:var(--danger){% endif %}">
     <div class="kpi-label">Critical &lt; 7 d</div>
     <div class="kpi-value">{{ critical }}</div>
-    <div class="kpi-meta">act now</div>
+    <div class="kpi-meta">renew now</div>
   </div>
   <div class="kpi-card" style="{% if warning > 0 %}border-color:var(--warn){% endif %}">
     <div class="kpi-label">Warning &lt; 30 d</div>
     <div class="kpi-value">{{ warning }}</div>
-    <div class="kpi-meta">renew window opens</div>
+    <div class="kpi-meta">in the renewal window</div>
   </div>
   <div class="kpi-card">
     <div class="kpi-label">Healthy</div>
@@ -76,8 +76,9 @@
     </div>
     <h3>No certificates yet</h3>
     <p class="text-soft">
-      As hostings get TLS issued (Let's Encrypt or self-signed bootstrap),
-      they'll show up here with expiry, issuer and node info.
+      Once hostings have TLS certificates issued (Let's Encrypt or a
+      self-signed bootstrap), they appear here with their expiry, issuer,
+      and node.
     </p>
     <div style="margin-top:0.9rem;display:flex;gap:0.5rem;justify-content:center;flex-wrap:wrap">
       <a class="btn" href="/hostings/new">Create your first hosting</a>
@@ -104,7 +105,7 @@
             <td>
               <code>{{ r.issuer }}</code>
               {% if r.issuer == "self-signed" %}
-                <span class="text-soft small" title="Bootstrap cert — click through and Issue cert once DNS resolves">bootstrap</span>
+                <span class="text-soft small" title="Bootstrap certificate — open the hosting and issue a certificate once DNS resolves">bootstrap</span>
               {% endif %}
             </td>
             <td>

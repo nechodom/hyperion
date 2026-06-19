@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}Dashboard · hyperion{% endblock %}
+{% block title %}Dashboard · Hyperion{% endblock %}
 {% block main %}
 <div class="page-header">
   <div>
@@ -8,7 +8,7 @@
       {% if let Some(c) = cluster %}
         {{ c.total_active }} active · {{ c.total_hostings }} total hostings · {{ c.nodes.len() }} node{% if c.nodes.len() != 1 %}s{% endif %}
       {% else %}
-        Cluster overview at a glance.
+        Your cluster at a glance.
       {% endif %}
     </div>
   </div>
@@ -16,7 +16,7 @@
   <div class="actions">
     <a href="/hostings/new" class="btn primary">
       <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-      New hosting
+      Create hosting
     </a>
   </div>
 </div>
@@ -72,10 +72,10 @@
     <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
     <div class="flash-body">
       <strong>Update available.</strong>
-      Running <code>{{ update_current_short }}</code>,
-      upstream <code>{{ update_latest_short }}</code>
+      This node runs <code>{{ update_current_short }}</code>;
+      the latest release is <code>{{ update_latest_short }}</code>
       (tag <code>{{ update_status.latest_tag }}</code>).
-      Run <code>sudo /opt/hyperion/packaging/install/update.sh</code> on this node to upgrade.
+      To upgrade, run <code>sudo /opt/hyperion/packaging/install/update.sh</code> on this node.
     </div>
   </div>
 {% endif %}
@@ -89,7 +89,7 @@
     <div class="flash-body">
       {{ a.message }}
       {% if let Some(h) = a.hosting %}
-        — <a href="/hostings/{{ h }}" style="color:inherit;text-decoration:underline">open {{ h }}</a>
+        — <a href="/hostings/{{ h }}" style="color:inherit;text-decoration:underline">Open {{ h }}</a>
       {% endif %}
     </div>
   </div>
@@ -106,7 +106,7 @@
     {% if services_health.warn_down > 0 %}
       {{ services_health.warn_down }} optional service(s) degraded.
     {% endif %}
-    <a href="/services" style="color:inherit;text-decoration:underline;margin-left:0.4rem">Open /services →</a>
+    <a href="/services" style="color:inherit;text-decoration:underline;margin-left:0.4rem">Review services →</a>
   </div>
 </div>
 {% endif %}
@@ -133,7 +133,7 @@
   </div>
 
   <div class="kpi-card bw">
-    <div class="kpi-label">BW out · 24h</div>
+    <div class="kpi-label">Bandwidth out · 24h</div>
     <div class="kpi-value">{% if let Some(c) = cluster %}{{ crate::handlers::stats::fmt_bytes(c.total_bw_out_24h) }}{% else %}—{% endif %}</div>
     <div class="kpi-meta">{% if let Some(c) = cluster %}{{ c.total_requests_24h }} requests · 24h{% else %}—{% endif %}</div>
   </div>
@@ -153,9 +153,9 @@
     </div>
     <div class="kpi-meta">
       {% if !services_health.services.is_empty() %}
-        {{ services_health.services.len() }} tracked · <a href="/services" style="color:inherit">details →</a>
+        {{ services_health.services.len() }} tracked · <a href="/services" style="color:inherit">View details →</a>
       {% else %}
-        not probed
+        not yet probed
       {% endif %}
     </div>
   </div>
@@ -225,7 +225,7 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
       </div>
       <h3>No hostings yet</h3>
-      <p>Provision your first site to see it appear here.</p>
+      <p>Create your first hosting to start serving a site. It will appear here once provisioned.</p>
       <a href="/hostings/new" class="btn primary">Create first hosting</a>
     </div>
   {% else %}
@@ -260,11 +260,11 @@
       Recent activity
     </h2>
     {% if !activity.is_empty() %}
-      <a href="/audit" class="btn small ghost">All →</a>
+      <a href="/audit" class="btn small ghost">View audit log →</a>
     {% endif %}
   </div>
   {% if activity.is_empty() %}
-    <p class="muted" style="font-size:0.88rem;margin:0">No audit entries yet.</p>
+    <p class="muted" style="font-size:0.88rem;margin:0">No activity yet. Actions across the cluster will show up here.</p>
   {% else %}
     <ul class="activity-feed">
       {% for a in activity %}

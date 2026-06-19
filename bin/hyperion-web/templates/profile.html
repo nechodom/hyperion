@@ -1,20 +1,20 @@
 {% extends "base.html" %}
-{% block title %}Profile · hyperion{% endblock %}
+{% block title %}Profile · Hyperion{% endblock %}
 {% block main %}
 {% if require_2fa %}
 <div class="flash error" role="alert" style="margin-bottom:1rem">
   <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
   <div class="flash-body">
     <strong>Two-factor authentication is required for your role.</strong>
-    Set it up below to unlock the rest of the panel — the other pages stay
-    locked until you enrol.
+    Set it up below to unlock the rest of the panel. Other pages stay
+    locked until you enroll.
   </div>
 </div>
 {% endif %}
 <div class="page-header">
   <div>
     <h1>Profile</h1>
-    <div class="subtitle">Your account · 2-factor authentication · password</div>
+    <div class="subtitle">Your account, two-factor authentication, password, and email.</div>
   </div>
   <div>
     <a href="/settings/sessions" class="btn ghost">
@@ -48,7 +48,7 @@
   <div class="kpi-card disk">
     <div class="kpi-label">Role</div>
     <div class="kpi-value" style="font-size:1.1rem">{{ crate::handlers::role_label(u.role.as_str()) }}</div>
-    <div class="kpi-meta">access scope</div>
+    <div class="kpi-meta">Your access level</div>
   </div>
   <div class="kpi-card bw">
     <div class="kpi-label">2FA</div>
@@ -60,7 +60,7 @@
       {% endif %}
     </div>
     <div class="kpi-meta">
-      {% if u.totp_required %}required by admin{% else %}optional{% endif %}
+      {% if u.totp_required %}Required for your role{% else %}Optional{% endif %}
     </div>
   </div>
 </div>
@@ -82,7 +82,7 @@
     </div>
     <div style="flex:1;min-width:14rem">
       <p class="muted" style="font-size:0.85rem;margin:0 0 0.6rem">
-        PNG / JPG / WEBP, max 1 MB. Recommend square ≥ 256 px.
+        PNG, JPG, or WEBP, up to 1 MB. A square image of at least 256 px works best.
       </p>
       {# Multipart upload: _csrf rides in URL query (middleware
          skips multipart body parsing). #}
@@ -91,15 +91,15 @@
             style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap;margin:0">
         <input type="file" name="file" accept="image/png,image/jpeg,image/webp" required
                style="font-size:0.85rem">
-        <button class="btn primary" type="submit">Upload</button>
+        <button class="btn primary" type="submit">Upload picture</button>
       </form>
       <form method="post" action="/profile/avatar/clear" style="margin:0.5rem 0 0"
-            data-confirm-title="Remove avatar"
-            data-confirm-body="Your profile picture will be removed."
-            data-confirm-confirm-label="Remove"
+            data-confirm-title="Remove profile picture"
+            data-confirm-body="Your profile picture will be removed and your initial shown instead. You can upload a new one at any time."
+            data-confirm-confirm-label="Remove picture"
             data-confirm-variant="danger">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-        <button class="btn small ghost" type="submit">Remove current avatar</button>
+        <button class="btn small ghost" type="submit">Remove current picture</button>
       </form>
     </div>
   </div>
@@ -113,21 +113,21 @@
 <div class="card" style="grid-column:1/-1">
   <h2>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
-    Set up 2-factor authentication
+    Set up two-factor authentication
   </h2>
   <ol style="line-height:1.7;font-size:0.92rem">
-    <li><strong>Open your authenticator app</strong> (Google Authenticator, 1Password, Authy, Bitwarden, etc.) and <strong>scan the QR code</strong> below — or enter the secret manually.</li>
-    <li><strong>Save the backup codes</strong> in your password manager. Each works exactly once if you lose access to your authenticator.</li>
-    <li><strong>Enter the 6-digit code</strong> your app generates to confirm enrollment.</li>
+    <li><strong>Open your authenticator app</strong> (Google Authenticator, 1Password, Authy, Bitwarden, and similar) and <strong>scan the QR code</strong> below, or enter the secret manually.</li>
+    <li><strong>Save the backup codes</strong> in your password manager. Each code works once, and lets you sign in if you lose access to your authenticator.</li>
+    <li><strong>Enter the 6-digit code</strong> from your app to confirm enrollment.</li>
   </ol>
 
   <div style="display:grid;grid-template-columns:auto 1fr;gap:1.5rem;align-items:start;margin-top:1rem">
     <div style="background:white;border-radius:var(--radius-md);padding:0.4rem">{{ en.qr_svg|safe }}</div>
     <div>
-      <div class="text-soft small" style="margin-bottom:0.2rem">SECRET (manual entry)</div>
+      <div class="text-soft small" style="margin-bottom:0.2rem">Secret (manual entry)</div>
       <code style="display:block;font-size:0.95rem;padding:0.4rem 0.6rem;background:var(--surface-2);border-radius:var(--radius-xs);word-break:break-all;border:1px solid var(--border)">{{ en.secret_base32 }}</code>
 
-      <div class="text-soft small" style="margin-top:0.8rem;margin-bottom:0.3rem">BACKUP CODES (save NOW — shown only once)</div>
+      <div class="text-soft small" style="margin-top:0.8rem;margin-bottom:0.3rem">Backup codes (save now — shown only once)</div>
       <div style="display:grid;grid-template-columns:repeat(2, 1fr);gap:0.3rem">
         {% for c in en.backup_codes %}
           <code style="background:var(--surface-2);padding:0.25rem 0.5rem;border-radius:var(--radius-xs);text-align:center;font-size:0.95rem;border:1px solid var(--border)">{{ c }}</code>
@@ -152,20 +152,20 @@
 {# Steady states. #}
 {% else %}
 <div class="card">
-  <h2 style="margin:0 0 0.6rem">2-factor authentication</h2>
+  <h2 style="margin:0 0 0.6rem">Two-factor authentication</h2>
   {% if let Some(u) = user %}
     {% if u.totp_enrolled %}
-      <p>You have 2FA enabled. On every login you'll be asked for a code from your authenticator app (or a one-time backup code).</p>
+      <p>Two-factor authentication is on. Each time you sign in, you'll be asked for a code from your authenticator app or a one-time backup code.</p>
       <form method="post" action="/profile/2fa/disable"
             data-confirm-title="Disable two-factor authentication"
-            data-confirm-body="Your login will only require a password again. You can re-enable 2FA at any time."
+            data-confirm-body="Sign-in will require only a password again, which is less secure. You can turn it back on at any time."
             data-confirm-confirm-label="Disable 2FA"
             data-confirm-variant="danger">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
         <button class="btn danger small" type="submit">Disable 2FA</button>
       </form>
     {% else %}
-      <p>You don't have 2FA enabled. Set it up to protect your account with a 6-digit code from an authenticator app.</p>
+      <p>Two-factor authentication is off. Turn it on to protect your account with a 6-digit code from an authenticator app.</p>
       <form method="post" action="/profile/2fa/start">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
         <button class="btn small primary" type="submit">Set up 2FA</button>
@@ -181,10 +181,10 @@
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <input type="password" name="current_password" placeholder="current password" autocomplete="current-password" required>
     <input type="password" name="new_password" placeholder="new password" minlength="8" autocomplete="new-password" required>
-    <input type="password" name="new_password_confirm" placeholder="repeat password" minlength="8" autocomplete="new-password" required>
+    <input type="password" name="new_password_confirm" placeholder="repeat new password" minlength="8" autocomplete="new-password" required>
     <button type="submit" class="btn small primary" style="align-self:flex-start">Change password</button>
   </form>
-  <p class="text-soft small" style="margin-top:0.4rem">Min 8 characters. Enter your current password to confirm — your other signed-in devices will be signed out.</p>
+  <p class="text-soft small" style="margin-top:0.4rem">At least 8 characters. Enter your current password to confirm. Your other signed-in devices will be signed out.</p>
 </div>
 
 <div class="card" style="margin-top:1rem">
@@ -195,7 +195,7 @@
   {% if let Some(u) = user %}
   <p class="text-soft small" style="margin:0 0 0.6rem">
     Current address: <code>{{ u.email }}</code>. We'll send a 6-digit
-    code to the new address; enter it here to confirm.
+    code to the new address. Enter it below to confirm the change.
   </p>
   {% endif %}
 
@@ -223,11 +223,11 @@
         <input type="text" name="code" placeholder="123456"
                inputmode="numeric" pattern="[0-9]{6}" maxlength="6" required autocomplete="off"
                style="font-size:1.1rem;letter-spacing:0.2em;width:8rem">
-        <button type="submit" class="btn small primary">Confirm</button>
+        <button type="submit" class="btn small primary">Confirm new email</button>
       </form>
       <form method="post" action="/profile/email/cancel" style="display:inline;margin:0">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-        <button type="submit" class="btn small ghost">Cancel pending</button>
+        <button type="submit" class="btn small ghost">Cancel request</button>
       </form>
     </div>
   </details>

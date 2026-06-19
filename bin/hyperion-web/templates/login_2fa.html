@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Two-factor authentication · hyperion</title>
+  <title>Two-factor authentication · Hyperion</title>
   <link rel="stylesheet" href="/static/app.css?v={{ css_version }}">
   <meta name="color-scheme" content="light dark">
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%236366f1'/%3E%3Cpath d='M9 9 L9 23 M9 16 L17 16 M17 9 L17 23 M21 14 L24 14 L24 23 M21 11 L21 14' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E">
@@ -35,10 +35,10 @@
           </div>
         </div>
 
-        <h1 style="margin-top:2rem">One more thing.</h1>
-        <p>Open your authenticator app and enter the 6-digit code — or use a backup code if you don't have the app handy.</p>
+        <h1 style="margin-top:2rem">One more step.</h1>
+        <p>Open your authenticator app and enter the 6-digit code. No app on hand? Use one of your backup codes instead.</p>
       </div>
-      <div class="footer">© hyperion · Debian 12+ · Rust + axum + askama</div>
+      <div class="footer">© Hyperion · Debian 12+ · Rust + axum + askama</div>
     </aside>
 
     <main class="login-form">
@@ -56,16 +56,16 @@
 
         <h2>Two-factor authentication</h2>
         <p class="subtitle" id="totp-subtitle">Enter the 6-digit code from your authenticator app.</p>
-        <p class="subtitle" id="backup-subtitle" hidden>Enter one of the one-shot backup codes you saved during enrollment.</p>
+        <p class="subtitle" id="backup-subtitle" hidden>Enter one of the single-use backup codes you saved when you set up two-factor authentication.</p>
 
         {% if let Some(e) = error %}
           <div class="flash error" role="alert">
             <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
             <div class="flash-body">
               {% if e == "invalid" %}
-                Wrong code — double-check the digits or try a backup code.
+                That code didn't match. Check the digits, or use a backup code instead.
               {% else if e == "expired" %}
-                Your 5-minute 2FA window expired. Start over from the sign-in page.
+                Your two-factor window expired. Sign in again to get a fresh code.
               {% else %}
                 {{ e }}
               {% endif %}
@@ -96,10 +96,10 @@
           </div>
           <label class="login-field-label" style="display:flex;align-items:center;gap:0.45rem;margin-top:0.9rem;cursor:pointer;font-weight:400">
             <input type="checkbox" name="remember" value="on" id="totp-remember">
-            Remember this device for 30 days
+            Trust this device for 30 days
           </label>
           <button class="btn primary lg" type="submit" id="totp-submit" style="width:100%;margin-top:0.8rem">
-            Verify
+            Verify code
             <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
           </button>
         </form>
@@ -118,7 +118,7 @@
           </div>
           <label class="login-field-label" style="display:flex;align-items:center;gap:0.45rem;margin-top:0.9rem;cursor:pointer;font-weight:400">
             <input type="checkbox" name="remember" value="on">
-            Remember this device for 30 days
+            Trust this device for 30 days
           </label>
           <button class="btn primary lg" type="submit" style="width:100%;margin-top:0.8rem">
             Verify backup code
@@ -137,7 +137,7 @@
 
         <p class="login-foot">
           Lost your authenticator and out of backup codes? An administrator can
-          reset 2FA on your account from <code>/admin/users</code>.
+          reset two-factor authentication on your account from <code>/admin/users</code>.
         </p>
       </div>
     </main>
