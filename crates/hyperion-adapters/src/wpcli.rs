@@ -1105,4 +1105,29 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].name, "twentytwentyfour");
     }
+
+    // The exact production payload (test.four.testovaciverze.cz): a real
+    // `wp plugin list --format=json` whose stdout has the six `$requires`
+    // warning pairs AND empty-version / must-use / dropin rows. We assert it
+    // parses with the warnings on EITHER side, so neither shape can regress.
+    const PROD_WARN: &str = "PHP Warning:  Undefined property: stdClass::$requires in phar:///usr/local/bin/wp/vendor/wp-cli/extension-command/src/Plugin_Command.php on line 875\nWarning: Undefined property: stdClass::$requires in phar:///usr/local/bin/wp/vendor/wp-cli/extension-command/src/Plugin_Command.php on line 875";
+    const PROD_ARRAY: &str = r#"[{"name":"acfml","status":"active","update":"unavailable","version":"1.10.1","update_version":"2.2.4","auto_update":"off"},{"name":"advanced-custom-fields-pro","status":"active","update":"available","version":"5.11.4","update_version":"6.8.4","auto_update":"off"},{"name":"apartmany-plugin","status":"active","update":"none","version":"","update_version":"","auto_update":"off"},{"name":"wphosting-fail401login","status":"must-use","update":"","version":"1.0","update_version":"","auto_update":"off"},{"name":"advanced-cache.php","status":"dropin","update":"","version":"","update_version":"","auto_update":"off"}]"#;
+
+    #[test]
+    fn parse_wp_json_real_production_payload_leading_noise() {
+        let raw = format!("{PROD_WARN}\n{PROD_ARRAY}");
+        let rows: Vec<RawPluginRow> = parse_wp_json(&raw, "wp plugin list").expect("should parse");
+        assert_eq!(rows.len(), 5);
+        assert_eq!(rows[0].name, "acfml");
+        assert_eq!(rows[4].name, "advanced-cache.php");
+    }
+
+    #[test]
+    fn parse_wp_json_real_production_payload_trailing_noise() {
+        // The shape the panel actually captured: JSON first, warnings after.
+        let raw = format!("{PROD_ARRAY}\n{PROD_WARN}");
+        let rows: Vec<RawPluginRow> = parse_wp_json(&raw, "wp plugin list").expect("should parse");
+        assert_eq!(rows.len(), 5);
+        assert_eq!(rows[1].name, "advanced-custom-fields-pro");
+    }
 }
