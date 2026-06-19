@@ -133,6 +133,12 @@ The script stops services, fast-forwards `/opt/hyperion`, rebuilds,
 reinstalls binaries, refreshes systemd units only if they changed,
 and tails `journalctl` for you on health-check failure.
 
+While `hyperion-web` is briefly down mid-update, the panel vhost serves
+a self-refreshing **"Hyperion is updating…"** page (HTTP 503) instead of
+a bare nginx 502 — it returns to the panel automatically once the service
+is back. (The agent re-asserts this fallback into the panel vhost on every
+boot, so it lands after the first update that ships it.)
+
 ### Local development (macOS / dev VPS)
 
 ```bash

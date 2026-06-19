@@ -83,5 +83,25 @@ server {
         proxy_read_timeout  3600s;
         proxy_send_timeout  3600s;
         proxy_buffering off;
+
+        # When hyperion-web is down — e.g. mid `update.sh`, which stops the
+        # service to swap the binary — nginx can't reach the upstream and would
+        # return a bare 502. Serve a friendly "updating" page instead, as a
+        # proper 503 + Retry-After so clients know it's temporary. We do NOT set
+        # proxy_intercept_errors, so hyperion-web's OWN 5xx responses still pass
+        # through untouched — only an unreachable upstream lands here.
+        error_page 502 503 504 =503 @hyperion_maintenance;
+    }
+
+    # Static "updating" page, served straight from disk so it works while the
+    # upstream is down. The agent plants/refreshes it at
+    # /var/lib/hyperion/maintenance/panel-maintenance.html whenever it writes
+    # this vhost; the =503 above keeps the status a real Service Unavailable.
+    location @hyperion_maintenance {
+        root /var/lib/hyperion/maintenance;
+        try_files /panel-maintenance.html =503;
+        add_header Retry-After 15 always;
+        add_header Cache-Control "no-store" always;
+        default_type text/html;
     }
 }

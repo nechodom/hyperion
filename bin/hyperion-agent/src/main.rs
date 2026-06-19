@@ -370,6 +370,20 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
+    // Self-heal / upgrade: re-assert the master panel vhost so template changes
+    // take effect after an in-place update — notably the upstream-down
+    // "updating" page that replaces a bare 502 while update.sh has hyperion-web
+    // stopped. No-op unless a panel hostname + cert are already present.
+    {
+        let panel_svc = svc.clone();
+        tokio::spawn(async move {
+            match panel_svc.ensure_panel_vhost().await {
+                Ok(true) => tracing::info!("boot: re-asserted master panel vhost"),
+                Ok(false) => tracing::debug!("boot: no panel vhost to assert"),
+                Err(e) => tracing::warn!(error=%e, "boot: panel vhost re-assert failed"),
+            }
+        });
+    }
     // Self-heal: scan every enabled nginx vhost for `ssl_certificate`
     // paths that no longer exist on disk. For each missing cert we
     // generate a self-signed bootstrap so `nginx -t` passes — without

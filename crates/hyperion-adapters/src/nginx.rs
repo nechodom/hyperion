@@ -236,6 +236,84 @@ pub fn render_panel(input: &PanelVhostInput<'_>) -> Result<String, AdapterError>
     Ok(tpl.render()?)
 }
 
+/// The "Hyperion is updating" page nginx serves from `@hyperion_maintenance`
+/// when the panel upstream (hyperion-web) is unreachable — i.e. while
+/// `update.sh` has it stopped to swap the binary. Self-contained (inline CSS,
+/// no upstream needed) and auto-refreshes so it returns to the panel the moment
+/// the service is back. The `x-hyperion-maintenance` marker lets us refresh our
+/// own copy on upgrade while never clobbering a page an operator customised.
+const PANEL_MAINTENANCE_HTML: &str = r##"<!-- x-hyperion-maintenance: panel v1 - operator may replace this file freely -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="refresh" content="10">
+  <title>Hyperion is updating…</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body {
+      margin: 0; min-height: 100vh;
+      display: flex; align-items: center; justify-content: center;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+      color: #e2e8f0; padding: 1.5rem;
+    }
+    .card {
+      max-width: 480px; padding: 2.5rem 2rem;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 12px; text-align: center; backdrop-filter: blur(8px);
+    }
+    .icon {
+      width: 56px; height: 56px; margin: 0 auto 1.4rem;
+      border-radius: 14px; background: rgba(99,102,241,0.18);
+      display: flex; align-items: center; justify-content: center;
+    }
+    .icon svg { animation: spin 1.6s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    @media (prefers-reduced-motion: reduce) { .icon svg { animation: none; } }
+    h1 { margin: 0 0 0.6rem; font-size: 1.5rem; font-weight: 700; }
+    p { margin: 0 0 1rem; font-size: 0.95rem; line-height: 1.55; opacity: 0.85; }
+    .foot { margin-top: 1.4rem; font-size: 0.78rem; opacity: 0.5; }
+  </style>
+</head>
+<body>
+  <main class="card">
+    <div class="icon">
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#a5b4fc" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 12a9 9 0 1 1-6.219-8.56"/>
+      </svg>
+    </div>
+    <h1>Hyperion is updating…</h1>
+    <p>The control panel is briefly offline while it installs a new version. This page refreshes itself — you'll be back in a few seconds. No action needed.</p>
+    <div class="foot">HTTP 503 · Service Temporarily Unavailable</div>
+  </main>
+</body>
+</html>
+"##;
+
+/// Plant the panel "updating" page so nginx's `@hyperion_maintenance` fallback
+/// always has a body. Writes when the file is missing OR still carries our
+/// marker (so upgrades refresh it); once an operator removes the marker we never
+/// touch it again. Best-effort — the caller logs failures but proceeds.
+async fn ensure_panel_maintenance_page() -> Result<(), AdapterError> {
+    let dir = Path::new("/var/lib/hyperion/maintenance");
+    // AdapterError: From<std::io::Error>, so `?` converts directly.
+    tokio::fs::create_dir_all(dir).await?;
+    let file = dir.join("panel-maintenance.html");
+    let ours = match tokio::fs::read_to_string(&file).await {
+        // Operator-customised (marker gone) → leave it alone.
+        Ok(existing) => existing.contains("x-hyperion-maintenance"),
+        // Missing → write it.
+        Err(_) => true,
+    };
+    if ours {
+        atomic_write(&file, PANEL_MAINTENANCE_HTML.as_bytes(), 0o644).await?;
+    }
+    Ok(())
+}
+
 /// Atomic-write + nginx-test + reload. Filename pinned to
 /// `hyperion-panel.conf` so the boot-time orphan-vhost sweep
 /// recognises it and never auto-cleans it.
@@ -243,6 +321,11 @@ pub async fn write_panel_vhost(
     paths: &Paths,
     input: &PanelVhostInput<'_>,
 ) -> Result<(), AdapterError> {
+    // Make sure the maintenance page the new vhost references exists before we
+    // reload, so the upstream-down fallback has something to serve.
+    if let Err(e) = ensure_panel_maintenance_page().await {
+        tracing::warn!(error=%e, "panel maintenance page plant failed — 502 fallback may be bare");
+    }
     let body = render_panel(input)?;
     let vhost = paths.sites_available.join("hyperion-panel.conf");
     let backup = backup_existing(&vhost).await?;

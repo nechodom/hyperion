@@ -6520,6 +6520,46 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
     }
 
+    /// Re-assert the master-panel nginx vhost from the current template, if a
+    /// panel hostname is configured and its cert exists on disk. Called on
+    /// agent boot so template improvements (e.g. the upstream-down "updating"
+    /// page that replaces a bare 502 during `update.sh`) take effect after an
+    /// in-place update — the vhost is otherwise only rewritten on hostname
+    /// provision / cert issuance — and a deleted panel vhost self-heals.
+    ///
+    /// Returns `Ok(false)` (no-op) when there's no panel hostname or no cert
+    /// yet; `write_panel_vhost` runs `nginx -t` and restores the prior file on
+    /// failure, so a bad reload can't take the panel offline.
+    pub async fn ensure_panel_vhost(&self) -> Result<bool, RpcError> {
+        let hostname = read_cluster_section(self.agent_config_path.as_deref())
+            .panel_hostname
+            .trim()
+            .to_string();
+        if hostname.is_empty() {
+            return Ok(false);
+        }
+        let cert_path = format!("/etc/hyperion/certs/{hostname}/fullchain.pem");
+        let key_path = format!("/etc/hyperion/certs/{hostname}/privkey.pem");
+        // Skip until the cert exists — otherwise nginx -t would fail and
+        // write_panel_vhost would just restore the backup. The panel isn't
+        // fully provisioned without it.
+        if tokio::fs::metadata(&cert_path).await.is_err() {
+            return Ok(false);
+        }
+        let acme_root = "/var/lib/hyperion/acme-challenges".to_string();
+        let input = hyperion_adapters::nginx::PanelVhostInput {
+            domain: &hostname,
+            cert_path: &cert_path,
+            key_path: &key_path,
+            acme_challenge_root: &acme_root,
+        };
+        let paths = hyperion_adapters::nginx::Paths::debian_defaults();
+        hyperion_adapters::nginx::write_panel_vhost(&paths, &input)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("ensure_panel_vhost: {e}")))?;
+        Ok(true)
+    }
+
     pub(crate) async fn notify_slack(&self, specific: Option<&str>, message: &str) {
         let url = specific
             .filter(|s| !s.trim().is_empty())
