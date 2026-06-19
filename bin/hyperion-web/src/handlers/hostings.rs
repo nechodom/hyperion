@@ -6344,21 +6344,25 @@ pub async fn post_quota_set(
         },
     )
     .await?;
-    let flash = match resp {
-        RpcResponse::QuotaApplied(v) => {
-            if let Some(err) = v.last_error.as_deref() {
-                format!("Quota saved (kernel: {err})")
-            } else {
-                "Quota saved + applied to the kernel.".to_string()
-            }
-        }
-        RpcResponse::Error(e) => format!("Quota set failed: {e}"),
-        _ => "Quota set: unexpected response".into(),
+    // `flash` = green success toast, `flash_error` = red. A kernel rejection
+    // is NOT a success: the policy row was saved but the cap isn't enforced, so
+    // it must read as an error, not "Quota saved" in green.
+    let (param, msg) = match resp {
+        RpcResponse::QuotaApplied(v) => match v.last_error.as_deref() {
+            Some(err) => (
+                "flash_error",
+                format!("Quota saved, but NOT enforced — the kernel rejected it: {err}"),
+            ),
+            None => ("flash", "Quota saved + applied to the kernel.".to_string()),
+        },
+        RpcResponse::Error(e) => ("flash_error", format!("Quota set failed: {e}")),
+        _ => ("flash_error", "Quota set: unexpected response".to_string()),
     };
     Ok(Redirect::to(&format!(
-        "/hostings/{}?flash={}#quota",
+        "/hostings/{}?{}={}#quota",
         sel_url,
-        urlencoding(&flash)
+        param,
+        urlencoding(&msg)
     ))
     .into_response())
 }
@@ -6396,15 +6400,28 @@ pub async fn post_quota_enable_kernel(
         Request::QuotaEnableKernel { hosting: sel },
     )
     .await?;
-    let flash = match resp {
-        RpcResponse::QuotaEnableKernel(s) => s.message,
-        RpcResponse::Error(e) => format!("Couldn't enable kernel quotas: {e}"),
-        _ => "Enable kernel quotas: unexpected response".into(),
+    // Only a genuinely-active result is a green toast. A hard failure OR a
+    // "reboot required" outcome routes through flash_error so the operator
+    // isn't told "done" in green when there's still a manual step left.
+    let (param, msg) = match resp {
+        RpcResponse::QuotaEnableKernel(s) => {
+            if s.ok {
+                ("flash", s.message)
+            } else {
+                ("flash_error", s.message)
+            }
+        }
+        RpcResponse::Error(e) => ("flash_error", format!("Couldn't enable kernel quotas: {e}")),
+        _ => (
+            "flash_error",
+            "Enable kernel quotas: unexpected response".to_string(),
+        ),
     };
     Ok(Redirect::to(&format!(
-        "/hostings/{}?flash={}#quota",
+        "/hostings/{}?{}={}#quota",
         sel_url,
-        urlencoding(&flash)
+        param,
+        urlencoding(&msg)
     ))
     .into_response())
 }

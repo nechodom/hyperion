@@ -108,18 +108,24 @@ pub async fn mark_applied(pool: &SqlitePool, hosting_id: &str, now: i64) -> Resu
     Ok(())
 }
 
+/// Record that the kernel rejected the latest apply. `applied_at` is cleared:
+/// the CURRENTLY-stored values are NOT enforced, so the UI must not show
+/// "applied at T" next to an error (a stale timestamp from an earlier success
+/// made "is the current policy live?" unanswerable from the row).
 pub async fn mark_failed(
     pool: &SqlitePool,
     hosting_id: &str,
     err: &str,
     now: i64,
 ) -> Result<(), StateError> {
-    sqlx::query("UPDATE hosting_quotas SET last_error = ?, updated_at = ? WHERE hosting_id = ?")
-        .bind(err)
-        .bind(now)
-        .bind(hosting_id)
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "UPDATE hosting_quotas SET applied_at = NULL, last_error = ?, updated_at = ? WHERE hosting_id = ?",
+    )
+    .bind(err)
+    .bind(now)
+    .bind(hosting_id)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -178,15 +184,17 @@ mod tests {
         assert_eq!(r.applied_at, Some(2000));
         assert!(r.last_error.is_none());
 
-        // mark_failed records the error without clearing the policy.
+        // mark_failed records the error and clears applied_at: the stored
+        // values are NOT enforced, so the row must not still claim "applied".
         mark_failed(&p, "h1", "quotaon disabled", 3000)
             .await
             .expect("mf");
         let r = read(&p, "h1").await.expect("read");
         assert_eq!(r.last_error.as_deref(), Some("quotaon disabled"));
-        // applied_at stays — last successful application is still
-        // meaningful even after a later failure.
-        assert_eq!(r.applied_at, Some(2000));
+        assert!(
+            r.applied_at.is_none(),
+            "a failed apply clears applied_at so the UI never shows applied+error"
+        );
     }
 
     /// Reading a never-configured hosting returns Default + the id —

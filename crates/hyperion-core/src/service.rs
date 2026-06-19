@@ -8098,8 +8098,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // policy is saved either way and the UI shows last_error
         // so the operator can see the kernel didn't accept it
         // (typically because quotaon isn't enabled on the mount).
-        let kernel_result =
-            apply_disk_quota(&detail.system_user, disk_soft_kib, disk_hard_kib).await;
+        let kernel_result = apply_disk_quota(
+            &detail.system_user,
+            &detail.root_dir,
+            disk_soft_kib,
+            disk_hard_kib,
+        )
+        .await;
         match kernel_result {
             Ok(()) => {
                 let _ = hyperion_state::hosting_quotas::mark_applied(
@@ -16402,54 +16407,83 @@ trait RpcErrorExt {
     fn Internal_with(msg: String) -> Self;
 }
 
-/// Push a disk quota into the kernel via `setquota -u <user>
-/// <soft_blocks> <hard_blocks> 0 0 -a`. The `-a` flag means "every
-/// filesystem with quotas on", so we don't have to detect which
-/// mount the user's home dir actually lives on.
+/// Push a per-user disk cap into the kernel for the filesystem carrying
+/// `home_dir`, via `setquota -u <user> <soft> <hard> 0 0 <mount>`.
 ///
-/// Inode limits are left at 0 (no cap) — operators care about disk
-/// space, not file count; capping inodes is a different policy
-/// knob we can expose later.
+/// Semantics by request:
+///   - **positive cap** (soft>0 || hard>0): the cap must be enforceable, so if
+///     kernel quotas aren't active on that mount yet we enable them
+///     automatically (fstab + remount + quotacheck + quotaon) and retry. If
+///     that can't finish live we return a clear, reboot-aware message — the
+///     caller still saves the policy, so it applies after the reboot.
+///   - **no cap** (soft==0 && hard==0): clear any existing cap when quotas are
+///     active; a no-op (Ok) when they're not — we don't touch fstab/remount
+///     just to express "no limit", so a memory/bandwidth-only save never
+///     triggers a disk-quota error.
 ///
-/// Returns `Ok(())` on exit 0 or `Err(stderr-tail)` otherwise. The
-/// most common failure is `setquota: Cannot wait for ... quotas
-/// turned off` when /etc/fstab doesn't carry `usrquota` — the UI
-/// surfaces that via the `setup_hint` returned alongside reads.
-async fn apply_disk_quota(user: &str, soft_kib: i64, hard_kib: i64) -> Result<(), String> {
-    // setquota refuses to run if quotaon hasn't been done on at
-    // least one mount. Probe `quotacheck`'s output cheaply via
-    // `quotaon -p` (print state). If no mount has quotas enabled,
-    // fail fast with a clean message instead of letting setquota
-    // produce its own confusing error.
-    let probe = tokio::process::Command::new("/usr/sbin/quotaon")
-        .args(["-p", "-a"])
-        .output()
-        .await;
-    if let Ok(p) = &probe {
-        let out = String::from_utf8_lossy(&p.stdout);
-        // `quotaon -p -a` lists each mount with "user quotas on" or
-        // "user quotas off". When ALL lines say off, setquota would
-        // fail. We tolerate stderr-only output too (some distros
-        // print to stderr).
-        let any_on = out
-            .lines()
-            .any(|l| l.contains("user quotas on") || l.contains("group quotas on"));
-        if !any_on && !out.is_empty() {
-            return Err(
-                "quotas not enabled on any filesystem — add usrquota,grpquota to /etc/fstab and run `mount -o remount /` + `quotacheck -ugm /` + `quotaon -v /`".into(),
-            );
+/// Inode limits are left at 0 (no cap) — operators care about disk space, not
+/// file count.
+///
+/// The active-state probe uses the SAME canonical parser as the enable/read
+/// path (`ext_quota_on` → `quota_report_shows_on`, matching `quotaon -p`'s
+/// `… is on`). A previous bespoke scan here looked for the literal
+/// `user quotas on`, which modern quota-tools never print (`user quota on … is
+/// on`), so it false-negatived and refused setquota even when quotas were on.
+async fn apply_disk_quota(
+    user: &str,
+    home_dir: &str,
+    soft_kib: i64,
+    hard_kib: i64,
+) -> Result<(), String> {
+    let mount = mount_point_for(home_dir).await;
+    let on = match &mount {
+        Some(mp) => ext_quota_on(mp).await,
+        None => false,
+    };
+
+    let wants_cap = soft_kib > 0 || hard_kib > 0;
+    if !wants_cap && !on {
+        // Nothing to enforce and nothing enabled to clear — success no-op.
+        return Ok(());
+    }
+
+    if wants_cap && !on {
+        // Bring kernel quotas up so the cap is actually enforceable.
+        // enable_kernel_quotas is idempotent: the fstab splice no-ops when the
+        // option is already present and an already-active fs short-circuits. On
+        // success we fall through to setquota; otherwise surface why it didn't.
+        let summary = enable_kernel_quotas(home_dir).await;
+        if !summary.ok {
+            return Err(if summary.requires_reboot {
+                format!(
+                    "kernel quotas need a reboot to finish activating — {} The limit is saved and will be enforced after the node reboots.",
+                    summary.message
+                )
+            } else {
+                format!(
+                    "couldn't enable kernel quotas automatically: {}",
+                    summary.message
+                )
+            });
         }
     }
+
+    // Target the specific mount when we resolved it; fall back to `-a` (every
+    // quota-enabled filesystem) only when the mount is unknown.
+    let mut args: Vec<String> = vec![
+        "-u".into(),
+        user.to_string(),
+        soft_kib.to_string(),
+        hard_kib.to_string(),
+        "0".into(),
+        "0".into(),
+    ];
+    match &mount {
+        Some(mp) => args.push(mp.clone()),
+        None => args.push("-a".into()),
+    }
     let out = tokio::process::Command::new("/usr/sbin/setquota")
-        .args([
-            "-u",
-            user,
-            &soft_kib.to_string(),
-            &hard_kib.to_string(),
-            "0",
-            "0",
-            "-a",
-        ])
+        .args(&args)
         .output()
         .await
         .map_err(|e| format!("spawn setquota: {e}"))?;
@@ -16577,6 +16611,27 @@ async fn quota_run_cmd(bin: &str, args: &[&str]) -> (bool, String) {
             (o.status.success(), s)
         }
         Err(e) => (false, format!("spawn {bin}: {e}")),
+    }
+}
+
+/// Like `quota_run_cmd` but aborts after `secs`, reporting a timeout as a
+/// failure. Used for `quotacheck`, which scans every inode on the filesystem
+/// and can run for minutes on a large/busy disk — since enabling quotas now
+/// happens inline on a quota save, an unbounded quotacheck could otherwise hang
+/// the RPC. The spawned process is left to finish in the background (it's
+/// building the aquota files either way); we just stop waiting on it.
+async fn quota_run_cmd_timeout(bin: &str, args: &[&str], secs: u64) -> (bool, String) {
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(secs),
+        quota_run_cmd(bin, args),
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(_) => (
+            false,
+            format!("{bin} still running after {secs}s — left to finish in the background"),
+        ),
     }
 }
 
@@ -17092,9 +17147,11 @@ async fn enable_kernel_quotas(home_path: &str) -> hyperion_types::QuotaEnableSum
             };
         }
     }
-    // quotacheck builds aquota.user/.group; -m allows it while mounted.
+    // quotacheck builds aquota.user/.group; -m allows it while mounted. Bound
+    // it so a huge/busy filesystem can't hang the save RPC (it keeps building
+    // in the background; quotaon below still tries, and a re-save finishes it).
     let (_check_ok, check_msg) =
-        quota_run_cmd("/usr/sbin/quotacheck", &["-ugm", &mount_point]).await;
+        quota_run_cmd_timeout("/usr/sbin/quotacheck", &["-ugm", &mount_point], 240).await;
     let (_qon_ok, qon) = quota_run_cmd("/usr/sbin/quotaon", &["-v", &mount_point]).await;
     if ext_quota_on(&mount_point).await {
         Summary {
@@ -17696,6 +17753,18 @@ mod tests {
             "user quota on /home (/dev/sda3) is off\ngroup quota on /home (/dev/sda3) is off"
         ));
         assert!(!quota_report_shows_on(""));
+
+        // Regression: the exact line `quotaon -p` prints on Debian 12 for an
+        // ACTIVE root filesystem. `apply_disk_quota` used to scan this for the
+        // literal "user quotas on" (plural), which never appears here — so it
+        // false-negatived and refused setquota on a correctly-enabled host.
+        // The canonical parser matches it; the dropped substring must not.
+        let modern_active = "user quota on / (/dev/vda1) is on\ngroup quota on / (/dev/vda1) is on";
+        assert!(quota_report_shows_on(modern_active));
+        assert!(
+            !modern_active.contains("user quotas on"),
+            "the old apply_disk_quota substring never occurs in modern output"
+        );
     }
 
     // ============================================================

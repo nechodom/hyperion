@@ -2052,13 +2052,18 @@
       </div>
     </div>
   {% endif %}
+  {% if let Some(err) = quota.policy.last_error.as_ref() %}
+    <div class="flash error" style="margin-bottom:0.8rem">
+      <div class="flash-body">
+        <strong>The kernel rejected the last apply — disk caps aren't being enforced.</strong>
+        <div class="text-soft small" style="margin-top:0.3rem">{{ err }}</div>
+      </div>
+    </div>
+  {% endif %}
   <div class="row" style="margin-bottom:0.8rem;gap:1.4rem">
     <span><strong>Current disk usage:</strong> {{ quota.current_disk_kib / 1024 }} MiB</span>
     {% if let Some(at) = quota.policy.applied_at %}
       <span class="text-soft small">last applied to kernel: {{ at }}</span>
-    {% endif %}
-    {% if let Some(err) = quota.policy.last_error.as_ref() %}
-      <span class="pill err" title="{{ err }}">kernel rejected last apply</span>
     {% endif %}
   </div>
   <form method="post" action="/hostings/quota/set">
