@@ -232,19 +232,25 @@ pub struct UsageBucket {
     pub bw_in_bytes: i64,
     pub bw_out_bytes: i64,
     pub php_requests: i64,
+    /// Migration 043: latest RSS of the hosting's processes (bytes) + CPU %.
+    pub mem_rss_bytes: i64,
+    pub cpu_pct_x100: i64,
 }
 
 pub async fn upsert_usage(pool: &SqlitePool, bucket: &UsageBucket) -> Result<(), StateError> {
     sqlx::query(
         r#"INSERT INTO hosting_usage
-           (hosting_id, period, disk_used_bytes, inodes_used, bw_in_bytes, bw_out_bytes, php_requests)
-           VALUES (?, ?, ?, ?, ?, ?, ?)
+           (hosting_id, period, disk_used_bytes, inodes_used, bw_in_bytes, bw_out_bytes,
+            php_requests, mem_rss_bytes, cpu_pct_x100)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(hosting_id, period) DO UPDATE SET
              disk_used_bytes = excluded.disk_used_bytes,
              inodes_used     = excluded.inodes_used,
              bw_in_bytes     = excluded.bw_in_bytes,
              bw_out_bytes    = excluded.bw_out_bytes,
-             php_requests    = excluded.php_requests"#,
+             php_requests    = excluded.php_requests,
+             mem_rss_bytes   = excluded.mem_rss_bytes,
+             cpu_pct_x100    = excluded.cpu_pct_x100"#,
     )
     .bind(bucket.hosting_id.as_str())
     .bind(&bucket.period)
@@ -253,19 +259,22 @@ pub async fn upsert_usage(pool: &SqlitePool, bucket: &UsageBucket) -> Result<(),
     .bind(bucket.bw_in_bytes)
     .bind(bucket.bw_out_bytes)
     .bind(bucket.php_requests)
+    .bind(bucket.mem_rss_bytes)
+    .bind(bucket.cpu_pct_x100)
     .execute(pool)
     .await?;
     Ok(())
 }
 
+#[allow(clippy::type_complexity)] // positional row tuple; mirrors the table
 pub async fn usage_for(
     pool: &SqlitePool,
     id: &HostingId,
     limit: i64,
 ) -> Result<Vec<UsageBucket>, StateError> {
-    let rows: Vec<(String, String, i64, i64, i64, i64, i64)> = sqlx::query_as(
+    let rows: Vec<(String, String, i64, i64, i64, i64, i64, i64, i64)> = sqlx::query_as(
         "SELECT hosting_id, period, disk_used_bytes, inodes_used,
-                bw_in_bytes, bw_out_bytes, php_requests
+                bw_in_bytes, bw_out_bytes, php_requests, mem_rss_bytes, cpu_pct_x100
          FROM hosting_usage WHERE hosting_id = ? ORDER BY period DESC LIMIT ?",
     )
     .bind(id.as_str())
@@ -275,7 +284,7 @@ pub async fn usage_for(
     Ok(rows
         .into_iter()
         .map(
-            |(hosting_id, period, disk, inodes, bw_in, bw_out, php)| UsageBucket {
+            |(hosting_id, period, disk, inodes, bw_in, bw_out, php, mem_rss, cpu)| UsageBucket {
                 hosting_id: HostingId(hosting_id),
                 period,
                 disk_used_bytes: disk,
@@ -283,6 +292,8 @@ pub async fn usage_for(
                 bw_in_bytes: bw_in,
                 bw_out_bytes: bw_out,
                 php_requests: php,
+                mem_rss_bytes: mem_rss,
+                cpu_pct_x100: cpu,
             },
         )
         .collect())
@@ -404,6 +415,8 @@ mod tests {
             bw_in_bytes: 2048,
             bw_out_bytes: 4096,
             php_requests: 17,
+            mem_rss_bytes: 33_554_432,
+            cpu_pct_x100: 1250,
         };
         upsert_usage(&pool, &bucket).await.expect("upsert");
         let got = usage_for(&pool, &id, 10).await.expect("get");

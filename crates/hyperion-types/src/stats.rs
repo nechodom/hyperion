@@ -26,6 +26,13 @@ pub struct HostingStats {
     pub requests_24h: i64,
     pub last_request_at: Option<i64>,
     pub sampled_at: i64,
+    /// Latest RSS of the site's processes (bytes) — migration 043. RSS
+    /// overcounts shared pages across php-fpm workers. 0 if not yet sampled.
+    #[serde(default)]
+    pub mem_rss_bytes: i64,
+    /// Latest CPU busy % × 100 attributed to the site's user.
+    #[serde(default)]
+    pub cpu_pct_x100: i64,
 }
 
 /// Latest snapshot for an agent node — cluster-wide or single-node.
@@ -1136,6 +1143,8 @@ mod tests {
             requests_24h: 100,
             last_request_at: Some(1_700_000_000),
             sampled_at: 1_700_000_500,
+            mem_rss_bytes: 67_108_864,
+            cpu_pct_x100: 875,
         };
         let j = serde_json::to_string(&s).expect("ser");
         let back: HostingStats = serde_json::from_str(&j).expect("de");

@@ -817,6 +817,14 @@
         <div style="color:var(--warn)">{{ crate::handlers::stats::sparkline_svg(usage_buckets, crate::handlers::stats::bucket_requests)|safe }}</div>
       {% endif %}
     </div>
+    <div>
+      <div class="text-soft small" title="Resident memory of this site's processes (php-fpm workers etc.). RSS overcounts pages shared between workers.">Memory (RSS)</div>
+      <div style="font-size:1.3rem;font-weight:600;margin:0.15rem 0 0.3rem">{% if s.mem_rss_bytes > 0 %}{{ crate::handlers::stats::fmt_bytes(s.mem_rss_bytes) }}{% else %}—{% endif %}</div>
+    </div>
+    <div>
+      <div class="text-soft small" title="CPU attributed to this site's user over the last sample window">CPU</div>
+      <div style="font-size:1.3rem;font-weight:600;margin:0.15rem 0 0.3rem">{{ crate::handlers::stats::fmt_pct_x100(s.cpu_pct_x100) }}</div>
+    </div>
   </div>
 
   <dl class="kv">

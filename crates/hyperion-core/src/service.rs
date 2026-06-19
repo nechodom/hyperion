@@ -9270,15 +9270,43 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
         }
 
+        // One /proc pass-pair (200 ms apart) to attribute live memory + CPU to
+        // each hosting's system_user — Hyperion runs one php-fpm pool per user,
+        // so a site's footprint is its user's processes. This is the only
+        // per-tick /proc walk; the per-hosting loop just looks up by uid.
+        let proc1 = scan_proc_usage_by_uid().await;
+        let cpu_total1 = read_cpu_jiffies().await.map(|(_, t)| t).unwrap_or(0) as i64;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        let proc2 = scan_proc_usage_by_uid().await;
+        let cpu_total2 = read_cpu_jiffies().await.map(|(_, t)| t).unwrap_or(0) as i64;
+        let cpu_total_delta = (cpu_total2 - cpu_total1).max(1);
+
         for s in &summaries {
+            let user = derive_user_from_summary(s);
             let host_root = std::path::PathBuf::from(&self.paths.home_root)
-                .join(derive_user_from_summary(s).unwrap_or_else(|| "_".to_string()))
+                .join(user.clone().unwrap_or_else(|| "_".to_string()))
                 .join(&s.domain);
             let disk = du_bytes(&host_root).await.unwrap_or(0);
             let inodes = du_inodes(&host_root).await;
             let logs_dir = host_root.join("logs");
             let (bw_in, bw_out, reqs, _last) =
                 parse_access_log_window(&logs_dir.join("access.log"), now - 24 * 3600).await;
+
+            // Per-hosting RSS + CPU% from this user's processes.
+            let (mem_rss, cpu_pct) = match &user {
+                Some(uname) => {
+                    match hyperion_state::system_users::get_by_name(&self.pool, uname).await {
+                        Ok(Some(su)) => {
+                            let rss = proc2.get(&su.uid).map(|(r, _)| *r).unwrap_or(0);
+                            let c0 = proc1.get(&su.uid).map(|(_, c)| *c).unwrap_or(0);
+                            let c1 = proc2.get(&su.uid).map(|(_, c)| *c).unwrap_or(0);
+                            (rss, (c1 - c0).max(0) * 10000 / cpu_total_delta)
+                        }
+                        _ => (0, 0),
+                    }
+                }
+                None => (0, 0),
+            };
 
             // Upsert usage row.
             let _ = hyperion_state::limits::upsert_usage(
@@ -9291,6 +9319,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     bw_in_bytes: bw_in,
                     bw_out_bytes: bw_out,
                     php_requests: reqs,
+                    mem_rss_bytes: mem_rss,
+                    cpu_pct_x100: cpu_pct,
                 },
             )
             .await;
@@ -9363,6 +9393,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             bw_out += r.bw_out_bytes;
             reqs += r.php_requests;
         }
+        // Memory + CPU are instantaneous, so take the most recent row (rows
+        // are period-DESC), not a 24h sum.
+        let (mem_rss, cpu_pct) = rows
+            .first()
+            .map(|r| (r.mem_rss_bytes, r.cpu_pct_x100))
+            .unwrap_or((0, 0));
         Ok(HostingStats {
             hosting_id: detail.id,
             domain: detail.domain,
@@ -9372,6 +9408,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             requests_24h: reqs,
             last_request_at: rows.first().map(|_| now),
             sampled_at: now,
+            mem_rss_bytes: mem_rss,
+            cpu_pct_x100: cpu_pct,
         })
     }
 
@@ -15484,6 +15522,71 @@ async fn read_proc_metrics() -> ProcMetrics {
         net_rx_bps,
         net_tx_bps,
     }
+}
+
+/// utime+stime jiffies from a `/proc/<pid>/stat` line. `comm` (field 2) can
+/// contain spaces and parens, so we anchor on the LAST ')' and count fields
+/// after it: utime is the 12th, stime the 13th token there.
+fn parse_stat_cpu_jiffies(s: &str) -> i64 {
+    let after = match s.rfind(')') {
+        Some(i) => &s[i + 1..],
+        None => return 0,
+    };
+    let toks: Vec<&str> = after.split_whitespace().collect();
+    let utime = toks
+        .get(11)
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0);
+    let stime = toks
+        .get(12)
+        .and_then(|v| v.parse::<i64>().ok())
+        .unwrap_or(0);
+    utime + stime
+}
+
+/// One pass over /proc: per-UID (summed RSS bytes, summed CPU jiffies) across
+/// that user's processes. Used to attribute memory + CPU to each hosting via
+/// its system_user — Hyperion runs one php-fpm pool per user, so a hosting's
+/// footprint is its user's processes. RSS overcounts shared pages (PHP binary
+/// / opcache shared across workers); it's the standard pragmatic figure.
+async fn scan_proc_usage_by_uid() -> std::collections::HashMap<i64, (i64, i64)> {
+    use std::collections::HashMap;
+    use std::os::unix::fs::MetadataExt;
+    const PAGE: i64 = 4096; // Debian x86_64 page size
+    let mut map: HashMap<i64, (i64, i64)> = HashMap::new();
+    let Ok(mut rd) = tokio::fs::read_dir("/proc").await else {
+        return map;
+    };
+    while let Ok(Some(ent)) = rd.next_entry().await {
+        let name = ent.file_name();
+        let name = name.to_string_lossy();
+        if name.is_empty() || !name.bytes().all(|b| b.is_ascii_digit()) {
+            continue; // not a pid dir
+        }
+        let dir = ent.path();
+        let Ok(meta) = tokio::fs::metadata(&dir).await else {
+            continue; // process exited between readdir and stat
+        };
+        let uid = meta.uid() as i64;
+        let rss = tokio::fs::read_to_string(dir.join("statm"))
+            .await
+            .ok()
+            .and_then(|s| {
+                s.split_whitespace()
+                    .nth(1)
+                    .and_then(|v| v.parse::<i64>().ok())
+            })
+            .unwrap_or(0)
+            * PAGE;
+        let cpu = tokio::fs::read_to_string(dir.join("stat"))
+            .await
+            .map(|s| parse_stat_cpu_jiffies(&s))
+            .unwrap_or(0);
+        let e = map.entry(uid).or_insert((0, 0));
+        e.0 += rss;
+        e.1 += cpu;
+    }
+    map
 }
 
 /// Result of a single HTTP probe. Internal — service builds the wire
