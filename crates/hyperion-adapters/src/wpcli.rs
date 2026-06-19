@@ -356,13 +356,16 @@ pub async fn theme_list(
     let rows: Vec<RawThemeRow> = parse_wp_json(&out, "wp theme list")?;
     let themes = rows
         .into_iter()
-        .map(|r| hyperion_types::WpTheme {
-            slug: r.name.clone(),
-            name: r.title.unwrap_or(r.name),
-            version: r.version,
-            status: r.status,
-            update_available: r.update == "available",
-            latest_version: r.update_version.unwrap_or_default(),
+        .map(|r| {
+            let slug = r.name.unwrap_or_default();
+            hyperion_types::WpTheme {
+                name: r.title.unwrap_or_else(|| slug.clone()),
+                slug,
+                version: r.version.unwrap_or_default(),
+                status: r.status.unwrap_or_default(),
+                update_available: r.update.as_deref() == Some("available"),
+                latest_version: r.update_version.unwrap_or_default(),
+            }
         })
         .collect::<Vec<_>>();
     // wp core version is cheap to reuse — same as plugin_list.
@@ -529,17 +532,19 @@ pub async fn plugin_list(
     let plugins: Vec<hyperion_types::WpPlugin> = rows
         .into_iter()
         .map(|r| hyperion_types::WpPlugin {
-            slug: r.name,
+            slug: r.name.unwrap_or_default(),
             // wp-cli's `name` column is actually the folder slug. We
             // don't have a separate "display name" available without
             // `wp plugin get`, which would mean one RPC per plugin.
             // Reuse the slug; the UI titlecases it.
             name: String::new(),
-            version: r.version,
-            status: r.status,
+            version: r.version.unwrap_or_default(),
+            status: r.status.unwrap_or_default(),
             update_available: r.update.as_deref() == Some("available"),
             latest_version: r.update_version.unwrap_or_default(),
-            auto_update: matches!(r.auto_update.as_deref(), Some("on")),
+            // Accept the bool form ("true") too — some wp-cli builds emit
+            // auto_update as a JSON bool instead of "on"/"off".
+            auto_update: matches!(r.auto_update.as_deref(), Some("on") | Some("true")),
         })
         .map(|mut p| {
             if p.name.is_empty() {
@@ -740,33 +745,67 @@ fn humanize_slug(slug: &str) -> String {
     out
 }
 
+/// Coerce ANY wp-cli JSON scalar into `Option<String>`. wp-cli is loosely
+/// typed: a column we expect as a string can come back as a bool, a number,
+/// or null depending on the component. The one that bit us: must-use plugins
+/// and drop-ins report `"update": false` (a BOOL, since they can't be updated)
+/// — and a single `false` where serde expected a string made the WHOLE
+/// `wp plugin list` array fail to deserialize, surfacing as the misleading
+/// "returned non-JSON". Mapping every scalar through here means no future
+/// wp-cli type quirk in any field can break the entire list again.
+fn de_flexible_string<'de, D>(de: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    Ok(match serde_json::Value::deserialize(de)? {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(s) => Some(s),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        // Arrays/objects shouldn't appear for these scalar columns; stringify
+        // defensively rather than fail the whole list.
+        other => Some(other.to_string()),
+    })
+}
+
+/// One row of `wp plugin list --format=json`. EVERY field is flexible (see
+/// de_flexible_string) so a bool/number/null in any column can't sink the
+/// whole list. `name`/`status`/`version` are unwrapped to "" when absent.
 #[derive(Debug, serde::Deserialize)]
 struct RawPluginRow {
-    name: String,
-    status: String,
-    /// "available" | "none" | "" (older wp-cli)
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_flexible_string")]
+    name: Option<String>,
+    #[serde(default, deserialize_with = "de_flexible_string")]
+    status: Option<String>,
+    /// "available" | "none" | "" (normal) | false (must-use / drop-in)
+    #[serde(default, deserialize_with = "de_flexible_string")]
     update: Option<String>,
-    version: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_flexible_string")]
+    version: Option<String>,
+    #[serde(default, deserialize_with = "de_flexible_string")]
     update_version: Option<String>,
-    /// "on" | "off" | None (very old wp-cli)
-    #[serde(default)]
+    /// "on" | "off" | true | false | None (very old wp-cli)
+    #[serde(default, deserialize_with = "de_flexible_string")]
     auto_update: Option<String>,
 }
 
 /// One row of `wp theme list --format=json`. Lifted to module scope (next
-/// to RawPluginRow) so `theme_list` can route through `parse_wp_json`.
+/// to RawPluginRow) so `theme_list` can route through `parse_wp_json`. Same
+/// flexible-scalar treatment as RawPluginRow.
 #[derive(Debug, serde::Deserialize)]
 struct RawThemeRow {
-    name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_flexible_string")]
+    name: Option<String>,
+    #[serde(default, deserialize_with = "de_flexible_string")]
     title: Option<String>,
-    status: String,
-    #[serde(default)]
-    update: String,
-    version: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "de_flexible_string")]
+    status: Option<String>,
+    #[serde(default, deserialize_with = "de_flexible_string")]
+    update: Option<String>,
+    #[serde(default, deserialize_with = "de_flexible_string")]
+    version: Option<String>,
+    #[serde(default, deserialize_with = "de_flexible_string")]
     update_version: Option<String>,
 }
 
@@ -981,7 +1020,7 @@ mod tests {
         );
         let rows: Vec<RawPluginRow> = parse_wp_json(&raw, "wp plugin list").expect("should parse");
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].name, "akismet");
+        assert_eq!(rows[0].name.as_deref(), Some("akismet"));
     }
 
     #[test]
@@ -999,7 +1038,7 @@ mod tests {
         let raw = format!("[{PLUGIN_ROW}]");
         let rows: Vec<RawPluginRow> = parse_wp_json(&raw, "wp plugin list").expect("should parse");
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].status, "active");
+        assert_eq!(rows[0].status.as_deref(), Some("active"));
     }
 
     #[test]
@@ -1053,7 +1092,7 @@ mod tests {
         let raw = format!("PHP Notice: array offset [0] on null in foo.php\n[{PLUGIN_ROW}]");
         let rows: Vec<RawPluginRow> = parse_wp_json(&raw, "wp plugin list").expect("should parse");
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].name, "akismet");
+        assert_eq!(rows[0].name.as_deref(), Some("akismet"));
     }
 
     #[test]
@@ -1068,7 +1107,7 @@ mod tests {
         );
         let rows: Vec<RawPluginRow> = parse_wp_json(&raw, "wp plugin list").expect("should parse");
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].name, "akismet");
+        assert_eq!(rows[0].name.as_deref(), Some("akismet"));
     }
 
     #[test]
@@ -1094,7 +1133,7 @@ mod tests {
             1,
             "must return the real array, not the [] decoy"
         );
-        assert_eq!(rows[0].name, "akismet");
+        assert_eq!(rows[0].name.as_deref(), Some("akismet"));
     }
 
     #[test]
@@ -1103,7 +1142,7 @@ mod tests {
         let raw = "Warning: noise\n[{\"name\":\"twentytwentyfour\",\"status\":\"active\",\"version\":\"1.2\"}]";
         let rows: Vec<RawThemeRow> = parse_wp_json(raw, "wp theme list").expect("should parse");
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].name, "twentytwentyfour");
+        assert_eq!(rows[0].name.as_deref(), Some("twentytwentyfour"));
     }
 
     // The exact production payload (test.four.testovaciverze.cz): a real
@@ -1111,15 +1150,18 @@ mod tests {
     // warning pairs AND empty-version / must-use / dropin rows. We assert it
     // parses with the warnings on EITHER side, so neither shape can regress.
     const PROD_WARN: &str = "PHP Warning:  Undefined property: stdClass::$requires in phar:///usr/local/bin/wp/vendor/wp-cli/extension-command/src/Plugin_Command.php on line 875\nWarning: Undefined property: stdClass::$requires in phar:///usr/local/bin/wp/vendor/wp-cli/extension-command/src/Plugin_Command.php on line 875";
-    const PROD_ARRAY: &str = r#"[{"name":"acfml","status":"active","update":"unavailable","version":"1.10.1","update_version":"2.2.4","auto_update":"off"},{"name":"advanced-custom-fields-pro","status":"active","update":"available","version":"5.11.4","update_version":"6.8.4","auto_update":"off"},{"name":"apartmany-plugin","status":"active","update":"none","version":"","update_version":"","auto_update":"off"},{"name":"wphosting-fail401login","status":"must-use","update":"","version":"1.0","update_version":"","auto_update":"off"},{"name":"advanced-cache.php","status":"dropin","update":"","version":"","update_version":"","auto_update":"off"}]"#;
+    // Verbatim shape from test.four.testovaciverze.cz: note `"update":false`
+    // (a BOOL) on the must-use + drop-in rows — the type quirk that sank the
+    // whole list and produced the misleading "returned non-JSON".
+    const PROD_ARRAY: &str = r#"[{"name":"acfml","status":"active","update":"unavailable","version":"1.10.1","update_version":"2.2.4","auto_update":"off"},{"name":"advanced-custom-fields-pro","status":"active","update":"available","version":"5.11.4","update_version":"6.8.4","auto_update":"off"},{"name":"apartmany-plugin","status":"active","update":"none","version":"","update_version":"","auto_update":"off"},{"name":"wphosting-fail401login","status":"must-use","update":false,"version":"1.0","update_version":"","auto_update":"off"},{"name":"advanced-cache.php","status":"dropin","update":false,"version":"","update_version":"","auto_update":"off"}]"#;
 
     #[test]
     fn parse_wp_json_real_production_payload_leading_noise() {
         let raw = format!("{PROD_WARN}\n{PROD_ARRAY}");
         let rows: Vec<RawPluginRow> = parse_wp_json(&raw, "wp plugin list").expect("should parse");
         assert_eq!(rows.len(), 5);
-        assert_eq!(rows[0].name, "acfml");
-        assert_eq!(rows[4].name, "advanced-cache.php");
+        assert_eq!(rows[0].name.as_deref(), Some("acfml"));
+        assert_eq!(rows[4].name.as_deref(), Some("advanced-cache.php"));
     }
 
     #[test]
@@ -1128,6 +1170,42 @@ mod tests {
         let raw = format!("{PROD_ARRAY}\n{PROD_WARN}");
         let rows: Vec<RawPluginRow> = parse_wp_json(&raw, "wp plugin list").expect("should parse");
         assert_eq!(rows.len(), 5);
-        assert_eq!(rows[1].name, "advanced-custom-fields-pro");
+        assert_eq!(rows[1].name.as_deref(), Some("advanced-custom-fields-pro"));
+    }
+
+    #[test]
+    fn raw_plugin_row_tolerates_bool_update_field() {
+        // The ACTUAL production failure: must-use / drop-in plugins report
+        // `"update": false` (a bool). A single bool where serde expected a
+        // string used to fail the WHOLE array. Each scalar must now coerce.
+        let json = r#"[
+            {"name":"akismet","status":"active","update":"available","version":"5.3","update_version":"5.4","auto_update":"off"},
+            {"name":"mu-x","status":"must-use","update":false,"version":"1.0","update_version":"","auto_update":"off"},
+            {"name":"advanced-cache.php","status":"dropin","update":false,"version":"","update_version":"","auto_update":"off"}
+        ]"#;
+        let rows: Vec<RawPluginRow> =
+            parse_wp_json(json, "wp plugin list").expect("bool update must parse");
+        assert_eq!(rows.len(), 3);
+        // The bool false becomes the string "false" → NOT "available".
+        assert_eq!(rows[1].update.as_deref(), Some("false"));
+        assert_eq!(rows[2].status.as_deref(), Some("dropin"));
+        // A normal plugin's update string is untouched.
+        assert_eq!(rows[0].update.as_deref(), Some("available"));
+    }
+
+    #[test]
+    fn de_flexible_string_coerces_every_scalar() {
+        #[derive(serde::Deserialize)]
+        struct Row {
+            #[serde(default, deserialize_with = "de_flexible_string")]
+            v: Option<String>,
+        }
+        let got = |s: &str| serde_json::from_str::<Row>(s).unwrap().v;
+        assert_eq!(got(r#"{"v":"hi"}"#), Some("hi".to_string()));
+        assert_eq!(got(r#"{"v":false}"#), Some("false".to_string()));
+        assert_eq!(got(r#"{"v":true}"#), Some("true".to_string()));
+        assert_eq!(got(r#"{"v":42}"#), Some("42".to_string()));
+        assert_eq!(got(r#"{"v":null}"#), None);
+        assert_eq!(got(r#"{}"#), None); // missing key
     }
 }
