@@ -311,6 +311,11 @@ async fn ensure_panel_maintenance_page() -> Result<(), AdapterError> {
     if ours {
         atomic_write(&file, PANEL_MAINTENANCE_HTML.as_bytes(), 0o644).await?;
     }
+    // nginx (www-data) must be able to traverse /var/lib/hyperion and the
+    // maintenance dir to serve the page; OR in the world-traverse bit so a
+    // tightened ancestor (e.g. 0700 from a hardening pass) doesn't silently
+    // demote the friendly 503 to a bare one. Best-effort, mirrors ACME/htdocs.
+    crate::fs::ensure_ancestors_traversable(&file).await;
     Ok(())
 }
 
@@ -939,6 +944,37 @@ mod tests {
     /// must use the `listen ... ssl http2;` parameter form, which
     /// works on every nginx ≥ 1.9.5 (it logs a deprecation NOTE on
     /// 1.25+, which is cosmetic; a hard error on 1.22 is not).
+    #[test]
+    fn rendered_panel_vhost_is_debian12_safe_and_has_maintenance_fallback() {
+        let out = render_panel(&PanelVhostInput {
+            domain: "panel.example.cz",
+            cert_path: "/etc/hyperion/certs/panel.example.cz/fullchain.pem",
+            key_path: "/etc/hyperion/certs/panel.example.cz/privkey.pem",
+            acme_challenge_root: "/var/lib/hyperion/acme-challenges",
+        })
+        .expect("render_panel");
+        // Debian-12 nginx 1.22 footgun (same guard as the per-hosting vhost):
+        // the parameter form, never the standalone `http2 on;` directive.
+        assert!(
+            out.contains("ssl http2;"),
+            "panel vhost lost the http2 param form:\n{out}"
+        );
+        assert!(
+            !out.contains("\n    http2 on;"),
+            "panel vhost uses the 1.25.1-only `http2 on;` directive:\n{out}"
+        );
+        // The upstream-down "updating" fallback must stay wired.
+        assert!(
+            out.contains("error_page 502 503 504 =503 @hyperion_maintenance;"),
+            "panel vhost lost the maintenance error_page:\n{out}"
+        );
+        assert!(out.contains("location @hyperion_maintenance"));
+        assert!(out.contains("try_files /panel-maintenance.html =503;"));
+        // ACME challenge must use alias (not root) so renewals work mid-update.
+        assert!(out.contains("location /.well-known/acme-challenge/ {"));
+        assert!(out.contains("alias /var/lib/hyperion/acme-challenges/;"));
+    }
+
     #[test]
     fn rendered_vhosts_use_debian12_compatible_http2() {
         let aliases: Vec<String> = vec![];
