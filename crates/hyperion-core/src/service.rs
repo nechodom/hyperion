@@ -16748,7 +16748,11 @@ async fn ensure_fstab_quota_option(mount_point: &str, is_xfs: bool) -> Result<bo
         .await
         .map_err(|e| format!("read {path}: {e}"))?;
     let to_add: &[&str] = if is_xfs {
-        &["prjquota"]
+        // XFS user+group quota in its native spelling. This MUST match the
+        // enforce path, which uses `setquota -u` (user quotas): `prjquota`
+        // would provision PROJECT accounting that `setquota -u` can't target,
+        // so a cap would silently never apply even after a reboot.
+        &["uquota", "gquota"]
     } else {
         &["usrquota", "grpquota"]
     };
@@ -17038,7 +17042,7 @@ async fn enable_kernel_quotas(home_path: &str) -> hyperion_types::QuotaEnableSum
             )
         }
     };
-    let mut best: Option<(String, String, String)> = None; // (mount, fstype, options)
+    let mut best: Option<(String, String, String, String)> = None; // (mount, fstype, options, device)
     for line in mounts.lines() {
         let f: Vec<&str> = line.split_whitespace().collect();
         if f.len() < 4 {
@@ -17051,14 +17055,19 @@ async fn enable_kernel_quotas(home_path: &str) -> hyperion_types::QuotaEnableSum
         if covers {
             let better = best
                 .as_ref()
-                .map(|(m, _, _)| mp.len() > m.len())
+                .map(|(m, _, _, _)| mp.len() > m.len())
                 .unwrap_or(true);
             if better {
-                best = Some((mp, f[2].to_string(), f[3].to_string()));
+                best = Some((
+                    mp,
+                    f[2].to_string(),
+                    f[3].to_string(),
+                    unescape_mount_field(f[0]),
+                ));
             }
         }
     }
-    let (mount_point, fs_type, cur_opts) = match best {
+    let (mount_point, fs_type, cur_opts, device) = match best {
         Some(v) => v,
         None => {
             return fail(
@@ -17070,9 +17079,15 @@ async fn enable_kernel_quotas(home_path: &str) -> hyperion_types::QuotaEnableSum
     };
 
     let is_xfs = fs_type == "xfs";
-    let already_mounted = cur_opts
-        .split(',')
-        .any(|o| matches!(o, "usrquota" | "grpquota" | "prjquota" | "quota" | "uquota"));
+    let already_mounted = cur_opts.split(',').any(|o| {
+        // ext family: usrquota/grpquota/prjquota · XFS: uquota/gquota/pquota
+        // (and the bare `quota` alias). Any of these means the quota option is
+        // already live on this mount.
+        matches!(
+            o,
+            "usrquota" | "grpquota" | "prjquota" | "quota" | "uquota" | "gquota" | "pquota"
+        )
+    });
 
     // 2. Make sure /etc/fstab carries the quota option for next boot.
     let fstab_added = match ensure_fstab_quota_option(&mount_point, is_xfs).await {
@@ -17091,15 +17106,27 @@ async fn enable_kernel_quotas(home_path: &str) -> hyperion_types::QuotaEnableSum
         "/etc/fstab already had it"
     };
 
-    // 3. XFS: quotas only initialise at mount, never on a live fs.
+    // 3. XFS: quota accounting only initialises at mount, never on a live fs.
     if is_xfs {
+        // If the option is already live AND reports on, accounting is active
+        // now (XFS turns it on at mount) — nothing to reboot for.
+        if already_mounted && ext_quota_on(&mount_point).await {
+            return Summary {
+                ok: true,
+                requires_reboot: false,
+                fs_type,
+                mount_point,
+                message: "XFS kernel quotas are already active — disk caps will be enforced."
+                    .into(),
+            };
+        }
         return Summary {
             ok: false,
             requires_reboot: true,
             fs_type,
             mount_point: mount_point.clone(),
             message: format!(
-                "{fstab_note}. XFS project quotas can only initialise at mount time — reboot the node (or remount {mount_point} while it's idle) to activate them."
+                "{fstab_note}. XFS quotas can only initialise at mount time — reboot the node (or remount {mount_point} while it's idle) to activate them."
             ),
         };
     }
@@ -17133,17 +17160,29 @@ async fn enable_kernel_quotas(home_path: &str) -> hyperion_types::QuotaEnableSum
             }
             // A hard error (bad option, read-only fs, unsupported option, …).
             // Surface the actual error instead of silently proceeding to
-            // quotacheck/quotaon on an fs that never got the quota option. A
-            // reboot only helps for `/` (re-reads fstab); for any other mount
-            // the error needs operator attention, not a reboot.
+            // quotacheck/quotaon on an fs that never got the quota option.
+            // A reboot only helps when the SAME fstab option would mount
+            // cleanly next time (e.g. a transient read-only `/`). A bad /
+            // unsupported option fails identically at boot, so don't promise a
+            // reboot for those — they need operator attention.
+            let bad_option = lower.contains("bad option")
+                || lower.contains("unsupported")
+                || lower.contains("unrecognized")
+                || lower.contains("invalid argument");
             return Summary {
                 ok: false,
-                requires_reboot: mount_point == "/",
+                requires_reboot: mount_point == "/" && !bad_option,
                 fs_type,
                 mount_point: mount_point.clone(),
-                message: format!(
-                    "{fstab_note}, but remounting {mount_point} with quota options failed: {remount_msg}."
-                ),
+                message: if bad_option {
+                    format!(
+                        "{fstab_note}, but {mount_point} rejected the quota mount option: {remount_msg}. This filesystem/kernel doesn't support it the way we tried — a reboot won't change that; it needs operator attention."
+                    )
+                } else {
+                    format!(
+                        "{fstab_note}, but remounting {mount_point} with quota options failed: {remount_msg}."
+                    )
+                },
             };
         }
     }
@@ -17161,6 +17200,19 @@ async fn enable_kernel_quotas(home_path: &str) -> hyperion_types::QuotaEnableSum
             mount_point,
             message: "Kernel quotas are now active — disk caps will be enforced.".into(),
         }
+    } else if ext4_has_quota_feature(&device).await == Some(false) {
+        // Accounting didn't start AND the on-disk `quota` feature is absent: a
+        // reboot just re-reads the same fstab option and still won't enable it.
+        // The one-time fix is `tune2fs -O quota`, not a reboot.
+        Summary {
+            ok: false,
+            requires_reboot: false,
+            fs_type,
+            mount_point: mount_point.clone(),
+            message: format!(
+                "{fstab_note} + quotacheck/quotaon ran, but {mount_point} ({device}) lacks the on-disk quota feature, so accounting can't start — a reboot won't help. Enable it once with `tune2fs -O quota {device}` ({mount_point} must be unmounted, or use single-user mode for `/`), then re-run. (quotacheck: {check_msg}; quotaon: {qon})"
+            ),
+        }
     } else {
         Summary {
             ok: false,
@@ -17172,6 +17224,32 @@ async fn enable_kernel_quotas(home_path: &str) -> hyperion_types::QuotaEnableSum
             ),
         }
     }
+}
+
+/// Whether the ext-family filesystem on `device` carries the on-disk `quota`
+/// feature flag (`tune2fs -l`). Returns `None` when we can't tell — tune2fs
+/// missing, a non-ext device, or an unparseable report — so callers never
+/// over-claim "feature absent" and wrongly suppress the reboot advice. When
+/// this is `Some(false)`, the mount option alone can't start accounting; the
+/// fs needs `tune2fs -O quota` first (a reboot won't help).
+async fn ext4_has_quota_feature(device: &str) -> Option<bool> {
+    let out = tokio::process::Command::new("/usr/sbin/tune2fs")
+        .args(["-l", device])
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    for line in text.lines() {
+        if let Some((key, val)) = line.split_once(':') {
+            if key.trim().eq_ignore_ascii_case("Filesystem features") {
+                return Some(val.split_whitespace().any(|f| f == "quota"));
+            }
+        }
+    }
+    None
 }
 
 /// Snapshot of one filesystem's usage, parsed from `df -P -B1`.
@@ -17730,12 +17808,16 @@ mod tests {
     }
 
     #[test]
-    fn fstab_splice_xfs_prjquota() {
+    fn fstab_splice_xfs_uquota() {
+        // XFS uses its native user+group quota spelling spliced into the
+        // options column. This MUST be uquota/gquota (user accounting), not
+        // prjquota (project) — the enforce path is `setquota -u`, which can
+        // only target user accounting.
         let content = "UUID=x /srv xfs defaults 0 2\n";
-        let out = fstab_with_quota_options(content, "/srv", &["prjquota"])
+        let out = fstab_with_quota_options(content, "/srv", &["uquota", "gquota"])
             .expect("match")
             .expect("changed");
-        assert_eq!(out, "UUID=x /srv xfs defaults,prjquota 0 2\n");
+        assert_eq!(out, "UUID=x /srv xfs defaults,uquota,gquota 0 2\n");
     }
 
     #[test]
