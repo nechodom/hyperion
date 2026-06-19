@@ -1,20 +1,22 @@
 name: Build and publish release binaries
 
-# Trigger on every push to main and on manual dispatch. We don't gate
-# on tags because we want every commit on main to ship — operators
-# pull "main" via update.sh and get the latest build.
+# Trigger on every push to main (ships the rolling build operators pull via
+# update.sh), on `v*` tags (cuts a versioned GitHub release — `git tag v1.2.0
+# && git push --tags`), and on manual dispatch.
 on:
   push:
     branches: [main]
+    tags: ['v[0-9]*']
   workflow_dispatch:
 
 permissions:
   contents: write   # required to create + overwrite the rolling release
 
 # Cancel in-flight builds when a new commit lands — only the latest
-# main matters for a rolling release.
+# main matters for a rolling release. Keyed by ref so a `v*` tag build
+# never cancels (or is cancelled by) the main build.
 concurrency:
-  group: release-main
+  group: release-${{ github.ref }}
   cancel-in-progress: true
 
 # Belt + suspenders alongside the per-action major-version bumps
@@ -53,6 +55,11 @@ jobs:
         # asset agree, which is what update.sh's staleness guard relies on.
         env:
           HYPERION_GIT_SHA: ${{ github.sha }}
+          # On a `v*` tag build, stamp the clean tag (e.g. `v1.2.0`) as the
+          # describe string so the binary's `--version` is exactly the release
+          # name. On a main push this is empty, so build.rs's `git describe`
+          # computes `vX.Y.Z-N-gSHA` from the full history fetched above.
+          HYPERION_DESCRIBE: ${{ github.ref_type == 'tag' && github.ref_name || '' }}
         run: |
           cargo build --release \
             --bin hyperion-agent \
@@ -80,10 +87,15 @@ jobs:
         run: |
           SHORT_SHA=$(git rev-parse --short HEAD)
           BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          # Same git-describe build.rs stamps into the binary — shown in the
+          # release body so the human version is visible at a glance.
+          DESCRIBE=$(git describe --tags --match 'v[0-9]*' --always)
           echo "short_sha=$SHORT_SHA" >> "$GITHUB_OUTPUT"
           echo "build_date=$BUILD_DATE" >> "$GITHUB_OUTPUT"
+          echo "describe=$DESCRIBE" >> "$GITHUB_OUTPUT"
 
       - name: Publish rolling release
+        if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
         # v3 runs on Node 24 — see
         # github.com/softprops/action-gh-release/releases/tag/v3.0.0
         # ("Move the action runtime and bundle target to Node 24").
@@ -94,6 +106,7 @@ jobs:
           body: |
             Auto-built rolling release. Always tracks `main`.
 
+            - **version**: `${{ steps.meta.outputs.describe }}`
             - **commit**: `${{ github.sha }}` (`${{ steps.meta.outputs.short_sha }}`)
             - **built**: ${{ steps.meta.outputs.build_date }}
             - **runner**: ubuntu-22.04 · glibc 2.35
@@ -117,5 +130,43 @@ jobs:
           draft: false
           prerelease: false
           make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish versioned release
+        # A `v*` tag cuts an immutable, named release pointing at this exact
+        # commit. The binaries are byte-identical to the rolling build for the
+        # same commit (same env, same runner); their `--version` reports the
+        # clean tag (e.g. `v1.2.0`) because we stamped HYPERION_DESCRIBE above.
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          body: |
+            Versioned release — `${{ github.ref_name }}`.
+
+            - **version**: `${{ steps.meta.outputs.describe }}`
+            - **commit**: `${{ github.sha }}` (`${{ steps.meta.outputs.short_sha }}`)
+            - **built**: ${{ steps.meta.outputs.build_date }}
+            - **runner**: ubuntu-22.04 · glibc 2.35
+            - **target**: x86_64-unknown-linux-gnu (Debian 12+ compatible)
+
+            Cut a release with `git tag ${{ github.ref_name }} && git push --tags`.
+            Operators on the rolling channel pull `main` via
+            `sudo /opt/hyperion/packaging/install/update.sh` and don't need to
+            pin a tag — this release is the human milestone marker that names
+            the version `--version` and the cluster version-skew pill report.
+
+            **Checksums** (`SHA256SUMS`) are uploaded alongside the binaries.
+          files: |
+            dist/hyperion-agent
+            dist/hyperion-web
+            dist/hctl
+            dist/SHA256SUMS
+            dist/VERSION
+          draft: false
+          prerelease: false
+          make_latest: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

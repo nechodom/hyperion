@@ -9,10 +9,16 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// `--version` output: crate version + git SHA stamped at build time
-/// (build.rs). See hyperion-agent's HYPERION_VERSION for the rationale —
-/// update.sh compares this against the agent's to catch a half-applied update.
-const HYPERION_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("HYPERION_GIT_SHA"));
+/// `--version` output: human git-describe version + full git SHA stamped at
+/// build time (build.rs), e.g. `v1.2.0-5-gf718fd1 (f718fd1a…40 chars…)`. See
+/// hyperion-agent's HYPERION_VERSION for the rationale — update.sh greps the
+/// 40-char SHA to catch a half-applied update.
+const HYPERION_VERSION: &str = concat!(
+    env!("HYPERION_DESCRIBE"),
+    " (",
+    env!("HYPERION_GIT_SHA"),
+    ")"
+);
 
 #[derive(Parser, Debug)]
 #[command(name = "hyperion-web", version = HYPERION_VERSION, about = "hyperion web admin UI")]

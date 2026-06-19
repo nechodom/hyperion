@@ -19,27 +19,35 @@ fn hostname_or_unknown() -> String {
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-/// The version token the agent reports to the master: the 12-char build SHA
-/// (stamped by build.rs), falling back to CARGO_PKG_VERSION only for dev
-/// builds outside a git checkout. This is the SINGLE source of the value —
-/// `AgentInfo`, enroll, and heartbeat all call it, so the `nodes.agent_version`
-/// column behind the cluster version-skew pill carries a real, comparable SHA
-/// instead of the useless hardcoded "0.1.0".
+/// The version token the agent reports to the master: the human git-describe
+/// string (`HYPERION_DESCRIBE`, e.g. `v1.2.0-5-gf718fd1`, stamped by build.rs),
+/// falling back to CARGO_PKG_VERSION only for dev builds outside a git checkout.
+/// This is the SINGLE source of the value — `AgentInfo`, enroll, and heartbeat
+/// all call it, so the `nodes.agent_version` column behind the cluster
+/// version-skew pill carries a real, comparable version instead of the useless
+/// hardcoded "0.1.0". Two nodes on the same commit describe identically (match);
+/// different commits describe differently (flagged).
 pub(crate) fn agent_version() -> String {
-    let short: String = env!("HYPERION_GIT_SHA").chars().take(12).collect();
-    if short == "dev-unknown" || short.is_empty() {
+    let describe = env!("HYPERION_DESCRIBE");
+    if describe.is_empty() || describe == "dev-unknown" {
         env!("CARGO_PKG_VERSION").to_string()
     } else {
-        short
+        describe.to_string()
     }
 }
 
-/// `--version` output: crate version + the git SHA stamped at build time
-/// (build.rs). The bare CARGO_PKG_VERSION is a useless "0.1.0" for every
-/// build, so we append the SHA — this is what lets `update.sh` (and a human)
-/// verify exactly which commit the installed binary was built from, and is the
-/// same SHA the agent reports to the master for the cluster version-skew pill.
-const HYPERION_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("HYPERION_GIT_SHA"));
+/// `--version` output: the human git-describe version + the full git SHA stamped
+/// at build time (build.rs), e.g. `v1.2.0-5-gf718fd1 (f718fd1a…40 chars…)`. The
+/// bare CARGO_PKG_VERSION is a useless "0.1.0" for every build, so we lead with
+/// the describe string for humans and keep the full 40-char SHA in parens —
+/// the latter is what `update.sh`'s post-install check greps to verify exactly
+/// which commit the installed binary was built from.
+const HYPERION_VERSION: &str = concat!(
+    env!("HYPERION_DESCRIBE"),
+    " (",
+    env!("HYPERION_GIT_SHA"),
+    ")"
+);
 
 #[derive(Parser, Debug)]
 #[command(name = "hyperion-agent", version = HYPERION_VERSION, about = "hyperion agent daemon")]

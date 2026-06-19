@@ -145,6 +145,36 @@ cargo build --release --workspace
 See [`docs/RUNBOOK.md`](docs/RUNBOOK.md#local-development) for the
 minimal `agent.toml` + `web.toml` for a rootless local instance.
 
+### Versioning & releases
+
+Every binary stamps its own version at build time (`build.rs`), so
+`--version` always tells you exactly what's running:
+
+```bash
+hyperion-agent --version
+# hyperion-agent v1.2.0-5-gf718fd1 (f718fd1a…full 40-char SHA…)
+```
+
+The human part is `git describe` against the nearest `vX.Y.Z` tag —
+`v1.2.0` exactly on a tag, `v1.2.0-5-gf718fd1` for the 5th commit
+after it, or a bare short SHA before the first tag. This is also the
+string each node reports to the master for the **cluster version-skew
+pill**, so two nodes on the same commit read identically and drift is
+obvious. The full 40-char SHA in parens is what `update.sh` greps to
+confirm a binary isn't a commit behind its source.
+
+There's nothing to bump by hand. To cut a milestone release:
+
+```bash
+git tag v1.2.0      # annotate the current commit
+git push --tags     # CI builds a named GitHub release for the tag
+```
+
+CI ships a `rolling` release on every push to `main` (what
+`update.sh` pulls) and an immutable, named release for each `v*` tag.
+Both contain byte-identical binaries for the same commit — the tag is
+purely the human milestone marker.
+
 ---
 
 ## Features
@@ -259,7 +289,7 @@ for the web to help.
 
 ```console
 $ hctl info
-agent: master.example.com version=0.1.0 schema=31 hostings=12
+agent: master.example.com version=v1.2.0-5-gf718fd1 schema=31 hostings=12
 
 $ hctl hosting create example.com --php 8.3 --db mariadb
 ✓ created example_com (id=01K4Z…)
