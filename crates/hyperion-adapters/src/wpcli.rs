@@ -349,28 +349,11 @@ pub async fn theme_list(
         ],
     );
     let out = cmd::run("/usr/bin/sudo", &argv_as_refs(&argv)).await?;
-    // wp-cli emits each row with `name` (= slug) and a separate
-    // human title isn't always returned; map the slug into both
-    // slug + name for the UI so a missing title isn't an empty
-    // column.
-    #[derive(serde::Deserialize)]
-    struct Row {
-        name: String,
-        #[serde(default)]
-        title: Option<String>,
-        status: String,
-        #[serde(default)]
-        update: String,
-        version: String,
-        #[serde(default)]
-        update_version: Option<String>,
-    }
-    let rows: Vec<Row> = serde_json::from_str(out.trim()).map_err(|e| {
-        AdapterError::Other(format!(
-            "wp theme list returned non-JSON / unexpected shape: {e}; head: {}",
-            out.chars().take(200).collect::<String>()
-        ))
-    })?;
+    // wp-cli emits each row with `name` (= slug); a separate human title
+    // isn't always returned, so map the slug into both slug + name for the
+    // UI below. parse_wp_json tolerates PHP warnings prepended to stdout
+    // (same wp-cli noise that breaks plugin_list).
+    let rows: Vec<RawThemeRow> = parse_wp_json(&out, "wp theme list")?;
     let themes = rows
         .into_iter()
         .map(|r| hyperion_types::WpTheme {
@@ -539,17 +522,10 @@ pub async fn plugin_list(
     ];
     let argv = build_argv(user, htdocs, &args);
     let stdout = cmd::run("/usr/bin/sudo", &argv_as_refs(&argv)).await?;
-    let rows: Vec<RawPluginRow> = serde_json::from_str(stdout.trim()).map_err(|e| {
-        // `chars().take(200)`, NOT byte-slicing `[..200]`: a PHP
-        // notice/deprecation prefixing the JSON can contain multi-byte
-        // UTF-8, and slicing on a non-char-boundary panics (the crate
-        // denies unwrap/expect but slicing bypasses that). Matches
-        // theme_list's handling.
-        let preview: String = stdout.chars().take(200).collect();
-        AdapterError::Other(format!(
-            "wp plugin list returned non-JSON: {e} — body: {preview}"
-        ))
-    })?;
+    // Tolerate PHP warnings/notices wp-cli prints to stdout before the JSON
+    // (e.g. the "Undefined property: stdClass::$requires" noise wp-cli emits
+    // for premium plugins). See parse_wp_json.
+    let rows: Vec<RawPluginRow> = parse_wp_json(&stdout, "wp plugin list")?;
     let plugins: Vec<hyperion_types::WpPlugin> = rows
         .into_iter()
         .map(|r| hyperion_types::WpPlugin {
@@ -764,7 +740,7 @@ fn humanize_slug(slug: &str) -> String {
     out
 }
 
-#[derive(serde::Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 struct RawPluginRow {
     name: String,
     status: String,
@@ -777,6 +753,83 @@ struct RawPluginRow {
     /// "on" | "off" | None (very old wp-cli)
     #[serde(default)]
     auto_update: Option<String>,
+}
+
+/// One row of `wp theme list --format=json`. Lifted to module scope (next
+/// to RawPluginRow) so `theme_list` can route through `parse_wp_json`.
+#[derive(Debug, serde::Deserialize)]
+struct RawThemeRow {
+    name: String,
+    #[serde(default)]
+    title: Option<String>,
+    status: String,
+    #[serde(default)]
+    update: String,
+    version: String,
+    #[serde(default)]
+    update_version: Option<String>,
+}
+
+/// Parse the JSON value embedded in wp-cli stdout, tolerating leading PHP
+/// noise printed ahead of the JSON.
+///
+/// wp-cli boots WordPress to run, and a buggy plugin — or wp-cli itself —
+/// can print PHP warnings/notices/deprecations to *stdout* (not just stderr)
+/// while the command still exits 0. With `--format=json` those lines get
+/// prepended to the JSON, e.g. real production output:
+///
+/// ```text
+/// Warning: Undefined property: stdClass::$requires in .../Plugin_Command.php on line 875
+/// [{"name":"akismet","status":"active",...}]
+/// ```
+///
+/// A naive `serde_json::from_str` on that whole blob fails and the caller
+/// renders an empty list ("No plugins installed yet") on a site that clearly
+/// has plugins. This locates the actual JSON value by scanning for the first
+/// `[`/`{` from which the *remainder parses to the end* — which is exactly
+/// the trailing JSON wp-cli emits as the final thing on stdout, never a stray
+/// bracket inside a preceding warning line. A genuine failure (no JSON at all,
+/// e.g. "Error: This does not seem to be a WordPress installation.") still
+/// surfaces as an error rather than a silent empty list. `cmd_label` is used
+/// only for that error message.
+///
+/// Assumes the JSON is the *final* output on stdout — true for the wp-cli
+/// list commands we call (the formatter flushes last; the `$requires` noise
+/// fires interleaved, before it). PHP noise printed *after* the JSON (rare
+/// shutdown-time deprecations) would surface as an error, not a wrong value.
+fn parse_wp_json<T: serde::de::DeserializeOwned>(
+    raw: &str,
+    cmd_label: &str,
+) -> Result<T, AdapterError> {
+    let trimmed = raw.trim();
+    // Fast path: clean JSON — the overwhelmingly common case.
+    if let Ok(v) = serde_json::from_str::<T>(trimmed) {
+        return Ok(v);
+    }
+    // Otherwise find where the JSON value actually begins. A PHP warning line
+    // could itself contain a bracket (e.g. "array offset [0] on null", or even
+    // a bare "[]"), so we don't blindly slice from the first `[`/`{` — we try
+    // each candidate opening delimiter and accept the first one whose
+    // remainder parses *to the end* via from_str. Requiring whole-remainder
+    // consumption is what makes a stray "[]" in a warning fail (it leaves
+    // trailing text) and fall through to the real JSON, which wp-cli always
+    // emits as the final thing on stdout. `char_indices` keeps `i` on a UTF-8
+    // boundary so slicing a multi-byte notice can never panic.
+    for (i, c) in trimmed.char_indices() {
+        if c != '[' && c != '{' {
+            continue;
+        }
+        if let Ok(v) = serde_json::from_str::<T>(&trimmed[i..]) {
+            return Ok(v);
+        }
+    }
+    // `chars().take(200)`, NOT byte-slicing `[..200]`: a PHP notice can
+    // contain multi-byte UTF-8 and slicing on a non-char boundary panics
+    // (the crate denies unwrap/expect but slicing bypasses that).
+    let preview: String = trimmed.chars().take(200).collect();
+    Err(AdapterError::Other(format!(
+        "{cmd_label} returned non-JSON: body: {preview}"
+    )))
 }
 
 #[cfg(test)]
@@ -900,5 +953,118 @@ mod tests {
         // 172.32+ and 172.15 are public, must not be caught by the /12 rule.
         assert!(validate_plugin_url("https://172.32.0.1/p.zip").is_ok());
         assert!(validate_plugin_url("https://172.15.0.1/p.zip").is_ok());
+    }
+
+    // ---- parse_wp_json: tolerate PHP noise on stdout before the JSON ----
+
+    const PLUGIN_ROW: &str = r#"{"name":"akismet","status":"active","update":"none","version":"5.3","update_version":null,"auto_update":"off"}"#;
+
+    #[test]
+    fn parse_wp_json_warning_prefixed_array_still_parses() {
+        // The literal production reproduction: a wp-cli `$requires` warning
+        // printed to stdout ahead of the JSON array (see the bug report).
+        let raw = format!(
+            "PHP Warning:  Undefined property: stdClass::$requires in \
+             phar:///usr/local/bin/wp/vendor/wp-cli/extension-command/src/Plugin_Command.php on line 875\n[{PLUGIN_ROW}]"
+        );
+        let rows: Vec<RawPluginRow> = parse_wp_json(&raw, "wp plugin list").expect("should parse");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "akismet");
+    }
+
+    #[test]
+    fn parse_wp_json_multiple_leading_noise_lines() {
+        let raw = format!(
+            "PHP Warning:  something\nWarning:  something\nDeprecated: old thing\nNotice: heads up\n[{PLUGIN_ROW},{PLUGIN_ROW}]"
+        );
+        let rows: Vec<RawPluginRow> = parse_wp_json(&raw, "wp plugin list").expect("should parse");
+        assert_eq!(rows.len(), 2);
+    }
+
+    #[test]
+    fn parse_wp_json_clean_array_unchanged() {
+        // Happy path: no prefix, identical result to a plain from_str.
+        let raw = format!("[{PLUGIN_ROW}]");
+        let rows: Vec<RawPluginRow> = parse_wp_json(&raw, "wp plugin list").expect("should parse");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].status, "active");
+    }
+
+    #[test]
+    fn parse_wp_json_multibyte_prefix_does_not_panic() {
+        // A Czech (multi-byte UTF-8) notice ahead of the JSON must not panic
+        // on a non-char-boundary slice, and must still parse.
+        let raw = format!("PHP Warning:  chyba v šabloně — žluťoučký kůň …\n[{PLUGIN_ROW}]");
+        let rows: Vec<RawPluginRow> = parse_wp_json(&raw, "wp plugin list").expect("should parse");
+        assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn parse_wp_json_empty_array_is_ok_not_error() {
+        // A site with no plugins is valid — both clean and warning-prefixed.
+        let clean: Vec<RawPluginRow> = parse_wp_json("[]", "wp plugin list").expect("clean []");
+        assert!(clean.is_empty());
+        let prefixed: Vec<RawPluginRow> =
+            parse_wp_json("Warning: noise\n[]", "wp plugin list").expect("prefixed []");
+        assert!(prefixed.is_empty());
+    }
+
+    #[test]
+    fn parse_wp_json_non_json_surfaces_error() {
+        // A genuine failure (no JSON at all) must still error, NOT silently
+        // return an empty list — otherwise the defender's "all clear" lies.
+        let err = parse_wp_json::<Vec<RawPluginRow>>(
+            "Error: This does not seem to be a WordPress installation.",
+            "wp plugin list",
+        )
+        .unwrap_err();
+        match err {
+            AdapterError::Other(msg) => {
+                assert!(
+                    msg.contains("wp plugin list returned non-JSON"),
+                    "msg: {msg}"
+                );
+                assert!(
+                    msg.contains("does not seem to be"),
+                    "preview missing: {msg}"
+                );
+            }
+            other => panic!("expected AdapterError::Other, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_wp_json_bracket_in_warning_is_not_mistaken_for_json() {
+        // A warning line containing a stray '[' must not be taken as the JSON
+        // start: the helper anchors on the first delimiter from which the
+        // FULL value deserializes, skipping the decoy.
+        let raw = format!("PHP Notice: array offset [0] on null in foo.php\n[{PLUGIN_ROW}]");
+        let rows: Vec<RawPluginRow> = parse_wp_json(&raw, "wp plugin list").expect("should parse");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "akismet");
+    }
+
+    #[test]
+    fn parse_wp_json_bare_empty_array_in_warning_is_not_the_payload() {
+        // A warning containing a bare "[]" must NOT be mistaken for an empty
+        // result — that would silently hide a site's real plugins. The real
+        // array (the tail) is what must be returned.
+        let raw = format!("Warning: found [] stale entries in cache\n[{PLUGIN_ROW}]");
+        let rows: Vec<RawPluginRow> = parse_wp_json(&raw, "wp plugin list").expect("should parse");
+        assert_eq!(
+            rows.len(),
+            1,
+            "must return the real array, not the [] decoy"
+        );
+        assert_eq!(rows[0].name, "akismet");
+    }
+
+    #[test]
+    fn parse_wp_json_theme_row_also_tolerates_prefix() {
+        // theme_list shares the helper via RawThemeRow.
+        let raw = "Warning: noise\n[{\"name\":\"twentytwentyfour\",\"status\":\"active\",\"version\":\"1.2\"}]";
+        let rows: Vec<RawThemeRow> = parse_wp_json(raw, "wp theme list").expect("should parse");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "twentytwentyfour");
     }
 }
