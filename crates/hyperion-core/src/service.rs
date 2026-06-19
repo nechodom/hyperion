@@ -16474,49 +16474,83 @@ async fn apply_disk_quota(user: &str, soft_kib: i64, hard_kib: i64) -> Result<()
 ///      always works (lets the UI show *some* number even on VPSes
 ///      without quotas configured).
 ///
+/// Longest mountpoint in /proc/self/mounts that contains `path` (so we can ask
+/// `quotaon -p` about the right filesystem). Mirrors the discovery in
+/// `enable_kernel_quotas`.
+async fn mount_point_for(path: &str) -> Option<String> {
+    let mounts = tokio::fs::read_to_string("/proc/self/mounts").await.ok()?;
+    let mut best: Option<String> = None;
+    for line in mounts.lines() {
+        let f: Vec<&str> = line.split_whitespace().collect();
+        if f.len() < 2 {
+            continue;
+        }
+        let mp = unescape_mount_field(f[1]);
+        let covers =
+            path == mp || mp == "/" || path.starts_with(&format!("{}/", mp.trim_end_matches('/')));
+        if covers && best.as_ref().map(|m| mp.len() > m.len()).unwrap_or(true) {
+            best = Some(mp);
+        }
+    }
+    best
+}
+
 /// Returns (current_disk_kib, quotas_enabled_on_fs, setup_hint).
 async fn quota_probe_current(user: &str, home_dir: &str) -> (i64, bool, String) {
-    // `quota -u -q -w` prints used blocks in machine-readable form.
-    // Output (when quotas are on) is one line: "<fs>  <used>  <soft>
-    // <hard>  <files>  <soft>  <hard>". When quotas are off, exit
-    // code is non-zero and stderr is "Disk quotas for user <user>:
-    // none".
-    let q = tokio::process::Command::new("/usr/bin/quota")
-        .args(["-u", "-q", "-w", user])
+    // Whether the quota SUBSYSTEM is active on the fs holding home_dir, via the
+    // SAME probe the enable flow uses (`quotaon -p`). We must NOT infer this
+    // from per-user `quota` output: `quota -q` prints nothing while the user is
+    // UNDER quota, which is the normal case right after enabling (no cap set
+    // yet) — so the old heuristic read "enabled" as false and the banner never
+    // cleared even though quotas were on.
+    let enabled = match mount_point_for(home_dir).await {
+        Some(mp) => ext_quota_on(&mp).await,
+        None => false,
+    };
+
+    // Current usage: prefer the kernel's accounting (`quota -u -w`, no `-q` so
+    // it prints even when under quota), else `du`.
+    let mut used = 0i64;
+    if let Ok(out) = tokio::process::Command::new("/usr/bin/quota")
+        .args(["-u", "-w", user])
         .output()
-        .await;
-    if let Ok(out) = q {
+        .await
+    {
         if out.status.success() {
             let s = String::from_utf8_lossy(&out.stdout);
             for line in s.lines() {
                 let cols: Vec<&str> = line.split_whitespace().collect();
                 if cols.len() >= 2 {
-                    if let Ok(used) = cols[1].trim_end_matches('*').parse::<i64>() {
-                        return (used, true, String::new());
+                    if let Ok(u) = cols[1].trim_end_matches('*').parse::<i64>() {
+                        used = u;
+                        break;
                     }
                 }
             }
         }
     }
-    // Fallback: `du -sk` for the home dir.
-    let du = tokio::process::Command::new("/usr/bin/du")
-        .args(["-sk", home_dir])
-        .output()
-        .await;
-    let used = du
-        .ok()
-        .and_then(|o| {
-            if !o.status.success() {
-                return None;
+    if used == 0 {
+        if let Ok(o) = tokio::process::Command::new("/usr/bin/du")
+            .args(["-sk", home_dir])
+            .output()
+            .await
+        {
+            if o.status.success() {
+                used = String::from_utf8_lossy(&o.stdout)
+                    .split_whitespace()
+                    .next()
+                    .and_then(|n| n.parse::<i64>().ok())
+                    .unwrap_or(0);
             }
-            let s = String::from_utf8_lossy(&o.stdout).into_owned();
-            s.split_whitespace()
-                .next()
-                .and_then(|n| n.parse::<i64>().ok())
-        })
-        .unwrap_or(0);
-    let hint = "Kernel quotas aren't enabled on this filesystem. Disk usage is shown from `du`, but `setquota` won't enforce caps. Use the \"Enable kernel quotas\" button to set this up automatically.".to_string();
-    (used, false, hint)
+        }
+    }
+
+    let hint = if enabled {
+        String::new()
+    } else {
+        "Kernel quotas aren't enabled on this filesystem. Disk usage is shown from `du`, but `setquota` won't enforce caps. Use the \"Enable kernel quotas\" button to set this up automatically.".to_string()
+    };
+    (used, enabled, hint)
 }
 
 /// Run a command, returning trimmed stdout (+ stderr) for status messages.
