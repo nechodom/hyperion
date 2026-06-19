@@ -3,7 +3,9 @@
 use crate::db::StateError;
 use sqlx::SqlitePool;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+// 21 columns now exceeds sqlx's 16-element positional-tuple limit, so the
+// reads use #[derive(FromRow)] (matched by column name) instead of tuples.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 pub struct NodeMetricsRow {
     pub id: i64,
     pub sampled_at: i64,
@@ -18,6 +20,15 @@ pub struct NodeMetricsRow {
     pub mem_total_kib: i64,
     pub mem_used_kib: i64,
     pub uptime_secs: i64,
+    // Migration 042 additions (default 0 on old rows / old agents).
+    pub cpu_pct_x100: i64,
+    pub swap_total_kib: i64,
+    pub swap_used_kib: i64,
+    pub psi_cpu_x100: i64,
+    pub psi_mem_x100: i64,
+    pub psi_io_x100: i64,
+    pub net_rx_bps: i64,
+    pub net_tx_bps: i64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -34,7 +45,23 @@ pub struct NodeMetricsInput {
     pub mem_total_kib: i64,
     pub mem_used_kib: i64,
     pub uptime_secs: i64,
+    pub cpu_pct_x100: i64,
+    pub swap_total_kib: i64,
+    pub swap_used_kib: i64,
+    pub psi_cpu_x100: i64,
+    pub psi_mem_x100: i64,
+    pub psi_io_x100: i64,
+    pub net_rx_bps: i64,
+    pub net_tx_bps: i64,
 }
+
+/// Column list shared by `latest`/`history`, in NodeMetricsRow field order so
+/// FromRow maps by name.
+const SELECT_COLS: &str = "id, sampled_at, hostings_count, hostings_active, hostings_suspended, \
+     hostings_failed, total_disk_bytes, total_bw_out_24h, total_requests_24h, \
+     loadavg_1m_x100, mem_total_kib, mem_used_kib, uptime_secs, cpu_pct_x100, \
+     swap_total_kib, swap_used_kib, psi_cpu_x100, psi_mem_x100, psi_io_x100, \
+     net_rx_bps, net_tx_bps";
 
 pub async fn insert(pool: &SqlitePool, m: &NodeMetricsInput) -> Result<i64, StateError> {
     let row: (i64,) = sqlx::query_as(
@@ -42,8 +69,10 @@ pub async fn insert(pool: &SqlitePool, m: &NodeMetricsInput) -> Result<i64, Stat
            (sampled_at, hostings_count, hostings_active, hostings_suspended,
             hostings_failed, total_disk_bytes, total_bw_out_24h,
             total_requests_24h, loadavg_1m_x100, mem_total_kib, mem_used_kib,
-            uptime_secs)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id"#,
+            uptime_secs, cpu_pct_x100, swap_total_kib, swap_used_kib,
+            psi_cpu_x100, psi_mem_x100, psi_io_x100, net_rx_bps, net_tx_bps)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           RETURNING id"#,
     )
     .bind(m.sampled_at)
     .bind(m.hostings_count)
@@ -57,66 +86,23 @@ pub async fn insert(pool: &SqlitePool, m: &NodeMetricsInput) -> Result<i64, Stat
     .bind(m.mem_total_kib)
     .bind(m.mem_used_kib)
     .bind(m.uptime_secs)
+    .bind(m.cpu_pct_x100)
+    .bind(m.swap_total_kib)
+    .bind(m.swap_used_kib)
+    .bind(m.psi_cpu_x100)
+    .bind(m.psi_mem_x100)
+    .bind(m.psi_io_x100)
+    .bind(m.net_rx_bps)
+    .bind(m.net_tx_bps)
     .fetch_one(pool)
     .await?;
     Ok(row.0)
 }
 
 pub async fn latest(pool: &SqlitePool) -> Result<Option<NodeMetricsRow>, StateError> {
-    let row: Option<(
-        i64,
-        i64,
-        i64,
-        i64,
-        i64,
-        i64,
-        i64,
-        i64,
-        i64,
-        i64,
-        i64,
-        i64,
-        i64,
-    )> = sqlx::query_as(
-        "SELECT id, sampled_at, hostings_count, hostings_active, hostings_suspended,
-                hostings_failed, total_disk_bytes, total_bw_out_24h,
-                total_requests_24h, loadavg_1m_x100, mem_total_kib, mem_used_kib,
-                uptime_secs
-         FROM node_metrics ORDER BY sampled_at DESC LIMIT 1",
-    )
-    .fetch_optional(pool)
-    .await?;
-    Ok(row.map(
-        |(
-            id,
-            sampled_at,
-            hostings_count,
-            hostings_active,
-            hostings_suspended,
-            hostings_failed,
-            total_disk_bytes,
-            total_bw_out_24h,
-            total_requests_24h,
-            loadavg_1m_x100,
-            mem_total_kib,
-            mem_used_kib,
-            uptime_secs,
-        )| NodeMetricsRow {
-            id,
-            sampled_at,
-            hostings_count,
-            hostings_active,
-            hostings_suspended,
-            hostings_failed,
-            total_disk_bytes,
-            total_bw_out_24h,
-            total_requests_24h,
-            loadavg_1m_x100,
-            mem_total_kib,
-            mem_used_kib,
-            uptime_secs,
-        },
-    ))
+    let sql = format!("SELECT {SELECT_COLS} FROM node_metrics ORDER BY sampled_at DESC LIMIT 1");
+    let row: Option<NodeMetricsRow> = sqlx::query_as(&sql).fetch_optional(pool).await?;
+    Ok(row)
 }
 
 /// Last N node_metrics samples ordered oldest → newest (so charts read
@@ -124,53 +110,10 @@ pub async fn latest(pool: &SqlitePool) -> Result<Option<NodeMetricsRow>, StateEr
 /// @ 5min tick" sparkline, 288 for a 24h window.
 pub async fn history(pool: &SqlitePool, limit: i64) -> Result<Vec<NodeMetricsRow>, StateError> {
     let limit = limit.clamp(1, 2000);
-    let rows: Vec<(
-        i64,
-        i64,
-        i64,
-        i64,
-        i64,
-        i64,
-        i64,
-        i64,
-        i64,
-        i64,
-        i64,
-        i64,
-        i64,
-    )> = sqlx::query_as(
-        "SELECT id, sampled_at, hostings_count, hostings_active, hostings_suspended,
-                hostings_failed, total_disk_bytes, total_bw_out_24h,
-                total_requests_24h, loadavg_1m_x100, mem_total_kib, mem_used_kib,
-                uptime_secs
-         FROM node_metrics
-         ORDER BY sampled_at DESC
-         LIMIT ?",
-    )
-    .bind(limit)
-    .fetch_all(pool)
-    .await?;
-    // We selected DESC for the LIMIT, now flip so callers iterate
-    // left-to-right (oldest first) — the natural reading order for a
-    // line chart.
-    let mut out: Vec<NodeMetricsRow> = rows
-        .into_iter()
-        .map(|t| NodeMetricsRow {
-            id: t.0,
-            sampled_at: t.1,
-            hostings_count: t.2,
-            hostings_active: t.3,
-            hostings_suspended: t.4,
-            hostings_failed: t.5,
-            total_disk_bytes: t.6,
-            total_bw_out_24h: t.7,
-            total_requests_24h: t.8,
-            loadavg_1m_x100: t.9,
-            mem_total_kib: t.10,
-            mem_used_kib: t.11,
-            uptime_secs: t.12,
-        })
-        .collect();
+    let sql = format!("SELECT {SELECT_COLS} FROM node_metrics ORDER BY sampled_at DESC LIMIT ?");
+    let mut out: Vec<NodeMetricsRow> = sqlx::query_as(&sql).bind(limit).fetch_all(pool).await?;
+    // Selected DESC for the LIMIT; flip so callers iterate oldest → newest
+    // (natural left-to-right reading order for a line chart).
     out.reverse();
     Ok(out)
 }

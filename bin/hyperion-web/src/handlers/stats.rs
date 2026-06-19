@@ -335,6 +335,14 @@ async fn aggregate_cluster_stats(
                     sampled_at: 0,
                     agent_version: String::new(),
                     agent_online: false,
+                    cpu_pct_x100: 0,
+                    swap_total_kib: 0,
+                    swap_used_kib: 0,
+                    psi_cpu_x100: 0,
+                    psi_mem_x100: 0,
+                    psi_io_x100: 0,
+                    net_rx_bps: 0,
+                    net_tx_bps: 0,
                 });
             }
             Err(e) => {
@@ -356,6 +364,14 @@ async fn aggregate_cluster_stats(
                     sampled_at: 0,
                     agent_version: String::new(),
                     agent_online: false,
+                    cpu_pct_x100: 0,
+                    swap_total_kib: 0,
+                    swap_used_kib: 0,
+                    psi_cpu_x100: 0,
+                    psi_mem_x100: 0,
+                    psi_io_x100: 0,
+                    net_rx_bps: 0,
+                    net_tx_bps: 0,
                 });
             }
             _ => {}
@@ -601,6 +617,17 @@ pub fn fmt_percent(num: &i64, total: &i64) -> String {
     }
     let p = (*num as f64 / *total as f64 * 100.0).round() as i64;
     format!("{p}%")
+}
+
+/// Display a "× 100" percentage (CPU %, PSI pressure) with one decimal:
+/// `4250` → `42.5%`.
+pub fn fmt_pct_x100(v: &i64) -> String {
+    format!("{:.1}%", *v as f64 / 100.0)
+}
+
+/// Bytes/sec → human rate, e.g. `1.2 MB/s`.
+pub fn fmt_rate(bps: &i64) -> String {
+    format!("{}/s", fmt_bytes(bps))
 }
 
 /// Load average from the stored ×100 integer.

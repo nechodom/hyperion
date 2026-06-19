@@ -9311,7 +9311,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             None => total_disk,
         };
 
-        let (la, mem_total, mem_used, uptime) = read_proc_metrics().await;
+        let pm = read_proc_metrics().await;
 
         let _ = metrics::insert(
             &self.pool,
@@ -9324,10 +9324,18 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 total_disk_bytes: node_disk_used,
                 total_bw_out_24h: total_bw_out,
                 total_requests_24h: total_requests,
-                loadavg_1m_x100: la,
-                mem_total_kib: mem_total,
-                mem_used_kib: mem_used,
-                uptime_secs: uptime,
+                loadavg_1m_x100: pm.loadavg_1m_x100,
+                mem_total_kib: pm.mem_total_kib,
+                mem_used_kib: pm.mem_used_kib,
+                uptime_secs: pm.uptime_secs,
+                cpu_pct_x100: pm.cpu_pct_x100,
+                swap_total_kib: pm.swap_total_kib,
+                swap_used_kib: pm.swap_used_kib,
+                psi_cpu_x100: pm.psi_cpu_x100,
+                psi_mem_x100: pm.psi_mem_x100,
+                psi_io_x100: pm.psi_io_x100,
+                net_rx_bps: pm.net_rx_bps,
+                net_tx_bps: pm.net_tx_bps,
             },
         )
         .await;
@@ -9378,12 +9386,20 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // never match a live `htop`/`free`. Read them LIVE here (this runs on
         // the node itself) so the headline number is current. The 24h aggregates
         // (disk, bandwidth, requests) legitimately stay from the latest sample.
-        let (la, mem_total, mem_used, uptime) = read_proc_metrics().await;
-        if mem_total > 0 {
-            ns.loadavg_1m_x100 = la;
-            ns.mem_total_kib = mem_total;
-            ns.mem_used_kib = mem_used;
-            ns.uptime_secs = uptime;
+        let pm = read_proc_metrics().await;
+        if pm.mem_total_kib > 0 {
+            ns.loadavg_1m_x100 = pm.loadavg_1m_x100;
+            ns.mem_total_kib = pm.mem_total_kib;
+            ns.mem_used_kib = pm.mem_used_kib;
+            ns.uptime_secs = pm.uptime_secs;
+            ns.cpu_pct_x100 = pm.cpu_pct_x100;
+            ns.swap_total_kib = pm.swap_total_kib;
+            ns.swap_used_kib = pm.swap_used_kib;
+            ns.psi_cpu_x100 = pm.psi_cpu_x100;
+            ns.psi_mem_x100 = pm.psi_mem_x100;
+            ns.psi_io_x100 = pm.psi_io_x100;
+            ns.net_rx_bps = pm.net_rx_bps;
+            ns.net_tx_bps = pm.net_tx_bps;
             ns.sampled_at = now_secs(); // = "just now", so the freshness label is honest
         }
         Ok(ns)
@@ -13633,6 +13649,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 total_bw_out_24h: r.total_bw_out_24h,
                 total_requests_24h: r.total_requests_24h,
                 hostings_count: r.hostings_count,
+                cpu_pct_x100: r.cpu_pct_x100,
+                swap_used_kib: r.swap_used_kib,
+                net_rx_bps: r.net_rx_bps,
+                net_tx_bps: r.net_tx_bps,
             })
             .collect();
         Ok(hyperion_types::NodeMetricsHistory { samples })
@@ -14474,6 +14494,14 @@ fn node_stats_from(
             sampled_at: r.sampled_at,
             agent_version: version.to_string(),
             agent_online: true,
+            cpu_pct_x100: r.cpu_pct_x100,
+            swap_total_kib: r.swap_total_kib,
+            swap_used_kib: r.swap_used_kib,
+            psi_cpu_x100: r.psi_cpu_x100,
+            psi_mem_x100: r.psi_mem_x100,
+            psi_io_x100: r.psi_io_x100,
+            net_rx_bps: r.net_rx_bps,
+            net_tx_bps: r.net_tx_bps,
         },
         None => NodeStats {
             node_id: hostname.to_string(),
@@ -14492,6 +14520,14 @@ fn node_stats_from(
             sampled_at: 0,
             agent_version: version.to_string(),
             agent_online: true,
+            cpu_pct_x100: 0,
+            swap_total_kib: 0,
+            swap_used_kib: 0,
+            psi_cpu_x100: 0,
+            psi_mem_x100: 0,
+            psi_io_x100: 0,
+            net_rx_bps: 0,
+            net_tx_bps: 0,
         },
     }
 }
@@ -15275,7 +15311,90 @@ async fn parse_access_log_window(path: &std::path::Path, since: i64) -> (i64, i6
     (bw_in, bw_out, reqs, last_ts)
 }
 
-async fn read_proc_metrics() -> (i64, i64, i64, i64) {
+/// Instantaneous node metrics read straight from /proc. CPU% and network rate
+/// require a delta, so this samples twice ~200 ms apart — cheap enough for the
+/// 5-min sampler and a page load.
+#[derive(Debug, Clone, Default)]
+struct ProcMetrics {
+    loadavg_1m_x100: i64,
+    mem_total_kib: i64,
+    mem_used_kib: i64,
+    uptime_secs: i64,
+    cpu_pct_x100: i64,
+    swap_total_kib: i64,
+    swap_used_kib: i64,
+    psi_cpu_x100: i64,
+    psi_mem_x100: i64,
+    psi_io_x100: i64,
+    net_rx_bps: i64,
+    net_tx_bps: i64,
+}
+
+/// `(busy_jiffies, total_jiffies)` from the aggregate `cpu` line of /proc/stat.
+/// busy = total - idle - iowait.
+async fn read_cpu_jiffies() -> Option<(u64, u64)> {
+    let s = tokio::fs::read_to_string("/proc/stat").await.ok()?;
+    let line = s.lines().next()?; // "cpu  u n s idle iowait irq softirq steal ..."
+    let mut it = line.split_whitespace();
+    if it.next()? != "cpu" {
+        return None;
+    }
+    let vals: Vec<u64> = it.filter_map(|v| v.parse::<u64>().ok()).collect();
+    if vals.len() < 5 {
+        return None;
+    }
+    let total: u64 = vals.iter().sum();
+    let idle = vals[3] + vals.get(4).copied().unwrap_or(0); // idle + iowait
+    Some((total.saturating_sub(idle), total))
+}
+
+/// `(rx_bytes, tx_bytes)` summed over every non-loopback interface in
+/// /proc/net/dev.
+async fn read_net_bytes() -> Option<(u64, u64)> {
+    let s = tokio::fs::read_to_string("/proc/net/dev").await.ok()?;
+    let mut rx = 0u64;
+    let mut tx = 0u64;
+    for line in s.lines() {
+        let Some((iface, rest)) = line.split_once(':') else {
+            continue;
+        };
+        let iface = iface.trim();
+        if iface == "lo" || iface.is_empty() {
+            continue;
+        }
+        let cols: Vec<u64> = rest
+            .split_whitespace()
+            .filter_map(|v| v.parse().ok())
+            .collect();
+        // /proc/net/dev: rx_bytes is col 0, tx_bytes is col 8.
+        if let (Some(r), Some(t)) = (cols.first(), cols.get(8)) {
+            rx += *r;
+            tx += *t;
+        }
+    }
+    Some((rx, tx))
+}
+
+/// `some avg10` (×100) from /proc/pressure/<resource>. 0 when PSI is
+/// unavailable (kernel without CONFIG_PSI). Line: `some avg10=0.00 avg60=...`.
+async fn read_psi_some_avg10(resource: &str) -> i64 {
+    let path = format!("/proc/pressure/{resource}");
+    let Ok(s) = tokio::fs::read_to_string(&path).await else {
+        return 0;
+    };
+    for line in s.lines() {
+        if let Some(rest) = line.strip_prefix("some ") {
+            for tok in rest.split_whitespace() {
+                if let Some(v) = tok.strip_prefix("avg10=") {
+                    return v.parse::<f64>().map(|f| (f * 100.0) as i64).unwrap_or(0);
+                }
+            }
+        }
+    }
+    0
+}
+
+async fn read_proc_metrics() -> ProcMetrics {
     let loadavg = tokio::fs::read_to_string("/proc/loadavg").await.ok();
     let la_1m = loadavg
         .and_then(|s| {
@@ -15287,29 +15406,31 @@ async fn read_proc_metrics() -> (i64, i64, i64, i64) {
         .unwrap_or(0);
 
     let meminfo = tokio::fs::read_to_string("/proc/meminfo").await.ok();
-    let (mem_total, mem_avail) = meminfo
+    let (mem_total, mem_avail, swap_total, swap_free) = meminfo
         .map(|s| {
-            let mut total = 0i64;
-            let mut avail = 0i64;
+            let field = |line: &str, key: &str| -> Option<i64> {
+                line.strip_prefix(key)?
+                    .split_whitespace()
+                    .next()
+                    .and_then(|n| n.parse().ok())
+            };
+            let (mut t, mut a, mut st, mut sf) = (0i64, 0i64, 0i64, 0i64);
             for l in s.lines() {
-                if let Some(rest) = l.strip_prefix("MemTotal:") {
-                    total = rest
-                        .split_whitespace()
-                        .next()
-                        .and_then(|n| n.parse().ok())
-                        .unwrap_or(0);
-                } else if let Some(rest) = l.strip_prefix("MemAvailable:") {
-                    avail = rest
-                        .split_whitespace()
-                        .next()
-                        .and_then(|n| n.parse().ok())
-                        .unwrap_or(0);
+                if let Some(v) = field(l, "MemTotal:") {
+                    t = v;
+                } else if let Some(v) = field(l, "MemAvailable:") {
+                    a = v;
+                } else if let Some(v) = field(l, "SwapTotal:") {
+                    st = v;
+                } else if let Some(v) = field(l, "SwapFree:") {
+                    sf = v;
                 }
             }
-            (total, avail)
+            (t, a, st, sf)
         })
-        .unwrap_or((0, 0));
+        .unwrap_or((0, 0, 0, 0));
     let mem_used = (mem_total - mem_avail).max(0);
+    let swap_used = (swap_total - swap_free).max(0);
 
     let uptime = tokio::fs::read_to_string("/proc/uptime")
         .await
@@ -15322,7 +15443,47 @@ async fn read_proc_metrics() -> (i64, i64, i64, i64) {
         .map(|f| f as i64)
         .unwrap_or(0);
 
-    (la_1m, mem_total, mem_used, uptime)
+    // CPU% + network rate need a delta: snapshot, wait, snapshot.
+    let cpu0 = read_cpu_jiffies().await;
+    let net0 = read_net_bytes().await;
+    const DT_MS: u64 = 200;
+    tokio::time::sleep(std::time::Duration::from_millis(DT_MS)).await;
+    let cpu1 = read_cpu_jiffies().await;
+    let net1 = read_net_bytes().await;
+
+    let cpu_pct_x100 = match (cpu0, cpu1) {
+        (Some((b0, t0)), Some((b1, t1))) if t1 > t0 => {
+            (((b1 - b0) as f64 / (t1 - t0) as f64) * 10000.0) as i64
+        }
+        _ => 0,
+    };
+    let dt_secs = DT_MS as f64 / 1000.0;
+    let rate = |a: u64, b: u64| -> i64 {
+        if b >= a {
+            ((b - a) as f64 / dt_secs) as i64
+        } else {
+            0 // counter wrapped/reset
+        }
+    };
+    let (net_rx_bps, net_tx_bps) = match (net0, net1) {
+        (Some((r0, t0)), Some((r1, t1))) => (rate(r0, r1), rate(t0, t1)),
+        _ => (0, 0),
+    };
+
+    ProcMetrics {
+        loadavg_1m_x100: la_1m,
+        mem_total_kib: mem_total,
+        mem_used_kib: mem_used,
+        uptime_secs: uptime,
+        cpu_pct_x100,
+        swap_total_kib: swap_total,
+        swap_used_kib: swap_used,
+        psi_cpu_x100: read_psi_some_avg10("cpu").await,
+        psi_mem_x100: read_psi_some_avg10("memory").await,
+        psi_io_x100: read_psi_some_avg10("io").await,
+        net_rx_bps,
+        net_tx_bps,
+    }
 }
 
 /// Result of a single HTTP probe. Internal — service builds the wire

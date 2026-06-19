@@ -49,6 +49,26 @@ pub struct NodeStats {
     pub sampled_at: i64,
     pub agent_version: String,
     pub agent_online: bool,
+    /// Real CPU busy % × 100 (migration 042). `#[serde(default)]` so an older
+    /// agent that doesn't send it still deserializes (shows 0).
+    #[serde(default)]
+    pub cpu_pct_x100: i64,
+    #[serde(default)]
+    pub swap_total_kib: i64,
+    #[serde(default)]
+    pub swap_used_kib: i64,
+    /// PSI "some avg10" × 100 for cpu / memory / io (0 if kernel lacks PSI).
+    #[serde(default)]
+    pub psi_cpu_x100: i64,
+    #[serde(default)]
+    pub psi_mem_x100: i64,
+    #[serde(default)]
+    pub psi_io_x100: i64,
+    /// Network throughput in bytes/sec (delta over the sample window).
+    #[serde(default)]
+    pub net_rx_bps: i64,
+    #[serde(default)]
+    pub net_tx_bps: i64,
 }
 
 /// Operator-facing alert surfaced on the dashboard. Computed from
@@ -118,6 +138,14 @@ pub struct NodeMetricPoint {
     pub total_bw_out_24h: i64,
     pub total_requests_24h: i64,
     pub hostings_count: i64,
+    #[serde(default)]
+    pub cpu_pct_x100: i64,
+    #[serde(default)]
+    pub swap_used_kib: i64,
+    #[serde(default)]
+    pub net_rx_bps: i64,
+    #[serde(default)]
+    pub net_tx_bps: i64,
 }
 
 /// Time-series window of node metrics. `samples` are oldest → newest.

@@ -139,6 +139,30 @@
           {% endif %}
         </div>
       </div>
+
+      <div class="kpi-card cpu">
+        <div class="kpi-label">CPU</div>
+        <div class="kpi-value">{{ crate::handlers::stats::fmt_pct_x100(n.cpu_pct_x100) }}</div>
+        <div class="kpi-meta">
+          busy across all cores
+          {% if n.psi_cpu_x100 > 0 %}· <span class="text-soft" title="PSI: share of time some task was stalled waiting for CPU (avg 10s)">stall {{ crate::handlers::stats::fmt_pct_x100(n.psi_cpu_x100) }}</span>{% endif %}
+        </div>
+      </div>
+
+      <div class="kpi-card swap">
+        <div class="kpi-label">Swap</div>
+        <div class="kpi-value">
+          {% if n.swap_total_kib > 0 %}{{ crate::handlers::stats::fmt_percent(n.swap_used_kib, n.swap_total_kib) }}{% else %}—{% endif %}
+        </div>
+        <div class="kpi-meta">
+          {% if n.swap_total_kib > 0 %}
+            {{ crate::handlers::stats::fmt_bytes(n.swap_used_kib * 1024) }} / {{ crate::handlers::stats::fmt_bytes(n.swap_total_kib * 1024) }}
+            {% if n.swap_used_kib * 100 > n.swap_total_kib * 20 %}· <span style="color:var(--warn)">thrashing?</span>{% endif %}
+          {% else %}
+            no swap configured
+          {% endif %}
+        </div>
+      </div>
     {% endif %}
   </div>
 
@@ -248,6 +272,9 @@
       <div><span class="text-soft">Bandwidth out · 24 h</span><strong>{{ crate::handlers::stats::fmt_bytes(n.total_bw_out_24h) }}</strong></div>
       <div><span class="text-soft">Requests · 24 h</span><strong>{{ n.total_requests_24h }}</strong></div>
       <div><span class="text-soft">Load avg · 1 m</span><strong>{{ crate::handlers::stats::fmt_load(n.loadavg_1m_x100) }}</strong></div>
+      <div><span class="text-soft">CPU busy</span><strong>{{ crate::handlers::stats::fmt_pct_x100(n.cpu_pct_x100) }}</strong></div>
+      <div><span class="text-soft">Network</span><strong>↓ {{ crate::handlers::stats::fmt_rate(n.net_rx_bps) }} · ↑ {{ crate::handlers::stats::fmt_rate(n.net_tx_bps) }}</strong></div>
+      <div><span class="text-soft">Pressure (cpu/mem/io)</span><strong>{{ crate::handlers::stats::fmt_pct_x100(n.psi_cpu_x100) }} / {{ crate::handlers::stats::fmt_pct_x100(n.psi_mem_x100) }} / {{ crate::handlers::stats::fmt_pct_x100(n.psi_io_x100) }}</strong></div>
       <div><span class="text-soft">Uptime</span><strong>{{ crate::handlers::stats::fmt_uptime(n.uptime_secs) }}</strong></div>
       <div><span class="text-soft">Last sample</span><strong>{{ crate::handlers::stats::fmt_ago(n.sampled_at) }}</strong></div>
     </div>
