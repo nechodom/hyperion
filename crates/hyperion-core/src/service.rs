@@ -16837,34 +16837,99 @@ async fn dir_size_bytes(path: &std::path::Path) -> Option<u64> {
     text.split_whitespace().next()?.parse::<u64>().ok()
 }
 
+/// `apt-get install quota`. Returns (succeeded, combined stdout+stderr) — apt
+/// prints the REAL dpkg error (e.g. "Read-only file system") to STDOUT, while
+/// only the generic "E: Sub-process ... error code (1)" goes to stderr, so we
+/// must capture both to diagnose a failure.
+async fn apt_install_quota() -> (bool, String) {
+    match tokio::process::Command::new("/usr/bin/apt-get")
+        .args(["install", "-y", "--no-install-recommends", "quota"])
+        .env("DEBIAN_FRONTEND", "noninteractive")
+        .output()
+        .await
+    {
+        Ok(o) => {
+            let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
+            s.push_str(&String::from_utf8_lossy(&o.stderr));
+            (o.status.success(), s)
+        }
+        Err(e) => (false, format!("couldn't exec apt-get: {e}")),
+    }
+}
+
+/// Operator-facing failure message carrying the last few lines of apt's output
+/// (the real cause) instead of the opaque "Sub-process dpkg returned 1".
+fn quota_install_err(output: &str) -> String {
+    let tail = output
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .rev()
+        .take(6)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join(" | ");
+    format!(
+        "the `quota` package isn't installed and auto-install failed: {tail} — \
+         on the node, run `sudo dpkg --configure -a` then `sudo apt-get install -y quota` \
+         (if `/` is read-only, first `sudo mount -o remount,rw /`)."
+    )
+}
+
 async fn ensure_quota_tools() -> Result<(), String> {
     let have = |p: &str| std::path::Path::new(p).exists();
     if have("/usr/sbin/quotaon") && have("/usr/sbin/quotacheck") {
         return Ok(());
     }
     tracing::info!("quota tools missing — installing the `quota` package via apt-get");
-    let result = tokio::process::Command::new("/usr/bin/apt-get")
-        .args(["install", "-y", "--no-install-recommends", "quota"])
-        .env("DEBIAN_FRONTEND", "noninteractive")
-        .output()
-        .await;
-    match result {
-        Ok(o) if o.status.success() && have("/usr/sbin/quotaon") => Ok(()),
-        Ok(o) => {
-            let err = String::from_utf8_lossy(&o.stderr);
-            let detail = if err.trim().is_empty() {
-                format!("exit {}", o.status.code().unwrap_or(-1))
-            } else {
-                err.trim().to_string()
-            };
-            Err(format!(
-                "the `quota` package isn't installed and auto-install failed ({detail}). Install it manually on the node: sudo apt-get install quota"
-            ))
-        }
-        Err(e) => Err(format!(
-            "couldn't run apt-get to install the `quota` package: {e}. Install it manually on the node: sudo apt-get install quota"
-        )),
+
+    let (ok, combined) = apt_install_quota().await;
+    if ok && have("/usr/sbin/quotaon") {
+        return Ok(());
     }
+
+    // The two usual reasons `dpkg returned error code (1)` here are (a) this
+    // node's read-only-/usr hardening (apt can't write) and (b) a half-
+    // configured dpkg from an interrupted run. Address whichever applies, then
+    // retry once. The remount mirrors the operator-facing ROFS unlock
+    // (remount_usr_rw); the hardening re-applies on the next reboot.
+    let lower = combined.to_lowercase();
+    let mut recovered = false;
+    if lower.contains("read-only file system") || lower.contains("erofs") {
+        tracing::warn!("apt failed on a read-only filesystem — remounting rw and retrying");
+        let _ = tokio::process::Command::new("/usr/bin/mount")
+            .args(["-o", "remount,rw", "/"])
+            .output()
+            .await;
+        let _ = tokio::process::Command::new("/usr/bin/mount")
+            .args(["-o", "remount,rw", "/usr"])
+            .output()
+            .await;
+        recovered = true;
+    }
+    if lower.contains("dpkg was interrupted")
+        || lower.contains("--configure -a")
+        || lower.contains("half-configured")
+        || lower.contains("half-installed")
+    {
+        tracing::warn!("dpkg is wedged — running `dpkg --configure -a` before retry");
+        let _ = tokio::process::Command::new("/usr/bin/dpkg")
+            .args(["--configure", "-a"])
+            .env("DEBIAN_FRONTEND", "noninteractive")
+            .output()
+            .await;
+        recovered = true;
+    }
+
+    if recovered {
+        let (ok2, combined2) = apt_install_quota().await;
+        if ok2 && have("/usr/sbin/quotaon") {
+            return Ok(());
+        }
+        return Err(quota_install_err(&combined2));
+    }
+    Err(quota_install_err(&combined))
 }
 
 async fn enable_kernel_quotas(home_path: &str) -> hyperion_types::QuotaEnableSummary {
