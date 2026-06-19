@@ -275,6 +275,7 @@
       <div><span class="text-soft">CPU busy</span><strong>{{ crate::handlers::stats::fmt_pct_x100(n.cpu_pct_x100) }}</strong></div>
       <div><span class="text-soft">Network</span><strong>↓ {{ crate::handlers::stats::fmt_rate(n.net_rx_bps) }} · ↑ {{ crate::handlers::stats::fmt_rate(n.net_tx_bps) }}</strong></div>
       <div><span class="text-soft">Pressure (cpu/mem/io)</span><strong>{{ crate::handlers::stats::fmt_pct_x100(n.psi_cpu_x100) }} / {{ crate::handlers::stats::fmt_pct_x100(n.psi_mem_x100) }} / {{ crate::handlers::stats::fmt_pct_x100(n.psi_io_x100) }}</strong></div>
+      <div><span class="text-soft">OOM kills · 24h</span>{% if n.oom_kills_24h > 0 %}<strong style="color:var(--warn)" title="A kernel out-of-memory kill — a process was force-terminated; the site may have blipped 500s">{{ n.oom_kills_24h }} · last {{ crate::handlers::stats::fmt_ago(n.last_oom_at) }}</strong>{% else %}<strong>0</strong>{% endif %}</div>
       <div><span class="text-soft">Uptime</span><strong>{{ crate::handlers::stats::fmt_uptime(n.uptime_secs) }}</strong></div>
       <div><span class="text-soft">Last sample</span><strong>{{ crate::handlers::stats::fmt_ago(n.sampled_at) }}</strong></div>
     </div>

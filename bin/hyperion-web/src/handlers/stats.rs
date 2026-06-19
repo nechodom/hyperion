@@ -343,6 +343,8 @@ async fn aggregate_cluster_stats(
                     psi_io_x100: 0,
                     net_rx_bps: 0,
                     net_tx_bps: 0,
+                    oom_kills_24h: 0,
+                    last_oom_at: 0,
                 });
             }
             Err(e) => {
@@ -372,6 +374,8 @@ async fn aggregate_cluster_stats(
                     psi_io_x100: 0,
                     net_rx_bps: 0,
                     net_tx_bps: 0,
+                    oom_kills_24h: 0,
+                    last_oom_at: 0,
                 });
             }
             _ => {}

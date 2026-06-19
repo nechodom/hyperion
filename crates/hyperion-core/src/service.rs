@@ -9373,7 +9373,69 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // Prune > 30d to keep DB lean.
         let _ = metrics::prune_older_than(&self.pool, now - 30 * 24 * 3600).await;
 
+        // Scrape any new kernel OOM-kills into oom_events (same cadence).
+        let _ = self.scan_oom_events().await;
+
         Ok(summaries.len() as i64)
+    }
+
+    /// Append kernel OOM-kill events newer than the last one we recorded into
+    /// `oom_events`, scraped from the journal. No-ops if journalctl is missing
+    /// or the kernel log is unreadable. Returns how many were recorded.
+    pub async fn scan_oom_events(&self) -> Result<i64, RpcError> {
+        let now = now_secs();
+        let since = hyperion_state::oom_events::latest_at(&self.pool)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(now - 24 * 3600);
+        let out = tokio::process::Command::new("/usr/bin/journalctl")
+            .args([
+                "-k",
+                "-o",
+                "short-unix",
+                "--no-pager",
+                "--since",
+                &format!("@{}", since + 1),
+                "--grep",
+                "Killed process",
+            ])
+            .output()
+            .await;
+        let out = match out {
+            Ok(o) if o.status.success() => o,
+            _ => return Ok(0),
+        };
+        let text = String::from_utf8_lossy(&out.stdout);
+        let mut n = 0i64;
+        for line in text.lines() {
+            // short-unix line: "<unix.micros> <host> <ident>: <message>"
+            let Some(at) = line
+                .split_whitespace()
+                .next()
+                .and_then(|t| t.split('.').next())
+                .and_then(|t| t.parse::<i64>().ok())
+            else {
+                continue;
+            };
+            if at <= since || !line.contains("Killed process") {
+                continue;
+            }
+            let (pid, comm) = parse_oom_kill(line);
+            let detail: String = line
+                .splitn(2, "kernel: ")
+                .nth(1)
+                .unwrap_or(line)
+                .chars()
+                .take(300)
+                .collect();
+            let _ = hyperion_state::oom_events::insert(&self.pool, at, &comm, pid, &detail).await;
+            n += 1;
+        }
+        // Keep ~90 days of OOM history.
+        let _ =
+            hyperion_state::oom_events::prune_older_than(&self.pool, now - 90 * 24 * 3600).await;
+        Ok(n)
     }
 
     pub async fn hosting_stats(&self, sel: HostingSelector) -> Result<HostingStats, RpcError> {
@@ -9440,6 +9502,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             ns.net_tx_bps = pm.net_tx_bps;
             ns.sampled_at = now_secs(); // = "just now", so the freshness label is honest
         }
+        // OOM-kill counters (filled regardless of the /proc read).
+        ns.oom_kills_24h =
+            hyperion_state::oom_events::count_since(&self.pool, now_secs() - 24 * 3600)
+                .await
+                .unwrap_or(0);
+        ns.last_oom_at = hyperion_state::oom_events::latest_at(&self.pool)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(0);
         Ok(ns)
     }
 
@@ -14540,6 +14612,8 @@ fn node_stats_from(
             psi_io_x100: r.psi_io_x100,
             net_rx_bps: r.net_rx_bps,
             net_tx_bps: r.net_tx_bps,
+            oom_kills_24h: 0, // filled by node_stats() (needs DB access)
+            last_oom_at: 0,
         },
         None => NodeStats {
             node_id: hostname.to_string(),
@@ -14566,6 +14640,8 @@ fn node_stats_from(
             psi_io_x100: 0,
             net_rx_bps: 0,
             net_tx_bps: 0,
+            oom_kills_24h: 0,
+            last_oom_at: 0,
         },
     }
 }
@@ -15542,6 +15618,25 @@ fn parse_stat_cpu_jiffies(s: &str) -> i64 {
         .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or(0);
     utime + stime
+}
+
+/// (pid, comm) from a kernel OOM line containing "Killed process 1234 (comm)".
+fn parse_oom_kill(msg: &str) -> (i64, String) {
+    let Some(idx) = msg.find("Killed process ") else {
+        return (0, String::new());
+    };
+    let rest = &msg[idx + "Killed process ".len()..];
+    let pid = rest
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .unwrap_or(0);
+    let comm = rest
+        .split_once('(')
+        .and_then(|(_, t)| t.split_once(')').map(|(c, _)| c.to_string()))
+        .unwrap_or_default();
+    (pid, comm)
 }
 
 /// One pass over /proc: per-UID (summed RSS bytes, summed CPU jiffies) across

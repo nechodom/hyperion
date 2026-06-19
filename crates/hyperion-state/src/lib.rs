@@ -24,6 +24,7 @@ pub mod monitors;
 pub mod nodejs;
 pub mod nodes;
 pub mod notifications;
+pub mod oom_events;
 pub mod profiles;
 pub mod scheduler;
 pub mod system_users;

@@ -76,6 +76,12 @@ pub struct NodeStats {
     pub net_rx_bps: i64,
     #[serde(default)]
     pub net_tx_bps: i64,
+    /// Kernel OOM-kills recorded on this node in the last 24h (migration 044).
+    #[serde(default)]
+    pub oom_kills_24h: i64,
+    /// Unix-secs of the most recent OOM-kill, 0 if none recorded.
+    #[serde(default)]
+    pub last_oom_at: i64,
 }
 
 /// Operator-facing alert surfaced on the dashboard. Computed from
