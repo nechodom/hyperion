@@ -697,7 +697,7 @@ pub async fn post_test_node(
     let elapsed_ms = started.elapsed().as_millis();
     match result {
         Ok(RpcResponse::AgentInfo(info)) => html_pill_ok(&format!(
-            "reachable · v{} · {} hostings · {} ms",
+            "reachable · {} · {} hostings · {} ms",
             info.version, info.hostings_count, elapsed_ms
         )),
         Ok(RpcResponse::Error(e)) => html_pill_err(&format!("agent error: {e}")),

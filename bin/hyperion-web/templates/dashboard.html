@@ -166,7 +166,7 @@
       {% if let Some(info) = agent_info %}{{ info.hostname }}{% else %}offline{% endif %}
     </div>
     <div class="kpi-meta">
-      {% if let Some(info) = agent_info %}v{{ info.version }}{% else %}socket unreachable{% endif %}
+      {% if let Some(info) = agent_info %}{{ info.version }}{% else %}socket unreachable{% endif %}
     </div>
   </div>
 </div>

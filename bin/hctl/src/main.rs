@@ -956,7 +956,7 @@ fn print_pretty(resp: &Response) {
         Response::NodesList(rows) => {
             for n in rows {
                 println!(
-                    "{}\t{}\tv{}\t{}",
+                    "{}\t{}\t{}\t{}",
                     n.node_id, n.label, n.agent_version, n.last_seen_at
                 );
             }
@@ -1112,7 +1112,7 @@ fn print_pretty(resp: &Response) {
         }
         Response::AgentConfigView(c) => {
             println!(
-                "agent: {} v{} (nginx user: {})",
+                "agent: {} {} (nginx user: {})",
                 c.hostname,
                 c.agent_version,
                 if c.nginx_user.is_empty() {

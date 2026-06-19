@@ -55,14 +55,21 @@ fn main() {
     println!("cargo:rerun-if-env-changed=HYPERION_DESCRIBE");
     // Rebuild when the checkout moves OR a new tag is cut. Watching ONLY
     // .git/HEAD misses commits on the same branch (the ref under .git/refs is
-    // what moves), and tags change the describe string. Paths are relative to
-    // this package dir.
-    println!("cargo:rerun-if-changed=../../.git/HEAD");
-    println!("cargo:rerun-if-changed=../../.git/packed-refs");
-    println!("cargo:rerun-if-changed=../../.git/refs/tags");
-    if let Ok(head) = std::fs::read_to_string("../../.git/HEAD") {
-        if let Some(r) = head.strip_prefix("ref:").map(str::trim) {
-            println!("cargo:rerun-if-changed=../../.git/{r}");
+    // what moves), and tags change the describe string. We resolve paths via
+    // `git rev-parse --git-path` rather than hardcoding ../../.git/* — that is
+    // correct inside a linked worktree too, where `.git` is a FILE pointing at
+    // a shared gitdir and the hardcoded paths silently don't exist (so the
+    // stamp would go stale across same-branch commits). Shipping builds stamp
+    // via env (CI/update.sh) so this only sharpens local incremental rebuilds.
+    for p in ["HEAD", "packed-refs", "refs/tags"] {
+        if let Some(path) = git(&["rev-parse", "--git-path", p]) {
+            println!("cargo:rerun-if-changed={path}");
+        }
+    }
+    // The branch ref that HEAD points at is what moves on a same-branch commit.
+    if let Some(refname) = git(&["symbolic-ref", "--quiet", "HEAD"]) {
+        if let Some(path) = git(&["rev-parse", "--git-path", &refname]) {
+            println!("cargo:rerun-if-changed={path}");
         }
     }
 }

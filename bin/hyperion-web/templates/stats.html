@@ -256,7 +256,7 @@
       <div>
         <h3 style="margin:0;font-size:1.05rem">{{ n.label }}</h3>
         <div class="text-soft small">
-          <code>{{ n.node_id }}</code> · v{{ n.agent_version }}
+          <code>{{ n.node_id }}</code> · {{ n.agent_version }}
         </div>
       </div>
       <span class="pill {% if n.agent_online %}ok{% else %}err{% endif %}">

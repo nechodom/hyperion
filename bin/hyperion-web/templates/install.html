@@ -247,9 +247,9 @@
               <span class="pill" style="background:#64748b;color:white" title="{% if !n.drain_reason.is_empty() %}{{ n.drain_reason }}{% else %}Maintenance — new hostings are not placed here{% endif %}">DRAINED</span>
               {% endif %}
               {% if version_skew %}
-              <span class="pill" style="background:var(--warn);color:white" title="This worker's agent ({{ n.agent_version }}) is a different version from the master. Older agents may not support newer features. Use Update below to bring it in sync.">⚠ v{{ n.agent_version }} · out of sync</span>
+              <span class="pill" style="background:var(--warn);color:white" title="This worker's agent ({{ n.agent_version }}) is a different version from the master. Older agents may not support newer features. Use Update below to bring it in sync.">⚠ {{ n.agent_version }} · out of sync</span>
               {% else %}
-              <span class="pill" style="background:var(--surface-2);color:var(--text-soft)">v{{ n.agent_version }}</span>
+              <span class="pill" style="background:var(--surface-2);color:var(--text-soft)">{{ n.agent_version }}</span>
               {% endif %}
               {% if let Some(pin) = n.tls_spki_pin %}
               <span class="pill" style="background:var(--surface-2);color:var(--text-soft)" title="TLS certificate SPKI pin reported by this node — curl --pinnedpubkey sha256//{{ pin }}. Recorded for change detection only; enforcement is enabled separately.">🔒 TLS pin on file</span>

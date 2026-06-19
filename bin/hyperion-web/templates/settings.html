@@ -37,7 +37,7 @@
   <div class="kpi-card hostings">
     <div class="kpi-label">Node</div>
     <div class="kpi-value" style="font-size:1.1rem">{{ config.hostname }}</div>
-    <div class="kpi-meta">agent v{{ config.agent_version }}</div>
+    <div class="kpi-meta">agent {{ config.agent_version }}</div>
   </div>
   <div class="kpi-card {% if update_status.update_available %}bw{% else %}disk{% endif %}">
     <div class="kpi-label">Version</div>
