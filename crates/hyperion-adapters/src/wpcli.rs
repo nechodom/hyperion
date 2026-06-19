@@ -770,8 +770,8 @@ struct RawThemeRow {
     update_version: Option<String>,
 }
 
-/// Parse the JSON value embedded in wp-cli stdout, tolerating leading PHP
-/// noise printed ahead of the JSON.
+/// Parse the JSON value embedded in wp-cli stdout, tolerating PHP noise
+/// printed before *or* after the JSON.
 ///
 /// wp-cli boots WordPress to run, and a buggy plugin — or wp-cli itself —
 /// can print PHP warnings/notices/deprecations to *stdout* (not just stderr)
@@ -793,35 +793,47 @@ struct RawThemeRow {
 /// surfaces as an error rather than a silent empty list. `cmd_label` is used
 /// only for that error message.
 ///
-/// Assumes the JSON is the *final* output on stdout — true for the wp-cli
-/// list commands we call (the formatter flushes last; the `$requires` noise
-/// fires interleaved, before it). PHP noise printed *after* the JSON (rare
-/// shutdown-time deprecations) would surface as an error, not a wrong value.
+/// The noise can land *before* the JSON (the `$requires` warning fires while
+/// wp-cli builds each row, ahead of the final flush) OR *after* it (shutdown-
+/// time deprecations from an object cache / a plugin's shutdown hook fire
+/// once the JSON is already on the wire — observed in production with the JSON
+/// arriving clean at the front and warnings trailing it). So we don't assume a
+/// position: we read exactly one JSON value at each candidate `[`/`{` start
+/// (ignoring whatever surrounds it) and keep the value that consumed the most
+/// bytes. The real payload dwarfs any stray `[]`/`{}` that might appear inside
+/// a warning line, so longest-consumed reliably picks it regardless of side.
 fn parse_wp_json<T: serde::de::DeserializeOwned>(
     raw: &str,
     cmd_label: &str,
 ) -> Result<T, AdapterError> {
     let trimmed = raw.trim();
-    // Fast path: clean JSON — the overwhelmingly common case.
+    // Fast path: clean JSON, nothing around it — the overwhelmingly common case.
     if let Ok(v) = serde_json::from_str::<T>(trimmed) {
         return Ok(v);
     }
-    // Otherwise find where the JSON value actually begins. A PHP warning line
-    // could itself contain a bracket (e.g. "array offset [0] on null", or even
-    // a bare "[]"), so we don't blindly slice from the first `[`/`{` — we try
-    // each candidate opening delimiter and accept the first one whose
-    // remainder parses *to the end* via from_str. Requiring whole-remainder
-    // consumption is what makes a stray "[]" in a warning fail (it leaves
-    // trailing text) and fall through to the real JSON, which wp-cli always
-    // emits as the final thing on stdout. `char_indices` keeps `i` on a UTF-8
-    // boundary so slicing a multi-byte notice can never panic.
+    // Otherwise scan candidate start positions. A streaming Deserializer reads
+    // one value and stops, so trailing noise after the value is ignored; the
+    // max-bytes-consumed tie-break drops a bare "[]"/"{}" decoy inside a
+    // leading warning in favour of the real (much longer) payload.
+    // `char_indices` keeps `i` on a UTF-8 boundary so slicing a multi-byte
+    // notice can never panic.
+    let mut best: Option<T> = None;
+    let mut best_len = 0usize;
     for (i, c) in trimmed.char_indices() {
         if c != '[' && c != '{' {
             continue;
         }
-        if let Ok(v) = serde_json::from_str::<T>(&trimmed[i..]) {
-            return Ok(v);
+        let mut stream = serde_json::Deserializer::from_str(&trimmed[i..]).into_iter::<T>();
+        if let Some(Ok(v)) = stream.next() {
+            let consumed = stream.byte_offset();
+            if best.is_none() || consumed > best_len {
+                best = Some(v);
+                best_len = consumed;
+            }
         }
+    }
+    if let Some(v) = best {
+        return Ok(v);
     }
     // `chars().take(200)`, NOT byte-slicing `[..200]`: a PHP notice can
     // contain multi-byte UTF-8 and slicing on a non-char boundary panics
@@ -1042,6 +1054,32 @@ mod tests {
         let rows: Vec<RawPluginRow> = parse_wp_json(&raw, "wp plugin list").expect("should parse");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].name, "akismet");
+    }
+
+    #[test]
+    fn parse_wp_json_trailing_noise_after_array_still_parses() {
+        // The second production shape: clean JSON at the front, PHP warnings
+        // trailing it (shutdown-time noise, e.g. from an object cache). The
+        // whole-blob from_str fails on the trailing text; the helper must
+        // still recover the leading array.
+        let raw = format!(
+            "[{PLUGIN_ROW}]\nPHP Warning:  Undefined property: stdClass::$requires in \
+             phar:///usr/local/bin/wp/vendor/wp-cli/extension-command/src/Plugin_Command.php on line 875"
+        );
+        let rows: Vec<RawPluginRow> = parse_wp_json(&raw, "wp plugin list").expect("should parse");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].name, "akismet");
+    }
+
+    #[test]
+    fn parse_wp_json_noise_on_both_sides_still_parses() {
+        // Leading "[]" decoy AND trailing "{}" decoy around the real array —
+        // longest-consumed must pick the real two-row payload.
+        let raw = format!(
+            "Warning: cache had [] entries\n[{PLUGIN_ROW},{PLUGIN_ROW}]\nDeprecated: foo {{}} bar"
+        );
+        let rows: Vec<RawPluginRow> = parse_wp_json(&raw, "wp plugin list").expect("should parse");
+        assert_eq!(rows.len(), 2);
     }
 
     #[test]
