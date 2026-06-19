@@ -545,6 +545,10 @@ pub async fn plugin_list(
             // Accept the bool form ("true") too — some wp-cli builds emit
             // auto_update as a JSON bool instead of "on"/"off".
             auto_update: matches!(r.auto_update.as_deref(), Some("on") | Some("true")),
+            // The agent has no skip-list; the master overlays these in
+            // wp_plugin_list from hosting_kv.
+            auto_update_blocked: false,
+            auto_update_block_reason: None,
         })
         .map(|mut p| {
             if p.name.is_empty() {
@@ -615,6 +619,14 @@ pub async fn plugin_action(
                 sub.into(),
                 slug.into(),
             ]
+        }
+        // Not a wp-cli action — the service layer (which owns the skip-list)
+        // intercepts ResumeAutoUpdate before ever reaching the adapter. Refuse
+        // loudly if it somehow gets here so the contract stays explicit.
+        hyperion_types::WpPluginAction::ResumeAutoUpdate => {
+            return Err(AdapterError::Other(
+                "ResumeAutoUpdate is service-handled, not a wp-cli action".into(),
+            ));
         }
     };
     let args_refs: Vec<&str> = args_owned.iter().map(|s| s.as_str()).collect();

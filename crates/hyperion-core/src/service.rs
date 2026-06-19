@@ -5036,7 +5036,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 message: "hosting must be active to list plugins".into(),
             });
         }
-        let (plugins, wp_version) = self
+        let (mut plugins, wp_version) = self
             .adapters
             .wp_plugin_list(&detail.system_user, &detail.root_dir)
             .await
@@ -5044,6 +5044,19 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 stage: "wp_plugin_list".into(),
                 reason: e.to_string(),
             })?;
+        // Overlay the keyless defender's auto-update PAUSE state (the agent
+        // doesn't know about the master-side skip-list) so the panel can badge
+        // commercial plugins whose auto-update keeps failing.
+        let skips = self.wp_update_skips(detail.id.as_str()).await;
+        let now = now_secs();
+        for p in &mut plugins {
+            if let Some(e) = skips.get(&p.slug) {
+                if e.paused_until > now {
+                    p.auto_update_blocked = true;
+                    p.auto_update_block_reason = Some(e.last_error.clone());
+                }
+            }
+        }
         let bulk_auto_update = wordpress::get_install(&self.pool, &detail.id)
             .await
             .map_err(|e| RpcError::Internal_with(format!("wp lookup: {e}")))?
@@ -5075,6 +5088,32 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 message: "hosting must be active to manage plugins".into(),
             });
         }
+        // ResumeAutoUpdate is service-only: drop the slug from the pause map so
+        // the next defender sweep retries it. No wp-cli involved.
+        if matches!(action, hyperion_types::WpPluginAction::ResumeAutoUpdate) {
+            let mut skips = self.wp_update_skips(detail.id.as_str()).await;
+            let removed = skips.remove(&slug).is_some();
+            if removed {
+                self.set_wp_update_skips(detail.id.as_str(), &skips).await;
+            }
+            self.append_audit(
+                "wp.plugin.action",
+                Some(detail.id.as_str()),
+                &serde_json::json!({ "action": "resume_auto_update", "slug": slug, "cleared": removed })
+                    .to_string(),
+                "ok",
+            )
+            .await;
+            return Ok(hyperion_types::WpPluginActionResult {
+                state: "ok".into(),
+                message: if removed {
+                    format!("Auto-update resumed for {slug}; it'll be retried on the next sweep.")
+                } else {
+                    format!("{slug} was not paused.")
+                },
+                output_tail: String::new(),
+            });
+        }
         let out = self
             .adapters
             .wp_plugin_action(&detail.system_user, &detail.root_dir, &slug, &action)
@@ -5097,6 +5136,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     "auto_update_disable"
                 }
             }
+            // Handled + returned above; never reaches the adapter path.
+            hyperion_types::WpPluginAction::ResumeAutoUpdate => "resume_auto_update",
         };
         self.append_audit(
             "wp.plugin.action",
@@ -5284,6 +5325,29 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
     }
 
+    /// The per-hosting auto-update pause map (commercial plugins whose update
+    /// kept failing — see wp_updates::AutoUpdateSkip). Absent/garbage ⇒ empty.
+    async fn wp_update_skips(&self, hosting_id: &str) -> crate::wp_updates::SkipMap {
+        match hyperion_state::hosting_kv::get(&self.pool, hosting_id, "wp_update_skips").await {
+            Ok(Some(s)) => crate::wp_updates::parse_skip_map(&s),
+            _ => crate::wp_updates::SkipMap::new(),
+        }
+    }
+
+    /// Persist the pause map. Best-effort: a write failure just means the next
+    /// sweep re-learns the failure (degrades safe).
+    async fn set_wp_update_skips(&self, hosting_id: &str, map: &crate::wp_updates::SkipMap) {
+        let json = serde_json::to_string(map).unwrap_or_else(|_| "{}".to_string());
+        let _ = hyperion_state::hosting_kv::set(
+            &self.pool,
+            hosting_id,
+            "wp_update_skips",
+            &json,
+            now_secs(),
+        )
+        .await;
+    }
+
     /// Daily defender sweep over every active WordPress hosting: scan for
     /// outdated plugins/themes, AUTO-APPLY safe minor/patch (same-major)
     /// updates when the per-hosting toggle is on (default), store the
@@ -5315,10 +5379,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             // Auto-apply minor/patch (same-major) updates when enabled.
             let mut auto_updated = 0i64;
             if self.wp_auto_update_enabled(s.id.as_str()).await {
+                let now = now_secs();
+                let mut skips = self.wp_update_skips(s.id.as_str()).await;
+                let mut skips_dirty = false;
+                // Skip plugins we've already PAUSED (commercial / license-gated
+                // updates that keep failing) — no pointless retry, no re-alert.
                 let targets: Vec<(String, String)> = scan
                     .findings
                     .iter()
                     .filter(|f| f.auto_updatable)
+                    .filter(|f| !crate::wp_updates::is_paused(&skips, &f.slug, now))
                     .map(|f| (f.kind.clone(), f.slug.clone()))
                     .collect();
                 for (kind, slug) in targets {
@@ -5340,21 +5410,47 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                         .map(|r| r.state)
                     };
                     match state {
-                        Ok(st) if st != "failed" => auto_updated += 1,
-                        Ok(_) => {
-                            self.notify_admins(
-                                "warn",
-                                "WordPress auto-update failed",
-                                &format!("{} — couldn't update {kind} {slug}", s.domain),
-                                &format!("/hostings/{}#wordpress", s.domain),
-                                &format!("wp.update.failed:{}:{slug}", s.domain),
-                            )
-                            .await;
+                        Ok(st) if st != "failed" => {
+                            auto_updated += 1;
+                            // Recovered (e.g. license added) — lift any pause.
+                            if skips.remove(&slug).is_some() {
+                                skips_dirty = true;
+                            }
                         }
-                        Err(e) => {
-                            tracing::warn!(domain = %s.domain, %slug, error = %e, "wp auto-update failed");
+                        other => {
+                            let err_msg = match &other {
+                                Ok(_) => format!("wp update {kind} {slug} reported failed"),
+                                Err(e) => e.to_string(),
+                            };
+                            tracing::warn!(domain = %s.domain, %kind, %slug, "wp auto-update failed: {err_msg}");
+                            // Themes can't be commercial-licensed the same way;
+                            // only pause plugins (themes just log + retry).
+                            if kind != "theme" {
+                                let newly_paused = crate::wp_updates::record_failure(
+                                    &mut skips, &slug, now, &err_msg,
+                                );
+                                skips_dirty = true;
+                                if newly_paused {
+                                    self.notify_admins(
+                                        "warn",
+                                        "WordPress auto-update paused",
+                                        &format!(
+                                            "{} — auto-update of plugin '{slug}' keeps failing, so Hyperion paused it. \
+                                             This is almost always a commercial plugin whose update needs a license key. \
+                                             Add the key, then click Resume on the hosting's WordPress panel.",
+                                            s.domain
+                                        ),
+                                        &format!("/hostings/{}#wordpress", s.domain),
+                                        &format!("wp.update.paused:{}:{slug}", s.domain),
+                                    )
+                                    .await;
+                                }
+                            }
                         }
                     }
+                }
+                if skips_dirty {
+                    self.set_wp_update_skips(s.id.as_str(), &skips).await;
                 }
                 // Re-scan so the stored result reflects what's LEFT
                 // (typically only major updates needing manual review).

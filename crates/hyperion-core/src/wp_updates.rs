@@ -95,6 +95,77 @@ pub fn outdated_finding(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Auto-update pause (skip-list)
+//
+// Some plugins are commercial: wp-cli reports an update is available, but the
+// package download is gated behind a license key, so `wp plugin update` fails.
+// Retrying every daily sweep is pointless noise. We don't keep a hardcoded
+// "premium" list — that would wrongly block plugins the customer HAS licensed
+// (those update fine). Instead we learn from the failure itself: after a couple
+// of consecutive failed attempts, PAUSE that one plugin for a while. A later
+// success (license added) or an operator "Resume" clears the pause.
+// ---------------------------------------------------------------------------
+
+/// Pause after this many consecutive failed auto-update attempts. The first
+/// failure can be a transient network/registry blip; a second makes "needs a
+/// license key" the overwhelmingly likely cause.
+pub const AUTO_UPDATE_FAIL_THRESHOLD: u32 = 2;
+
+/// How long a pause lasts before the sweep retries it once (covers the case
+/// where a license was added in the meantime). A manual "Resume" clears it
+/// immediately. 30 days.
+pub const AUTO_UPDATE_PAUSE_SECS: i64 = 30 * 24 * 3600;
+
+/// Per-plugin pause state, stored as JSON in hosting_kv key `wp_update_skips`
+/// as a map `{ slug -> AutoUpdateSkip }`.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct AutoUpdateSkip {
+    pub fail_count: u32,
+    pub first_failed_at: i64,
+    pub last_failed_at: i64,
+    /// Unix secs until which auto-update is paused. `0` = not paused yet
+    /// (still below the failure threshold and being retried). `> now` = paused.
+    pub paused_until: i64,
+    /// Trimmed last error, shown next to the "paused" badge.
+    pub last_error: String,
+}
+
+/// `{ slug -> AutoUpdateSkip }`. BTreeMap so serialization is stable/diffable.
+pub type SkipMap = std::collections::BTreeMap<String, AutoUpdateSkip>;
+
+/// Deserialize the skip-list JSON; an absent/garbage value yields an empty map
+/// (never an error — the feature must degrade to "nothing paused").
+pub fn parse_skip_map(s: &str) -> SkipMap {
+    serde_json::from_str(s).unwrap_or_default()
+}
+
+/// Is this slug currently paused (so the sweep must NOT attempt it)?
+pub fn is_paused(map: &SkipMap, slug: &str, now: i64) -> bool {
+    match map.get(slug) {
+        Some(e) => e.paused_until > now,
+        None => false,
+    }
+}
+
+/// Record a failed auto-update attempt for `slug`. Returns `true` iff this call
+/// newly crossed into the PAUSED state (so the caller notifies admins exactly
+/// once, not on every subsequent failure).
+pub fn record_failure(map: &mut SkipMap, slug: &str, now: i64, err: &str) -> bool {
+    let e = map.entry(slug.to_string()).or_default();
+    let was_paused = e.paused_until > now;
+    if e.first_failed_at == 0 {
+        e.first_failed_at = now;
+    }
+    e.fail_count = e.fail_count.saturating_add(1);
+    e.last_failed_at = now;
+    e.last_error = err.chars().take(200).collect();
+    if e.fail_count >= AUTO_UPDATE_FAIL_THRESHOLD {
+        e.paused_until = now + AUTO_UPDATE_PAUSE_SECS;
+    }
+    !was_paused && e.paused_until > now
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -128,5 +199,52 @@ mod tests {
         assert_eq!(major.update_type, "major");
         assert_eq!(major.severity, "high");
         assert!(!major.auto_updatable);
+    }
+
+    #[test]
+    fn skip_pauses_after_threshold_failures() {
+        let mut m = SkipMap::new();
+        let now = 1_000_000;
+        // First failure: recorded but NOT paused yet (could be transient).
+        assert!(!record_failure(
+            &mut m,
+            "wp-rocket",
+            now,
+            "could not download"
+        ));
+        assert!(!is_paused(&m, "wp-rocket", now));
+        // Second failure: crosses the threshold → newly paused (notify once).
+        assert!(record_failure(
+            &mut m,
+            "wp-rocket",
+            now + 86_400,
+            "could not download"
+        ));
+        assert!(is_paused(&m, "wp-rocket", now + 86_400));
+        // Third failure: still paused, but NOT "newly" → no repeat notify.
+        assert!(!record_failure(
+            &mut m,
+            "wp-rocket",
+            now + 172_800,
+            "could not download"
+        ));
+        // Pause lapses after the window.
+        assert!(!is_paused(
+            &m,
+            "wp-rocket",
+            now + AUTO_UPDATE_PAUSE_SECS + 200_000
+        ));
+    }
+
+    #[test]
+    fn skip_map_round_trips_and_tolerates_garbage() {
+        let mut m = SkipMap::new();
+        record_failure(&mut m, "acf-pro", 5, "boom");
+        let json = serde_json::to_string(&m).unwrap();
+        let back = parse_skip_map(&json);
+        assert_eq!(back.get("acf-pro").unwrap().fail_count, 1);
+        // Garbage / absent → empty map, never an error.
+        assert!(parse_skip_map("not json").is_empty());
+        assert!(parse_skip_map("").is_empty());
     }
 }

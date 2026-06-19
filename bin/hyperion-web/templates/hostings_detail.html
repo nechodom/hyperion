@@ -1372,6 +1372,10 @@
             {% if p.update_available %}
               <div class="muted" style="font-size:0.76rem">→ {{ p.latest_version }} available</div>
             {% endif %}
+            {% if p.auto_update_blocked %}
+              <div style="font-size:0.74rem;color:var(--warn);font-weight:600;margin-top:.15rem">⏸ Auto-update paused</div>
+              <div class="muted" style="font-size:0.72rem">Needs a license / manual update{% if let Some(r) = p.auto_update_block_reason %} — {{ r }}{% endif %}</div>
+            {% endif %}
           </td>
           <td>
             <form method="post" action="/hostings/wp/plugin-action" style="display:inline">
@@ -1398,6 +1402,16 @@
                   <input type="hidden" name="slug" value="{{ p.slug }}">
                   <input type="hidden" name="action" value="update">
                   <button class="btn small" type="submit" title="Update to {{ p.latest_version }}">Update</button>
+                </form>
+              {% endif %}
+              {% if p.auto_update_blocked %}
+                <form method="post" action="/hostings/wp/plugin-action" style="display:inline">
+                  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                  <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+                  <input type="hidden" name="slug" value="{{ p.slug }}">
+                  <input type="hidden" name="action" value="resume_auto_update">
+                  <button class="btn small ghost" type="submit"
+                          title="Clear the auto-update pause — the next sweep will try this plugin again (do this after adding its license key).">Resume</button>
                 </form>
               {% endif %}
               {% if p.status == "active" || p.status == "active-network" %}

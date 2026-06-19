@@ -7212,6 +7212,7 @@ pub async fn post_wp_plugin_action(
         "delete" => hyperion_types::WpPluginAction::Delete,
         "auto_update_enable" => hyperion_types::WpPluginAction::SetAutoUpdate { enabled: true },
         "auto_update_disable" => hyperion_types::WpPluginAction::SetAutoUpdate { enabled: false },
+        "resume_auto_update" => hyperion_types::WpPluginAction::ResumeAutoUpdate,
         other => {
             return Err(AppError::BadRequest(format!(
                 "unknown wp plugin action: {}",

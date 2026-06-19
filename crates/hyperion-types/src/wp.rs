@@ -78,6 +78,19 @@ pub struct WpPlugin {
     /// this plugin (independent of Hyperion's bulk `auto_update_plugins`
     /// flag on the install).
     pub auto_update: bool,
+    /// Set by the master when the keyless defender has PAUSED auto-updates
+    /// for this plugin: a minor/patch update kept failing, almost always
+    /// because the plugin is commercial and the package download needs a
+    /// license key. The plugin is still listed and usable — auto-update just
+    /// won't keep retrying (and re-alerting) until the pause lapses or an
+    /// operator clicks Resume. Defaults `false`; the agent doesn't know about
+    /// the skip-list, so the service layer overlays this in `wp_plugin_list`.
+    #[serde(default)]
+    pub auto_update_blocked: bool,
+    /// One-line reason for the pause (the trimmed wp-cli error), shown next to
+    /// the "Auto-update paused" badge. `None` unless `auto_update_blocked`.
+    #[serde(default)]
+    pub auto_update_block_reason: Option<String>,
 }
 
 /// Response payload for `WpPluginList` — the plugin table plus
@@ -197,6 +210,11 @@ pub enum WpPluginAction {
     Delete,
     /// `wp plugin auto-updates enable <slug>` or `disable`.
     SetAutoUpdate { enabled: bool },
+    /// Clear the keyless defender's auto-update PAUSE for this plugin, so the
+    /// next sweep retries it. NOT a wp-cli action — handled entirely in the
+    /// service layer (drops the slug from the per-hosting skip-list). Used by
+    /// the "Resume" button after a licensed plugin's key has been added.
+    ResumeAutoUpdate,
 }
 
 /// Outcome of a `WpPluginAction`. `output_tail` carries the last
