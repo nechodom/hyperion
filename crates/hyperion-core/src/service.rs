@@ -9275,6 +9275,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .join(derive_user_from_summary(s).unwrap_or_else(|| "_".to_string()))
                 .join(&s.domain);
             let disk = du_bytes(&host_root).await.unwrap_or(0);
+            let inodes = du_inodes(&host_root).await;
             let logs_dir = host_root.join("logs");
             let (bw_in, bw_out, reqs, _last) =
                 parse_access_log_window(&logs_dir.join("access.log"), now - 24 * 3600).await;
@@ -9286,7 +9287,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     hosting_id: s.id.clone(),
                     period: period.clone(),
                     disk_used_bytes: disk,
-                    inodes_used: 0,
+                    inodes_used: inodes,
                     bw_in_bytes: bw_in,
                     bw_out_bytes: bw_out,
                     php_requests: reqs,
@@ -9299,6 +9300,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             total_requests += reqs;
         }
 
+        // Node "Total disk" = REAL filesystem usage of the home root's volume
+        // (df Used), not the sum of tenant `du` above — the latter ignores the
+        // OS, /var/lib databases, logs, backups and the panel DB, so a node at
+        // 95% real disk could look nearly empty. Fall back to the du sum only
+        // if df fails.
+        let node_disk_used = match fs_used_bytes(std::path::Path::new(&self.paths.home_root)).await
+        {
+            Some(used) => used as i64,
+            None => total_disk,
+        };
+
         let (la, mem_total, mem_used, uptime) = read_proc_metrics().await;
 
         let _ = metrics::insert(
@@ -9309,7 +9321,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 hostings_active: active,
                 hostings_suspended: suspended,
                 hostings_failed: failed,
-                total_disk_bytes: total_disk,
+                total_disk_bytes: node_disk_used,
                 total_bw_out_24h: total_bw_out,
                 total_requests_24h: total_requests,
                 loadavg_1m_x100: la,
@@ -9360,7 +9372,21 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .await
             .map_err(|e| RpcError::Internal_with(format!("metrics: {e}")))?;
         let summaries = self.list().await?;
-        Ok(node_stats_from(hostname, version, latest, &summaries))
+        let mut ns = node_stats_from(hostname, version, latest, &summaries);
+        // RAM / load / uptime are INSTANTANEOUS readings. The background sampler
+        // only writes them every 5 min, so the gauge could be minutes stale and
+        // never match a live `htop`/`free`. Read them LIVE here (this runs on
+        // the node itself) so the headline number is current. The 24h aggregates
+        // (disk, bandwidth, requests) legitimately stay from the latest sample.
+        let (la, mem_total, mem_used, uptime) = read_proc_metrics().await;
+        if mem_total > 0 {
+            ns.loadavg_1m_x100 = la;
+            ns.mem_total_kib = mem_total;
+            ns.mem_used_kib = mem_used;
+            ns.uptime_secs = uptime;
+            ns.sampled_at = now_secs(); // = "just now", so the freshness label is honest
+        }
+        Ok(ns)
     }
 
     /// Set or clear the per-hosting ACME contact email override.
@@ -14674,6 +14700,50 @@ async fn du_bytes(path: &std::path::Path) -> Result<i64, std::io::Error> {
         .next()
         .and_then(|n| n.parse().ok())
         .unwrap_or(0))
+}
+
+/// Inode count of the tree at `path`, via `du --inodes -s`. The per-hosting
+/// "Inodes used" used to be hardcoded 0; this fills it with the real number so
+/// inode exhaustion (the many-tiny-files outage) is actually visible. Returns
+/// 0 on any failure (caller treats unknown as 0, same as du_bytes).
+async fn du_inodes(path: &std::path::Path) -> i64 {
+    let out = tokio::process::Command::new("/usr/bin/du")
+        .args(["--inodes", "-s"])
+        .arg(path)
+        .output()
+        .await;
+    match out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+            .split_whitespace()
+            .next()
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(0),
+        _ => 0,
+    }
+}
+
+/// Actually-used bytes of the filesystem that holds `path`, via `df -P -B1`
+/// (3rd column = Used). This is the REAL disk usage — OS, databases under
+/// /var/lib, logs, backups and the panel DB included — unlike summing per-
+/// hosting `du`, which only sees tenant home dirs and badly under-reports.
+/// `None` on any exec/parse failure (caller falls back to the du sum).
+async fn fs_used_bytes(path: &std::path::Path) -> Option<u64> {
+    let out = tokio::process::Command::new("/usr/bin/df")
+        .args(["-P", "-B1", "--", &path.display().to_string()])
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    // `df -P` data line: Filesystem  Size  Used  Available  Capacity  Mounted-on
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.lines()
+        .nth(1)?
+        .split_whitespace()
+        .nth(2)?
+        .parse::<u64>()
+        .ok()
 }
 
 /// Parse the tail of nginx access.log (default combined format) for the

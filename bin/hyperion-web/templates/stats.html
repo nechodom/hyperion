@@ -115,7 +115,10 @@
       <div class="kpi-card load">
         <div class="kpi-label">Load avg · 1 m</div>
         <div class="kpi-value">{{ crate::handlers::stats::fmt_load(n.loadavg_1m_x100) }}</div>
-        <div class="kpi-meta">uptime {{ crate::handlers::stats::fmt_uptime(n.uptime_secs) }}</div>
+        <div class="kpi-meta">
+          uptime {{ crate::handlers::stats::fmt_uptime(n.uptime_secs) }}
+          {% if n.agent_online %}· <span class="text-soft" title="Load &amp; memory are read live when this page loads">read {{ crate::handlers::stats::fmt_ago(n.sampled_at) }}</span>{% else %}· <span style="color:var(--warn)">agent offline</span>{% endif %}
+        </div>
       </div>
 
       <div class="kpi-card mem">
@@ -130,6 +133,7 @@
         <div class="kpi-meta">
           {% if n.mem_total_kib > 0 %}
             {{ crate::handlers::stats::fmt_bytes(n.mem_used_kib * 1024) }} / {{ crate::handlers::stats::fmt_bytes(n.mem_total_kib * 1024) }}
+            <span class="text-soft" title="Used excludes reclaimable cache (MemAvailable), matching free/htop">· real used</span>
           {% else %}
             No sample yet
           {% endif %}

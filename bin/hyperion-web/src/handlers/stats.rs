@@ -421,11 +421,11 @@ where
         .copied()
         .fold(f64::NEG_INFINITY, f64::max)
         .max(0.0);
-    let min = values
-        .iter()
-        .copied()
-        .fold(f64::INFINITY, f64::min)
-        .min(max);
+    // Zero-base the y-axis. These series are all non-negative magnitudes
+    // (load, memory %, requests, bandwidth, response time), so anchoring at 0
+    // shows the TRUE size of each change. Auto-scaling to the series minimum
+    // made a 71%→73% memory wobble fill the whole chart and look alarming.
+    let min = 0.0_f64;
     let range = (max - min).max(1e-9);
     let n = pts.len() as f64;
     let dx = W / (n - 1.0);
