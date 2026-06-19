@@ -1,23 +1,39 @@
 name: 🐛 Bug report
-description: Something's not working as expected.
+description: Something in Hyperion isn't working as expected.
 title: "bug: "
 labels: ["bug"]
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for taking the time to report a bug.
+        Thanks for taking the time to file a bug.
 
-        **Security vulnerabilities go to `security@nechodom.dev` —
-        please do NOT file them as public issues. See
-        [SECURITY.md](https://github.com/nechodom/hyperion/blob/main/SECURITY.md).**
+        **Security vulnerabilities don't go here.** Email
+        `security@nechodom.dev` instead — see
+        [SECURITY.md](https://github.com/nechodom/hyperion/blob/main/SECURITY.md).
+        A public issue for a security bug puts every other operator at risk.
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      description: Where does the bug show up? Pick the closest.
+      options:
+        - Web UI (hyperion-web)
+        - Agent / node daemon (hyperion-agent)
+        - CLI (hctl)
+        - Clustering / multi-node
+        - Install / update (update.sh, packaging)
+        - Not sure
+    validations:
+      required: true
 
   - type: input
     id: version
     attributes:
       label: Hyperion version
-      description: Output of `hctl info` (line starting with `agent:`)
-      placeholder: "agent: master.example.com version=0.1.0 schema=31"
+      description: The `agent:` line from `hctl info` (or `hyperion-agent --version`).
+      placeholder: "agent: master.example.com version=v0.1.0-12-gabc1234 schema=31"
     validations:
       required: true
 
@@ -25,7 +41,7 @@ body:
     id: os
     attributes:
       label: OS / Debian version
-      description: `cat /etc/os-release | head -2`
+      description: "Output of: cat /etc/os-release | head -2"
       placeholder: "Debian GNU/Linux 12 (bookworm)"
     validations:
       required: true
@@ -34,13 +50,13 @@ body:
     id: what_happened
     attributes:
       label: What happened?
-      description: Steps to reproduce + actual behaviour vs expected.
+      description: Steps to reproduce, plus actual vs expected behaviour.
       placeholder: |
         1. Opened /hostings/new
         2. Submitted with domain=example.com, php=8.3, db=mariadb
-        3. Got 500 page; log shows …
+        3. Got a 500 page; the log shows …
 
-        Expected: hosting created.
+        Expected: the hosting is created.
     validations:
       required: true
 
@@ -49,12 +65,11 @@ body:
     attributes:
       label: Relevant log lines
       description: |
-        Run:
+        Run these around the time of the failure and paste the relevant bits:
         ```
         journalctl -u hyperion-agent --since "5 min ago" --no-pager
-        journalctl -u hyperion-web --since "5 min ago" --no-pager
+        journalctl -u hyperion-web   --since "5 min ago" --no-pager
         ```
-        Paste the bits around the failure here.
       render: shell
     validations:
       required: false
@@ -63,6 +78,16 @@ body:
     id: extra
     attributes:
       label: Anything else?
-      description: Cluster topology, custom config, related issues, screenshots.
+      description: Cluster topology, custom config, screenshots, related issues.
     validations:
       required: false
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I'm on a recent build (`update.sh` tracks the latest `main`) and it still reproduces.
+          required: false
+        - label: This is not a security vulnerability (those go to security@nechodom.dev).
+          required: true
