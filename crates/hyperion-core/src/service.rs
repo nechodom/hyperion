@@ -6845,28 +6845,47 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             None => self.profile_get(profile_id).await?,
         };
 
-        // Push limits.
+        // Push the FPM-pool / DB limits via the limits path. Disk / memory /
+        // bandwidth caps do NOT go here: `limits.disk_hard_bytes` is inert (it's
+        // never pushed to setquota and the enforce loop never reads it). They go
+        // through quota_set below — the ENFORCED hosting_quotas path.
         let mut limits = hyperion_types::HostingLimits::defaults();
         limits.php_memory_mb = p.php_memory_mb;
         limits.php_max_exec_secs = p.php_max_exec_secs;
         limits.php_max_children = p.php_max_children;
         limits.php_max_requests = p.php_max_requests;
         limits.db_max_connections = p.db_max_connections;
-        limits.disk_hard_bytes = p.disk_hard_mb.map(|m| m * 1024 * 1024);
-        limits.bw_monthly_bytes = p.bw_monthly_mb.map(|m| m * 1024 * 1024);
         self.set_limits(HostingSelector::Id(detail.id.clone()), limits)
             .await?;
 
-        // Seed the per-hosting disk-overage policy (notify | suspend) from the
-        // profile; overridable later from the hosting's Quota card.
-        let _ = hyperion_state::hosting_kv::set(
-            &self.pool,
-            detail.id.as_str(),
-            QUOTA_KV_ACTION,
-            QuotaExceedAction::parse(&p.quota_exceed_action).as_str(),
-            now_secs(),
-        )
-        .await;
+        // Disk + memory + bandwidth caps + the overage policy → the enforced
+        // hosting_quotas row (setquota / quota_enforce_tick read it). quota_set
+        // also seeds quota_exceed_action and pushes the cap to the kernel, so a
+        // profile-created site's disk cap actually enforces and its over-quota
+        // notify/suspend action can fire. Only when the profile sets a cap;
+        // otherwise just seed the overage policy for a later per-hosting cap.
+        if p.disk_hard_mb.is_some() || p.disk_soft_mb.is_some() || p.mem_limit_mib.is_some() {
+            let _ = self
+                .quota_set(
+                    HostingSelector::Id(detail.id.clone()),
+                    p.disk_soft_mb.unwrap_or(0) * 1024,
+                    p.disk_hard_mb.unwrap_or(0) * 1024,
+                    p.mem_limit_mib.unwrap_or(0),
+                    0,                            // bw soft (unused)
+                    p.bw_monthly_mb.unwrap_or(0), // monthly allowance → bw hard
+                    &p.quota_exceed_action,
+                )
+                .await;
+        } else {
+            let _ = hyperion_state::hosting_kv::set(
+                &self.pool,
+                detail.id.as_str(),
+                QUOTA_KV_ACTION,
+                QuotaExceedAction::parse(&p.quota_exceed_action).as_str(),
+                now_secs(),
+            )
+            .await;
+        }
 
         // Push expiry policy (without changing expires_at — operator sets that).
         let cur = self
@@ -15118,6 +15137,47 @@ fn validate_profile(mut p: ProfileInput) -> Result<ProfileInput, RpcError> {
             });
         }
     }
+    // Numeric limits flow verbatim onto the live FPM pool / quota at apply, so
+    // reject nonsensical values here (create AND update both call this). PHP
+    // memory + the worker/request/connection counts must be at least 1; the
+    // exec timeout + grace must be non-negative.
+    for (val, what, min) in [
+        (p.php_memory_mb, "PHP memory_limit (MiB)", 1),
+        (p.php_max_children, "PHP max children", 1),
+        (p.php_max_requests, "PHP max requests", 1),
+        (p.db_max_connections, "DB max connections", 1),
+        (p.php_max_exec_secs, "PHP max exec seconds", 0),
+        (p.expiry_grace_days, "expiry grace days", 0),
+    ] {
+        if val < min {
+            return Err(RpcError::Validation {
+                message: format!("{what} must be >= {min}"),
+            });
+        }
+    }
+    // Caps are optional; when set they must be non-negative and the disk soft
+    // cap must not exceed the hard cap (quota_set rejects soft > hard).
+    for (val, what) in [
+        (p.disk_hard_mb, "disk hard cap (MiB)"),
+        (p.disk_soft_mb, "disk soft cap (MiB)"),
+        (p.mem_limit_mib, "memory cap (MiB)"),
+        (p.bw_monthly_mb, "monthly bandwidth (MiB)"),
+    ] {
+        if let Some(v) = val {
+            if v < 0 {
+                return Err(RpcError::Validation {
+                    message: format!("{what} must be >= 0"),
+                });
+            }
+        }
+    }
+    if let (Some(soft), Some(hard)) = (p.disk_soft_mb, p.disk_hard_mb) {
+        if soft > 0 && hard > 0 && soft > hard {
+            return Err(RpcError::Validation {
+                message: "disk soft cap must be <= disk hard cap".into(),
+            });
+        }
+    }
     Ok(p)
 }
 
@@ -15149,6 +15209,8 @@ fn profile_input_to_new(input: ProfileInput) -> hyperion_state::profiles::NewPro
         quota_exceed_action: QuotaExceedAction::parse(&input.quota_exceed_action)
             .as_str()
             .to_string(),
+        disk_soft_mb: input.disk_soft_mb.filter(|m| *m > 0),
+        mem_limit_mib: input.mem_limit_mib.filter(|m| *m > 0),
     }
 }
 
@@ -15175,6 +15237,8 @@ fn profile_row_to_wire(r: hyperion_state::profiles::ProfileRow) -> HostingProfil
         default_php_version: r.default_php_version,
         default_db_engine: r.default_db_engine,
         quota_exceed_action: r.quota_exceed_action,
+        disk_soft_mb: r.disk_soft_mb,
+        mem_limit_mib: r.mem_limit_mib,
         created_at: r.created_at,
         updated_at: r.updated_at,
     }
@@ -18443,6 +18507,57 @@ mod tests {
             .expect("match")
             .expect("changed");
         assert_eq!(out, "UUID=x /srv xfs defaults,uquota,gquota 0 2\n");
+    }
+
+    #[test]
+    fn validate_profile_rejects_bad_numbers() {
+        use super::validate_profile;
+        let base = || hyperion_types::ProfileInput {
+            name: "Plan".into(),
+            php_memory_mb: 256,
+            php_max_exec_secs: 30,
+            php_max_children: 10,
+            php_max_requests: 500,
+            db_max_connections: 50,
+            ..Default::default()
+        };
+        // A clean profile passes.
+        assert!(validate_profile(base()).is_ok());
+        // Zero/negative worker + memory counts are rejected.
+        assert!(validate_profile(hyperion_types::ProfileInput {
+            php_max_children: 0,
+            ..base()
+        })
+        .is_err());
+        assert!(validate_profile(hyperion_types::ProfileInput {
+            php_memory_mb: -1,
+            ..base()
+        })
+        .is_err());
+        assert!(validate_profile(hyperion_types::ProfileInput {
+            db_max_connections: 0,
+            ..base()
+        })
+        .is_err());
+        // Negative caps rejected; soft > hard rejected.
+        assert!(validate_profile(hyperion_types::ProfileInput {
+            disk_hard_mb: Some(-5),
+            ..base()
+        })
+        .is_err());
+        assert!(validate_profile(hyperion_types::ProfileInput {
+            disk_soft_mb: Some(2048),
+            disk_hard_mb: Some(1024),
+            ..base()
+        })
+        .is_err());
+        // soft <= hard passes.
+        assert!(validate_profile(hyperion_types::ProfileInput {
+            disk_soft_mb: Some(1024),
+            disk_hard_mb: Some(2048),
+            ..base()
+        })
+        .is_ok());
     }
 
     #[test]

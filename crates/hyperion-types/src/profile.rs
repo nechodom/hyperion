@@ -53,6 +53,12 @@ pub struct HostingProfile {
     /// `hosting_kv` at create; overridable per-hosting from the Quota card.
     #[serde(default)]
     pub quota_exceed_action: String,
+    /// Soft (warning) disk cap + memory cap in MiB, applied to the enforced
+    /// `hosting_quotas` row at apply alongside `disk_hard_mb`. `None` = no cap.
+    #[serde(default)]
+    pub disk_soft_mb: Option<i64>,
+    #[serde(default)]
+    pub mem_limit_mib: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -110,6 +116,11 @@ pub struct ProfileInput {
     /// See `HostingProfile::quota_exceed_action` ("notify" | "suspend").
     #[serde(default)]
     pub quota_exceed_action: String,
+    /// See `HostingProfile::disk_soft_mb` / `mem_limit_mib`.
+    #[serde(default)]
+    pub disk_soft_mb: Option<i64>,
+    #[serde(default)]
+    pub mem_limit_mib: Option<i64>,
 }
 
 /// One row in the WordPress asset library — operator-uploaded

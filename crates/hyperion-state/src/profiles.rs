@@ -43,6 +43,12 @@ pub struct ProfileRow {
     /// the hosting's `hosting_kv` at create time.
     #[sqlx(default)]
     pub quota_exceed_action: String,
+    /// Migration 046 — soft (warning) disk cap + memory cap, seeded into the
+    /// enforced `hosting_quotas` row at apply (alongside `disk_hard_mb`).
+    #[sqlx(default)]
+    pub disk_soft_mb: Option<i64>,
+    #[sqlx(default)]
+    pub mem_limit_mib: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -73,6 +79,9 @@ pub struct NewProfile {
     pub default_db_engine: Option<String>,
     /// See ProfileRow::quota_exceed_action ("notify" | "suspend").
     pub quota_exceed_action: String,
+    /// See ProfileRow::disk_soft_mb / mem_limit_mib.
+    pub disk_soft_mb: Option<i64>,
+    pub mem_limit_mib: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -94,8 +103,9 @@ pub async fn insert(pool: &SqlitePool, p: &NewProfile, now: i64) -> Result<i64, 
             expiry_grace_days, expiry_warning_offsets, price_minor, price_currency,
             price_interval, slack_webhook, wp_plugins, wp_themes,
             default_php_version, default_db_engine, quota_exceed_action,
+            disk_soft_mb, mem_limit_mib,
             created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            RETURNING id"#,
     )
     .bind(&p.name)
@@ -118,6 +128,8 @@ pub async fn insert(pool: &SqlitePool, p: &NewProfile, now: i64) -> Result<i64, 
     .bind(&p.default_php_version)
     .bind(&p.default_db_engine)
     .bind(&p.quota_exceed_action)
+    .bind(p.disk_soft_mb)
+    .bind(p.mem_limit_mib)
     .bind(now)
     .bind(now)
     .fetch_one(pool)
@@ -139,6 +151,7 @@ pub async fn update(
             expiry_warning_offsets = ?, price_minor = ?, price_currency = ?,
             price_interval = ?, slack_webhook = ?, wp_plugins = ?, wp_themes = ?,
             default_php_version = ?, default_db_engine = ?, quota_exceed_action = ?,
+            disk_soft_mb = ?, mem_limit_mib = ?,
             updated_at = ?
            WHERE id = ?"#,
     )
@@ -183,6 +196,7 @@ const SELECT_ALL: &str =
             expiry_grace_days, expiry_warning_offsets, price_minor, price_currency,
             price_interval, slack_webhook, wp_plugins, wp_themes,
             default_php_version, default_db_engine, quota_exceed_action,
+            disk_soft_mb, mem_limit_mib,
             created_at, updated_at
      FROM hosting_profiles";
 
@@ -354,6 +368,8 @@ mod tests {
             default_php_version: None,
             default_db_engine: None,
             quota_exceed_action: "suspend".into(),
+            disk_soft_mb: Some(1024),
+            mem_limit_mib: Some(256),
         };
         let id = insert(&pool, &p, 100).await.expect("insert");
         assert!(id > 0);
@@ -362,6 +378,8 @@ mod tests {
         assert_eq!(all[0].name, "Pro");
         assert_eq!(all[0].price_minor, Some(19_900));
         assert_eq!(all[0].quota_exceed_action, "suspend");
+        assert_eq!(all[0].disk_soft_mb, Some(1024));
+        assert_eq!(all[0].mem_limit_mib, Some(256));
     }
 
     #[tokio::test]

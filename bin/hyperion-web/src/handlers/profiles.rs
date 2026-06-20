@@ -122,6 +122,10 @@ pub struct CreateForm {
     #[serde(default)]
     pub disk_hard_mb: String,
     #[serde(default)]
+    pub disk_soft_mb: String,
+    #[serde(default)]
+    pub mem_limit_mib: String,
+    #[serde(default)]
     pub bw_monthly_mb: String,
     #[serde(default = "default_30")]
     pub expiry_grace_days: i64,
@@ -239,6 +243,8 @@ pub async fn post_create(
             Some(form.default_db_engine.trim().to_string())
         },
         quota_exceed_action: form.quota_exceed_action.clone(),
+        disk_soft_mb: parse_opt_i64(&form.disk_soft_mb),
+        mem_limit_mib: parse_opt_i64(&form.mem_limit_mib),
     };
     let resp =
         hyperion_rpc_client::call(&state.agent_socket, Request::ProfileCreate(input)).await?;
@@ -326,6 +332,8 @@ pub async fn post_clone(
         default_php_version: src.default_php_version.clone(),
         default_db_engine: src.default_db_engine.clone(),
         quota_exceed_action: src.quota_exceed_action.clone(),
+        disk_soft_mb: src.disk_soft_mb,
+        mem_limit_mib: src.mem_limit_mib,
     };
     let resp =
         hyperion_rpc_client::call(&state.agent_socket, Request::ProfileCreate(input)).await?;
@@ -453,6 +461,8 @@ pub async fn post_update(
             Some(form.default_db_engine.trim().to_string())
         },
         quota_exceed_action: form.quota_exceed_action.clone(),
+        disk_soft_mb: parse_opt_i64(&form.disk_soft_mb),
+        mem_limit_mib: parse_opt_i64(&form.mem_limit_mib),
     };
     let resp = hyperion_rpc_client::call(&state.agent_socket, Request::ProfileUpdate { id, input })
         .await?;

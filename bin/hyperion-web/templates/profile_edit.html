@@ -68,13 +68,23 @@
         <input id="p_db_max" name="db_max_connections" type="number" min="1" max="1000" value="{{ profile.db_max_connections }}">
       </div>
       <div class="field">
-        <label for="p_disk">Disk limit <span class="hint">MB · leave blank for unlimited</span></label>
+        <label for="p_disk_soft">Disk soft limit <span class="hint">MB · warning threshold · blank = none</span></label>
+        <input id="p_disk_soft" name="disk_soft_mb" type="number" min="0" value="{% if let Some(m) = profile.disk_soft_mb %}{{ m }}{% endif %}">
+      </div>
+      <div class="field">
+        <label for="p_disk">Disk hard limit <span class="hint">MB · enforced cap · blank = unlimited</span></label>
         <input id="p_disk" name="disk_hard_mb" type="number" min="0" value="{% if let Some(m) = profile.disk_hard_mb %}{{ m }}{% endif %}">
       </div>
     </div>
-    <div class="field">
-      <label for="p_bw">Monthly bandwidth <span class="hint">MB · leave blank for unlimited</span></label>
-      <input id="p_bw" name="bw_monthly_mb" type="number" min="0" value="{% if let Some(m) = profile.bw_monthly_mb %}{{ m }}{% endif %}">
+    <div class="field-row">
+      <div class="field">
+        <label for="p_mem">Memory cap <span class="hint">MiB · per-hosting quota · blank = none</span></label>
+        <input id="p_mem" name="mem_limit_mib" type="number" min="0" value="{% if let Some(m) = profile.mem_limit_mib %}{{ m }}{% endif %}">
+      </div>
+      <div class="field">
+        <label for="p_bw">Monthly bandwidth <span class="hint">MB · leave blank for unlimited</span></label>
+        <input id="p_bw" name="bw_monthly_mb" type="number" min="0" value="{% if let Some(m) = profile.bw_monthly_mb %}{{ m }}{% endif %}">
+      </div>
     </div>
     <div class="field">
       <label for="p_quota_action">When a site exceeds its disk limit <span class="hint">default for sites created from this profile · overridable per-site</span></label>
