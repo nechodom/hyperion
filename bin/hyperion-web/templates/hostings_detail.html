@@ -2109,7 +2109,7 @@
     </div>
     <div class="field-row">
       <div class="field">
-        <label for="exceed_action">When the disk hard cap is exceeded <span class="hint">writes are always blocked at the cap; this is the extra action</span></label>
+        <label for="exceed_action">When the disk hard cap is exceeded <span class="hint">{% if quota.quotas_enabled_on_fs %}the kernel blocks writes at the cap; this is the extra action{% else %}kernel quotas are OFF, so writes aren't blocked — this action is the only enforcement{% endif %}</span></label>
         <select id="exceed_action" name="exceed_action">
           <option value="notify"{% if quota.policy.exceed_action != "suspend" %} selected{% endif %}>Notify only (send an alert)</option>
           <option value="suspend"{% if quota.policy.exceed_action == "suspend" %} selected{% endif %}>Suspend the site (+ alert)</option>
@@ -2122,7 +2122,7 @@
     </button>
   </form>
   <p class="text-soft small" style="margin:0.8rem 0 0">
-    Disk caps push into the kernel via <code>setquota -u</code>. The hard cap blocks writes with ENOSPC; the soft cap starts the grace period.
+    Disk caps push into the kernel via <code>setquota -u</code>. Where kernel quotas are enabled, the hard cap blocks writes with ENOSPC and the soft cap starts the grace period; the overage action above is enforced from per-user accounting regardless.
     On <strong>Suspend</strong>, a site that crosses the hard cap is stopped and auto-resumes once usage drops back under the cap — you're notified either way. The default for new sites comes from the create profile.
     Bandwidth is informational and alert-driven (no kernel enforcement). The memory limit takes effect on the next FPM pool rebuild.
   </p>

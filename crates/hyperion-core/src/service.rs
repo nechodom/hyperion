@@ -8149,16 +8149,21 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         .map_err(|e| RpcError::Internal_with(format!("quota upsert: {e}")))?;
 
         // Persist the overage policy (notify | suspend) in hosting_kv. Parsed
-        // so a stray value can't poison the enforce loop.
+        // so a stray value can't poison the enforce loop. An EMPTY value means
+        // the field was absent (an older web binary that predates it) — treat
+        // that as "leave the stored policy untouched" so a skewed panel can't
+        // silently downgrade a configured "suspend" back to "notify".
         let action = QuotaExceedAction::parse(exceed_action);
-        let _ = hyperion_state::hosting_kv::set(
-            &self.pool,
-            detail.id.as_str(),
-            QUOTA_KV_ACTION,
-            action.as_str(),
-            now,
-        )
-        .await;
+        if !exceed_action.trim().is_empty() {
+            let _ = hyperion_state::hosting_kv::set(
+                &self.pool,
+                detail.id.as_str(),
+                QUOTA_KV_ACTION,
+                action.as_str(),
+                now,
+            )
+            .await;
+        }
 
         // Push to kernel. Failure here doesn't fail the RPC — the
         // policy is saved either way and the UI shows last_error
@@ -8238,10 +8243,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
 
         // Re-read so the UI sees the post-apply state (including
-        // applied_at / last_error flips).
+        // applied_at / last_error flips). Read the EFFECTIVE stored action (not
+        // the parsed request) so the empty-string no-op case above reflects the
+        // value we left in place rather than the "notify" default.
         let row = hyperion_state::hosting_quotas::read(&self.pool, detail.id.as_str())
             .await
             .map_err(|e| RpcError::Internal_with(format!("quota re-read: {e}")))?;
+        let effective_action = self.hosting_quota_action(detail.id.as_str()).await;
         Ok(hyperion_types::HostingQuotaView {
             hosting_id: row.hosting_id,
             disk_soft_kib: row.disk_soft_kib,
@@ -8252,7 +8260,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             applied_at: row.applied_at,
             last_error: row.last_error,
             updated_at: row.updated_at,
-            exceed_action: action.as_str().to_string(),
+            exceed_action: effective_action.as_str().to_string(),
         })
     }
 
@@ -8345,66 +8353,110 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 Ok(d) => d,
                 Err(_) => continue,
             };
-            let (used_kib, _enabled, _hint) =
-                quota_probe_current(&detail.system_user, &detail.root_dir).await;
+            // Kernel-authoritative usage (whole-user, matches the setquota
+            // scope). None ⇒ quotas aren't active/readable ⇒ skip rather than
+            // act on an unreliable du estimate or a probe glitch.
+            let used_kib = match quota_used_kib(&detail.system_user).await {
+                Some(u) => u,
+                None => continue,
+            };
             let action = self.hosting_quota_action(&row.hosting_id).await;
-            let mut state = QuotaState::parse(
+            let stored = QuotaState::parse(
                 &hyperion_state::hosting_kv::get(&self.pool, &row.hosting_id, QUOTA_KV_STATE)
                     .await
                     .ok()
                     .flatten()
                     .unwrap_or_default(),
             );
+            let mut state = stored;
+            let now = now_secs();
 
-            // Reconcile against the hosting's REAL state so we never auto-resume
-            // a site someone else suspended, and never fight a manual resume.
-            let hosting_suspended = detail.state == hyperion_types::HostingState::Suspended;
-            if hosting_suspended && state != QuotaState::Suspended {
-                continue; // suspended by operator/expiry — leave it alone
-            }
-            if !hosting_suspended && state == QuotaState::Suspended {
-                // Operator manually resumed our quota-suspend: track it as
-                // "over" but never auto-re-suspend (respect their choice).
-                state = QuotaState::Over;
+            // Reconcile against the hosting's REAL state + the AUTHORITATIVE
+            // suspension reason, so we only ever auto-resume suspensions we own
+            // (over-disk), never an operator/expiry/bandwidth hold, and never
+            // re-suspend a site an operator manually resumed.
+            let suspended = detail.state == hyperion_types::HostingState::Suspended;
+            if suspended {
+                let reason = hyperion_state::limits::get_suspension(&self.pool, &detail.id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|s| s.suspended_by)
+                    .unwrap_or_default();
+                let expired = self
+                    .get_expiry(HostingSelector::Id(detail.id.clone()))
+                    .await
+                    .ok()
+                    .and_then(|e| e.expires_at)
+                    .map(|t| t <= now)
+                    .unwrap_or(false);
+                if reason != hyperion_types::SuspendReason::OverDisk.label() || expired {
+                    continue; // not ours / a higher-priority hold — leave alone
+                }
+                state = QuotaState::Suspended;
+            } else if state == QuotaState::Suspended {
+                // We suspended it; an operator manually resumed it → hold:
+                // never auto-re-suspend until usage drops well under the cap.
+                state = QuotaState::Released;
             }
 
             let (step, new_state) = quota_enforce_decide(used_kib, hard, action, state);
-            let now = now_secs();
             let used_mib = used_kib / 1024;
             let cap_mib = hard / 1024;
             let det = serde_json::json!({ "used_mib": used_mib, "cap_mib": cap_mib }).to_string();
             let id = detail.id.as_str();
-            match step {
-                QuotaStep::Nothing => {}
+
+            // `committed` gates persisting new_state: a FAILED suspend/resume
+            // leaves the stored state unchanged so the next tick retries instead
+            // of masking the failure (and not notifying the customer "done").
+            let committed = match step {
+                QuotaStep::Nothing => true,
                 QuotaStep::NotifyOver => {
                     self.notify_quota_over(&detail.domain, id, used_mib, cap_mib, false)
                         .await;
                     self.append_audit("quota.over", Some(id), &det, "ok").await;
                     acted += 1;
+                    true
                 }
-                QuotaStep::Suspend => {
-                    let _ = self
-                        .suspend(
-                            HostingSelector::Id(detail.id.clone()),
-                            hyperion_types::SuspendReason::OverDisk,
-                        )
-                        .await;
-                    self.notify_quota_over(&detail.domain, id, used_mib, cap_mib, true)
-                        .await;
-                    self.append_audit("quota.suspend", Some(id), &det, "ok")
-                        .await;
-                    acted += 1;
-                }
+                QuotaStep::Suspend => match self
+                    .suspend(
+                        HostingSelector::Id(detail.id.clone()),
+                        hyperion_types::SuspendReason::OverDisk,
+                    )
+                    .await
+                {
+                    Ok(()) => {
+                        self.notify_quota_over(&detail.domain, id, used_mib, cap_mib, true)
+                            .await;
+                        self.append_audit("quota.suspend", Some(id), &det, "ok")
+                            .await;
+                        acted += 1;
+                        true
+                    }
+                    Err(e) => {
+                        tracing::warn!(hosting = %id, error = %e, "quota: auto-suspend failed; will retry");
+                        false
+                    }
+                },
                 QuotaStep::AutoResume => {
-                    let _ = self.resume(HostingSelector::Id(detail.id.clone())).await;
-                    self.notify_quota_resolved(&detail.domain, id, used_mib, cap_mib)
-                        .await;
-                    self.append_audit("quota.autoresume", Some(id), &det, "ok")
-                        .await;
-                    acted += 1;
+                    match self.resume(HostingSelector::Id(detail.id.clone())).await {
+                        Ok(()) => {
+                            self.notify_quota_resolved(&detail.domain, id, used_mib, cap_mib)
+                                .await;
+                            self.append_audit("quota.autoresume", Some(id), &det, "ok")
+                                .await;
+                            acted += 1;
+                            true
+                        }
+                        Err(e) => {
+                            tracing::warn!(hosting = %id, error = %e, "quota: auto-resume failed; will retry");
+                            false
+                        }
+                    }
                 }
-            }
-            if new_state != state || step != QuotaStep::Nothing {
+            };
+
+            if committed && new_state != stored {
                 let _ = hyperion_state::hosting_kv::set(
                     &self.pool,
                     &row.hosting_id,
@@ -16880,7 +16932,9 @@ const QUOTA_KV_STATE: &str = "quota_exceed_state";
 /// `hosting_kv` under `quota_exceed_action`; seeded from the profile at create.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum QuotaExceedAction {
-    /// Send a notification only (default) — setquota still blocks writes.
+    /// Send a notification only (default). Where kernel quotas are enabled,
+    /// setquota also blocks writes at the cap; where they're off, this alert is
+    /// the only signal.
     Notify,
     /// Suspend the site (and notify).
     Suspend,
@@ -16902,18 +16956,22 @@ impl QuotaExceedAction {
 
 /// De-dup state for the enforce loop, stored per hosting in `hosting_kv` under
 /// `quota_exceed_state`. `Suspended` means WE auto-suspended it (so we may
-/// auto-resume); a manually/expiry-suspended site never reaches this value.
+/// auto-resume); `Released` means we suspended it but an operator manually
+/// resumed it — we hold off and NEVER auto-re-suspend until usage drops back
+/// well under the cap. A manually/expiry-suspended site never reaches these.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum QuotaState {
     Ok,
     Over,
     Suspended,
+    Released,
 }
 impl QuotaState {
     fn parse(s: &str) -> Self {
         match s.trim() {
             "over" => Self::Over,
             "suspended" => Self::Suspended,
+            "released" => Self::Released,
             _ => Self::Ok,
         }
     }
@@ -16921,6 +16979,7 @@ impl QuotaState {
         match self {
             Self::Over => "over",
             Self::Suspended => "suspended",
+            Self::Released => "released",
             Self::Ok => "ok",
         }
     }
@@ -16939,7 +16998,8 @@ enum QuotaStep {
 /// action, and the last recorded state, return (step, new_state). Auto-resume
 /// uses **90%-of-cap hysteresis** so a site hovering at the limit can't flap
 /// suspend/resume. The caller separately guards the hosting's real
-/// Active/Suspended state so a manually-suspended site is never auto-resumed.
+/// Active/Suspended state + the authoritative suspension reason so a manually-
+/// or expiry-suspended site is never auto-resumed.
 fn quota_enforce_decide(
     used_kib: i64,
     hard_cap_kib: i64,
@@ -16950,7 +17010,9 @@ fn quota_enforce_decide(
         return (QuotaStep::Nothing, QuotaState::Ok);
     }
     let over = used_kib >= hard_cap_kib;
-    let well_under = used_kib < hard_cap_kib * 9 / 10; // 90% hysteresis
+    // 90% hysteresis, but never round the floor below 1 KiB — otherwise a
+    // 1-KiB cap could never report "well under" and would never re-arm.
+    let well_under = used_kib < (hard_cap_kib * 9 / 10).max(1);
 
     match state {
         QuotaState::Suspended => {
@@ -16958,6 +17020,15 @@ fn quota_enforce_decide(
                 (QuotaStep::AutoResume, QuotaState::Ok)
             } else {
                 (QuotaStep::Nothing, QuotaState::Suspended)
+            }
+        }
+        // We suspended it; an operator manually resumed it. Respect that: never
+        // auto-re-suspend. Only re-arm (back to Ok) once usage drops well under.
+        QuotaState::Released => {
+            if well_under {
+                (QuotaStep::Nothing, QuotaState::Ok)
+            } else {
+                (QuotaStep::Nothing, QuotaState::Released)
             }
         }
         QuotaState::Ok | QuotaState::Over => {
@@ -16976,6 +17047,36 @@ fn quota_enforce_decide(
             }
         }
     }
+}
+
+/// Kernel-authoritative per-user disk usage in KiB for the enforce loop. Uses
+/// `quota -u -w` (whole-user accounting, the same scope `setquota -u` caps) and
+/// returns `None` when the quota subsystem isn't active/readable — so the loop
+/// SKIPS the site rather than acting on an unreliable number. We deliberately do
+/// NOT gate on exit status: `quota` exits 1 precisely when the user is OVER
+/// quota (the case we care about) and only 2 on a real error; we instead key on
+/// whether a numeric data line was produced. (The `du` fallback used by the
+/// read-only report measures only the docroot, a different scope — never used
+/// to drive a suspend/resume decision.)
+async fn quota_used_kib(user: &str) -> Option<i64> {
+    let out = tokio::process::Command::new("/usr/bin/quota")
+        .args(["-u", "-w", user])
+        .output()
+        .await
+        .ok()?;
+    let s = String::from_utf8_lossy(&out.stdout);
+    for line in s.lines() {
+        let cols: Vec<&str> = line.split_whitespace().collect();
+        // Data line: "<device> <blocks> <quota> <limit> ...". blocks = cols[1],
+        // possibly with a trailing '*' (over soft limit). Header lines have a
+        // non-numeric cols[1] and are skipped.
+        if cols.len() >= 2 {
+            if let Ok(u) = cols[1].trim_end_matches('*').parse::<i64>() {
+                return Some(u);
+            }
+        }
+    }
+    None
 }
 
 /// Returns (current_disk_kib, quotas_enabled_on_fs, setup_hint).
@@ -18290,7 +18391,8 @@ mod tests {
     fn quota_enforce_decide_transitions() {
         use super::{
             quota_enforce_decide as d, QuotaExceedAction::Notify, QuotaExceedAction::Suspend,
-            QuotaState::Ok, QuotaState::Over, QuotaState::Suspended, QuotaStep,
+            QuotaState::Ok, QuotaState::Over, QuotaState::Released, QuotaState::Suspended,
+            QuotaStep,
         };
         let cap = 1000;
         // No cap → never acts.
@@ -18320,6 +18422,27 @@ mod tests {
         // Over (notify) + drops well under → reset so a future crossing re-notifies.
         assert_eq!(d(400, cap, Notify, Over), (QuotaStep::Nothing, Ok));
         assert_eq!(d(1000, cap, Notify, Ok), (QuotaStep::NotifyOver, Over)); // re-crosses → re-notifies
+
+        // Released = WE suspended it, operator manually resumed. MUST never
+        // re-suspend even while still over (the core safety guarantee), only
+        // re-arm once usage drops well under the cap.
+        assert_eq!(
+            d(1200, cap, Suspend, Released),
+            (QuotaStep::Nothing, Released)
+        );
+        assert_eq!(
+            d(1000, cap, Suspend, Released),
+            (QuotaStep::Nothing, Released)
+        );
+        assert_eq!(
+            d(950, cap, Suspend, Released),
+            (QuotaStep::Nothing, Released)
+        ); // hysteresis band
+        assert_eq!(d(899, cap, Suspend, Released), (QuotaStep::Nothing, Ok)); // re-armed, no suspend
+
+        // Hysteresis floor never rounds below 1 KiB: a 1-KiB cap still resumes
+        // at 0 usage instead of being stuck suspended forever.
+        assert_eq!(d(0, 1, Suspend, Suspended), (QuotaStep::AutoResume, Ok));
     }
 
     #[test]
