@@ -175,6 +175,8 @@ pub async fn update(
     .bind(&p.default_php_version)
     .bind(&p.default_db_engine)
     .bind(&p.quota_exceed_action)
+    .bind(p.disk_soft_mb)
+    .bind(p.mem_limit_mib)
     .bind(now)
     .bind(id)
     .execute(pool)
@@ -415,6 +417,56 @@ mod tests {
         assert_eq!(all[0].quota_exceed_action, "suspend");
         assert_eq!(all[0].disk_soft_mb, Some(1024));
         assert_eq!(all[0].mem_limit_mib, Some(256));
+    }
+
+    #[tokio::test]
+    async fn update_persists_changes() {
+        // Regression guard: update()'s bind chain must stay aligned with its SQL
+        // placeholders. A missing bind makes the trailing params NULL, so the
+        // statement becomes `WHERE id = NULL` and silently updates zero rows
+        // while the caller still sees Ok — every profile edit a no-op.
+        let pool = open_memory().await.expect("open");
+        let id = insert(
+            &pool,
+            &NewProfile {
+                name: "Pro".into(),
+                php_memory_mb: 256,
+                disk_hard_mb: Some(1024),
+                disk_soft_mb: Some(512),
+                mem_limit_mib: Some(128),
+                quota_exceed_action: "notify".into(),
+                ..Default::default()
+            },
+            100,
+        )
+        .await
+        .expect("insert");
+
+        update(
+            &pool,
+            id,
+            &NewProfile {
+                name: "Pro+".into(),
+                php_memory_mb: 999,
+                disk_hard_mb: Some(4096),
+                disk_soft_mb: Some(3072),
+                mem_limit_mib: Some(777),
+                quota_exceed_action: "suspend".into(),
+                ..Default::default()
+            },
+            200,
+        )
+        .await
+        .expect("update");
+
+        let row = get(&pool, id).await.expect("get").expect("row exists");
+        assert_eq!(row.name, "Pro+");
+        assert_eq!(row.php_memory_mb, 999);
+        assert_eq!(row.disk_hard_mb, Some(4096));
+        assert_eq!(row.disk_soft_mb, Some(3072));
+        assert_eq!(row.mem_limit_mib, Some(777));
+        assert_eq!(row.quota_exceed_action, "suspend");
+        assert_eq!(row.updated_at, 200, "updated_at must advance, not go NULL");
     }
 
     #[tokio::test]
