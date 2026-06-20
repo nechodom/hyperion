@@ -2460,6 +2460,20 @@
     </button>
     <span class="muted" style="font-size:0.85rem;margin-left:0.4rem">Archives htdocs and dumps the database to <code>/var/lib/hyperion/backups/local/{{ detail.system_user }}/</code></span>
   </form>
+  <form method="post" action="/hostings/backup-cadence" style="display:flex;align-items:flex-end;gap:0.5rem;flex-wrap:wrap;margin-bottom:1rem" data-role-min="admin">
+    <input type="hidden" name="_csrf" value="{{ csrf_backup_cadence }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+    <div class="field" style="margin:0">
+      <label for="backup_cadence" style="font-size:0.8rem">Automatic backups <span class="hint">runs on this node's hourly schedule</span></label>
+      <select id="backup_cadence" name="cadence">
+        <option value="off"{% if backup_cadence == "off" %} selected{% endif %}>Off — only when I click</option>
+        <option value="daily"{% if backup_cadence == "daily" %} selected{% endif %}>Daily</option>
+        <option value="weekly"{% if backup_cadence == "weekly" %} selected{% endif %}>Weekly</option>
+        <option value="monthly"{% if backup_cadence == "monthly" %} selected{% endif %}>Monthly</option>
+      </select>
+    </div>
+    <button class="btn" type="submit">Save schedule</button>
+  </form>
   {% if backups.is_empty() %}
     <p class="muted" style="font-size:0.9rem">No backups yet. Run a backup to capture the files and database.</p>
   {% else %}

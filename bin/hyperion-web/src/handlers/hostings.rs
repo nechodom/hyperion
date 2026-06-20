@@ -123,6 +123,10 @@ struct DetailTpl<'a> {
     csrf_limits: String,
     csrf_wp_install: String,
     csrf_backup_now: String,
+    csrf_backup_cadence: String,
+    /// Per-hosting recurring-backup cadence ("off"|"daily"|"weekly"|"monthly"),
+    /// read from the owning node's hosting_kv; drives the Backups-card select.
+    backup_cadence: String,
     csrf_expiry_set: String,
     csrf_expiry_clear: String,
     csrf_dns_check: String,
@@ -1192,6 +1196,8 @@ pub async fn post_create(
                 csrf_limits: csrf_token_for(&state, &ctx, "/hostings/set-limits"),
                 csrf_wp_install: csrf_token_for(&state, &ctx, "/hostings/wp/install"),
                 csrf_backup_now: csrf_token_for(&state, &ctx, "/hostings/backup-now"),
+                csrf_backup_cadence: csrf_token_for(&state, &ctx, "/hostings/backup-cadence"),
+                backup_cadence: "off".into(),
                 csrf_expiry_set: csrf_token_for(&state, &ctx, "/hostings/expiry/set"),
                 csrf_expiry_clear: csrf_token_for(&state, &ctx, "/hostings/expiry/clear"),
                 csrf_dns_check: csrf_token_for(&state, &ctx, "/hostings/dns-check"),
@@ -1868,6 +1874,26 @@ pub async fn get_detail(
         .map(|(_, v)| v.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| format!("staging.{}", detail.domain));
+    // Recurring-backup cadence lives in the OWNING node's hosting_kv (seeded by
+    // profile_apply there + overridable here), so read it from the owner rather
+    // than the master kv_pairs above. Best-effort: default "off".
+    let backup_cadence = match crate::dispatcher::dispatch_to_node(
+        &state,
+        target,
+        Request::HostingKvList {
+            hosting_id: detail.id.as_str().to_string(),
+        },
+    )
+    .await
+    {
+        Ok(RpcResponse::HostingKvList(v)) => v
+            .into_iter()
+            .find(|(k, _)| k == "backup_cadence")
+            .map(|(_, v)| v)
+            .filter(|v| matches!(v.as_str(), "daily" | "weekly" | "monthly"))
+            .unwrap_or_else(|| "off".into()),
+        _ => "off".into(),
+    };
     let tpl = DetailTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -1897,6 +1923,8 @@ pub async fn get_detail(
         cron_body,
         csrf_wp_reset: csrf_token_for(&state, &ctx, "/hostings/wp/reset-password"),
         csrf_db_reset: csrf_token_for(&state, &ctx, "/hostings/db/reset-password"),
+        csrf_backup_cadence: csrf_token_for(&state, &ctx, "/hostings/backup-cadence"),
+        backup_cadence,
         csrf_profile_apply: csrf_token_for(&state, &ctx, "/profiles/apply"),
         profile_apply,
         applied_profile_name,
@@ -4792,6 +4820,54 @@ pub async fn post_wp_auto_update(
     .await;
     Ok(Redirect::to(&format!(
         "/hostings/{}?flash_saved=auto-update#wordpress",
+        sel_url
+    ))
+    .into_response())
+}
+
+#[derive(serde::Deserialize)]
+pub struct BackupCadenceForm {
+    pub selector: String,
+    pub cadence: String,
+}
+
+/// Override a hosting's recurring-backup cadence. Stored in the OWNING node's
+/// hosting_kv ("backup_cadence", keyed by ULID) where scheduled_backups_tick
+/// reads it. Canonicalised to off|daily|weekly|monthly.
+pub async fn post_set_backup_cadence(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<BackupCadenceForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let sel_url = urlencoding(&form.selector);
+    let (detail, target) = match find_hosting_anywhere(&state, sel).await {
+        Ok(v) => v,
+        Err(_) => {
+            return Ok(Redirect::to(&format!("/hostings/{}#backups", sel_url)).into_response());
+        }
+    };
+    let value = match form.cadence.as_str() {
+        "daily" => "daily",
+        "weekly" => "weekly",
+        "monthly" => "monthly",
+        _ => "off",
+    };
+    let _ = crate::dispatcher::dispatch_to_node(
+        &state,
+        target.as_deref(),
+        Request::HostingKvSet {
+            hosting_id: detail.id.as_str().to_string(),
+            key: "backup_cadence".into(),
+            value: value.into(),
+        },
+    )
+    .await;
+    Ok(Redirect::to(&format!(
+        "/hostings/{}?flash_saved=backup-cadence#backups",
         sel_url
     ))
     .into_response())
