@@ -51,9 +51,20 @@
             {% if !p.description.is_empty() %}
               <div class="muted" style="font-size:0.78rem">{{ p.description }}</div>
             {% endif %}
+            {# Plan fingerprint — the differentiating fields, so tiers are
+               distinguishable without opening each edit page. #}
+            <div class="muted" style="font-size:0.74rem;margin-top:2px">
+              {% match p.default_php_version %}{% when Some with (v) %}PHP {{ v }}{% when None %}PHP —{% endmatch %}
+              · {% match p.default_db_engine %}{% when Some with (e) %}{% if e.is_empty() %}any DB{% else %}{{ e }}{% endif %}{% when None %}any DB{% endmatch %}
+              {% if p.plugin_count() > 0 %} · {{ p.plugin_count() }} plugin{% if p.plugin_count() != 1 %}s{% endif %}{% endif %}
+              {% if p.theme_count() > 0 %} · {{ p.theme_count() }} theme{% if p.theme_count() != 1 %}s{% endif %}{% endif %}
+            </div>
           </td>
           <td>{{ p.php_memory_mb }} MB</td>
-          <td>{% if let Some(m) = p.disk_hard_mb %}{{ m }} MB{% else %}<span class="text-soft">unlimited</span>{% endif %}</td>
+          <td>
+            {% if let Some(m) = p.disk_hard_mb %}{{ m }} MB{% else %}<span class="text-soft">unlimited</span>{% endif %}
+            {% if p.quota_exceed_action == "suspend" %}<br><span class="pill warn" title="Sites on this profile auto-suspend when they exceed the disk hard cap">on overage: suspend</span>{% endif %}
+          </td>
           <td>{{ p.pretty_price() }}</td>
           <td>{{ p.expiry_grace_days }} d</td>
           <td>{% if p.slack_webhook.is_some() %}<span class="pill ok">configured</span>{% else %}<span class="text-soft">—</span>{% endif %}</td>

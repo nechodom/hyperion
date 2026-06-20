@@ -71,6 +71,17 @@ pub struct HostingProfile {
 }
 
 impl HostingProfile {
+    /// Number of effective plugin lines (ignores blanks + `#` comments) — drives
+    /// the "N plugins" badge on the profiles list.
+    pub fn plugin_count(&self) -> usize {
+        count_items(&self.wp_plugins)
+    }
+
+    /// Number of effective theme lines (same rules as `plugin_count`).
+    pub fn theme_count(&self) -> usize {
+        count_items(&self.wp_themes)
+    }
+
     /// Pretty price like "199.00 Kč/měsíc" or "—" when no price.
     pub fn pretty_price(&self) -> String {
         match (
@@ -91,6 +102,17 @@ impl HostingProfile {
             _ => "—".into(),
         }
     }
+}
+
+/// Count non-blank, non-comment lines in a wp_plugins / wp_themes list (the
+/// same lines profile_apply actually installs).
+fn count_items(list: &str) -> usize {
+    list.lines()
+        .filter(|l| {
+            let t = l.trim();
+            !t.is_empty() && !t.starts_with('#')
+        })
+        .count()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]

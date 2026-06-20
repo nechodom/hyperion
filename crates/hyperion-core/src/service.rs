@@ -15268,6 +15268,34 @@ fn validate_profile(mut p: ProfileInput) -> Result<ProfileInput, RpcError> {
             });
         }
     }
+    // Reject a malformed expiry-warning-offsets CSV at save time instead of
+    // silently dropping bad tokens (or falling back) later when the scheduler
+    // parses it. Every comma-separated token must be a non-negative integer.
+    if p.expiry_warning_offsets.split(',').any(|tok| {
+        let t = tok.trim();
+        t.is_empty() || t.parse::<i64>().map(|n| n < 0).unwrap_or(true)
+    }) {
+        return Err(RpcError::Validation {
+            message: "expiry warning offsets must be comma-separated non-negative day counts (e.g. 30,7,1)".into(),
+        });
+    }
+    // Constrain the small closed enums so a typo'd value fails loudly here
+    // rather than silently coercing (quota action) or no-op'ing (db engine) at
+    // apply. Empty = "no preference" and is allowed.
+    if let Some(eng) = p.default_db_engine.as_deref() {
+        if !matches!(eng, "" | "mariadb" | "postgres" | "none") {
+            return Err(RpcError::Validation {
+                message: "default DB engine must be mariadb | postgres | none".into(),
+            });
+        }
+    }
+    if !p.quota_exceed_action.trim().is_empty()
+        && !matches!(p.quota_exceed_action.as_str(), "notify" | "suspend")
+    {
+        return Err(RpcError::Validation {
+            message: "quota overage action must be notify | suspend".into(),
+        });
+    }
     Ok(p)
 }
 
@@ -18670,6 +18698,34 @@ mod tests {
         assert!(validate_profile(hyperion_types::ProfileInput {
             disk_soft_mb: Some(1024),
             disk_hard_mb: Some(2048),
+            ..base()
+        })
+        .is_ok());
+        // Malformed expiry-warning-offsets rejected; a clean CSV passes.
+        assert!(validate_profile(hyperion_types::ProfileInput {
+            expiry_warning_offsets: "30,foo,1".into(),
+            ..base()
+        })
+        .is_err());
+        assert!(validate_profile(hyperion_types::ProfileInput {
+            expiry_warning_offsets: "30,7,1".into(),
+            ..base()
+        })
+        .is_ok());
+        // Closed enums: bad db engine + bad quota action rejected.
+        assert!(validate_profile(hyperion_types::ProfileInput {
+            default_db_engine: Some("mysql".into()),
+            ..base()
+        })
+        .is_err());
+        assert!(validate_profile(hyperion_types::ProfileInput {
+            quota_exceed_action: "suspendd".into(),
+            ..base()
+        })
+        .is_err());
+        assert!(validate_profile(hyperion_types::ProfileInput {
+            default_db_engine: Some("postgres".into()),
+            quota_exceed_action: "suspend".into(),
             ..base()
         })
         .is_ok());
