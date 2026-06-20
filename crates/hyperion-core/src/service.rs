@@ -6747,7 +6747,20 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let rows = profiles::list(&self.pool)
             .await
             .map_err(|e| RpcError::Internal_with(format!("profile list: {e}")))?;
-        Ok(rows.into_iter().map(profile_row_to_wire).collect())
+        // One GROUP BY query for all counts, then attach by id (avoids N+1).
+        let counts: std::collections::HashMap<i64, i64> = profiles::counts_by_profile(&self.pool)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let mut w = profile_row_to_wire(r);
+                w.in_use_count = counts.get(&w.id).copied().unwrap_or(0);
+                w
+            })
+            .collect())
     }
 
     pub async fn profile_get(&self, id: i64) -> Result<HostingProfile, RpcError> {
@@ -6758,7 +6771,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 kind: "profile".into(),
                 id: id.to_string(),
             })?;
-        Ok(profile_row_to_wire(row))
+        let mut w = profile_row_to_wire(row);
+        w.in_use_count = profiles::count_in_use(&self.pool, id).await.unwrap_or(0);
+        Ok(w)
+    }
+
+    /// The hosting ids currently on this profile — drives "re-apply to all".
+    /// Master-only (the hosting_profile_apply table lives on the master).
+    pub async fn profile_usage(&self, id: i64) -> Result<Vec<String>, RpcError> {
+        profiles::hosting_ids_for_profile(&self.pool, id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("profile usage: {e}")))
     }
 
     pub async fn profile_create(&self, input: ProfileInput) -> Result<HostingProfile, RpcError> {
@@ -15239,6 +15262,8 @@ fn profile_row_to_wire(r: hyperion_state::profiles::ProfileRow) -> HostingProfil
         quota_exceed_action: r.quota_exceed_action,
         disk_soft_mb: r.disk_soft_mb,
         mem_limit_mib: r.mem_limit_mib,
+        // Filled in by profile_list / profile_get; 0 from the bare conversion.
+        in_use_count: 0,
         created_at: r.created_at,
         updated_at: r.updated_at,
     }

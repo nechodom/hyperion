@@ -1008,6 +1008,12 @@ fn print_pretty(resp: &Response) {
             println!("price: {}", p.pretty_price());
         }
         Response::ProfileDelete => println!("✓ profile deleted"),
+        Response::ProfileUsage(ids) => {
+            println!("in use by {} hosting(s):", ids.len());
+            for id in ids {
+                println!("  {id}");
+            }
+        }
         Response::ProfileApply(a) => {
             println!("✓ profile applied");
             if let Some(ts) = a.next_billing_at {

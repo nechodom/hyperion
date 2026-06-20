@@ -250,6 +250,41 @@ pub async fn upsert_apply(
     Ok(())
 }
 
+/// How many hostings were created from / applied this profile (drives the
+/// "in use: N" badge + the re-apply / delete-confirm copy).
+pub async fn count_in_use(pool: &SqlitePool, profile_id: i64) -> Result<i64, StateError> {
+    let (n,): (i64,) =
+        sqlx::query_as("SELECT COUNT(*) FROM hosting_profile_apply WHERE profile_id = ?")
+            .bind(profile_id)
+            .fetch_one(pool)
+            .await?;
+    Ok(n)
+}
+
+/// Count of hostings per profile, for the profiles list ({profile_id: count}).
+pub async fn counts_by_profile(pool: &SqlitePool) -> Result<Vec<(i64, i64)>, StateError> {
+    let rows: Vec<(i64, i64)> = sqlx::query_as(
+        "SELECT profile_id, COUNT(*) FROM hosting_profile_apply
+          WHERE profile_id IS NOT NULL GROUP BY profile_id",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+/// The hosting ids currently on this profile — drives "re-apply to all".
+pub async fn hosting_ids_for_profile(
+    pool: &SqlitePool,
+    profile_id: i64,
+) -> Result<Vec<String>, StateError> {
+    let rows: Vec<(String,)> =
+        sqlx::query_as("SELECT hosting_id FROM hosting_profile_apply WHERE profile_id = ?")
+            .bind(profile_id)
+            .fetch_all(pool)
+            .await?;
+    Ok(rows.into_iter().map(|(h,)| h).collect())
+}
+
 pub async fn get_apply(
     pool: &SqlitePool,
     hosting_id: &HostingId,

@@ -46,7 +46,10 @@ struct ProfileEditTpl<'a> {
     /// clean default like "199.00" instead of "19900".
     price_major: String,
     csrf_update: String,
+    /// CSRF for the "re-apply to all sites on this profile" action.
+    csrf_reapply: String,
     error: Option<String>,
+    flash: Option<String>,
     /// Uploaded plugin assets — drives the "Add from library" picker
     /// next to the wp_plugins textarea so operators don't have to
     /// look up `@asset:N` IDs in a separate tab.
@@ -395,7 +398,9 @@ pub async fn get_edit(
         profile,
         price_major,
         csrf_update: csrf_token(&state, &ctx, &format!("/profiles/{}/update", id)),
+        csrf_reapply: csrf_token(&state, &ctx, "/profiles/reapply"),
         error: q.error,
+        flash: q.flash,
         plugin_assets,
         theme_assets,
     };
@@ -406,6 +411,8 @@ pub async fn get_edit(
 pub struct EditQuery {
     #[serde(default)]
     pub error: Option<String>,
+    #[serde(default)]
+    pub flash: Option<String>,
 }
 
 pub async fn post_update(
@@ -593,6 +600,129 @@ pub async fn post_apply(
     )
     .await?;
     Ok(Redirect::to(&format!("/hostings/{}?wpjob={}#wordpress", sel_url, job_id)).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct ReapplyAllForm {
+    pub profile_id: i64,
+}
+
+/// POST /profiles/reapply — re-push a profile to EVERY hosting on it.
+///
+/// "Profile as a living plan": after editing a profile, propagate the new
+/// limits / quota / expiry / pricing (+ WP items) to all N sites in one job.
+/// Reuses the exact per-hosting apply path as the single /profiles/apply
+/// (resolves each hosting's owning node, applies the profile inline), so it
+/// stays multi-node-correct. Admin+ only — it mutates many hostings at once,
+/// potentially across tenants. Redirects to the job page so the operator
+/// watches the per-site progress.
+pub async fn post_reapply_all(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<ReapplyAllForm>,
+) -> Result<Response, AppError> {
+    if !ctx.is_admin_or_higher() {
+        return Err(AppError::Forbidden);
+    }
+    let profile_id = form.profile_id;
+    let edit_url = format!("/profiles/{profile_id}/edit");
+    // Hosting ids currently on this profile (master-only table).
+    let ids: Vec<String> = match hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::ProfileUsage { id: profile_id },
+    )
+    .await?
+    {
+        RpcResponse::ProfileUsage(v) => v,
+        RpcResponse::Error(e) => return Err(AppError::Rpc(e.to_string())),
+        _ => return Err(AppError::Internal("unexpected response".into())),
+    };
+    if ids.is_empty() {
+        return Ok(Redirect::to(&format!(
+            "{edit_url}?flash={}",
+            urlencoding("No hostings are on this profile yet — nothing to re-apply.")
+        ))
+        .into_response());
+    }
+    let actor_label = ctx.username.clone();
+    let actor_uid = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
+    let payload = serde_json::json!({"profile_id": profile_id, "count": ids.len()});
+    let job_state = state.clone();
+    let job_id = crate::handlers::jobs::spawn_job(
+        state.clone(),
+        "profile_reapply_all",
+        None,
+        &payload.to_string(),
+        &actor_label,
+        actor_uid,
+        move |reporter| async move {
+            let total = ids.len() as i64;
+            let mut ok = 0i64;
+            let mut failed: Vec<String> = Vec::new();
+            for (i, raw) in ids.iter().enumerate() {
+                let sel =
+                    hyperion_rpc::wire::HostingSelector::Id(hyperion_types::HostingId(raw.clone()));
+                // Per-site slice of the [5, 95] progress band.
+                let base = 5 + (i as i64) * 90 / total;
+                let span = (90 / total).max(1);
+                let (detail, owner_node) =
+                    match super::hostings::find_hosting_anywhere(&job_state, sel).await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            failed.push(format!("{raw}: {e}"));
+                            reporter
+                                .step(
+                                    &format!("Skipped {raw}"),
+                                    base + span,
+                                    &format!("could not locate hosting {raw}: {e}\n"),
+                                )
+                                .await;
+                            continue;
+                        }
+                    };
+                reporter
+                    .step(
+                        &format!("Re-applying to {} ({}/{})", detail.domain, i + 1, total),
+                        base,
+                        &format!("→ {}\n", detail.domain),
+                    )
+                    .await;
+                match super::hostings::run_profile_apply_phase(
+                    &reporter,
+                    &job_state,
+                    owner_node.as_deref(),
+                    &detail.id,
+                    profile_id,
+                    base,
+                    span,
+                )
+                .await
+                {
+                    Ok(()) => ok += 1,
+                    Err(msg) => failed.push(format!("{}: {msg}", detail.domain)),
+                }
+            }
+            if failed.is_empty() {
+                reporter
+                    .step("Done", 100, &format!("Re-applied to all {ok} site(s).\n"))
+                    .await;
+                reporter.finish(true, None).await;
+            } else {
+                reporter
+                    .finish(
+                        false,
+                        Some(format!(
+                            "Re-applied to {ok}/{total}; {} failed:\n{}",
+                            failed.len(),
+                            failed.join("\n")
+                        )),
+                    )
+                    .await;
+            }
+        },
+    )
+    .await?;
+    Ok(Redirect::to(&format!("/jobs/{job_id}")).into_response())
 }
 
 fn parse_opt_i64(s: &str) -> Option<i64> {

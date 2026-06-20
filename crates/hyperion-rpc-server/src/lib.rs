@@ -1248,6 +1248,10 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(_) => Response::ProfileDelete,
             Err(e) => Response::Error(e),
         },
+        Request::ProfileUsage { id } => match api.profile_usage(id).await {
+            Ok(v) => Response::ProfileUsage(v),
+            Err(e) => Response::Error(e),
+        },
         Request::ProfileApply {
             sel,
             profile_id,
@@ -2347,6 +2351,9 @@ mod tests {
         }
         async fn profile_delete(&self, _: i64) -> Result<(), RpcError> {
             Ok(())
+        }
+        async fn profile_usage(&self, _: i64) -> Result<Vec<String>, RpcError> {
+            Ok(vec![])
         }
         async fn profile_apply(
             &self,

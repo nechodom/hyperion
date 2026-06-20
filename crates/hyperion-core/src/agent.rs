@@ -1408,6 +1408,9 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     async fn profile_delete(&self, id: i64) -> Result<(), RpcError> {
         self.svc.profile_delete(id).await
     }
+    async fn profile_usage(&self, id: i64) -> Result<Vec<String>, RpcError> {
+        self.svc.profile_usage(id).await
+    }
     async fn profile_apply(
         &self,
         sel: HostingSelector,

@@ -1178,6 +1178,11 @@ pub enum Request {
     ProfileDelete {
         id: i64,
     },
+    /// Hosting ids currently on this profile (rows in hosting_profile_apply).
+    /// Master-only; drives the "re-apply to all N sites" action.
+    ProfileUsage {
+        id: i64,
+    },
     ProfileApply {
         sel: HostingSelector,
         profile_id: i64,
@@ -1604,6 +1609,8 @@ pub enum Response {
     ProfileCreate(HostingProfile),
     ProfileUpdate(HostingProfile),
     ProfileDelete,
+    /// Hosting ids currently on a profile (for ProfileUsage).
+    ProfileUsage(Vec<String>),
     ProfileApply(ProfileApply),
     ProfileGetApply(Option<ProfileApply>),
     /// Ack for ProfileWpItemInstall. `label` is the human-readable

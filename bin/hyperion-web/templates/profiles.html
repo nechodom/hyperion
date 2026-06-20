@@ -39,6 +39,7 @@
           <th>Price</th>
           <th>Expiry grace</th>
           <th>Slack</th>
+          <th>In use</th>
           <th class="right">Actions</th>
         </tr>
       </thead>
@@ -56,6 +57,7 @@
           <td>{{ p.pretty_price() }}</td>
           <td>{{ p.expiry_grace_days }} d</td>
           <td>{% if p.slack_webhook.is_some() %}<span class="pill ok">configured</span>{% else %}<span class="text-soft">—</span>{% endif %}</td>
+          <td>{% if p.in_use_count > 0 %}<a href="/profiles/{{ p.id }}/edit" class="pill">{{ p.in_use_count }} site{% if p.in_use_count != 1 %}s{% endif %}</a>{% else %}<span class="text-soft">—</span>{% endif %}</td>
           <td class="right">
             <div class="row-actions">
               <a class="btn small" href="/profiles/{{ p.id }}/edit">Edit</a>
@@ -71,7 +73,7 @@
               </form>
               <form method="post" action="/profiles/delete" style="display:inline"
                     data-confirm-title="Delete profile {{ p.name }}"
-                    data-confirm-body="Hostings that previously had this profile applied keep their current limits, expiry policy and price — only the profile template is removed."
+                    data-confirm-body="{% if p.in_use_count > 0 %}{{ p.in_use_count }} hosting{% if p.in_use_count != 1 %}s{% endif %} use this profile. They keep their applied limits, expiry policy and price.{% if p.slack_webhook.is_some() %} ⚠ Their per-profile Slack billing channel will be lost — expiry/billing notices fall back to email-only.{% endif %} Only the profile template is removed.{% else %}No hostings use this profile — only the template is removed.{% endif %}"
                     data-confirm-confirm-label="Delete profile"
                     data-confirm-variant="danger">
                 <input type="hidden" name="_csrf" value="{{ csrf_delete }}">

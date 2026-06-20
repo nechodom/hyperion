@@ -59,6 +59,13 @@ pub struct HostingProfile {
     pub disk_soft_mb: Option<i64>,
     #[serde(default)]
     pub mem_limit_mib: Option<i64>,
+    /// How many hostings are currently on this profile (rows in
+    /// `hosting_profile_apply`). Computed at list/get time — drives the
+    /// "in use: N" badge, the "re-apply to N sites" action, and the
+    /// delete-confirm warning. `#[serde(default)]` so older agents that don't
+    /// send it deserialize with 0.
+    #[serde(default)]
+    pub in_use_count: i64,
     pub created_at: i64,
     pub updated_at: i64,
 }

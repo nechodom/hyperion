@@ -26,6 +26,12 @@
     <div class="flash-body">{{ e }}</div>
   </div>
 {% endif %}
+{% if let Some(f) = flash %}
+  <div class="flash success">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+    <div class="flash-body">{{ f }}</div>
+  </div>
+{% endif %}
 
 <div class="card hover">
   <form method="post" action="/profiles/{{ profile.id }}/update">
@@ -337,5 +343,27 @@
       <a class="btn ghost" href="/profiles">Cancel</a>
     </div>
   </form>
+</div>
+
+<div class="card hover" style="margin-top:1rem">
+  <h2 style="font-size:0.95rem;margin:0 0 0.4rem">Living plan</h2>
+  {% if profile.in_use_count > 0 %}
+    <p class="text-soft" style="margin:0 0 0.8rem">
+      <strong>{{ profile.in_use_count }}</strong> hosting{% if profile.in_use_count != 1 %}s{% endif %}
+      currently use this profile. Saving above only changes <em>future</em> applies — use the button
+      below to push the current limits, quota, expiry, pricing &amp; plugins to all of them now.
+    </p>
+    <form method="post" action="/profiles/reapply"
+          onsubmit="return confirm('Re-apply this profile to all {{ profile.in_use_count }} hosting(s) now? This overwrites their limits, disk/memory quota, expiry policy, pricing and re-runs the profile\'s plugin/theme installs.');">
+      <input type="hidden" name="_csrf" value="{{ csrf_reapply }}">
+      <input type="hidden" name="profile_id" value="{{ profile.id }}">
+      <button class="btn" type="submit">
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+        Re-apply to all {{ profile.in_use_count }} site{% if profile.in_use_count != 1 %}s{% endif %}
+      </button>
+    </form>
+  {% else %}
+    <p class="text-soft" style="margin:0">No hostings use this profile yet. Apply it from a hosting's Profile tab, or pick it in the create wizard.</p>
+  {% endif %}
 </div>
 {% endblock %}
