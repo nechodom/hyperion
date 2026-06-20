@@ -6907,7 +6907,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // notify/suspend action can fire. Only when the profile sets a cap;
         // otherwise just seed the overage policy for a later per-hosting cap.
         if p.disk_hard_mb.is_some() || p.disk_soft_mb.is_some() || p.mem_limit_mib.is_some() {
-            let _ = self
+            // A kernel-push failure is recorded in hosting_quotas.last_error (not
+            // an Err); quota_set only Errs on a Validation reject, which a
+            // validated profile shouldn't hit — but if it does, log it instead of
+            // silently reporting a clean apply.
+            if let Err(e) = self
                 .quota_set(
                     HostingSelector::Id(detail.id.clone()),
                     p.disk_soft_mb.unwrap_or(0) * 1024,
@@ -6917,7 +6921,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     p.bw_monthly_mb.unwrap_or(0), // monthly allowance → bw hard
                     &p.quota_exceed_action,
                 )
-                .await;
+                .await
+            {
+                tracing::warn!(
+                    hosting_id = %detail.id.as_str(),
+                    error = %e,
+                    "profile apply: quota_set rejected the profile's caps; disk/mem quota not set"
+                );
+            }
         } else {
             let _ = hyperion_state::hosting_kv::set(
                 &self.pool,

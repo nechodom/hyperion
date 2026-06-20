@@ -6696,9 +6696,17 @@ async fn run_post_create_job(
 
         // ── Phase 3: profile (plugins/themes ride with WP) ───
         if profile_id > 0 {
-            if let Err(msg) =
-                run_profile_apply_phase(&reporter, &state, target, &hosting_id, profile_id, 70, 25)
-                    .await
+            if let Err(msg) = run_profile_apply_phase(
+                &reporter,
+                &state,
+                target,
+                &hosting_id,
+                profile_id,
+                70,
+                25,
+                None,
+            )
+            .await
             {
                 deferred_failures.push(msg);
                 reporter
@@ -6747,6 +6755,10 @@ pub(crate) async fn run_profile_apply_phase(
     profile_id: i64,
     pct_base: i64,
     pct_span: i64,
+    // The resolved profile, when the caller already has it (re-apply-to-all
+    // fetches it ONCE for the whole batch instead of once per site). `None` ⇒
+    // fetch it here, as the single-apply path does.
+    prefetched: Option<hyperion_types::HostingProfile>,
 ) -> Result<(), String> {
     reporter
         .step(
@@ -6758,19 +6770,22 @@ pub(crate) async fn run_profile_apply_phase(
     // Resolve the profile on the master (hosting_profiles is master-only) and
     // pass it inline, so the apply works even when the hosting lives on a
     // worker (which has no profiles in its own DB). Reused below for WP items.
-    let profile = match hyperion_rpc_client::call(
-        &state.agent_socket,
-        Request::ProfileGet { id: profile_id },
-    )
-    .await
-    {
-        Ok(RpcResponse::ProfileGet(p)) => p,
-        _ => {
-            return Err(
-                "Couldn't read the profile from the master — re-run from the Profile tab."
-                    .to_string(),
-            )
-        }
+    let profile = match prefetched {
+        Some(p) => p,
+        None => match hyperion_rpc_client::call(
+            &state.agent_socket,
+            Request::ProfileGet { id: profile_id },
+        )
+        .await
+        {
+            Ok(RpcResponse::ProfileGet(p)) => p,
+            _ => {
+                return Err(
+                    "Couldn't read the profile from the master — re-run from the Profile tab."
+                        .to_string(),
+                )
+            }
+        },
     };
     let apply = crate::dispatcher::dispatch_to_node(
         state,

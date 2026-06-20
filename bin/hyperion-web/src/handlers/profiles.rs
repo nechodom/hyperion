@@ -585,6 +585,7 @@ pub async fn post_apply(
                 job_profile_id,
                 5,
                 90,
+                None,
             )
             .await
             {
@@ -659,6 +660,29 @@ pub async fn post_reapply_all(
             let total = ids.len() as i64;
             let mut ok = 0i64;
             let mut failed: Vec<String> = Vec::new();
+            // Resolve the profile ONCE for the whole batch (master-only table)
+            // and pass it inline to every site — avoids an identical ProfileGet
+            // round-trip per hosting inside the loop.
+            let profile = match hyperion_rpc_client::call(
+                &job_state.agent_socket,
+                Request::ProfileGet { id: profile_id },
+            )
+            .await
+            {
+                Ok(RpcResponse::ProfileGet(p)) => p,
+                _ => {
+                    reporter
+                        .finish(
+                            false,
+                            Some(
+                                "Couldn't read the profile from the master — nothing re-applied."
+                                    .into(),
+                            ),
+                        )
+                        .await;
+                    return;
+                }
+            };
             for (i, raw) in ids.iter().enumerate() {
                 let sel =
                     hyperion_rpc::wire::HostingSelector::Id(hyperion_types::HostingId(raw.clone()));
@@ -695,6 +719,7 @@ pub async fn post_reapply_all(
                     profile_id,
                     base,
                     span,
+                    Some(profile.clone()),
                 )
                 .await
                 {
