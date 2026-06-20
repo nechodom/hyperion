@@ -2951,6 +2951,51 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     ) -> Result<(), RpcError> {
         let detail = self.get(sel).await?;
         if detail.state == HostingState::Suspended {
+            // Already suspended. Normally idempotent — but UPGRADE the recorded
+            // reason when the incoming one outranks it (operator/lifecycle hold
+            // > automated usage hold). Otherwise e.g. a Manual/Expired suspend
+            // stacked on an auto OverDisk suspend would leave suspended_by
+            // ="over-disk", and the quota enforce loop would then treat the
+            // site as its own and auto-resume it — undoing the operator's hold.
+            let current = hyperion_state::limits::get_suspension(&self.pool, &detail.id)
+                .await
+                .ok()
+                .flatten();
+            let current_label = current
+                .as_ref()
+                .map(|s| s.suspended_by.as_str())
+                .unwrap_or("");
+            if suspend_reason_rank(reason.label()) > suspend_reason_rank(current_label) {
+                let susp = hyperion_state::limits::SuspensionRow {
+                    hosting_id: detail.id.clone(),
+                    suspended_at: now_secs(),
+                    suspended_by: reason.label().to_string(),
+                    reason_message: reason.message().map(|s| s.to_string()),
+                    // Preserve any operator-set custom suspended page (the upsert
+                    // overwrites every column).
+                    custom_page_html: current.as_ref().and_then(|s| s.custom_page_html.clone()),
+                };
+                hyperion_state::limits::insert_suspension(&self.pool, &susp)
+                    .await
+                    .map_err(|e| {
+                        RpcError::Internal_with(format!("upgrade suspension reason: {e}"))
+                    })?;
+                let _ = self
+                    .adapters
+                    .nginx_apply_suspended(&detail.domain, reason.message().map(|s| s.to_string()))
+                    .await;
+                self.append_audit(
+                    "hosting.suspend",
+                    Some(detail.id.as_str()),
+                    &serde_json::json!({
+                        "reason": reason.label(),
+                        "upgraded_from": current_label,
+                    })
+                    .to_string(),
+                    "ok",
+                )
+                .await;
+            }
             return Ok(());
         }
         if detail.state == HostingState::Deleting {
@@ -16994,6 +17039,19 @@ enum QuotaStep {
     AutoResume,
 }
 
+/// Precedence for a `SuspendReason::label()`. Operator/lifecycle holds (manual,
+/// expired) outrank automated usage holds (over-disk, over-bandwidth). A second
+/// `suspend()` on an already-suspended site only overwrites the recorded reason
+/// when the incoming one strictly outranks the current — so a manual/expiry
+/// hold "sticks" over an auto over-disk suspend (and the quota loop then leaves
+/// it alone), while a lower-or-equal reason stays idempotent.
+fn suspend_reason_rank(label: &str) -> u8 {
+    match label {
+        "manual" | "expired" => 2,
+        _ => 1, // over-disk, over-bandwidth, or unknown/missing
+    }
+}
+
 /// Pure decision core: given current disk usage vs the hard cap, the configured
 /// action, and the last recorded state, return (step, new_state). Auto-resume
 /// uses **90%-of-cap hysteresis** so a site hovering at the limit can't flap
@@ -19474,6 +19532,55 @@ mod tests {
         s.suspend(sel, hyperion_types::SuspendReason::Expired)
             .await
             .expect("idempotent");
+    }
+
+    #[tokio::test]
+    async fn suspend_reason_upgrades_overdisk_to_manual_but_not_back() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), suspend_mocks());
+        let created = s.create(req("ex.cz")).await.expect("create");
+        let sel = HostingSelector::Id(created.id.clone());
+
+        // Auto over-disk suspend first.
+        s.suspend(sel.clone(), hyperion_types::SuspendReason::OverDisk)
+            .await
+            .expect("over-disk suspend");
+        let row = hyperion_state::limits::get_suspension(&pool, &created.id)
+            .await
+            .expect("get")
+            .expect("present");
+        assert_eq!(row.suspended_by, "over-disk");
+
+        // Operator manually suspends the already-down site → reason UPGRADES,
+        // so the quota loop (which only resumes its own "over-disk" holds) will
+        // leave it alone.
+        s.suspend(
+            sel.clone(),
+            hyperion_types::SuspendReason::Manual {
+                message: Some("non-payment".into()),
+            },
+        )
+        .await
+        .expect("manual suspend");
+        let row = hyperion_state::limits::get_suspension(&pool, &created.id)
+            .await
+            .expect("get")
+            .expect("present");
+        assert_eq!(row.suspended_by, "manual", "manual outranks over-disk");
+        assert_eq!(row.reason_message.as_deref(), Some("non-payment"));
+
+        // A lower-priority automated reason must NOT downgrade the manual hold.
+        s.suspend(sel, hyperion_types::SuspendReason::OverBandwidth)
+            .await
+            .expect("over-bandwidth suspend");
+        let row = hyperion_state::limits::get_suspension(&pool, &created.id)
+            .await
+            .expect("get")
+            .expect("present");
+        assert_eq!(
+            row.suspended_by, "manual",
+            "over-bandwidth must not downgrade a manual hold"
+        );
     }
 
     #[tokio::test]
