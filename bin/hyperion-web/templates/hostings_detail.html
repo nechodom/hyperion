@@ -2207,9 +2207,23 @@
       <div class="row" style="gap:0.5rem;align-items:flex-end">
         <div class="field" style="flex:1;margin:0">
           <label for="apply_profile">Profile</label>
-          <select id="apply_profile" name="profile_id" required>
+          <select id="apply_profile" name="profile_id" required
+                  onchange="hyperionApplyPreview()">
             {% for p in profiles %}
-              <option value="{{ p.id }}">
+              <option value="{{ p.id }}"
+                data-phpmem="{{ p.php_memory_mb }}"
+                data-disk="{% if let Some(m) = p.disk_hard_mb %}{{ m }}{% endif %}"
+                data-disksoft="{% if let Some(m) = p.disk_soft_mb %}{{ m }}{% endif %}"
+                data-mem="{% if let Some(m) = p.mem_limit_mib %}{{ m }}{% endif %}"
+                data-bw="{% if let Some(m) = p.bw_monthly_mb %}{{ m }}{% endif %}"
+                data-grace="{{ p.expiry_grace_days }}"
+                data-quota="{{ p.quota_exceed_action }}"
+                data-cadence="{{ p.backup_cadence }}"
+                data-php="{% if let Some(v) = p.default_php_version %}{{ v }}{% endif %}"
+                data-db="{% if let Some(e) = p.default_db_engine %}{{ e }}{% endif %}"
+                data-plugins="{{ p.plugin_count() }}"
+                data-themes="{{ p.theme_count() }}"
+                data-price="{{ p.pretty_price() }}">
                 {{ p.name }}{% if !p.description.is_empty() %} — {{ p.description }}{% endif %} ({{ p.pretty_price() }})
               </option>
             {% endfor %}
@@ -2220,7 +2234,38 @@
           Apply
         </button>
       </div>
+      {# Preview of exactly what the chosen profile will set, so the operator
+         isn't applying blind. Profile-side values only (no current-vs-new unit
+         math); all numbers/enums, so innerHTML is XSS-safe. #}
+      <div id="apply-preview" class="muted" style="font-size:0.82rem;margin-top:0.6rem;line-height:1.65"></div>
     </form>
+    <script>
+      function hyperionApplyPreview() {
+        var sel = document.getElementById('apply_profile');
+        var box = document.getElementById('apply-preview');
+        if (!sel || !box) return;
+        var o = sel.options[sel.selectedIndex];
+        if (!o) { box.textContent = ''; return; }
+        var d = o.dataset;
+        var cap = function (mb) { return mb ? (mb + ' MB') : 'unlimited'; };
+        var parts = [];
+        parts.push('PHP memory <b>' + d.phpmem + ' MB</b>');
+        parts.push('disk <b>' + cap(d.disk) + '</b>'
+          + (d.disksoft ? (' (soft ' + d.disksoft + ' MB)') : '')
+          + (d.quota === 'suspend' ? ' · <b>suspend on overage</b>' : ''));
+        if (d.mem) parts.push('memory cap <b>' + d.mem + ' MiB</b>');
+        parts.push('bandwidth <b>' + cap(d.bw) + '</b>');
+        parts.push('expiry grace <b>' + d.grace + 'd</b>');
+        parts.push('backups <b>' + (d.cadence && d.cadence !== 'off' ? d.cadence : 'off') + '</b>');
+        if (d.php) parts.push('PHP <b>' + d.php + '</b>');
+        if (d.db) parts.push('DB <b>' + d.db + '</b>');
+        if (d.plugins && d.plugins !== '0') parts.push('<b>' + d.plugins + '</b> plugin(s)');
+        if (d.themes && d.themes !== '0') parts.push('<b>' + d.themes + '</b> theme(s)');
+        if (d.price && d.price !== '—') parts.push('price <b>' + d.price + '</b>');
+        box.innerHTML = 'Will set: ' + parts.join(' · ') + '. <span style="color:var(--warn)">Overwrites the current values.</span>';
+      }
+      hyperionApplyPreview();
+    </script>
   {% endif %}
 </div>
 
