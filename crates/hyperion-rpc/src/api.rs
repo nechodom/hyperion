@@ -896,8 +896,11 @@ pub trait AgentApi: Send + Sync + 'static {
         input: ProfileInput,
     ) -> Result<HostingProfile, RpcError>;
     async fn profile_delete(&self, id: i64) -> Result<(), RpcError>;
-    /// Hosting ids currently on a profile (master-only) — drives re-apply-all.
+    /// Hosting ids currently on a profile (this node) — drives re-apply-all.
     async fn profile_usage(&self, id: i64) -> Result<Vec<String>, RpcError>;
+    /// (profile_id, live count) per profile on this node — fanned out for the
+    /// cluster-wide "in use: N" badge.
+    async fn profile_usage_counts(&self) -> Result<Vec<(i64, i64)>, RpcError>;
     /// Apply a profile to a hosting — copies limits + expiry policy +
     /// pricing onto the hosting and links it. `skip_wp_items=true`
     /// leaves the profile's wp_plugins / wp_themes for the caller to

@@ -1252,6 +1252,10 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::ProfileUsage(v),
             Err(e) => Response::Error(e),
         },
+        Request::ProfileUsageCounts => match api.profile_usage_counts().await {
+            Ok(v) => Response::ProfileUsageCounts(v),
+            Err(e) => Response::Error(e),
+        },
         Request::ProfileApply {
             sel,
             profile_id,
@@ -2353,6 +2357,9 @@ mod tests {
             Ok(())
         }
         async fn profile_usage(&self, _: i64) -> Result<Vec<String>, RpcError> {
+            Ok(vec![])
+        }
+        async fn profile_usage_counts(&self) -> Result<Vec<(i64, i64)>, RpcError> {
             Ok(vec![])
         }
         async fn profile_apply(

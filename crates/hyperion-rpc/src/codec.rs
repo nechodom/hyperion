@@ -1178,11 +1178,14 @@ pub enum Request {
     ProfileDelete {
         id: i64,
     },
-    /// Hosting ids currently on this profile (rows in hosting_profile_apply).
-    /// Master-only; drives the "re-apply to all N sites" action.
+    /// Hosting ids currently on this profile (rows in hosting_profile_apply on
+    /// THIS node). Fanned out across nodes + unioned for cluster-wide re-apply.
     ProfileUsage {
         id: i64,
     },
+    /// (profile_id, live-hosting count) for every profile with apply rows on
+    /// THIS node. Fanned out + summed for the cluster-wide "in use: N" badge.
+    ProfileUsageCounts,
     ProfileApply {
         sel: HostingSelector,
         profile_id: i64,
@@ -1611,6 +1614,8 @@ pub enum Response {
     ProfileDelete,
     /// Hosting ids currently on a profile (for ProfileUsage).
     ProfileUsage(Vec<String>),
+    /// (profile_id, count) per profile on a node (for ProfileUsageCounts).
+    ProfileUsageCounts(Vec<(i64, i64)>),
     ProfileApply(ProfileApply),
     ProfileGetApply(Option<ProfileApply>),
     /// Ack for ProfileWpItemInstall. `label` is the human-readable

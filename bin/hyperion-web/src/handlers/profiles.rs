@@ -71,7 +71,15 @@ pub async fn get_profiles(
     ctx: AuthCtx,
     Query(q): Query<ProfilesQuery>,
 ) -> Result<Response, AppError> {
-    let profiles = fetch_profiles(&state).await.unwrap_or_default();
+    let mut profiles = fetch_profiles(&state).await.unwrap_or_default();
+    // The in_use_count from ProfileList is master-local; add the per-node counts
+    // from every worker so the badge is cluster-wide.
+    let remote = remote_usage_counts(&state).await;
+    for p in &mut profiles {
+        if let Some(extra) = remote.get(&p.id) {
+            p.in_use_count += extra;
+        }
+    }
     // Asset library — best-effort. An empty list hides the picker.
     let assets: Vec<WpAssetSummary> =
         match hyperion_rpc_client::call(&state.agent_socket, Request::WpAssetList).await {
@@ -371,7 +379,7 @@ pub async fn get_edit(
     Query(q): Query<EditQuery>,
 ) -> Result<Response, AppError> {
     let resp = hyperion_rpc_client::call(&state.agent_socket, Request::ProfileGet { id }).await?;
-    let profile = match resp {
+    let mut profile = match resp {
         RpcResponse::ProfileGet(p) => p,
         RpcResponse::Error(hyperion_rpc::RpcError::NotFound { .. }) => {
             return Err(AppError::NotFound)
@@ -379,6 +387,9 @@ pub async fn get_edit(
         RpcResponse::Error(e) => return Err(AppError::Rpc(e.to_string())),
         _ => return Err(AppError::Internal("unexpected response".into())),
     };
+    // ProfileGet's in_use_count is master-local; add the worker sites so the
+    // "living plan" card + re-apply button count the whole cluster.
+    profile.in_use_count += remote_usage_ids(&state, id).await.len() as i64;
     let price_major = match profile.price_minor {
         Some(m) => format!("{:.2}", m as f64 / 100.0),
         None => String::new(),
@@ -634,7 +645,7 @@ pub async fn post_reapply_all(
     let profile_id = form.profile_id;
     let edit_url = format!("/profiles/{profile_id}/edit");
     // Hosting ids currently on this profile (master-only table).
-    let ids: Vec<String> = match hyperion_rpc_client::call(
+    let mut ids: Vec<String> = match hyperion_rpc_client::call(
         &state.agent_socket,
         Request::ProfileUsage { id: profile_id },
     )
@@ -644,6 +655,11 @@ pub async fn post_reapply_all(
         RpcResponse::Error(e) => return Err(AppError::Rpc(e.to_string())),
         _ => return Err(AppError::Internal("unexpected response".into())),
     };
+    // Add worker-resident hostings so a re-apply covers the whole cluster, not
+    // just master-local sites (their apply rows live on the owning node).
+    ids.extend(remote_usage_ids(&state, profile_id).await);
+    ids.sort();
+    ids.dedup();
     if ids.is_empty() {
         return Ok(Redirect::to(&format!(
             "{edit_url}?flash={}",
@@ -754,6 +770,50 @@ pub async fn post_reapply_all(
     )
     .await?;
     Ok(Redirect::to(&format!("/jobs/{job_id}")).into_response())
+}
+
+/// Sum, across all worker nodes, the per-profile live-hosting counts. The
+/// master-local counts already live on each HostingProfile (from ProfileList);
+/// this adds the workers so the "in use: N" badge is cluster-wide. Best-effort:
+/// a down node simply contributes nothing (fan_out excludes it).
+async fn remote_usage_counts(state: &SharedState) -> std::collections::HashMap<i64, i64> {
+    let mut map: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
+    let workers = super::hostings::fetch_remote_nodes(state)
+        .await
+        .unwrap_or_default();
+    if workers.is_empty() {
+        return map;
+    }
+    for (_n, resp) in crate::dispatcher::fan_out(state, workers, Request::ProfileUsageCounts).await
+    {
+        if let RpcResponse::ProfileUsageCounts(counts) = resp {
+            for (pid, n) in counts {
+                *map.entry(pid).or_insert(0) += n;
+            }
+        }
+    }
+    map
+}
+
+/// Union, across all worker nodes, the hosting ids on a profile — the caller
+/// already holds the master-local ids. Drives cluster-wide re-apply + the
+/// edit-page count. Best-effort (a down node contributes nothing).
+async fn remote_usage_ids(state: &SharedState, profile_id: i64) -> Vec<String> {
+    let mut out = Vec::new();
+    let workers = super::hostings::fetch_remote_nodes(state)
+        .await
+        .unwrap_or_default();
+    if workers.is_empty() {
+        return out;
+    }
+    for (_n, resp) in
+        crate::dispatcher::fan_out(state, workers, Request::ProfileUsage { id: profile_id }).await
+    {
+        if let RpcResponse::ProfileUsage(ids) = resp {
+            out.extend(ids);
+        }
+    }
+    out
 }
 
 fn parse_opt_i64(s: &str) -> Option<i64> {

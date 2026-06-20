@@ -6905,12 +6905,20 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(w)
     }
 
-    /// The hosting ids currently on this profile — drives "re-apply to all".
-    /// Master-only (the hosting_profile_apply table lives on the master).
+    /// The live hosting ids on this profile ON THIS NODE — the web unions these
+    /// across nodes for cluster-wide "re-apply to all".
     pub async fn profile_usage(&self, id: i64) -> Result<Vec<String>, RpcError> {
         profiles::hosting_ids_for_profile(&self.pool, id)
             .await
             .map_err(|e| RpcError::Internal_with(format!("profile usage: {e}")))
+    }
+
+    /// (profile_id, live-hosting count) for every profile with apply rows on
+    /// THIS node — the web sums these across nodes for the "in use: N" badge.
+    pub async fn profile_usage_counts(&self) -> Result<Vec<(i64, i64)>, RpcError> {
+        profiles::counts_by_profile(&self.pool)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("profile usage counts: {e}")))
     }
 
     pub async fn profile_create(&self, input: ProfileInput) -> Result<HostingProfile, RpcError> {

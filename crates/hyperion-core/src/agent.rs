@@ -1411,6 +1411,9 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     async fn profile_usage(&self, id: i64) -> Result<Vec<String>, RpcError> {
         self.svc.profile_usage(id).await
     }
+    async fn profile_usage_counts(&self) -> Result<Vec<(i64, i64)>, RpcError> {
+        self.svc.profile_usage_counts().await
+    }
     async fn profile_apply(
         &self,
         sel: HostingSelector,

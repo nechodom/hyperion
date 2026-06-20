@@ -1014,6 +1014,11 @@ fn print_pretty(resp: &Response) {
                 println!("  {id}");
             }
         }
+        Response::ProfileUsageCounts(counts) => {
+            for (pid, n) in counts {
+                println!("profile {pid}\t{n} hosting(s)");
+            }
+        }
         Response::ProfileApply(a) => {
             println!("✓ profile applied");
             if let Some(ts) = a.next_billing_at {
