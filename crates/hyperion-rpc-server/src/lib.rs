@@ -339,6 +339,7 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             mem_limit_mib,
             bw_soft_mib,
             bw_hard_mib,
+            exceed_action,
         } => match api
             .quota_set(
                 hosting,
@@ -347,6 +348,7 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 mem_limit_mib,
                 bw_soft_mib,
                 bw_hard_mib,
+                exceed_action,
             )
             .await
         {
@@ -1460,6 +1462,7 @@ mod tests {
             _: i64,
             _: i64,
             _: i64,
+            _: String,
         ) -> Result<hyperion_types::HostingQuotaView, RpcError> {
             Ok(hyperion_types::HostingQuotaView::default())
         }

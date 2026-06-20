@@ -72,6 +72,7 @@ pub enum SuspendReason {
     Manual { message: Option<String> },
     Expired,
     OverBandwidth,
+    OverDisk,
 }
 
 impl SuspendReason {
@@ -80,6 +81,7 @@ impl SuspendReason {
             Self::Manual { .. } => "manual",
             Self::Expired => "expired",
             Self::OverBandwidth => "over-bandwidth",
+            Self::OverDisk => "over-disk",
         }
     }
     pub fn message(&self) -> Option<&str> {
@@ -87,6 +89,7 @@ impl SuspendReason {
             Self::Manual { message } => message.as_deref(),
             Self::Expired => Some("This site has expired."),
             Self::OverBandwidth => Some("This site exceeded its bandwidth allowance."),
+            Self::OverDisk => Some("This site exceeded its disk allowance."),
         }
     }
 }

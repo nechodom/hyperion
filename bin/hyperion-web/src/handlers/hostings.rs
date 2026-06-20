@@ -6307,6 +6307,10 @@ pub struct QuotaSetForm {
     pub bw_soft_mib: i64,
     #[serde(default)]
     pub bw_hard_mib: i64,
+    /// "notify" (default) or "suspend" — what to do when usage crosses the
+    /// disk hard cap.
+    #[serde(default)]
+    pub exceed_action: String,
 }
 
 pub async fn post_quota_set(
@@ -6341,6 +6345,7 @@ pub async fn post_quota_set(
             mem_limit_mib: form.mem_limit_mib,
             bw_soft_mib: form.bw_soft_mib,
             bw_hard_mib: form.bw_hard_mib,
+            exceed_action: form.exceed_action.clone(),
         },
     )
     .await?;

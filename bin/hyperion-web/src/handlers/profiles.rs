@@ -155,6 +155,10 @@ pub struct CreateForm {
     /// / "" (empty = no preference).
     #[serde(default)]
     pub default_db_engine: String,
+    /// Default disk-overage action for sites created from this profile:
+    /// "notify" (default) or "suspend".
+    #[serde(default)]
+    pub quota_exceed_action: String,
 }
 
 fn default_256() -> i64 {
@@ -234,6 +238,7 @@ pub async fn post_create(
         } else {
             Some(form.default_db_engine.trim().to_string())
         },
+        quota_exceed_action: form.quota_exceed_action.clone(),
     };
     let resp =
         hyperion_rpc_client::call(&state.agent_socket, Request::ProfileCreate(input)).await?;
@@ -320,6 +325,7 @@ pub async fn post_clone(
         wp_themes: src.wp_themes.clone(),
         default_php_version: src.default_php_version.clone(),
         default_db_engine: src.default_db_engine.clone(),
+        quota_exceed_action: src.quota_exceed_action.clone(),
     };
     let resp =
         hyperion_rpc_client::call(&state.agent_socket, Request::ProfileCreate(input)).await?;
@@ -446,6 +452,7 @@ pub async fn post_update(
         } else {
             Some(form.default_db_engine.trim().to_string())
         },
+        quota_exceed_action: form.quota_exceed_action.clone(),
     };
     let resp = hyperion_rpc_client::call(&state.agent_socket, Request::ProfileUpdate { id, input })
         .await?;

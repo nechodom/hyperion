@@ -48,6 +48,11 @@ pub struct HostingProfile {
     /// sites explicitly says "don't provision a DB".
     #[serde(default)]
     pub default_db_engine: Option<String>,
+    /// Default action when a hosting created from this profile exceeds its disk
+    /// hard cap: "notify" (default) or "suspend". Seeds the hosting's
+    /// `hosting_kv` at create; overridable per-hosting from the Quota card.
+    #[serde(default)]
+    pub quota_exceed_action: String,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -102,6 +107,9 @@ pub struct ProfileInput {
     /// See `HostingProfile::default_db_engine`.
     #[serde(default)]
     pub default_db_engine: Option<String>,
+    /// See `HostingProfile::quota_exceed_action` ("notify" | "suspend").
+    #[serde(default)]
+    pub quota_exceed_action: String,
 }
 
 /// One row in the WordPress asset library — operator-uploaded

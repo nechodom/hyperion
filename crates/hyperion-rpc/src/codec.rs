@@ -713,6 +713,11 @@ pub enum Request {
         mem_limit_mib: i64,
         bw_soft_mib: i64,
         bw_hard_mib: i64,
+        /// What to do when this hosting exceeds its disk hard cap:
+        /// "notify" (default) or "suspend". Defaulted for back-compat so
+        /// an older web binary's QuotaSet still decodes.
+        #[serde(default)]
+        exceed_action: String,
     },
     /// Automatically enable Linux kernel disk quotas on the filesystem
     /// carrying this hosting's home tree (edits /etc/fstab + remount +

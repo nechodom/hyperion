@@ -362,6 +362,7 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         mem_limit_mib: i64,
         bw_soft_mib: i64,
         bw_hard_mib: i64,
+        exceed_action: String,
     ) -> Result<hyperion_types::HostingQuotaView, RpcError> {
         self.svc
             .quota_set(
@@ -371,6 +372,7 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
                 mem_limit_mib,
                 bw_soft_mib,
                 bw_hard_mib,
+                &exceed_action,
             )
             .await
     }

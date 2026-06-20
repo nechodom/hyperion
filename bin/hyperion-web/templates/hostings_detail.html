@@ -2107,6 +2107,15 @@
                value="{{ quota.policy.bw_hard_mib }}">
       </div>
     </div>
+    <div class="field-row">
+      <div class="field">
+        <label for="exceed_action">When the disk hard cap is exceeded <span class="hint">writes are always blocked at the cap; this is the extra action</span></label>
+        <select id="exceed_action" name="exceed_action">
+          <option value="notify"{% if quota.policy.exceed_action != "suspend" %} selected{% endif %}>Notify only (send an alert)</option>
+          <option value="suspend"{% if quota.policy.exceed_action == "suspend" %} selected{% endif %}>Suspend the site (+ alert)</option>
+        </select>
+      </div>
+    </div>
     <button class="btn primary" type="submit">
       <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
       Save + apply quota
@@ -2114,6 +2123,7 @@
   </form>
   <p class="text-soft small" style="margin:0.8rem 0 0">
     Disk caps push into the kernel via <code>setquota -u</code>. The hard cap blocks writes with ENOSPC; the soft cap starts the grace period.
+    On <strong>Suspend</strong>, a site that crosses the hard cap is stopped and auto-resumes once usage drops back under the cap — you're notified either way. The default for new sites comes from the create profile.
     Bandwidth is informational and alert-driven (no kernel enforcement). The memory limit takes effect on the next FPM pool rebuild.
   </p>
 </div>

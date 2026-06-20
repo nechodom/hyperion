@@ -556,6 +556,7 @@ async fn e2e_bundle_a_c_round_trip_through_wire() {
             mem_limit_mib: 0,
             bw_soft_mib: 0,
             bw_hard_mib: 0,
+            exceed_action: String::new(),
         },
     )
     .await
@@ -577,6 +578,7 @@ async fn e2e_bundle_a_c_round_trip_through_wire() {
             mem_limit_mib: 256,
             bw_soft_mib: 5_000,
             bw_hard_mib: 10_000,
+            exceed_action: "suspend".to_string(),
         },
     )
     .await

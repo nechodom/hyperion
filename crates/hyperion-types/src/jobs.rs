@@ -89,6 +89,10 @@ pub struct HostingQuotaView {
     /// enabled on the filesystem hosting the user's home dir).
     pub last_error: Option<String>,
     pub updated_at: i64,
+    /// Action when disk usage crosses the hard cap: "notify" (default) or
+    /// "suspend". Read from `hosting_kv`; seeded from the create profile.
+    #[serde(default)]
+    pub exceed_action: String,
 }
 
 /// Off-site backup destination (S3-compatible or local dir).

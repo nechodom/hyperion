@@ -595,6 +595,13 @@ async fn main() -> anyhow::Result<()> {
                     Ok(_) => {}
                     Err(e) => tracing::warn!(error=%e, "fail2ban tick failed"),
                 }
+                // Enforce per-hosting disk-overage policy (notify / suspend +
+                // auto-resume) for sites that crossed their disk hard cap.
+                match tick_svc.quota_enforce_tick().await {
+                    Ok(n) if n > 0 => tracing::info!(acted = n, "quota enforce: acted on sites"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error=%e, "quota enforce tick failed"),
+                }
             }
         });
     }

@@ -170,6 +170,7 @@ pub trait AgentApi: Send + Sync + 'static {
         mem_limit_mib: i64,
         bw_soft_mib: i64,
         bw_hard_mib: i64,
+        exceed_action: String,
     ) -> Result<hyperion_types::HostingQuotaView, RpcError>;
 
     /// Automatically enable kernel disk quotas on the hosting's filesystem.
