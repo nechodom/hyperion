@@ -6675,12 +6675,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
     }
 
-    /// Periodic sweep — sends a Slack message for every hosting whose
-    /// `next_billing_at` is within 3 days. Called from the scheduler
-    /// tick; idempotency is left to the caller's interval (today the
-    /// tick runs every 5 min — fine, Slack will get duplicated msgs
-    /// every 5 min for 3 days, which is acceptable for a first cut).
-    /// Resets next_billing_at to next-interval after notification.
+    /// Periodic sweep — sends one Slack + email reminder per hosting whose
+    /// `next_billing_at` falls within the next 3 days, then ADVANCES the date by
+    /// one billing interval so the reminder fires once per cycle instead of
+    /// re-firing every tick forever. Called hourly from the agent scheduler.
     pub async fn billing_sweep(&self) -> Result<i64, RpcError> {
         let now = now_secs();
         let due = profiles::due_billings(&self.pool, now, 3 * 86400)
@@ -6697,13 +6695,19 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .as_ref()
                 .map(|d| d.domain.clone())
                 .unwrap_or_default();
-            let webhook = match row.profile_id {
-                Some(pid) => self
-                    .profile_get(pid)
-                    .await
-                    .ok()
-                    .and_then(|p| p.slack_webhook),
-                None => None,
+            // Prefer the webhook snapshotted at apply (survives a profile
+            // delete); fall back to the live profile lookup for old rows whose
+            // snapshot is null.
+            let webhook = match row.slack_webhook.clone() {
+                Some(w) => Some(w),
+                None => match row.profile_id {
+                    Some(pid) => self
+                        .profile_get(pid)
+                        .await
+                        .ok()
+                        .and_then(|p| p.slack_webhook),
+                    None => None,
+                },
             };
             let price_str = match (row.price_minor, &row.price_currency, &row.price_interval) {
                 (Some(m), Some(c), Some(iv)) => {
@@ -6734,6 +6738,21 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             );
             self.notify_email(&to, &subj, &body, Some(row.hosting_id.as_str()), "billing")
                 .await;
+            // Advance the billing clock past `now` so this reminder fires once
+            // per cycle instead of re-firing every tick forever. A row with no
+            // interval can't recur, so clear its date to stop it being due.
+            let advanced = row
+                .price_interval
+                .as_deref()
+                .and_then(|iv| advance_billing_date(row.next_billing_at.unwrap_or(now), iv, now));
+            if let Err(e) = profiles::set_next_billing(&self.pool, &row.hosting_id, advanced).await
+            {
+                tracing::warn!(
+                    hosting_id = %row.hosting_id.as_str(),
+                    error = %e,
+                    "billing: failed to advance next_billing_at; reminder may repeat"
+                );
+            }
             count += 1;
         }
         Ok(count)
@@ -6924,13 +6943,27 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         self.set_expiry(HostingSelector::Id(detail.id.clone()), expiry)
             .await?;
 
-        // Pricing snapshot + initial next_billing_at = now + interval.
+        // Pricing snapshot + billing clock. On the FIRST apply (or when the
+        // interval changed) start a fresh clock at now + interval. On a RE-apply
+        // with the same interval, PRESERVE the running date — re-applying a
+        // profile to push a limit/quota change must not shove every site's
+        // billing date forward and skip its imminent reminder.
         let now = now_secs();
-        let next = match p.price_interval.as_deref() {
-            Some("monthly") => Some(now + 30 * 86400),
-            Some("quarterly") => Some(now + 90 * 86400),
-            Some("yearly") => Some(now + 365 * 86400),
-            _ => None,
+        let existing = profiles::get_apply(&self.pool, &detail.id)
+            .await
+            .ok()
+            .flatten();
+        let interval_changed = existing
+            .as_ref()
+            .map(|e| e.price_interval.as_deref() != p.price_interval.as_deref())
+            .unwrap_or(true);
+        let next = match existing.as_ref().and_then(|e| e.next_billing_at) {
+            Some(existing_next) if !interval_changed => Some(existing_next),
+            _ => p
+                .price_interval
+                .as_deref()
+                .and_then(billing_interval_secs)
+                .map(|s| now + s),
         };
         profiles::upsert_apply(
             &self.pool,
@@ -6940,6 +6973,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             p.price_currency.as_deref(),
             p.price_interval.as_deref(),
             next,
+            p.slack_webhook.as_deref(),
             now,
         )
         .await
@@ -15131,6 +15165,28 @@ fn validate_crontab(body: &str) -> Result<(), RpcError> {
     Ok(())
 }
 
+/// Seconds in one billing interval, or `None` for an unknown/absent interval.
+fn billing_interval_secs(interval: &str) -> Option<i64> {
+    match interval {
+        "monthly" => Some(30 * 86400),
+        "quarterly" => Some(90 * 86400),
+        "yearly" => Some(365 * 86400),
+        _ => None,
+    }
+}
+
+/// Next billing date strictly after `now`, stepping `current` forward by whole
+/// intervals (so a long-dormant agent catches up without re-firing a reminder
+/// for every period it slept through). `None` for an unknown interval.
+fn advance_billing_date(current: i64, interval: &str, now: i64) -> Option<i64> {
+    let step = billing_interval_secs(interval)?;
+    let mut next = current + step;
+    while next <= now {
+        next += step;
+    }
+    Some(next)
+}
+
 fn validate_profile(mut p: ProfileInput) -> Result<ProfileInput, RpcError> {
     p.name = p.name.trim().to_string();
     if p.name.is_empty() {
@@ -18532,6 +18588,29 @@ mod tests {
             .expect("match")
             .expect("changed");
         assert_eq!(out, "UUID=x /srv xfs defaults,uquota,gquota 0 2\n");
+    }
+
+    #[test]
+    fn advance_billing_date_steps_strictly_past_now() {
+        use super::advance_billing_date;
+        let day = 86400;
+        // Just due now → advance exactly one interval past it.
+        assert_eq!(
+            advance_billing_date(1_000, "monthly", 1_000),
+            Some(1_000 + 30 * day)
+        );
+        // Dormant agent (100 days late) → catch up to the FIRST future boundary,
+        // not one step (which would still be in the past) and not 100 reminders.
+        let now = 1_000 + 100 * day;
+        let next = advance_billing_date(1_000, "monthly", now).expect("monthly");
+        assert!(next > now, "must land strictly after now");
+        assert_eq!((next - 1_000) % (30 * day), 0, "on an interval boundary");
+        assert!(
+            next - now <= 30 * day,
+            "first future boundary, no overshoot"
+        );
+        // Unknown interval → no recurrence.
+        assert_eq!(advance_billing_date(1_000, "weekly", 1_000), None);
     }
 
     #[test]

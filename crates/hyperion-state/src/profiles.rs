@@ -92,6 +92,10 @@ pub struct ProfileApplyRow {
     pub price_currency: Option<String>,
     pub price_interval: Option<String>,
     pub next_billing_at: Option<i64>,
+    /// Snapshot of the profile's Slack billing/expiry webhook at apply time
+    /// (migration 047). billing_sweep reads this first so the channel survives
+    /// a profile delete; `None` falls back to the live profile lookup.
+    pub slack_webhook: Option<String>,
     pub applied_at: i64,
 }
 
@@ -217,6 +221,7 @@ pub async fn get(pool: &SqlitePool, id: i64) -> Result<Option<ProfileRow>, State
     Ok(row)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn upsert_apply(
     pool: &SqlitePool,
     hosting_id: &HostingId,
@@ -225,19 +230,21 @@ pub async fn upsert_apply(
     price_currency: Option<&str>,
     price_interval: Option<&str>,
     next_billing_at: Option<i64>,
+    slack_webhook: Option<&str>,
     now: i64,
 ) -> Result<(), StateError> {
     sqlx::query(
         r#"INSERT INTO hosting_profile_apply
             (hosting_id, profile_id, price_minor, price_currency, price_interval,
-             next_billing_at, applied_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?)
+             next_billing_at, slack_webhook, applied_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(hosting_id) DO UPDATE SET
             profile_id = excluded.profile_id,
             price_minor = excluded.price_minor,
             price_currency = excluded.price_currency,
             price_interval = excluded.price_interval,
             next_billing_at = excluded.next_billing_at,
+            slack_webhook = excluded.slack_webhook,
             applied_at = excluded.applied_at"#,
     )
     .bind(hosting_id.as_str())
@@ -246,45 +253,72 @@ pub async fn upsert_apply(
     .bind(price_currency)
     .bind(price_interval)
     .bind(next_billing_at)
+    .bind(slack_webhook)
     .bind(now)
     .execute(pool)
     .await?;
     Ok(())
 }
 
-/// How many hostings were created from / applied this profile (drives the
-/// "in use: N" badge + the re-apply / delete-confirm copy).
+/// How many LIVE hostings are on this profile (drives the "in use: N" badge +
+/// the re-apply / delete-confirm copy). Trashed sites are excluded — they're on
+/// their way out and shouldn't inflate the count or the re-apply scope.
 pub async fn count_in_use(pool: &SqlitePool, profile_id: i64) -> Result<i64, StateError> {
-    let (n,): (i64,) =
-        sqlx::query_as("SELECT COUNT(*) FROM hosting_profile_apply WHERE profile_id = ?")
-            .bind(profile_id)
-            .fetch_one(pool)
-            .await?;
+    let (n,): (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM hosting_profile_apply a
+           JOIN hostings h ON h.id = a.hosting_id
+          WHERE a.profile_id = ? AND h.state != 'trashed'",
+    )
+    .bind(profile_id)
+    .fetch_one(pool)
+    .await?;
     Ok(n)
 }
 
-/// Count of hostings per profile, for the profiles list ({profile_id: count}).
+/// Count of LIVE hostings per profile, for the profiles list ({profile_id: count}).
 pub async fn counts_by_profile(pool: &SqlitePool) -> Result<Vec<(i64, i64)>, StateError> {
     let rows: Vec<(i64, i64)> = sqlx::query_as(
-        "SELECT profile_id, COUNT(*) FROM hosting_profile_apply
-          WHERE profile_id IS NOT NULL GROUP BY profile_id",
+        "SELECT a.profile_id, COUNT(*) FROM hosting_profile_apply a
+           JOIN hostings h ON h.id = a.hosting_id
+          WHERE a.profile_id IS NOT NULL AND h.state != 'trashed'
+          GROUP BY a.profile_id",
     )
     .fetch_all(pool)
     .await?;
     Ok(rows)
 }
 
-/// The hosting ids currently on this profile — drives "re-apply to all".
+/// The LIVE hosting ids currently on this profile — drives "re-apply to all".
+/// Trashed sites are skipped so a bulk re-apply doesn't churn dead sites.
 pub async fn hosting_ids_for_profile(
     pool: &SqlitePool,
     profile_id: i64,
 ) -> Result<Vec<String>, StateError> {
-    let rows: Vec<(String,)> =
-        sqlx::query_as("SELECT hosting_id FROM hosting_profile_apply WHERE profile_id = ?")
-            .bind(profile_id)
-            .fetch_all(pool)
-            .await?;
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT a.hosting_id FROM hosting_profile_apply a
+           JOIN hostings h ON h.id = a.hosting_id
+          WHERE a.profile_id = ? AND h.state != 'trashed'",
+    )
+    .bind(profile_id)
+    .fetch_all(pool)
+    .await?;
     Ok(rows.into_iter().map(|(h,)| h).collect())
+}
+
+/// Move a hosting's billing clock (used by billing_sweep to advance the date
+/// after a reminder fires, so the reminder doesn't re-fire every tick forever).
+/// `None` clears it (a row with no interval should stop being due).
+pub async fn set_next_billing(
+    pool: &SqlitePool,
+    hosting_id: &HostingId,
+    next_billing_at: Option<i64>,
+) -> Result<(), StateError> {
+    sqlx::query("UPDATE hosting_profile_apply SET next_billing_at = ? WHERE hosting_id = ?")
+        .bind(next_billing_at)
+        .bind(hosting_id.as_str())
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 pub async fn get_apply(
@@ -298,10 +332,11 @@ pub async fn get_apply(
         Option<String>,
         Option<String>,
         Option<i64>,
+        Option<String>,
         i64,
     )> = sqlx::query_as(
         "SELECT hosting_id, profile_id, price_minor, price_currency, price_interval,
-                next_billing_at, applied_at
+                next_billing_at, slack_webhook, applied_at
          FROM hosting_profile_apply WHERE hosting_id = ?",
     )
     .bind(hosting_id.as_str())
@@ -315,6 +350,7 @@ pub async fn get_apply(
             price_currency,
             price_interval,
             next_billing_at,
+            slack_webhook,
             applied_at,
         )| ProfileApplyRow {
             hosting_id: HostingId(hosting_id),
@@ -323,12 +359,15 @@ pub async fn get_apply(
             price_currency,
             price_interval,
             next_billing_at,
+            slack_webhook,
             applied_at,
         },
     ))
 }
 
-/// All hostings whose next billing is within `within_secs` of `now`.
+/// All LIVE hostings whose next billing is within `within_secs` of `now`.
+/// Trashed sites are excluded — a site in the bin must stop generating billing
+/// reminders.
 pub async fn due_billings(
     pool: &SqlitePool,
     now: i64,
@@ -341,13 +380,15 @@ pub async fn due_billings(
         Option<String>,
         Option<String>,
         Option<i64>,
+        Option<String>,
         i64,
     )> = sqlx::query_as(
-        "SELECT hosting_id, profile_id, price_minor, price_currency, price_interval,
-                next_billing_at, applied_at
-         FROM hosting_profile_apply
-         WHERE next_billing_at IS NOT NULL AND next_billing_at <= ?
-         ORDER BY next_billing_at",
+        "SELECT a.hosting_id, a.profile_id, a.price_minor, a.price_currency, a.price_interval,
+                a.next_billing_at, a.slack_webhook, a.applied_at
+         FROM hosting_profile_apply a
+           JOIN hostings h ON h.id = a.hosting_id
+         WHERE a.next_billing_at IS NOT NULL AND a.next_billing_at <= ? AND h.state != 'trashed'
+         ORDER BY a.next_billing_at",
     )
     .bind(now + within_secs)
     .fetch_all(pool)
@@ -362,6 +403,7 @@ pub async fn due_billings(
                 price_currency,
                 price_interval,
                 next_billing_at,
+                slack_webhook,
                 applied_at,
             )| ProfileApplyRow {
                 hosting_id: HostingId(hosting_id),
@@ -370,6 +412,7 @@ pub async fn due_billings(
                 price_currency,
                 price_interval,
                 next_billing_at,
+                slack_webhook,
                 applied_at,
             },
         )
