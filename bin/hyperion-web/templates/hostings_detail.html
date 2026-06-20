@@ -1958,6 +1958,7 @@
   <h2>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="9" y1="9" x2="15" y2="9"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
     PHP-FPM &amp; DB limits
+    {% if let Some(pn) = applied_profile_name %}<span class="tag" title="Last set by applying the {{ pn }} profile — re-apply the profile to refresh" style="background:var(--primary-soft);color:var(--primary-h);border-color:transparent;font-weight:500;font-size:0.62rem;margin-left:0.45rem;vertical-align:middle">from {{ pn }}</span>{% endif %}
   </h2>
   <p class="muted small" style="margin-top:-0.4rem;margin-bottom:0.9rem">
     Per-hosting PHP-FPM pool tuning, plus advisory caps surfaced as alerts.
@@ -2023,6 +2024,7 @@
   <h2>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="9" ry="3"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"/></svg>
     Disk &amp; bandwidth quota
+    {% if let Some(pn) = applied_profile_name %}<span class="tag" title="Last set by applying the {{ pn }} profile — re-apply the profile to refresh" style="background:var(--primary-soft);color:var(--primary-h);border-color:transparent;font-weight:500;font-size:0.62rem;margin-left:0.45rem;vertical-align:middle">from {{ pn }}</span>{% endif %}
   </h2>
   <p class="muted small" style="margin-top:-0.4rem;margin-bottom:0.9rem">
     Hard disk caps pushed into the kernel via <code>setquota</code> (writes are blocked
@@ -2133,6 +2135,7 @@
   <h2>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
     Expiration
+    {% if let Some(pn) = applied_profile_name %}<span class="tag" title="Grace + warning offsets last set by applying the {{ pn }} profile" style="background:var(--primary-soft);color:var(--primary-h);border-color:transparent;font-weight:500;font-size:0.62rem;margin-left:0.45rem;vertical-align:middle">from {{ pn }}</span>{% endif %}
   </h2>
   {% if let Some(t) = expiry.expires_at %}
     <div class="row" style="margin-bottom:0.8rem">
