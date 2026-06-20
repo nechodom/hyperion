@@ -99,6 +99,15 @@
         <option value="suspend"{% if profile.quota_exceed_action == "suspend" %} selected{% endif %}>Suspend the site (+ alert)</option>
       </select>
     </div>
+    <div class="field">
+      <label for="p_backup_cadence">Automatic backups <span class="hint">sites on this profile back up on this cadence · overridable per-site</span></label>
+      <select id="p_backup_cadence" name="backup_cadence">
+        <option value="off"{% if profile.backup_cadence != "daily" && profile.backup_cadence != "weekly" && profile.backup_cadence != "monthly" %} selected{% endif %}>Off — back up only on demand</option>
+        <option value="daily"{% if profile.backup_cadence == "daily" %} selected{% endif %}>Daily</option>
+        <option value="weekly"{% if profile.backup_cadence == "weekly" %} selected{% endif %}>Weekly</option>
+        <option value="monthly"{% if profile.backup_cadence == "monthly" %} selected{% endif %}>Monthly</option>
+      </select>
+    </div>
 
     <h2 style="font-size:0.95rem;margin:1.5rem 0 0.6rem">Expiration policy</h2>
     <div class="field-row">

@@ -166,6 +166,9 @@ pub struct CreateForm {
     /// "notify" (default) or "suspend".
     #[serde(default)]
     pub quota_exceed_action: String,
+    /// Recurring-backup cadence: "off" (default) | "daily" | "weekly" | "monthly".
+    #[serde(default)]
+    pub backup_cadence: String,
 }
 
 fn default_256() -> i64 {
@@ -248,6 +251,7 @@ pub async fn post_create(
         quota_exceed_action: form.quota_exceed_action.clone(),
         disk_soft_mb: parse_opt_i64(&form.disk_soft_mb),
         mem_limit_mib: parse_opt_i64(&form.mem_limit_mib),
+        backup_cadence: form.backup_cadence.clone(),
     };
     let resp =
         hyperion_rpc_client::call(&state.agent_socket, Request::ProfileCreate(input)).await?;
@@ -337,6 +341,7 @@ pub async fn post_clone(
         quota_exceed_action: src.quota_exceed_action.clone(),
         disk_soft_mb: src.disk_soft_mb,
         mem_limit_mib: src.mem_limit_mib,
+        backup_cadence: src.backup_cadence.clone(),
     };
     let resp =
         hyperion_rpc_client::call(&state.agent_socket, Request::ProfileCreate(input)).await?;
@@ -470,6 +475,7 @@ pub async fn post_update(
         quota_exceed_action: form.quota_exceed_action.clone(),
         disk_soft_mb: parse_opt_i64(&form.disk_soft_mb),
         mem_limit_mib: parse_opt_i64(&form.mem_limit_mib),
+        backup_cadence: form.backup_cadence.clone(),
     };
     let resp = hyperion_rpc_client::call(&state.agent_socket, Request::ProfileUpdate { id, input })
         .await?;

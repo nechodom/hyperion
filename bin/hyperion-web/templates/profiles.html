@@ -171,6 +171,15 @@
         <option value="suspend">Suspend the site (+ alert)</option>
       </select>
     </div>
+    <div class="field">
+      <label for="p_backup_cadence">Automatic backups <span class="hint">sites on this profile back up on this cadence · overridable per-site</span></label>
+      <select id="p_backup_cadence" name="backup_cadence">
+        <option value="off" selected>Off — back up only on demand</option>
+        <option value="daily">Daily</option>
+        <option value="weekly">Weekly</option>
+        <option value="monthly">Monthly</option>
+      </select>
+    </div>
 
     <h2 style="font-size:0.95rem;margin:1.5rem 0 0.6rem">Expiration policy</h2>
     <div class="field-row">

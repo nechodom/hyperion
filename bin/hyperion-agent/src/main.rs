@@ -729,6 +729,25 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
+    // Scheduled backups — checks hourly which LOCAL hostings are due per their
+    // backup_cadence (off by default) and runs backup_now for each. Runs on
+    // every node since backups are node-local.
+    {
+        let bk = svc.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+            interval.tick().await;
+            loop {
+                match bk.scheduled_backups_tick().await {
+                    Ok(n) if n > 0 => tracing::info!(started = n, "scheduled backups tick"),
+                    Ok(_) => tracing::debug!("scheduled backups tick: nothing due"),
+                    Err(e) => tracing::warn!(error=%e, "scheduled backups tick failed"),
+                }
+                interval.tick().await;
+            }
+        });
+    }
     // One-shot enrollment with the master, if configured and not yet done.
     let state_file = cfg
         .enrollment

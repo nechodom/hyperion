@@ -49,6 +49,10 @@ pub struct ProfileRow {
     pub disk_soft_mb: Option<i64>,
     #[sqlx(default)]
     pub mem_limit_mib: Option<i64>,
+    /// Migration 048 — recurring-backup cadence seeded at apply
+    /// ("off"|"daily"|"weekly"|"monthly").
+    #[sqlx(default)]
+    pub backup_cadence: String,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -82,6 +86,8 @@ pub struct NewProfile {
     /// See ProfileRow::disk_soft_mb / mem_limit_mib.
     pub disk_soft_mb: Option<i64>,
     pub mem_limit_mib: Option<i64>,
+    /// See ProfileRow::backup_cadence.
+    pub backup_cadence: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -107,9 +113,9 @@ pub async fn insert(pool: &SqlitePool, p: &NewProfile, now: i64) -> Result<i64, 
             expiry_grace_days, expiry_warning_offsets, price_minor, price_currency,
             price_interval, slack_webhook, wp_plugins, wp_themes,
             default_php_version, default_db_engine, quota_exceed_action,
-            disk_soft_mb, mem_limit_mib,
+            disk_soft_mb, mem_limit_mib, backup_cadence,
             created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            RETURNING id"#,
     )
     .bind(&p.name)
@@ -134,6 +140,7 @@ pub async fn insert(pool: &SqlitePool, p: &NewProfile, now: i64) -> Result<i64, 
     .bind(&p.quota_exceed_action)
     .bind(p.disk_soft_mb)
     .bind(p.mem_limit_mib)
+    .bind(&p.backup_cadence)
     .bind(now)
     .bind(now)
     .fetch_one(pool)
@@ -155,7 +162,7 @@ pub async fn update(
             expiry_warning_offsets = ?, price_minor = ?, price_currency = ?,
             price_interval = ?, slack_webhook = ?, wp_plugins = ?, wp_themes = ?,
             default_php_version = ?, default_db_engine = ?, quota_exceed_action = ?,
-            disk_soft_mb = ?, mem_limit_mib = ?,
+            disk_soft_mb = ?, mem_limit_mib = ?, backup_cadence = ?,
             updated_at = ?
            WHERE id = ?"#,
     )
@@ -181,6 +188,7 @@ pub async fn update(
     .bind(&p.quota_exceed_action)
     .bind(p.disk_soft_mb)
     .bind(p.mem_limit_mib)
+    .bind(&p.backup_cadence)
     .bind(now)
     .bind(id)
     .execute(pool)
@@ -202,7 +210,7 @@ const SELECT_ALL: &str =
             expiry_grace_days, expiry_warning_offsets, price_minor, price_currency,
             price_interval, slack_webhook, wp_plugins, wp_themes,
             default_php_version, default_db_engine, quota_exceed_action,
-            disk_soft_mb, mem_limit_mib,
+            disk_soft_mb, mem_limit_mib, backup_cadence,
             created_at, updated_at
      FROM hosting_profiles";
 
@@ -450,6 +458,7 @@ mod tests {
             quota_exceed_action: "suspend".into(),
             disk_soft_mb: Some(1024),
             mem_limit_mib: Some(256),
+            backup_cadence: "daily".into(),
         };
         let id = insert(&pool, &p, 100).await.expect("insert");
         assert!(id > 0);
@@ -460,6 +469,7 @@ mod tests {
         assert_eq!(all[0].quota_exceed_action, "suspend");
         assert_eq!(all[0].disk_soft_mb, Some(1024));
         assert_eq!(all[0].mem_limit_mib, Some(256));
+        assert_eq!(all[0].backup_cadence, "daily");
     }
 
     #[tokio::test]

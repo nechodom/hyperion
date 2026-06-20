@@ -6758,6 +6758,116 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(count)
     }
 
+    /// Enabled S3 backup targets resolved from THIS node's `backup_targets`
+    /// table (secret read inline from its 0600 file). On the master / a single
+    /// node this returns the configured targets; on a worker (where the table
+    /// is empty) it returns none, so a scheduled backup there still runs to the
+    /// local backup_root + the FTP target in agent.toml. Mirrors the web's
+    /// resolve_s3_targets but reads the local DB directly (the agent can't RPC
+    /// the master for these).
+    async fn resolve_local_s3_targets(&self) -> Vec<hyperion_types::S3BackupTarget> {
+        let rows = match hyperion_state::backup_targets::list(&self.pool).await {
+            Ok(v) => v,
+            Err(_) => return Vec::new(),
+        };
+        let mut out = Vec::new();
+        for r in rows {
+            if !r.enabled || r.kind != "s3" {
+                continue;
+            }
+            let Some(path) = r.secret_key_id.as_deref() else {
+                continue;
+            };
+            let secret = match tokio::fs::read_to_string(path).await {
+                Ok(s) => s.trim().to_string(),
+                Err(_) => continue,
+            };
+            out.push(hyperion_types::S3BackupTarget {
+                name: r.name,
+                endpoint: r.endpoint,
+                bucket: r.bucket,
+                region: r.region,
+                access_key_id: r.access_key_id,
+                secret_access_key: secret,
+                age_recipient: r.age_recipient,
+                retention_daily: r.retention_daily,
+            });
+        }
+        out
+    }
+
+    /// Per-node recurring-backup driver. For every LOCAL Active hosting whose
+    /// `backup_cadence` (hosting_kv, seeded from its profile) is due, run the
+    /// same `backup_now` the manual button does (local + FTP + any local S3
+    /// targets, with the existing disk preflight + retention pruning), then
+    /// stamp `backup_last_run_at`. Best-effort + idempotent: the last-run stamp
+    /// is written on every attempt (success OR failure) so a persistently
+    /// failing site retries on its next cadence rather than hammering hourly;
+    /// failures are logged and recorded in `backup_runs`. Returns how many
+    /// backups it started. Runs on every node (backups are node-local).
+    pub async fn scheduled_backups_tick(&self) -> Result<i64, RpcError> {
+        let hostings = self
+            .list()
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("scheduled backups: list: {e}")))?;
+        // Resolve S3 targets once for the whole sweep.
+        let s3_targets = self.resolve_local_s3_targets().await;
+        let now = now_secs();
+        let mut started = 0i64;
+        for h in hostings {
+            if h.state != hyperion_types::HostingState::Active {
+                continue;
+            }
+            let cadence =
+                hyperion_state::hosting_kv::get(&self.pool, h.id.as_str(), BACKUP_KV_CADENCE)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+            let Some(cadence_secs) = backup_cadence_secs(&cadence) else {
+                continue; // off / unknown
+            };
+            let last_run =
+                hyperion_state::hosting_kv::get(&self.pool, h.id.as_str(), BACKUP_KV_LAST_RUN)
+                    .await
+                    .ok()
+                    .flatten()
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .unwrap_or(0);
+            if !backup_due(cadence_secs, last_run, now) {
+                continue;
+            }
+            // Stamp the attempt BEFORE running so a slow/looping backup can't be
+            // re-triggered on the next tick (and a failure waits a full cadence).
+            let _ = hyperion_state::hosting_kv::set(
+                &self.pool,
+                h.id.as_str(),
+                BACKUP_KV_LAST_RUN,
+                &now.to_string(),
+                now,
+            )
+            .await;
+            started += 1;
+            match self
+                .backup_now(HostingSelector::Id(h.id.clone()), s3_targets.clone())
+                .await
+            {
+                Ok(_) => {
+                    tracing::info!(hosting_id = %h.id.as_str(), cadence = %cadence, "scheduled backup ok");
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        hosting_id = %h.id.as_str(),
+                        cadence = %cadence,
+                        error = %e,
+                        "scheduled backup failed; will retry next cadence (see backup_runs)"
+                    );
+                }
+            }
+        }
+        Ok(started)
+    }
+
     // ================================================================
     //  Hosting profiles (templates)
     // ================================================================
@@ -6939,6 +7049,18 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             )
             .await;
         }
+
+        // Seed the recurring-backup cadence from the profile ("off" by default =
+        // nothing scheduled). The per-node scheduled-backup driver reads this
+        // per-hosting value; operators can override it on the Backups card.
+        let _ = hyperion_state::hosting_kv::set(
+            &self.pool,
+            detail.id.as_str(),
+            BACKUP_KV_CADENCE,
+            canonical_backup_cadence(&p.backup_cadence),
+            now_secs(),
+        )
+        .await;
 
         // Push expiry policy (without changing expires_at — operator sets that).
         let cur = self
@@ -15296,6 +15418,16 @@ fn validate_profile(mut p: ProfileInput) -> Result<ProfileInput, RpcError> {
             message: "quota overage action must be notify | suspend".into(),
         });
     }
+    if !p.backup_cadence.trim().is_empty()
+        && !matches!(
+            p.backup_cadence.as_str(),
+            "off" | "daily" | "weekly" | "monthly"
+        )
+    {
+        return Err(RpcError::Validation {
+            message: "backup cadence must be off | daily | weekly | monthly".into(),
+        });
+    }
     Ok(p)
 }
 
@@ -15329,6 +15461,7 @@ fn profile_input_to_new(input: ProfileInput) -> hyperion_state::profiles::NewPro
             .to_string(),
         disk_soft_mb: input.disk_soft_mb.filter(|m| *m > 0),
         mem_limit_mib: input.mem_limit_mib.filter(|m| *m > 0),
+        backup_cadence: canonical_backup_cadence(&input.backup_cadence).to_string(),
     }
 }
 
@@ -15357,6 +15490,7 @@ fn profile_row_to_wire(r: hyperion_state::profiles::ProfileRow) -> HostingProfil
         quota_exceed_action: r.quota_exceed_action,
         disk_soft_mb: r.disk_soft_mb,
         mem_limit_mib: r.mem_limit_mib,
+        backup_cadence: r.backup_cadence,
         // Filled in by profile_list / profile_get; 0 from the bare conversion.
         in_use_count: 0,
         created_at: r.created_at,
@@ -17156,6 +17290,39 @@ async fn mount_point_for(path: &str) -> Option<String> {
 const QUOTA_KV_ACTION: &str = "quota_exceed_action";
 /// `hosting_kv` key: de-dup state for the enforce loop ("ok"|"over"|"suspended").
 const QUOTA_KV_STATE: &str = "quota_exceed_state";
+/// `hosting_kv` key: per-hosting recurring-backup cadence
+/// ("off"|"daily"|"weekly"|"monthly"); seeded from the profile at apply.
+const BACKUP_KV_CADENCE: &str = "backup_cadence";
+/// `hosting_kv` key: unix-secs of the last successful scheduled backup.
+const BACKUP_KV_LAST_RUN: &str = "backup_last_run_at";
+
+/// Canonicalise a backup cadence string to one of the four known values; any
+/// unknown/empty input becomes "off" so a stray value never schedules backups.
+fn canonical_backup_cadence(c: &str) -> &'static str {
+    match c.trim() {
+        "daily" => "daily",
+        "weekly" => "weekly",
+        "monthly" => "monthly",
+        _ => "off",
+    }
+}
+
+/// Seconds in one backup cadence, or `None` for "off"/unknown (never due).
+fn backup_cadence_secs(c: &str) -> Option<i64> {
+    match canonical_backup_cadence(c) {
+        "daily" => Some(86_400),
+        "weekly" => Some(7 * 86_400),
+        "monthly" => Some(30 * 86_400),
+        _ => None,
+    }
+}
+
+/// A scheduled backup is due when the cadence has elapsed since the last run.
+/// `last_run == 0` (never) is always due, so enabling a cadence triggers a
+/// prompt first backup.
+fn backup_due(cadence_secs: i64, last_run: i64, now: i64) -> bool {
+    now.saturating_sub(last_run) >= cadence_secs
+}
 
 /// Per-hosting policy for when disk usage crosses the hard cap. Stored in
 /// `hosting_kv` under `quota_exceed_action`; seeded from the profile at create.
@@ -18650,6 +18817,25 @@ mod tests {
         );
         // Unknown interval → no recurrence.
         assert_eq!(advance_billing_date(1_000, "weekly", 1_000), None);
+    }
+
+    #[test]
+    fn backup_cadence_and_due_logic() {
+        use super::{backup_cadence_secs, backup_due, canonical_backup_cadence};
+        // Canonicalisation: only the four known values survive.
+        assert_eq!(canonical_backup_cadence("weekly"), "weekly");
+        assert_eq!(canonical_backup_cadence("  daily "), "daily");
+        assert_eq!(canonical_backup_cadence("hourly"), "off");
+        assert_eq!(canonical_backup_cadence(""), "off");
+        // off / unknown never schedule.
+        assert_eq!(backup_cadence_secs("off"), None);
+        assert_eq!(backup_cadence_secs("nonsense"), None);
+        assert_eq!(backup_cadence_secs("daily"), Some(86_400));
+        assert_eq!(backup_cadence_secs("monthly"), Some(30 * 86_400));
+        // Never-run (0) is always due; just-run is not; a full cadence later is.
+        assert!(backup_due(86_400, 0, 1_700_000_000));
+        assert!(!backup_due(86_400, 1_700_000_000, 1_700_000_000 + 100));
+        assert!(backup_due(86_400, 1_700_000_000, 1_700_000_000 + 86_400));
     }
 
     #[test]
