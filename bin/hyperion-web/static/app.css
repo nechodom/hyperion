@@ -165,7 +165,12 @@ pre code {
   padding: 0;
 }
 
-::selection { background: var(--primary-soft); color: var(--text); }
+/* A bright highlighter: 88%-opaque primary (white in dark mode, black in
+   light) with the inverse foreground. Derives from --primary/--primary-fg so
+   it flips correctly across every theme scope (default :root, prefers-light,
+   and the data-theme overrides). Replaces the old --primary-soft (#1a1a1a)
+   on #000, which was all but invisible. */
+::selection { background: color-mix(in srgb, var(--primary) 88%, transparent); color: var(--primary-fg); }
 
 /* ============================================================
  *  App shell — sidebar + content
