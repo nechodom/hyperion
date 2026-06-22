@@ -29,6 +29,10 @@ pub struct NodeMetricsRow {
     pub psi_io_x100: i64,
     pub net_rx_bps: i64,
     pub net_tx_bps: i64,
+    // Migration 049: tenant footprint (Σ per-hosting du) and node-volume size,
+    // split from total_disk_bytes (which stays the node volume's df-Used).
+    pub hostings_disk_bytes: i64,
+    pub node_disk_total_bytes: i64,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -53,6 +57,10 @@ pub struct NodeMetricsInput {
     pub psi_io_x100: i64,
     pub net_rx_bps: i64,
     pub net_tx_bps: i64,
+    // Migration 049: tenant footprint (Σ per-hosting du) and node-volume size,
+    // split from total_disk_bytes (which stays the node volume's df-Used).
+    pub hostings_disk_bytes: i64,
+    pub node_disk_total_bytes: i64,
 }
 
 /// Column list shared by `latest`/`history`, in NodeMetricsRow field order so
@@ -61,7 +69,7 @@ const SELECT_COLS: &str = "id, sampled_at, hostings_count, hostings_active, host
      hostings_failed, total_disk_bytes, total_bw_out_24h, total_requests_24h, \
      loadavg_1m_x100, mem_total_kib, mem_used_kib, uptime_secs, cpu_pct_x100, \
      swap_total_kib, swap_used_kib, psi_cpu_x100, psi_mem_x100, psi_io_x100, \
-     net_rx_bps, net_tx_bps";
+     net_rx_bps, net_tx_bps, hostings_disk_bytes, node_disk_total_bytes";
 
 pub async fn insert(pool: &SqlitePool, m: &NodeMetricsInput) -> Result<i64, StateError> {
     let row: (i64,) = sqlx::query_as(
@@ -70,8 +78,9 @@ pub async fn insert(pool: &SqlitePool, m: &NodeMetricsInput) -> Result<i64, Stat
             hostings_failed, total_disk_bytes, total_bw_out_24h,
             total_requests_24h, loadavg_1m_x100, mem_total_kib, mem_used_kib,
             uptime_secs, cpu_pct_x100, swap_total_kib, swap_used_kib,
-            psi_cpu_x100, psi_mem_x100, psi_io_x100, net_rx_bps, net_tx_bps)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            psi_cpu_x100, psi_mem_x100, psi_io_x100, net_rx_bps, net_tx_bps,
+            hostings_disk_bytes, node_disk_total_bytes)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            RETURNING id"#,
     )
     .bind(m.sampled_at)
@@ -94,6 +103,8 @@ pub async fn insert(pool: &SqlitePool, m: &NodeMetricsInput) -> Result<i64, Stat
     .bind(m.psi_io_x100)
     .bind(m.net_rx_bps)
     .bind(m.net_tx_bps)
+    .bind(m.hostings_disk_bytes)
+    .bind(m.node_disk_total_bytes)
     .fetch_one(pool)
     .await?;
     Ok(row.0)
@@ -141,12 +152,18 @@ mod tests {
             loadavg_1m_x100: 35,
             mem_total_kib: 1_000_000,
             mem_used_kib: 250_000,
+            hostings_disk_bytes: 4242,
+            node_disk_total_bytes: 999_999,
             ..Default::default()
         };
         insert(&pool, &m).await.expect("insert");
         let l = latest(&pool).await.expect("latest").expect("present");
         assert_eq!(l.hostings_count, 5);
         assert_eq!(l.loadavg_1m_x100, 35);
+        // Migration 049 columns survive the write→read round-trip (guards the
+        // INSERT placeholder/bind alignment for the two new trailing columns).
+        assert_eq!(l.hostings_disk_bytes, 4242);
+        assert_eq!(l.node_disk_total_bytes, 999_999);
     }
 
     #[tokio::test]

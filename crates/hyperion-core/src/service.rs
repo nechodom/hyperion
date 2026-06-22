@@ -9960,16 +9960,18 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             total_requests += reqs;
         }
 
-        // Node "Total disk" = REAL filesystem usage of the home root's volume
-        // (df Used), not the sum of tenant `du` above — the latter ignores the
-        // OS, /var/lib databases, logs, backups and the panel DB, so a node at
-        // 95% real disk could look nearly empty. Fall back to the du sum only
-        // if df fails.
-        let node_disk_used = match fs_used_bytes(std::path::Path::new(&self.paths.home_root)).await
-        {
-            Some(used) => used as i64,
-            None => total_disk,
-        };
+        // Node disk = REAL filesystem usage + capacity of the home root's
+        // volume (df Used/Size), not the sum of tenant `du` above — the latter
+        // ignores the OS, /var/lib databases, logs, backups and the panel DB,
+        // so a node at 95% real disk could look nearly empty. We keep BOTH:
+        // this node-volume figure (disk-pressure) AND `total_disk` (the real
+        // per-site footprint) so the dashboard can show them separately. Fall
+        // back to the du sum / unknown capacity only if df fails.
+        let (node_disk_used, node_disk_total) =
+            match fs_used_total_bytes(std::path::Path::new(&self.paths.home_root)).await {
+                Some((used, total)) => (used as i64, total as i64),
+                None => (total_disk, 0),
+            };
 
         let pm = read_proc_metrics().await;
 
@@ -9996,6 +9998,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 psi_io_x100: pm.psi_io_x100,
                 net_rx_bps: pm.net_rx_bps,
                 net_tx_bps: pm.net_tx_bps,
+                hostings_disk_bytes: total_disk,
+                node_disk_total_bytes: node_disk_total,
             },
         )
         .await;
@@ -14410,6 +14414,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             total_suspended: n.hostings_suspended,
             total_failed: n.hostings_failed,
             total_disk_bytes: n.total_disk_bytes,
+            total_hostings_disk_bytes: n.hostings_disk_bytes,
+            total_node_disk_total_bytes: n.node_disk_total_bytes,
             total_bw_out_24h: n.total_bw_out_24h,
             total_requests_24h: n.total_requests_24h,
             nodes: vec![n],
@@ -15225,6 +15231,8 @@ fn node_stats_from(
             hostings_suspended: s,
             hostings_failed: f,
             total_disk_bytes: r.total_disk_bytes,
+            hostings_disk_bytes: r.hostings_disk_bytes,
+            node_disk_total_bytes: r.node_disk_total_bytes,
             total_bw_out_24h: r.total_bw_out_24h,
             total_requests_24h: r.total_requests_24h,
             loadavg_1m_x100: r.loadavg_1m_x100,
@@ -15253,6 +15261,8 @@ fn node_stats_from(
             hostings_suspended: s,
             hostings_failed: f,
             total_disk_bytes: 0,
+            hostings_disk_bytes: 0,
+            node_disk_total_bytes: 0,
             total_bw_out_24h: 0,
             total_requests_24h: 0,
             loadavg_1m_x100: 0,
@@ -15617,12 +15627,13 @@ async fn du_inodes(path: &std::path::Path) -> i64 {
     }
 }
 
-/// Actually-used bytes of the filesystem that holds `path`, via `df -P -B1`
-/// (3rd column = Used). This is the REAL disk usage — OS, databases under
-/// /var/lib, logs, backups and the panel DB included — unlike summing per-
-/// hosting `du`, which only sees tenant home dirs and badly under-reports.
+/// `(used, total)` bytes of the filesystem that holds `path`, via `df -P -B1`
+/// (2nd column = Size, 3rd = Used). `used` is the REAL disk usage — OS,
+/// databases under /var/lib, logs, backups and the panel DB included — unlike
+/// summing per-hosting `du`, which only sees tenant home dirs and badly
+/// under-reports. `total` is the volume capacity, for an "X / Y (Z%)" readout.
 /// `None` on any exec/parse failure (caller falls back to the du sum).
-async fn fs_used_bytes(path: &std::path::Path) -> Option<u64> {
+async fn fs_used_total_bytes(path: &std::path::Path) -> Option<(u64, u64)> {
     let out = tokio::process::Command::new("/usr/bin/df")
         .args(["-P", "-B1", "--", &path.display().to_string()])
         .output()
@@ -15633,12 +15644,10 @@ async fn fs_used_bytes(path: &std::path::Path) -> Option<u64> {
     }
     // `df -P` data line: Filesystem  Size  Used  Available  Capacity  Mounted-on
     let text = String::from_utf8_lossy(&out.stdout);
-    text.lines()
-        .nth(1)?
-        .split_whitespace()
-        .nth(2)?
-        .parse::<u64>()
-        .ok()
+    let cols: Vec<&str> = text.lines().nth(1)?.split_whitespace().collect();
+    let total = cols.get(1)?.parse::<u64>().ok()?;
+    let used = cols.get(2)?.parse::<u64>().ok()?;
+    Some((used, total))
 }
 
 /// Parse the tail of nginx access.log (default combined format) for the

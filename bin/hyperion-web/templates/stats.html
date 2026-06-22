@@ -95,8 +95,14 @@
 
     <div class="kpi-card disk">
       <div class="kpi-label">Disk used</div>
+      <div class="kpi-value">{{ crate::handlers::stats::fmt_bytes(c.total_hostings_disk_bytes) }}</div>
+      <div class="kpi-meta">across all sites</div>
+    </div>
+
+    <div class="kpi-card disk">
+      <div class="kpi-label">Node disk</div>
       <div class="kpi-value">{{ crate::handlers::stats::fmt_bytes(c.total_disk_bytes) }}</div>
-      <div class="kpi-meta">across all hostings</div>
+      <div class="kpi-meta">{% if c.total_node_disk_total_bytes > 0 %}{{ crate::handlers::stats::disk_used_pct(c.total_disk_bytes, c.total_node_disk_total_bytes) }}% of {{ crate::handlers::stats::fmt_bytes(c.total_node_disk_total_bytes) }} · OS + data{% else %}whole volume · OS + data{% endif %}</div>
     </div>
 
     <div class="kpi-card bw">
@@ -268,7 +274,8 @@
       <div><span class="text-soft">Active</span><strong>{{ n.hostings_active }}</strong></div>
       <div><span class="text-soft">Suspended</span><strong>{{ n.hostings_suspended }}</strong></div>
       <div><span class="text-soft">Failed</span><strong>{{ n.hostings_failed }}</strong></div>
-      <div><span class="text-soft">Disk</span><strong>{{ crate::handlers::stats::fmt_bytes(n.total_disk_bytes) }}</strong></div>
+      <div><span class="text-soft">Disk · sites</span><strong>{{ crate::handlers::stats::fmt_bytes(n.hostings_disk_bytes) }}</strong></div>
+      <div><span class="text-soft">Node disk</span><strong>{{ crate::handlers::stats::fmt_bytes(n.total_disk_bytes) }}{% if n.node_disk_total_bytes > 0 %} / {{ crate::handlers::stats::fmt_bytes(n.node_disk_total_bytes) }} ({{ crate::handlers::stats::disk_used_pct(n.total_disk_bytes, n.node_disk_total_bytes) }}%){% endif %}</strong></div>
       <div><span class="text-soft">Bandwidth out · 24 h</span><strong>{{ crate::handlers::stats::fmt_bytes(n.total_bw_out_24h) }}</strong></div>
       <div><span class="text-soft">Requests · 24 h</span><strong>{{ n.total_requests_24h }}</strong></div>
       <div><span class="text-soft">Load avg · 1 m</span><strong>{{ crate::handlers::stats::fmt_load(n.loadavg_1m_x100) }}</strong></div>

@@ -45,7 +45,17 @@ pub struct NodeStats {
     pub hostings_active: i64,
     pub hostings_suspended: i64,
     pub hostings_failed: i64,
+    /// df-Used of this node's home-root *volume* — OS + /var + logs + backups
+    /// + the panel DB + the sites. NOT the tenant footprint (that's
+    /// `hostings_disk_bytes`). Kept as the node disk-pressure signal.
     pub total_disk_bytes: i64,
+    /// Σ per-hosting `du` on this node — the real tenant footprint (migration
+    /// 049). `#[serde(default)]` so an older agent still deserializes (0).
+    #[serde(default)]
+    pub hostings_disk_bytes: i64,
+    /// Capacity (df Size) of this node's home-root volume (migration 049).
+    #[serde(default)]
+    pub node_disk_total_bytes: i64,
     pub total_bw_out_24h: i64,
     pub total_requests_24h: i64,
     /// 1-minute load average × 100 (so we can store i64).
@@ -134,7 +144,16 @@ pub struct ClusterStats {
     pub total_active: i64,
     pub total_suspended: i64,
     pub total_failed: i64,
+    /// Σ of each node's `total_disk_bytes` (node-volume df-Used). The node
+    /// disk-pressure figure, NOT the tenant footprint.
     pub total_disk_bytes: i64,
+    /// Σ of each node's `hostings_disk_bytes` — the real "across all sites"
+    /// figure (migration 049). `#[serde(default)]` for older-node fan-in.
+    #[serde(default)]
+    pub total_hostings_disk_bytes: i64,
+    /// Σ of each node's home-root volume capacity (df Size) (migration 049).
+    #[serde(default)]
+    pub total_node_disk_total_bytes: i64,
     pub total_bw_out_24h: i64,
     pub total_requests_24h: i64,
 }
@@ -1166,6 +1185,8 @@ mod tests {
             total_suspended: 0,
             total_failed: 0,
             total_disk_bytes: 0,
+            total_hostings_disk_bytes: 0,
+            total_node_disk_total_bytes: 0,
             total_bw_out_24h: 0,
             total_requests_24h: 0,
         };

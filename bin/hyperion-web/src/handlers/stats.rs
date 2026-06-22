@@ -326,6 +326,8 @@ async fn aggregate_cluster_stats(
                     hostings_suspended: 0,
                     hostings_failed: 0,
                     total_disk_bytes: 0,
+                    hostings_disk_bytes: 0,
+                    node_disk_total_bytes: 0,
                     total_bw_out_24h: 0,
                     total_requests_24h: 0,
                     loadavg_1m_x100: 0,
@@ -357,6 +359,8 @@ async fn aggregate_cluster_stats(
                     hostings_suspended: 0,
                     hostings_failed: 0,
                     total_disk_bytes: 0,
+                    hostings_disk_bytes: 0,
+                    node_disk_total_bytes: 0,
                     total_bw_out_24h: 0,
                     total_requests_24h: 0,
                     loadavg_1m_x100: 0,
@@ -391,6 +395,8 @@ fn merge_cluster(dst: &mut ClusterStats, src: &ClusterStats) {
     dst.total_suspended += src.total_suspended;
     dst.total_failed += src.total_failed;
     dst.total_disk_bytes += src.total_disk_bytes;
+    dst.total_hostings_disk_bytes += src.total_hostings_disk_bytes;
+    dst.total_node_disk_total_bytes += src.total_node_disk_total_bytes;
     dst.total_bw_out_24h += src.total_bw_out_24h;
     dst.total_requests_24h += src.total_requests_24h;
     dst.nodes.extend(src.nodes.iter().cloned());
@@ -557,6 +563,18 @@ pub fn fmt_bytes(n: &i64) -> String {
         format!("{} {}", n as i64, units[i])
     } else {
         format!("{:.1} {}", v, units[i])
+    }
+}
+
+/// Integer percent `used / total`, floored and clamped to 0..=100. Returns 0
+/// when capacity is unknown (`total <= 0`). Takes `&i64` like `fmt_bytes` so
+/// templates call it the same way, e.g.
+/// `disk_used_pct(c.total_disk_bytes, c.total_node_disk_total_bytes)`.
+pub fn disk_used_pct(used: &i64, total: &i64) -> i64 {
+    if *total <= 0 {
+        0
+    } else {
+        (used.saturating_mul(100) / *total).clamp(0, 100)
     }
 }
 

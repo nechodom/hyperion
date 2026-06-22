@@ -128,8 +128,14 @@
 
   <div class="kpi-card disk">
     <div class="kpi-label">Disk used</div>
+    <div class="kpi-value">{% if let Some(c) = cluster %}{{ crate::handlers::stats::fmt_bytes(c.total_hostings_disk_bytes) }}{% else %}—{% endif %}</div>
+    <div class="kpi-meta">across all sites</div>
+  </div>
+
+  <div class="kpi-card disk">
+    <div class="kpi-label">Node disk</div>
     <div class="kpi-value">{% if let Some(c) = cluster %}{{ crate::handlers::stats::fmt_bytes(c.total_disk_bytes) }}{% else %}—{% endif %}</div>
-    <div class="kpi-meta">all hostings combined</div>
+    <div class="kpi-meta">{% if let Some(c) = cluster %}{% if c.total_node_disk_total_bytes > 0 %}{{ crate::handlers::stats::disk_used_pct(c.total_disk_bytes, c.total_node_disk_total_bytes) }}% of {{ crate::handlers::stats::fmt_bytes(c.total_node_disk_total_bytes) }} · OS + data{% else %}whole volume · OS + data{% endif %}{% else %}—{% endif %}</div>
   </div>
 
   <div class="kpi-card bw">
