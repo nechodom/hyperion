@@ -392,7 +392,11 @@ pre code {
 
 /* Mobile: collapse sidebar to a top bar */
 @media (max-width: 880px) {
-  .app { grid-template-columns: 1fr; }
+  /* minmax(0, …) lets the single column shrink below the nav's min-content
+     width; without it the horizontal top-bar (.sidebar, below) forces the
+     track — and the whole page — to the full nav width, causing app-wide
+     horizontal overflow on every page at ≤880px. */
+  .app { grid-template-columns: minmax(0, 1fr); }
   .sidebar {
     position: static;
     height: auto;
@@ -402,6 +406,9 @@ pre code {
     gap: 0.5rem;
     border-right: 0;
     border-bottom: 1px solid var(--border);
+    /* Scroll the top-bar within the viewport instead of stretching the page. */
+    overflow-x: auto;
+    min-width: 0;
   }
   /* Dissolve the desktop scroll wrapper so the two nav-sections
      flow directly in the horizontal top-bar exactly as before —
