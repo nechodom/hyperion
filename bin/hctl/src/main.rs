@@ -185,12 +185,24 @@ enum HostingCmd {
         /// Source panel: cloudpanel | hestiacp.
         #[arg(long)]
         source: String,
-        /// Where to read from: inplace (P0) | remote | archive.
+        /// Where to read from: inplace | remote.
         #[arg(long, default_value = "inplace")]
         mode: String,
         /// Preview the plan without creating anything.
         #[arg(long)]
         dry_run: bool,
+        /// remote mode: source host (ip/hostname).
+        #[arg(long)]
+        ssh_host: Option<String>,
+        /// remote mode: ssh user (default root).
+        #[arg(long, default_value = "root")]
+        ssh_user: String,
+        /// remote mode: ssh port (default 22).
+        #[arg(long, default_value_t = 22)]
+        ssh_port: u16,
+        /// remote mode: path to the private key file used to reach the source.
+        #[arg(long)]
+        ssh_key: Option<String>,
     },
 }
 
@@ -361,10 +373,33 @@ async fn call(cli: &Cli) -> anyhow::Result<Response> {
             source,
             mode,
             dry_run,
+            ssh_host,
+            ssh_user,
+            ssh_port,
+            ssh_key,
         }) => {
+            let ssh = if mode == "remote" {
+                let host = ssh_host
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("remote mode requires --ssh-host"))?;
+                let key_path = ssh_key.clone().ok_or_else(|| {
+                    anyhow::anyhow!("remote mode requires --ssh-key (path to private key)")
+                })?;
+                let key = std::fs::read_to_string(&key_path)
+                    .map_err(|e| anyhow::anyhow!("read --ssh-key {key_path}: {e}"))?;
+                Some(hyperion_import::SshConn {
+                    host,
+                    user: ssh_user.clone(),
+                    port: *ssh_port,
+                    key,
+                })
+            } else {
+                None
+            };
             let req = hyperion_import::ImportPanelReq {
                 source_kind: source.clone(),
                 mode: mode.clone(),
+                ssh,
             };
             if *dry_run {
                 Request::HostingImportPanelPlan { req }

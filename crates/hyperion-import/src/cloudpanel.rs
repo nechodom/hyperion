@@ -3,21 +3,18 @@
 //! CloudPanel keeps its state in a SQLite DB at
 //! `/home/clp/htdocs/app/data/db.sq3`; sites live under
 //! `/home/<site-user>/htdocs/<domain>`. It manages **no** mail and **no**
-//! authoritative DNS, so those are always reported as `unsupported` (never a
-//! silent "0").
+//! authoritative DNS, so those are always reported as `unsupported`.
 //!
-//! P0 supports only the **in-place** mode (agent running on the CloudPanel box);
-//! remote/archive land in P1. We read the SQLite store via the `sqlite3 -json`
-//! CLI rather than a Rust sqlite dependency — it matches the in-place model,
-//! copes with CloudPanel's version-variant schema (we tolerate missing columns
-//! at the call site), and `-readonly` avoids touching the live DB lock.
+//! Works in **in-place** (local) and **remote** (SSH) modes via [`Runner`] —
+//! the same query logic runs locally or over `ssh`. Archive mode is P1.x.
+//! The SQLite store is read with `sqlite3 -readonly -json` (matches the
+//! version-variant schema; `-readonly` avoids the live DB lock).
 
-use crate::adapter::{Location, SourceAdapter, SourceKind, SourcePanelInfo};
+use crate::adapter::{Location, Runner, SourceAdapter, SourceKind, SourcePanelInfo};
 use crate::error::ImportError;
 use crate::ir::{
     ImportIR, IrDatabase, IrDbEngine, IrHosting, IrSiteKind, IrUnsupported, SourceSummary,
 };
-use std::path::Path;
 
 const DB_PATH: &str = "/home/clp/htdocs/app/data/db.sq3";
 const APP_DIR: &str = "/home/clp/htdocs/app";
@@ -31,35 +28,37 @@ impl SourceAdapter for CloudPanelAdapter {
     }
 
     async fn detect(&self, location: &Location) -> Option<SourcePanelInfo> {
-        // P0: in-place only.
-        if !matches!(location, Location::InPlace) {
-            return None;
+        if matches!(location, Location::Archive(_)) {
+            return None; // archive mode not supported yet
         }
-        if !Path::new(DB_PATH).exists() || !Path::new(APP_DIR).exists() {
+        let runner = Runner::for_location(location);
+        if !runner.exists(DB_PATH).await || !runner.exists(APP_DIR).await {
             return None;
         }
         Some(SourcePanelInfo {
             kind: SourceKind::CloudPanel,
-            version: clpctl_version().await.unwrap_or_else(|| "unknown".into()),
+            version: clpctl_version(&runner)
+                .await
+                .unwrap_or_else(|| "unknown".into()),
             has_mail: false, // CloudPanel never manages mail …
             has_dns: false,  // … or authoritative DNS.
         })
     }
 
     async fn extract(&self, location: &Location) -> Result<ImportIR, ImportError> {
-        if !matches!(location, Location::InPlace) {
-            return Err(ImportError::UnsupportedMode(format!(
-                "CloudPanel adapter supports in-place only in P0 (got {})",
-                location.mode()
-            )));
+        if matches!(location, Location::Archive(_)) {
+            return Err(ImportError::UnsupportedMode(
+                "CloudPanel adapter: archive mode not yet supported".into(),
+            ));
         }
+        let runner = Runner::for_location(location);
         let info = self
             .detect(location)
             .await
             .ok_or(ImportError::NotDetected)?;
 
         let sites = sqlite_json(
-            DB_PATH,
+            &runner,
             "SELECT id, domain_name, user, type, root_directory, reverse_proxy_url, ssh_keys \
              FROM site",
         )
@@ -67,7 +66,7 @@ impl SourceAdapter for CloudPanelAdapter {
         // DB rows joined to their owning site. Best-effort: schema varies by
         // version, so tolerate a failing join (sites still import without DBs).
         let dbs = sqlite_json(
-            DB_PATH,
+            &runner,
             "SELECT d.name AS db_name, d.site_id AS site_id, ds.engine AS engine, \
              du.user_name AS user_name \
              FROM \"database\" d \
@@ -76,8 +75,7 @@ impl SourceAdapter for CloudPanelAdapter {
         )
         .await
         .unwrap_or_default();
-        // PHP version per site (column name varies by version → best-effort).
-        let php = sqlite_json(DB_PATH, "SELECT site_id, php_version FROM php_settings")
+        let php = sqlite_json(&runner, "SELECT site_id, php_version FROM php_settings")
             .await
             .unwrap_or_default();
 
@@ -105,20 +103,15 @@ impl SourceAdapter for CloudPanelAdapter {
                     let name = jstr(d, "db_name");
                     IrDatabase {
                         engine: db_engine(&jstr(d, "engine")),
-                        charset: None, // captured at dump time
+                        charset: None,
                         user: jstr(d, "user_name"),
-                        dump_hint: format!(
-                            "clpctl db:export --databaseName={name} --file=<out>.sql.gz"
-                        ),
+                        dump_hint: format!("clpctl db:export --databaseName={name}"),
                         name,
                     }
                 })
                 .collect();
 
-            // CloudPanel's `root_directory` is the full path UNDER
-            // /home/<user>/htdocs (defaults to the domain, but can be e.g.
-            // "<domain>/public"). Confirmed against a live install: the vhost
-            // emits `root /home/<user>/htdocs/<root_directory>`.
+            // root_directory is the full path UNDER /home/<user>/htdocs.
             let docroot = if root.is_empty() {
                 format!("/home/{owner}/htdocs/{domain}")
             } else {
@@ -138,15 +131,15 @@ impl SourceAdapter for CloudPanelAdapter {
             hostings.push(IrHosting {
                 source_key: format!("cloudpanel:{owner}:{domain}"),
                 domain,
-                aliases: Vec::new(), // TODO(P1): extra server_name aliases from the vhost
+                aliases: Vec::new(),
                 owner_user: owner,
                 kind,
                 php_version,
                 docroot,
                 proxy_upstream,
                 databases,
-                crons: Vec::new(), // TODO(P1): /var/spool/cron/crontabs + /etc/cron.d
-                tls: None,         // TODO(P1): /etc/nginx/ssl-certificates/<domain>.{crt,key}
+                crons: Vec::new(),
+                tls: None,
                 ssh_keys,
             });
         }
@@ -155,7 +148,7 @@ impl SourceAdapter for CloudPanelAdapter {
             source: SourceSummary {
                 kind: SourceKind::CloudPanel.as_str().into(),
                 version: info.version,
-                host: "localhost".into(),
+                host: location_host(location),
             },
             hostings,
             unsupported: vec![
@@ -175,6 +168,14 @@ impl SourceAdapter for CloudPanelAdapter {
     }
 }
 
+/// Host label for the report: the ssh host for remote, else localhost.
+fn location_host(loc: &Location) -> String {
+    match loc {
+        Location::Remote(t) => t.host.clone(),
+        _ => "localhost".into(),
+    }
+}
+
 fn site_kind(raw: &str) -> IrSiteKind {
     let t = raw.to_lowercase();
     if t.contains("php") || t.contains("wordpress") {
@@ -182,7 +183,6 @@ fn site_kind(raw: &str) -> IrSiteKind {
     } else if t.contains("static") || t.contains("html") {
         IrSiteKind::Static
     } else {
-        // node / python / reverse-proxy → reverse_proxy (Unsupported in v1).
         IrSiteKind::ReverseProxy
     }
 }
@@ -198,43 +198,28 @@ fn db_engine(raw: &str) -> IrDbEngine {
     }
 }
 
-/// `clpctl --version` → just the `X.Y.Z` version token. The CLI prints a whole
-/// banner ("CloudPanel CLI 6.0.8 (env: prod …) #StandWithUkraine …"), so pluck
-/// the first dotted-numeric word rather than showing the lot.
-async fn clpctl_version() -> Option<String> {
-    let out = tokio::process::Command::new("clpctl")
-        .arg("--version")
-        .output()
-        .await
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    text.split_whitespace()
+/// `clpctl --version` → just the `X.Y.Z` token (the CLI prints a long banner).
+async fn clpctl_version(runner: &Runner) -> Option<String> {
+    let out = runner.sh("clpctl --version").await.ok()?;
+    out.split_whitespace()
         .find(|t| t.contains('.') && t.chars().next().is_some_and(|c| c.is_ascii_digit()))
         .map(String::from)
 }
 
-/// Run a read-only query via `sqlite3 -json` and return the rows as objects.
+/// Run a read-only query via `sqlite3 -json` (local or over ssh) → row objects.
 async fn sqlite_json(
-    db: &str,
+    runner: &Runner,
     sql: &str,
 ) -> Result<Vec<serde_json::Map<String, serde_json::Value>>, ImportError> {
-    let out = tokio::process::Command::new("sqlite3")
-        .args(["-readonly", "-json", db, sql])
-        .output()
-        .await?;
-    if !out.status.success() {
-        return Err(ImportError::Command {
-            cmd: format!("sqlite3 -json <db> \"{sql}\""),
-            msg: String::from_utf8_lossy(&out.stderr).trim().to_string(),
-        });
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
+    let cmd = format!(
+        "sqlite3 -readonly -json {} {}",
+        crate::adapter::shell_quote(DB_PATH),
+        crate::adapter::shell_quote(sql)
+    );
+    let text = runner.sh(&cmd).await?;
     let text = text.trim();
     if text.is_empty() {
-        return Ok(Vec::new()); // sqlite3 -json prints nothing for an empty result
+        return Ok(Vec::new());
     }
     let val: serde_json::Value = serde_json::from_str(text).map_err(|e| ImportError::Parse {
         what: "sqlite3 -json".into(),

@@ -7,14 +7,39 @@ use crate::ir::IrUnsupported;
 use serde::{Deserialize, Serialize};
 
 /// Request for the panel-import RPCs (`hosting_import_panel` + `_plan`).
-/// No secret fields — in-place reads local files; remote (P1) passes an
-/// on-node key path, never the key bytes.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ImportPanelReq {
     /// `"cloudpanel"` | `"hestiacp"`.
     pub source_kind: String,
-    /// `"inplace"` (P0) | `"remote"` | `"archive"`.
+    /// `"inplace"` | `"remote"` (`"archive"` not yet supported).
     pub mode: String,
+    /// SSH connection for `remote` mode (source panel on another machine).
+    /// Required iff `mode == "remote"`. The private key is ephemeral — the
+    /// engine writes it to a 0600 file for the run and deletes it after.
+    #[serde(default)]
+    pub ssh: Option<SshConn>,
+}
+
+/// SSH connection to a remote source box. `key` carries the private key
+/// material; it is **redacted in Debug** and never persisted.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SshConn {
+    pub host: String,
+    pub user: String,
+    pub port: u16,
+    /// PEM / OpenSSH private key bytes (ephemeral).
+    pub key: String,
+}
+
+impl std::fmt::Debug for SshConn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SshConn")
+            .field("host", &self.host)
+            .field("user", &self.user)
+            .field("port", &self.port)
+            .field("key", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Outcome of an apply run.
@@ -48,10 +73,11 @@ pub fn adapter_for(source_kind: &str) -> Option<Box<dyn SourceAdapter>> {
     }
 }
 
-/// Parse the location mode. P0 supports in-place only.
+/// Parse a side-effect-free location mode. Only `inplace` is resolvable here;
+/// `remote` needs a key-file written on the node, so the engine builds it.
 pub fn location_for(mode: &str) -> Option<Location> {
     match mode {
         "inplace" => Some(Location::InPlace),
-        _ => None, // "remote" / "archive" → P1
+        _ => None, // "remote" built by the engine (needs key I/O); "archive" TBD
     }
 }

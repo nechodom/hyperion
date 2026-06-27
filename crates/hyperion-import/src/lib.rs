@@ -27,5 +27,6 @@ pub use ir::{
 };
 pub use panel::{
     adapter_for, location_for, ImportPanelReq, ImportPanelResult, ImportedHosting, SkippedHosting,
+    SshConn,
 };
 pub use planner::{Action, ImportPlan, ImportPlanner, PlannedHosting};

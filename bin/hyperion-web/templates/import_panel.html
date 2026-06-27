@@ -25,16 +25,43 @@
         </select>
       </div>
       <div class="field">
+        <label>Mode</label>
+        <select name="mode" id="import-mode" onchange="document.getElementById('ssh-fields').style.display = this.value === 'remote' ? '' : 'none';">
+          <option value="inplace" {% if mode == "inplace" %}selected{% endif %}>In-place — panel is on this node</option>
+          <option value="remote" {% if mode == "remote" %}selected{% endif %}>Remote — connect over SSH</option>
+        </select>
+      </div>
+      <div class="field">
         <label>Run on node</label>
         <select name="node_id">
           {% for n in nodes %}
           <option value="{{ n.id }}" {% if node_id == n.id %}selected{% endif %}>{{ n.label }}</option>
           {% endfor %}
         </select>
-        <div class="hint">The node where the source panel is installed (in-place).</div>
+        <div class="hint">The Hyperion node that performs the import.</div>
       </div>
     </div>
-    <input type="hidden" name="mode" value="inplace">
+    <div id="ssh-fields" {% if mode != "remote" %}style="display:none"{% endif %}>
+      <div class="field-row">
+        <div class="field">
+          <label>SSH host</label>
+          <input name="ssh_host" value="{{ ssh_host }}" placeholder="203.0.113.10">
+        </div>
+        <div class="field">
+          <label>SSH user</label>
+          <input name="ssh_user" value="{{ ssh_user }}" placeholder="root">
+        </div>
+        <div class="field">
+          <label>SSH port</label>
+          <input name="ssh_port" value="{{ ssh_port }}" placeholder="22">
+        </div>
+      </div>
+      <div class="field">
+        <label>Private key</label>
+        <textarea name="ssh_key" rows="4" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----&#10;…">{{ ssh_key }}</textarea>
+        <div class="hint">Key to reach the source box (a root or sudo user). Used only for this import, written to a 0600 file on the node and deleted afterwards — never stored.</div>
+      </div>
+    </div>
     <button type="submit" class="btn">Preview (dry-run)</button>
   </form>
 </div>
@@ -78,6 +105,10 @@
     <input type="hidden" name="source_kind" value="{{ source_kind }}">
     <input type="hidden" name="mode" value="{{ mode }}">
     <input type="hidden" name="node_id" value="{{ node_id }}">
+    <input type="hidden" name="ssh_host" value="{{ ssh_host }}">
+    <input type="hidden" name="ssh_user" value="{{ ssh_user }}">
+    <input type="hidden" name="ssh_port" value="{{ ssh_port }}">
+    <input type="hidden" name="ssh_key" value="{{ ssh_key }}">
     <button type="submit" class="btn btn-primary">Apply import</button>
     <span class="text-soft small" style="margin-left:0.5rem">Creates a Hyperion hosting per “create” row, copies files, and restores each database.</span>
   </form>

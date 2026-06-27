@@ -47,6 +47,10 @@ struct ImportTpl {
     source_kind: String,
     mode: String,
     node_id: String,
+    ssh_host: String,
+    ssh_user: String,
+    ssh_port: String,
+    ssh_key: String,
     // "form" | "plan" | "result"
     stage: &'static str,
     source_label: String,
@@ -72,6 +76,10 @@ impl ImportTpl {
             source_kind: "cloudpanel".into(),
             mode: "inplace".into(),
             node_id: "local".into(),
+            ssh_host: String::new(),
+            ssh_user: "root".into(),
+            ssh_port: "22".into(),
+            ssh_key: String::new(),
             stage: "form",
             source_label: String::new(),
             source_version: String::new(),
@@ -129,9 +137,50 @@ pub struct ImportForm {
     pub mode: String,
     #[serde(default)]
     pub node_id: String,
+    #[serde(default)]
+    pub ssh_host: String,
+    #[serde(default)]
+    pub ssh_user: String,
+    #[serde(default)]
+    pub ssh_port: String,
+    #[serde(default)]
+    pub ssh_key: String,
 }
 fn default_mode() -> String {
     "inplace".into()
+}
+
+/// Build the SSH connection for remote mode from the form (None otherwise).
+fn build_ssh(form: &ImportForm) -> Option<hyperion_import::SshConn> {
+    if form.mode != "remote" || form.ssh_host.trim().is_empty() || form.ssh_key.trim().is_empty() {
+        return None;
+    }
+    Some(hyperion_import::SshConn {
+        host: form.ssh_host.trim().to_string(),
+        user: if form.ssh_user.trim().is_empty() {
+            "root".into()
+        } else {
+            form.ssh_user.trim().to_string()
+        },
+        port: form.ssh_port.trim().parse().unwrap_or(22),
+        key: form.ssh_key.clone(),
+    })
+}
+
+/// Copy the SSH form fields into the template so the apply step can resubmit.
+fn echo_ssh(tpl: &mut ImportTpl, form: &ImportForm) {
+    tpl.ssh_host = form.ssh_host.clone();
+    tpl.ssh_user = if form.ssh_user.trim().is_empty() {
+        "root".into()
+    } else {
+        form.ssh_user.clone()
+    };
+    tpl.ssh_port = if form.ssh_port.trim().is_empty() {
+        "22".into()
+    } else {
+        form.ssh_port.clone()
+    };
+    tpl.ssh_key = form.ssh_key.clone();
 }
 
 /// POST /import/plan — dry-run the import on the chosen node.
@@ -146,6 +195,7 @@ pub async fn post_plan(
     let req = hyperion_import::ImportPanelReq {
         source_kind: form.source_kind.clone(),
         mode: form.mode.clone(),
+        ssh: build_ssh(&form),
     };
     let resp = crate::dispatcher::dispatch_to_node(
         &state,
@@ -158,6 +208,7 @@ pub async fn post_plan(
     tpl.source_kind = form.source_kind.clone();
     tpl.mode = form.mode.clone();
     tpl.node_id = form.node_id.clone();
+    echo_ssh(&mut tpl, &form);
     match resp {
         RpcResponse::HostingImportPanelPlan(plan) => {
             tpl.stage = "plan";
@@ -201,6 +252,7 @@ pub async fn post_apply(
     let req = hyperion_import::ImportPanelReq {
         source_kind: form.source_kind.clone(),
         mode: form.mode.clone(),
+        ssh: build_ssh(&form),
     };
     let resp = crate::dispatcher::dispatch_to_node(
         &state,
@@ -213,6 +265,7 @@ pub async fn post_apply(
     tpl.source_kind = form.source_kind.clone();
     tpl.mode = form.mode.clone();
     tpl.node_id = form.node_id.clone();
+    echo_ssh(&mut tpl, &form);
     match resp {
         RpcResponse::HostingImportPanel(res) => {
             tpl.stage = "result";
