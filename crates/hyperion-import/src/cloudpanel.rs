@@ -55,9 +55,12 @@ impl SourceAdapter for CloudPanelAdapter {
         }
         let info = self.detect(location).await.ok_or(ImportError::NotDetected)?;
 
-        let sites =
-            sqlite_json(DB_PATH, "SELECT id, domain_name, user, type, root_directory FROM site")
-                .await?;
+        let sites = sqlite_json(
+            DB_PATH,
+            "SELECT id, domain_name, user, type, root_directory, reverse_proxy_url, ssh_keys \
+             FROM site",
+        )
+        .await?;
         // DB rows joined to their owning site. Best-effort: schema varies by
         // version, so tolerate a failing join (sites still import without DBs).
         let dbs = sqlite_json(
@@ -109,25 +112,39 @@ impl SourceAdapter for CloudPanelAdapter {
                 })
                 .collect();
 
+            // CloudPanel's `root_directory` is the full path UNDER
+            // /home/<user>/htdocs (defaults to the domain, but can be e.g.
+            // "<domain>/public"). Confirmed against a live install: the vhost
+            // emits `root /home/<user>/htdocs/<root_directory>`.
             let docroot = if root.is_empty() {
                 format!("/home/{owner}/htdocs/{domain}")
             } else {
-                format!("/home/{owner}/htdocs/{domain}/{root}")
+                format!("/home/{owner}/htdocs/{root}")
             };
+            let proxy_upstream = {
+                let u = jstr(s, "reverse_proxy_url");
+                (!u.is_empty()).then_some(u)
+            };
+            let ssh_keys: Vec<String> = jstr(s, "ssh_keys")
+                .lines()
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(String::from)
+                .collect();
 
             hostings.push(IrHosting {
                 source_key: format!("cloudpanel:{owner}:{domain}"),
                 domain,
-                aliases: Vec::new(), // TODO(P1): parse extra server_name from the vhost
+                aliases: Vec::new(), // TODO(P1): extra server_name aliases from the vhost
                 owner_user: owner,
                 kind,
                 php_version,
                 docroot,
-                proxy_upstream: None, // TODO(P1): reverse-proxy upstream from the vhost
+                proxy_upstream,
                 databases,
                 crons: Vec::new(), // TODO(P1): /var/spool/cron/crontabs + /etc/cron.d
                 tls: None,         // TODO(P1): /etc/nginx/ssl-certificates/<domain>.{crt,key}
-                ssh_keys: Vec::new(), // TODO(P1): ssh_user table + authorized_keys
+                ssh_keys,
             });
         }
 
