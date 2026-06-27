@@ -4,6 +4,13 @@
 //! Unix socket today and (in sub-project 1.5) by `hyperion-rpc-tls` over mTLS.
 //! Wire format is `u32be length || JSON body`, max body 4 MiB.
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+// Wire enums/tuples are intentionally "complex"/"many-argument"; doc-list nits
+// in the big codec docs are tolerated.
+#![allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::doc_lazy_continuation
+)]
 #![forbid(unsafe_code)]
 
 pub mod api;

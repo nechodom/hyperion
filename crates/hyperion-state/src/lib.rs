@@ -3,6 +3,9 @@
 //! The pool is the single source of truth for hostings, users, DBs, and
 //! certificates on the node. All public functions are async.
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+// sqlx row tuples / multi-column query helpers are intentionally "complex" and
+// "many-argument"; aliasing each adds noise without clarity.
+#![allow(clippy::type_complexity, clippy::too_many_arguments)]
 #![forbid(unsafe_code)]
 
 pub mod audit;

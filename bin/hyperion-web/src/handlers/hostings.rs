@@ -343,7 +343,7 @@ pub async fn get_list(
                 .cmp(b.node_id.as_deref().unwrap_or(""))
         }),
         // Default + "domain" both fall here.
-        _ => rows.sort_by(|a, b| a.domain.to_lowercase().cmp(&b.domain.to_lowercase())),
+        _ => rows.sort_by_key(|a| a.domain.to_lowercase()),
     }
     if desc {
         rows.reverse();
@@ -2731,7 +2731,7 @@ pub async fn post_set_php_ini(
     // Resolve owner — the .user.ini lives on the node hosting the site.
     let (detail, owner_node) = match find_hosting_anywhere(&state, sel).await {
         Ok(v) => v,
-        Err(e) => return Err(AppError::from(e)),
+        Err(e) => return Err(e),
     };
     let hosting_id = detail.id.as_str().to_string();
 
@@ -5728,12 +5728,13 @@ pub async fn post_bulk(
         }
     }
     let flash = if errs.is_empty() {
-        format!(
-            "{} {} {}",
-            ok,
-            form.action,
-            if ok == 1 { "ok" } else { "ok" }
-        )
+        // NOTE: both arms yield "ok" — this looks like a vestigial
+        // singular/plural branch that was never finished. Preserving behavior
+        // verbatim (no message change) and allowing the lint; flagged for a
+        // human to decide the intended wording.
+        #[allow(clippy::if_same_then_else)]
+        let suffix = if ok == 1 { "ok" } else { "ok" };
+        format!("{} {} {}", ok, form.action, suffix)
     } else {
         format!(
             "{} succeeded, {} failed: {}",

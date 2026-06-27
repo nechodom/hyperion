@@ -608,7 +608,7 @@ pub async fn get_panel_cert_status(
             // whether HTMX keeps polling.
             let (pill_class, pill_text, bar_pct, bar_color, keep_polling) = match p.stage.as_str() {
                 "self-signed" => ("warn", "self-signed", 10, "var(--warn)", true),
-                "issuing"     => ("warn", "issuing…",    50 + ((elapsed % 30) * 50 / 30).min(40) as i64, "var(--accent)", true),
+                "issuing"     => ("warn", "issuing…",    50 + ((elapsed % 30) * 50 / 30).min(40), "var(--accent)", true),
                 "issued"      => ("ok",   "real LE cert", 100, "var(--success)", false),
                 "failed"      => ("err",  "failed",       100, "var(--danger)", false),
                 _             => ("",     p.stage.as_str(),0, "var(--surface-2)", false),
@@ -787,7 +787,7 @@ fn mask_secrets_in_toml(s: &str) -> String {
         // Find `<key> = "..."` lines that match a suspect.
         if let Some(eq) = trimmed.find('=') {
             let key = trimmed[..eq].trim();
-            if SUSPECT_KEYS.iter().any(|k| key == *k) {
+            if SUSPECT_KEYS.contains(&key) {
                 let value_part = trimmed[eq + 1..].trim();
                 if value_part.starts_with('"') {
                     let indent_len = line.len() - trimmed.len();

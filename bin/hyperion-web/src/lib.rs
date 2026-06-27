@@ -1,6 +1,17 @@
 //! hyperion-web library — the axum-based admin UI, factored so the binary
 //! can drive it and tests can call `build_router` directly.
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+// Style lints we deliberately accept across this crate's handlers (kept out of
+// per-site noise). Correctness-flavored lints are fixed/allowed at their sites.
+#![allow(clippy::type_complexity)]
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::doc_lazy_continuation)]
+#![allow(clippy::doc_overindented_list_items)]
+#![allow(clippy::empty_line_after_doc_comments)]
+#![allow(clippy::nonminimal_bool)]
+#![allow(clippy::inconsistent_digit_grouping)]
+#![allow(clippy::unnecessary_sort_by)]
+#![allow(clippy::cmp_owned)]
 #![forbid(unsafe_code)]
 
 pub mod admin_user;

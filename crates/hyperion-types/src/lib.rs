@@ -3,6 +3,14 @@
 //! No I/O, no system calls — just newtype IDs, enums, and DTOs that
 //! cross crate boundaries and the RPC wire.
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+// Wire DTOs/tuples are intentionally "complex"/"many-argument"; aliasing each
+// adds noise without clarity. Doc-list + test-builder style nits are tolerated.
+#![allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::doc_lazy_continuation,
+    clippy::field_reassign_with_default
+)]
 #![forbid(unsafe_code)]
 
 pub mod cert;

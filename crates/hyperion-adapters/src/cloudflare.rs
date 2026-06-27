@@ -63,14 +63,13 @@ async fn zone_id_for(token: &str, record_name: &str) -> Result<(String, String),
         let (Some(id), Some(name)) = (z["id"].as_str(), z["name"].as_str()) else {
             continue;
         };
-        if record_name == name || record_name.ends_with(&format!(".{name}")) {
-            if best
+        if (record_name == name || record_name.ends_with(&format!(".{name}")))
+            && best
                 .as_ref()
                 .map(|(_, n)| name.len() > n.len())
                 .unwrap_or(true)
-            {
-                best = Some((id.to_string(), name.to_string()));
-            }
+        {
+            best = Some((id.to_string(), name.to_string()));
         }
     }
     best.ok_or_else(|| {

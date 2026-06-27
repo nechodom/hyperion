@@ -746,8 +746,8 @@ fn print_pretty(resp: &Response) {
         Response::EmailChangeCancel => println!("✓ pending email change cancelled"),
         Response::MonitorOverview(items) => {
             println!(
-                "{:<32} {:<10} {:>5} {:>7} {:>4} {}",
-                "DOMAIN", "STATE", "SUCC%", "AVG_MS", "SAMP", "NODE"
+                "{:<32} {:<10} {:>5} {:>7} {:>4} NODE",
+                "DOMAIN", "STATE", "SUCC%", "AVG_MS", "SAMP"
             );
             for it in items.iter() {
                 println!(
@@ -844,8 +844,8 @@ fn print_pretty(resp: &Response) {
         }
         Response::BackupList(rows) => {
             println!(
-                "{:>4} {:<19} {:<8} {:>12} {}",
-                "ID", "STARTED", "STATE", "BYTES", "ARCHIVE"
+                "{:>4} {:<19} {:<8} {:>12} ARCHIVE",
+                "ID", "STARTED", "STATE", "BYTES"
             );
             for r in rows {
                 println!(
@@ -871,8 +871,8 @@ fn print_pretty(resp: &Response) {
         }
         Response::InviteList(rows) => {
             println!(
-                "{:<32} {:>12} {:>12} {}",
-                "LABEL", "CREATED", "EXPIRES", "TOKEN HASH"
+                "{:<32} {:>12} {:>12} TOKEN HASH",
+                "LABEL", "CREATED", "EXPIRES"
             );
             for r in rows {
                 println!(
@@ -1189,10 +1189,7 @@ fn print_pretty(resp: &Response) {
         Response::FirewallList(v) => {
             println!("firewall backend: {}", v.backend);
             if !v.ports.is_empty() {
-                println!(
-                    "{:<8} {:<6} {:<10} {}",
-                    "PORT", "PROTO", "CATEGORY", "REASON"
-                );
+                println!("{:<8} {:<6} {:<10} REASON", "PORT", "PROTO", "CATEGORY");
                 for p in &v.ports {
                     println!(
                         "{:<8} {:<6} {:<10} {}",
@@ -1510,7 +1507,7 @@ fn print_pretty(resp: &Response) {
             if assets.is_empty() {
                 println!("(no wp assets uploaded yet)");
             } else {
-                println!("{:<5} {:<7} {:<10} {}", "ID", "KIND", "SIZE", "FILENAME");
+                println!("{:<5} {:<7} {:<10} FILENAME", "ID", "KIND", "SIZE");
                 for a in assets {
                     println!(
                         "{:<5} {:<7} {:<10} {}",
@@ -1547,10 +1544,7 @@ fn print_pretty(resp: &Response) {
         }
         Response::WpThemeList(r) => {
             println!("wp core: {}", r.wp_version);
-            println!(
-                "{:<24} {:<10} {:<10} {}",
-                "SLUG", "STATUS", "VERSION", "UPDATE"
-            );
+            println!("{:<24} {:<10} {:<10} UPDATE", "SLUG", "STATUS", "VERSION");
             for t in &r.themes {
                 println!(
                     "{:<24} {:<10} {:<10} {}",
@@ -1695,8 +1689,8 @@ fn print_pretty(resp: &Response) {
                 println!("no jobs");
             } else {
                 println!(
-                    "{:<26} {:<14} {:<10} {:>4}% {:<8} {}",
-                    "id", "kind", "state", "pct", "elapsed", "target"
+                    "{:<26} {:<14} {:<10} {:>4}% {:<8} target",
+                    "id", "kind", "state", "pct", "elapsed"
                 );
                 for j in list {
                     let elapsed = match j.finished_at {
@@ -1709,7 +1703,7 @@ fn print_pretty(resp: &Response) {
                         j.kind,
                         j.state,
                         j.progress_pct,
-                        format_args!("{}s", elapsed),
+                        format!("{}s", elapsed),
                         j.target.as_deref().unwrap_or("-")
                     );
                 }
@@ -1805,7 +1799,7 @@ fn print_pretty(resp: &Response) {
             if items.is_empty() {
                 println!("no certificates");
             } else {
-                println!("{:<40} {:<14} {:>5} {}", "domain", "issuer", "days", "band");
+                println!("{:<40} {:<14} {:>5} band", "domain", "issuer", "days");
                 for it in items {
                     println!(
                         "{:<40} {:<14} {:>5} {}",

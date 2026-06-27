@@ -5,6 +5,16 @@
 //! Tests inject `MockAdapterPort` (via `mockall`) so orchestration logic
 //! is verified without touching the system.
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+// Orchestrator surface is wide: many-arg sequencing fns, rich tuples, and large
+// doc blocks. These style lints stay allowed; correctness lints remain on.
+#![allow(
+    clippy::type_complexity,
+    clippy::too_many_arguments,
+    clippy::doc_lazy_continuation,
+    clippy::doc_overindented_list_items,
+    clippy::empty_line_after_doc_comments,
+    clippy::nonminimal_bool
+)]
 #![forbid(unsafe_code)]
 
 pub mod agent;

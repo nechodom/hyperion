@@ -534,7 +534,8 @@ fn json_str(s: &str) -> String {
 /// the monitor sparkline. <50ms = 30%, 5000ms = 100%, log scale-ish.
 pub fn clamp_height_percent(ms: &i64) -> i64 {
     let ms = (*ms).max(0);
-    let p = if ms < 50 {
+
+    if ms < 50 {
         30
     } else if ms < 200 {
         50
@@ -544,8 +545,7 @@ pub fn clamp_height_percent(ms: &i64) -> i64 {
         85
     } else {
         100
-    };
-    p
+    }
 }
 
 /// Format a byte count as a short string (e.g. "1.4 GiB"). Public for use
@@ -821,7 +821,7 @@ mod tests {
     #[test]
     fn build_sparkline_two_samples_renders_line() {
         let s = build_sparkline(
-            [(1_700_000_000_i64, 1.0), (1_700_000_060, 3.0)].into_iter(),
+            [(1_700_000_000_i64, 1.0), (1_700_000_060, 3.0)],
             "load",
             |v| format!("{v:.1}"),
         );
@@ -850,8 +850,7 @@ mod tests {
                 (1_700_000_000_i64, 5.0),
                 (1_700_000_060, 5.0),
                 (1_700_000_120, 5.0),
-            ]
-            .into_iter(),
+            ],
             "load",
             |v| format!("{v}"),
         );
@@ -872,8 +871,7 @@ mod tests {
                 (1_700_000_000_i64, -1.0),
                 (1_700_000_060, 0.0),
                 (1_700_000_120, 1.0),
-            ]
-            .into_iter(),
+            ],
             "load",
             |v| format!("{v:.1}"),
         );
