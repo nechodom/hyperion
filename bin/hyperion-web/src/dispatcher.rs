@@ -158,7 +158,8 @@ fn timeout_for_request(req: &Request) -> u64 {
         Request::BackupRestore { .. }
         | Request::BackupRestoreAsNew { .. }
         | Request::HostingImport { .. }
-        | Request::HostingImportFromUrl { .. } => 3600,
+        | Request::HostingImportFromUrl { .. }
+        | Request::HostingImportPanel { .. } => 3600,
         // Create the archive / move a bundle / install WordPress.
         Request::BackupNow { .. }
         | Request::BackupFetchChunk { .. }

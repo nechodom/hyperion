@@ -1,6 +1,17 @@
 //! hyperion-web library — the axum-based admin UI, factored so the binary
 //! can drive it and tests can call `build_router` directly.
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+// Style lints we deliberately accept across this crate's handlers (kept out of
+// per-site noise). Correctness-flavored lints are fixed/allowed at their sites.
+#![allow(clippy::type_complexity)]
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::doc_lazy_continuation)]
+#![allow(clippy::doc_overindented_list_items)]
+#![allow(clippy::empty_line_after_doc_comments)]
+#![allow(clippy::nonminimal_bool)]
+#![allow(clippy::inconsistent_digit_grouping)]
+#![allow(clippy::unnecessary_sort_by)]
+#![allow(clippy::cmp_owned)]
 #![forbid(unsafe_code)]
 
 pub mod admin_user;
@@ -443,6 +454,9 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/emails", get(handlers::emails::get_emails))
         .route("/install", get(handlers::install::get_install))
         .route("/install/invite", post(handlers::install::post_invite))
+        .route("/import", get(handlers::import_panel::get_import))
+        .route("/import/plan", post(handlers::import_panel::post_plan))
+        .route("/import/apply", post(handlers::import_panel::post_apply))
         .route(
             "/install/invite/revoke",
             post(handlers::install::post_revoke),

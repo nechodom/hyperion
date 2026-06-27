@@ -6,6 +6,8 @@
 //! - is idempotent (ensure-X style, no-ops if state already matches),
 //! - returns a `RollbackToken` for any state-mutating step.
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
+// System-call wrappers occasionally take many typed args / return rich tuples.
+#![allow(clippy::type_complexity, clippy::too_many_arguments)]
 #![forbid(unsafe_code)]
 
 pub mod acme;

@@ -28,6 +28,13 @@ pub struct InMemoryChallengeWriter {
 }
 
 #[cfg(test)]
+impl Default for InMemoryChallengeWriter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(test)]
 impl InMemoryChallengeWriter {
     pub fn new() -> Self {
         Self {

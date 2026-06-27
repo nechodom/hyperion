@@ -756,6 +756,20 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.hosting_import(manifest_path).await
     }
 
+    async fn hosting_import_panel_plan(
+        &self,
+        req: hyperion_import::ImportPanelReq,
+    ) -> Result<hyperion_import::ImportPlan, RpcError> {
+        self.svc.import_panel_plan(req).await
+    }
+
+    async fn hosting_import_panel(
+        &self,
+        req: hyperion_import::ImportPanelReq,
+    ) -> Result<hyperion_import::ImportPanelResult, RpcError> {
+        self.svc.import_panel_apply(req).await
+    }
+
     async fn hosting_import_from_url(
         &self,
         base_url: String,

@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 hyperion-rpc = { path = "../../crates/hyperion-rpc" }
 hyperion-rpc-client = { path = "../../crates/hyperion-rpc-client" }
+hyperion-import = { path = "../../crates/hyperion-import" }
 hyperion-types = { path = "../../crates/hyperion-types" }
 hyperion-validate = { path = "../../crates/hyperion-validate" }
 tokio = { workspace = true }

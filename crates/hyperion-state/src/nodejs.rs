@@ -243,7 +243,7 @@ mod tests {
         let c = allocate_port(&pool).await.expect("c");
         assert_ne!(a, b);
         assert_ne!(b, c);
-        assert!(a >= 30000 && a < 40000);
+        assert!((30000..40000).contains(&a));
     }
 
     #[tokio::test]

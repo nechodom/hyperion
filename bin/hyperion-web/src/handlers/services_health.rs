@@ -58,10 +58,7 @@ pub async fn get_services_health(
 ) -> Result<Response, AppError> {
     let target = q.node.as_deref();
     let dispatch =
-        match crate::dispatcher::dispatch_to_node(&state, target, Request::ServicesHealth).await {
-            Ok(r) => Ok(r),
-            Err(e) => Err(e),
-        };
+        crate::dispatcher::dispatch_to_node(&state, target, Request::ServicesHealth).await;
     let (health, error) = match dispatch {
         Ok(RpcResponse::ServicesHealth(h)) => (h, None),
         Ok(RpcResponse::Error(e)) => (ServicesHealth::default(), Some(e.to_string())),

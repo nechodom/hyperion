@@ -1,5 +1,9 @@
 //! `hyperion-agent` — the privileged daemon.
 
+// Doc-formatting style lints we accept crate-wide.
+#![allow(clippy::doc_overindented_list_items)]
+#![allow(clippy::doc_lazy_continuation)]
+
 use clap::Parser;
 use hyperion_core::AdapterPort;
 use std::path::PathBuf;

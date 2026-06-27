@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct Config {
     pub agent: AgentSection,
     pub acme: AcmeSection,
@@ -177,21 +178,6 @@ impl Default for BackupRetentionSection {
         Self {
             max_age_days: 30,
             keep_latest_n: 5,
-        }
-    }
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            agent: AgentSection::default(),
-            acme: AcmeSection::default(),
-            backup_remote: BackupRemoteSection::default(),
-            backup_retention: BackupRetentionSection::default(),
-            enrollment: EnrollmentSection::default(),
-            slack: SlackSection::default(),
-            email: EmailSection::default(),
-            remote_rpc: RemoteRpcSection::default(),
         }
     }
 }

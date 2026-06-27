@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct Config {
     pub web: WebSection,
 }
@@ -31,14 +32,6 @@ pub struct WebSection {
     pub tls_enabled: bool,
     pub tls_cert_file: PathBuf,
     pub tls_key_file: PathBuf,
-}
-
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            web: WebSection::default(),
-        }
-    }
 }
 
 impl Default for WebSection {

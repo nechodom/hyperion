@@ -174,6 +174,36 @@ enum HostingCmd {
         #[arg(long)]
         token: String,
     },
+    /// Import existing hosting from a third-party control panel
+    /// (HestiaCP / CloudPanel) detected ON THIS node. Reuses
+    /// `hosting create` per site + copies files & databases. Mail and
+    /// DNS are intentionally out of scope (reported, never imported).
+    ///
+    /// Preview first, then drop --dry-run to apply:
+    ///   hctl hosting import-panel --source cloudpanel --mode inplace --dry-run
+    ImportPanel {
+        /// Source panel: cloudpanel | hestiacp.
+        #[arg(long)]
+        source: String,
+        /// Where to read from: inplace | remote.
+        #[arg(long, default_value = "inplace")]
+        mode: String,
+        /// Preview the plan without creating anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// remote mode: source host (ip/hostname).
+        #[arg(long)]
+        ssh_host: Option<String>,
+        /// remote mode: ssh user (default root).
+        #[arg(long, default_value = "root")]
+        ssh_user: String,
+        /// remote mode: ssh port (default 22).
+        #[arg(long, default_value_t = 22)]
+        ssh_port: u16,
+        /// remote mode: path to the private key file used to reach the source.
+        #[arg(long)]
+        ssh_key: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -339,6 +369,44 @@ async fn call(cli: &Cli) -> anyhow::Result<Response> {
         Cmd::Hosting(HostingCmd::Import { manifest }) => Request::HostingImport {
             manifest_path: manifest.clone(),
         },
+        Cmd::Hosting(HostingCmd::ImportPanel {
+            source,
+            mode,
+            dry_run,
+            ssh_host,
+            ssh_user,
+            ssh_port,
+            ssh_key,
+        }) => {
+            let ssh = if mode == "remote" {
+                let host = ssh_host
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("remote mode requires --ssh-host"))?;
+                let key_path = ssh_key.clone().ok_or_else(|| {
+                    anyhow::anyhow!("remote mode requires --ssh-key (path to private key)")
+                })?;
+                let key = std::fs::read_to_string(&key_path)
+                    .map_err(|e| anyhow::anyhow!("read --ssh-key {key_path}: {e}"))?;
+                Some(hyperion_import::SshConn {
+                    host,
+                    user: ssh_user.clone(),
+                    port: *ssh_port,
+                    key,
+                })
+            } else {
+                None
+            };
+            let req = hyperion_import::ImportPanelReq {
+                source_kind: source.clone(),
+                mode: mode.clone(),
+                ssh,
+            };
+            if *dry_run {
+                Request::HostingImportPanelPlan { req }
+            } else {
+                Request::HostingImportPanel { req }
+            }
+        }
         Cmd::Hosting(HostingCmd::ImportFromUrl { base_url, token }) => {
             Request::HostingImportFromUrl {
                 base_url: base_url.clone(),
@@ -678,8 +746,8 @@ fn print_pretty(resp: &Response) {
         Response::EmailChangeCancel => println!("✓ pending email change cancelled"),
         Response::MonitorOverview(items) => {
             println!(
-                "{:<32} {:<10} {:>5} {:>7} {:>4} {}",
-                "DOMAIN", "STATE", "SUCC%", "AVG_MS", "SAMP", "NODE"
+                "{:<32} {:<10} {:>5} {:>7} {:>4} NODE",
+                "DOMAIN", "STATE", "SUCC%", "AVG_MS", "SAMP"
             );
             for it in items.iter() {
                 println!(
@@ -776,8 +844,8 @@ fn print_pretty(resp: &Response) {
         }
         Response::BackupList(rows) => {
             println!(
-                "{:>4} {:<19} {:<8} {:>12} {}",
-                "ID", "STARTED", "STATE", "BYTES", "ARCHIVE"
+                "{:>4} {:<19} {:<8} {:>12} ARCHIVE",
+                "ID", "STARTED", "STATE", "BYTES"
             );
             for r in rows {
                 println!(
@@ -803,8 +871,8 @@ fn print_pretty(resp: &Response) {
         }
         Response::InviteList(rows) => {
             println!(
-                "{:<32} {:>12} {:>12} {}",
-                "LABEL", "CREATED", "EXPIRES", "TOKEN HASH"
+                "{:<32} {:>12} {:>12} TOKEN HASH",
+                "LABEL", "CREATED", "EXPIRES"
             );
             for r in rows {
                 println!(
@@ -1031,6 +1099,42 @@ fn print_pretty(resp: &Response) {
                 if *activated { " (activated)" } else { "" }
             );
         }
+        Response::HostingImportPanelPlan(plan) => {
+            println!(
+                "Import plan — source {} {} ({} site(s)):",
+                plan.source.kind,
+                plan.source.version,
+                plan.items.len()
+            );
+            for it in &plan.items {
+                println!(
+                    "  [{:?}] {}  php={}  db={}  — {}",
+                    it.action,
+                    it.domain,
+                    it.php_version.as_deref().unwrap_or("-"),
+                    it.db_count,
+                    it.reason
+                );
+            }
+            for u in &plan.unsupported {
+                println!("  (not imported — {}: {})", u.category, u.detail);
+            }
+        }
+        Response::HostingImportPanel(res) => {
+            println!("{}", res.message);
+            for c in &res.created {
+                println!(
+                    "  ✓ created {} ({}) — {} database(s)",
+                    c.domain, c.hosting_id, c.databases
+                );
+            }
+            for s in &res.skipped {
+                println!("  · skipped {} — {}", s.domain, s.reason);
+            }
+            for u in &res.unsupported {
+                println!("  note: {} not imported — {}", u.category, u.detail);
+            }
+        }
         Response::ProfileGetApply(maybe) => match maybe {
             Some(a) => {
                 println!("profile_id: {:?}", a.profile_id);
@@ -1085,10 +1189,7 @@ fn print_pretty(resp: &Response) {
         Response::FirewallList(v) => {
             println!("firewall backend: {}", v.backend);
             if !v.ports.is_empty() {
-                println!(
-                    "{:<8} {:<6} {:<10} {}",
-                    "PORT", "PROTO", "CATEGORY", "REASON"
-                );
+                println!("{:<8} {:<6} {:<10} REASON", "PORT", "PROTO", "CATEGORY");
                 for p in &v.ports {
                     println!(
                         "{:<8} {:<6} {:<10} {}",
@@ -1406,7 +1507,7 @@ fn print_pretty(resp: &Response) {
             if assets.is_empty() {
                 println!("(no wp assets uploaded yet)");
             } else {
-                println!("{:<5} {:<7} {:<10} {}", "ID", "KIND", "SIZE", "FILENAME");
+                println!("{:<5} {:<7} {:<10} FILENAME", "ID", "KIND", "SIZE");
                 for a in assets {
                     println!(
                         "{:<5} {:<7} {:<10} {}",
@@ -1443,10 +1544,7 @@ fn print_pretty(resp: &Response) {
         }
         Response::WpThemeList(r) => {
             println!("wp core: {}", r.wp_version);
-            println!(
-                "{:<24} {:<10} {:<10} {}",
-                "SLUG", "STATUS", "VERSION", "UPDATE"
-            );
+            println!("{:<24} {:<10} {:<10} UPDATE", "SLUG", "STATUS", "VERSION");
             for t in &r.themes {
                 println!(
                     "{:<24} {:<10} {:<10} {}",
@@ -1591,8 +1689,8 @@ fn print_pretty(resp: &Response) {
                 println!("no jobs");
             } else {
                 println!(
-                    "{:<26} {:<14} {:<10} {:>4}% {:<8} {}",
-                    "id", "kind", "state", "pct", "elapsed", "target"
+                    "{:<26} {:<14} {:<10} {:>4}% {:<8} target",
+                    "id", "kind", "state", "pct", "elapsed"
                 );
                 for j in list {
                     let elapsed = match j.finished_at {
@@ -1605,7 +1703,7 @@ fn print_pretty(resp: &Response) {
                         j.kind,
                         j.state,
                         j.progress_pct,
-                        format_args!("{}s", elapsed),
+                        format!("{}s", elapsed),
                         j.target.as_deref().unwrap_or("-")
                     );
                 }
@@ -1701,7 +1799,7 @@ fn print_pretty(resp: &Response) {
             if items.is_empty() {
                 println!("no certificates");
             } else {
-                println!("{:<40} {:<14} {:>5} {}", "domain", "issuer", "days", "band");
+                println!("{:<40} {:<14} {:>5} band", "domain", "issuer", "days");
                 for it in items {
                     println!(
                         "{:<40} {:<14} {:>5} {}",

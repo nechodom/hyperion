@@ -944,7 +944,8 @@ async fn run_service_install(
     .unwrap_or_else(|_| {
         // The timeout fired — log it and treat as failure.
         let s = slot.clone();
-        let _ = tokio::spawn(async move {
+        // Fire-and-forget: the spawned task runs; we deliberately drop the handle.
+        tokio::spawn(async move {
             append_line(
                 &s,
                 "apt-install timed out after 10 min — check dpkg lock or mirror outage",
@@ -3592,7 +3593,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         limit: i64,
     ) -> Result<Vec<hyperion_types::HostingUsageBucket>, RpcError> {
         let detail = self.get(sel).await?;
-        let rows = hyperion_state::limits::usage_for(&self.pool, &detail.id, limit.max(1).min(744))
+        let rows = hyperion_state::limits::usage_for(&self.pool, &detail.id, limit.clamp(1, 744))
             .await
             .map_err(|e| RpcError::Internal_with(format!("usage: {e}")))?;
         Ok(rows
@@ -4332,7 +4333,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         limit: i64,
     ) -> Result<Vec<hyperion_types::BackupRunWire>, RpcError> {
         let detail = self.get(sel).await?;
-        let rows = hyperion_state::backups::list_for(&self.pool, &detail.id, limit.max(1).min(500))
+        let rows = hyperion_state::backups::list_for(&self.pool, &detail.id, limit.clamp(1, 500))
             .await
             .map_err(|e| RpcError::Internal_with(format!("list: {e}")))?;
         Ok(rows.into_iter().map(run_to_wire).collect())
@@ -8877,7 +8878,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         &self,
         limit: i64,
     ) -> Result<Vec<hyperion_rpc::AuditEntryWire>, RpcError> {
-        let rows = hyperion_state::audit::list(&self.pool, limit.max(1).min(1000))
+        let rows = hyperion_state::audit::list(&self.pool, limit.clamp(1, 1000))
             .await
             .map_err(|e| RpcError::Internal_with(format!("audit list: {e}")))?;
         Ok(rows
@@ -10057,8 +10058,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
             let (pid, comm) = parse_oom_kill(line);
             let detail: String = line
-                .splitn(2, "kernel: ")
-                .nth(1)
+                .split_once("kernel: ")
+                .map(|x| x.1)
                 .unwrap_or(line)
                 .chars()
                 .take(300)
@@ -12898,7 +12899,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 // Cap message length for the response payload.
                 if m.len() > 256 {
                     m.truncate(256);
-                    m.push_str("…");
+                    m.push('…');
                 }
                 (o.status.code().unwrap_or(-1), m)
             }
@@ -19536,9 +19537,8 @@ mod tests {
         let row = hostings::get_by_domain(&pool, "example.cz")
             .await
             .expect("query");
-        match row {
-            Some(r) => assert_eq!(r.state, HostingState::Failed),
-            None => {}
+        if let Some(r) = row {
+            assert_eq!(r.state, HostingState::Failed)
         }
     }
 

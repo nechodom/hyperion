@@ -189,7 +189,7 @@ pub async fn enroll_now(cfg: &EnrollmentConfig) -> Result<(), String> {
             adjusted.master_url = format!("https://{}", &base[7..]);
             return finish_enrollment(&adjusted, &stdout).await;
         }
-        Err(e) => return Err(e),
+        Err(e) => Err(e),
     }
 }
 
@@ -359,6 +359,10 @@ async fn clear_invite_token_in_config(path: &std::path::Path) -> Result<(), Stri
         .map_err(|e| format!("parse {}: {e}", path.display()))?;
     // Only mutate if the field actually exists AND has a non-empty
     // value. Avoids touching the file on subsequent restarts.
+    // `is_none_or` is stable since 1.82; workspace MSRV is declared 1.80 but
+    // the toolchain we build/ship with is current stable, so allow it here
+    // rather than open-code a `map_or(true, ..)` (which clippy then flags back).
+    #[allow(clippy::incompatible_msrv)]
     let already_blank = doc
         .get("enrollment")
         .and_then(|s| s.get("invite_token"))

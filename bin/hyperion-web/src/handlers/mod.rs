@@ -10,6 +10,7 @@ pub mod files;
 pub mod firewall;
 pub mod health;
 pub mod hostings;
+pub mod import_panel;
 pub mod install;
 pub mod jobs;
 pub mod login;
