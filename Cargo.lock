@@ -1472,6 +1472,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "hyperion-import"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "hyperion-rpc"
 version = "0.1.0"
 dependencies = [
