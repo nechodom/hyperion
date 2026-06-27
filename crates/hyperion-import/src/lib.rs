@@ -13,6 +13,7 @@
 pub mod adapter;
 pub mod cloudpanel;
 pub mod error;
+pub mod hestia;
 pub mod ir;
 pub mod panel;
 pub mod planner;
@@ -20,6 +21,7 @@ pub mod planner;
 pub use adapter::{Location, SourceAdapter, SourceKind, SourcePanelInfo, SshTarget};
 pub use cloudpanel::CloudPanelAdapter;
 pub use error::ImportError;
+pub use hestia::HestiaAdapter;
 pub use ir::{
     ImportIR, IrCert, IrDatabase, IrDbEngine, IrHosting, IrSiteKind, IrUnsupported, SourceSummary,
 };

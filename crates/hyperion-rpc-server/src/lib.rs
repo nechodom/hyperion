@@ -648,12 +648,10 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::HostingImport(v),
             Err(e) => Response::Error(e),
         },
-        Request::HostingImportPanelPlan { req } => {
-            match api.hosting_import_panel_plan(req).await {
-                Ok(v) => Response::HostingImportPanelPlan(v),
-                Err(e) => Response::Error(e),
-            }
-        }
+        Request::HostingImportPanelPlan { req } => match api.hosting_import_panel_plan(req).await {
+            Ok(v) => Response::HostingImportPanelPlan(v),
+            Err(e) => Response::Error(e),
+        },
         Request::HostingImportPanel { req } => match api.hosting_import_panel(req).await {
             Ok(v) => Response::HostingImportPanel(v),
             Err(e) => Response::Error(e),

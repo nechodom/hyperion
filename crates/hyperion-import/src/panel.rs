@@ -43,7 +43,7 @@ pub struct SkippedHosting {
 pub fn adapter_for(source_kind: &str) -> Option<Box<dyn SourceAdapter>> {
     match source_kind {
         "cloudpanel" => Some(Box::new(CloudPanelAdapter)),
-        // "hestiacp" => Some(Box::new(HestiaAdapter)),  // P1
+        "hestiacp" => Some(Box::new(crate::hestia::HestiaAdapter)),
         _ => None,
     }
 }

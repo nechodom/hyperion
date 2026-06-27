@@ -53,7 +53,10 @@ impl SourceAdapter for CloudPanelAdapter {
                 location.mode()
             )));
         }
-        let info = self.detect(location).await.ok_or(ImportError::NotDetected)?;
+        let info = self
+            .detect(location)
+            .await
+            .ok_or(ImportError::NotDetected)?;
 
         let sites = sqlite_json(
             DB_PATH,

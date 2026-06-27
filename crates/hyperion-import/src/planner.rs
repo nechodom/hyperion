@@ -88,11 +88,7 @@ impl ImportPlanner {
     }
 }
 
-fn classify(
-    h: &IrHosting,
-    existing: &HashSet<&str>,
-    imported: &HashSet<&str>,
-) -> (Action, String) {
+fn classify(h: &IrHosting, existing: &HashSet<&str>, imported: &HashSet<&str>) -> (Action, String) {
     if imported.contains(h.source_key.as_str()) {
         (Action::Skip, "already imported (idempotent re-run)".into())
     } else if existing.contains(h.domain.as_str()) {
@@ -107,7 +103,10 @@ fn classify(
         )
     } else {
         let dbs = h.databases.len();
-        (Action::Create, format!("create php/static site + {dbs} database(s)"))
+        (
+            Action::Create,
+            format!("create php/static site + {dbs} database(s)"),
+        )
     }
 }
 

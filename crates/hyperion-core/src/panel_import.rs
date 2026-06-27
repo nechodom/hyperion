@@ -26,17 +26,25 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 message: format!("unknown source panel: {}", req.source_kind),
             })?;
         let loc = hyperion_import::location_for(&req.mode).ok_or_else(|| RpcError::Validation {
-            message: format!("unsupported import mode '{}' (P0 supports inplace)", req.mode),
+            message: format!(
+                "unsupported import mode '{}' (P0 supports inplace)",
+                req.mode
+            ),
         })?;
         if adapter.detect(&loc).await.is_none() {
             return Err(RpcError::Validation {
-                message: format!("no {} install detected ({} mode)", req.source_kind, req.mode),
+                message: format!(
+                    "no {} install detected ({} mode)",
+                    req.source_kind, req.mode
+                ),
             });
         }
         let ir = adapter
             .extract(&loc)
             .await
-            .map_err(|e| RpcError::Validation { message: format!("extract failed: {e}") })?;
+            .map_err(|e| RpcError::Validation {
+                message: format!("extract failed: {e}"),
+            })?;
         let existing: Vec<String> = self.list().await?.into_iter().map(|s| s.domain).collect();
         Ok(ImportPlanner::plan(ir, &existing, &[]))
     }
@@ -69,16 +77,26 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 }),
             }
         }
-        let message = format!("imported {} site(s), skipped {}", created.len(), skipped.len());
-        Ok(ImportPanelResult { created, skipped, unsupported: plan.unsupported, message })
+        let message = format!(
+            "imported {} site(s), skipped {}",
+            created.len(),
+            skipped.len()
+        );
+        Ok(ImportPanelResult {
+            created,
+            skipped,
+            unsupported: plan.unsupported,
+            message,
+        })
     }
 
     /// Provision one hosting and pull its files + DB across (in-place/local).
     async fn apply_one_import(&self, h: &IrHosting) -> Result<String, RpcError> {
         // 1. Provision a fresh Hyperion hosting — reuses ALL of create()
         //    (system user, dirs, nginx vhost, php-fpm pool, DB if any).
-        let domain = Domain::parse(&h.domain)
-            .map_err(|e| RpcError::Validation { message: format!("domain: {e}") })?;
+        let domain = Domain::parse(&h.domain).map_err(|e| RpcError::Validation {
+            message: format!("domain: {e}"),
+        })?;
         let php_version = h.php_version.as_deref().and_then(|v| v.parse().ok());
         let database = h.databases.first().map(|d| match d.engine {
             IrDbEngine::Postgres => hyperion_types::DbProvision::Postgres,
@@ -106,12 +124,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         //    imported site's own index.php/index.html (nginx prefers .html).
         let _ = tokio::fs::remove_file(Path::new(&created.root_dir).join("index.html")).await;
         if Path::new(&h.docroot).is_dir() {
-            run_cmd("cp", &["-a", &format!("{}/.", h.docroot), &created.root_dir])
-                .await
-                .map_err(|reason| RpcError::ProvisioningFailed {
-                    stage: "import_copy_files".into(),
-                    reason,
-                })?;
+            run_cmd(
+                "cp",
+                &["-a", &format!("{}/.", h.docroot), &created.root_dir],
+            )
+            .await
+            .map_err(|reason| RpcError::ProvisioningFailed {
+                stage: "import_copy_files".into(),
+                reason,
+            })?;
         }
 
         // 3. Fix ownership: the copy ran as root, so chown the whole hosting
@@ -130,18 +151,27 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             ],
         )
         .await
-        .map_err(|reason| RpcError::ProvisioningFailed { stage: "import_chown".into(), reason })?;
+        .map_err(|reason| RpcError::ProvisioningFailed {
+            stage: "import_chown".into(),
+            reason,
+        })?;
         let _ = crate::ensure_ancestors_traversable(Path::new(&created.root_dir)).await;
 
         // 4. DB: dump the source DB and load it into the freshly-created one
         //    (in-place: same MariaDB instance, root socket auth).
         if let (Some(srcdb), Some(newdb)) = (h.databases.first(), created.db.as_ref()) {
-            let dump = format!("/var/lib/hyperion/migration/import-{}.sql", created.id.as_str());
+            let dump = format!(
+                "/var/lib/hyperion/migration/import-{}.sql",
+                created.id.as_str()
+            );
             if let Some(parent) = Path::new(&dump).parent() {
                 let _ = tokio::fs::create_dir_all(parent).await;
             }
             dump_mariadb(&srcdb.name, &dump).await.map_err(|reason| {
-                RpcError::ProvisioningFailed { stage: "import_db_dump".into(), reason }
+                RpcError::ProvisioningFailed {
+                    stage: "import_db_dump".into(),
+                    reason,
+                }
             })?;
             hyperion_adapters::backup::restore_mariadb_dump(&newdb.db_name, Path::new(&dump))
                 .await
@@ -152,8 +182,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             let _ = tokio::fs::remove_file(&dump).await;
 
             // 5. Repoint wp-config.php (if present) at the new DB credentials.
-            rewrite_wp_config(&created.root_dir, &newdb.db_name, &newdb.db_user, &newdb.password)
-                .await;
+            rewrite_wp_config(
+                &created.root_dir,
+                &newdb.db_name,
+                &newdb.db_user,
+                &newdb.password,
+            )
+            .await;
         }
 
         // 6. Record the source key so a re-run reports this site as already
@@ -186,7 +221,10 @@ async fn run_cmd(bin: &str, args: &[&str]) -> Result<(), String> {
         .await
         .map_err(|e| format!("{bin}: {e}"))?;
     if !out.status.success() {
-        return Err(format!("{bin} failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        return Err(format!(
+            "{bin} failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
     }
     Ok(())
 }
@@ -223,9 +261,11 @@ async fn rewrite_wp_config(root_dir: &str, db_name: &str, db_user: &str, db_pass
     let rewritten: Vec<String> = content
         .lines()
         .map(|line| {
-            for (key, val) in
-                [("DB_NAME", db_name), ("DB_USER", db_user), ("DB_PASSWORD", db_pass)]
-            {
+            for (key, val) in [
+                ("DB_NAME", db_name),
+                ("DB_USER", db_user),
+                ("DB_PASSWORD", db_pass),
+            ] {
                 let is_def = line.contains("define")
                     && (line.contains(&format!("'{key}'")) || line.contains(&format!("\"{key}\"")));
                 if is_def {
