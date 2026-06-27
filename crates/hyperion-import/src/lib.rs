@@ -14,6 +14,7 @@ pub mod adapter;
 pub mod cloudpanel;
 pub mod error;
 pub mod ir;
+pub mod panel;
 pub mod planner;
 
 pub use adapter::{Location, SourceAdapter, SourceKind, SourcePanelInfo, SshTarget};
@@ -21,5 +22,8 @@ pub use cloudpanel::CloudPanelAdapter;
 pub use error::ImportError;
 pub use ir::{
     ImportIR, IrCert, IrDatabase, IrDbEngine, IrHosting, IrSiteKind, IrUnsupported, SourceSummary,
+};
+pub use panel::{
+    adapter_for, location_for, ImportPanelReq, ImportPanelResult, ImportedHosting, SkippedHosting,
 };
 pub use planner::{Action, ImportPlan, ImportPlanner, PlannedHosting};

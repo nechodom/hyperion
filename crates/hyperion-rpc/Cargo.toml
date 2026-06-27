@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 hyperion-types = { path = "../hyperion-types" }
 hyperion-validate = { path = "../hyperion-validate" }
+hyperion-import = { path = "../hyperion-import" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

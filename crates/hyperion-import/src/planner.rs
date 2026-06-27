@@ -5,7 +5,7 @@ use crate::ir::{ImportIR, IrHosting, IrSiteKind, IrUnsupported, SourceSummary};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ImportPlan {
     pub source: SourceSummary,
     pub items: Vec<PlannedHosting>,
@@ -22,7 +22,7 @@ impl ImportPlan {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PlannedHosting {
     pub source_key: String,
     pub domain: String,

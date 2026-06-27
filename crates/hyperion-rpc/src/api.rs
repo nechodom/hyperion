@@ -466,6 +466,21 @@ pub trait AgentApi: Send + Sync + 'static {
         manifest_path: String,
     ) -> Result<hyperion_types::HostingImportResult, RpcError>;
 
+    /// Dry-run a third-party control-panel import on this node: detect + extract
+    /// the source (HestiaCP/CloudPanel) and return a per-site plan
+    /// (create/skip/conflict/unsupported). Side-effect-free.
+    async fn hosting_import_panel_plan(
+        &self,
+        req: hyperion_import::ImportPanelReq,
+    ) -> Result<hyperion_import::ImportPlan, RpcError>;
+
+    /// Apply a third-party control-panel import on this node: provision +
+    /// populate every importable site. Runs agent-side (node-local).
+    async fn hosting_import_panel(
+        &self,
+        req: hyperion_import::ImportPanelReq,
+    ) -> Result<hyperion_import::ImportPanelResult, RpcError>;
+
     /// Per-hosting (or cluster-wide) email log.
     async fn email_log_list(
         &self,

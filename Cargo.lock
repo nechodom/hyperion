@@ -1195,6 +1195,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "hyperion-import",
  "hyperion-rpc",
  "hyperion-rpc-client",
  "hyperion-types",
@@ -1452,6 +1453,7 @@ dependencies = [
  "hex",
  "hyperion-adapters",
  "hyperion-auth",
+ "hyperion-import",
  "hyperion-rpc",
  "hyperion-state",
  "hyperion-types",
@@ -1489,6 +1491,7 @@ name = "hyperion-rpc"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "hyperion-import",
  "hyperion-types",
  "hyperion-validate",
  "serde",

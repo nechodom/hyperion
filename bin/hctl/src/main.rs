@@ -174,6 +174,24 @@ enum HostingCmd {
         #[arg(long)]
         token: String,
     },
+    /// Import existing hosting from a third-party control panel
+    /// (HestiaCP / CloudPanel) detected ON THIS node. Reuses
+    /// `hosting create` per site + copies files & databases. Mail and
+    /// DNS are intentionally out of scope (reported, never imported).
+    ///
+    /// Preview first, then drop --dry-run to apply:
+    ///   hctl hosting import-panel --source cloudpanel --mode inplace --dry-run
+    ImportPanel {
+        /// Source panel: cloudpanel | hestiacp.
+        #[arg(long)]
+        source: String,
+        /// Where to read from: inplace (P0) | remote | archive.
+        #[arg(long, default_value = "inplace")]
+        mode: String,
+        /// Preview the plan without creating anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -339,6 +357,21 @@ async fn call(cli: &Cli) -> anyhow::Result<Response> {
         Cmd::Hosting(HostingCmd::Import { manifest }) => Request::HostingImport {
             manifest_path: manifest.clone(),
         },
+        Cmd::Hosting(HostingCmd::ImportPanel {
+            source,
+            mode,
+            dry_run,
+        }) => {
+            let req = hyperion_import::ImportPanelReq {
+                source_kind: source.clone(),
+                mode: mode.clone(),
+            };
+            if *dry_run {
+                Request::HostingImportPanelPlan { req }
+            } else {
+                Request::HostingImportPanel { req }
+            }
+        }
         Cmd::Hosting(HostingCmd::ImportFromUrl { base_url, token }) => {
             Request::HostingImportFromUrl {
                 base_url: base_url.clone(),
@@ -1030,6 +1063,42 @@ fn print_pretty(resp: &Response) {
                 "✓ installed {label}{}",
                 if *activated { " (activated)" } else { "" }
             );
+        }
+        Response::HostingImportPanelPlan(plan) => {
+            println!(
+                "Import plan — source {} {} ({} site(s)):",
+                plan.source.kind,
+                plan.source.version,
+                plan.items.len()
+            );
+            for it in &plan.items {
+                println!(
+                    "  [{:?}] {}  php={}  db={}  — {}",
+                    it.action,
+                    it.domain,
+                    it.php_version.as_deref().unwrap_or("-"),
+                    it.db_count,
+                    it.reason
+                );
+            }
+            for u in &plan.unsupported {
+                println!("  (not imported — {}: {})", u.category, u.detail);
+            }
+        }
+        Response::HostingImportPanel(res) => {
+            println!("{}", res.message);
+            for c in &res.created {
+                println!(
+                    "  ✓ created {} ({}) — {} database(s)",
+                    c.domain, c.hosting_id, c.databases
+                );
+            }
+            for s in &res.skipped {
+                println!("  · skipped {} — {}", s.domain, s.reason);
+            }
+            for u in &res.unsupported {
+                println!("  note: {} not imported — {}", u.category, u.detail);
+            }
         }
         Response::ProfileGetApply(maybe) => match maybe {
             Some(a) => {

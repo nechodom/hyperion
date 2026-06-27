@@ -528,6 +528,14 @@ pub enum Request {
     HostingImport {
         manifest_path: String,
     },
+    /// Dry-run a third-party panel import (HestiaCP/CloudPanel) on this node.
+    HostingImportPanelPlan {
+        req: hyperion_import::ImportPanelReq,
+    },
+    /// Apply a third-party panel import on this node.
+    HostingImportPanel {
+        req: hyperion_import::ImportPanelReq,
+    },
     /// Per-hosting (or cluster-wide) email log.
     EmailLogList {
         /// `None` returns the cluster-wide stream; `Some(hosting_id)`
@@ -1377,6 +1385,8 @@ pub enum Response {
         bytes_b64: String,
     },
     HostingImport(hyperion_types::HostingImportResult),
+    HostingImportPanelPlan(hyperion_import::ImportPlan),
+    HostingImportPanel(hyperion_import::ImportPanelResult),
     HostingImportFromUrl(hyperion_types::HostingImportResult),
     EmailLogList(Vec<hyperion_types::EmailLogEntry>),
     SiteEmailLogList(Vec<hyperion_types::SiteEmailLogEntry>),

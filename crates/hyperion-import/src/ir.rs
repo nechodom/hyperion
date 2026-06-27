@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Everything an adapter could extract from one source panel.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct ImportIR {
     pub source: SourceSummary,
     pub hostings: Vec<IrHosting>,
@@ -16,7 +16,7 @@ pub struct ImportIR {
     pub unsupported: Vec<IrUnsupported>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
 pub struct SourceSummary {
     /// `"hestiacp"` | `"cloudpanel"`.
     pub kind: String,
@@ -25,7 +25,7 @@ pub struct SourceSummary {
     pub host: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IrHosting {
     /// Stable idempotency key: `"<panel>:<owner>:<domain>"`. Recorded on the
     /// created Hyperion hosting so a re-run detects it and reports `Skip`.
@@ -57,7 +57,7 @@ pub enum IrSiteKind {
     ReverseProxy,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IrDatabase {
     pub name: String,
     pub engine: IrDbEngine,
@@ -76,7 +76,7 @@ pub enum IrDbEngine {
     Postgres,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IrCert {
     pub cert_path: String,
     pub key_path: String,
@@ -84,7 +84,7 @@ pub struct IrCert {
     pub letsencrypt: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct IrUnsupported {
     /// `"mail"` | `"dns"` | `"ftp"`.
     pub category: String,
