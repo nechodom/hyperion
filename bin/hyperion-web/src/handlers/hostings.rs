@@ -2239,28 +2239,78 @@ pub async fn post_backup_now(
     ctx: AuthCtx,
     Form(form): Form<BackupNowForm>,
 ) -> Result<Response, AppError> {
+    // ── Synchronous pre-flight (must error immediately) ──
+    // authz gate, selector resolution, dispatch-target resolution, and
+    // the S3-target secret read (master-local, reads 0600 files) all
+    // happen on the request thread so the operator gets auth/lookup
+    // failures right away. Only the long-running BackupNow dispatch —
+    // tar of the whole docroot, DB dump, optional S3 upload, which on a
+    // big site is minutes — moves into the detached worker so closing
+    // the browser no longer aborts the backup.
     let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
-    let target = node_target(&form.target_node);
+    let node = node_target(&form.target_node).map(String::from);
     let s3_targets = resolve_s3_targets(&state).await;
-    let resp =
-        crate::dispatcher::dispatch_to_node(&state, target, Request::BackupNow { sel, s3_targets })
-            .await?;
-    let sel_url = urlencoding(&form.selector);
-    match resp {
-        RpcResponse::BackupNow(_) => {
-            Ok(Redirect::to(&format!("/hostings/{}?backup=started", sel_url)).into_response())
+
+    let actor_uid = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
+    let actor_label = ctx.username.clone();
+    let job_state = state.clone();
+
+    let job_id = crate::handlers::jobs::spawn_job(
+        state.clone(),
+        "backup",
+        Some(&form.selector),
+        "{}",
+        &actor_label,
+        actor_uid,
+        move |reporter| async move {
+            run_backup_now_job(reporter, job_state, node, sel, s3_targets).await;
+        },
+    )
+    .await?;
+
+    Ok(Redirect::to(&format!("/jobs/{}", job_id)).into_response())
+}
+
+/// Background worker: run the backup on the owning node and fold the
+/// resulting archive path / size into the job log.
+async fn run_backup_now_job(
+    reporter: crate::handlers::jobs::JobReporter,
+    state: SharedState,
+    node: Option<String>,
+    sel: HostingSelector,
+    s3_targets: Vec<hyperion_types::S3BackupTarget>,
+) {
+    reporter
+        .step("Backing up — files + database…", 10, "")
+        .await;
+    match crate::dispatcher::dispatch_to_node(
+        &state,
+        node.as_deref(),
+        Request::BackupNow { sel, s3_targets },
+    )
+    .await
+    {
+        Ok(RpcResponse::BackupNow(run)) => {
+            let mut log = format!("state={} bytes_total={}\n", run.state, run.bytes_total);
+            if let Some(p) = &run.archive_path {
+                log.push_str(&format!("archive: {p}\n"));
+            }
+            if let Some(p) = &run.db_dump_path {
+                log.push_str(&format!("db dump: {p}\n"));
+            }
+            reporter.step("Backup complete.", 100, &log).await;
+            reporter.finish(true, None).await;
         }
-        RpcResponse::Error(e) => {
-            let msg = urlencoding(&e.to_string());
-            Ok(
-                Redirect::to(&format!("/hostings/{}?backup_error={}", sel_url, msg))
-                    .into_response(),
-            )
+        Ok(RpcResponse::Error(e)) => reporter.finish(false, Some(e.to_string())).await,
+        Ok(_) => {
+            reporter
+                .finish(false, Some("unexpected agent response".into()))
+                .await
         }
-        _ => Err(AppError::Internal("unexpected response".into())),
+        Err(e) => reporter.finish(false, Some(e.to_string())).await,
     }
 }
 
@@ -2432,28 +2482,70 @@ pub async fn post_wp_install(
         // it later in WP admin.
         no_index: false,
     };
+    // ── Synchronous pre-flight (authz, form parse, owner-node lookup
+    // above) stays on the request thread. Only the WpInstall dispatch —
+    // download core, scaffold DB, run wp-cli, which is tens of seconds —
+    // detaches into the worker so a dropped browser doesn't abort it.
+    //
     // Find owner node so WpInstall lands on the right agent
     // (post-migration the master may not own the row anymore).
-    let target_owned: Option<String> = find_hosting_anywhere(&state, sel.clone())
+    let node: Option<String> = find_hosting_anywhere(&state, sel.clone())
         .await
         .ok()
         .and_then(|(_d, n)| n);
-    let resp = crate::dispatcher::dispatch_to_node(
-        &state,
-        target_owned.as_deref(),
-        Request::WpInstall { sel, req },
+
+    let actor_uid = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
+    let actor_label = ctx.username.clone();
+    let job_state = state.clone();
+    // payload_json carries no secrets — admin_password lives only in
+    // `req`, in memory, never persisted to the job row.
+    let job_id = crate::handlers::jobs::spawn_job(
+        state.clone(),
+        "install",
+        Some(&form.selector),
+        "{}",
+        &actor_label,
+        actor_uid,
+        move |reporter| async move {
+            run_wp_install_job(reporter, job_state, node, sel, req).await;
+        },
     )
     .await?;
-    let sel_url = urlencoding(&form.selector);
-    match resp {
-        RpcResponse::WpInstall(_) => {
-            Ok(Redirect::to(&format!("/hostings/{}?wp=installed", sel_url)).into_response())
+
+    Ok(Redirect::to(&format!("/jobs/{}", job_id)).into_response())
+}
+
+/// Background worker: run the WordPress install on the owning node and
+/// fold the installed version into the job log.
+async fn run_wp_install_job(
+    reporter: crate::handlers::jobs::JobReporter,
+    state: SharedState,
+    node: Option<String>,
+    sel: HostingSelector,
+    req: WpInstallRequest,
+) {
+    reporter
+        .step("Installing WordPress — core + database…", 10, "")
+        .await;
+    match crate::dispatcher::dispatch_to_node(
+        &state,
+        node.as_deref(),
+        Request::WpInstall { sel, req },
+    )
+    .await
+    {
+        Ok(RpcResponse::WpInstall(st)) => {
+            let log = format!("WordPress {} installed at {}\n", st.wp_version, st.site_url);
+            reporter.step("WordPress installed.", 100, &log).await;
+            reporter.finish(true, None).await;
         }
-        RpcResponse::Error(e) => {
-            let msg = urlencoding(&e.to_string());
-            Ok(Redirect::to(&format!("/hostings/{}?wp_error={}", sel_url, msg)).into_response())
+        Ok(RpcResponse::Error(e)) => reporter.finish(false, Some(e.to_string())).await,
+        Ok(_) => {
+            reporter
+                .finish(false, Some("unexpected agent response".into()))
+                .await
         }
-        _ => Err(AppError::Internal("unexpected response".into())),
+        Err(e) => reporter.finish(false, Some(e.to_string())).await,
     }
 }
 
@@ -5115,36 +5207,83 @@ pub async fn post_cert_issue(
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
-    let sel_url = urlencoding(&form.selector);
     let req = CertIssueRequest {
         staging: form.staging.as_deref() == Some("on"),
         require_dns_match: form.require_dns_match.as_deref() != Some("off"),
         extra_sans: vec![],
     };
     let staging = req.staging;
+    // ── Synchronous pre-flight (authz + form parse above). The
+    // owner-node lookup also stays synchronous; only the ACME issuance
+    // dispatch — HTTP-01 challenge round-trips with Let's Encrypt plus an
+    // nginx reload, which can stall on slow DNS/ACME — moves into the
+    // worker so the operator isn't tied to a hung request.
+    //
     // Cert lives on the node that owns the hosting (nginx vhost +
     // /etc/letsencrypt/live both go there). Find the right node
     // before dispatching ACME.
-    let target_owned: Option<String> = find_hosting_anywhere(&state, sel.clone())
+    let node: Option<String> = find_hosting_anywhere(&state, sel.clone())
         .await
         .ok()
         .and_then(|(_d, n)| n);
-    let resp = crate::dispatcher::dispatch_to_node(
-        &state,
-        target_owned.as_deref(),
-        Request::CertIssueAcme { sel, req },
+
+    let actor_uid = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
+    let actor_label = ctx.username.clone();
+    let job_state = state.clone();
+    let job_id = crate::handlers::jobs::spawn_job(
+        state.clone(),
+        "acme_issue",
+        Some(&form.selector),
+        "{}",
+        &actor_label,
+        actor_uid,
+        move |reporter| async move {
+            run_cert_issue_job(reporter, job_state, node, sel, req, staging).await;
+        },
     )
     .await?;
-    match resp {
-        RpcResponse::CertIssueAcme(_) => {
-            let kind = if staging { "staging" } else { "prod" };
-            Ok(Redirect::to(&format!("/hostings/{}?cert={}", sel_url, kind)).into_response())
+
+    Ok(Redirect::to(&format!("/jobs/{}", job_id)).into_response())
+}
+
+/// Background worker: run the ACME issuance on the owning node and fold
+/// the issued cert's issuer + expiry into the job log.
+async fn run_cert_issue_job(
+    reporter: crate::handlers::jobs::JobReporter,
+    state: SharedState,
+    node: Option<String>,
+    sel: HostingSelector,
+    req: CertIssueRequest,
+    staging: bool,
+) {
+    let kind = if staging { "staging" } else { "prod" };
+    reporter
+        .step(&format!("Issuing {kind} certificate via ACME…"), 10, "")
+        .await;
+    match crate::dispatcher::dispatch_to_node(
+        &state,
+        node.as_deref(),
+        Request::CertIssueAcme { sel, req },
+    )
+    .await
+    {
+        Ok(RpcResponse::CertIssueAcme(info)) => {
+            let log = format!(
+                "issued for {} (issuer={}, not_after={})\n",
+                info.domain, info.issuer, info.not_after
+            );
+            reporter
+                .step(&format!("{kind} certificate issued."), 100, &log)
+                .await;
+            reporter.finish(true, None).await;
         }
-        RpcResponse::Error(e) => {
-            let msg = urlencoding(&e.to_string());
-            Ok(Redirect::to(&format!("/hostings/{}?cert_error={}", sel_url, msg)).into_response())
+        Ok(RpcResponse::Error(e)) => reporter.finish(false, Some(e.to_string())).await,
+        Ok(_) => {
+            reporter
+                .finish(false, Some("unexpected agent response".into()))
+                .await
         }
-        _ => Err(AppError::Internal("unexpected response".into())),
+        Err(e) => reporter.finish(false, Some(e.to_string())).await,
     }
 }
 
@@ -7582,35 +7721,80 @@ pub async fn post_restore(
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
-    let sel_url = urlencoding(&form.selector);
+    // ── Synchronous pre-flight (authz, form parse, restore-mode parse,
+    // owner-node lookup). Only the BackupRestore dispatch — untar of the
+    // whole archive plus a DB import, minutes on a large site — detaches
+    // into the worker so a dropped browser can't abort a half-applied
+    // restore.
+    //
     // The backup archive + the hosting tree live on the owning node —
     // dispatch there (archive_path is the worker's local path).
-    let target_owned: Option<String> = find_hosting_anywhere(&state, sel.clone())
+    let node: Option<String> = find_hosting_anywhere(&state, sel.clone())
         .await
         .ok()
         .and_then(|(_d, n)| n);
-    let resp = crate::dispatcher::dispatch_to_node(
-        &state,
-        target_owned.as_deref(),
-        Request::BackupRestore {
-            sel,
-            archive_path: form.archive_path.trim().to_string(),
-            mode: parse_restore_mode(&form.mode),
+    let archive_path = form.archive_path.trim().to_string();
+    let mode = parse_restore_mode(&form.mode);
+
+    let actor_uid = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
+    let actor_label = ctx.username.clone();
+    let job_state = state.clone();
+    let job_id = crate::handlers::jobs::spawn_job(
+        state.clone(),
+        "restore",
+        Some(&form.selector),
+        "{}",
+        &actor_label,
+        actor_uid,
+        move |reporter| async move {
+            run_restore_job(reporter, job_state, node, sel, archive_path, mode).await;
         },
     )
     .await?;
-    match resp {
-        RpcResponse::BackupRestore => {
-            Ok(Redirect::to(&format!("/hostings/{}?restore=ok", sel_url)).into_response())
+
+    Ok(Redirect::to(&format!("/jobs/{}", job_id)).into_response())
+}
+
+/// Background worker: restore a backup archive on the owning node.
+async fn run_restore_job(
+    reporter: crate::handlers::jobs::JobReporter,
+    state: SharedState,
+    node: Option<String>,
+    sel: HostingSelector,
+    archive_path: String,
+    mode: hyperion_types::BackupRestoreMode,
+) {
+    reporter
+        .step(
+            "Restoring backup — files + database…",
+            10,
+            &format!("archive: {archive_path}\n"),
+        )
+        .await;
+    match crate::dispatcher::dispatch_to_node(
+        &state,
+        node.as_deref(),
+        Request::BackupRestore {
+            sel,
+            archive_path,
+            mode,
+        },
+    )
+    .await
+    {
+        Ok(RpcResponse::BackupRestore) => {
+            reporter
+                .step("Restore complete.", 100, "✓ archive restored")
+                .await;
+            reporter.finish(true, None).await;
         }
-        RpcResponse::Error(e) => {
-            let msg = urlencoding(&e.to_string());
-            Ok(
-                Redirect::to(&format!("/hostings/{}?restore_error={}", sel_url, msg))
-                    .into_response(),
-            )
+        Ok(RpcResponse::Error(e)) => reporter.finish(false, Some(e.to_string())).await,
+        Ok(_) => {
+            reporter
+                .finish(false, Some("unexpected agent response".into()))
+                .await
         }
-        _ => Err(AppError::Internal("unexpected response".into())),
+        Err(e) => reporter.finish(false, Some(e.to_string())).await,
     }
 }
 
@@ -7879,36 +8063,70 @@ pub async fn post_wp_staging_push(
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
-    let sel_url = urlencoding(&form.selector);
+    // ── Synchronous pre-flight (authz, staging-hostname KV lookup,
+    // owner-node lookup). Only the WpStagingPush dispatch — rsync the
+    // staging docroot over prod plus a search-replace DB rewrite, which
+    // can run for a while — detaches into the worker so a dropped
+    // browser can't abort a half-applied push.
+    //
     // Push must target the same staging hostname create used.
     let staging_override = read_master_kv(&state, &form.selector, "staging_domain").await;
-    let target: Option<String> = find_hosting_anywhere(&state, sel.clone())
+    let node: Option<String> = find_hosting_anywhere(&state, sel.clone())
         .await
         .ok()
         .and_then(|(_d, n)| n);
-    let resp = crate::dispatcher::dispatch_to_node(
-        &state,
-        target.as_deref(),
-        Request::WpStagingPush {
-            sel,
-            staging_domain: staging_override,
+
+    let actor_uid = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
+    let actor_label = ctx.username.clone();
+    let job_state = state.clone();
+    let job_id = crate::handlers::jobs::spawn_job(
+        state.clone(),
+        "staging_push",
+        Some(&form.selector),
+        "{}",
+        &actor_label,
+        actor_uid,
+        move |reporter| async move {
+            run_wp_staging_push_job(reporter, job_state, node, sel, staging_override).await;
         },
     )
     .await?;
-    match resp {
-        RpcResponse::WpStagingPush => Ok(Redirect::to(&format!(
-            "/hostings/{}?staging=pushed#wordpress",
-            sel_url
-        ))
-        .into_response()),
-        RpcResponse::Error(e) => {
-            let msg = urlencoding(&e.to_string());
-            Ok(Redirect::to(&format!(
-                "/hostings/{}?staging_error={}#wordpress",
-                sel_url, msg
-            ))
-            .into_response())
+
+    Ok(Redirect::to(&format!("/jobs/{}", job_id)).into_response())
+}
+
+/// Background worker: push the staging site over production on the
+/// owning node.
+async fn run_wp_staging_push_job(
+    reporter: crate::handlers::jobs::JobReporter,
+    state: SharedState,
+    node: Option<String>,
+    sel: HostingSelector,
+    staging_domain: Option<String>,
+) {
+    reporter.step("Pushing staging → production…", 10, "").await;
+    match crate::dispatcher::dispatch_to_node(
+        &state,
+        node.as_deref(),
+        Request::WpStagingPush {
+            sel,
+            staging_domain,
+        },
+    )
+    .await
+    {
+        Ok(RpcResponse::WpStagingPush) => {
+            reporter
+                .step("Staging pushed to production.", 100, "✓ push complete")
+                .await;
+            reporter.finish(true, None).await;
         }
-        _ => Err(AppError::Internal("unexpected response".into())),
+        Ok(RpcResponse::Error(e)) => reporter.finish(false, Some(e.to_string())).await,
+        Ok(_) => {
+            reporter
+                .finish(false, Some("unexpected agent response".into()))
+                .await
+        }
+        Err(e) => reporter.finish(false, Some(e.to_string())).await,
     }
 }

@@ -240,7 +240,12 @@ pub async fn post_plan(
     Ok(Html(tpl.render()?).into_response())
 }
 
-/// POST /import/apply — actually run the import on the chosen node.
+/// POST /import/apply — run the import as a background job on the chosen node.
+///
+/// The import can take minutes (large docroots, DB dumps, remote ssh/rsync), so
+/// it must NOT be tied to the browser request: we open a job, detach the work
+/// onto a tokio task via `spawn_job`, and redirect to the live progress page.
+/// Losing the browser connection no longer aborts the import.
 pub async fn post_apply(
     State(state): State<SharedState>,
     ctx: AuthCtx,
@@ -254,51 +259,88 @@ pub async fn post_apply(
         mode: form.mode.clone(),
         ssh: build_ssh(&form),
     };
-    let resp = crate::dispatcher::dispatch_to_node(
-        &state,
-        target(&form.node_id),
-        Request::HostingImportPanel { req },
+    // Owned bits captured by the detached task (no secrets in the job payload —
+    // the ssh key lives only in `req`, in memory, never persisted to the row).
+    let node = target(&form.node_id).map(String::from);
+    let actor_uid = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
+    let actor_label = ctx.username.clone();
+    let label = format!("{} ({})", form.source_kind, form.mode);
+    let job_state = state.clone();
+
+    let job_id = crate::handlers::jobs::spawn_job(
+        state.clone(),
+        "panel_import",
+        Some(&label),
+        "{}",
+        &actor_label,
+        actor_uid,
+        move |reporter| async move {
+            run_panel_import_job(reporter, job_state, node, req).await;
+        },
     )
     .await?;
 
-    let mut tpl = ImportTpl::base(&state, &ctx, node_options(&state).await);
-    tpl.source_kind = form.source_kind.clone();
-    tpl.mode = form.mode.clone();
-    tpl.node_id = form.node_id.clone();
-    echo_ssh(&mut tpl, &form);
-    match resp {
-        RpcResponse::HostingImportPanel(res) => {
-            tpl.stage = "result";
-            tpl.result_msg = res.message.clone();
-            tpl.created = res
-                .created
-                .iter()
-                .map(|c| KvRow {
-                    a: c.domain.clone(),
-                    b: format!("{} · {} database(s)", c.hosting_id, c.databases),
-                })
-                .collect();
-            tpl.skipped = res
-                .skipped
-                .iter()
-                .map(|s| KvRow {
-                    a: s.domain.clone(),
-                    b: s.reason.clone(),
-                })
-                .collect();
-            tpl.notes = res
-                .unsupported
-                .iter()
-                .map(|u| KvRow {
-                    a: u.category.clone(),
-                    b: u.detail.clone(),
-                })
-                .collect();
+    Ok(Redirect::to(&format!("/jobs/{}", job_id)).into_response())
+}
+
+/// Background worker: dispatch the import RPC and fold the per-site outcome into
+/// the job log. The import RPC is one coarse step (the node does all sites then
+/// replies); progress is start → done, with the full created/skipped/unsupported
+/// breakdown captured in the job's log tail.
+async fn run_panel_import_job(
+    reporter: crate::handlers::jobs::JobReporter,
+    state: SharedState,
+    node: Option<String>,
+    req: hyperion_import::ImportPanelReq,
+) {
+    let source = req.source_kind.clone();
+    let where_ = if req.mode == "remote" {
+        format!(
+            "{} over SSH",
+            req.ssh
+                .as_ref()
+                .map(|s| s.host.as_str())
+                .unwrap_or("remote")
+        )
+    } else {
+        "this node (in-place)".to_string()
+    };
+    reporter
+        .step(&format!("Importing {source} from {where_}…"), 10, "")
+        .await;
+
+    match crate::dispatcher::dispatch_to_node(
+        &state,
+        node.as_deref(),
+        Request::HostingImportPanel { req },
+    )
+    .await
+    {
+        Ok(RpcResponse::HostingImportPanel(res)) => {
+            let mut log = String::new();
+            for c in &res.created {
+                log.push_str(&format!(
+                    "✓ created {} ({} database(s))\n",
+                    c.domain, c.databases
+                ));
+            }
+            for s in &res.skipped {
+                log.push_str(&format!("· skipped {} — {}\n", s.domain, s.reason));
+            }
+            for u in &res.unsupported {
+                log.push_str(&format!("(not imported — {}: {})\n", u.category, u.detail));
+            }
+            reporter.step(&res.message, 100, &log).await;
+            reporter.finish(true, None).await;
         }
-        RpcResponse::Error(e) => tpl.error = Some(e.to_string()),
-        _ => tpl.error = Some("unexpected response from node".into()),
+        Ok(RpcResponse::Error(e)) => reporter.finish(false, Some(e.to_string())).await,
+        Ok(_) => {
+            reporter
+                .finish(false, Some("unexpected response from node".into()))
+                .await
+        }
+        Err(e) => reporter.finish(false, Some(e.to_string())).await,
     }
-    Ok(Html(tpl.render()?).into_response())
 }
 
 fn action_str(a: &hyperion_import::Action) -> &'static str {
