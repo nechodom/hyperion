@@ -198,7 +198,9 @@ fn db_engine(raw: &str) -> IrDbEngine {
     }
 }
 
-/// `clpctl --version`, trimmed first line.
+/// `clpctl --version` → just the `X.Y.Z` version token. The CLI prints a whole
+/// banner ("CloudPanel CLI 6.0.8 (env: prod …) #StandWithUkraine …"), so pluck
+/// the first dotted-numeric word rather than showing the lot.
 async fn clpctl_version() -> Option<String> {
     let out = tokio::process::Command::new("clpctl")
         .arg("--version")
@@ -208,11 +210,10 @@ async fn clpctl_version() -> Option<String> {
     if !out.status.success() {
         return None;
     }
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .next()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.split_whitespace()
+        .find(|t| t.contains('.') && t.chars().next().is_some_and(|c| c.is_ascii_digit()))
+        .map(String::from)
 }
 
 /// Run a read-only query via `sqlite3 -json` and return the rows as objects.
