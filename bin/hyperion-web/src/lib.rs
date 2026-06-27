@@ -443,6 +443,9 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/emails", get(handlers::emails::get_emails))
         .route("/install", get(handlers::install::get_install))
         .route("/install/invite", post(handlers::install::post_invite))
+        .route("/import", get(handlers::import_panel::get_import))
+        .route("/import/plan", post(handlers::import_panel::post_plan))
+        .route("/import/apply", post(handlers::import_panel::post_apply))
         .route(
             "/install/invite/revoke",
             post(handlers::install::post_revoke),

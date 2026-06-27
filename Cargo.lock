@@ -1601,6 +1601,7 @@ dependencies = [
  "hyperion-adapters",
  "hyperion-auth",
  "hyperion-core",
+ "hyperion-import",
  "hyperion-rpc",
  "hyperion-rpc-client",
  "hyperion-rpc-server",

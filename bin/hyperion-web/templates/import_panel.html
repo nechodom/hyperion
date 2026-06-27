@@ -1,0 +1,107 @@
+{% extends "base.html" %}
+{% block title %}Import from another panel · Hyperion{% endblock %}
+{% block main %}
+
+<div class="page-header">
+  <div>
+    <h1>Import from another panel</h1>
+    <div class="subtitle">Migrate existing sites &amp; databases from <strong>HestiaCP</strong> or <strong>CloudPanel</strong> into Hyperion. The import runs on the chosen node; preview a dry-run first, then apply. Email and DNS are out of scope — they are reported, never imported.</div>
+  </div>
+</div>
+
+{% if let Some(e) = error %}
+<div class="flash error"><div class="flash-body">{{ e }}</div></div>
+{% endif %}
+
+<div class="card" style="margin-bottom:1rem">
+  <form method="post" action="/import/plan">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="field-row">
+      <div class="field">
+        <label>Source panel</label>
+        <select name="source_kind">
+          <option value="cloudpanel" {% if source_kind == "cloudpanel" %}selected{% endif %}>CloudPanel</option>
+          <option value="hestiacp" {% if source_kind == "hestiacp" %}selected{% endif %}>HestiaCP</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Run on node</label>
+        <select name="node_id">
+          {% for n in nodes %}
+          <option value="{{ n.id }}" {% if node_id == n.id %}selected{% endif %}>{{ n.label }}</option>
+          {% endfor %}
+        </select>
+        <div class="hint">The node where the source panel is installed (in-place).</div>
+      </div>
+    </div>
+    <input type="hidden" name="mode" value="inplace">
+    <button type="submit" class="btn">Preview (dry-run)</button>
+  </form>
+</div>
+
+{% if stage == "plan" || stage == "result" %}
+<div class="card" style="margin-bottom:1rem">
+  <h3 style="margin-top:0">Plan — {{ source_label }} {{ source_version }}</h3>
+  {% if plan_rows.is_empty() && stage == "plan" %}
+    <p class="muted">No importable sites found on this node.</p>
+  {% else if stage == "plan" %}
+  <div class="no-pad-table">
+    <table>
+      <thead><tr><th>Action</th><th>Domain</th><th>PHP</th><th>DBs</th><th>Notes</th></tr></thead>
+      <tbody>
+      {% for r in plan_rows %}
+        <tr>
+          <td><span class="pill {% if r.action == "create" %}ok{% else if r.action == "conflict" %}warn{% else %}{% endif %}">{{ r.action }}</span></td>
+          <td>{{ r.domain }}</td>
+          <td>{{ r.php }}</td>
+          <td>{{ r.db }}</td>
+          <td class="text-soft small">{{ r.reason }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+
+  {% if !notes.is_empty() %}
+  <div class="text-soft small" style="margin-top:0.75rem">
+    {% for n in notes %}
+    <div>· <strong>{{ n.a }}</strong> not imported — {{ n.b }}</div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if stage == "plan" %}
+  <form method="post" action="/import/apply" style="margin-top:1rem"
+        onsubmit="return confirm('Create the planned hostings on this node?');">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="source_kind" value="{{ source_kind }}">
+    <input type="hidden" name="mode" value="{{ mode }}">
+    <input type="hidden" name="node_id" value="{{ node_id }}">
+    <button type="submit" class="btn btn-primary">Apply import</button>
+    <span class="text-soft small" style="margin-left:0.5rem">Creates a Hyperion hosting per “create” row, copies files, and restores each database.</span>
+  </form>
+  {% endif %}
+</div>
+{% endif %}
+
+{% if stage == "result" %}
+<div class="card">
+  <h3 style="margin-top:0">Result</h3>
+  <p>{{ result_msg }}</p>
+  {% if !created.is_empty() %}
+  <div style="margin-bottom:0.5rem"><strong>Imported</strong></div>
+  {% for c in created %}<div class="small">✓ {{ c.a }} <span class="text-soft">({{ c.b }})</span></div>{% endfor %}
+  {% endif %}
+  {% if !skipped.is_empty() %}
+  <div style="margin:0.75rem 0 0.5rem"><strong>Skipped</strong></div>
+  {% for s in skipped %}<div class="small text-soft">· {{ s.a }} — {{ s.b }}</div>{% endfor %}
+  {% endif %}
+  <div style="margin-top:1rem">
+    <a class="btn" href="/hostings">View hostings</a>
+    <a class="btn" href="/import">Import another</a>
+  </div>
+</div>
+{% endif %}
+
+{% endblock %}
