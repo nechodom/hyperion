@@ -1326,6 +1326,22 @@ mod tests {
         async fn agent_repin(&self) -> Result<Option<String>, RpcError> {
             Ok(None)
         }
+        async fn hosting_import_panel_plan(
+            &self,
+            _: hyperion_import::ImportPanelReq,
+        ) -> Result<hyperion_import::ImportPlan, RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
+        }
+        async fn hosting_import_panel(
+            &self,
+            _: hyperion_import::ImportPanelReq,
+        ) -> Result<hyperion_import::ImportPanelResult, RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
+        }
         async fn hosting_create(&self, _: HostingCreateReq) -> Result<HostingCreated, RpcError> {
             Err(RpcError::Internal {
                 message: "not supported by this agent".into(),
