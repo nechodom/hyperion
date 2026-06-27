@@ -101,7 +101,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .await?;
 
         // 2. Copy the source docroot into the new hosting's docroot
-        //    (created.root_dir == <host_root>/htdocs).
+        //    (created.root_dir == <host_root>/htdocs). First drop the default
+        //    landing index.html create() planted, so it doesn't shadow the
+        //    imported site's own index.php/index.html (nginx prefers .html).
+        let _ = tokio::fs::remove_file(Path::new(&created.root_dir).join("index.html")).await;
         if Path::new(&h.docroot).is_dir() {
             run_cmd("cp", &["-a", &format!("{}/.", h.docroot), &created.root_dir])
                 .await
