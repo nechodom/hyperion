@@ -5801,17 +5801,82 @@ pub async fn post_bulk(
         )
         .into_response());
     }
+    // Validate the action up-front so an unknown verb fails fast
+    // (synchronously) instead of erroring inside the background loop.
+    if !matches!(
+        form.action.as_str(),
+        "suspend" | "resume" | "backup" | "delete" | "install_asset"
+    ) {
+        return Err(AppError::BadRequest(format!(
+            "unknown bulk action: {}",
+            form.action
+        )));
+    }
     let activate = matches!(form.activate.as_deref(), Some("on" | "true" | "1"));
-    let mut ok = 0;
-    let mut errs: Vec<String> = vec![];
-    // Resolve S3 targets once for the whole bulk run (only the backup action
-    // uses them); each backup dispatch carries them to the owning node.
-    let bulk_s3_targets = if form.action == "backup" {
+    // Resolve S3 targets once for the whole bulk run (secret read — stays
+    // synchronous); only the backup action uses them.
+    let s3_targets = if form.action == "backup" {
         resolve_s3_targets(&state).await
     } else {
         Vec::new()
     };
-    for sel_str in &form.selected {
+
+    // The loop can span many hostings and minutes of work (backups, installs),
+    // so run it as a detached background job with per-item progress instead of
+    // blocking the request — a browser disconnect won't abort the batch.
+    let actor_uid = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
+    let actor_label = ctx.username.clone();
+    let action = form.action.clone();
+    let selected = form.selected.clone();
+    let asset_id = form.asset_id_parsed();
+    let label = format!("{} × {} hosting(s)", action, selected.len());
+    let job_state = state.clone();
+
+    let job_id = crate::handlers::jobs::spawn_job(
+        state.clone(),
+        "bulk",
+        Some(&label),
+        "{}",
+        &actor_label,
+        actor_uid,
+        move |reporter| async move {
+            run_bulk_job(
+                reporter, job_state, action, selected, s3_targets, asset_id, activate,
+            )
+            .await;
+        },
+    )
+    .await?;
+
+    Ok(Redirect::to(&format!("/jobs/{}", job_id)).into_response())
+}
+
+/// Background worker for a bulk action: applies `action` to each selected
+/// hosting on its owning node, ticking per-item progress into the job. A
+/// per-hosting failure is collected and the run continues; the job ends
+/// `failed` (red) iff any item failed, with every failure listed in the log.
+#[allow(clippy::too_many_arguments)]
+async fn run_bulk_job(
+    reporter: crate::handlers::jobs::JobReporter,
+    state: SharedState,
+    action: String,
+    selected: Vec<String>,
+    s3_targets: Vec<hyperion_types::S3BackupTarget>,
+    asset_id: i64,
+    activate: bool,
+) {
+    let total = selected.len().max(1) as i64;
+    let mut ok = 0i64;
+    let mut errs: Vec<String> = vec![];
+    for (i, sel_str) in selected.iter().enumerate() {
+        let pct = (((i as i64) * 100) / total).clamp(1, 99);
+        reporter
+            .step(
+                &format!("{action} {sel_str} ({}/{})", i + 1, selected.len()),
+                pct,
+                "",
+            )
+            .await;
         let sel = match parse_selector(sel_str) {
             Ok(s) => s,
             Err(e) => {
@@ -5819,17 +5884,13 @@ pub async fn post_bulk(
                 continue;
             }
         };
-        // For multi-node correctness: every per-hosting action —
-        // including backup — has to land on the node that actually owns
-        // the hosting (backups are stored per node, and BackupNow on the
-        // master NotFounds for a worker-hosted row). Look it up first
-        // (best-effort — single-node setups treat all hostings as local).
+        // Land each action on the node that owns the hosting (backups are
+        // stored per node, and an action on the master NotFounds a worker row).
         let target_owned: Option<String> = find_hosting_anywhere(&state, sel.clone())
             .await
             .ok()
             .and_then(|(_d, n)| n);
-        let target = target_owned.as_deref();
-        let req = match form.action.as_str() {
+        let req = match action.as_str() {
             "suspend" => Request::HostingSuspend {
                 sel,
                 reason: hyperion_types::SuspendReason::Manual {
@@ -5839,7 +5900,7 @@ pub async fn post_bulk(
             "resume" => Request::HostingResume(sel),
             "backup" => Request::BackupNow {
                 sel,
-                s3_targets: bulk_s3_targets.clone(),
+                s3_targets: s3_targets.clone(),
             },
             "delete" => Request::HostingDelete {
                 sel,
@@ -5850,40 +5911,38 @@ pub async fn post_bulk(
             },
             "install_asset" => Request::WpInstallFromAsset {
                 sel,
-                asset_id: form.asset_id_parsed(),
+                asset_id,
                 activate,
             },
-            other => {
-                return Err(AppError::BadRequest(format!(
-                    "unknown bulk action: {other}"
-                )));
+            _ => {
+                // Pre-validated in the handler; defensive only.
+                errs.push(format!("{sel_str}: unknown action {action}"));
+                continue;
             }
         };
-        let result = crate::dispatcher::dispatch_to_node(&state, target, req).await;
-        match result {
+        match crate::dispatcher::dispatch_to_node(&state, target_owned.as_deref(), req).await {
             Ok(RpcResponse::Error(e)) => errs.push(format!("{sel_str}: {e}")),
             Ok(_) => ok += 1,
             Err(e) => errs.push(format!("{sel_str}: {e}")),
         }
     }
-    let flash = if errs.is_empty() {
-        // NOTE: both arms yield "ok" — this looks like a vestigial
-        // singular/plural branch that was never finished. Preserving behavior
-        // verbatim (no message change) and allowing the lint; flagged for a
-        // human to decide the intended wording.
-        #[allow(clippy::if_same_then_else)]
-        let suffix = if ok == 1 { "ok" } else { "ok" };
-        format!("{} {} {}", ok, form.action, suffix)
+
+    let noun = if ok == 1 { "hosting" } else { "hostings" };
+    if errs.is_empty() {
+        reporter
+            .step(&format!("{action}: {ok} {noun} ok"), 100, "")
+            .await;
+        reporter.finish(true, None).await;
     } else {
-        format!(
-            "{} succeeded, {} failed: {}",
-            ok,
-            errs.len(),
-            errs.into_iter().take(3).collect::<Vec<_>>().join("; ")
-        )
-    };
-    let q = urlencoding(&flash);
-    Ok(Redirect::to(&format!("/hostings?bulk_flash={}", q)).into_response())
+        let summary = format!("{action}: {ok} {noun} ok, {} failed", errs.len());
+        reporter.step(&summary, 100, &errs.join("\n")).await;
+        reporter
+            .finish(
+                false,
+                Some(format!("{} of {} failed", errs.len(), selected.len())),
+            )
+            .await;
+    }
 }
 
 /// POST /hostings/:sel/wp/plugins/action
