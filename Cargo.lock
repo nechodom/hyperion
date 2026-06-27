@@ -1526,6 +1526,7 @@ dependencies = [
  "chrono",
  "hyperion-adapters",
  "hyperion-core",
+ "hyperion-import",
  "hyperion-rpc",
  "hyperion-rpc-client",
  "hyperion-state",
