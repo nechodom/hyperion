@@ -15,7 +15,7 @@
 
 <div class="card" style="margin-bottom:1rem">
   <form method="post" action="/import/plan">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <div class="field-row">
       <div class="field">
         <label>Source panel</label>
@@ -74,7 +74,7 @@
   {% if stage == "plan" %}
   <form method="post" action="/import/apply" style="margin-top:1rem"
         onsubmit="return confirm('Create the planned hostings on this node?');">
-    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <input type="hidden" name="source_kind" value="{{ source_kind }}">
     <input type="hidden" name="mode" value="{{ mode }}">
     <input type="hidden" name="node_id" value="{{ node_id }}">
