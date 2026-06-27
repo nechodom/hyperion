@@ -157,8 +157,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         })?;
         let _ = crate::ensure_ancestors_traversable(Path::new(&created.root_dir)).await;
 
-        // 4. DB: dump the source DB and load it into the freshly-created one
-        //    (in-place: same MariaDB instance, root socket auth).
+        // 4. DB: dump the source DB and load it into the freshly-created one,
+        //    using the engine-appropriate tool. Reuses Hyperion's own backup
+        //    helpers so auth matches backup_now (in-place: same DB server).
         if let (Some(srcdb), Some(newdb)) = (h.databases.first(), created.db.as_ref()) {
             let dump = format!(
                 "/var/lib/hyperion/migration/import-{}.sql",
@@ -167,18 +168,37 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             if let Some(parent) = Path::new(&dump).parent() {
                 let _ = tokio::fs::create_dir_all(parent).await;
             }
-            dump_mariadb(&srcdb.name, &dump).await.map_err(|reason| {
-                RpcError::ProvisioningFailed {
-                    stage: "import_db_dump".into(),
-                    reason,
+            let dump_path = Path::new(&dump);
+            match srcdb.engine {
+                IrDbEngine::Postgres => {
+                    hyperion_adapters::backup::dump_postgres(&srcdb.name, dump_path)
+                        .await
+                        .map_err(|e| RpcError::ProvisioningFailed {
+                            stage: "import_db_dump".into(),
+                            reason: e.to_string(),
+                        })?;
+                    hyperion_adapters::backup::restore_postgres_dump(&newdb.db_name, dump_path)
+                        .await
+                        .map_err(|e| RpcError::ProvisioningFailed {
+                            stage: "import_db_restore".into(),
+                            reason: e.to_string(),
+                        })?;
                 }
-            })?;
-            hyperion_adapters::backup::restore_mariadb_dump(&newdb.db_name, Path::new(&dump))
-                .await
-                .map_err(|e| RpcError::ProvisioningFailed {
-                    stage: "import_db_restore".into(),
-                    reason: e.to_string(),
-                })?;
+                _ => {
+                    hyperion_adapters::backup::dump_mariadb(&srcdb.name, dump_path)
+                        .await
+                        .map_err(|e| RpcError::ProvisioningFailed {
+                            stage: "import_db_dump".into(),
+                            reason: e.to_string(),
+                        })?;
+                    hyperion_adapters::backup::restore_mariadb_dump(&newdb.db_name, dump_path)
+                        .await
+                        .map_err(|e| RpcError::ProvisioningFailed {
+                            stage: "import_db_restore".into(),
+                            reason: e.to_string(),
+                        })?;
+                }
+            }
             let _ = tokio::fs::remove_file(&dump).await;
 
             // 5. Repoint wp-config.php (if present) at the new DB credentials.
@@ -225,27 +245,6 @@ async fn run_cmd(bin: &str, args: &[&str]) -> Result<(), String> {
             "{bin} failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         ));
-    }
-    Ok(())
-}
-
-/// `mysqldump` a database to `out` via the local root socket (in-place).
-async fn dump_mariadb(db: &str, out: &str) -> Result<(), String> {
-    let f = std::fs::File::create(out).map_err(|e| format!("create dump file: {e}"))?;
-    let status = tokio::process::Command::new("mysqldump")
-        .args([
-            "--single-transaction",
-            "--no-tablespaces",
-            "--default-character-set=utf8mb4",
-            "--",
-            db,
-        ])
-        .stdout(std::process::Stdio::from(f))
-        .status()
-        .await
-        .map_err(|e| format!("mysqldump spawn: {e}"))?;
-    if !status.success() {
-        return Err(format!("mysqldump exited {status}"));
     }
     Ok(())
 }
