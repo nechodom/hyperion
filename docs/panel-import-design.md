@@ -12,7 +12,7 @@
 2. **DB credentials** — v1 **resets** the DB password (`hosting_create` mints fresh + `db_reset_password`) and **rewrites the app config** (`wp-config.php` etc.) during file staging. Carrying MySQL/PG auth hashes is **P2** (for non-WP apps that can't be config-rewritten).
 3. **Domain conflict** — v1 ships **Skip-on-conflict only**. "Rename alias" → P1; guarded "overwrite" → P2.
 4. **Remote SSH key** — handled **ephemerally**: written to a `0600` temp file for the job, deleted on completion, **never persisted to the DB**; if a field is unavoidable on the wire it goes through `RedactedFields`. Remote mode is P1.
-5. **Hestia mail** — treated as **P2 / optional**. v1 exports Hestia mail + DNS to an operator report; it does not import them (needs net-new Hyperion mail/DNS subsystems). This keeps P0–P1 lean.
+5. **Mail & DNS — permanently out of scope (maintainer decision).** Hyperion will not implement email or DNS-server management, so the importer never imports mail or DNS and builds **no** export tooling for them. It only *reports* that they exist (e.g. "this Hestia box had N mailboxes / N zones — migrate them separately"). No mail/DNS code, in any phase.
 6. **Node/Python/proxy sites** — map to Hyperion `kind="reverse_proxy"` + `proxy_upstream_url`. **P0 covers PHP + static only**; proxy-type sites are flagged `Unsupported` in the P0 dry-run and added in P1.
 
 ---
@@ -26,8 +26,8 @@
 - A **dry-run plan** previewing create/skip/conflict/unsupported before any write.
 
 ### Explicitly OUT for v1
-- **Mail.** CloudPanel manages none (nothing to import). Hestia does (Exim+Dovecot) but Hyperion has no mail-domain/mailbox/hash-transplant RPC → P2+.
-- **Authoritative DNS.** Neither panel's zones are recreated in Hyperion (Hyperion doesn't own zones). Hestia zones are exported to a report.
+- **Mail — out of scope, permanently.** Hyperion will not implement email management (maintainer decision). CloudPanel manages no mail anyway; Hestia's Exim/Dovecot mailboxes are **not** imported and no export tooling is built — the importer only notes they exist.
+- **Authoritative DNS — out of scope, permanently.** Hyperion will not run or manage a DNS server (maintainer decision). Neither panel's zones are recreated or exported; the importer only notes that DNS lives elsewhere and must be migrated separately.
 - FTP accounts, multi-mailbox, billing-from-source, source audit trail, atomic whole-box convert.
 
 ### Honesty rule (in the UI)
@@ -80,7 +80,7 @@ Import engine lives in `hyperion-core`, runs **inside the agent** (same place `c
 | Cron | `cron.conf` / `/var/spool/cron/crontabs/<u>` | re-applied (filter Hestia `admin` crons) | S |
 | SSL (real) | `data/users/<u>/ssl/<d>.pem` + `.key` | `cert_upload` | S |
 | SSL (`LETSENCRYPT=yes`) | — | re-issue via `cert_issue_acme` | S |
-| Mail / DNS | `mail.conf`, `dns/<d>.conf` | none (gaps #1,#2) | O (export to report) |
+| Mail / DNS | — | none — **permanently out of scope** | O (note only; never imported or exported) |
 | FTP / SSH keys | `web.conf FTP_*` / `~/.ssh/authorized_keys` | `sftp_set` (needs hosting first) | N (P1) |
 
 ### CloudPanel → Hyperion
@@ -148,7 +148,7 @@ Two throwaway source VMs (real panels) + one Hyperion target; assert parity from
 
 - **P0 (MVP, ~1–1.5 wk): CloudPanel sites + DBs, in-place.** Highest value, lowest risk (clean SQLite source, no mail/DNS). Crate skeleton + IR + `CloudPanelAdapter` (in-place) + planner + dry-run + apply (create/restore + chown + `db_reset_password` + wp-config rewrite). `hctl` only, no web UI. Ships independently.
 - **P1 (~2–3 wk):** `HestiaAdapter` (CLI + flat-file, Vesta) gated on `*_SYSTEM`; remote + archive modes; web wizard; `cert_upload` + ACME re-issue; `sftp_set` for SSH keys; "rename alias" conflict option; proxy-type sites.
-- **P2 (as appetite allows):** Hestia mail import (net-new Hyperion mail RPCs — big, maybe never); DNS export-to-zonefile helper; DB hash transplant; overwrite-on-conflict; profile-apply at import; source audit-trail fields.
+- **P2 (as appetite allows):** DB auth-hash transplant (skip the forced password reset for non-WP apps); overwrite-on-conflict; profile-apply at import time; source audit-trail fields on imported hostings. **Mail and DNS are NOT here — they are permanently out of scope.**
 
 Each phase is independently shippable; P0 alone closes the most common request ("I'm on CloudPanel, get me onto Hyperion").
 
