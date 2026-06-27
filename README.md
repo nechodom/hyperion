@@ -7,19 +7,35 @@
 One binary on each server, one web UI on the master.
 Provisions PHP / static / Node.js sites end-to-end —
 nginx + FPM pool + database + TLS + WordPress — in a single atomic
-transaction. Manages a fleet of VPSes from one screen.
+transaction. Manages a fleet of VPSes from one screen,
+and **imports your existing sites from HestiaCP or CloudPanel**.
 
 [![Rust](https://img.shields.io/badge/rust-stable_2024-orange?logo=rust)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-blue)](#license)
 [![Debian](https://img.shields.io/badge/debian-12%2B-red?logo=debian)](#install)
 [![Tests](https://img.shields.io/badge/tests-650%2B-green)](#testing)
-[![Status](https://img.shields.io/badge/status-production-brightgreen)](#status)
+[![Status](https://img.shields.io/badge/status-beta-orange)](#project-status)
 
 [**Install**](#install) · [**Features**](#features) ·
-[**Multi-node**](#multi-node-cluster) · [**Architecture**](#architecture) ·
-[**Status**](#status)
+[**Migrate in**](#migrate-in-panel-import) · [**Multi-node**](#multi-node-cluster) ·
+[**Architecture**](#architecture) · [**Status**](#project-status)
 
 </div>
+
+---
+
+> [!WARNING]
+> ### 🧪 Young project — not yet battle-tested in production
+>
+> Hyperion is a free-time project. It's heavily unit-tested (~650 tests) and
+> validated end-to-end in throwaway VMs — but it has **not** been proven in
+> real-world production, and the newest pieces (the [panel import](#migrate-in-panel-import))
+> have only been run against my own test machines. **Run it on disposable / test
+> servers, keep backups, and don't trust it with anything you can't afford to lose — yet.**
+>
+> 🙏 **Testers & reviewers wanted.** If you kick the tyres, I'd genuinely love
+> feedback on **functionality, security, or just design / UX ideas** — open an
+> issue, however rough. That's exactly what will move this toward production-grade.
 
 ---
 
@@ -66,6 +82,7 @@ transaction. Manages a fleet of VPSes from one screen.
 | Off-site backups (S3 + age encryption)    | ⚠️ FTP only                 | ✅ S3 + age (multi-target)          |
 | One-click cross-node hosting migration    | ❌                          | ✅                                  |
 | Hosting clone to a new domain             | ❌                          | ✅                                  |
+| Import *from* HestiaCP / CloudPanel       | ❌                          | ✅ in-place or remote (SSH)         |
 
 ---
 
@@ -191,7 +208,7 @@ purely the human milestone marker.
 - **PHP 8.1 / 8.2 / 8.3 / 8.4** side by side via deb.sury.org. Static-only sites, and a reverse-proxy mode for Node.js / Python / Docker.
 - **Suspend / resume** — 503 page, FPM stop, DB lock, user processes killed. Fully reversible.
 - **Hosting profiles** — stamp the same set of limits + WP plugins + DB engine onto a hundred sites in one click.
-- **Live progress bars** on every long-running operation — migration, install, cert issue, backup, ROFS fix, hosting clone. HTMX-polled `/jobs/<id>` page; navigate away and come back, the bar's still updating.
+- **Every slow action is a background job** — create, migration, clone, backup, restore, cert issue, WP install, staging push, **panel import**, and bulk actions all spawn a detached server-side job and redirect to a live HTMX-polled `/jobs/<id>` page. Close the tab or drop your connection and the work keeps running; the progress bar is right where you left it when you come back. An orphan reaper fails anything a restart interrupts.
 - **Cross-node hosting migration** with version preflight (catches stale worker before cryptic failures).
 - **Hosting clone** to a new domain on the same or different node — staging mirror in two clicks.
 - **Expiration + grace** with scheduled notifications and auto-suspend.
@@ -240,6 +257,18 @@ directly to nginx, FPM, and the WordPress install. Every save runs
 - **Download** any archive from the browser — streamed off the owning node in chunks, so backups larger than the RPC frame limit work without buffering in master RAM.
 - **Restore as a new domain** — spin up a brand-new hosting from any archive (mirrors PHP / DB / kind; WordPress URLs auto-rewritten with `wp search-replace`).
 
+### Migrate in (panel import)
+
+Move existing sites off another panel without a weekend of manual work.
+Wizard at **`/import`** (admin only) or `hctl hosting import-panel`.
+
+- **Sources: HestiaCP and CloudPanel.** Reads the source panel's own state directly (Hestia's flat `*.conf` files, CloudPanel's SQLite store) — no scraping, no API.
+- **In-place or remote.** *In-place* runs on the source box; *remote* imports from **another machine over SSH** — give Hyperion the host + a private key, files come across with `rsync` and databases are dumped over `ssh`. The key is used for that one run, written to a `0600` file, and deleted afterwards — never stored.
+- **Dry-run first.** A plan shows exactly what would be **created / skipped / conflict** before anything is touched. A domain that already exists is skipped, never overwritten.
+- **Sites + databases, WordPress included.** Files copied, DB dumped and restored, and `wp-config.php` automatically repointed at the new credentials so WP sites come up working.
+- **Honest scope — mail & DNS are out.** Hyperion runs no mail server or authoritative nameserver, so mailboxes and DNS zones are **reported, never migrated**; move those separately.
+- **Runs as a background job** with a live progress page, like everything else slow.
+
 ### Security
 
 - **`#![forbid(unsafe_code)]`** in every crate.
@@ -273,7 +302,7 @@ directly to nginx, FPM, and the WordPress install. Every save runs
 - **axum + askama + HTMX**, no JS build step, single binary.
 - **Themed confirm modals** for every destructive action — explains in plain words what will actually happen, requires type-the-domain for deletes.
 - **Live service-install progress** — `apt-get install` runs in the background, log tail streams in.
-- **Background jobs page** — every long-running operation appears in `/jobs` with kind + state + progress + step label + bounded log tail. Sidebar shows a live count of running jobs.
+- **Background jobs page** — every long-running operation appears in `/jobs` with kind + state + progress + step label + bounded log tail. Jobs run detached on the server, so they survive a browser disconnect; the sidebar shows a live count of running jobs, and a reaper fails any orphaned by a restart.
 - **Role-aware navigation** — operators and viewers don't see Users / Nodes / Settings in the sidebar at all (defense in depth: server still enforces RBAC).
 - **Dark + light themes** via `prefers-color-scheme`.
 
@@ -351,6 +380,14 @@ panel every 3 seconds.
 Every page that's node-aware (Service health, Stats, Install, Hostings)
 has a "View on node:" dropdown — pick a worker to render that node's
 data, not the master's.
+
+### Import an existing HestiaCP / CloudPanel server
+
+**Import** (sidebar, admin) → pick the source panel + mode — *in-place* if
+Hyperion runs on that box, or *remote over SSH* with the host + a private key —
+→ **Preview** the dry-run plan → **Apply**. Sites and databases (WordPress
+included) come across; mail and DNS are reported but not migrated. It runs as a
+job, so watch it on `/jobs/<id>` and close the tab whenever you like.
 
 ---
 
@@ -439,7 +476,13 @@ hyperion/
 
 ---
 
-## Status
+## Project status
+
+**Beta.** A lot is shipped (below) and every line is unit-tested, but none of
+it has been hardened by real production traffic yet — read the lists as
+*"implemented and demo-tested in VMs"*, not *"proven at scale"*. The fastest
+way to change that is real-world testing and a critical eye on functionality,
+security, and UX — bug reports and ideas of any size are hugely welcome.
 
 ### Shipped — single node
 
@@ -469,6 +512,7 @@ hyperion/
 | Per-hosting php.ini override (.user.ini)                  | UI · RPC        |
 | Granular backup restore (full / DB-only / files-only)     | UI · CLI · RPC  |
 | Backup download (chunked stream) + restore-as-new-domain  | UI · CLI · RPC  |
+| Panel import — HestiaCP + CloudPanel (in-place + SSH)      | UI · CLI · RPC  |
 | FTP per-hosting (vsftpd, chroot to home)                  | UI · RPC        |
 | Key-only chrooted SFTP per hosting                        | UI · CLI · RPC  |
 | WAF-lite + wp-admin IP allowlist per hosting              | UI · RPC        |
@@ -542,6 +586,12 @@ covers the same for the RPC layer.
 ---
 
 ## Contributing
+
+**Trying it out is the most valuable contribution right now.** This is a young
+project that hasn't met real production traffic — so honest reports on
+**functionality, security, or design / UX** are worth as much as code. Found a
+bug, a sharp edge, or a security concern? [Open an issue](https://github.com/nechodom/hyperion/issues),
+even a rough one.
 
 Issues + PRs welcome. Each crate has a single clear responsibility
 (the names are descriptive) so onboarding takes an afternoon.
