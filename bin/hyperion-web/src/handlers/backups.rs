@@ -18,6 +18,7 @@ use axum::extract::{Path as AxPath, State};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Form;
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
+use hyperion_state::capabilities::Capability;
 use serde::Deserialize;
 
 #[derive(Template)]
@@ -36,7 +37,7 @@ pub async fn get_backups(
     State(state): State<SharedState>,
     ctx: AuthCtx,
 ) -> Result<Response, AppError> {
-    if !ctx.is_admin_or_higher() {
+    if !ctx.can(Capability::BackupTargets) {
         return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
     }
     let resp = hyperion_rpc_client::call(&state.agent_socket, Request::BackupTargetList).await?;
@@ -105,7 +106,7 @@ pub async fn post_upsert(
     ctx: AuthCtx,
     Form(form): Form<BackupTargetForm>,
 ) -> Result<Response, AppError> {
-    if !ctx.is_admin_or_higher() {
+    if !ctx.can(Capability::BackupTargets) {
         return Err(AppError::Forbidden);
     }
     let secret_key = if form.secret_key.trim().is_empty() {
@@ -150,7 +151,7 @@ pub async fn post_delete(
     ctx: AuthCtx,
     AxPath(id): AxPath<i64>,
 ) -> Result<Response, AppError> {
-    if !ctx.is_admin_or_higher() {
+    if !ctx.can(Capability::BackupTargets) {
         return Err(AppError::Forbidden);
     }
     let _ =
@@ -163,7 +164,7 @@ pub async fn post_probe(
     ctx: AuthCtx,
     AxPath(id): AxPath<i64>,
 ) -> Result<Response, AppError> {
-    if !ctx.is_admin_or_higher() {
+    if !ctx.can(Capability::BackupTargets) {
         return Ok(
             Html("<div class=\"pill err\">admin role required</div>".to_string()).into_response(),
         );

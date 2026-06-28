@@ -7,6 +7,7 @@ use askama::Template;
 use axum::extract::{Query, State};
 use axum::response::{Html, IntoResponse, Response};
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
+use hyperion_state::capabilities::Capability;
 use hyperion_types::{ClusterStats, NodeMetricsHistory, NodeStats};
 use serde::Deserialize;
 
@@ -81,6 +82,12 @@ pub async fn get_stats(
     ctx: AuthCtx,
     Query(query): Query<StatsQuery>,
 ) -> Result<Response, AppError> {
+    // Cluster/node-aggregate stats expose every tenant's resource usage, so
+    // gate on MonitoringView + all-hostings scope (admin-equivalent). Tenant
+    // roles see their own usage on each hosting's detail page instead.
+    if !(ctx.can(Capability::MonitoringView) && ctx.scope_all()) {
+        return Ok(axum::response::Redirect::to("/").into_response());
+    }
     // View mode:
     //   - empty / "cluster" → AGGREGATE across master + all enrolled nodes
     //   - "local"           → master local only

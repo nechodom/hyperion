@@ -9,6 +9,7 @@ use axum::extract::{Query, State};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Form;
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
+use hyperion_state::capabilities::Capability;
 use hyperion_types::{HostingProfile, ProfileInput, WpAssetSummary};
 use serde::Deserialize;
 
@@ -71,6 +72,9 @@ pub async fn get_profiles(
     ctx: AuthCtx,
     Query(q): Query<ProfilesQuery>,
 ) -> Result<Response, AppError> {
+    if !ctx.can(Capability::ProfilesManage) {
+        return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
+    }
     let mut profiles = fetch_profiles(&state).await.unwrap_or_default();
     // The in_use_count from ProfileList is master-local; add the per-node counts
     // from every worker so the badge is cluster-wide.
@@ -209,8 +213,8 @@ pub async fn post_create(
     // Profiles are an admin construct (PHP limits, pricing, plugin/theme
     // bundles). The route only enforces auth+CSRF, so without this gate
     // any authenticated viewer could create/edit/delete them — matching
-    // the asset handlers below which all gate on is_admin_or_higher.
-    if !ctx.is_admin_or_higher() {
+    // the asset handlers below which all gate on ProfilesManage.
+    if !ctx.can(Capability::ProfilesManage) {
         return Err(AppError::Forbidden);
     }
     let price_minor = parse_price_major(&form.price_major)?;
@@ -303,7 +307,7 @@ pub async fn post_clone(
     ctx: AuthCtx,
     Form(form): Form<CloneForm>,
 ) -> Result<Response, AppError> {
-    if !ctx.is_admin_or_higher() {
+    if !ctx.can(Capability::ProfilesManage) {
         return Err(AppError::Forbidden);
     }
     // Fetch the source profile.
@@ -437,7 +441,7 @@ pub async fn post_update(
     axum::extract::Path(id): axum::extract::Path<i64>,
     Form(form): Form<CreateForm>,
 ) -> Result<Response, AppError> {
-    if !ctx.is_admin_or_higher() {
+    if !ctx.can(Capability::ProfilesManage) {
         return Err(AppError::Forbidden);
     }
     let price_minor = parse_price_major(&form.price_major)?;
@@ -511,7 +515,7 @@ pub async fn post_delete(
     ctx: AuthCtx,
     Form(form): Form<DeleteForm>,
 ) -> Result<Response, AppError> {
-    if !ctx.is_admin_or_higher() {
+    if !ctx.can(Capability::ProfilesManage) {
         return Err(AppError::Forbidden);
     }
     let resp =
@@ -639,7 +643,7 @@ pub async fn post_reapply_all(
     ctx: AuthCtx,
     Form(form): Form<ReapplyAllForm>,
 ) -> Result<Response, AppError> {
-    if !ctx.is_admin_or_higher() {
+    if !ctx.can(Capability::ProfilesManage) {
         return Err(AppError::Forbidden);
     }
     let profile_id = form.profile_id;
@@ -886,7 +890,7 @@ pub async fn get_wp_assets(
     ctx: AuthCtx,
     Query(q): Query<WpAssetsQuery>,
 ) -> Result<Response, AppError> {
-    if !ctx.is_admin_or_higher() {
+    if !ctx.can(Capability::ProfilesManage) {
         return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
     }
     let assets = match hyperion_rpc_client::call(&state.agent_socket, Request::WpAssetList).await? {
@@ -926,7 +930,7 @@ pub async fn post_wp_asset_upload(
         operator = %ctx.username,
         "post_wp_asset_upload entered"
     );
-    if !ctx.is_admin_or_higher() {
+    if !ctx.can(Capability::ProfilesManage) {
         return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
     }
     let mut kind: Option<String> = None;
@@ -1047,7 +1051,7 @@ pub async fn post_wp_install_from_asset(
 ) -> Result<Response, AppError> {
     let sel = super::hostings::parse_selector_public(&form.selector)?;
     let sel_url = urlencoding(&form.selector);
-    if !ctx.is_admin_or_higher() {
+    if !ctx.can(Capability::ProfilesManage) {
         return Ok(Redirect::to(&format!(
             "/hostings/{}?wp_error={}#wordpress",
             sel_url,
@@ -1106,7 +1110,7 @@ pub async fn post_wp_asset_replace(
     mut multipart: axum::extract::Multipart,
 ) -> Result<Response, AppError> {
     tracing::info!(operator = %ctx.username, "post_wp_asset_replace entered");
-    if !ctx.is_admin_or_higher() {
+    if !ctx.can(Capability::ProfilesManage) {
         return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
     }
     let mut id: Option<i64> = None;
@@ -1198,7 +1202,7 @@ pub async fn post_wp_asset_reinstall_all(
     ctx: AuthCtx,
     Form(form): Form<WpAssetReinstallForm>,
 ) -> Result<Response, AppError> {
-    if !ctx.is_admin_or_higher() {
+    if !ctx.can(Capability::ProfilesManage) {
         return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
     }
     let force_activate = match form.activate_mode.as_str() {
@@ -1254,7 +1258,7 @@ pub async fn post_wp_asset_delete(
     ctx: AuthCtx,
     Form(form): Form<WpAssetDeleteForm>,
 ) -> Result<Response, AppError> {
-    if !ctx.is_admin_or_higher() {
+    if !ctx.can(Capability::ProfilesManage) {
         return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
     }
     let resp =

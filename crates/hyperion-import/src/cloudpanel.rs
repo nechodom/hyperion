@@ -28,8 +28,18 @@ impl SourceAdapter for CloudPanelAdapter {
     }
 
     async fn detect(&self, location: &Location) -> Option<SourcePanelInfo> {
-        if matches!(location, Location::Archive(_)) {
-            return None; // archive mode not supported yet
+        if let Location::Archive(dir) = location {
+            // Archive mode: trust the bundle manifest (produced by export-bundle).
+            let ir = crate::bundle::read_manifest(dir).await?;
+            if ir.source.kind != SourceKind::CloudPanel.as_str() {
+                return None;
+            }
+            return Some(SourcePanelInfo {
+                kind: SourceKind::CloudPanel,
+                version: ir.source.version,
+                has_mail: false,
+                has_dns: false,
+            });
         }
         let runner = Runner::for_location(location);
         if !runner.exists(DB_PATH).await || !runner.exists(APP_DIR).await {
@@ -46,10 +56,13 @@ impl SourceAdapter for CloudPanelAdapter {
     }
 
     async fn extract(&self, location: &Location) -> Result<ImportIR, ImportError> {
-        if matches!(location, Location::Archive(_)) {
-            return Err(ImportError::UnsupportedMode(
-                "CloudPanel adapter: archive mode not yet supported".into(),
-            ));
+        if let Location::Archive(dir) = location {
+            return crate::bundle::read_manifest(dir)
+                .await
+                .ok_or(ImportError::Parse {
+                    what: "bundle manifest".into(),
+                    msg: "manifest.json missing or invalid in the uploaded bundle".into(),
+                });
         }
         let runner = Runner::for_location(location);
         let info = self

@@ -192,6 +192,8 @@ pub async fn post_2fa_confirm(
             // a full session now that they've enrolled so the gate lifts.
             if session.needs_2fa_enrollment() {
                 let now = hyperion_types::now_secs();
+                let (caps, scope_all, caps_present) =
+                    crate::auth::resolve_caps(&state, session.user_id).await;
                 let full = hyperion_auth::Session {
                     sid: session.sid.clone(),
                     user_id: session.user_id,
@@ -200,6 +202,9 @@ pub async fn post_2fa_confirm(
                     username: session.username.clone(),
                     role: session.role.clone(),
                     purpose: hyperion_auth::PURPOSE_SESSION.to_string(),
+                    caps,
+                    scope_all,
+                    caps_present,
                 };
                 if let Ok(token) = state.session.sign(&full) {
                     let mut resp =

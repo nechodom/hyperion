@@ -10677,6 +10677,279 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(())
     }
 
+    // ----------------------------------------------------------------
+    //  Custom roles (granular RBAC)
+    // ----------------------------------------------------------------
+
+    pub async fn role_list(&self) -> Result<Vec<hyperion_types::CustomRoleSummary>, RpcError> {
+        let rows = hyperion_state::custom_roles::list(&self.pool)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("role list: {e}")))?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let in_use = hyperion_state::custom_roles::count_in_use(&self.pool, row.id)
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("role in-use count: {e}")))?;
+            out.push(hyperion_types::CustomRoleSummary {
+                id: row.id,
+                name: row.name.clone(),
+                capabilities: row.caps().bits(),
+                scope_all: row.scope_all(),
+                in_use,
+                created_at: row.created_at,
+                updated_at: row.updated_at,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Self-service import wizard token ops. One entry point (the op enum keeps
+    /// the RPC surface to a single method). Tokens are stored hashed; the
+    /// plaintext is returned ONCE on Mint. See hyperion_state::import_tokens.
+    pub async fn import_token(
+        &self,
+        op: hyperion_types::ImportTokenOp,
+    ) -> Result<hyperion_types::ImportTokenResult, RpcError> {
+        use hyperion_state::import_tokens as toks;
+        use hyperion_types::{ImportTokenInfo, ImportTokenOp, ImportTokenResult};
+
+        fn to_info(r: toks::ImportTokenRow) -> ImportTokenInfo {
+            ImportTokenInfo {
+                id: r.id,
+                target_node: r.target_node,
+                source_kind: r.source_kind,
+                status: r.status,
+                received_bytes: r.received_bytes,
+                job_id: r.job_id,
+                expires_at: r.expires_at,
+                created_by: r.created_by,
+                created_at: r.created_at,
+            }
+        }
+        let map = |what: &'static str| {
+            move |e: hyperion_state::db::StateError| {
+                RpcError::Internal_with(format!("import token {what}: {e}"))
+            }
+        };
+
+        match op {
+            ImportTokenOp::Mint {
+                target_node,
+                source_kind,
+                created_by,
+                ttl_secs,
+            } => {
+                use rand::RngCore;
+                let mut buf = [0u8; 32];
+                rand::thread_rng().fill_bytes(&mut buf);
+                let token = hex::encode(buf);
+                let hash = hex::encode(blake3::hash(token.as_bytes()).as_bytes());
+                let now = now_secs();
+                let expires_at = now + ttl_secs.clamp(60, 86_400);
+                let id = toks::create(
+                    &self.pool,
+                    &hash,
+                    &target_node,
+                    &source_kind,
+                    &created_by,
+                    now,
+                    expires_at,
+                )
+                .await
+                .map_err(map("mint"))?;
+                Ok(ImportTokenResult::Minted {
+                    token,
+                    id,
+                    expires_at,
+                })
+            }
+            ImportTokenOp::Resolve { token, consume } => {
+                let hash = hex::encode(blake3::hash(token.as_bytes()).as_bytes());
+                let now = now_secs();
+                let row = if consume {
+                    toks::consume_for_ingest(&self.pool, &hash, now)
+                        .await
+                        .map_err(map("consume"))?
+                } else {
+                    toks::get_fetchable(&self.pool, &hash, now)
+                        .await
+                        .map_err(map("resolve"))?
+                };
+                Ok(ImportTokenResult::Resolved(row.map(to_info)))
+            }
+            ImportTokenOp::Update {
+                id,
+                status,
+                job_id,
+                received_bytes,
+            } => {
+                if let Some(s) = status {
+                    toks::set_status(&self.pool, id, &s)
+                        .await
+                        .map_err(map("status"))?;
+                }
+                if let Some(j) = job_id {
+                    toks::set_job(&self.pool, id, &j)
+                        .await
+                        .map_err(map("job"))?;
+                }
+                if let Some(b) = received_bytes {
+                    toks::set_received_bytes(&self.pool, id, b)
+                        .await
+                        .map_err(map("bytes"))?;
+                }
+                Ok(ImportTokenResult::Ack)
+            }
+            ImportTokenOp::List => {
+                let rows = toks::list_active(&self.pool, now_secs())
+                    .await
+                    .map_err(map("list"))?;
+                Ok(ImportTokenResult::Listed(
+                    rows.into_iter().map(to_info).collect(),
+                ))
+            }
+            ImportTokenOp::Cancel { id } => {
+                toks::cancel(&self.pool, id).await.map_err(map("cancel"))?;
+                Ok(ImportTokenResult::Ack)
+            }
+        }
+    }
+
+    pub async fn role_create(
+        &self,
+        name: String,
+        capabilities: u64,
+        scope_all: bool,
+    ) -> Result<i64, RpcError> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(RpcError::Validation {
+                message: "role name must not be empty".into(),
+            });
+        }
+        let id = hyperion_state::custom_roles::create(
+            &self.pool,
+            name,
+            capabilities,
+            scope_all,
+            now_secs(),
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("role create: {e}")))?;
+        self.append_audit(
+            "web.role.create",
+            None,
+            &serde_json::json!({"id": id, "name": name, "capabilities": capabilities, "scope_all": scope_all}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(id)
+    }
+
+    pub async fn role_update(
+        &self,
+        id: i64,
+        name: String,
+        capabilities: u64,
+        scope_all: bool,
+    ) -> Result<(), RpcError> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(RpcError::Validation {
+                message: "role name must not be empty".into(),
+            });
+        }
+        hyperion_state::custom_roles::update(
+            &self.pool,
+            id,
+            name,
+            capabilities,
+            scope_all,
+            now_secs(),
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("role update: {e}")))?;
+        self.append_audit(
+            "web.role.update",
+            None,
+            &serde_json::json!({"id": id, "name": name, "capabilities": capabilities, "scope_all": scope_all}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
+    pub async fn role_delete(&self, id: i64) -> Result<(), RpcError> {
+        let in_use = hyperion_state::custom_roles::count_in_use(&self.pool, id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("role in-use count: {e}")))?;
+        if in_use > 0 {
+            return Err(RpcError::Validation {
+                message: format!("role in use by {in_use} user(s)"),
+            });
+        }
+        hyperion_state::custom_roles::delete(&self.pool, id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("role delete: {e}")))?;
+        self.append_audit(
+            "web.role.delete",
+            None,
+            &serde_json::json!({"id": id}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
+    pub async fn web_user_set_custom_role(
+        &self,
+        user_id: i64,
+        custom_role_id: i64,
+    ) -> Result<(), RpcError> {
+        let role = hyperion_state::custom_roles::get(&self.pool, custom_role_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("role get: {e}")))?;
+        if role.is_none() {
+            return Err(RpcError::NotFound {
+                kind: "custom_role".into(),
+                id: custom_role_id.to_string(),
+            });
+        }
+        hyperion_state::web_users::set_custom_role(&self.pool, user_id, custom_role_id, now_secs())
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("set custom role: {e}")))?;
+        self.append_audit(
+            "web.user.custom_role_set",
+            None,
+            &serde_json::json!({"user_id": user_id, "custom_role_id": custom_role_id}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
+    pub async fn web_user_effective_role(
+        &self,
+        user_id: i64,
+    ) -> Result<hyperion_types::EffectiveRoleWire, RpcError> {
+        let er = hyperion_state::web_users::effective_role(&self.pool, user_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("effective role: {e}")))?;
+        let Some(er) = er else {
+            return Err(RpcError::NotFound {
+                kind: "web_user".into(),
+                id: user_id.to_string(),
+            });
+        };
+        Ok(hyperion_types::EffectiveRoleWire {
+            caps: er.caps.bits(),
+            scope_all: er.scope_all,
+            label: er.label,
+            custom_role_id: er.custom_role_id,
+            base_role: er.base_role.as_str().to_string(),
+        })
+    }
+
     pub async fn web_user_set_locked(
         &self,
         user_id: i64,

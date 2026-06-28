@@ -67,6 +67,94 @@ struct Cli {
     /// agent is restarted into a crash-loop.
     #[arg(long)]
     dry_run_migrations: bool,
+
+    /// One-shot subcommand (the daemon runs when none is given).
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum Command {
+    /// Export an in-place source panel (CloudPanel / HestiaCP) to a portable
+    /// bundle for offline import. Run on the SOURCE box as root/sudo — no
+    /// agent.toml or Hyperion install is needed there. Hand the resulting tar to
+    /// Hyperion (Import → Upload bundle); no inbound SSH/root to the source.
+    ExportBundle {
+        /// `cloudpanel` | `hestiacp`. Auto-detected if omitted.
+        #[arg(long)]
+        kind: Option<String>,
+        /// Output bundle path, e.g. /root/hyperion-bundle.tar
+        #[arg(long)]
+        out: PathBuf,
+        /// Export only this one domain (default: every site).
+        #[arg(long)]
+        only: Option<String>,
+    },
+}
+
+/// `export-bundle`: detect + extract the local source panel, then pack docroots,
+/// DB dumps, and the IR manifest into one portable tar for offline import.
+async fn run_export_bundle(
+    kind: Option<String>,
+    out: PathBuf,
+    only: Option<String>,
+) -> anyhow::Result<()> {
+    use hyperion_import::{adapter_for, Location};
+    let loc = Location::InPlace;
+
+    let adapter = match kind.as_deref() {
+        Some(k) => adapter_for(k)
+            .ok_or_else(|| anyhow::anyhow!("unknown --kind '{k}' (cloudpanel | hestiacp)"))?,
+        None => {
+            // Auto-detect: probe both adapters in-place.
+            let mut found = None;
+            for k in ["cloudpanel", "hestiacp"] {
+                if let Some(a) = adapter_for(k) {
+                    if a.detect(&loc).await.is_some() {
+                        found = Some(a);
+                        break;
+                    }
+                }
+            }
+            found.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no CloudPanel or HestiaCP install detected here — run this on the \
+                     SOURCE panel server as root/sudo, or pass --kind"
+                )
+            })?
+        }
+    };
+
+    let info = adapter.detect(&loc).await.ok_or_else(|| {
+        anyhow::anyhow!("panel not detected locally — are you root on the source?")
+    })?;
+    eprintln!("• detected {} {}", info.kind.as_str(), info.version);
+
+    let mut ir = adapter.extract(&loc).await?;
+    if let Some(d) = only.as_deref() {
+        ir.hostings.retain(|h| h.domain == d);
+        if ir.hostings.is_empty() {
+            anyhow::bail!("no site named '{d}' found in the source panel");
+        }
+    }
+    eprintln!(
+        "• packing {} site(s) (docroots + DB dumps) …",
+        ir.hostings.len()
+    );
+
+    hyperion_import::bundle::build(&ir, &out).await?;
+    // In stream mode (`--out -`) stdout carries the tar — keep ALL human output
+    // on stderr so it can't corrupt the bundle piped into curl.
+    if out.as_os_str() == "-" {
+        eprintln!("✓ streamed bundle — {} site(s).", ir.hostings.len());
+    } else {
+        println!(
+            "✓ wrote {} — {} site(s). Upload it in Hyperion: Import → Upload bundle.",
+            out.display(),
+            ir.hostings.len()
+        );
+    }
+    Ok(())
 }
 
 /// Apply the embedded migrations to a throwaway copy of the real state DB and
@@ -115,6 +203,13 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
+
+    // `export-bundle` runs standalone on a SOURCE panel box that has no
+    // agent.toml — handle it BEFORE loading the agent config.
+    if let Some(Command::ExportBundle { kind, out, only }) = cli.command {
+        return run_export_bundle(kind, out, only).await;
+    }
+
     let cfg = config::Config::load_from_path(&cli.config)?;
 
     if cli.dry_run_migrations {

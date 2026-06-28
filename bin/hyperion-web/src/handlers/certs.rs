@@ -13,6 +13,7 @@ use askama::Template;
 use axum::extract::State;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
+use hyperion_state::capabilities::Capability;
 use serde::Deserialize;
 
 fn urlencode(s: &str) -> String {
@@ -52,7 +53,9 @@ pub async fn get_certs(
     ctx: AuthCtx,
     axum::extract::Query(q): axum::extract::Query<CertsQuery>,
 ) -> Result<Response, AppError> {
-    if !ctx.is_admin_or_higher() {
+    // Cluster-wide cert page: tenant roles also hold CertManage (for their own
+    // hostings' certs), so require all-hostings scope to reach the cluster view.
+    if !(ctx.can(Capability::CertManage) && ctx.scope_all()) {
         return Ok(
             axum::response::Redirect::to("/?flash_error=admin+role+required").into_response(),
         );
@@ -128,7 +131,9 @@ pub async fn post_renew_all(
     State(state): State<SharedState>,
     ctx: AuthCtx,
 ) -> Result<Response, AppError> {
-    if !ctx.is_admin_or_higher() {
+    // Cluster-wide cert page: tenant roles also hold CertManage (for their own
+    // hostings' certs), so require all-hostings scope to reach the cluster view.
+    if !(ctx.can(Capability::CertManage) && ctx.scope_all()) {
         return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
     }
     let mut total_renewed = 0u32;

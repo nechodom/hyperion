@@ -1001,6 +1001,52 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     async fn web_user_set_role(&self, user_id: i64, role: String) -> Result<(), RpcError> {
         self.svc.web_user_set_role(user_id, role).await
     }
+    async fn role_list(&self) -> Result<Vec<hyperion_types::CustomRoleSummary>, RpcError> {
+        self.svc.role_list().await
+    }
+    async fn import_token(
+        &self,
+        op: hyperion_types::ImportTokenOp,
+    ) -> Result<hyperion_types::ImportTokenResult, RpcError> {
+        self.svc.import_token(op).await
+    }
+    async fn role_create(
+        &self,
+        name: String,
+        capabilities: u64,
+        scope_all: bool,
+    ) -> Result<i64, RpcError> {
+        self.svc.role_create(name, capabilities, scope_all).await
+    }
+    async fn role_update(
+        &self,
+        id: i64,
+        name: String,
+        capabilities: u64,
+        scope_all: bool,
+    ) -> Result<(), RpcError> {
+        self.svc
+            .role_update(id, name, capabilities, scope_all)
+            .await
+    }
+    async fn role_delete(&self, id: i64) -> Result<(), RpcError> {
+        self.svc.role_delete(id).await
+    }
+    async fn web_user_set_custom_role(
+        &self,
+        user_id: i64,
+        custom_role_id: i64,
+    ) -> Result<(), RpcError> {
+        self.svc
+            .web_user_set_custom_role(user_id, custom_role_id)
+            .await
+    }
+    async fn web_user_effective_role(
+        &self,
+        user_id: i64,
+    ) -> Result<hyperion_types::EffectiveRoleWire, RpcError> {
+        self.svc.web_user_effective_role(user_id).await
+    }
     async fn web_user_set_locked(
         &self,
         user_id: i64,

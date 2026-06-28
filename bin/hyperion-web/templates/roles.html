@@ -1,0 +1,132 @@
+{% extends "base.html" %}
+{% block title %}Roles · Hyperion{% endblock %}
+{% block main %}
+<div class="page-header">
+  <div>
+    <h1>Roles</h1>
+    <div class="subtitle">
+      Built-in roles are fixed presets. Build custom roles to grant a precise
+      set of capabilities, then assign them to users from the Users page.
+    </div>
+  </div>
+  <span class="grow"></span>
+  <div class="actions">
+    <a href="/roles/new" class="btn primary">
+      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+      New role
+    </a>
+  </div>
+</div>
+
+{% if let Some(e) = error %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">{{ e }}</div>
+  </div>
+{% endif %}
+{% if let Some(m) = flash %}
+  <div class="flash success">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+    <div class="flash-body">{{ m }}</div>
+  </div>
+{% endif %}
+
+<div class="card no-pad-table" style="margin-bottom:1rem">
+  <h2 style="font-size:0.95rem;margin:0.8rem 1rem 0.2rem">Custom roles</h2>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Scope</th>
+          <th>Capabilities</th>
+          <th>In use</th>
+          <th class="right">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% if custom.is_empty() %}
+        <tr>
+          <td colspan="5" class="text-soft small" style="padding:1rem">
+            No custom roles yet. Click <strong>New role</strong> to build one,
+            or clone a built-in preset as a starting point.
+          </td>
+        </tr>
+        {% endif %}
+        {% for r in custom %}
+        <tr>
+          <td><strong>{{ r.name }}</strong></td>
+          <td>
+            {% if r.scope_all %}
+              <span class="pill small">All hostings</span>
+            {% else %}
+              <span class="pill small">Only assigned</span>
+            {% endif %}
+          </td>
+          <td class="text-soft small">{{ r.capabilities.count_ones() }} capabilit{% if r.capabilities.count_ones() == 1 %}y{% else %}ies{% endif %}</td>
+          <td class="text-soft small">
+            {% if r.in_use > 0 %}
+              {{ r.in_use }} user{% if r.in_use != 1 %}s{% endif %}
+            {% else %}
+              —
+            {% endif %}
+          </td>
+          <td class="right">
+            <div style="display:inline-flex;gap:0.4rem;align-items:center">
+              <a href="/roles/{{ r.id }}/edit" class="btn small">Edit</a>
+              <a href="/roles/new?clone={{ r.id }}" class="btn small ghost">Clone</a>
+              <form method="post" action="/roles/{{ r.id }}/delete"
+                    data-confirm-title="Delete role"
+                    data-confirm-body="The role is removed. Users currently assigned this role keep their access until you reassign them — the agent refuses to delete a role that is still in use."
+                    data-confirm-confirm-label="Delete role"
+                    data-confirm-variant="danger"
+                    style="display:inline">
+                <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                <input type="hidden" name="id" value="{{ r.id }}">
+                <button type="submit" class="btn small danger"{% if r.in_use > 0 %} disabled title="In use by {{ r.in_use }} user(s) — reassign them first"{% endif %}>Delete</button>
+              </form>
+            </div>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<div class="card no-pad-table">
+  <h2 style="font-size:0.95rem;margin:0.8rem 1rem 0.2rem">Built-in roles</h2>
+  <p class="text-soft small" style="margin:0 1rem 0.2rem">
+    Fixed presets — not editable. Clone a custom role to start from a tailored
+    set of capabilities instead.
+  </p>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Id</th>
+          <th>Scope</th>
+          <th>Capabilities</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for b in builtins %}
+        <tr>
+          <td><strong>{{ b.label }}</strong></td>
+          <td class="text-soft small"><code>{{ b.machine }}</code></td>
+          <td>
+            {% if b.scope_all %}
+              <span class="pill small">All hostings</span>
+            {% else %}
+              <span class="pill small">Only assigned</span>
+            {% endif %}
+          </td>
+          <td class="text-soft small">{{ b.cap_count }} capabilit{% if b.cap_count == 1 %}y{% else %}ies{% endif %}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endblock %}

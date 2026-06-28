@@ -16,6 +16,9 @@ hyperion-import = { path = "../../crates/hyperion-import" }
 hyperion-types = { path = "../../crates/hyperion-types" }
 hyperion-validate = { path = "../../crates/hyperion-validate" }
 hyperion-auth = { path = "../../crates/hyperion-auth" }
+# Pure RBAC types (Capability/CapSet, WebRole) for AuthCtx::can() — no DB pool
+# is opened here; the web layer still does all state I/O over RPC.
+hyperion-state = { path = "../../crates/hyperion-state" }
 # Needed for master_rpc::MasterRpcSigner (master→node RPC signing
 # key loaded at startup, used by dispatcher::dispatch_to_node).
 hyperion-core = { path = "../../crates/hyperion-core" }

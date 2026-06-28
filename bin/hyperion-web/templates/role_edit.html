@@ -1,0 +1,148 @@
+{% extends "base.html" %}
+{% block title %}{% if is_edit %}Edit role · {{ name }}{% else %}New role{% endif %} · Hyperion{% endblock %}
+{% block main %}
+<div class="breadcrumbs">
+  <a href="/roles">Roles</a>
+  <span class="sep">›</span>
+  <span>{% if is_edit %}{{ name }}{% else %}New role{% endif %}</span>
+</div>
+<div class="page-header">
+  <div>
+    <h1>{% if is_edit %}Edit role: {{ name }}{% else %}New custom role{% endif %}</h1>
+    <div class="subtitle">
+      Pick the exact capabilities this role grants. Assign it to users from the
+      <a href="/admin/users">Users</a> page after saving.
+    </div>
+  </div>
+  <span class="grow"></span>
+  <div class="actions">
+    <a href="/roles" class="btn ghost">
+      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><line x1="19" y1="12" x2="5" y2="12"/><polyline points="12 19 5 12 12 5"/></svg>
+      Back to roles
+    </a>
+  </div>
+</div>
+
+{% if let Some(e) = error %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">{{ e }}</div>
+  </div>
+{% endif %}
+{% if let Some(f) = flash %}
+  <div class="flash success">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+    <div class="flash-body">{{ f }}</div>
+  </div>
+{% endif %}
+
+<div class="card hover">
+  <form method="post" action="{% if is_edit %}/roles/{{ role_id }}/update{% else %}/roles{% endif %}">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <div class="field">
+      <label for="r_name">Name <span class="hint">unique short label, e.g. "Junior support"</span></label>
+      <input id="r_name" name="name" type="text" required maxlength="64" value="{{ name }}" placeholder="Junior support">
+    </div>
+
+    <h2 style="font-size:0.95rem;margin:1.5rem 0 0.4rem">Hosting scope</h2>
+    <div class="field" style="display:flex;flex-direction:column;gap:0.4rem">
+      <label class="cap-row" style="cursor:pointer">
+        <input type="radio" name="scope" value="all"{% if scope_all %} checked{% endif %}>
+        <span><strong>All hostings</strong> <span class="text-soft small">— this role can act on every hosting in the cluster (subject to its capabilities)</span></span>
+      </label>
+      <label class="cap-row" style="cursor:pointer">
+        <input type="radio" name="scope" value="assigned"{% if !scope_all %} checked{% endif %}>
+        <span><strong>Only assigned</strong> <span class="text-soft small">— only hostings explicitly granted to the user on each hosting's Access tab</span></span>
+      </label>
+    </div>
+
+    <h2 style="font-size:0.95rem;margin:1.5rem 0 0.4rem">Capabilities</h2>
+    <div class="cap-groups">
+      {% for g in groups %}
+      <div class="cap-group">
+        <div class="cap-group-head">
+          <span class="cap-group-title">{{ g.label }}</span>
+          <button type="button" class="btn small ghost cap-select-all" data-group="{{ loop.index0 }}">Select all</button>
+        </div>
+        <div class="cap-group-body" data-group="{{ loop.index0 }}">
+          {% for c in g.caps %}
+          <label class="cap-row">
+            <input type="checkbox" name="{{ c.machine }}"{% if c.checked %} checked{% endif %}>
+            <span class="cap-label">{{ c.label }}</span>
+            <code class="cap-machine text-soft small">{{ c.machine }}</code>
+          </label>
+          {% endfor %}
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+
+    <div class="row" style="margin-top:1.25rem;gap:0.5rem">
+      <button class="btn primary" type="submit">
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+        {% if is_edit %}Save changes{% else %}Create role{% endif %}
+      </button>
+      <a class="btn ghost" href="/roles">Cancel</a>
+    </div>
+  </form>
+</div>
+
+<style>
+  .cap-groups {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(20rem, 1fr));
+    gap: 0.75rem;
+  }
+  .cap-group {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-sm);
+    background: var(--surface-1);
+  }
+  .cap-group-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.5rem 0.75rem;
+    border-bottom: 1px solid var(--border);
+  }
+  .cap-group-title { font-weight: 600; font-size: 0.85rem; }
+  .cap-group-body { padding: 0.3rem 0.4rem 0.5rem; }
+  .cap-row {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    padding: 0.35rem 0.55rem;
+    border-radius: var(--radius-xs);
+    cursor: pointer;
+    font-size: 0.85rem;
+  }
+  .cap-row:hover { background: var(--surface-2); }
+  .cap-row input { margin: 0; flex: none; }
+  .cap-label { flex: 1; min-width: 0; }
+  .cap-machine { flex: none; opacity: 0.7; }
+</style>
+<script>
+  (function () {
+    'use strict';
+    // Per-group "select all" — toggles every checkbox in the group. The
+    // button label flips to "Clear all" when the whole group is ticked.
+    document.querySelectorAll('.cap-select-all').forEach(function (btn) {
+      var group = btn.dataset.group;
+      var body = document.querySelector('.cap-group-body[data-group="' + group + '"]');
+      if (!body) return;
+      var boxes = body.querySelectorAll('input[type="checkbox"]');
+      function sync() {
+        var allOn = Array.prototype.every.call(boxes, function (b) { return b.checked; });
+        btn.textContent = allOn ? 'Clear all' : 'Select all';
+      }
+      btn.addEventListener('click', function () {
+        var allOn = Array.prototype.every.call(boxes, function (b) { return b.checked; });
+        boxes.forEach(function (b) { b.checked = !allOn; });
+        sync();
+      });
+      boxes.forEach(function (b) { b.addEventListener('change', sync); });
+      sync();
+    });
+  })();
+</script>
+{% endblock %}

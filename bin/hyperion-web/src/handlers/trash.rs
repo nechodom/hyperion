@@ -15,6 +15,7 @@ use axum::extract::State;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Form;
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
+use hyperion_state::capabilities::Capability;
 use hyperion_types::TrashEntry;
 use serde::Deserialize;
 
@@ -52,7 +53,7 @@ pub async fn get_trash(
     // no per-entry ownership check. `is_read_only()` only excludes the `viewer`
     // role, which let tenant-scoped operators AND customers see + purge other
     // tenants' trash. Restrict to admin+.
-    if !ctx.is_admin_or_higher() {
+    if !ctx.can(Capability::TrashManage) {
         return Ok(Redirect::to("/").into_response());
     }
 
@@ -126,7 +127,7 @@ pub async fn post_trash_restore(
     ctx: AuthCtx,
     Form(form): Form<TrashActionForm>,
 ) -> Result<Response, AppError> {
-    if !ctx.is_admin_or_higher() {
+    if !ctx.can(Capability::TrashManage) {
         return Err(AppError::Forbidden);
     }
     let sel = crate::handlers::hostings::parse_selector_public(&form.selector)?;
@@ -159,7 +160,7 @@ pub async fn post_trash_purge(
     ctx: AuthCtx,
     Form(form): Form<TrashActionForm>,
 ) -> Result<Response, AppError> {
-    if !ctx.is_admin_or_higher() {
+    if !ctx.can(Capability::TrashManage) {
         return Err(AppError::Forbidden);
     }
     let sel = crate::handlers::hostings::parse_selector_public(&form.selector)?;
@@ -206,7 +207,7 @@ pub async fn get_trash_count(
 ) -> axum::response::Response {
     // Same admin+ gate as the page itself — tenant-scoped roles don't get the
     // cluster trash badge (they can't open the page either).
-    if !ctx.is_admin_or_higher() {
+    if !ctx.can(Capability::TrashManage) {
         return axum::Json(serde_json::json!({"count": 0})).into_response();
     }
     let mut total = 0usize;

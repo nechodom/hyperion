@@ -52,12 +52,34 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             hyperion_import::adapter_for(&req.source_kind).ok_or_else(|| RpcError::Validation {
                 message: format!("unknown source panel: {}", req.source_kind),
             })?;
+        // For remote mode, prove SSH connectivity FIRST. The detect() path
+        // collapses EVERY ssh failure (auth, connection refused, timeout,
+        // permission denied) to `None` (hyperion-import Runner::exists does
+        // `.unwrap_or(false)`), which then surfaces as a misleading "no X
+        // install detected". Probing here lets us report the real ssh error.
+        if let Location::Remote(t) = loc {
+            ssh_preflight(t).await.map_err(|msg| RpcError::Validation {
+                message: format!("SSH to {}@{}:{} failed — {}", t.user, t.host, t.port, msg),
+            })?;
+        }
         if adapter.detect(loc).await.is_none() {
             return Err(RpcError::Validation {
-                message: format!(
-                    "no {} install detected ({} mode)",
-                    req.source_kind, req.mode
-                ),
+                message: match loc {
+                    // SSH already proven above, so reaching here means we got
+                    // in but the panel's files weren't found/readable.
+                    Location::Remote(t) => format!(
+                        "connected to {host} over SSH, but no {kind} install was found there. \
+                         Make sure {kind} is installed on {host} and that the SSH user '{user}' \
+                         can read its data files (use root, or a user with sudo/read access).",
+                        host = t.host,
+                        kind = req.source_kind,
+                        user = t.user
+                    ),
+                    _ => format!(
+                        "no {} install detected on this node (in-place mode)",
+                        req.source_kind
+                    ),
+                },
             });
         }
         let ir = adapter
@@ -144,7 +166,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         //    landing index.html create() planted, so it doesn't shadow the
         //    imported site's own index.php/index.html (nginx prefers .html).
         let _ = tokio::fs::remove_file(Path::new(&created.root_dir).join("index.html")).await;
-        fetch_files(loc, &h.docroot, &created.root_dir)
+        fetch_files(loc, &h.domain, &h.docroot, &created.root_dir)
             .await
             .map_err(|reason| RpcError::ProvisioningFailed {
                 stage: "import_copy_files".into(),
@@ -184,12 +206,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 let _ = tokio::fs::create_dir_all(parent).await;
             }
             let dump_path = Path::new(&dump);
-            fetch_db(loc, srcdb, dump_path).await.map_err(|reason| {
-                RpcError::ProvisioningFailed {
+            fetch_db(loc, &h.domain, srcdb, dump_path)
+                .await
+                .map_err(|reason| RpcError::ProvisioningFailed {
                     stage: "import_db_dump".into(),
                     reason,
-                }
-            })?;
+                })?;
             match srcdb.engine {
                 IrDbEngine::Postgres => {
                     hyperion_adapters::backup::restore_postgres_dump(&newdb.db_name, dump_path)
@@ -257,10 +279,12 @@ async fn build_location(req: &ImportPanelReq) -> Result<(Location, Option<PathBu
                     reason: e.to_string(),
                 })?;
             let path = PathBuf::from(format!("{dir}/import-key-{}", unique_token()));
-            let mut key = ssh.key.clone();
-            if !key.ends_with('\n') {
-                key.push('\n'); // OpenSSH refuses keys without a trailing newline
-            }
+            // Pasted keys routinely arrive with CRLF line endings, trailing
+            // spaces, or surrounding blank lines (browser textareas, Windows
+            // clipboards) — any of which makes OpenSSH reject the key with
+            // "error in libcrypto". Normalise before writing so the operator
+            // doesn't have to hand-sanitise the key.
+            let key = normalize_private_key(&ssh.key);
             tokio::fs::write(&path, key.as_bytes()).await.map_err(|e| {
                 RpcError::ProvisioningFailed {
                     stage: "import_ssh_key".into(),
@@ -283,21 +307,81 @@ async fn build_location(req: &ImportPanelReq) -> Result<(Location, Option<PathBu
             };
             Ok((Location::Remote(target), Some(path)))
         }
+        "archive" => {
+            // An export bundle already staged on this node (uploaded via the UI).
+            // Unpack it to a temp dir; the adapters read the manifest + the
+            // per-site docroot/DB from there. No source access needed.
+            let src = req
+                .archive_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| RpcError::Validation {
+                    message: "archive mode requires an uploaded bundle".into(),
+                })?;
+            if !Path::new(src).exists() {
+                return Err(RpcError::Validation {
+                    message: format!("bundle not found on node: {src}"),
+                });
+            }
+            let dir = PathBuf::from(format!(
+                "/var/lib/hyperion/migration/bundle-{}",
+                unique_token()
+            ));
+            tokio::fs::create_dir_all(&dir)
+                .await
+                .map_err(|e| RpcError::ProvisioningFailed {
+                    stage: "import_bundle_dir".into(),
+                    reason: e.to_string(),
+                })?;
+            let out = tokio::process::Command::new("tar")
+                .arg("xf")
+                .arg(src)
+                .arg("-C")
+                .arg(&dir)
+                .output()
+                .await
+                .map_err(|e| RpcError::ProvisioningFailed {
+                    stage: "import_bundle_unpack".into(),
+                    reason: e.to_string(),
+                })?;
+            if !out.status.success() {
+                let _ = tokio::fs::remove_dir_all(&dir).await;
+                return Err(RpcError::Validation {
+                    message: format!(
+                        "could not unpack bundle: {}",
+                        String::from_utf8_lossy(&out.stderr).trim()
+                    ),
+                });
+            }
+            Ok((Location::Archive(dir.clone()), Some(dir)))
+        }
         other => Err(RpcError::Validation {
-            message: format!("unsupported import mode '{other}' (inplace | remote)"),
+            message: format!("unsupported import mode '{other}' (inplace | remote | archive)"),
         }),
     }
 }
 
-async fn cleanup_key(key_file: Option<PathBuf>) {
-    if let Some(p) = key_file {
-        let _ = tokio::fs::remove_file(p).await;
+/// Remove the per-run ephemeral artifact: the 0600 ssh key file (remote mode)
+/// or the unpacked bundle temp dir (archive mode).
+async fn cleanup_key(artifact: Option<PathBuf>) {
+    if let Some(p) = artifact {
+        if p.is_dir() {
+            let _ = tokio::fs::remove_dir_all(&p).await;
+        } else {
+            let _ = tokio::fs::remove_file(&p).await;
+        }
     }
 }
 
 /// Copy the source docroot's contents into `dest` — local `cp -a` for in-place,
 /// `rsync -e ssh` for remote.
-async fn fetch_files(loc: &Location, src_docroot: &str, dest: &str) -> Result<(), String> {
+async fn fetch_files(
+    loc: &Location,
+    domain: &str,
+    src_docroot: &str,
+    dest: &str,
+) -> Result<(), String> {
     match loc {
         Location::Remote(t) => {
             let ssh = format!("ssh {}", t.ssh_opts().join(" "));
@@ -307,6 +391,18 @@ async fn fetch_files(loc: &Location, src_docroot: &str, dest: &str) -> Result<()
                 &["-a", "--numeric-ids", "-e", &ssh, &src, &format!("{dest}/")],
             )
             .await
+        }
+        Location::Archive(dir) => {
+            // Unpack this site's bundled docroot tarball (absent = empty site).
+            let tgz = dir
+                .join("sites")
+                .join(hyperion_import::bundle::site_dir(domain))
+                .join("docroot.tar.gz");
+            if tgz.is_file() {
+                run_cmd("tar", &["xzf", &tgz.display().to_string(), "-C", dest]).await
+            } else {
+                Ok(())
+            }
         }
         _ => {
             // In-place: only copy if the source dir actually exists.
@@ -323,10 +419,29 @@ async fn fetch_files(loc: &Location, src_docroot: &str, dest: &str) -> Result<()
 /// `ssh mysqldump`/`pg_dump` for remote (output captured to the file).
 async fn fetch_db(
     loc: &Location,
+    domain: &str,
     srcdb: &hyperion_import::IrDatabase,
     dump_path: &Path,
 ) -> Result<(), String> {
     match loc {
+        Location::Archive(dir) => {
+            let f = dir
+                .join("sites")
+                .join(hyperion_import::bundle::site_dir(domain))
+                .join("db")
+                .join(format!("{}.dump", srcdb.name));
+            if f.is_file() {
+                tokio::fs::copy(&f, dump_path)
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| format!("copy bundle dump: {e}"))
+            } else {
+                Err(format!(
+                    "database dump '{}' missing from bundle",
+                    srcdb.name
+                ))
+            }
+        }
         Location::Remote(t) => {
             let q = hyperion_import::adapter::shell_quote(&srcdb.name);
             let remote_cmd = match srcdb.engine {
@@ -379,6 +494,61 @@ fn unique_token() -> String {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     format!("{}-{}", std::process::id(), nanos)
+}
+
+/// Normalise a pasted private key: strip CR (CRLF→LF), trim trailing
+/// whitespace per line, drop surrounding blank lines, and guarantee exactly
+/// one trailing newline. OpenSSH/libcrypto rejects keys with stray `\r` or
+/// leading/trailing junk ("error in libcrypto"); base64 bodies and PEM/OpenSSH
+/// header lines never carry significant edge whitespace, so this is lossless
+/// for a valid key but rescues one mangled by a browser textarea / clipboard.
+fn normalize_private_key(raw: &str) -> String {
+    let body = raw
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .lines()
+        .map(|l| l.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("{}\n", body.trim())
+}
+
+/// Prove we can SSH in and run a trivial command, capturing the REAL ssh error
+/// (auth failure, connection refused, timeout, host-key/key-format problem)
+/// instead of letting it collapse into a generic "not detected". Returns Ok on
+/// a clean remote exit, Err(<cleaned ssh stderr>) otherwise.
+async fn ssh_preflight(t: &SshTarget) -> Result<(), String> {
+    let out = tokio::process::Command::new("ssh")
+        .args(t.ssh_opts())
+        .arg(format!("{}@{}", t.user, t.host))
+        .arg("echo hyperion-ssh-ok")
+        .output()
+        .await
+        .map_err(|e| format!("could not run ssh: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    // Drop benign host-key acceptance noise ("Warning: Permanently added …")
+    // and blank lines so the real cause stands out.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let mut msg = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.contains("Permanently added"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    if msg.is_empty() {
+        msg = format!("ssh exited with status {}", out.status);
+    }
+    // A key that won't parse is almost always passphrase-protected or in a
+    // non-OpenSSH format — point the operator at the fix.
+    if msg.contains("error in libcrypto") || msg.contains("Load key") {
+        msg.push_str(
+            " — the private key couldn't be loaded; it must be an UNENCRYPTED \
+             OpenSSH/PEM key (passphrase-protected or PuTTY .ppk keys won't work)",
+        );
+    }
+    Err(msg)
 }
 
 /// Run a command, mapping a non-zero exit to a readable error string.

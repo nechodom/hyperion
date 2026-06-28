@@ -1403,6 +1403,7 @@ dependencies = [
  "chrono",
  "clap",
  "hyperion-core",
+ "hyperion-import",
  "hyperion-rpc",
  "hyperion-rpc-server",
  "hyperion-state",

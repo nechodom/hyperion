@@ -23,6 +23,7 @@ use axum::extract::State;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Form;
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
+use hyperion_state::capabilities::Capability;
 use serde::Deserialize;
 
 #[derive(Template)]
@@ -242,7 +243,7 @@ pub async fn get_firewall(
 ) -> Result<Response, AppError> {
     // Only admins should see the ruleset — it reveals service
     // topology that an operator role doesn't need.
-    if !ctx.is_admin_or_higher() {
+    if !(ctx.can(Capability::SecurityManage) && ctx.scope_all()) {
         return Ok(
             Redirect::to("/?flash_error=admin+role+required+to+view+firewall").into_response(),
         );
@@ -383,7 +384,7 @@ pub async fn post_apply(
     ctx: AuthCtx,
     Form(form): Form<ApplyTemplateForm>,
 ) -> Result<Response, AppError> {
-    if !ctx.is_admin_or_higher() {
+    if !(ctx.can(Capability::SecurityManage) && ctx.scope_all()) {
         return Ok((
             axum::http::StatusCode::FORBIDDEN,
             [("content-type", "text/html; charset=utf-8")],

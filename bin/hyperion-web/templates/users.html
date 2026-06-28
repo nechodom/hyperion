@@ -89,11 +89,20 @@
               <input type="hidden" name="_csrf" value="{{ csrf_token }}">
               <input type="hidden" name="user_id" value="{{ u.id }}">
               <select name="role">
-                <option value="viewer" {% if u.role == "viewer" %}selected{% endif %}>Read-only</option>
-                <option value="customer" {% if u.role == "customer" %}selected{% endif %}>Customer</option>
-                <option value="operator" {% if u.role == "operator" %}selected{% endif %}>Operator</option>
-                <option value="admin" {% if u.role == "admin" %}selected{% endif %}>Administrator</option>
-                <option value="super_admin" {% if u.role == "super_admin" %}selected{% endif %}>Owner</option>
+                <optgroup label="Built-in">
+                  <option value="viewer" {% if u.role == "viewer" %}selected{% endif %}>Read-only</option>
+                  <option value="customer" {% if u.role == "customer" %}selected{% endif %}>Customer</option>
+                  <option value="operator" {% if u.role == "operator" %}selected{% endif %}>Operator</option>
+                  <option value="admin" {% if u.role == "admin" %}selected{% endif %}>Administrator</option>
+                  <option value="super_admin" {% if u.role == "super_admin" %}selected{% endif %}>Owner</option>
+                </optgroup>
+                {% if !custom_roles.is_empty() %}
+                <optgroup label="Custom">
+                  {% for cr in custom_roles %}
+                  <option value="custom:{{ cr.id }}">{{ cr.name }}</option>
+                  {% endfor %}
+                </optgroup>
+                {% endif %}
               </select>
               <button type="submit" class="btn small">Save role</button>
             </form>

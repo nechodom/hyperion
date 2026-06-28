@@ -14,6 +14,7 @@ use askama::Template;
 use axum::extract::{Query, State};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
+use hyperion_state::capabilities::Capability;
 use hyperion_types::EmailLogEntry;
 use serde::Deserialize;
 
@@ -61,7 +62,7 @@ pub async fn get_emails(
     // info across the whole cluster. A viewer with per-hosting
     // access to ONE site shouldn't see notifications for every
     // other site. The per-hosting Emails tab is correctly scoped.
-    if !ctx.is_admin_or_higher() {
+    if !ctx.can(Capability::EmailLogView) {
         return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
     }
     let hosting_id: Option<String> = if q.hosting.trim().is_empty() {

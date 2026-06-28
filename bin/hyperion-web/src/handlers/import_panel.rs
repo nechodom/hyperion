@@ -10,6 +10,7 @@ use askama::Template;
 use axum::extract::State;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
+use hyperion_state::capabilities::Capability;
 use serde::Deserialize;
 
 /// A selectable node for the "run on" dropdown.
@@ -123,7 +124,7 @@ pub async fn get_import(
     State(state): State<SharedState>,
     ctx: AuthCtx,
 ) -> Result<Response, AppError> {
-    if !ctx.is_admin_or_higher() {
+    if !ctx.can(Capability::PanelImport) {
         return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
     }
     let tpl = ImportTpl::base(&state, &ctx, node_options(&state).await);
@@ -145,9 +146,23 @@ pub struct ImportForm {
     pub ssh_port: String,
     #[serde(default)]
     pub ssh_key: String,
+    /// archive mode: node-local path to an uploaded bundle (set by the upload
+    /// handler, echoed through the plan → apply steps).
+    #[serde(default)]
+    pub archive_path: String,
 }
 fn default_mode() -> String {
     "inplace".into()
+}
+
+/// None unless the form carries a non-empty archive path.
+fn opt_archive(form: &ImportForm) -> Option<String> {
+    let p = form.archive_path.trim();
+    if p.is_empty() {
+        None
+    } else {
+        Some(p.to_string())
+    }
 }
 
 /// Build the SSH connection for remote mode from the form (None otherwise).
@@ -189,13 +204,14 @@ pub async fn post_plan(
     ctx: AuthCtx,
     axum::Form(form): axum::Form<ImportForm>,
 ) -> Result<Response, AppError> {
-    if !ctx.is_admin_or_higher() {
+    if !ctx.can(Capability::PanelImport) {
         return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
     }
     let req = hyperion_import::ImportPanelReq {
         source_kind: form.source_kind.clone(),
         mode: form.mode.clone(),
         ssh: build_ssh(&form),
+        archive_path: opt_archive(&form),
     };
     let resp = crate::dispatcher::dispatch_to_node(
         &state,
@@ -251,13 +267,14 @@ pub async fn post_apply(
     ctx: AuthCtx,
     axum::Form(form): axum::Form<ImportForm>,
 ) -> Result<Response, AppError> {
-    if !ctx.is_admin_or_higher() {
+    if !ctx.can(Capability::PanelImport) {
         return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
     }
     let req = hyperion_import::ImportPanelReq {
         source_kind: form.source_kind.clone(),
         mode: form.mode.clone(),
         ssh: build_ssh(&form),
+        archive_path: opt_archive(&form),
     };
     // Owned bits captured by the detached task (no secrets in the job payload —
     // the ssh key lives only in `req`, in memory, never persisted to the row).
@@ -287,7 +304,7 @@ pub async fn post_apply(
 /// the job log. The import RPC is one coarse step (the node does all sites then
 /// replies); progress is start → done, with the full created/skipped/unsupported
 /// breakdown captured in the job's log tail.
-async fn run_panel_import_job(
+pub(crate) async fn run_panel_import_job(
     reporter: crate::handlers::jobs::JobReporter,
     state: SharedState,
     node: Option<String>,

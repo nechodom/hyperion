@@ -158,19 +158,98 @@ pub async fn set_password_hash(
     Ok(())
 }
 
+/// Assign a built-in role. Clears any custom-role link so switching a
+/// custom-role user back to a built-in fully takes effect.
 pub async fn set_role(
     pool: &SqlitePool,
     user_id: i64,
     role: WebRole,
     now: i64,
 ) -> Result<(), StateError> {
-    sqlx::query("UPDATE web_users SET role = ?, updated_at = ? WHERE id = ?")
-        .bind(role.as_str())
+    sqlx::query(
+        "UPDATE web_users SET role = ?, custom_role_id = NULL, updated_at = ? WHERE id = ?",
+    )
+    .bind(role.as_str())
+    .bind(now)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Assign a custom role. The `role` column is set to a minimal built-in
+/// sentinel (`Operator`) so any authorization gate not yet converted to a
+/// capability check **default-denies** the custom role rather than leaking
+/// admin power; the real capabilities come from the custom role resolved into
+/// the session at login.
+pub async fn set_custom_role(
+    pool: &SqlitePool,
+    user_id: i64,
+    custom_role_id: i64,
+    now: i64,
+) -> Result<(), StateError> {
+    sqlx::query("UPDATE web_users SET role = ?, custom_role_id = ?, updated_at = ? WHERE id = ?")
+        .bind(WebRole::Operator.as_str())
+        .bind(custom_role_id)
         .bind(now)
         .bind(user_id)
         .execute(pool)
         .await?;
     Ok(())
+}
+
+/// A user's effective authorization: capabilities + scope + a display label,
+/// resolved from either the built-in `role` or a linked custom role. Stamped
+/// into the session at login so request handlers gate on capabilities.
+#[derive(Debug, Clone)]
+pub struct EffectiveRole {
+    pub caps: crate::capabilities::CapSet,
+    pub scope_all: bool,
+    /// Custom role name, or the built-in role's machine string.
+    pub label: String,
+    pub custom_role_id: Option<i64>,
+    pub base_role: WebRole,
+}
+
+/// Resolve a user's effective role in a single query (built-in preset, or the
+/// linked custom role's bitmask + scope).
+pub async fn effective_role(
+    pool: &SqlitePool,
+    user_id: i64,
+) -> Result<Option<EffectiveRole>, StateError> {
+    let row: Option<(
+        String,
+        Option<i64>,
+        Option<String>,
+        Option<i64>,
+        Option<i64>,
+    )> = sqlx::query_as(
+        "SELECT u.role, u.custom_role_id, c.name, c.capabilities, c.scope_all_hostings \
+             FROM web_users u LEFT JOIN custom_roles c ON c.id = u.custom_role_id \
+             WHERE u.id = ?",
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.map(|(role, crid, cname, ccaps, cscope)| {
+        let base = WebRole::from_str(&role).unwrap_or(WebRole::Viewer);
+        match (crid, cname, ccaps) {
+            (Some(id), Some(name), Some(caps)) => EffectiveRole {
+                caps: crate::capabilities::CapSet::from_bits(caps as u64),
+                scope_all: cscope.unwrap_or(0) != 0,
+                label: name,
+                custom_role_id: Some(id),
+                base_role: base,
+            },
+            _ => EffectiveRole {
+                caps: base.capabilities(),
+                scope_all: base.scope_all(),
+                label: base.as_str().to_string(),
+                custom_role_id: None,
+                base_role: base,
+            },
+        }
+    }))
 }
 
 pub async fn set_email(

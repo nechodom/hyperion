@@ -6,6 +6,7 @@ use axum::extract::{Query, State};
 use axum::response::{Html, IntoResponse, Response};
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
 use hyperion_rpc::AuditEntryWire;
+use hyperion_state::capabilities::Capability;
 use serde::Deserialize;
 use std::collections::BTreeSet;
 
@@ -85,7 +86,7 @@ pub async fn get_audit(
     // every hosting + user + cluster-wide event. Subjects + JSON
     // payloads leak cross-tenant operational data — viewer with
     // access to one site can read everything else.
-    if !ctx.is_admin_or_higher() {
+    if !ctx.can(Capability::AuditView) {
         return Ok(
             axum::response::Redirect::to("/?flash_error=admin+role+required").into_response(),
         );
@@ -223,7 +224,7 @@ pub async fn post_verify_chain(
     State(state): State<SharedState>,
     ctx: AuthCtx,
 ) -> Result<Response, AppError> {
-    if !ctx.is_admin_or_higher() {
+    if !ctx.can(Capability::AuditView) {
         return Ok(
             Html("<div class=\"pill err\">admin role required</div>".to_string()).into_response(),
         );

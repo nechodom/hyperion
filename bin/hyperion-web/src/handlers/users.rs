@@ -13,7 +13,7 @@ use axum::extract::State;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Form;
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
-use hyperion_types::WebUserSummary;
+use hyperion_types::{CustomRoleSummary, WebUserSummary};
 use serde::Deserialize;
 
 #[derive(Template)]
@@ -25,6 +25,11 @@ struct UsersTpl<'a> {
     css_version: &'static str,
     htmx_version: &'static str,
     users: Vec<WebUserSummary>,
+    /// Custom roles — listed in the change-role dropdown under a
+    /// "Custom" optgroup so an owner can assign one after a user is
+    /// created. Best-effort: an RPC failure leaves this empty and the
+    /// dropdown shows only built-ins.
+    custom_roles: Vec<CustomRoleSummary>,
     #[allow(dead_code)] // accessed by template; will surface via askama macros
     is_super_admin: bool,
     csrf_token: String,
@@ -55,6 +60,13 @@ pub async fn get_users(
             Ok(_) => (vec![], Some("unexpected agent response".into())),
             Err(e) => (vec![], Some(format!("rpc: {e}"))),
         };
+    // Custom roles for the change-role dropdown. Best-effort — failure
+    // just hides the "Custom" optgroup (built-ins still work).
+    let custom_roles = match hyperion_rpc_client::call(&state.agent_socket, Request::RoleList).await
+    {
+        Ok(RpcResponse::RoleList(v)) => v,
+        _ => Vec::new(),
+    };
     let csrf_token = super::session_csrf_token(&state, &ctx);
     let tpl = UsersTpl {
         username: &ctx.username,
@@ -63,6 +75,7 @@ pub async fn get_users(
         css_version: super::css_version(),
         htmx_version: super::htmx_version(),
         users,
+        custom_roles,
         is_super_admin: ctx.is_super_admin(),
         error: error.or(q.error),
         flash: q.flash,
@@ -124,6 +137,23 @@ pub async fn post_set_role(
 ) -> Result<Response, AppError> {
     if !ctx.is_super_admin() {
         return Ok(Redirect::to("/").into_response());
+    }
+    // A custom-role pick arrives as "custom:<id>"; everything else is a
+    // built-in role machine string handled by the existing path.
+    if let Some(rest) = form.role.strip_prefix("custom:") {
+        let custom_role_id = rest
+            .parse::<i64>()
+            .map_err(|_| AppError::BadRequest(format!("invalid custom role id: {rest:?}")))?;
+        let resp = hyperion_rpc_client::call(
+            &state.agent_socket,
+            Request::WebUserSetCustomRole {
+                user_id: form.user_id,
+                custom_role_id,
+            },
+        )
+        .await
+        .map_err(AppError::from)?;
+        return flash_redirect(resp, "Role updated");
     }
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
@@ -235,6 +265,7 @@ pub async fn post_reset_password(
 fn flash_redirect(resp: RpcResponse, success_msg: &str) -> Result<Response, AppError> {
     match resp {
         RpcResponse::WebUserSetRole
+        | RpcResponse::WebUserSetCustomRole
         | RpcResponse::WebUserSetLocked
         | RpcResponse::WebUserDelete
         | RpcResponse::WebUserSetPassword => Ok(Redirect::to(&format!(

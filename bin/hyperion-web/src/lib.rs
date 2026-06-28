@@ -292,6 +292,12 @@ pub fn build_router(state: SharedState) -> Router {
             "/admin/users/password",
             post(handlers::users::post_reset_password),
         )
+        .route("/roles", get(handlers::roles::get_roles))
+        .route("/roles", post(handlers::roles::post_create))
+        .route("/roles/new", get(handlers::roles::get_new))
+        .route("/roles/:id/edit", get(handlers::roles::get_edit))
+        .route("/roles/:id/update", post(handlers::roles::post_update))
+        .route("/roles/:id/delete", post(handlers::roles::post_delete))
         .route(
             "/hostings/access/grant",
             post(handlers::hostings::post_access_grant),
@@ -457,6 +463,15 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/import", get(handlers::import_panel::get_import))
         .route("/import/plan", post(handlers::import_panel::post_plan))
         .route("/import/apply", post(handlers::import_panel::post_apply))
+        .route("/import/wizard", get(handlers::import_wizard::get_wizard))
+        .route(
+            "/import/wizard/mint",
+            post(handlers::import_wizard::post_mint),
+        )
+        .route(
+            "/import/wizard/transfers",
+            get(handlers::import_wizard::get_transfers),
+        )
         .route(
             "/install/invite/revoke",
             post(handlers::install::post_revoke),
@@ -560,6 +575,22 @@ pub fn build_router(state: SharedState) -> Router {
         .route(
             "/api/migration/bundle/:bundle_id/:filename",
             get(handlers::migration::get_bundle_file),
+        )
+        // Self-service import — public, one-time-token-gated (the source box has
+        // no Hyperion session; the token IS the credential: single-use, scoped,
+        // expiring). Ingest streams a (possibly huge) bundle → body limit off.
+        .route(
+            "/import/agent/:token",
+            get(handlers::import_wizard::get_agent_script),
+        )
+        .route(
+            "/import/agent-bin/:token",
+            get(handlers::import_wizard::get_agent_bin),
+        )
+        .route(
+            "/import/ingest/:token",
+            post(handlers::import_wizard::post_ingest)
+                .layer(axum::extract::DefaultBodyLimit::disable()),
         )
         .layer(axum::middleware::from_fn(security_headers))
         .layer(from_fn_with_state(state.clone(), enforce_panel_hostname))

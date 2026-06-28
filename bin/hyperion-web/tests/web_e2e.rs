@@ -1105,6 +1105,9 @@ async fn pending_2fa_token_in_session_cookie_slot_is_rejected() {
         username: String::new(),
         role: "pending_2fa".into(),
         purpose: PURPOSE_PENDING_2FA.into(),
+        caps: 0,
+        scope_all: false,
+        caps_present: false,
     };
     let token = signer.sign(&pending).expect("sign");
     let cookie = format!("hyperion_session={token}");

@@ -7,6 +7,7 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Form;
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
 use hyperion_rpc::wire::{DeleteOpts, HostingCreateReq, HostingCreated, HostingSelector};
+use hyperion_state::capabilities::Capability;
 use hyperion_types::{
     CertIssueRequest, DbProvision, DnsCheckResult, HostingDetail, HostingProfile, HostingStats,
     HostingSummary, PhpVersion, ProfileApply, SpfCheckResult, WpInstallRequest, WpInstallStatus,
@@ -428,7 +429,7 @@ pub async fn get_new(State(state): State<SharedState>, ctx: AuthCtx) -> Result<R
     // the post_create handler enforces this server-side anyway,
     // bouncing on GET avoids rendering the entire form just to
     // refuse the submit.
-    if !ctx.is_admin_or_higher() {
+    if !ctx.can(Capability::HostingCreate) {
         return Err(AppError::Forbidden);
     }
     // Wildcard CSRF token so it also covers the DNS-preflight HTMX
@@ -592,7 +593,7 @@ pub async fn post_create(
 ) -> Result<Response, AppError> {
     // Creating a new hosting is a cluster-scoped action — operators
     // with per-hosting grants can't conjure new sites into existence.
-    if !ctx.is_admin_or_higher() {
+    if !ctx.can(Capability::HostingCreate) {
         return Err(AppError::Forbidden);
     }
     let csrf_token = super::session_csrf_token(&state, &ctx);
@@ -3734,7 +3735,7 @@ pub(crate) async fn filter_by_access(
     ctx: &AuthCtx,
     rows: Vec<HostingSummary>,
 ) -> Vec<HostingSummary> {
-    if ctx.is_admin_or_higher() {
+    if ctx.is_admin_or_higher() || ctx.scope_all() {
         return rows;
     }
     let Some(sess) = ctx.session.as_ref() else {
@@ -3778,7 +3779,9 @@ pub async fn require_hosting_access(
     hosting_id: &str,
     require_manage: bool,
 ) -> Result<(), Response> {
-    if ctx.is_admin_or_higher() {
+    // Admins and any all-scope role (built-in admin/super, or a custom role with
+    // "all hostings" scope) reach every hosting without a per-hosting grant.
+    if ctx.is_admin_or_higher() || ctx.scope_all() {
         return Ok(());
     }
     let forbidden = || {
@@ -3834,7 +3837,7 @@ pub async fn require_manage_for_selector(
             .into_response()
     };
     let sel = parse_selector(sel_str).map_err(|_| forbidden())?;
-    if ctx.is_admin_or_higher() {
+    if ctx.is_admin_or_higher() || ctx.scope_all() {
         return Ok(sel);
     }
     let hosting_id = match &sel {
@@ -4496,7 +4499,7 @@ pub async fn get_check_domain(
     // Same role gate as the wizard — viewers / customers can't see
     // /hostings/new so they shouldn't be able to probe domain
     // availability either.
-    if !ctx.is_admin_or_higher() {
+    if !ctx.can(Capability::HostingCreate) {
         return axum::Json(serde_json::json!({"exists": false, "checked": false})).into_response();
     }
     let needle = q.domain.trim().to_ascii_lowercase();
@@ -4610,7 +4613,7 @@ pub async fn post_dns_check_domain(
 ) -> Result<Response, AppError> {
     // Used by the new-hosting form. Match post_create's gating —
     // operators can't be on this page anyway.
-    if !ctx.is_admin_or_higher() {
+    if !ctx.can(Capability::HostingCreate) {
         return Err(AppError::Forbidden);
     }
     let trimmed = form.domain.trim();

@@ -51,6 +51,17 @@ pub struct Session {
     /// — they were always real sessions.
     #[serde(default = "default_purpose")]
     pub purpose: String,
+    /// Resolved capability bitmask for this user (built-in preset or custom
+    /// role), stamped at login. Only authoritative when `caps_present` is true.
+    #[serde(default)]
+    pub caps: u64,
+    /// Does this user act on all hostings (vs only assigned)?
+    #[serde(default)]
+    pub scope_all: bool,
+    /// True for sessions minted after the capability system shipped. Older
+    /// cookies have it false → the web layer derives caps from `role`.
+    #[serde(default)]
+    pub caps_present: bool,
 }
 
 fn default_role() -> String {
@@ -203,6 +214,9 @@ mod tests {
             username: "tester".into(),
             role: "super_admin".into(),
             purpose: PURPOSE_SESSION.into(),
+            caps: 0,
+            scope_all: false,
+            caps_present: false,
         }
     }
 
@@ -258,6 +272,9 @@ mod tests {
             username: "evil".into(),
             role: "super_admin".into(),
             purpose: PURPOSE_SESSION.into(),
+            caps: 0,
+            scope_all: false,
+            caps_present: false,
         };
         let new_payload = serde_json::to_vec(&evil).expect("json");
         let new_token = format!("{}.{}", B64.encode(&new_payload), sig);
@@ -308,6 +325,9 @@ mod tests {
             username: String::new(),
             role: "pending_2fa".into(),
             purpose: PURPOSE_PENDING_2FA.into(),
+            caps: 0,
+            scope_all: false,
+            caps_present: false,
         };
         let token = s.sign(&pending).expect("sign");
         let back = s.verify(&token, 9_000).expect("verify");

@@ -10,6 +10,7 @@ use askama::Template;
 use axum::extract::State;
 use axum::response::{Html, IntoResponse, Response};
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
+use hyperion_state::capabilities::Capability;
 use hyperion_types::MonitorOverviewItem;
 
 #[derive(Template)]
@@ -35,7 +36,7 @@ pub async fn get_monitoring(
     // per-hosting access, so a tenant-scoped role (operator/customer/viewer)
     // would enumerate other tenants' inventory here. Restrict to admin+;
     // tenant-scoped users still get per-hosting monitoring on each detail page.
-    if !ctx.is_admin_or_higher() {
+    if !(ctx.can(Capability::MonitoringView) && ctx.scope_all()) {
         return Ok(axum::response::Redirect::to("/").into_response());
     }
 
