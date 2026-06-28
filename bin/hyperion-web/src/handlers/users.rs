@@ -265,6 +265,7 @@ pub async fn post_reset_password(
 fn flash_redirect(resp: RpcResponse, success_msg: &str) -> Result<Response, AppError> {
     match resp {
         RpcResponse::WebUserSetRole
+        | RpcResponse::WebUserSetCustomRole
         | RpcResponse::WebUserSetLocked
         | RpcResponse::WebUserDelete
         | RpcResponse::WebUserSetPassword => Ok(Redirect::to(&format!(

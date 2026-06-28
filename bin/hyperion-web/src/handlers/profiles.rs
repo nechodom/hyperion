@@ -72,6 +72,9 @@ pub async fn get_profiles(
     ctx: AuthCtx,
     Query(q): Query<ProfilesQuery>,
 ) -> Result<Response, AppError> {
+    if !ctx.can(Capability::ProfilesManage) {
+        return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
+    }
     let mut profiles = fetch_profiles(&state).await.unwrap_or_default();
     // The in_use_count from ProfileList is master-local; add the per-node counts
     // from every worker so the badge is cluster-wide.
