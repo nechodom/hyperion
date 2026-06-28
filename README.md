@@ -4,11 +4,12 @@
 
 **Self-hosted, multi-node hosting control panel written in Rust.**
 
-One binary on each server, one web UI on the master.
-Provisions PHP / static / Node.js sites end-to-end —
-nginx + FPM pool + database + TLS + WordPress — in a single atomic
-transaction. Manages a fleet of VPSes from one screen,
-and **imports your existing sites from HestiaCP or CloudPanel**.
+One binary per server, one web UI on the master. It provisions
+PHP / static / Node.js sites end-to-end — Linux user, nginx vhost,
+FPM pool, database, TLS, WordPress — in one transaction that rolls
+back cleanly if any step trips, so you never inherit a half-built
+site at 2am. Runs a fleet of VPSes from one screen, and **imports
+what you've already got on HestiaCP or CloudPanel**.
 
 [![Rust](https://img.shields.io/badge/rust-stable_2024-orange?logo=rust)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/license-AGPL--3.0-blue)](#license)
@@ -27,15 +28,17 @@ and **imports your existing sites from HestiaCP or CloudPanel**.
 > [!WARNING]
 > ### 🧪 Young project — not yet battle-tested in production
 >
-> Hyperion is a free-time project. It's heavily unit-tested (~650 tests) and
-> validated end-to-end in throwaway VMs — but it has **not** been proven in
-> real-world production, and the newest pieces (the [panel import](#migrate-in-panel-import))
-> have only been run against my own test machines. **Run it on disposable / test
-> servers, keep backups, and don't trust it with anything you can't afford to lose — yet.**
+> Hyperion is a free-time project. It compiles, ~650 tests are green, and it's
+> been driven end-to-end across throwaway VMs — and it has **never once seen real
+> production traffic.** Schrödinger's hosting panel: probably fine, definitely
+> unobserved. The newest bits (the [panel import](#migrate-in-panel-import)) have
+> only ever met my own test machines. **Run it on boxes you'd be happy to `dd` into
+> oblivion, keep backups, and don't point anything you can't afford to lose at it — yet.**
 >
-> 🙏 **Testers & reviewers wanted.** If you kick the tyres, I'd genuinely love
-> feedback on **functionality, security, or just design / UX ideas** — open an
-> issue, however rough. That's exactly what will move this toward production-grade.
+> 🙏 **Testers & reviewers wanted.** Kick the tyres and tell me what breaks —
+> feedback on **functionality, security, or just design / UX** is worth its weight
+> in `cargo build` minutes right now. Open an issue, however rough; that's what
+> drags this toward production-grade.
 
 ---
 
@@ -62,11 +65,13 @@ and **imports your existing sites from HestiaCP or CloudPanel**.
 
 ## Why Hyperion?
 
-> The honest pitch: most open-source hosting panels are PHP wrappers
-> around shell templating. They work, but you trust 10 000 lines of
-> `bash`-by-stringification. Hyperion is the opposite — a small,
-> security-first Rust core that does the same job *and* scales across
-> multiple servers out of the box.
+> The honest pitch: most open-source panels are PHP wrappers around shell
+> templating. They work — right up until a domain with a funny character turns
+> a config write into accidental `bash` improv, and you realise you've been
+> trusting ~10 000 lines of string-concatenated shell running as root. Hyperion
+> does the same job from a small, security-first Rust core where the worst a typo
+> earns you is a compile error instead of a 2am page — and it scales across
+> servers out of the box.
 
 |                                           | HestiaCP / Vesta / aapanel | **Hyperion**                       |
 | ----------------------------------------- | -------------------------- | ---------------------------------- |
@@ -94,6 +99,10 @@ and **imports your existing sites from HestiaCP or CloudPanel**.
 curl -fsSL https://raw.githubusercontent.com/nechodom/hyperion/main/packaging/install/install-master.sh \
   | sudo bash
 ```
+
+Yes, it's `curl | sudo bash` piping a script straight into root. Read it
+first — I would. (Prefer to clone and run it yourself? See
+[local development](#local-development-macos--dev-vps) below.)
 
 In ~3–5 minutes the script:
 
@@ -436,7 +445,9 @@ Two layers per box:
 ```
 
 Every adapter takes pre-validated typed arguments and shells out
-only via `Command::new(..).arg(..)`. The `AdapterPort` trait is
+only via `Command::new(..).arg(..)` — never `format!()` into a shell,
+the one rule that turns "oops, an unescaped quote in a domain name"
+from an RCE into a boring type error. The `AdapterPort` trait is
 mocked end-to-end so the orchestrator's rollback paths are unit-
 tested in isolation. Wire protocol is `u32be length || JSON`,
 max frame 128 MiB. RPC envelope is Ed25519-signed Canonical-JSON
@@ -557,14 +568,14 @@ security, and UX — bug reports and ideas of any size are hugely welcome.
 ## Testing
 
 ```bash
-cargo test --workspace                    # ~650 tests, runs in seconds
-cargo fmt --all                           # format clean
-cargo clippy --workspace --all-targets    # warnings-only
+cargo test --workspace                    # ~650 tests, green, runs in seconds
+cargo fmt --all                           # bikeshedding, automated away
+cargo clippy --workspace --all-targets    # also clean under -D warnings
 ```
 
-A handful of integration tests are gated `#[ignore]` because they
-need a real Debian (`useradd`, `mariadb-dump`, `systemctl reload
-nginx`). On a node:
+A handful of integration tests are gated `#[ignore]` because they want a
+real Debian (`useradd`, `mariadb-dump`, `systemctl reload nginx`) — they
+don't run on your laptop, and honestly neither should your panel. On a node:
 
 ```bash
 cargo test --workspace -- --ignored
@@ -627,6 +638,6 @@ get in touch.
 
 **[⬆ back to top](#-hyperion)**
 
-Built with ☕ in Czechia by [@nechodom](https://github.com/nechodom) — contributions welcome.
+Built with ☕ in Czechia by [@nechodom](https://github.com/nechodom), one `cargo build` at a time — contributions (and bug reports) welcome.
 
 </div>
