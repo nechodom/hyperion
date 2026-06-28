@@ -279,10 +279,12 @@ async fn build_location(req: &ImportPanelReq) -> Result<(Location, Option<PathBu
                     reason: e.to_string(),
                 })?;
             let path = PathBuf::from(format!("{dir}/import-key-{}", unique_token()));
-            let mut key = ssh.key.clone();
-            if !key.ends_with('\n') {
-                key.push('\n'); // OpenSSH refuses keys without a trailing newline
-            }
+            // Pasted keys routinely arrive with CRLF line endings, trailing
+            // spaces, or surrounding blank lines (browser textareas, Windows
+            // clipboards) — any of which makes OpenSSH reject the key with
+            // "error in libcrypto". Normalise before writing so the operator
+            // doesn't have to hand-sanitise the key.
+            let key = normalize_private_key(&ssh.key);
             tokio::fs::write(&path, key.as_bytes()).await.map_err(|e| {
                 RpcError::ProvisioningFailed {
                     stage: "import_ssh_key".into(),
@@ -403,10 +405,27 @@ fn unique_token() -> String {
     format!("{}-{}", std::process::id(), nanos)
 }
 
+/// Normalise a pasted private key: strip CR (CRLF→LF), trim trailing
+/// whitespace per line, drop surrounding blank lines, and guarantee exactly
+/// one trailing newline. OpenSSH/libcrypto rejects keys with stray `\r` or
+/// leading/trailing junk ("error in libcrypto"); base64 bodies and PEM/OpenSSH
+/// header lines never carry significant edge whitespace, so this is lossless
+/// for a valid key but rescues one mangled by a browser textarea / clipboard.
+fn normalize_private_key(raw: &str) -> String {
+    let body = raw
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .lines()
+        .map(|l| l.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("{}\n", body.trim())
+}
+
 /// Prove we can SSH in and run a trivial command, capturing the REAL ssh error
-/// (auth failure, connection refused, timeout, host-key problem) instead of
-/// letting it collapse into a generic "not detected". Returns Ok on a clean
-/// remote exit, Err(<ssh stderr / io error>) otherwise.
+/// (auth failure, connection refused, timeout, host-key/key-format problem)
+/// instead of letting it collapse into a generic "not detected". Returns Ok on
+/// a clean remote exit, Err(<cleaned ssh stderr>) otherwise.
 async fn ssh_preflight(t: &SshTarget) -> Result<(), String> {
     let out = tokio::process::Command::new("ssh")
         .args(t.ssh_opts())
@@ -418,12 +437,27 @@ async fn ssh_preflight(t: &SshTarget) -> Result<(), String> {
     if out.status.success() {
         return Ok(());
     }
-    let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
-    Err(if err.is_empty() {
-        format!("ssh exited with status {}", out.status)
-    } else {
-        err
-    })
+    // Drop benign host-key acceptance noise ("Warning: Permanently added …")
+    // and blank lines so the real cause stands out.
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let mut msg = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.contains("Permanently added"))
+        .collect::<Vec<_>>()
+        .join("; ");
+    if msg.is_empty() {
+        msg = format!("ssh exited with status {}", out.status);
+    }
+    // A key that won't parse is almost always passphrase-protected or in a
+    // non-OpenSSH format — point the operator at the fix.
+    if msg.contains("error in libcrypto") || msg.contains("Load key") {
+        msg.push_str(
+            " — the private key couldn't be loaded; it must be an UNENCRYPTED \
+             OpenSSH/PEM key (passphrase-protected or PuTTY .ppk keys won't work)",
+        );
+    }
+    Err(msg)
 }
 
 /// Run a command, mapping a non-zero exit to a readable error string.
