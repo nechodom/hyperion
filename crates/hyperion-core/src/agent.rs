@@ -1004,6 +1004,12 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     async fn role_list(&self) -> Result<Vec<hyperion_types::CustomRoleSummary>, RpcError> {
         self.svc.role_list().await
     }
+    async fn import_token(
+        &self,
+        op: hyperion_types::ImportTokenOp,
+    ) -> Result<hyperion_types::ImportTokenResult, RpcError> {
+        self.svc.import_token(op).await
+    }
     async fn role_create(
         &self,
         name: String,

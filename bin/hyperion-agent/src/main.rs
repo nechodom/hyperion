@@ -143,11 +143,17 @@ async fn run_export_bundle(
     );
 
     hyperion_import::bundle::build(&ir, &out).await?;
-    println!(
-        "✓ wrote {} — {} site(s). Upload it in Hyperion: Import → Upload bundle.",
-        out.display(),
-        ir.hostings.len()
-    );
+    // In stream mode (`--out -`) stdout carries the tar — keep ALL human output
+    // on stderr so it can't corrupt the bundle piped into curl.
+    if out.as_os_str() == "-" {
+        eprintln!("✓ streamed bundle — {} site(s).", ir.hostings.len());
+    } else {
+        println!(
+            "✓ wrote {} — {} site(s). Upload it in Hyperion: Import → Upload bundle.",
+            out.display(),
+            ir.hostings.len()
+        );
+    }
     Ok(())
 }
 

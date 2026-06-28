@@ -147,10 +147,7 @@ pub async fn cancel(pool: &SqlitePool, id: i64) -> Result<(), StateError> {
 
 /// Active tokens (pending/receiving/importing, unexpired) — for the wizard's
 /// "in-flight transfers" list.
-pub async fn list_active(
-    pool: &SqlitePool,
-    now: i64,
-) -> Result<Vec<ImportTokenRow>, StateError> {
+pub async fn list_active(pool: &SqlitePool, now: i64) -> Result<Vec<ImportTokenRow>, StateError> {
     let rows = sqlx::query_as::<_, ImportTokenRow>(&format!(
         "SELECT {COLS} FROM import_tokens \
          WHERE status IN ('pending', 'receiving', 'importing') AND expires_at > ? \

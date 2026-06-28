@@ -865,6 +865,9 @@ pub enum Request {
         user_id: i64,
         role: String,
     },
+    /// Self-service import wizard token op (mint/resolve/update/list/cancel).
+    /// One variant keeps the RPC surface small; the op enum carries the rest.
+    ImportToken(hyperion_types::ImportTokenOp),
     /// List all custom roles (granular RBAC). Each summary carries a
     /// capability bitmask, its scope, and a live in-use count.
     RoleList,
@@ -1535,6 +1538,7 @@ pub enum Response {
     RoleDelete,
     WebUserSetCustomRole,
     WebUserEffectiveRole(hyperion_types::EffectiveRoleWire),
+    ImportToken(hyperion_types::ImportTokenResult),
     WebUserSetLocked,
     WebUserDelete,
     Web2faEnrollStart(hyperion_types::Web2faEnrollment),

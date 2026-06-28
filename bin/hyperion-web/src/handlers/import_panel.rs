@@ -304,7 +304,7 @@ pub async fn post_apply(
 /// the job log. The import RPC is one coarse step (the node does all sites then
 /// replies); progress is start → done, with the full created/skipped/unsupported
 /// breakdown captured in the job's log tail.
-async fn run_panel_import_job(
+pub(crate) async fn run_panel_import_job(
     reporter: crate::handlers::jobs::JobReporter,
     state: SharedState,
     node: Option<String>,

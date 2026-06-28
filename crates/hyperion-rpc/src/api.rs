@@ -683,6 +683,12 @@ pub trait AgentApi: Send + Sync + 'static {
         &self,
         user_id: i64,
     ) -> Result<hyperion_types::EffectiveRoleWire, RpcError>;
+    /// Self-service import wizard: mint / resolve / update / list / cancel
+    /// one-time import tokens (a single op enum keeps the RPC surface small).
+    async fn import_token(
+        &self,
+        op: hyperion_types::ImportTokenOp,
+    ) -> Result<hyperion_types::ImportTokenResult, RpcError>;
     async fn web_user_set_locked(
         &self,
         user_id: i64,

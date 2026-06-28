@@ -850,6 +850,10 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::RoleList(v),
             Err(e) => Response::Error(e),
         },
+        Request::ImportToken(op) => match api.import_token(op).await {
+            Ok(r) => Response::ImportToken(r),
+            Err(e) => Response::Error(e),
+        },
         Request::RoleCreate {
             name,
             capabilities,
@@ -2077,6 +2081,12 @@ mod tests {
         }
         async fn role_list(&self) -> Result<Vec<hyperion_types::CustomRoleSummary>, RpcError> {
             Ok(vec![])
+        }
+        async fn import_token(
+            &self,
+            _: hyperion_types::ImportTokenOp,
+        ) -> Result<hyperion_types::ImportTokenResult, RpcError> {
+            Ok(hyperion_types::ImportTokenResult::Ack)
         }
         async fn role_create(&self, _: String, _: u64, _: bool) -> Result<i64, RpcError> {
             Ok(0)

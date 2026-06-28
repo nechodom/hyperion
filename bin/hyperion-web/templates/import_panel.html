@@ -9,6 +9,11 @@
   </div>
 </div>
 
+<div class="card" style="margin-bottom:1rem;border-color:var(--accent)">
+  <strong>No SSH access (or don't want to hand over a key)?</strong>
+  Use <a href="/import/wizard">self-service import</a> — run one command on the source server; it streams the data straight here. No SSH key, no browser upload, nothing through your laptop.
+</div>
+
 {% if let Some(e) = error %}
 <div class="flash error"><div class="flash-body">{{ e }}</div></div>
 {% endif %}

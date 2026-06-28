@@ -18,6 +18,7 @@ pub mod db;
 pub mod dns;
 pub mod hosting;
 pub mod ids;
+pub mod import;
 pub mod jobs;
 pub mod limits;
 pub mod migration;
@@ -34,6 +35,7 @@ pub use hosting::{
     HostingDetail, HostingState, HostingSummary, SftpStatus, VhostOptions, WpExtras, WpRedisConfig,
 };
 pub use ids::{AgentId, HostingId, SecretId};
+pub use import::{ImportTokenInfo, ImportTokenOp, ImportTokenResult};
 pub use jobs::{
     BackupTargetProbe, BackupTargetView, HostingQuotaReport, HostingQuotaView, JobView,
     QuotaEnableSummary, S3BackupTarget, WebSessionView,

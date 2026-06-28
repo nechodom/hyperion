@@ -10703,6 +10703,118 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(out)
     }
 
+    /// Self-service import wizard token ops. One entry point (the op enum keeps
+    /// the RPC surface to a single method). Tokens are stored hashed; the
+    /// plaintext is returned ONCE on Mint. See hyperion_state::import_tokens.
+    pub async fn import_token(
+        &self,
+        op: hyperion_types::ImportTokenOp,
+    ) -> Result<hyperion_types::ImportTokenResult, RpcError> {
+        use hyperion_state::import_tokens as toks;
+        use hyperion_types::{ImportTokenInfo, ImportTokenOp, ImportTokenResult};
+
+        fn to_info(r: toks::ImportTokenRow) -> ImportTokenInfo {
+            ImportTokenInfo {
+                id: r.id,
+                target_node: r.target_node,
+                source_kind: r.source_kind,
+                status: r.status,
+                received_bytes: r.received_bytes,
+                job_id: r.job_id,
+                expires_at: r.expires_at,
+                created_by: r.created_by,
+                created_at: r.created_at,
+            }
+        }
+        let map = |what: &'static str| {
+            move |e: hyperion_state::db::StateError| {
+                RpcError::Internal_with(format!("import token {what}: {e}"))
+            }
+        };
+
+        match op {
+            ImportTokenOp::Mint {
+                target_node,
+                source_kind,
+                created_by,
+                ttl_secs,
+            } => {
+                use rand::RngCore;
+                let mut buf = [0u8; 32];
+                rand::thread_rng().fill_bytes(&mut buf);
+                let token = hex::encode(buf);
+                let hash = hex::encode(blake3::hash(token.as_bytes()).as_bytes());
+                let now = now_secs();
+                let expires_at = now + ttl_secs.clamp(60, 86_400);
+                let id = toks::create(
+                    &self.pool,
+                    &hash,
+                    &target_node,
+                    &source_kind,
+                    &created_by,
+                    now,
+                    expires_at,
+                )
+                .await
+                .map_err(map("mint"))?;
+                Ok(ImportTokenResult::Minted {
+                    token,
+                    id,
+                    expires_at,
+                })
+            }
+            ImportTokenOp::Resolve { token, consume } => {
+                let hash = hex::encode(blake3::hash(token.as_bytes()).as_bytes());
+                let now = now_secs();
+                let row = if consume {
+                    toks::consume_for_ingest(&self.pool, &hash, now)
+                        .await
+                        .map_err(map("consume"))?
+                } else {
+                    toks::get_fetchable(&self.pool, &hash, now)
+                        .await
+                        .map_err(map("resolve"))?
+                };
+                Ok(ImportTokenResult::Resolved(row.map(to_info)))
+            }
+            ImportTokenOp::Update {
+                id,
+                status,
+                job_id,
+                received_bytes,
+            } => {
+                if let Some(s) = status {
+                    toks::set_status(&self.pool, id, &s)
+                        .await
+                        .map_err(map("status"))?;
+                }
+                if let Some(j) = job_id {
+                    toks::set_job(&self.pool, id, &j)
+                        .await
+                        .map_err(map("job"))?;
+                }
+                if let Some(b) = received_bytes {
+                    toks::set_received_bytes(&self.pool, id, b)
+                        .await
+                        .map_err(map("bytes"))?;
+                }
+                Ok(ImportTokenResult::Ack)
+            }
+            ImportTokenOp::List => {
+                let rows = toks::list_active(&self.pool, now_secs())
+                    .await
+                    .map_err(map("list"))?;
+                Ok(ImportTokenResult::Listed(
+                    rows.into_iter().map(to_info).collect(),
+                ))
+            }
+            ImportTokenOp::Cancel { id } => {
+                toks::cancel(&self.pool, id).await.map_err(map("cancel"))?;
+                Ok(ImportTokenResult::Ack)
+            }
+        }
+    }
+
     pub async fn role_create(
         &self,
         name: String,

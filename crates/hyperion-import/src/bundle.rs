@@ -48,7 +48,14 @@ pub async fn read_manifest(dir: &Path) -> Option<ImportIR> {
 /// everything into `out`. Shells out to `tar`/`mysqldump`/`pg_dump` (present on
 /// any panel box) so there are no extra crate deps.
 pub async fn build(ir: &ImportIR, out: &Path) -> Result<(), ImportError> {
-    let stage = out.with_extension("bundle-stage");
+    // `--out -` streams the final tar straight to stdout (piped into curl on the
+    // source by the self-service bootstrap — no bundle file lands on disk).
+    let to_stdout = out.as_os_str() == "-";
+    let stage = if to_stdout {
+        std::env::temp_dir().join(format!("hyperion-export-stage-{}", std::process::id()))
+    } else {
+        out.with_extension("bundle-stage")
+    };
     let _ = tokio::fs::remove_dir_all(&stage).await;
     tokio::fs::create_dir_all(&stage).await?;
 
@@ -78,6 +85,26 @@ pub async fn build(ir: &ImportIR, out: &Path) -> Result<(), ImportError> {
             let dest = site.join("db").join(format!("{}.dump", db.name));
             dump_db(db, &dest).await?;
         }
+    }
+
+    if to_stdout {
+        // Stream the packed bundle to our stdout (inherited by .status()).
+        let status = Command::new("tar")
+            .arg("cf")
+            .arg("-")
+            .arg("-C")
+            .arg(&stage)
+            .arg(".")
+            .status()
+            .await?;
+        let _ = tokio::fs::remove_dir_all(&stage).await;
+        if !status.success() {
+            return Err(ImportError::Command {
+                cmd: "tar cf - (stream)".into(),
+                msg: format!("tar exited with {status}"),
+            });
+        }
+        return Ok(());
     }
 
     run(

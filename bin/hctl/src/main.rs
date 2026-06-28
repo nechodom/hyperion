@@ -1338,6 +1338,7 @@ fn print_pretty(resp: &Response) {
         Response::RoleUpdate => println!("role updated"),
         Response::RoleDelete => println!("role deleted"),
         Response::WebUserSetCustomRole => println!("custom role assigned"),
+        Response::ImportToken(r) => println!("import token: {r:?}"),
         Response::WebUserEffectiveRole(er) => {
             println!(
                 "effective role: label={} base={} caps={:#x} scope_all={} custom_role_id={}",

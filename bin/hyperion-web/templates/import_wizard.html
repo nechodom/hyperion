@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}Self-service import · Hyperion{% endblock %}
+{% block main %}
+
+<div class="page-header">
+  <div>
+    <h1>Self-service import</h1>
+    <div class="subtitle">Import a <strong>CloudPanel</strong> / <strong>HestiaCP</strong> server with one command — no SSH key handed over, no browser upload, nothing routed through your laptop. You run a one-liner on the source; it streams the bundle straight here and imports in the background. Mail &amp; DNS are out of scope (reported, never imported).</div>
+  </div>
+  <span class="grow"></span>
+  <div class="actions">
+    <a class="btn small ghost" href="/import">SSH / in-place import →</a>
+  </div>
+</div>
+
+{% if let Some(m) = minted %}
+<div class="card" style="margin-bottom:1rem;border-color:var(--accent)">
+  <h3>Run this on your {{ m.kind }} server, as root</h3>
+  <p class="text-soft">Valid for 2 hours, single use. It downloads the exporter, exports your panel, and streams the bundle here — your laptop is never in the middle.</p>
+  <pre class="code-block" style="white-space:pre-wrap;word-break:break-all;user-select:all"><code>{{ m.one_liner }}</code></pre>
+  <button class="btn small" type="button"
+          onclick="navigator.clipboard.writeText(this.previousElementSibling.innerText.trim());this.textContent='Copied ✓';">Copy command</button>
+  <p class="text-soft" style="margin-top:.5rem">It needs <code>sudo</code>/root on the source (to read the panel DB). You can close this page — the transfer keeps running and shows below.</p>
+</div>
+{% endif %}
+
+<div class="card" style="margin-bottom:1rem">
+  <h3>Generate a command</h3>
+  <form method="post" action="/import/wizard/mint">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <div class="field-row">
+      <div class="field">
+        <label>Source panel</label>
+        <select name="source_kind">
+          <option value="cloudpanel">CloudPanel</option>
+          <option value="hestiacp">HestiaCP</option>
+        </select>
+      </div>
+      <div class="field" style="align-self:flex-end">
+        <button class="btn primary" type="submit">Generate command</button>
+      </div>
+    </div>
+  </form>
+</div>
+
+<div class="card">
+  <h3>Transfers</h3>
+  <div hx-get="/import/wizard/transfers" hx-trigger="load, every 3s" hx-swap="innerHTML">
+    {% if transfers.is_empty() %}
+      <p class="text-soft">No transfers in flight. Generate a command above and run it on your source server.</p>
+    {% else %}
+      <table class="table">
+        <thead><tr><th>Source</th><th>By</th><th>Status</th><th>Received</th><th></th></tr></thead>
+        <tbody>
+        {% for t in transfers %}
+          <tr>
+            <td>{{ t.source_kind }}</td>
+            <td>{{ t.created_by }}</td>
+            <td><span class="pill">{{ t.status }}</span></td>
+            <td>{{ t.received }}</td>
+            <td>{% if let Some(j) = t.job_id %}<a href="/jobs/{{ j }}">progress →</a>{% else %}<span class="text-soft">waiting for source…</span>{% endif %}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    {% endif %}
+  </div>
+</div>
+
+{% endblock %}
