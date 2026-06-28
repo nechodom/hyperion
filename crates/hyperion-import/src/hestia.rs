@@ -31,8 +31,17 @@ impl SourceAdapter for HestiaAdapter {
     }
 
     async fn detect(&self, location: &Location) -> Option<SourcePanelInfo> {
-        if matches!(location, Location::Archive(_)) {
-            return None;
+        if let Location::Archive(dir) = location {
+            let ir = crate::bundle::read_manifest(dir).await?;
+            if ir.source.kind != SourceKind::HestiaCp.as_str() {
+                return None;
+            }
+            return Some(SourcePanelInfo {
+                kind: SourceKind::HestiaCp,
+                version: ir.source.version,
+                has_mail: false,
+                has_dns: false,
+            });
         }
         let runner = Runner::for_location(location);
         if !runner.exists(HESTIA_CONF).await && !runner.exists(VESTA_CONF).await {
@@ -60,10 +69,13 @@ impl SourceAdapter for HestiaAdapter {
     }
 
     async fn extract(&self, location: &Location) -> Result<ImportIR, ImportError> {
-        if matches!(location, Location::Archive(_)) {
-            return Err(ImportError::UnsupportedMode(
-                "Hestia adapter: archive mode not yet supported".into(),
-            ));
+        if let Location::Archive(dir) = location {
+            return crate::bundle::read_manifest(dir)
+                .await
+                .ok_or(ImportError::Parse {
+                    what: "bundle manifest".into(),
+                    msg: "manifest.json missing or invalid in the uploaded bundle".into(),
+                });
         }
         let runner = Runner::for_location(location);
         let info = self

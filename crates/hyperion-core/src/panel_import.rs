@@ -166,7 +166,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         //    landing index.html create() planted, so it doesn't shadow the
         //    imported site's own index.php/index.html (nginx prefers .html).
         let _ = tokio::fs::remove_file(Path::new(&created.root_dir).join("index.html")).await;
-        fetch_files(loc, &h.docroot, &created.root_dir)
+        fetch_files(loc, &h.domain, &h.docroot, &created.root_dir)
             .await
             .map_err(|reason| RpcError::ProvisioningFailed {
                 stage: "import_copy_files".into(),
@@ -206,12 +206,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 let _ = tokio::fs::create_dir_all(parent).await;
             }
             let dump_path = Path::new(&dump);
-            fetch_db(loc, srcdb, dump_path).await.map_err(|reason| {
-                RpcError::ProvisioningFailed {
+            fetch_db(loc, &h.domain, srcdb, dump_path)
+                .await
+                .map_err(|reason| RpcError::ProvisioningFailed {
                     stage: "import_db_dump".into(),
                     reason,
-                }
-            })?;
+                })?;
             match srcdb.engine {
                 IrDbEngine::Postgres => {
                     hyperion_adapters::backup::restore_postgres_dump(&newdb.db_name, dump_path)
@@ -307,21 +307,81 @@ async fn build_location(req: &ImportPanelReq) -> Result<(Location, Option<PathBu
             };
             Ok((Location::Remote(target), Some(path)))
         }
+        "archive" => {
+            // An export bundle already staged on this node (uploaded via the UI).
+            // Unpack it to a temp dir; the adapters read the manifest + the
+            // per-site docroot/DB from there. No source access needed.
+            let src = req
+                .archive_path
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .ok_or_else(|| RpcError::Validation {
+                    message: "archive mode requires an uploaded bundle".into(),
+                })?;
+            if !Path::new(src).exists() {
+                return Err(RpcError::Validation {
+                    message: format!("bundle not found on node: {src}"),
+                });
+            }
+            let dir = PathBuf::from(format!(
+                "/var/lib/hyperion/migration/bundle-{}",
+                unique_token()
+            ));
+            tokio::fs::create_dir_all(&dir)
+                .await
+                .map_err(|e| RpcError::ProvisioningFailed {
+                    stage: "import_bundle_dir".into(),
+                    reason: e.to_string(),
+                })?;
+            let out = tokio::process::Command::new("tar")
+                .arg("xf")
+                .arg(src)
+                .arg("-C")
+                .arg(&dir)
+                .output()
+                .await
+                .map_err(|e| RpcError::ProvisioningFailed {
+                    stage: "import_bundle_unpack".into(),
+                    reason: e.to_string(),
+                })?;
+            if !out.status.success() {
+                let _ = tokio::fs::remove_dir_all(&dir).await;
+                return Err(RpcError::Validation {
+                    message: format!(
+                        "could not unpack bundle: {}",
+                        String::from_utf8_lossy(&out.stderr).trim()
+                    ),
+                });
+            }
+            Ok((Location::Archive(dir.clone()), Some(dir)))
+        }
         other => Err(RpcError::Validation {
-            message: format!("unsupported import mode '{other}' (inplace | remote)"),
+            message: format!("unsupported import mode '{other}' (inplace | remote | archive)"),
         }),
     }
 }
 
-async fn cleanup_key(key_file: Option<PathBuf>) {
-    if let Some(p) = key_file {
-        let _ = tokio::fs::remove_file(p).await;
+/// Remove the per-run ephemeral artifact: the 0600 ssh key file (remote mode)
+/// or the unpacked bundle temp dir (archive mode).
+async fn cleanup_key(artifact: Option<PathBuf>) {
+    if let Some(p) = artifact {
+        if p.is_dir() {
+            let _ = tokio::fs::remove_dir_all(&p).await;
+        } else {
+            let _ = tokio::fs::remove_file(&p).await;
+        }
     }
 }
 
 /// Copy the source docroot's contents into `dest` — local `cp -a` for in-place,
 /// `rsync -e ssh` for remote.
-async fn fetch_files(loc: &Location, src_docroot: &str, dest: &str) -> Result<(), String> {
+async fn fetch_files(
+    loc: &Location,
+    domain: &str,
+    src_docroot: &str,
+    dest: &str,
+) -> Result<(), String> {
     match loc {
         Location::Remote(t) => {
             let ssh = format!("ssh {}", t.ssh_opts().join(" "));
@@ -331,6 +391,18 @@ async fn fetch_files(loc: &Location, src_docroot: &str, dest: &str) -> Result<()
                 &["-a", "--numeric-ids", "-e", &ssh, &src, &format!("{dest}/")],
             )
             .await
+        }
+        Location::Archive(dir) => {
+            // Unpack this site's bundled docroot tarball (absent = empty site).
+            let tgz = dir
+                .join("sites")
+                .join(hyperion_import::bundle::site_dir(domain))
+                .join("docroot.tar.gz");
+            if tgz.is_file() {
+                run_cmd("tar", &["xzf", &tgz.display().to_string(), "-C", dest]).await
+            } else {
+                Ok(())
+            }
         }
         _ => {
             // In-place: only copy if the source dir actually exists.
@@ -347,10 +419,29 @@ async fn fetch_files(loc: &Location, src_docroot: &str, dest: &str) -> Result<()
 /// `ssh mysqldump`/`pg_dump` for remote (output captured to the file).
 async fn fetch_db(
     loc: &Location,
+    domain: &str,
     srcdb: &hyperion_import::IrDatabase,
     dump_path: &Path,
 ) -> Result<(), String> {
     match loc {
+        Location::Archive(dir) => {
+            let f = dir
+                .join("sites")
+                .join(hyperion_import::bundle::site_dir(domain))
+                .join("db")
+                .join(format!("{}.dump", srcdb.name));
+            if f.is_file() {
+                tokio::fs::copy(&f, dump_path)
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| format!("copy bundle dump: {e}"))
+            } else {
+                Err(format!(
+                    "database dump '{}' missing from bundle",
+                    srcdb.name
+                ))
+            }
+        }
         Location::Remote(t) => {
             let q = hyperion_import::adapter::shell_quote(&srcdb.name);
             let remote_cmd = match srcdb.engine {

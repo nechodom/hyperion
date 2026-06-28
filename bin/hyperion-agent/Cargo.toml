@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 hyperion-core = { path = "../../crates/hyperion-core" }
+hyperion-import = { path = "../../crates/hyperion-import" }
 hyperion-rpc = { path = "../../crates/hyperion-rpc" }
 hyperion-rpc-server = { path = "../../crates/hyperion-rpc-server" }
 hyperion-state = { path = "../../crates/hyperion-state" }

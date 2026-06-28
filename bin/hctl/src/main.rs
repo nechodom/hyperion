@@ -203,6 +203,9 @@ enum HostingCmd {
         /// remote mode: path to the private key file used to reach the source.
         #[arg(long)]
         ssh_key: Option<String>,
+        /// archive mode: node-local path to an export bundle (`bundle.tar`).
+        #[arg(long)]
+        archive: Option<String>,
     },
 }
 
@@ -377,6 +380,7 @@ async fn call(cli: &Cli) -> anyhow::Result<Response> {
             ssh_user,
             ssh_port,
             ssh_key,
+            archive,
         }) => {
             let ssh = if mode == "remote" {
                 let host = ssh_host
@@ -400,6 +404,7 @@ async fn call(cli: &Cli) -> anyhow::Result<Response> {
                 source_kind: source.clone(),
                 mode: mode.clone(),
                 ssh,
+                archive_path: archive.clone(),
             };
             if *dry_run {
                 Request::HostingImportPanelPlan { req }

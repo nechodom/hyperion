@@ -11,13 +11,18 @@ use serde::{Deserialize, Serialize};
 pub struct ImportPanelReq {
     /// `"cloudpanel"` | `"hestiacp"`.
     pub source_kind: String,
-    /// `"inplace"` | `"remote"` (`"archive"` not yet supported).
+    /// `"inplace"` | `"remote"` | `"archive"`.
     pub mode: String,
     /// SSH connection for `remote` mode (source panel on another machine).
     /// Required iff `mode == "remote"`. The private key is ephemeral — the
     /// engine writes it to a 0600 file for the run and deletes it after.
     #[serde(default)]
     pub ssh: Option<SshConn>,
+    /// Node-local path to an uploaded export bundle (`bundle.tar`) for
+    /// `archive` mode. The engine unpacks it to a temp dir for the run and
+    /// removes that temp dir afterwards.
+    #[serde(default)]
+    pub archive_path: Option<String>,
 }
 
 /// SSH connection to a remote source box. `key` carries the private key

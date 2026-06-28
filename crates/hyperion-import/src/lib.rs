@@ -11,6 +11,7 @@
 //! back to core (avoids a core ↔ import dependency cycle and keeps it trivially
 //! unit-testable).
 pub mod adapter;
+pub mod bundle;
 pub mod cloudpanel;
 pub mod error;
 pub mod hestia;

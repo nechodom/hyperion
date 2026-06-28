@@ -146,9 +146,23 @@ pub struct ImportForm {
     pub ssh_port: String,
     #[serde(default)]
     pub ssh_key: String,
+    /// archive mode: node-local path to an uploaded bundle (set by the upload
+    /// handler, echoed through the plan → apply steps).
+    #[serde(default)]
+    pub archive_path: String,
 }
 fn default_mode() -> String {
     "inplace".into()
+}
+
+/// None unless the form carries a non-empty archive path.
+fn opt_archive(form: &ImportForm) -> Option<String> {
+    let p = form.archive_path.trim();
+    if p.is_empty() {
+        None
+    } else {
+        Some(p.to_string())
+    }
 }
 
 /// Build the SSH connection for remote mode from the form (None otherwise).
@@ -197,6 +211,7 @@ pub async fn post_plan(
         source_kind: form.source_kind.clone(),
         mode: form.mode.clone(),
         ssh: build_ssh(&form),
+        archive_path: opt_archive(&form),
     };
     let resp = crate::dispatcher::dispatch_to_node(
         &state,
@@ -259,6 +274,7 @@ pub async fn post_apply(
         source_kind: form.source_kind.clone(),
         mode: form.mode.clone(),
         ssh: build_ssh(&form),
+        archive_path: opt_archive(&form),
     };
     // Owned bits captured by the detached task (no secrets in the job payload —
     // the ssh key lives only in `req`, in memory, never persisted to the row).
