@@ -260,12 +260,48 @@ if (( DO_BUILD && PREBUILT_OK == 0 )); then
     fail "cargo not found and no usable pre-built release. Re-run install-master.sh."
   fi
   log "Building release binaries from source ..."
+
+  # On small (1–2 GB) master nodes the from-source build can be OOM-killed
+  # (rustc/linker peak during codegen). If RAM is tight and there's no swap,
+  # add a temporary swapfile for the duration of the build and remove it after
+  # — whether the build succeeds or fails.
+  SWAPFILE=""
+  mem_avail_kb="$(awk '/MemAvailable/{print $2}' /proc/meminfo 2>/dev/null || echo 0)"
+  swap_total_kb="$(awk '/SwapTotal/{print $2}' /proc/meminfo 2>/dev/null || echo 0)"
+  if (( mem_avail_kb < 1900000 )) && (( swap_total_kb < 1000000 )); then
+    sf="/var/tmp/hyperion-build.swap"
+    avail_disk_kb="$(df -Pk /var/tmp | awk 'NR==2{print $4}')"
+    if (( avail_disk_kb > 5000000 )); then
+      log "  low RAM (${mem_avail_kb} kB avail, no swap) — adding a temporary 4 GB swapfile for the build"
+      rm -f "$sf"
+      if { fallocate -l 4G "$sf" 2>/dev/null || dd if=/dev/zero of="$sf" bs=1M count=4096 status=none 2>/dev/null; } \
+         && chmod 600 "$sf" && mkswap "$sf" >/dev/null 2>&1 && swapon "$sf" 2>/dev/null; then
+        SWAPFILE="$sf"
+      else
+        rm -f "$sf"
+        warn "  couldn't enable a temp swapfile — proceeding (build may OOM)"
+      fi
+    else
+      warn "  low RAM and <5 GB free on /var/tmp — can't add swap; build may OOM"
+    fi
+  fi
+
   # Stamp the exact checked-out commit into the binaries. build.rs reads this
   # env first, and `rerun-if-env-changed=HYPERION_GIT_SHA` forces a rebuild if
   # a previous incremental build had baked a different SHA — so a source build
-  # can never embed a stale commit.
+  # can never embed a stale commit. `|| rc=$?` keeps the swap cleanup reachable
+  # under `set -e`.
+  build_rc=0
   HYPERION_GIT_SHA="$HEAD_FULL" cargo build --release \
-    --bin hyperion-agent --bin hyperion-web --bin hctl --quiet
+    --bin hyperion-agent --bin hyperion-web --bin hctl --quiet || build_rc=$?
+  if [ -n "$SWAPFILE" ]; then
+    swapoff "$SWAPFILE" 2>/dev/null || true
+    rm -f "$SWAPFILE"
+  fi
+  if (( build_rc != 0 )); then
+    fail "cargo build failed (exit $build_rc). On a low-RAM box, ensure some swap is available and re-run."
+  fi
+
   log "Installing binaries ..."
   install -m 0755 target/release/hyperion-agent /usr/sbin/hyperion-agent
   install -m 0755 target/release/hctl           /usr/bin/hctl
