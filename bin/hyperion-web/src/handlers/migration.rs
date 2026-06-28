@@ -27,6 +27,7 @@ use axum::http::{header, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Form;
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
+use hyperion_state::capabilities::Capability;
 use serde::Deserialize;
 use tokio_util::io::ReaderStream;
 
@@ -184,7 +185,7 @@ pub async fn post_import_from_url(
 ) -> Result<Response, AppError> {
     // Admin-or-higher: creating a hosting is admin-level, importing
     // is the same operation under the hood.
-    if !ctx.is_admin_or_higher() {
+    if !ctx.can(Capability::HostingMigrateClone) {
         return Ok(Redirect::to("/hostings/import?error=admin+role+required").into_response());
     }
     let base = form.base_url.trim().to_string();

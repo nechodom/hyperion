@@ -15,6 +15,7 @@ use axum::response::Json;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Form;
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
+use hyperion_state::capabilities::Capability;
 use hyperion_types::{AgentConfigView, EmailLogEntry, SmtpAutodetect, UpdateStatus};
 use serde::Deserialize;
 use std::net::SocketAddr;
@@ -97,7 +98,7 @@ pub async fn get_settings(
     // log across ALL hostings. Every POST under /settings is admin-gated, but
     // the GET page was reachable by any logged-in user (the nav only hides the
     // link). Tenant-scoped roles must not read it.
-    if !ctx.is_admin_or_higher() {
+    if !ctx.can(Capability::SettingsManage) {
         return Ok(Redirect::to("/").into_response());
     }
     let (config_res, update_res, emails_res) = tokio::join!(
@@ -233,7 +234,7 @@ pub async fn post_email_test(
     // Without this gate any authenticated viewer can use Hyperion's
     // SMTP relay as a free spam vector — the relay's daily quota
     // would also get blown out, breaking real cluster notifications.
-    if !ctx.is_admin_or_higher() {
+    if !ctx.can(Capability::SettingsManage) {
         return Ok(
             Redirect::to("/settings?flash_error=admin+role+required+to+send+test+emails")
                 .into_response(),
@@ -586,7 +587,7 @@ pub async fn get_panel_cert_status(
     ctx: AuthCtx,
 ) -> Result<Response, AppError> {
     // Panel-cert issuance progress is admin chrome (polled from /settings).
-    if !ctx.is_admin_or_higher() {
+    if !ctx.can(Capability::SettingsManage) {
         return Err(AppError::Forbidden);
     }
     let snap = match hyperion_rpc_client::call(&state.agent_socket, Request::PanelCertStatus).await
@@ -730,7 +731,7 @@ pub async fn post_email_autodetect(
 ) -> Result<Response, AppError> {
     // Viewers shouldn't be able to fingerprint local SMTP via this
     // endpoint — the probe is operator-config only.
-    if !ctx.is_admin_or_higher() {
+    if !ctx.can(Capability::SettingsManage) {
         return Ok(Json(SmtpAutodetect {
             found: false,
             smtp_host: String::new(),
@@ -880,7 +881,7 @@ pub async fn post_mta_queue_flush(
     ctx: AuthCtx,
     Form(form): Form<NodeActionForm>,
 ) -> Result<Response, AppError> {
-    if !ctx.is_admin_or_higher() {
+    if !ctx.can(Capability::SettingsManage) {
         return Ok(Redirect::to("/settings?flash_error=admin+role+required#mail").into_response());
     }
     let (target, node_q) = mail_node_target(&form.target_node);
@@ -925,7 +926,7 @@ pub async fn post_mta_queue_clear(
     ctx: AuthCtx,
     Form(form): Form<NodeActionForm>,
 ) -> Result<Response, AppError> {
-    if !ctx.is_admin_or_higher() {
+    if !ctx.can(Capability::SettingsManage) {
         return Ok(Redirect::to("/settings?flash_error=admin+role+required#mail").into_response());
     }
     let (target, node_q) = mail_node_target(&form.target_node);
@@ -963,7 +964,7 @@ pub async fn post_mta_reconfigure(
     ctx: AuthCtx,
     Form(form): Form<NodeActionForm>,
 ) -> Result<Response, AppError> {
-    if !ctx.is_admin_or_higher() {
+    if !ctx.can(Capability::SettingsManage) {
         return Ok(Redirect::to(
             "/settings?flash_error=admin+role+required+to+reconfigure+MTA#mail",
         )
@@ -1006,7 +1007,7 @@ pub async fn post_mta_test(
     headers: HeaderMap,
     Form(form): Form<MtaTestForm>,
 ) -> Result<Response, AppError> {
-    if !ctx.is_admin_or_higher() {
+    if !ctx.can(Capability::SettingsManage) {
         return Ok(Redirect::to(
             "/settings?flash_error=admin+role+required+to+send+test+emails#mail",
         )

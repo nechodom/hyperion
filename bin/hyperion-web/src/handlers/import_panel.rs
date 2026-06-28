@@ -10,6 +10,7 @@ use askama::Template;
 use axum::extract::State;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
+use hyperion_state::capabilities::Capability;
 use serde::Deserialize;
 
 /// A selectable node for the "run on" dropdown.
@@ -123,7 +124,7 @@ pub async fn get_import(
     State(state): State<SharedState>,
     ctx: AuthCtx,
 ) -> Result<Response, AppError> {
-    if !ctx.is_admin_or_higher() {
+    if !ctx.can(Capability::PanelImport) {
         return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
     }
     let tpl = ImportTpl::base(&state, &ctx, node_options(&state).await);
@@ -189,7 +190,7 @@ pub async fn post_plan(
     ctx: AuthCtx,
     axum::Form(form): axum::Form<ImportForm>,
 ) -> Result<Response, AppError> {
-    if !ctx.is_admin_or_higher() {
+    if !ctx.can(Capability::PanelImport) {
         return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
     }
     let req = hyperion_import::ImportPanelReq {
@@ -251,7 +252,7 @@ pub async fn post_apply(
     ctx: AuthCtx,
     axum::Form(form): axum::Form<ImportForm>,
 ) -> Result<Response, AppError> {
-    if !ctx.is_admin_or_higher() {
+    if !ctx.can(Capability::PanelImport) {
         return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
     }
     let req = hyperion_import::ImportPanelReq {

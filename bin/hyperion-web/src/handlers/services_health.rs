@@ -13,6 +13,7 @@ use axum::extract::{Query, State};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Form;
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
+use hyperion_state::capabilities::Capability;
 use hyperion_types::{NodeSummary, ServicesHealth};
 use serde::Deserialize;
 
@@ -222,7 +223,7 @@ pub async fn get_service_install_status(
     ctx: AuthCtx,
     axum::extract::Query(q): axum::extract::Query<InstallStatusQuery>,
 ) -> Response {
-    if !ctx.is_admin_or_higher() {
+    if !ctx.can(Capability::ServicesView) {
         return (
             axum::http::StatusCode::FORBIDDEN,
             [("content-type", "text/html; charset=utf-8")],
