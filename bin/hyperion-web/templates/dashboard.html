@@ -14,7 +14,7 @@
   </div>
   <span class="grow"></span>
   <div class="actions">
-    <a href="/hostings/new" class="btn primary">
+    <a href="/hostings/new" class="btn primary" data-require-caps="hosting_create">
       <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
       Create hosting
     </a>
@@ -30,19 +30,19 @@
     <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
     All hostings
   </a>
-  <a href="/monitoring" class="btn small">
+  <a href="/monitoring" class="btn small" data-require-caps="monitoring_view" data-require-scope-all>
     <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
     Monitoring
   </a>
-  <a href="/stats" class="btn small">
+  <a href="/stats" class="btn small" data-require-caps="monitoring_view" data-require-scope-all>
     <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
     Stats
   </a>
-  <a href="/services" class="btn small">
+  <a href="/services" class="btn small" data-require-caps="services_view">
     <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
     Services
   </a>
-  <a href="/audit" class="btn small" data-role-min="admin">
+  <a href="/audit" class="btn small" data-require-caps="audit_view">
     <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
     Audit log
   </a>
@@ -50,11 +50,11 @@
     <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
     Nodes
   </a>
-  <a href="/profiles" class="btn small">
+  <a href="/profiles" class="btn small" data-require-caps="profiles_manage">
     <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7h-9"/><path d="M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></svg>
     Profiles &amp; limits
   </a>
-  <a href="/trash" class="btn small" data-hide-roles="customer,viewer">
+  <a href="/trash" class="btn small" data-require-caps="trash_manage">
     <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
     Trash
   </a>
@@ -232,7 +232,7 @@
       </div>
       <h3>No hostings yet</h3>
       <p>Create your first hosting to start serving a site. It will appear here once provisioned.</p>
-      <a href="/hostings/new" class="btn primary">Create first hosting</a>
+      <a href="/hostings/new" class="btn primary" data-require-caps="hosting_create">Create first hosting</a>
     </div>
   {% else %}
     <div class="table-wrap">

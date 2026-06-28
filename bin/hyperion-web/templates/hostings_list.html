@@ -18,7 +18,7 @@
       <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polyline points="21 8 21 21 3 21 3 8"/><rect x="1" y="3" width="22" height="5"/><line x1="10" y1="12" x2="14" y2="12"/></svg>
       Import hosting
     </a>
-    <a href="/hostings/new" class="btn primary header-action-new">
+    <a href="/hostings/new" class="btn primary header-action-new" data-require-caps="hosting_create">
       <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
       Create hosting
     </a>
@@ -88,7 +88,7 @@
     </div>
     <h3>No hostings yet</h3>
     <p>Create one to provision nginx, PHP-FPM, a database, and a TLS certificate in a single step.</p>
-    <a href="/hostings/new" class="btn primary">Create your first hosting</a>
+    <a href="/hostings/new" class="btn primary" data-require-caps="hosting_create">Create your first hosting</a>
   </div>
 </div>
 {% else %}

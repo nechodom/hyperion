@@ -52,12 +52,34 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             hyperion_import::adapter_for(&req.source_kind).ok_or_else(|| RpcError::Validation {
                 message: format!("unknown source panel: {}", req.source_kind),
             })?;
+        // For remote mode, prove SSH connectivity FIRST. The detect() path
+        // collapses EVERY ssh failure (auth, connection refused, timeout,
+        // permission denied) to `None` (hyperion-import Runner::exists does
+        // `.unwrap_or(false)`), which then surfaces as a misleading "no X
+        // install detected". Probing here lets us report the real ssh error.
+        if let Location::Remote(t) = loc {
+            ssh_preflight(t).await.map_err(|msg| RpcError::Validation {
+                message: format!("SSH to {}@{}:{} failed — {}", t.user, t.host, t.port, msg),
+            })?;
+        }
         if adapter.detect(loc).await.is_none() {
             return Err(RpcError::Validation {
-                message: format!(
-                    "no {} install detected ({} mode)",
-                    req.source_kind, req.mode
-                ),
+                message: match loc {
+                    // SSH already proven above, so reaching here means we got
+                    // in but the panel's files weren't found/readable.
+                    Location::Remote(t) => format!(
+                        "connected to {host} over SSH, but no {kind} install was found there. \
+                         Make sure {kind} is installed on {host} and that the SSH user '{user}' \
+                         can read its data files (use root, or a user with sudo/read access).",
+                        host = t.host,
+                        kind = req.source_kind,
+                        user = t.user
+                    ),
+                    _ => format!(
+                        "no {} install detected on this node (in-place mode)",
+                        req.source_kind
+                    ),
+                },
             });
         }
         let ir = adapter
@@ -379,6 +401,29 @@ fn unique_token() -> String {
         .map(|d| d.as_nanos())
         .unwrap_or(0);
     format!("{}-{}", std::process::id(), nanos)
+}
+
+/// Prove we can SSH in and run a trivial command, capturing the REAL ssh error
+/// (auth failure, connection refused, timeout, host-key problem) instead of
+/// letting it collapse into a generic "not detected". Returns Ok on a clean
+/// remote exit, Err(<ssh stderr / io error>) otherwise.
+async fn ssh_preflight(t: &SshTarget) -> Result<(), String> {
+    let out = tokio::process::Command::new("ssh")
+        .args(t.ssh_opts())
+        .arg(format!("{}@{}", t.user, t.host))
+        .arg("echo hyperion-ssh-ok")
+        .output()
+        .await
+        .map_err(|e| format!("could not run ssh: {e}"))?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+    Err(if err.is_empty() {
+        format!("ssh exited with status {}", out.status)
+    } else {
+        err
+    })
 }
 
 /// Run a command, mapping a non-zero exit to a readable error string.

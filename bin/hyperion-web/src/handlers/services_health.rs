@@ -57,6 +57,12 @@ pub async fn get_services_health(
     ctx: AuthCtx,
     Query(q): Query<ServicesQuery>,
 ) -> Result<Response, AppError> {
+    // Cluster service-health overview reveals every node's service topology —
+    // admin-level info. ServicesView is an admin-only capability (not in any
+    // tenant preset), so the cap check alone restricts it correctly.
+    if !ctx.can(Capability::ServicesView) {
+        return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
+    }
     let target = q.node.as_deref();
     let dispatch =
         crate::dispatcher::dispatch_to_node(&state, target, Request::ServicesHealth).await;

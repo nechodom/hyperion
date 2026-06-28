@@ -13,23 +13,38 @@ use crate::auth::AuthCtx;
 use axum::http::header;
 use axum::response::IntoResponse;
 use axum::response::Response;
+use hyperion_state::capabilities::Capability;
 
-/// GET /api/me/role — returns the current session's role as plain text.
+/// GET /api/me/role — returns the current session's role, effective
+/// capabilities, and scope as JSON. Drives base.html's nav-visibility shim
+/// so the sidebar + action buttons reflect EXACTLY what the user can do —
+/// including custom roles, which a role-name hierarchy can't represent.
 ///
-/// One of: "super_admin", "admin", "operator", "viewer".
-/// Always 200 — the require_auth middleware would have redirected
-/// already if there was no session.
+/// Shape: `{"role":"operator","caps":["hosting_view",…],"scope_all":false}`.
 ///
-/// Cache: `no-store` because the role can change (user demoted /
-/// promoted via /admin/users), and we'd rather pay the round-trip
-/// than render a stale nav after a role change.
+/// Always 200 — the require_auth middleware would have redirected already if
+/// there was no session.
+///
+/// Cache: `no-store` because role/caps can change (promote/demote, role edit),
+/// and we'd rather pay the round-trip than render a stale nav after a change.
 pub async fn get_role(ctx: AuthCtx) -> Response {
+    let caps: Vec<&'static str> = Capability::ALL
+        .iter()
+        .filter(|c| ctx.can(**c))
+        .map(|c| c.as_str())
+        .collect();
+    let body = serde_json::json!({
+        "role": ctx.role(),
+        "caps": caps,
+        "scope_all": ctx.scope_all(),
+    })
+    .to_string();
     (
         [
-            (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            (header::CONTENT_TYPE, "application/json; charset=utf-8"),
             (header::CACHE_CONTROL, "no-store"),
         ],
-        ctx.role().to_string(),
+        body,
     )
         .into_response()
 }

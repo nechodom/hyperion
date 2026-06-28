@@ -243,7 +243,7 @@ pub async fn get_firewall(
 ) -> Result<Response, AppError> {
     // Only admins should see the ruleset — it reveals service
     // topology that an operator role doesn't need.
-    if !ctx.can(Capability::SecurityManage) {
+    if !(ctx.can(Capability::SecurityManage) && ctx.scope_all()) {
         return Ok(
             Redirect::to("/?flash_error=admin+role+required+to+view+firewall").into_response(),
         );
@@ -384,7 +384,7 @@ pub async fn post_apply(
     ctx: AuthCtx,
     Form(form): Form<ApplyTemplateForm>,
 ) -> Result<Response, AppError> {
-    if !ctx.can(Capability::SecurityManage) {
+    if !(ctx.can(Capability::SecurityManage) && ctx.scope_all()) {
         return Ok((
             axum::http::StatusCode::FORBIDDEN,
             [("content-type", "text/html; charset=utf-8")],

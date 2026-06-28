@@ -35,7 +35,9 @@ pub async fn get_vulns(
     State(state): State<SharedState>,
     ctx: AuthCtx,
 ) -> Result<Response, AppError> {
-    if !ctx.can(Capability::WpVulnView) {
+    // Cluster-wide WP-vuln overview: tenant roles hold WpVulnView for their own
+    // sites, so require all-hostings scope for the cross-cluster view.
+    if !(ctx.can(Capability::WpVulnView) && ctx.scope_all()) {
         return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
     }
     let mut all: Vec<hyperion_types::HostingVulnSummary> = Vec::new();

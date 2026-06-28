@@ -55,7 +55,9 @@ pub async fn get_bans(
     ctx: AuthCtx,
     axum::extract::Query(q): axum::extract::Query<BansQuery>,
 ) -> Result<Response, AppError> {
-    if !ctx.can(Capability::SecurityManage) {
+    // Cluster-wide bans: require all-hostings scope (tenant roles with
+    // SecurityManage act only on their own hostings, not the cluster view).
+    if !(ctx.can(Capability::SecurityManage) && ctx.scope_all()) {
         return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
     }
     let mut rows: Vec<BanRow> = Vec::new();
@@ -127,7 +129,9 @@ pub async fn post_unban(
     ctx: AuthCtx,
     axum::Form(form): axum::Form<ClusterUnbanForm>,
 ) -> Result<Response, AppError> {
-    if !ctx.can(Capability::SecurityManage) {
+    // Cluster-wide bans: require all-hostings scope (tenant roles with
+    // SecurityManage act only on their own hostings, not the cluster view).
+    if !(ctx.can(Capability::SecurityManage) && ctx.scope_all()) {
         return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
     }
     let target = if form.node_id.is_empty() || form.node_id == "local" {

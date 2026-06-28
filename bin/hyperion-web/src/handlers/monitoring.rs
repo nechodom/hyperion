@@ -36,7 +36,7 @@ pub async fn get_monitoring(
     // per-hosting access, so a tenant-scoped role (operator/customer/viewer)
     // would enumerate other tenants' inventory here. Restrict to admin+;
     // tenant-scoped users still get per-hosting monitoring on each detail page.
-    if !ctx.can(Capability::MonitoringView) {
+    if !(ctx.can(Capability::MonitoringView) && ctx.scope_all()) {
         return Ok(axum::response::Redirect::to("/").into_response());
     }
 
