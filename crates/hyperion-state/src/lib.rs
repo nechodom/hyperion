@@ -21,6 +21,7 @@ pub mod email_log;
 pub mod hosting_kv;
 pub mod hosting_quotas;
 pub mod hostings;
+pub mod import_tokens;
 pub mod invites;
 pub mod jobs;
 pub mod limits;
