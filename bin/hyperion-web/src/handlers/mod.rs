@@ -20,6 +20,7 @@ pub mod monitoring;
 pub mod notifications;
 pub mod profile;
 pub mod profiles;
+pub mod roles;
 pub mod search;
 pub mod services_health;
 pub mod sessions;

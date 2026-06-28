@@ -292,6 +292,12 @@ pub fn build_router(state: SharedState) -> Router {
             "/admin/users/password",
             post(handlers::users::post_reset_password),
         )
+        .route("/roles", get(handlers::roles::get_roles))
+        .route("/roles", post(handlers::roles::post_create))
+        .route("/roles/new", get(handlers::roles::get_new))
+        .route("/roles/:id/edit", get(handlers::roles::get_edit))
+        .route("/roles/:id/update", post(handlers::roles::post_update))
+        .route("/roles/:id/delete", post(handlers::roles::post_delete))
         .route(
             "/hostings/access/grant",
             post(handlers::hostings::post_access_grant),
