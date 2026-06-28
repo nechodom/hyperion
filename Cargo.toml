@@ -76,5 +76,11 @@ strum = { version = "0.26", features = ["derive"] }
 
 [profile.release]
 strip = "symbols"
-lto = "thin"
-codegen-units = 1
+# lto=thin + codegen-units=1 minimised binary size but the whole-program LTO
+# link of hyperion-agent (which pulls in the large hyperion-core rlib) peaked
+# high enough to get OOM-killed on small (1–2 GB) master nodes during
+# `update.sh`'s from-source fallback. lto=off + 16 codegen units keeps peak RAM
+# well within reach (and builds faster); the runtime cost is negligible for an
+# I/O-bound control panel. update.sh also adds a temp swapfile as a backstop.
+lto = false
+codegen-units = 16
