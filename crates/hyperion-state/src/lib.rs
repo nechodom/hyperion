@@ -14,6 +14,7 @@ pub mod backups;
 pub mod bans;
 pub mod capabilities;
 pub mod certificates;
+pub mod custom_roles;
 pub mod databases;
 pub mod db;
 pub mod email_log;
