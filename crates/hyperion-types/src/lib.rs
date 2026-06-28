@@ -48,14 +48,15 @@ pub use profile::{HostingProfile, ProfileApply, ProfileInput, WpAssetSummary};
 pub use spf::SpfCheckResult;
 pub use stats::{
     AcmeConfigView, AgentConfigView, BackupRemoteConfigView, BackupRetentionConfigView,
-    ClusterConfigView, ClusterStats, DashboardAlert, EmailConfigView, EmailLogEntry, FirewallPort,
-    FirewallView, FsDiagnostics, FsFixStep, FtpAccountSummary, HostingFileContent,
-    HostingFileEntry, HostingStats, MonitorConfigView, MonitorHistory, MonitorOverviewItem,
-    MonitorSamplePoint, MtaDiagnostics, MtaPortProbe, NodeMetricPoint, NodeMetricsHistory,
-    NodeStats, NodeSummary, NodeUpdateStatus, NotificationFeed, NotificationTemplatesView,
-    NotificationView, ServiceHealth, ServiceInstallStatus, ServicesHealth, SiteEmailLogEntry,
-    SlackConfigView, SmtpAutodetect, TrashEntry, UpdateStatus, Web2faEnrollment, WebHostingAccess,
-    WebLoginResult, WebUserSummary, WebVerify2faResult,
+    ClusterConfigView, ClusterStats, CustomRoleSummary, DashboardAlert, EffectiveRoleWire,
+    EmailConfigView, EmailLogEntry, FirewallPort, FirewallView, FsDiagnostics, FsFixStep,
+    FtpAccountSummary, HostingFileContent, HostingFileEntry, HostingStats, MonitorConfigView,
+    MonitorHistory, MonitorOverviewItem, MonitorSamplePoint, MtaDiagnostics, MtaPortProbe,
+    NodeMetricPoint, NodeMetricsHistory, NodeStats, NodeSummary, NodeUpdateStatus,
+    NotificationFeed, NotificationTemplatesView, NotificationView, ServiceHealth,
+    ServiceInstallStatus, ServicesHealth, SiteEmailLogEntry, SlackConfigView, SmtpAutodetect,
+    TrashEntry, UpdateStatus, Web2faEnrollment, WebHostingAccess, WebLoginResult, WebUserSummary,
+    WebVerify2faResult,
 };
 pub use wp::{
     HostingVulnSummary, WpInstallRequest, WpInstallStatus, WpPlugin, WpPluginAction,

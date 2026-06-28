@@ -10677,6 +10677,167 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(())
     }
 
+    // ----------------------------------------------------------------
+    //  Custom roles (granular RBAC)
+    // ----------------------------------------------------------------
+
+    pub async fn role_list(&self) -> Result<Vec<hyperion_types::CustomRoleSummary>, RpcError> {
+        let rows = hyperion_state::custom_roles::list(&self.pool)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("role list: {e}")))?;
+        let mut out = Vec::with_capacity(rows.len());
+        for row in rows {
+            let in_use = hyperion_state::custom_roles::count_in_use(&self.pool, row.id)
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("role in-use count: {e}")))?;
+            out.push(hyperion_types::CustomRoleSummary {
+                id: row.id,
+                name: row.name.clone(),
+                capabilities: row.caps().bits(),
+                scope_all: row.scope_all(),
+                in_use,
+                created_at: row.created_at,
+                updated_at: row.updated_at,
+            });
+        }
+        Ok(out)
+    }
+
+    pub async fn role_create(
+        &self,
+        name: String,
+        capabilities: u64,
+        scope_all: bool,
+    ) -> Result<i64, RpcError> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(RpcError::Validation {
+                message: "role name must not be empty".into(),
+            });
+        }
+        let id = hyperion_state::custom_roles::create(
+            &self.pool,
+            name,
+            capabilities,
+            scope_all,
+            now_secs(),
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("role create: {e}")))?;
+        self.append_audit(
+            "web.role.create",
+            None,
+            &serde_json::json!({"id": id, "name": name, "capabilities": capabilities, "scope_all": scope_all}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(id)
+    }
+
+    pub async fn role_update(
+        &self,
+        id: i64,
+        name: String,
+        capabilities: u64,
+        scope_all: bool,
+    ) -> Result<(), RpcError> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(RpcError::Validation {
+                message: "role name must not be empty".into(),
+            });
+        }
+        hyperion_state::custom_roles::update(
+            &self.pool,
+            id,
+            name,
+            capabilities,
+            scope_all,
+            now_secs(),
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("role update: {e}")))?;
+        self.append_audit(
+            "web.role.update",
+            None,
+            &serde_json::json!({"id": id, "name": name, "capabilities": capabilities, "scope_all": scope_all}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
+    pub async fn role_delete(&self, id: i64) -> Result<(), RpcError> {
+        let in_use = hyperion_state::custom_roles::count_in_use(&self.pool, id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("role in-use count: {e}")))?;
+        if in_use > 0 {
+            return Err(RpcError::Validation {
+                message: format!("role in use by {in_use} user(s)"),
+            });
+        }
+        hyperion_state::custom_roles::delete(&self.pool, id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("role delete: {e}")))?;
+        self.append_audit(
+            "web.role.delete",
+            None,
+            &serde_json::json!({"id": id}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
+    pub async fn web_user_set_custom_role(
+        &self,
+        user_id: i64,
+        custom_role_id: i64,
+    ) -> Result<(), RpcError> {
+        let role = hyperion_state::custom_roles::get(&self.pool, custom_role_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("role get: {e}")))?;
+        if role.is_none() {
+            return Err(RpcError::NotFound {
+                kind: "custom_role".into(),
+                id: custom_role_id.to_string(),
+            });
+        }
+        hyperion_state::web_users::set_custom_role(&self.pool, user_id, custom_role_id, now_secs())
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("set custom role: {e}")))?;
+        self.append_audit(
+            "web.user.custom_role_set",
+            None,
+            &serde_json::json!({"user_id": user_id, "custom_role_id": custom_role_id}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
+    pub async fn web_user_effective_role(
+        &self,
+        user_id: i64,
+    ) -> Result<hyperion_types::EffectiveRoleWire, RpcError> {
+        let er = hyperion_state::web_users::effective_role(&self.pool, user_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("effective role: {e}")))?;
+        let Some(er) = er else {
+            return Err(RpcError::NotFound {
+                kind: "web_user".into(),
+                id: user_id.to_string(),
+            });
+        };
+        Ok(hyperion_types::EffectiveRoleWire {
+            caps: er.caps.bits(),
+            scope_all: er.scope_all,
+            label: er.label,
+            custom_role_id: er.custom_role_id,
+            base_role: er.base_role.as_str().to_string(),
+        })
+    }
+
     pub async fn web_user_set_locked(
         &self,
         user_id: i64,

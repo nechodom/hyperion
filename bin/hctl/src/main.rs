@@ -1320,6 +1320,31 @@ fn print_pretty(resp: &Response) {
         }
         Response::WebUserSetPassword => println!("password set"),
         Response::WebUserSetRole => println!("role set"),
+        Response::RoleList(roles) => {
+            println!("{} custom role(s):", roles.len());
+            for r in roles {
+                println!(
+                    "  id={} {} caps={:#x} scope_all={} in_use={}",
+                    r.id, r.name, r.capabilities, r.scope_all, r.in_use
+                );
+            }
+        }
+        Response::RoleCreate { id } => println!("role created: id={id}"),
+        Response::RoleUpdate => println!("role updated"),
+        Response::RoleDelete => println!("role deleted"),
+        Response::WebUserSetCustomRole => println!("custom role assigned"),
+        Response::WebUserEffectiveRole(er) => {
+            println!(
+                "effective role: label={} base={} caps={:#x} scope_all={} custom_role_id={}",
+                er.label,
+                er.base_role,
+                er.caps,
+                er.scope_all,
+                er.custom_role_id
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "—".into())
+            );
+        }
         Response::WebUserSetLocked => println!("lock state changed"),
         Response::WebUserDelete => println!("user deleted"),
         Response::Web2faEnrollStart(e) => {

@@ -225,7 +225,9 @@ impl CapSet {
     }
 
     pub fn iter(self) -> impl Iterator<Item = Capability> {
-        Capability::ALL.into_iter().filter(move |c| self.contains(*c))
+        Capability::ALL
+            .into_iter()
+            .filter(move |c| self.contains(*c))
     }
 
     pub fn count(self) -> u32 {
@@ -294,9 +296,7 @@ impl WebRole {
         match self {
             WebRole::SuperAdmin => CapSet::all(),
             // Admin = everything except managing users + roles.
-            WebRole::Admin => {
-                CapSet(CapSet::all().0 & !UsersManage.bit() & !RolesManage.bit())
-            }
+            WebRole::Admin => CapSet(CapSet::all().0 & !UsersManage.bit() & !RolesManage.bit()),
             // Operator = full control of assigned hostings + their tooling.
             WebRole::Operator => [
                 HostingView,
@@ -334,7 +334,9 @@ impl WebRole {
             .into_iter()
             .collect(),
             // Viewer = read-only on granted hostings.
-            WebRole::Viewer => [HostingView, WpVulnView, MonitoringView].into_iter().collect(),
+            WebRole::Viewer => [HostingView, WpVulnView, MonitoringView]
+                .into_iter()
+                .collect(),
         }
     }
 
@@ -361,7 +363,11 @@ mod tests {
     fn machine_strings_unique_and_roundtrip() {
         let mut seen = std::collections::HashSet::new();
         for c in Capability::ALL {
-            assert!(seen.insert(c.as_str()), "duplicate machine str: {}", c.as_str());
+            assert!(
+                seen.insert(c.as_str()),
+                "duplicate machine str: {}",
+                c.as_str()
+            );
             assert_eq!(Capability::from_machine_str(c.as_str()), Some(c));
         }
     }
@@ -372,7 +378,10 @@ mod tests {
         flat.sort_by_key(|c| *c as u8);
         let mut all = Capability::ALL.to_vec();
         all.sort_by_key(|c| *c as u8);
-        assert_eq!(flat, all, "groups() must list every capability exactly once");
+        assert_eq!(
+            flat, all,
+            "groups() must list every capability exactly once"
+        );
     }
 
     #[test]

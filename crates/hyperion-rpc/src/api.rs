@@ -658,6 +658,31 @@ pub trait AgentApi: Send + Sync + 'static {
         current_password: Option<String>,
     ) -> Result<(), RpcError>;
     async fn web_user_set_role(&self, user_id: i64, role: String) -> Result<(), RpcError>;
+    // Custom roles (granular RBAC) — see codec.rs for semantics.
+    async fn role_list(&self) -> Result<Vec<hyperion_types::CustomRoleSummary>, RpcError>;
+    async fn role_create(
+        &self,
+        name: String,
+        capabilities: u64,
+        scope_all: bool,
+    ) -> Result<i64, RpcError>;
+    async fn role_update(
+        &self,
+        id: i64,
+        name: String,
+        capabilities: u64,
+        scope_all: bool,
+    ) -> Result<(), RpcError>;
+    async fn role_delete(&self, id: i64) -> Result<(), RpcError>;
+    async fn web_user_set_custom_role(
+        &self,
+        user_id: i64,
+        custom_role_id: i64,
+    ) -> Result<(), RpcError>;
+    async fn web_user_effective_role(
+        &self,
+        user_id: i64,
+    ) -> Result<hyperion_types::EffectiveRoleWire, RpcError>;
     async fn web_user_set_locked(
         &self,
         user_id: i64,

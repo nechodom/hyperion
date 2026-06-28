@@ -166,12 +166,14 @@ pub async fn set_role(
     role: WebRole,
     now: i64,
 ) -> Result<(), StateError> {
-    sqlx::query("UPDATE web_users SET role = ?, custom_role_id = NULL, updated_at = ? WHERE id = ?")
-        .bind(role.as_str())
-        .bind(now)
-        .bind(user_id)
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "UPDATE web_users SET role = ?, custom_role_id = NULL, updated_at = ? WHERE id = ?",
+    )
+    .bind(role.as_str())
+    .bind(now)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -215,15 +217,20 @@ pub async fn effective_role(
     pool: &SqlitePool,
     user_id: i64,
 ) -> Result<Option<EffectiveRole>, StateError> {
-    let row: Option<(String, Option<i64>, Option<String>, Option<i64>, Option<i64>)> =
-        sqlx::query_as(
-            "SELECT u.role, u.custom_role_id, c.name, c.capabilities, c.scope_all_hostings \
+    let row: Option<(
+        String,
+        Option<i64>,
+        Option<String>,
+        Option<i64>,
+        Option<i64>,
+    )> = sqlx::query_as(
+        "SELECT u.role, u.custom_role_id, c.name, c.capabilities, c.scope_all_hostings \
              FROM web_users u LEFT JOIN custom_roles c ON c.id = u.custom_role_id \
              WHERE u.id = ?",
-        )
-        .bind(user_id)
-        .fetch_optional(pool)
-        .await?;
+    )
+    .bind(user_id)
+    .fetch_optional(pool)
+    .await?;
     Ok(row.map(|(role, crid, cname, ccaps, cscope)| {
         let base = WebRole::from_str(&role).unwrap_or(WebRole::Viewer);
         match (crid, cname, ccaps) {

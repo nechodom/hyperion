@@ -865,6 +865,36 @@ pub enum Request {
         user_id: i64,
         role: String,
     },
+    /// List all custom roles (granular RBAC). Each summary carries a
+    /// capability bitmask, its scope, and a live in-use count.
+    RoleList,
+    /// Create a custom role. `capabilities` is a plain bitmask. Returns
+    /// the new role id.
+    RoleCreate {
+        name: String,
+        capabilities: u64,
+        scope_all: bool,
+    },
+    /// Update a custom role's name / capabilities / scope.
+    RoleUpdate {
+        id: i64,
+        name: String,
+        capabilities: u64,
+        scope_all: bool,
+    },
+    /// Delete a custom role. Refuses if any user is still assigned it.
+    RoleDelete {
+        id: i64,
+    },
+    /// Assign a custom role to a user (links `custom_role_id`).
+    WebUserSetCustomRole {
+        user_id: i64,
+        custom_role_id: i64,
+    },
+    /// Resolve a user's effective authorization (capabilities + scope).
+    WebUserEffectiveRole {
+        user_id: i64,
+    },
     /// Lock / unlock a user. super_admin only.
     WebUserSetLocked {
         user_id: i64,
@@ -1497,6 +1527,14 @@ pub enum Response {
     },
     WebUserSetPassword,
     WebUserSetRole,
+    RoleList(Vec<hyperion_types::CustomRoleSummary>),
+    RoleCreate {
+        id: i64,
+    },
+    RoleUpdate,
+    RoleDelete,
+    WebUserSetCustomRole,
+    WebUserEffectiveRole(hyperion_types::EffectiveRoleWire),
     WebUserSetLocked,
     WebUserDelete,
     Web2faEnrollStart(hyperion_types::Web2faEnrollment),

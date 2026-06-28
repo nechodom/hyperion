@@ -846,6 +846,44 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::RoleList => match api.role_list().await {
+            Ok(v) => Response::RoleList(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::RoleCreate {
+            name,
+            capabilities,
+            scope_all,
+        } => match api.role_create(name, capabilities, scope_all).await {
+            Ok(id) => Response::RoleCreate { id },
+            Err(e) => Response::Error(e),
+        },
+        Request::RoleUpdate {
+            id,
+            name,
+            capabilities,
+            scope_all,
+        } => match api.role_update(id, name, capabilities, scope_all).await {
+            Ok(()) => Response::RoleUpdate,
+            Err(e) => Response::Error(e),
+        },
+        Request::RoleDelete { id } => match api.role_delete(id).await {
+            Ok(()) => Response::RoleDelete,
+            Err(e) => Response::Error(e),
+        },
+        Request::WebUserSetCustomRole {
+            user_id,
+            custom_role_id,
+        } => match api.web_user_set_custom_role(user_id, custom_role_id).await {
+            Ok(()) => Response::WebUserSetCustomRole,
+            Err(e) => Response::Error(e),
+        },
+        Request::WebUserEffectiveRole { user_id } => {
+            match api.web_user_effective_role(user_id).await {
+                Ok(v) => Response::WebUserEffectiveRole(v),
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::WebUserSetLocked {
             user_id,
             locked,
@@ -2036,6 +2074,33 @@ mod tests {
         }
         async fn web_user_set_role(&self, _: i64, _: String) -> Result<(), RpcError> {
             Ok(())
+        }
+        async fn role_list(&self) -> Result<Vec<hyperion_types::CustomRoleSummary>, RpcError> {
+            Ok(vec![])
+        }
+        async fn role_create(&self, _: String, _: u64, _: bool) -> Result<i64, RpcError> {
+            Ok(0)
+        }
+        async fn role_update(&self, _: i64, _: String, _: u64, _: bool) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn role_delete(&self, _: i64) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn web_user_set_custom_role(&self, _: i64, _: i64) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn web_user_effective_role(
+            &self,
+            _: i64,
+        ) -> Result<hyperion_types::EffectiveRoleWire, RpcError> {
+            Ok(hyperion_types::EffectiveRoleWire {
+                caps: 0,
+                scope_all: false,
+                label: String::new(),
+                custom_role_id: None,
+                base_role: String::new(),
+            })
         }
         async fn web_user_set_locked(
             &self,

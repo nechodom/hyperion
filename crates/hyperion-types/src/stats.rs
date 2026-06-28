@@ -566,6 +566,33 @@ pub struct WebUserSummary {
     pub created_at: i64,
 }
 
+/// Wire shape of one custom role. `capabilities` is a plain bitmask (the
+/// `Capability`/`CapSet` model lives in hyperion-state; the wire layer must
+/// not depend on it, so it crosses as a `u64`). `in_use` is the number of
+/// users currently assigned this role.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CustomRoleSummary {
+    pub id: i64,
+    pub name: String,
+    pub capabilities: u64,
+    pub scope_all: bool,
+    pub in_use: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// Wire shape of a user's effective authorization. `caps` is a plain bitmask
+/// (same reasoning as `CustomRoleSummary::capabilities`). `base_role` is the
+/// built-in role's machine string.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EffectiveRoleWire {
+    pub caps: u64,
+    pub scope_all: bool,
+    pub label: String,
+    pub custom_role_id: Option<i64>,
+    pub base_role: String,
+}
+
 /// Outcome of a `Request::WebLogin` call. Web binary uses this to decide
 /// whether to mint a session immediately, prompt for 2FA, or surface
 /// a clean error.
