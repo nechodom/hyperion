@@ -8,6 +8,25 @@ use axum::http::{header, request::Parts, HeaderValue, StatusCode};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Redirect, Response};
 use hyperion_auth::Session;
+use hyperion_state::capabilities::{CapSet, Capability};
+use hyperion_state::web_users::WebRole;
+use std::str::FromStr;
+
+/// Resolve a user's capability bitmask + scope for session minting, via the
+/// agent. `(caps, scope_all, true)` on success; `(0, false, false)` on failure
+/// so the session falls back to deriving caps from the built-in role string.
+pub async fn resolve_caps(state: &SharedState, user_id: i64) -> (u64, bool, bool) {
+    use hyperion_rpc::codec::{Request, Response as RpcResponse};
+    match hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::WebUserEffectiveRole { user_id },
+    )
+    .await
+    {
+        Ok(RpcResponse::WebUserEffectiveRole(er)) => (er.caps, er.scope_all, true),
+        _ => (0, false, false),
+    }
+}
 
 /// Cookie-extracted session, available in handlers via the State extractor
 /// chain. Absence is represented by `None`.
@@ -67,6 +86,45 @@ impl AuthCtx {
             .as_ref()
             .map(|s| s.is_customer())
             .unwrap_or(false)
+    }
+
+    /// Effective capability set: the session's stamped caps when present
+    /// (built-in or custom role), else derived from the built-in `role` string
+    /// (pre-capability cookies). Unauthenticated → empty.
+    fn caps(&self) -> CapSet {
+        match &self.session {
+            Some(s) if s.caps_present => CapSet::from_bits(s.caps),
+            Some(s) => WebRole::from_str(&s.role)
+                .map(|r| r.capabilities())
+                .unwrap_or_else(|_| CapSet::empty()),
+            None => CapSet::empty(),
+        }
+    }
+
+    /// Does the current user hold `cap`? The capability-aware gate; built-in
+    /// roles carry their preset, custom roles carry exactly what was ticked.
+    pub fn can(&self, cap: Capability) -> bool {
+        self.caps().contains(cap)
+    }
+
+    /// 403 unless the user holds `cap`.
+    pub fn require_cap(&self, cap: Capability) -> Result<(), AppError> {
+        if self.can(cap) {
+            Ok(())
+        } else {
+            Err(AppError::Forbidden)
+        }
+    }
+
+    /// Acts on all hostings (vs only `web_user_hosting_access` grants)?
+    pub fn scope_all(&self) -> bool {
+        match &self.session {
+            Some(s) if s.caps_present => s.scope_all,
+            Some(s) => WebRole::from_str(&s.role)
+                .map(|r| r.scope_all())
+                .unwrap_or(false),
+            None => false,
+        }
     }
 }
 

@@ -368,6 +368,9 @@ fn mint_pending_2fa_cookie(
         username: String::new(),
         role: "pending_2fa".to_string(),
         purpose: PURPOSE_PENDING_2FA.to_string(),
+        caps: 0,
+        scope_all: false,
+        caps_present: false,
     };
     let token = state
         .session
@@ -565,6 +568,7 @@ async fn mint_session_redirect(
 ) -> Result<Response, AppError> {
     let now = hyperion_types::now_secs();
     let sid = ulid::Ulid::new().to_string();
+    let (caps, scope_all, caps_present) = crate::auth::resolve_caps(state, user_id).await;
     let session = Session {
         sid: sid.clone(),
         user_id,
@@ -573,6 +577,9 @@ async fn mint_session_redirect(
         username,
         role,
         purpose: purpose.to_string(),
+        caps,
+        scope_all,
+        caps_present,
     };
     let token = state
         .session
@@ -638,6 +645,9 @@ fn remember_device_cookie(
         username: username.to_string(),
         role: role.to_string(),
         purpose: PURPOSE_REMEMBER_DEVICE.to_string(),
+        caps: 0,
+        scope_all: false,
+        caps_present: false,
     };
     let token = state.session.sign(&rd).ok()?;
     let cookie = format!(
