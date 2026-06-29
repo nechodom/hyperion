@@ -57,6 +57,9 @@ struct SettingsTpl<'a> {
     /// Which node the Mail tab is currently editing ("" / "local" = master).
     /// The `mta` diagnostics + the form pre-fill are for THIS node.
     mail_node: String,
+    /// Master node's Cloudflare DNS-01 token state — drives the "Cloudflare
+    /// certs (DNS-01)" card so the operator can save/test the token without SSH.
+    cloudflare: hyperion_types::CloudflareTokenInfo,
     error: Option<String>,
     flash: Option<String>,
     flash_error: Option<String>,
@@ -166,6 +169,17 @@ pub async fn get_settings(
         Ok(s) => mask_secrets_in_toml(&s),
         Err(e) => format!("(could not read /etc/hyperion/agent.toml: {e})"),
     };
+    // Master's Cloudflare DNS-01 token state (live-verified if present) for the
+    // "Cloudflare certs" card. Best-effort: a failed RPC just shows "unknown".
+    let cloudflare: hyperion_types::CloudflareTokenInfo = match hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::CloudflareTokenStatus,
+    )
+    .await
+    {
+        Ok(RpcResponse::CloudflareToken(i)) => i,
+        _ => hyperion_types::CloudflareTokenInfo::default(),
+    };
     let update_current_short = short_sha(&update_status.current_sha);
     let update_latest_short = short_sha(&update_status.latest_sha);
     // Per-test-node wildcard rows: a `*.<base>` cert issued once covers
@@ -203,12 +217,54 @@ pub async fn get_settings(
         raw_toml,
         mta,
         mail_node,
+        cloudflare,
         error,
         flash: q.flash,
         flash_error: q.flash_error,
         csrf_token,
     };
     Ok(Html(tpl.render()?).into_response())
+}
+
+#[derive(Deserialize)]
+pub struct CloudflareTokenForm {
+    #[serde(default)]
+    pub _csrf: String,
+    pub token: String,
+}
+
+/// `POST /settings/cloudflare/token` — validate the Cloudflare DNS-01 API token
+/// against the live API and, only if accepted, persist it on the master (0600).
+/// Enables one-click real-cert issuance via DNS-01 behind the CloudFlare proxy.
+pub async fn post_cloudflare_token(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<CloudflareTokenForm>,
+) -> Result<Response, AppError> {
+    if !ctx.can(Capability::SettingsManage) {
+        return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
+    }
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::CloudflareTokenSet {
+            token: form.token.into(),
+        },
+    )
+    .await
+    .map_err(AppError::from)?;
+    let dest = match resp {
+        RpcResponse::CloudflareToken(i) => {
+            format!("/settings?flash={}#cluster", urlencode(&i.message))
+        }
+        RpcResponse::Error(e) => {
+            format!(
+                "/settings?flash_error={}#cluster",
+                urlencode(&e.to_string())
+            )
+        }
+        _ => return Err(AppError::Internal("unexpected response".into())),
+    };
+    Ok(Redirect::to(&dest).into_response())
 }
 
 #[derive(Deserialize)]

@@ -980,6 +980,11 @@
       then you continue to validate. Requires control of the domain's DNS.
     </p>
     <p class="text-soft small" style="margin:-0.3rem 0 0.7rem;padding:0.5rem 0.7rem;background:var(--surface-1);border-radius:6px">
+      <strong>Behind Cloudflare / a CDN?</strong> Choose the <em>Cloudflare</em> provider below — DNS-01
+      validates over DNS, so it issues a real cert even when traffic is proxied and HTTP-01 can't reach this
+      server. Set the API token once in <a href="/settings#cloudflare-certs">Settings → Cloudflare certs</a>.
+    </p>
+    <p class="text-soft small" style="margin:-0.3rem 0 0.7rem;padding:0.5rem 0.7rem;background:var(--surface-1);border-radius:6px">
       On a <strong>test node</strong>? Issue one <code>*.&lt;base&gt;</code> wildcard for the
       whole node under <a href="/settings#testnodes">Settings → Test nodes</a> instead — every
       auto-subdomain reuses it, so this per-site certificate isn't needed there.

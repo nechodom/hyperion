@@ -28,6 +28,24 @@
         Renew all eligible
       </button>
     </form>
+    {# Bulk-issue real certs via Cloudflare DNS-01 for every master-hosted site
+       still on a bootstrap self-signed cert — works behind the CloudFlare proxy.
+       Only shown when there's something to do. Needs a token (Settings →
+       Cloudflare certs). Runs as a background job. #}
+    {% if self_signed > 0 %}
+    <form method="post" action="/certs/issue-all-cloudflare" style="display:inline"
+          data-confirm-title="Issue real certs via Cloudflare DNS"
+          data-confirm-body="Issues a real Let's Encrypt certificate via Cloudflare DNS-01 for every master-hosted site still on a bootstrap self-signed cert. DNS-01 validates over DNS, so it works even behind the CloudFlare proxy. Needs a Cloudflare token (Settings → Cloudflare certs). Each site takes ~25s; progress streams to Jobs."
+          data-confirm-confirm-label="Issue now"
+          data-confirm-variant="primary">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <button class="btn" type="submit"
+              title="Issue real certs via Cloudflare DNS-01 for {{ self_signed }} self-signed site(s)">
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></svg>
+        Issue {{ self_signed }} via Cloudflare DNS
+      </button>
+    </form>
+    {% endif %}
   </div>
 </div>
 

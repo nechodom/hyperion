@@ -496,6 +496,14 @@ pub enum Request {
     EmailConfigSet {
         fields: RedactedFields,
     },
+    /// Report whether THIS node has a usable Cloudflare DNS-01 token (drives the
+    /// Settings card + whether one-click DNS-01-via-Cloudflare is offered).
+    CloudflareTokenStatus,
+    /// Validate + persist THIS node's Cloudflare DNS-01 token (0600). The token
+    /// is `RedactedPem` so it can't leak into a worker's request log.
+    CloudflareTokenSet {
+        token: RedactedPem,
+    },
     /// Compare the running binary's git SHA against the upstream
     /// `rolling` release tag's SHA. Cached agent-side for an hour
     /// so the dashboard banner doesn't hammer the GitHub API.
@@ -1412,6 +1420,7 @@ pub enum Response {
     NodeUpdateStatus(hyperion_types::NodeUpdateStatus),
     AgentConfigUpdate,
     EmailConfigSet,
+    CloudflareToken(hyperion_types::CloudflareTokenInfo),
     UpdateCheck(hyperion_types::UpdateStatus),
     HostingExport(hyperion_types::HostingMigrationBundle),
     HostingMigrationFetchBundleFile {

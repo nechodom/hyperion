@@ -13,7 +13,9 @@ use askama::Template;
 use axum::extract::State;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
+use hyperion_rpc::wire::HostingSelector;
 use hyperion_state::capabilities::Capability;
+use hyperion_validate::Domain;
 use serde::Deserialize;
 
 fn urlencode(s: &str) -> String {
@@ -34,6 +36,9 @@ struct CertsTpl<'a> {
     critical: usize,
     warning: usize,
     ok: usize,
+    /// Master-hosted sites still on a bootstrap self-signed cert — drives the
+    /// "Issue all via Cloudflare DNS" bulk button (hidden when zero).
+    self_signed: usize,
     /// Flash banner state (set after redirect from /certs/renew-all).
     flash: Option<String>,
     flash_error: Option<String>,
@@ -99,6 +104,11 @@ pub async fn get_certs(
             _ => ok += 1,
         }
     }
+    // Master-hosted bootstrap certs we can bulk-issue via Cloudflare DNS-01.
+    let self_signed = all
+        .iter()
+        .filter(|i| i.issuer == "self-signed" && i.node_id.is_empty())
+        .count();
 
     let tpl = CertsTpl {
         username: &ctx.username,
@@ -111,6 +121,7 @@ pub async fn get_certs(
         critical,
         warning,
         ok,
+        self_signed,
         flash: q.flash.filter(|s| !s.is_empty()),
         flash_error: q.flash_error.filter(|s| !s.is_empty()),
         csrf_token: super::session_csrf_token(&state, &ctx),
@@ -190,4 +201,149 @@ pub async fn post_renew_all(
         "flash"
     };
     Ok(Redirect::to(&format!("/certs?{key}={}", urlencode(&msg))).into_response())
+}
+
+/// POST /certs/issue-all-cloudflare — background job that issues a real Let's
+/// Encrypt cert via Cloudflare DNS-01 for every master-hosted site still on a
+/// bootstrap self-signed cert. DNS-01 validates over DNS, so it works behind the
+/// CloudFlare proxy (where HTTP-01 can't reach the origin). Each site issues
+/// sequentially (~25s), so this runs detached and the operator watches the job.
+///
+/// Worker-hosted sites are left alone for now (issue them per-site from the
+/// site's SSL tab); the job log notes this if any are skipped.
+pub async fn post_issue_all_cloudflare(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+) -> Result<Response, AppError> {
+    if !(ctx.can(Capability::CertManage) && ctx.scope_all()) {
+        return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
+    }
+    let actor_uid = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
+    let actor_label = ctx.username.clone();
+    let job_state = state.clone();
+    let job_id = crate::handlers::jobs::spawn_job(
+        state.clone(),
+        "cert-issue-cloudflare",
+        None,
+        "{}",
+        &actor_label,
+        actor_uid,
+        move |reporter| async move {
+            run_issue_all_cf_job(reporter, job_state).await;
+        },
+    )
+    .await?;
+    Ok(Redirect::to(&format!("/jobs/{}", job_id)).into_response())
+}
+
+async fn run_issue_all_cf_job(reporter: crate::handlers::jobs::JobReporter, state: SharedState) {
+    reporter.step("Checking the Cloudflare token…", 2, "").await;
+    match hyperion_rpc_client::call(&state.agent_socket, Request::CloudflareTokenStatus).await {
+        Ok(RpcResponse::CloudflareToken(i)) if i.valid == Some(true) => {}
+        Ok(RpcResponse::CloudflareToken(i)) => {
+            reporter
+                .finish(
+                    false,
+                    Some(format!(
+                        "Cloudflare token not usable ({}). Set it in Settings → Cloudflare certs first.",
+                        i.message
+                    )),
+                )
+                .await;
+            return;
+        }
+        _ => {
+            reporter
+                .finish(false, Some("Could not check the Cloudflare token.".into()))
+                .await;
+            return;
+        }
+    }
+    reporter
+        .step("Listing sites still on a self-signed cert…", 5, "")
+        .await;
+    let items = match hyperion_rpc_client::call(&state.agent_socket, Request::CertOverview).await {
+        Ok(RpcResponse::CertOverview(v)) => v,
+        _ => {
+            reporter
+                .finish(false, Some("Could not list certificates.".into()))
+                .await;
+            return;
+        }
+    };
+    // Master-hosted (node_id empty), still self-signed.
+    let targets: Vec<String> = items
+        .into_iter()
+        .filter(|i| i.issuer == "self-signed" && i.node_id.is_empty())
+        .map(|i| i.domain)
+        .collect();
+    if targets.is_empty() {
+        reporter
+            .step(
+                "No master-hosted sites on a self-signed cert — nothing to do.",
+                100,
+                "",
+            )
+            .await;
+        reporter.finish(true, None).await;
+        return;
+    }
+    let total = targets.len();
+    let mut ok = 0usize;
+    let mut failed: Vec<String> = Vec::new();
+    for (idx, domain) in targets.iter().enumerate() {
+        let pct = 5 + ((idx * 90) / total) as i64;
+        reporter
+            .step(
+                &format!("[{}/{total}] Issuing {domain} via Cloudflare DNS…", idx + 1),
+                pct,
+                "",
+            )
+            .await;
+        let sel = match Domain::parse(domain) {
+            Ok(d) => HostingSelector::Domain(d),
+            Err(e) => {
+                failed.push(format!("{domain}: {e}"));
+                continue;
+            }
+        };
+        match hyperion_rpc_client::call(
+            &state.agent_socket,
+            Request::CertDns01Begin {
+                sel,
+                staging: false,
+                provider: "cloudflare".into(),
+            },
+        )
+        .await
+        {
+            Ok(RpcResponse::CertDns01Begin {
+                completed: true, ..
+            }) => {
+                ok += 1;
+                reporter
+                    .step(&format!("✓ {domain}"), pct, &format!("issued {domain}\n"))
+                    .await;
+            }
+            Ok(RpcResponse::CertDns01Begin {
+                completed: false, ..
+            }) => {
+                failed.push(format!("{domain}: DNS-01 did not complete"));
+            }
+            Ok(RpcResponse::Error(e)) => failed.push(format!("{domain}: {e}")),
+            Ok(_) => failed.push(format!("{domain}: unexpected response")),
+            Err(e) => failed.push(format!("{domain}: {e}")),
+        }
+    }
+    let mut summary = format!("Issued {ok}/{total} certs via Cloudflare DNS.");
+    if !failed.is_empty() {
+        summary.push_str(&format!(" {} failed:\n{}", failed.len(), failed.join("\n")));
+    }
+    reporter.step(&summary, 100, &summary).await;
+    reporter
+        .finish(
+            failed.is_empty(),
+            (!failed.is_empty()).then(|| format!("{} site(s) failed — see log", failed.len())),
+        )
+        .await;
 }

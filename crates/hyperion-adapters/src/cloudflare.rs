@@ -35,6 +35,47 @@ pub fn is_configured() -> bool {
     token().is_some()
 }
 
+/// Validate a token by listing zones — confirms it's accepted and has at least
+/// `Zone:Read`. Returns the number of zones it can see (a quick sanity signal
+/// for the operator). Errors if Cloudflare rejects the token.
+pub async fn verify_token(token: &str) -> Result<usize, AdapterError> {
+    let t = token.trim();
+    if t.is_empty() {
+        return Err(AdapterError::Other("empty Cloudflare token".into()));
+    }
+    let url = format!("{API}/zones?per_page=50");
+    let v = curl_json(t, &[&url]).await?;
+    if v["success"].as_bool() != Some(true) {
+        return Err(AdapterError::Other(format!(
+            "cloudflare: token rejected: {}",
+            v["errors"]
+        )));
+    }
+    Ok(v["result"].as_array().map(|a| a.len()).unwrap_or(0))
+}
+
+/// Persist the API token to [`TOKEN_FILE`] with `0600` perms (so DNS-01 issuance
+/// can read it without the operator SSHing to the box). Caller should
+/// [`verify_token`] first.
+pub fn write_token(token: &str) -> Result<(), AdapterError> {
+    let t = token.trim();
+    if t.is_empty() {
+        return Err(AdapterError::Other("empty Cloudflare token".into()));
+    }
+    if let Some(dir) = std::path::Path::new(TOKEN_FILE).parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    std::fs::write(TOKEN_FILE, format!("{t}\n"))
+        .map_err(|e| AdapterError::Other(format!("write {TOKEN_FILE}: {e}")))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(TOKEN_FILE, std::fs::Permissions::from_mode(0o600))
+            .map_err(|e| AdapterError::Other(format!("chmod {TOKEN_FILE}: {e}")))?;
+    }
+    Ok(())
+}
+
 async fn curl_json(token: &str, args: &[&str]) -> Result<serde_json::Value, AdapterError> {
     let auth = format!("Authorization: Bearer {token}");
     let mut full: Vec<&str> = vec![
