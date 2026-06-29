@@ -230,7 +230,7 @@ pub async fn get_agent_script(
     let kind = info.source_kind;
     // $T/$B/$K/$TMP use no braces, so they pass through format! untouched.
     let script = format!(
-        r#"#!/bin/sh
+        r#"#!/bin/bash
 # Hyperion self-service import — runs on the SOURCE panel box (as root).
 set -eu
 T="{token}"
@@ -241,7 +241,8 @@ TMP="$(mktemp)"
 curl -fsSL "$B/import/agent-bin/$T" -o "$TMP"
 chmod +x "$TMP"
 echo "[hyperion] exporting $K and streaming the bundle to Hyperion (nothing is downloaded to your machine) …" >&2
-"$TMP" export-bundle --kind "$K" --out - | curl -fsS --max-time 86400 -X POST -T - "$B/import/ingest/$T"
+set -o pipefail
+"$TMP" --kind "$K" --out - | curl -fsS --max-time 86400 -X POST -T - "$B/import/ingest/$T"
 rm -f "$TMP"
 echo "[hyperion] upload done — watch progress in Hyperion → Import." >&2
 "#
@@ -256,8 +257,8 @@ echo "[hyperion] upload done — watch progress in Hyperion → Import." >&2
         .into_response())
 }
 
-/// `GET /import/agent-bin/:token` — serve THIS node's hyperion-agent binary so
-/// the source can run `export-bundle` (matching arch assumed; see spec).
+/// `GET /import/agent-bin/:token` — serve the portable `hyperion-export` binary
+/// (static musl, runs on any Linux) so the source box can produce the bundle.
 pub async fn get_agent_bin(
     State(state): State<SharedState>,
     Path(token): Path<String>,
@@ -265,10 +266,10 @@ pub async fn get_agent_bin(
     if resolve(&state, &token, false).await?.is_none() {
         return Ok((StatusCode::NOT_FOUND, "invalid or expired import token\n").into_response());
     }
-    let Some(bin) = agent_bin_path() else {
+    let Some(bin) = exporter_bin_path() else {
         return Ok((
             StatusCode::NOT_FOUND,
-            "hyperion-agent binary not found on this node\n",
+            "hyperion-export binary not found on this node — run update.sh to install it\n",
         )
             .into_response());
     };
@@ -419,25 +420,26 @@ fn base_url(state: &SharedState, headers: &HeaderMap) -> String {
     format!("{scheme}://{host}")
 }
 
-/// Resolve THIS node's hyperion-agent binary: env override → sibling of the web
-/// binary (installed together) → the standard install path.
-fn agent_bin_path() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("HYPERION_AGENT_BIN") {
+/// Resolve the portable `hyperion-export` binary this node serves to source
+/// boxes — a static musl build that runs on any Linux regardless of glibc.
+/// env override → standard install paths → sibling of the web binary.
+fn exporter_bin_path() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("HYPERION_EXPORT_BIN") {
         let pb = PathBuf::from(p);
         if pb.is_file() {
             return Some(pb);
         }
     }
+    let mut cands = vec![
+        PathBuf::from("/usr/local/bin/hyperion-export"),
+        PathBuf::from("/usr/sbin/hyperion-export"),
+    ];
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            let pb = dir.join("hyperion-agent");
-            if pb.is_file() {
-                return Some(pb);
-            }
+            cands.push(dir.join("hyperion-export"));
         }
     }
-    let std_path = PathBuf::from("/usr/local/bin/hyperion-agent");
-    std_path.is_file().then_some(std_path)
+    cands.into_iter().find(|p| p.is_file())
 }
 
 async fn avail_bytes(dir: &str) -> Option<i64> {
