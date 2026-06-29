@@ -460,7 +460,10 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/emails", get(handlers::emails::get_emails))
         .route("/install", get(handlers::install::get_install))
         .route("/install/invite", post(handlers::install::post_invite))
-        .route("/import", get(handlers::import_panel::get_import))
+        // /import lands on the self-service wizard (the common case: no SSH key).
+        // The SSH / in-place importer moved to /import/ssh, linked from the wizard.
+        .route("/import", get(handlers::import_wizard::get_wizard))
+        .route("/import/ssh", get(handlers::import_panel::get_import))
         .route("/import/plan", post(handlers::import_panel::post_plan))
         .route("/import/apply", post(handlers::import_panel::post_apply))
         .route("/import/wizard", get(handlers::import_wizard::get_wizard))
