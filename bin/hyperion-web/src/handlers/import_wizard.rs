@@ -16,7 +16,7 @@ use crate::auth::AuthCtx;
 use crate::error::AppError;
 use crate::state::SharedState;
 use askama::Template;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Form;
@@ -39,9 +39,15 @@ pub struct TransferRow {
     pub created_by: String,
 }
 
-/// Shown once after minting: the command to paste on the source box.
+/// Shown once after minting: the commands to paste on the source box.
 pub struct MintedView {
+    /// Import everything.
     pub one_liner: String,
+    /// Dry run — list what WOULD be imported, export nothing.
+    pub preview_liner: String,
+    /// Base URL + token, for the JS that builds a "only these domains" command.
+    pub base: String,
+    pub token: String,
     pub kind: String,
 }
 
@@ -171,12 +177,16 @@ pub async fn post_mint(
         _ => return Err(AppError::Internal("mint returned unexpected result".into())),
     };
     let base = base_url(&state, &headers);
-    let one_liner = format!("curl -fsSL {base}/import/agent/{token} | sudo bash");
+    let one_liner = format!("curl -fsSL \"{base}/import/agent/{token}\" | sudo bash");
+    let preview_liner = format!("curl -fsSL \"{base}/import/agent/{token}?mode=list\" | sudo bash");
     render(
         &state,
         &ctx,
         Some(MintedView {
             one_liner,
+            preview_liner,
+            base,
+            token,
             kind: kind.into(),
         }),
     )
@@ -218,16 +228,52 @@ async fn render(
 
 /// `GET /import/agent/:token` — the bootstrap script the operator pipes to
 /// `sudo bash` on the source box. Auditable (curl it without `| bash` first).
+/// Query for the bootstrap script: `?mode=list` → dry run (print, export
+/// nothing); `?only=a.com,b.com` → restrict to those domains.
+#[derive(Deserialize, Default)]
+pub struct ScriptQuery {
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub only: Option<String>,
+}
+
 pub async fn get_agent_script(
     State(state): State<SharedState>,
     Path(token): Path<String>,
+    Query(q): Query<ScriptQuery>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
+    // `mode=list` is a read-only preview, so it does NOT consume the token.
     let Some(info) = resolve(&state, &token, false).await? else {
         return Ok((StatusCode::NOT_FOUND, "invalid or expired import token\n").into_response());
     };
     let base = base_url(&state, &headers);
     let kind = info.source_kind;
+    let list_mode = q.mode.as_deref() == Some("list");
+    // Keep only domain characters [A-Za-z0-9.-] and commas, so the value cannot
+    // break out of the double-quoted shell argument below.
+    let only_arg = match q.only.as_deref().map(sanitize_domains) {
+        Some(d) if !d.is_empty() => format!(" --only \"{d}\""),
+        _ => String::new(),
+    };
+
+    // The exporter invocation differs for preview vs real run; everything else
+    // (download the static exporter, clean up) is shared.
+    let action = if list_mode {
+        format!(
+            r#"echo "[hyperion] DRY RUN — listing the sites that WOULD be imported (nothing is exported) …" >&2
+"$TMP" --kind "$K"{only_arg} --list"#
+        )
+    } else {
+        format!(
+            r#"echo "[hyperion] exporting $K and streaming the bundle to Hyperion (nothing is downloaded to your machine) …" >&2
+set -o pipefail
+"$TMP" --kind "$K"{only_arg} --out - | curl -fsS --max-time 86400 -X POST -T - "$B/import/ingest/$T"
+echo "[hyperion] upload done — watch progress in Hyperion → Import." >&2"#
+        )
+    };
+
     // $T/$B/$K/$TMP use no braces, so they pass through format! untouched.
     let script = format!(
         r#"#!/bin/bash
@@ -240,11 +286,8 @@ echo "[hyperion] downloading exporter from $B …" >&2
 TMP="$(mktemp)"
 curl -fsSL "$B/import/agent-bin/$T" -o "$TMP"
 chmod +x "$TMP"
-echo "[hyperion] exporting $K and streaming the bundle to Hyperion (nothing is downloaded to your machine) …" >&2
-set -o pipefail
-"$TMP" --kind "$K" --out - | curl -fsS --max-time 86400 -X POST -T - "$B/import/ingest/$T"
+{action}
 rm -f "$TMP"
-echo "[hyperion] upload done — watch progress in Hyperion → Import." >&2
 "#
     );
     Ok((
@@ -255,6 +298,14 @@ echo "[hyperion] upload done — watch progress in Hyperion → Import." >&2
         script,
     )
         .into_response())
+}
+
+/// Keep only characters valid in a comma-separated domain list, so a tampered
+/// `?only=` value can never inject shell into the generated bootstrap.
+fn sanitize_domains(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ','))
+        .collect()
 }
 
 /// `GET /import/agent-bin/:token` — serve the portable `hyperion-export` binary
@@ -499,4 +550,23 @@ fn transfers_html(rows: &[TransferRow]) -> String {
     }
     h.push_str("</tbody></table>");
     h
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize_domains;
+
+    #[test]
+    fn sanitize_domains_keeps_only_domain_chars() {
+        // Plain comma list survives intact.
+        assert_eq!(
+            sanitize_domains("a.com,b-c.example.org"),
+            "a.com,b-c.example.org"
+        );
+        // Shell metacharacters (spaces, ;, /, $(), ``, quotes) are all stripped,
+        // so a tampered ?only= value cannot inject into the generated bootstrap.
+        assert_eq!(sanitize_domains("a.com;rm$(id)"), "a.comrmid");
+        assert_eq!(sanitize_domains("x.com `whoami` \"q\""), "x.comwhoamiq");
+        assert_eq!(sanitize_domains(""), "");
+    }
 }

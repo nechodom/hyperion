@@ -15,12 +15,25 @@
 
 {% if let Some(m) = minted %}
 <div class="card" style="margin-bottom:1rem;border-color:var(--accent)">
-  <h3>Run this on your {{ m.kind }} server, as root</h3>
-  <p class="text-soft">Valid for 2 hours, single use. It downloads the exporter, exports your panel, and streams the bundle here — your laptop is never in the middle.</p>
-  <pre class="code-block" style="white-space:pre-wrap;word-break:break-all;user-select:all"><code>{{ m.one_liner }}</code></pre>
+  <h3>Run on your {{ m.kind }} server, as root</h3>
+  <p class="text-soft">Token valid for 2 hours, single use. Everything runs server-to-server — your laptop is never in the middle. Needs <code>sudo</code>/root on the source (to read the panel DB).</p>
+
+  <p style="margin:.85rem 0 .25rem"><strong>1. Preview (optional)</strong> — lists the sites that would be imported. Exports nothing; safe and reusable.</p>
+  <pre class="code-block" style="white-space:pre-wrap;word-break:break-all;user-select:all"><code>{{ m.preview_liner }}</code></pre>
   <button class="btn small" type="button"
-          onclick="navigator.clipboard.writeText(this.previousElementSibling.innerText.trim());this.textContent='Copied ✓';">Copy command</button>
-  <p class="text-soft" style="margin-top:.5rem">It needs <code>sudo</code>/root on the source (to read the panel DB). You can close this page — the transfer keeps running and shows below.</p>
+          onclick="navigator.clipboard.writeText(this.previousElementSibling.innerText.trim());this.textContent='Copied ✓';">Copy preview</button>
+
+  <p style="margin:1.1rem 0 .25rem"><strong>2. Import</strong> — exports and streams the bundle here, then imports in the background.</p>
+  <div class="field" style="margin-bottom:.5rem">
+    <label>Only these domains <span class="text-soft">(optional, comma-separated — blank = all)</span></label>
+    <input type="text" id="only-domains" placeholder="site1.com, site2.com" autocomplete="off"
+           data-base="{{ m.base }}" data-token="{{ m.token }}"
+           oninput="var c=this.value.replace(/[^A-Za-z0-9.,-]/g,'');var q=String.fromCharCode(34);var u=this.dataset.base+'/import/agent/'+this.dataset.token+(c?('?only='+encodeURIComponent(c)):'');document.querySelector('#import-cmd code').textContent='curl -fsSL '+q+u+q+' | sudo bash';">
+  </div>
+  <pre class="code-block" id="import-cmd" style="white-space:pre-wrap;word-break:break-all;user-select:all"><code>{{ m.one_liner }}</code></pre>
+  <button class="btn small" type="button"
+          onclick="navigator.clipboard.writeText(document.querySelector('#import-cmd code').innerText.trim());this.textContent='Copied ✓';">Copy import</button>
+  <p class="text-soft" style="margin-top:.5rem">You can close this page — the transfer keeps running and shows below.</p>
 </div>
 {% endif %}
 
