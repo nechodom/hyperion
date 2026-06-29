@@ -66,6 +66,13 @@ jobs:
             --bin hyperion-web \
             --bin hctl
           ls -lh target/release/{hyperion-agent,hyperion-web,hctl}
+          # Portable exporter for the self-service import wizard: a pure-Rust,
+          # statically-linked musl binary that runs on ANY Linux regardless of
+          # glibc. The wizard serves this to source boxes (which may have an
+          # older glibc than this build host), so it MUST be static.
+          rustup target add x86_64-unknown-linux-musl
+          cargo build --release --target x86_64-unknown-linux-musl -p hyperion-export
+          ls -lh target/x86_64-unknown-linux-musl/release/hyperion-export
 
       - name: Stage build artefacts + checksums
         run: |
@@ -73,13 +80,15 @@ jobs:
           cp target/release/hyperion-agent dist/
           cp target/release/hyperion-web   dist/
           cp target/release/hctl           dist/
+          # Static musl exporter (portable across glibc) for the import wizard.
+          cp target/x86_64-unknown-linux-musl/release/hyperion-export dist/
           # VERSION = the exact commit these binaries were built from. update.sh
           # fetches just this tiny file to decide whether the rolling release is
           # current with the node's source HEAD before trusting the pre-built
           # binaries (a 12 MB download) — closing the "pulled mid-CI-build, got a
           # commit behind" race.
           printf '%s\n' "${{ github.sha }}" > dist/VERSION
-          ( cd dist && sha256sum hyperion-agent hyperion-web hctl > SHA256SUMS )
+          ( cd dist && sha256sum hyperion-agent hyperion-web hctl hyperion-export > SHA256SUMS )
           cat dist/SHA256SUMS dist/VERSION
 
       - name: Compute version metadata
@@ -125,6 +134,7 @@ jobs:
             dist/hyperion-agent
             dist/hyperion-web
             dist/hctl
+            dist/hyperion-export
             dist/SHA256SUMS
             dist/VERSION
           draft: false
@@ -163,6 +173,7 @@ jobs:
             dist/hyperion-agent
             dist/hyperion-web
             dist/hctl
+            dist/hyperion-export
             dist/SHA256SUMS
             dist/VERSION
           draft: false

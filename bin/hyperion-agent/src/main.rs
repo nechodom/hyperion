@@ -99,60 +99,15 @@ async fn run_export_bundle(
     out: PathBuf,
     only: Option<String>,
 ) -> anyhow::Result<()> {
-    use hyperion_import::{adapter_for, Location};
-    let loc = Location::InPlace;
-
-    let adapter = match kind.as_deref() {
-        Some(k) => adapter_for(k)
-            .ok_or_else(|| anyhow::anyhow!("unknown --kind '{k}' (cloudpanel | hestiacp)"))?,
-        None => {
-            // Auto-detect: probe both adapters in-place.
-            let mut found = None;
-            for k in ["cloudpanel", "hestiacp"] {
-                if let Some(a) = adapter_for(k) {
-                    if a.detect(&loc).await.is_some() {
-                        found = Some(a);
-                        break;
-                    }
-                }
-            }
-            found.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "no CloudPanel or HestiaCP install detected here — run this on the \
-                     SOURCE panel server as root/sudo, or pass --kind"
-                )
-            })?
-        }
-    };
-
-    let info = adapter.detect(&loc).await.ok_or_else(|| {
-        anyhow::anyhow!("panel not detected locally — are you root on the source?")
-    })?;
-    eprintln!("• detected {} {}", info.kind.as_str(), info.version);
-
-    let mut ir = adapter.extract(&loc).await?;
-    if let Some(d) = only.as_deref() {
-        ir.hostings.retain(|h| h.domain == d);
-        if ir.hostings.is_empty() {
-            anyhow::bail!("no site named '{d}' found in the source panel");
-        }
-    }
-    eprintln!(
-        "• packing {} site(s) (docroots + DB dumps) …",
-        ir.hostings.len()
-    );
-
-    hyperion_import::bundle::build(&ir, &out).await?;
-    // In stream mode (`--out -`) stdout carries the tar — keep ALL human output
-    // on stderr so it can't corrupt the bundle piped into curl.
+    // Delegate to the shared driver (also used by the standalone hyperion-export
+    // binary the wizard serves). All messages go to stderr; stdout may be the tar.
+    let n = hyperion_import::export::run(kind.as_deref(), &out, only.as_deref())
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
     if out.as_os_str() == "-" {
-        eprintln!("✓ streamed bundle — {} site(s).", ir.hostings.len());
+        eprintln!("✓ streamed bundle — {n} site(s).");
     } else {
-        println!(
-            "✓ wrote {} — {} site(s). Upload it in Hyperion: Import → Upload bundle.",
-            out.display(),
-            ir.hostings.len()
-        );
+        eprintln!("✓ wrote {n} site(s) to {}.", out.display());
     }
     Ok(())
 }

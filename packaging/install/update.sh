@@ -189,7 +189,7 @@ if (( DO_BUILD && PREFER_PREBUILT )); then
   trap "rm -rf '$TMP'" EXIT
   REL_BASE="https://github.com/$RELEASE_REPO/releases/download/$RELEASE_TAG"
   fetch_ok=1
-  for f in hyperion-agent hctl SHA256SUMS $((( HAVE_WEB )) && echo hyperion-web); do
+  for f in hyperion-agent hctl SHA256SUMS $((( HAVE_WEB )) && echo hyperion-web) $((( HAVE_WEB )) && echo hyperion-export); do
     [[ -z "$f" ]] && continue
     # Capture both curl's exit code and the HTTP status separately
     # so the fall-back message can name the real cause. The OLD
@@ -232,7 +232,7 @@ if (( DO_BUILD && PREFER_PREBUILT )); then
     # SHA256SUMS list down to just the files we actually fetched
     # before handing it to sha256sum.
     EXPECTED=(hyperion-agent hctl)
-    (( HAVE_WEB )) && EXPECTED+=(hyperion-web)
+    (( HAVE_WEB )) && EXPECTED+=(hyperion-web hyperion-export)
     if (
         cd "$TMP"
         for f in "${EXPECTED[@]}"; do
@@ -247,6 +247,9 @@ if (( DO_BUILD && PREFER_PREBUILT )); then
       install -m 0755 "$TMP/hctl"           /usr/bin/hctl
       if (( HAVE_WEB )); then
         install -m 0755 "$TMP/hyperion-web" /usr/sbin/hyperion-web
+        # Portable (static musl) exporter the self-service import wizard serves.
+        install -d -m 0755 /usr/local/bin
+        install -m 0755 "$TMP/hyperion-export" /usr/local/bin/hyperion-export
       fi
       PREBUILT_OK=1
     else
@@ -307,6 +310,20 @@ if (( DO_BUILD && PREBUILT_OK == 0 )); then
   install -m 0755 target/release/hctl           /usr/bin/hctl
   if (( HAVE_WEB )); then
     install -m 0755 target/release/hyperion-web /usr/sbin/hyperion-web
+    # The self-service import wizard serves hyperion-export to SOURCE boxes that
+    # may run an OLDER glibc than this build host. A host-glibc build would fail
+    # there, so build it as a static musl binary (hyperion-export is pure Rust —
+    # no C deps — so this needs no extra toolchain). Best-effort: a failure here
+    # doesn't abort the update (only the self-service wizard is affected).
+    musl_target="$(uname -m)-unknown-linux-musl"
+    if rustup target add "$musl_target" >/dev/null 2>&1 \
+       && HYPERION_GIT_SHA="$HEAD_FULL" cargo build --release --target "$musl_target" \
+            -p hyperion-export --quiet; then
+      install -d -m 0755 /usr/local/bin
+      install -m 0755 "target/$musl_target/release/hyperion-export" /usr/local/bin/hyperion-export
+    else
+      warn "  couldn't build static hyperion-export ($musl_target) — the self-service import wizard may not run on older-glibc sources (rolling release ships a prebuilt one)"
+    fi
   fi
 elif (( ! DO_BUILD )); then
   log "--no-build: skipping binary install."

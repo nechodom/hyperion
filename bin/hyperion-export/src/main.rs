@@ -1,0 +1,42 @@
+//! `hyperion-export` — a tiny, statically-linkable panel exporter.
+//!
+//! Depends only on the pure-Rust `hyperion-import` crate, so it builds as a
+//! fully static musl binary that runs on ANY Linux regardless of glibc version
+//! or distro. The self-service import wizard serves this to source boxes; the
+//! operator runs it as root on a CloudPanel / HestiaCP server and it streams a
+//! portable import bundle straight to Hyperion (`--out -`).
+
+use clap::Parser;
+use std::path::PathBuf;
+
+#[derive(Parser, Debug)]
+#[command(
+    name = "hyperion-export",
+    about = "Export a CloudPanel/HestiaCP panel into a Hyperion import bundle"
+)]
+struct Cli {
+    /// `cloudpanel` | `hestiacp`. Auto-detected if omitted.
+    #[arg(long)]
+    kind: Option<String>,
+    /// Output bundle path, or `-` to stream the tar to stdout.
+    #[arg(long)]
+    out: PathBuf,
+    /// Export only this one domain (default: every site).
+    #[arg(long)]
+    only: Option<String>,
+}
+
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+    let n = hyperion_import::export::run(cli.kind.as_deref(), &cli.out, cli.only.as_deref())
+        .await
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    // Keep all output on stderr — stdout may be the bundle stream (`--out -`).
+    if cli.out.as_os_str() == "-" {
+        eprintln!("✓ streamed bundle — {n} site(s).");
+    } else {
+        eprintln!("✓ wrote {} — {n} site(s).", cli.out.display());
+    }
+    Ok(())
+}

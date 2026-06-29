@@ -12,6 +12,7 @@ members = [
     "crates/hyperion-auth",
     "crates/hyperion-import",
     "bin/hyperion-agent",
+    "bin/hyperion-export",
     "bin/hctl",
     "bin/hyperion-web",
 ]

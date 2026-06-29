@@ -1,0 +1,18 @@
+[package]
+name = "hyperion-export"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "hyperion-export"
+path = "src/main.rs"
+
+# Depends ONLY on the pure-Rust hyperion-import crate (no C deps) so this builds
+# as a fully static musl binary that runs on any Linux regardless of glibc.
+[dependencies]
+hyperion-import = { path = "../../crates/hyperion-import" }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+clap = { workspace = true, features = ["derive"] }
+anyhow.workspace = true
