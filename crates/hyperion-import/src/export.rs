@@ -14,7 +14,16 @@ use std::path::Path;
 /// Detect (or use the given `kind`) the local source panel, extract it, and
 /// write a bundle to `out` (`-` streams the tar to stdout). Returns the number
 /// of sites packed.
-pub async fn run(kind: Option<&str>, out: &Path, only: Option<&str>) -> Result<usize, ImportError> {
+///
+/// `only` is an optional comma-separated allow-list of domains. When `list` is
+/// true this is a **dry run**: the sites that *would* be exported are printed to
+/// stdout and nothing is packed (no docroots tarred, no DBs dumped).
+pub async fn run(
+    kind: Option<&str>,
+    out: &Path,
+    only: Option<&str>,
+    list: bool,
+) -> Result<usize, ImportError> {
     let loc = Location::InPlace;
 
     let adapter = match kind {
@@ -43,17 +52,58 @@ pub async fn run(kind: Option<&str>, out: &Path, only: Option<&str>) -> Result<u
 
     let mut ir = adapter.extract(&loc).await?;
     if let Some(d) = only {
-        ir.hostings.retain(|h| h.domain == d);
+        let want: Vec<&str> = d
+            .split(',')
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .collect();
+        ir.hostings
+            .retain(|h| want.iter().any(|w| w.eq_ignore_ascii_case(&h.domain)));
         if ir.hostings.is_empty() {
             return Err(ImportError::Parse {
                 what: "--only".into(),
-                msg: format!("no site '{d}' found in the source panel"),
+                msg: format!("no matching site for '{d}' in the source panel"),
             });
         }
     }
 
     let n = ir.hostings.len();
+
+    if list {
+        // Dry run: show what would be exported, pack nothing.
+        print_plan(&ir);
+        return Ok(n);
+    }
+
     eprintln!("• packing {n} site(s) (docroots + DB dumps) …");
     crate::bundle::build(&ir, out).await?;
     Ok(n)
+}
+
+/// Print a human-readable preview of the sites an export would include. Goes to
+/// STDOUT (the operator reads it directly — nothing is streamed in list mode).
+fn print_plan(ir: &crate::ir::ImportIR) {
+    println!(
+        "Sites that WOULD be exported from {} {} — {} total:\n",
+        ir.source.kind,
+        ir.source.version,
+        ir.hostings.len()
+    );
+    for h in &ir.hostings {
+        let php = h.php_version.as_deref().unwrap_or("static");
+        let dbs: Vec<&str> = h.databases.iter().map(|d| d.name.as_str()).collect();
+        let dbtxt = if dbs.is_empty() {
+            "no db".to_string()
+        } else {
+            format!("{} db: {}", dbs.len(), dbs.join(", "))
+        };
+        println!(
+            "  • {:<40} owner={:<16} php={:<6} {}",
+            h.domain, h.owner_user, php, dbtxt
+        );
+    }
+    println!(
+        "\nTo export everything, re-run without --list.\n\
+         To export only some, add --only domain1,domain2 (or use the form in the wizard)."
+    );
 }

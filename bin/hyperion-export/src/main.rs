@@ -18,22 +18,29 @@ struct Cli {
     /// `cloudpanel` | `hestiacp`. Auto-detected if omitted.
     #[arg(long)]
     kind: Option<String>,
-    /// Output bundle path, or `-` to stream the tar to stdout.
-    #[arg(long)]
+    /// Output bundle path, or `-` to stream the tar to stdout. Ignored with --list.
+    #[arg(long, default_value = "-")]
     out: PathBuf,
-    /// Export only this one domain (default: every site).
+    /// Export only these domains (comma-separated). Default: every site.
     #[arg(long)]
     only: Option<String>,
+    /// Dry run: print the sites that WOULD be exported and pack nothing.
+    #[arg(long)]
+    list: bool,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let n = hyperion_import::export::run(cli.kind.as_deref(), &cli.out, cli.only.as_deref())
-        .await
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
-    // Keep all output on stderr — stdout may be the bundle stream (`--out -`).
-    if cli.out.as_os_str() == "-" {
+    let n =
+        hyperion_import::export::run(cli.kind.as_deref(), &cli.out, cli.only.as_deref(), cli.list)
+            .await
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    // Keep all non-list output on stderr — stdout may be the bundle stream
+    // (`--out -`). In --list mode the plan is printed to stdout by the driver.
+    if cli.list {
+        eprintln!("✓ dry run — {n} site(s) would be exported.");
+    } else if cli.out.as_os_str() == "-" {
         eprintln!("✓ streamed bundle — {n} site(s).");
     } else {
         eprintln!("✓ wrote {} — {n} site(s).", cli.out.display());

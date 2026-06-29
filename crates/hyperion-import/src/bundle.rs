@@ -65,26 +65,41 @@ pub async fn build(ir: &ImportIR, out: &Path) -> Result<(), ImportError> {
     })?;
     tokio::fs::write(stage.join(MANIFEST), manifest).await?;
 
+    // A single unreadable docroot or DB must not sink a 40-site migration:
+    // record the failure, drop the partial artefact, and keep going. The import
+    // side skips any site whose docroot/DB dump is absent from the bundle.
+    let mut failures: Vec<String> = Vec::new();
     for h in &ir.hostings {
         let site = stage.join("sites").join(site_dir(&h.domain));
         tokio::fs::create_dir_all(site.join("db")).await?;
         if Path::new(&h.docroot).is_dir() {
-            run(
+            let tgz = site.join("docroot.tar.gz");
+            if let Err(e) = run(
                 "tar",
-                &[
-                    "czf",
-                    &site.join("docroot.tar.gz").display().to_string(),
-                    "-C",
-                    &h.docroot,
-                    ".",
-                ],
+                &["czf", &tgz.display().to_string(), "-C", &h.docroot, "."],
             )
-            .await?;
+            .await
+            {
+                let _ = tokio::fs::remove_file(&tgz).await;
+                eprintln!("  ⚠ {}: docroot skipped — {e}", h.domain);
+                failures.push(format!("{} (docroot)", h.domain));
+            }
         }
         for db in &h.databases {
             let dest = site.join("db").join(format!("{}.dump", db.name));
-            dump_db(db, &dest).await?;
+            if let Err(e) = dump_db(db, &dest, &ir.source.kind).await {
+                let _ = tokio::fs::remove_file(&dest).await;
+                eprintln!("  ⚠ {}: database '{}' skipped — {e}", h.domain, db.name);
+                failures.push(format!("{} (db {})", h.domain, db.name));
+            }
         }
+    }
+    if !failures.is_empty() {
+        eprintln!(
+            "⚠ {} item(s) could not be exported and were skipped: {}",
+            failures.len(),
+            failures.join(", ")
+        );
     }
 
     if to_stdout {
@@ -124,25 +139,191 @@ pub async fn build(ir: &ImportIR, out: &Path) -> Result<(), ImportError> {
 
 /// Dump one DB to `dest`, matching the format the restore helpers expect
 /// (mariadb/mysql → plain SQL; postgres → custom `-Fc`).
-async fn dump_db(db: &IrDatabase, dest: &Path) -> Result<(), ImportError> {
-    let cmd = match db.engine {
+async fn dump_db(db: &IrDatabase, dest: &Path, source_kind: &str) -> Result<(), ImportError> {
+    match db.engine {
         IrDbEngine::Postgres => {
-            format!("sudo -u postgres pg_dump -Fc -- {}", shell_quote(&db.name))
+            let bytes = sh_capture(&format!(
+                "sudo -u postgres pg_dump -Fc -- {}",
+                shell_quote(&db.name)
+            ))
+            .await?;
+            tokio::fs::write(dest, &bytes).await?;
+            Ok(())
         }
-        _ => format!(
-            "mysqldump --single-transaction --routines --triggers --events -- {}",
-            shell_quote(&db.name)
-        ),
+        _ => dump_mariadb(&db.name, dest, source_kind).await,
+    }
+}
+
+/// MariaDB/MySQL → plain SQL at `dest`.
+///
+/// On CloudPanel the *system* root has NO access to MariaDB (the panel sets a
+/// root password), so a bare `mysqldump` fails with "Access denied … (using
+/// password: NO)". Try, in order, the methods most likely to work on a panel
+/// box, using the first that yields a non-empty dump:
+///   1. `mysqldump` with the root creds CloudPanel stores in its own SQLite,
+///      passed via a 0600 defaults-file so the password never reaches argv/ps;
+///   2. `clpctl db:export` — the panel's native exporter, which handles auth and
+///      any password encryption itself; its (often gzipped) output is inflated;
+///   3. a plain `mysqldump` (works where root has unix_socket auth or ~/.my.cnf).
+async fn dump_mariadb(name: &str, dest: &Path, source_kind: &str) -> Result<(), ImportError> {
+    let mut errors: Vec<String> = Vec::new();
+
+    if source_kind == "cloudpanel" {
+        match cloudpanel_creds_dump(name).await {
+            Ok(Some(bytes)) if !bytes.is_empty() => {
+                tokio::fs::write(dest, &bytes).await?;
+                return Ok(());
+            }
+            Ok(_) => {}
+            Err(e) => errors.push(format!("stored-creds: {e}")),
+        }
+        match clpctl_export(name, dest).await {
+            Ok(true) => return Ok(()),
+            Ok(false) => errors.push("clpctl db:export: empty output".into()),
+            Err(e) => errors.push(format!("clpctl: {e}")),
+        }
+    }
+
+    // Plain socket mysqldump — root via unix_socket plugin or ~/.my.cnf.
+    match sh_capture(&format!(
+        "mysqldump --single-transaction --routines --triggers --events -- {}",
+        shell_quote(name)
+    ))
+    .await
+    {
+        Ok(bytes) if !bytes.is_empty() => {
+            tokio::fs::write(dest, &bytes).await?;
+            return Ok(());
+        }
+        Ok(_) => errors.push("mysqldump (socket): empty output".into()),
+        Err(e) => errors.push(format!("mysqldump (socket): {e}")),
+    }
+
+    Err(ImportError::Command {
+        cmd: format!("dump database {name}"),
+        msg: errors.join("; "),
+    })
+}
+
+/// CloudPanel's SQLite path — its source of truth for managed-MariaDB root creds.
+const CLOUDPANEL_DB_SQ3: &str = "/home/clp/htdocs/app/data/db.sq3";
+
+/// Read CloudPanel's stored MariaDB root creds (`database_server` table) and
+/// `mysqldump` with them via a 0600 defaults-file (so the password never appears
+/// in argv / `ps`). `Ok(None)` if the panel records no DB server (nothing to do
+/// → let the caller fall through to `clpctl`).
+async fn cloudpanel_creds_dump(name: &str) -> Result<Option<Vec<u8>>, ImportError> {
+    let sql = "SELECT host,user_name,password,port FROM database_server \
+               ORDER BY is_default DESC, id ASC LIMIT 1;";
+    let q = format!(
+        "sqlite3 -readonly -json {} {}",
+        shell_quote(CLOUDPANEL_DB_SQ3),
+        shell_quote(sql)
+    );
+    let raw = sh_capture(&q).await?;
+    let text = String::from_utf8_lossy(&raw);
+    let text = text.trim();
+    if text.is_empty() || text == "[]" {
+        return Ok(None);
+    }
+    let rows: Vec<serde_json::Map<String, serde_json::Value>> = serde_json::from_str(text)
+        .map_err(|e| ImportError::Parse {
+            what: "database_server".into(),
+            msg: e.to_string(),
+        })?;
+    let Some(row) = rows.into_iter().next() else {
+        return Ok(None);
     };
-    let out = Command::new("sh").arg("-c").arg(&cmd).output().await?;
+    let field = |k: &str| -> String {
+        match row.get(k) {
+            Some(serde_json::Value::String(s)) => s.clone(),
+            Some(serde_json::Value::Number(n)) => n.to_string(),
+            _ => String::new(),
+        }
+    };
+    let nonempty = |v: String, default: &str| if v.is_empty() { default.to_string() } else { v };
+    let host = nonempty(field("host"), "localhost");
+    let user = nonempty(field("user_name"), "root");
+    let pass = field("password");
+    let port = nonempty(field("port"), "3306");
+
+    let cnf = std::env::temp_dir().join(format!(
+        "hyperion-mysql-{}-{}.cnf",
+        std::process::id(),
+        site_dir(name)
+    ));
+    tokio::fs::write(
+        &cnf,
+        format!("[client]\nhost={host}\nuser={user}\npassword={pass}\nport={port}\n"),
+    )
+    .await?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = tokio::fs::set_permissions(&cnf, std::fs::Permissions::from_mode(0o600)).await;
+    }
+    let cnf_q = shell_quote(&cnf.display().to_string());
+    let res = sh_capture(&format!(
+        "mysqldump --defaults-extra-file={cnf_q} --single-transaction --routines --triggers --events -- {}",
+        shell_quote(name)
+    ))
+    .await;
+    let _ = tokio::fs::remove_file(&cnf).await;
+    Ok(Some(res?))
+}
+
+/// Drive CloudPanel's own `clpctl db:export`, which authenticates internally.
+/// It writes a (usually gzipped) SQL file; we inflate it so the bundle always
+/// holds plain SQL. `Ok(false)` if clpctl produced no usable output.
+async fn clpctl_export(name: &str, dest: &Path) -> Result<bool, ImportError> {
+    let tmp = std::env::temp_dir().join(format!(
+        "hyperion-clpexport-{}-{}.sql.gz",
+        std::process::id(),
+        site_dir(name)
+    ));
+    let _ = tokio::fs::remove_file(&tmp).await;
+    let out = Command::new("clpctl")
+        .arg("db:export")
+        .arg(format!("--databaseName={name}"))
+        .arg(format!("--file={}", tmp.display()))
+        .output()
+        .await?;
     if !out.status.success() {
+        let _ = tokio::fs::remove_file(&tmp).await;
         return Err(ImportError::Command {
-            cmd: format!("dump database {}", db.name),
+            cmd: format!("clpctl db:export {name}"),
             msg: String::from_utf8_lossy(&out.stderr).trim().to_string(),
         });
     }
-    tokio::fs::write(dest, &out.stdout).await?;
-    Ok(())
+    if !tokio::fs::try_exists(&tmp).await.unwrap_or(false) {
+        return Ok(false);
+    }
+    let tmp_q = shell_quote(&tmp.display().to_string());
+    // `gzip -dc` succeeds on gzipped output; errors on plain SQL → use as-is.
+    match sh_capture(&format!("gzip -dc {tmp_q}")).await {
+        Ok(plain) if !plain.is_empty() => tokio::fs::write(dest, &plain).await?,
+        _ => {
+            tokio::fs::copy(&tmp, dest).await?;
+        }
+    }
+    let _ = tokio::fs::remove_file(&tmp).await;
+    let size = tokio::fs::metadata(dest)
+        .await
+        .map(|m| m.len())
+        .unwrap_or(0);
+    Ok(size > 0)
+}
+
+/// Run `sh -c <cmd>`, returning stdout on success or an error carrying stderr.
+async fn sh_capture(cmd: &str) -> Result<Vec<u8>, ImportError> {
+    let out = Command::new("sh").arg("-c").arg(cmd).output().await?;
+    if !out.status.success() {
+        return Err(ImportError::Command {
+            cmd: cmd.to_string(),
+            msg: String::from_utf8_lossy(&out.stderr).trim().to_string(),
+        });
+    }
+    Ok(out.stdout)
 }
 
 async fn run(bin: &str, args: &[&str]) -> Result<(), ImportError> {

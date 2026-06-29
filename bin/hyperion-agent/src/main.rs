@@ -83,12 +83,15 @@ enum Command {
         /// `cloudpanel` | `hestiacp`. Auto-detected if omitted.
         #[arg(long)]
         kind: Option<String>,
-        /// Output bundle path, e.g. /root/hyperion-bundle.tar
-        #[arg(long)]
+        /// Output bundle path, e.g. /root/hyperion-bundle.tar (`-` = stdout).
+        #[arg(long, default_value = "-")]
         out: PathBuf,
-        /// Export only this one domain (default: every site).
+        /// Export only these domains (comma-separated). Default: every site.
         #[arg(long)]
         only: Option<String>,
+        /// Dry run: print the sites that WOULD be exported and pack nothing.
+        #[arg(long)]
+        list: bool,
     },
 }
 
@@ -98,13 +101,16 @@ async fn run_export_bundle(
     kind: Option<String>,
     out: PathBuf,
     only: Option<String>,
+    list: bool,
 ) -> anyhow::Result<()> {
     // Delegate to the shared driver (also used by the standalone hyperion-export
     // binary the wizard serves). All messages go to stderr; stdout may be the tar.
-    let n = hyperion_import::export::run(kind.as_deref(), &out, only.as_deref())
+    let n = hyperion_import::export::run(kind.as_deref(), &out, only.as_deref(), list)
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
-    if out.as_os_str() == "-" {
+    if list {
+        eprintln!("✓ dry run — {n} site(s) would be exported.");
+    } else if out.as_os_str() == "-" {
         eprintln!("✓ streamed bundle — {n} site(s).");
     } else {
         eprintln!("✓ wrote {n} site(s) to {}.", out.display());
@@ -166,8 +172,14 @@ async fn main() -> anyhow::Result<()> {
 
     // `export-bundle` runs standalone on a SOURCE panel box that has no
     // agent.toml — handle it BEFORE loading the agent config.
-    if let Some(Command::ExportBundle { kind, out, only }) = cli.command {
-        return run_export_bundle(kind, out, only).await;
+    if let Some(Command::ExportBundle {
+        kind,
+        out,
+        only,
+        list,
+    }) = cli.command
+    {
+        return run_export_bundle(kind, out, only, list).await;
     }
 
     let cfg = config::Config::load_from_path(&cli.config)?;
