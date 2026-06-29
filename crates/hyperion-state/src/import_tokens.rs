@@ -20,10 +20,17 @@ pub struct ImportTokenRow {
     pub status: String,
     pub received_bytes: i64,
     pub job_id: Option<String>,
+    /// JSON site list the source reported (interactive import). `None` until the
+    /// `--list --json` report arrives.
+    pub manifest_json: Option<String>,
+    /// JSON of the operator's pick (`["*"]` = all, or a list of domains). `None`
+    /// until they choose in the panel.
+    pub selection_json: Option<String>,
 }
 
 const COLS: &str = "id, token_hash, target_node, source_kind, created_by, created_at, \
-                    expires_at, used_at, status, received_bytes, job_id";
+                    expires_at, used_at, status, received_bytes, job_id, \
+                    manifest_json, selection_json";
 
 /// Mint a token row. `token_hash` is the blake3 hex of the plaintext (minted by
 /// the caller). Returns the new row id.
@@ -130,6 +137,42 @@ pub async fn set_job(pool: &SqlitePool, id: i64, job_id: &str) -> Result<(), Sta
 pub async fn set_received_bytes(pool: &SqlitePool, id: i64, bytes: i64) -> Result<(), StateError> {
     sqlx::query("UPDATE import_tokens SET received_bytes = ? WHERE id = ?")
         .bind(bytes)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+/// Record the site list the source reported (interactive import), while the
+/// token is still pending + unexpired. Returns `true` if a row was updated.
+pub async fn set_manifest(
+    pool: &SqlitePool,
+    token_hash: &str,
+    manifest_json: &str,
+    now: i64,
+) -> Result<bool, StateError> {
+    let n = sqlx::query(
+        "UPDATE import_tokens SET manifest_json = ? \
+         WHERE token_hash = ? AND status = 'pending' AND expires_at > ?",
+    )
+    .bind(manifest_json)
+    .bind(token_hash)
+    .bind(now)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(n > 0)
+}
+
+/// Record the operator's site selection (JSON; `["*"]` = all). Does NOT touch
+/// `status`, so the single-use ingest guard stays intact.
+pub async fn set_selection(
+    pool: &SqlitePool,
+    id: i64,
+    selection_json: &str,
+) -> Result<(), StateError> {
+    sqlx::query("UPDATE import_tokens SET selection_json = ? WHERE id = ?")
+        .bind(selection_json)
         .bind(id)
         .execute(pool)
         .await?;

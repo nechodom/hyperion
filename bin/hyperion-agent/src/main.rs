@@ -92,6 +92,9 @@ enum Command {
         /// Dry run: print the sites that WOULD be exported and pack nothing.
         #[arg(long)]
         list: bool,
+        /// With --list, emit the site list as JSON (interactive wizard).
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -102,10 +105,11 @@ async fn run_export_bundle(
     out: PathBuf,
     only: Option<String>,
     list: bool,
+    json: bool,
 ) -> anyhow::Result<()> {
     // Delegate to the shared driver (also used by the standalone hyperion-export
     // binary the wizard serves). All messages go to stderr; stdout may be the tar.
-    let n = hyperion_import::export::run(kind.as_deref(), &out, only.as_deref(), list)
+    let n = hyperion_import::export::run(kind.as_deref(), &out, only.as_deref(), list, json)
         .await
         .map_err(|e| anyhow::anyhow!("{e}"))?;
     if list {
@@ -177,9 +181,10 @@ async fn main() -> anyhow::Result<()> {
         out,
         only,
         list,
+        json,
     }) = cli.command
     {
-        return run_export_bundle(kind, out, only, list).await;
+        return run_export_bundle(kind, out, only, list, json).await;
     }
 
     let cfg = config::Config::load_from_path(&cli.config)?;
