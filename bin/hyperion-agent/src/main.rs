@@ -196,6 +196,11 @@ async fn dry_run_migrations(real_db: &std::path::Path) -> anyhow::Result<()> {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
+        // Log to STDERR, never stdout. The daemon doesn't care (journald
+        // captures both), but `export-bundle --out -` streams the bundle tar to
+        // stdout — any log line on stdout would corrupt it ("not a tar
+        // archive"). Keeping logs on stderr guarantees a clean tar stream.
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,lm=debug")),
