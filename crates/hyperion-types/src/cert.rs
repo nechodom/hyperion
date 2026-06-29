@@ -22,6 +22,22 @@ pub struct CertOverviewItem {
     pub node_id: String,
 }
 
+/// State of the node's Cloudflare API token, for the Settings card that lets an
+/// operator save/test it without SSHing. Drives whether DNS-01-via-Cloudflare
+/// (real certs behind the CF proxy) is one-click available.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct CloudflareTokenInfo {
+    /// A non-empty token file (or env var) is present on the node.
+    pub configured: bool,
+    /// Result of a live API check: `Some(true)` accepted, `Some(false)`
+    /// rejected, `None` not tested this call.
+    pub valid: Option<bool>,
+    /// Zones the token can see (sanity signal); `None` if not tested.
+    pub zones: Option<u32>,
+    /// Human-readable status / error for the UI.
+    pub message: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CertInfo {
     pub domain: String,

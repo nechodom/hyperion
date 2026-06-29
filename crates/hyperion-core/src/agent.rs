@@ -725,6 +725,19 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.email_config_set(fields).await
     }
 
+    async fn cloudflare_token_status(
+        &self,
+    ) -> Result<hyperion_types::CloudflareTokenInfo, RpcError> {
+        self.svc.cloudflare_token_status().await
+    }
+
+    async fn cloudflare_token_set(
+        &self,
+        token: String,
+    ) -> Result<hyperion_types::CloudflareTokenInfo, RpcError> {
+        self.svc.cloudflare_token_set(token).await
+    }
+
     async fn update_check(
         &self,
         force_refresh: bool,

@@ -7388,7 +7388,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                             kind: "cert_self_signed".into(),
                             severity: "warn".into(),
                             message: format!(
-                                "{} is using a bootstrap self-signed cert; click Issue Cert when DNS resolves.",
+                                "{} has a temporary self-signed cert. Issue a real one from the site's SSL tab — \
+                                 HTTP-01 (needs DNS pointing here) or DNS-01/Cloudflare (works behind a proxy/CDN).",
                                 detail.domain
                             ),
                             hosting: Some(detail.domain.clone()),
@@ -9457,6 +9458,78 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         )
         .await;
         Ok(cert)
+    }
+
+    /// Report this node's Cloudflare DNS-01 token state, live-verifying it
+    /// against the Cloudflare API when present (so the Settings card can show
+    /// "OK — N zones" vs "rejected" without the operator SSHing in).
+    pub async fn cloudflare_token_status(
+        &self,
+    ) -> Result<hyperion_types::CloudflareTokenInfo, RpcError> {
+        if !hyperion_adapters::cloudflare::is_configured() {
+            return Ok(hyperion_types::CloudflareTokenInfo {
+                configured: false,
+                valid: None,
+                zones: None,
+                message: "No Cloudflare token set on this node.".into(),
+            });
+        }
+        let token = hyperion_adapters::cloudflare::token().unwrap_or_default();
+        match hyperion_adapters::cloudflare::verify_token(&token).await {
+            Ok(n) => Ok(hyperion_types::CloudflareTokenInfo {
+                configured: true,
+                valid: Some(true),
+                zones: Some(n as u32),
+                message: format!("Token OK — can see {n} zone(s)."),
+            }),
+            Err(e) => Ok(hyperion_types::CloudflareTokenInfo {
+                configured: true,
+                valid: Some(false),
+                zones: None,
+                message: format!("Token present but rejected by Cloudflare: {e}"),
+            }),
+        }
+    }
+
+    /// Validate a Cloudflare API token against the live API, then (only if it's
+    /// accepted) persist it to `/etc/hyperion/cloudflare.token` (0600) so DNS-01
+    /// issuance can use it. A rejected token is never written.
+    pub async fn cloudflare_token_set(
+        &self,
+        token: String,
+    ) -> Result<hyperion_types::CloudflareTokenInfo, RpcError> {
+        let t = token.trim().to_string();
+        if t.is_empty() {
+            return Err(RpcError::Validation {
+                message: "Cloudflare token is empty.".into(),
+            });
+        }
+        let zones = hyperion_adapters::cloudflare::verify_token(&t)
+            .await
+            .map_err(|e| RpcError::Validation {
+                message: format!(
+                    "Cloudflare rejected this token ({e}). Create an API token with \
+                     Zone:Read + DNS:Edit for your zone(s)."
+                ),
+            })?;
+        hyperion_adapters::cloudflare::write_token(&t)
+            .map_err(|e| RpcError::Internal_with(format!("could not save token: {e}")))?;
+        self.append_audit(
+            "cloudflare.token.set",
+            None,
+            &serde_json::json!({ "zones": zones }).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(hyperion_types::CloudflareTokenInfo {
+            configured: true,
+            valid: Some(true),
+            zones: Some(zones as u32),
+            message: format!(
+                "Saved — token can see {zones} zone(s). You can now issue real certs via \
+                 Cloudflare DNS (works behind the CloudFlare proxy)."
+            ),
+        })
     }
 
     /// DNS-01 issuance for a bare domain that is NOT tied to a hosting —

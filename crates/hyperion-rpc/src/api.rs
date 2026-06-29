@@ -293,6 +293,19 @@ pub trait AgentApi: Send + Sync + 'static {
         key_pem: String,
         ca_bundle_pem: Option<String>,
     ) -> Result<CertInfo, RpcError>;
+    /// Report whether THIS node has a Cloudflare DNS-01 token and, if so,
+    /// live-verify it (so the operator can set it up without SSH). Dispatchable
+    /// per node like [`Self::email_config_set`].
+    async fn cloudflare_token_status(
+        &self,
+    ) -> Result<hyperion_types::CloudflareTokenInfo, RpcError>;
+    /// Validate (via the Cloudflare API) then persist THIS node's DNS-01 token
+    /// to `/etc/hyperion/cloudflare.token` (0600). Rejected tokens are not
+    /// written.
+    async fn cloudflare_token_set(
+        &self,
+        token: String,
+    ) -> Result<hyperion_types::CloudflareTokenInfo, RpcError>;
 
     /// Latest stats snapshot for a hosting (disk, bw, reqs).
     async fn hosting_stats(

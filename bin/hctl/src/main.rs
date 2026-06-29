@@ -1424,6 +1424,10 @@ fn print_pretty(resp: &Response) {
         Response::ServiceInstall => println!("service installed"),
         Response::AgentConfigUpdate => println!("agent.toml updated"),
         Response::EmailConfigSet => println!("email config set + applied (agent restarting)"),
+        Response::CloudflareToken(i) => println!(
+            "cloudflare token: configured={} valid={:?} zones={:?} — {}",
+            i.configured, i.valid, i.zones, i.message
+        ),
         Response::UpdateCheck(s) => {
             println!("update check:");
             println!("  current: {}", s.current_sha);

@@ -1120,6 +1120,38 @@
     {% endif %}
   </div>
 
+  <div class="card" id="cloudflare-certs" style="margin-top:1rem">
+    <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Cloudflare certs (DNS-01)</h2>
+    <p class="text-soft small" style="margin:0 0 0.6rem">
+      For sites behind Cloudflare, issue <strong>real Let's Encrypt certs via DNS-01</strong> — it validates
+      over DNS, so it works even when traffic is proxied and HTTP-01 can't reach the origin. Save a Cloudflare
+      API token here once; then use <em>Issue via Cloudflare DNS</em> on a site's SSL tab, or the bulk button
+      on <a href="/certs">Certificates</a>.
+    </p>
+    {% match cloudflare.valid %}
+    {% when Some with (v) %}
+      <p class="text-soft" style="margin:0 0 0.6rem">{% if v %}✓{% else %}⚠{% endif %} {{ cloudflare.message }}</p>
+    {% when None %}
+      <p class="text-soft" style="margin:0 0 0.6rem">{{ cloudflare.message }}</p>
+    {% endmatch %}
+    <form method="post" action="/settings/cloudflare/token"
+          style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:flex-end">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <div class="field" style="flex:1;min-width:260px">
+        <label>Cloudflare API token <span class="text-soft">(Zone:Read + DNS:Edit)</span></label>
+        <input type="password" name="token" autocomplete="off"
+               placeholder="paste token — it's validated before saving">
+      </div>
+      <button class="btn primary" type="submit">Save &amp; test</button>
+    </form>
+    <p class="text-soft small" style="margin:0.6rem 0 0">
+      Create one at Cloudflare → My Profile → API Tokens → <em>Edit zone DNS</em> template (scope it to your
+      zone(s)). It's stored <code>0600</code> on the master and never shown again. Unsure of your SSL mode?
+      In Cloudflare see <strong>SSL/TLS → Overview</strong> — <strong>Full (strict)</strong> with a real cert
+      here is the safest.
+    </p>
+  </div>
+
   <div class="card muted" style="margin-top:1rem">
     <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Multi-node tips</h2>
     <ul class="text-soft small" style="margin:0;padding-left:1.2rem;line-height:1.7">

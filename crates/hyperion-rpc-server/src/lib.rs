@@ -624,6 +624,16 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(()) => Response::EmailConfigSet,
             Err(e) => Response::Error(e),
         },
+        Request::CloudflareTokenStatus => match api.cloudflare_token_status().await {
+            Ok(v) => Response::CloudflareToken(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::CloudflareTokenSet { token } => {
+            match api.cloudflare_token_set(token.into_inner()).await {
+                Ok(v) => Response::CloudflareToken(v),
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::UpdateCheck { force_refresh } => match api.update_check(force_refresh).await {
             Ok(v) => Response::UpdateCheck(v),
             Err(e) => Response::Error(e),
@@ -1857,6 +1867,17 @@ mod tests {
             _: std::collections::BTreeMap<String, String>,
         ) -> Result<(), RpcError> {
             Ok(())
+        }
+        async fn cloudflare_token_status(
+            &self,
+        ) -> Result<hyperion_types::CloudflareTokenInfo, RpcError> {
+            Ok(hyperion_types::CloudflareTokenInfo::default())
+        }
+        async fn cloudflare_token_set(
+            &self,
+            _: String,
+        ) -> Result<hyperion_types::CloudflareTokenInfo, RpcError> {
+            Ok(hyperion_types::CloudflareTokenInfo::default())
         }
         async fn update_check(&self, _: bool) -> Result<hyperion_types::UpdateStatus, RpcError> {
             Ok(hyperion_types::UpdateStatus::default())

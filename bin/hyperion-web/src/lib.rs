@@ -268,6 +268,10 @@ pub fn build_router(state: SharedState) -> Router {
         )
         .route("/settings/config", post(handlers::settings::post_config))
         .route(
+            "/settings/cloudflare/token",
+            post(handlers::settings::post_cloudflare_token),
+        )
+        .route(
             "/settings/node-wildcard/begin",
             post(handlers::settings::post_node_wildcard_begin),
         )
@@ -427,6 +431,10 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/bans", get(handlers::bans::get_bans))
         .route("/bans/unban", post(handlers::bans::post_unban))
         .route("/certs/renew-all", post(handlers::certs::post_renew_all))
+        .route(
+            "/certs/issue-all-cloudflare",
+            post(handlers::certs::post_issue_all_cloudflare),
+        )
         .route("/firewall", get(handlers::firewall::get_firewall))
         .route("/firewall/apply", post(handlers::firewall::post_apply))
         .route("/audit", get(handlers::audit::get_audit))
