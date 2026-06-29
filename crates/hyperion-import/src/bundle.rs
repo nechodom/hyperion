@@ -15,7 +15,7 @@
 use crate::adapter::shell_quote;
 use crate::error::ImportError;
 use crate::ir::{ImportIR, IrDatabase, IrDbEngine};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tokio::process::Command;
 
 /// Manifest filename inside the bundle.
@@ -174,7 +174,11 @@ async fn dump_mariadb(name: &str, dest: &Path, source_kind: &str) -> Result<(), 
                 tokio::fs::write(dest, &bytes).await?;
                 return Ok(());
             }
-            Ok(_) => {}
+            // Record WHY each method produced nothing, so the per-site skip
+            // message names every path that was tried (diagnosability across
+            // dozens of sites).
+            Ok(Some(_)) => errors.push("stored-creds: empty output".into()),
+            Ok(None) => errors.push("stored-creds: no DB server recorded in CloudPanel".into()),
             Err(e) => errors.push(format!("stored-creds: {e}")),
         }
         match clpctl_export(name, dest).await {
@@ -272,46 +276,134 @@ async fn cloudpanel_creds_dump(name: &str) -> Result<Option<Vec<u8>>, ImportErro
     Ok(Some(res?))
 }
 
-/// Drive CloudPanel's own `clpctl db:export`, which authenticates internally.
-/// It writes a (usually gzipped) SQL file; we inflate it so the bundle always
-/// holds plain SQL. `Ok(false)` if clpctl produced no usable output.
+/// Drive CloudPanel's own `clpctl db:export`, which authenticates internally,
+/// and normalise its output to the plain SQL the bundle/restore contract
+/// requires. `Ok(false)` = clpctl produced nothing usable (caller records the
+/// skip and falls through); `Err` = clpctl itself failed.
+///
+/// Hardening (a binary `.dump` would silently break the restore, which just
+/// runs `mariadb < dump`): we (1) export into a fresh dir and pick up whatever
+/// file clpctl actually writes — it may not honour `--file` exactly; (2) decide
+/// gzip vs plain by MAGIC BYTES, never by "try gzip then copy raw on failure";
+/// (3) accept the result only if it actually looks like a SQL dump.
+///
+/// Note: CloudPanel v1 used `db:backup` rather than `db:export`; v2 (CE 6.x,
+/// what we target) uses `db:export`. On a v1 box this errors → the DB is
+/// skipped-and-reported, never silently corrupted.
 async fn clpctl_export(name: &str, dest: &Path) -> Result<bool, ImportError> {
-    let tmp = std::env::temp_dir().join(format!(
-        "hyperion-clpexport-{}-{}.sql.gz",
+    let dir = std::env::temp_dir().join(format!(
+        "hyperion-clpexp-{}-{}",
         std::process::id(),
         site_dir(name)
     ));
-    let _ = tokio::fs::remove_file(&tmp).await;
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+    tokio::fs::create_dir_all(&dir).await?;
+    let want = dir.join(format!("{}.sql.gz", site_dir(name)));
+    let result = clpctl_export_inner(name, &dir, &want, dest).await;
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+    result
+}
+
+async fn clpctl_export_inner(
+    name: &str,
+    dir: &Path,
+    want: &Path,
+    dest: &Path,
+) -> Result<bool, ImportError> {
     let out = Command::new("clpctl")
         .arg("db:export")
         .arg(format!("--databaseName={name}"))
-        .arg(format!("--file={}", tmp.display()))
+        .arg(format!("--file={}", want.display()))
         .output()
         .await?;
     if !out.status.success() {
-        let _ = tokio::fs::remove_file(&tmp).await;
         return Err(ImportError::Command {
             cmd: format!("clpctl db:export {name}"),
             msg: String::from_utf8_lossy(&out.stderr).trim().to_string(),
         });
     }
-    if !tokio::fs::try_exists(&tmp).await.unwrap_or(false) {
+    // clpctl may honour `want`, change the extension, or derive its own name —
+    // take whatever single file landed in our fresh dir.
+    let file = if tokio::fs::try_exists(want).await.unwrap_or(false) {
+        want.to_path_buf()
+    } else {
+        match newest_file_in(dir).await {
+            Some(f) => f,
+            None => return Ok(false), // clpctl wrote nothing we can see
+        }
+    };
+
+    let raw = tokio::fs::read(&file).await?;
+    if raw.is_empty() {
         return Ok(false);
     }
-    let tmp_q = shell_quote(&tmp.display().to_string());
-    // `gzip -dc` succeeds on gzipped output; errors on plain SQL → use as-is.
-    match sh_capture(&format!("gzip -dc {tmp_q}")).await {
-        Ok(plain) if !plain.is_empty() => tokio::fs::write(dest, &plain).await?,
-        _ => {
-            tokio::fs::copy(&tmp, dest).await?;
+    // gzip magic is 1f 8b. Decompress ONLY when it's really gzip; a failure here
+    // is a genuine error (surfaced) — we never fall back to writing raw bytes.
+    let plain = if raw.len() >= 2 && raw[0] == 0x1f && raw[1] == 0x8b {
+        sh_capture(&format!(
+            "gzip -dc {}",
+            shell_quote(&file.display().to_string())
+        ))
+        .await?
+    } else {
+        raw
+    };
+    // Refuse to write anything that isn't recognisably a SQL dump, so a stray
+    // binary artefact is rejected here (recorded as a skip) instead of poisoning
+    // the restore later.
+    if !looks_like_sql(&plain) {
+        return Ok(false);
+    }
+    tokio::fs::write(dest, &plain).await?;
+    Ok(true)
+}
+
+/// Newest regular file in `dir`, if any.
+async fn newest_file_in(dir: &Path) -> Option<PathBuf> {
+    let mut rd = tokio::fs::read_dir(dir).await.ok()?;
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    while let Ok(Some(e)) = rd.next_entry().await {
+        match e.metadata().await {
+            Ok(m) if m.is_file() => {
+                let t = m.modified().unwrap_or(std::time::UNIX_EPOCH);
+                if best.as_ref().map(|(bt, _)| t >= *bt).unwrap_or(true) {
+                    best = Some((t, e.path()));
+                }
+            }
+            _ => {}
         }
     }
-    let _ = tokio::fs::remove_file(&tmp).await;
-    let size = tokio::fs::metadata(dest)
-        .await
-        .map(|m| m.len())
-        .unwrap_or(0);
-    Ok(size > 0)
+    best.map(|(_, p)| p)
+}
+
+/// Heuristic guard for the "db/<name>.dump is plain SQL" invariant: inspect only
+/// the first 64 bytes (a dump's header is ASCII; binary content later in the
+/// file is fine) and require it to begin with a token a SQL dump emits. A gzip
+/// or other binary blob fails this and is rejected.
+fn looks_like_sql(bytes: &[u8]) -> bool {
+    let head = &bytes[..bytes.len().min(64)];
+    let head_up = String::from_utf8_lossy(head)
+        .trim_start_matches(|c: char| c.is_whitespace() || c == '\u{feff}')
+        .to_ascii_uppercase();
+    if head_up.is_empty() {
+        return false;
+    }
+    const PREFIXES: [&str; 13] = [
+        "--",
+        "/*",
+        "#",
+        "SET ",
+        "CREATE",
+        "INSERT",
+        "DROP",
+        "USE ",
+        "LOCK",
+        "ALTER",
+        "DELIMITER",
+        "START TRANSACTION",
+        "BEGIN",
+    ];
+    PREFIXES.iter().any(|p| head_up.starts_with(p))
 }
 
 /// Run `sh -c <cmd>`, returning stdout on success or an error carrying stderr.
@@ -335,4 +427,37 @@ async fn run(bin: &str, args: &[&str]) -> Result<(), ImportError> {
         });
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{looks_like_sql, site_dir};
+
+    #[test]
+    fn looks_like_sql_accepts_real_dumps() {
+        assert!(looks_like_sql(b"-- MySQL dump 10.19  Distrib 10.11\n"));
+        assert!(looks_like_sql(
+            b"/*!40101 SET @OLD_CHARACTER_SET=@@CHARACTER_SET */;"
+        ));
+        assert!(looks_like_sql(b"\n\n  CREATE TABLE `wp_posts` ("));
+        assert!(looks_like_sql(b"\xEF\xBB\xBF-- with a UTF-8 BOM\n")); // BOM then SQL
+                                                                       // Binary content AFTER an SQL header is fine (we only inspect the head).
+        let mut v = b"INSERT INTO t VALUES (".to_vec();
+        v.extend_from_slice(&[0u8, 1, 2, 3, 255, 254]);
+        assert!(looks_like_sql(&v));
+    }
+
+    #[test]
+    fn looks_like_sql_rejects_binary_and_gzip() {
+        assert!(!looks_like_sql(&[0x1f, 0x8b, 0x08, 0x00, 0x00])); // gzip magic
+        assert!(!looks_like_sql(b"")); // empty
+        assert!(!looks_like_sql(&[0u8, 1, 2, 3, 4, 5])); // raw bytes
+        assert!(!looks_like_sql(b"\x89PNG\r\n\x1a\n")); // a PNG, not SQL
+    }
+
+    #[test]
+    fn site_dir_collapses_unsafe_chars() {
+        assert_eq!(site_dir("a.example.com"), "a.example.com");
+        assert_eq!(site_dir("a/b c:d"), "a_b_c_d");
+    }
 }
