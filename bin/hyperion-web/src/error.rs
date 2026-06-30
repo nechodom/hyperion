@@ -113,6 +113,22 @@ fn render_themed(
     }
 }
 
+/// Router fallback for URLs that match no route at all. axum's built-in
+/// fallback is a bare empty `404` with no body — this renders the themed error
+/// page instead. Wording is generic ("this page doesn't exist"), distinct from
+/// [`AppError::NotFound`], which is for a known-but-missing resource.
+pub async fn not_found_fallback() -> Response {
+    render_themed(
+        StatusCode::NOT_FOUND,
+        "Not found",
+        "This page doesn't exist",
+        "The address may be mistyped, or the page may have moved. \
+         Head back to the dashboard to find your way around.",
+        &[],
+        Some(("Back to dashboard", "/")),
+    )
+}
+
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         match self {
