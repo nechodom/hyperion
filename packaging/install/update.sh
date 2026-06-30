@@ -344,16 +344,16 @@ if (( DO_BUILD && PREBUILT_OK == 0 )); then
   # Speed up the from-source path. Both are best-effort + safe to skip:
   #  - incremental compilation reuses the persistent target/ across updates so
   #    only changed crates (+ the three bins, which re-stamp the SHA) recompile;
-  #  - a faster linker (mold > lld > gold) when one is installed — link time is a
-  #    real slice now that lto=off. (Setting RUSTFLAGS invalidates the cache once
-  #    on first adoption; nodes without an alt linker are untouched.)
+  #  - a faster linker (mold > lld) when one is installed — link time is a real
+  #    slice now that lto=off. (Setting RUSTFLAGS invalidates the cache once on
+  #    first adoption; nodes without an alt linker are untouched.) gold is
+  #    deliberately NOT used: it's deprecated and rustc warns it has known bugs.
   export CARGO_INCREMENTAL=1
-  for _ld in mold ld.lld lld ld.gold; do
+  for _ld in mold ld.lld lld; do
     if command -v "$_ld" >/dev/null 2>&1; then
       case "$_ld" in
         mold)        _lf="-C link-arg=-fuse-ld=mold" ;;
         ld.lld|lld)  _lf="-C link-arg=-fuse-ld=lld" ;;
-        ld.gold)     _lf="-C link-arg=-fuse-ld=gold" ;;
       esac
       export RUSTFLAGS="${RUSTFLAGS:-} $_lf"
       log "  using $_ld for faster linking"

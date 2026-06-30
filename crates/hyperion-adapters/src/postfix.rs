@@ -75,7 +75,10 @@ pub async fn ensure_relay_config(cfg: &EmailConfig) -> Result<(), AdapterError> 
     // so it can't carry whitespace/newlines that corrupt the map or smuggle a
     // second postconf token — parity with the direct-delivery path's myhostname
     // check. `smtp_user` lands in `host  user:password`, so reject `:`/controls.
-    let host = cfg.smtp_host.trim();
+    // Strip a port the operator may have pasted into the host field
+    // ("localhost:25") so the relayhost isn't built as "[localhost:25]:25".
+    let (host, embedded_port) = crate::email::normalize_smtp_host(&cfg.smtp_host);
+    let host = host.trim().to_string();
     if !host
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':'))
@@ -96,7 +99,12 @@ pub async fn ensure_relay_config(cfg: &EmailConfig) -> Result<(), AdapterError> 
     // for STARTTLS / explicit-TLS. For implicit TLS (port 465) the
     // operator should set smtp_port = 465 in agent.toml AND
     // security = "tls". We honour whatever's in cfg.
-    let relayhost = format!("[{}]:{}", cfg.smtp_host.trim(), cfg.smtp_port);
+    let port = if cfg.smtp_port != 0 {
+        cfg.smtp_port
+    } else {
+        embedded_port.unwrap_or(587)
+    };
+    let relayhost = format!("[{host}]:{port}");
 
     // Step 1: main.cf via postconf. Each `-e key=value` is a separate
     // invocation because postconf needs them one-at-a-time on older
