@@ -8,30 +8,34 @@
   <meta name="referrer" content="strict-origin-when-cross-origin">
   <meta name="color-scheme" content="light dark">
   <meta name="robots" content="noindex,nofollow">
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%236366f1'/%3E%3Cpath d='M9 9 L9 23 M9 16 L17 16 M17 9 L17 23 M21 14 L24 14 L24 23 M21 11 L21 14' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23000000'/%3E%3Cpath d='M9 9 L9 23 M9 16 L17 16 M17 9 L17 23 M21 14 L24 14 L24 23 M21 11 L21 14' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E">
   <style>
     /* Standalone styles so the page renders correctly even when the
        app stylesheet is unavailable (CDN miss, agent down, etc.). */
+    /* Hyperion design tokens (mirrors app.css :root) so error pages stay
+       on-brand even when the app stylesheet itself can't load. */
     :root {
-      --bg: #0b0e15;
-      --surface: #131826;
-      --surface-1: #1a2034;
-      --border: #2a3148;
-      --text: #e6eaf3;
-      --text-soft: #98a0b3;
-      --accent: #6366f1;
-      --danger: #ef4444;
-      --warn: #f59e0b;
+      --bg: #000000;
+      --surface: #0a0a0a;
+      --surface-1: #161616;
+      --border: #1f1f1f;
+      --text: #fafafa;
+      --text-soft: #a1a1aa;
+      --accent: #fafafa;     /* primary button / wordmark — Hyperion is monochrome */
+      --accent-fg: #000000;  /* text on the accent button */
+      --danger: #ff4d4f;
+      --warn: #f5a524;
     }
     @media (prefers-color-scheme: light) {
       :root {
-        --bg: #f7f8fb;
+        --bg: #fafafa;
         --surface: #ffffff;
-        --surface-1: #f0f2f7;
-        --border: #d9dde7;
-        --text: #14171f;
-        --text-soft: #586071;
-        --accent: #6366f1;
+        --surface-1: #f4f4f5;
+        --border: #eaeaea;
+        --text: #0a0a0a;
+        --text-soft: #52525b;
+        --accent: #0a0a0a;
+        --accent-fg: #ffffff;
         --danger: #dc2626;
         --warn: #c2740a;
       }
@@ -43,7 +47,8 @@
       padding: 2rem 1rem;
       background: var(--bg);
       color: var(--text);
-      font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      font: 15px/1.55 "Geist", "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      -webkit-font-smoothing: antialiased;
     }
     .err-card {
       background: var(--surface);
@@ -113,7 +118,7 @@
     .err-btn.primary {
       background: var(--accent);
       border-color: var(--accent);
-      color: white;
+      color: var(--accent-fg);
     }
     .err-btn:hover { filter: brightness(1.08); }
     .err-brand {

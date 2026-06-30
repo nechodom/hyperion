@@ -620,6 +620,9 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::import_wizard::post_ingest)
                 .layer(axum::extract::DefaultBodyLimit::disable()),
         )
+        // Unmatched URLs get the themed 404 page (axum's default is a bare empty
+        // body). Still flows through the layers below (security headers etc.).
+        .fallback(crate::error::not_found_fallback)
         .layer(axum::middleware::from_fn(security_headers))
         .layer(from_fn_with_state(state.clone(), enforce_panel_hostname))
         .with_state(state)
