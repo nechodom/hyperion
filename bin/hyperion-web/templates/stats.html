@@ -81,7 +81,10 @@
   </div>
   {% endif %}
 
-  {# Top KPI strip — full-width, 6 cards covering everything at-a-glance. #}
+  {# KPI overview — grouped into cluster-wide totals, then this node's live
+     system metrics, so the tiles don't wrap into a lonely orphan row (and Swap
+     folds into the Memory card below). #}
+  <div class="kpi-section-label">Across all sites</div>
   <div class="kpi-grid">
     <div class="kpi-card hostings">
       <div class="kpi-label">Hostings</div>
@@ -116,8 +119,11 @@
       <div class="kpi-value">{{ c.total_requests_24h }}</div>
       <div class="kpi-meta">across all hostings</div>
     </div>
+  </div>
 
-    {% if let Some(n) = selected_node %}
+  {% if let Some(n) = selected_node %}
+  <div class="kpi-section-label" style="margin-top:1.1rem">This node — live</div>
+  <div class="kpi-grid">
       <div class="kpi-card load">
         <div class="kpi-label">Load avg · 1 m</div>
         <div class="kpi-value">{{ crate::handlers::stats::fmt_load(n.loadavg_1m_x100) }}</div>
@@ -140,6 +146,11 @@
           {% if n.mem_total_kib > 0 %}
             {{ crate::handlers::stats::fmt_bytes(n.mem_used_kib * 1024) }} / {{ crate::handlers::stats::fmt_bytes(n.mem_total_kib * 1024) }}
             <span class="text-soft" title="Used excludes reclaimable cache (MemAvailable), matching free/htop">· real used</span>
+            {% if n.swap_total_kib > 0 %}
+              <br>Swap {{ crate::handlers::stats::fmt_bytes(n.swap_used_kib * 1024) }} / {{ crate::handlers::stats::fmt_bytes(n.swap_total_kib * 1024) }}{% if n.swap_used_kib * 100 > n.swap_total_kib * 20 %} <span style="color:var(--warn)">· thrashing?</span>{% endif %}
+            {% else %}
+              <br><span class="text-soft">Swap: none configured</span>
+            {% endif %}
           {% else %}
             No sample yet
           {% endif %}
@@ -155,22 +166,8 @@
         </div>
       </div>
 
-      <div class="kpi-card swap">
-        <div class="kpi-label">Swap</div>
-        <div class="kpi-value">
-          {% if n.swap_total_kib > 0 %}{{ crate::handlers::stats::fmt_percent(n.swap_used_kib, n.swap_total_kib) }}{% else %}—{% endif %}
-        </div>
-        <div class="kpi-meta">
-          {% if n.swap_total_kib > 0 %}
-            {{ crate::handlers::stats::fmt_bytes(n.swap_used_kib * 1024) }} / {{ crate::handlers::stats::fmt_bytes(n.swap_total_kib * 1024) }}
-            {% if n.swap_used_kib * 100 > n.swap_total_kib * 20 %}· <span style="color:var(--warn)">thrashing?</span>{% endif %}
-          {% else %}
-            no swap configured
-          {% endif %}
-        </div>
-      </div>
-    {% endif %}
   </div>
+  {% endif %}
 
   {# Sparkline grid — 4 mini charts, pure inline SVG, no JS. #}
   <div class="spark-grid">
