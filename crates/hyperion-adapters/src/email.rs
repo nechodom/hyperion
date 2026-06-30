@@ -93,31 +93,51 @@ pub async fn send_text(
         .body(body.to_string())
         .map_err(|e| AdapterError::Other(format!("smtp: build message: {e}")))?;
 
-    let creds = Credentials::new(cfg.smtp_user.clone(), cfg.smtp_password.clone());
+    // Only authenticate when a username is configured. A local/anonymous relay
+    // (e.g. postfix on localhost:25 that accepts mail without auth) advertises
+    // no AUTH mechanism, and forcing credentials makes lettre fail with
+    // "No compatible authentication mechanism was found" instead of just
+    // sending. Empty user ⇒ no AUTH; non-empty user ⇒ authenticate.
+    let creds = if cfg.smtp_user.trim().is_empty() {
+        None
+    } else {
+        Some(Credentials::new(
+            cfg.smtp_user.clone(),
+            cfg.smtp_password.clone(),
+        ))
+    };
     let transport: AsyncSmtpTransport<Tokio1Executor> = match cfg.security.as_str() {
-        "tls" => AsyncSmtpTransport::<Tokio1Executor>::relay(&host)
-            .map_err(|e| AdapterError::Other(format!("smtp: relay: {e}")))?
-            .port(port)
-            .credentials(creds)
-            .build(),
+        "tls" => {
+            let mut b = AsyncSmtpTransport::<Tokio1Executor>::relay(&host)
+                .map_err(|e| AdapterError::Other(format!("smtp: relay: {e}")))?
+                .port(port);
+            if let Some(c) = creds {
+                b = b.credentials(c);
+            }
+            b.build()
+        }
         "plain" => {
             // No TLS at all — useful for local dev with a mail catcher
-            // like mailhog. Wrap in builder() so we can set port + no TLS.
-            AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&host)
-                .port(port)
-                .credentials(creds)
-                .build()
+            // like mailhog, or a localhost postfix relay. Wrap in builder() so
+            // we can set port + no TLS.
+            let mut b = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&host).port(port);
+            if let Some(c) = creds {
+                b = b.credentials(c);
+            }
+            b.build()
         }
         _ => {
             // Default: STARTTLS upgrade (most relays expect this on 587).
             let tls = TlsParameters::new(host.clone())
                 .map_err(|e| AdapterError::Other(format!("smtp: tls params: {e}")))?;
-            AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&host)
+            let mut b = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&host)
                 .map_err(|e| AdapterError::Other(format!("smtp: starttls: {e}")))?
                 .port(port)
-                .credentials(creds)
-                .tls(Tls::Required(tls))
-                .build()
+                .tls(Tls::Required(tls));
+            if let Some(c) = creds {
+                b = b.credentials(c);
+            }
+            b.build()
         }
     };
 
