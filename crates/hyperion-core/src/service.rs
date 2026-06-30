@@ -1144,12 +1144,22 @@ async fn run_update_script(
     );
 }
 
-/// Remove `mig_*` sub-dirs under `root` whose mtime is older than
-/// `max_age`. Returns the count removed. Extracted as a free
-/// function so it has a fs-only signature that's easy to unit-test
-/// with `tempfile::tempdir`. Caller (`prune_old_migration_bundles`)
-/// is responsible for passing the real `/var/lib/hyperion/migration`
+/// Remove stale migration artifacts under `root` whose mtime is older than
+/// `max_age`. Returns the count removed. Extracted as a free function so it has
+/// a fs-only signature that's easy to unit-test with `tempfile::tempdir`. Caller
+/// (`prune_old_migration_bundles`) passes the real `/var/lib/hyperion/migration`
 /// root.
+///
+/// Sweeps three artifact families WE create (and nothing else an operator may
+/// have stashed there):
+///   * `mig_*`     sub-dirs   — export bundles (migration.rs)
+///   * `bundle-*`  sub-dirs   — panel-import archive staging (panel_import.rs)
+///   * `bundle-*.tar` files   — self-service ingested bundles (import_wizard.rs)
+///
+/// SECURITY (sec-findings #6): the flat `bundle-<id>.tar` files contain
+/// plaintext DB dumps + wp-config secrets; before this they were never swept and
+/// lingered forever. They're normally deleted at job end, but this is the
+/// belt-and-braces backstop for crashed/orphaned imports.
 async fn prune_migration_bundle_dir(
     root: &std::path::Path,
     max_age: std::time::Duration,
@@ -1169,29 +1179,36 @@ async fn prune_migration_bundle_dir(
     let mut removed: u32 = 0;
     while let Ok(Some(entry)) = dir.next_entry().await {
         let path = entry.path();
-        // Only prune mig_* sub-dirs we created. Don't touch anything
-        // else an operator may have stashed there.
         let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
             continue;
         };
-        if !name.starts_with("mig_") {
-            continue;
-        }
         let Ok(meta) = entry.metadata().await else {
             continue;
         };
-        if !meta.is_dir() {
+        let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
+        if mtime >= cutoff {
             continue;
         }
-        let mtime = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
-        if mtime < cutoff {
+        // Stale `mig_*` / `bundle-*` sub-dirs.
+        if meta.is_dir() && (name.starts_with("mig_") || name.starts_with("bundle-")) {
             match tokio::fs::remove_dir_all(&path).await {
                 Ok(()) => {
-                    tracing::info!(bundle=%name, "pruned stale migration bundle");
+                    tracing::info!(bundle=%name, "pruned stale migration bundle dir");
                     removed = removed.saturating_add(1);
                 }
                 Err(e) => {
-                    tracing::warn!(bundle=%name, error=%e, "could not prune bundle");
+                    tracing::warn!(bundle=%name, error=%e, "could not prune bundle dir");
+                }
+            }
+        // Stale flat `bundle-*.tar` files (self-service ingested bundles).
+        } else if meta.is_file() && name.starts_with("bundle-") && name.ends_with(".tar") {
+            match tokio::fs::remove_file(&path).await {
+                Ok(()) => {
+                    tracing::info!(bundle=%name, "pruned stale migration bundle file");
+                    removed = removed.saturating_add(1);
+                }
+                Err(e) => {
+                    tracing::warn!(bundle=%name, error=%e, "could not prune bundle file");
                 }
             }
         }
@@ -1291,7 +1308,11 @@ async fn rewrite_manifest_domain(
     Ok(())
 }
 
-async fn curl_to_file(url: &str, dest: &std::path::Path) -> Result<(), RpcError> {
+async fn curl_to_file(
+    url: &str,
+    dest: &std::path::Path,
+    resolve_pins: &[String],
+) -> Result<(), RpcError> {
     // -f: fail with non-zero exit on 4xx/5xx (otherwise curl happily
     //     writes the error body to disk and we'd "import" garbage).
     // --max-time 1800: 30-minute hard cap for multi-GB archives.
@@ -1319,7 +1340,7 @@ async fn curl_to_file(url: &str, dest: &std::path::Path) -> Result<(), RpcError>
     // self-signed cert (same chicken-egg as enrollment — no DNS at
     // install). Trust on first use: the bundle's signed token +
     // BLAKE3 digest are the integrity guarantees, NOT TLS.
-    let args: Vec<String> = vec![
+    let mut args: Vec<String> = vec![
         "-fsS".into(),
         "-k".into(),
         "--max-time".into(),
@@ -1330,10 +1351,15 @@ async fn curl_to_file(url: &str, dest: &std::path::Path) -> Result<(), RpcError>
         "0".into(),
         "--proto".into(),
         "=https,http".into(),
-        "-o".into(),
-        dest.display().to_string(),
-        url.to_string(),
     ];
+    // SSRF guard (sec-findings #4): pin curl to the IP(s) the caller already
+    // validated as non-internal, so a DNS-rebind can't swing the host to an
+    // internal address between our resolve and curl's.
+    for pin in resolve_pins {
+        args.push("--resolve".into());
+        args.push(pin.clone());
+    }
+    args.extend(["-o".into(), dest.display().to_string(), url.to_string()]);
     let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     let out = tokio::process::Command::new("/usr/bin/curl")
         .args(&arg_refs)
@@ -1341,20 +1367,22 @@ async fn curl_to_file(url: &str, dest: &std::path::Path) -> Result<(), RpcError>
         .await
         .map_err(|e| RpcError::Internal_with(format!("spawn curl: {e}")))?;
     if !out.status.success() {
+        // SECURITY (sec-findings #4): do NOT reflect the raw curl stderr/exit
+        // code back to the caller. The distinct messages for 404 vs connection-
+        // refused vs timeout turn this into an internal-reachability oracle for
+        // port/host enumeration. Log the detail server-side; return a generic,
+        // non-distinguishing error (the >8 GB case keeps a friendlier hint).
         let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        // Curl exit 63 is "Maximum file size exceeded" — surface it
-        // with a friendlier error than the bare exit code.
-        let hint = if out.status.code() == Some(63) {
-            " (archive larger than 8 GB — refusing to download)"
+        let code = out.status.code().unwrap_or(-1);
+        tracing::warn!(code, %stderr, "migration download failed");
+        let message = if code == 63 {
+            "download failed: archive larger than 8 GB — refusing to download".to_string()
         } else {
-            ""
+            "download failed: could not fetch the bundle from the source URL \
+             (check the URL and token, and that the source is reachable)"
+                .to_string()
         };
-        return Err(RpcError::Validation {
-            message: format!(
-                "download failed (exit {}): {stderr}{hint}",
-                out.status.code().unwrap_or(-1),
-            ),
-        });
+        return Err(RpcError::Validation { message });
     }
     Ok(())
 }
@@ -5696,6 +5724,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         tokio::fs::create_dir_all(&bundle_dir)
             .await
             .map_err(|e| RpcError::Internal_with(format!("mkdir migration: {e}")))?;
+        // SECURITY (sec-findings #6): the bundle dir holds the DB dump + manifest
+        // (secrets). Lock it to 0700 so other local users can't read it.
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = tokio::fs::set_permissions(&bundle_dir, std::fs::Permissions::from_mode(0o700))
+                .await;
+        }
         let archive_dest = bundle_dir.join("archive.tar.gz");
         // Hardlink the archive into the migration dir — keeps a stable
         // path while costing zero disk (same inode). Fall back to copy
@@ -6003,6 +6038,18 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             });
         }
 
+        // SSRF guard (sec-findings #4): resolve the base host ONCE and refuse
+        // internal/loopback/link-local targets (e.g. 169.254.169.254 metadata,
+        // 127.0.0.1 admin APIs) before any curl runs. Both the manifest and the
+        // archive live under `base`, so the same pins cover both fetches and
+        // also defeat DNS rebinding between the two requests.
+        let resolve_pins = ssrf_guard_resolve(&base).await.map_err(|e| {
+            tracing::warn!(error = %e, "import-from-url SSRF guard rejected base URL");
+            RpcError::Validation {
+                message: "import URL points at a disallowed (internal) address".into(),
+            }
+        })?;
+
         // Staging area lives next to the export dir so /var/lib has
         // a single migration namespace operators can grep / delete.
         let staging_id = format!("inc_{}", ulid::Ulid::new());
@@ -6019,7 +6066,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
         // Download manifest first — small file, fail fast on bad
         // signature / wrong URL before we burn time on the archive.
-        curl_to_file(&manifest_url, &manifest_path).await?;
+        curl_to_file(&manifest_url, &manifest_path, &resolve_pins).await?;
 
         // CLONE OVERRIDES: when the caller passed `override_domain`
         // (the typical `hosting clone` flow), rewrite the manifest
@@ -6042,7 +6089,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
         // Then the archive — can be many GB. curl streams to disk
         // directly so RSS stays flat.
-        curl_to_file(&archive_url, &archive_path).await?;
+        curl_to_file(&archive_url, &archive_path, &resolve_pins).await?;
 
         // Delegate to the existing path-based importer. It re-reads
         // the SHA from disk and refuses on mismatch — that doubles
@@ -6625,23 +6672,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         );
         let message = rendered.as_str();
         let body = serde_json::json!({"text": message}).to_string();
-        let out = tokio::process::Command::new("/usr/bin/curl")
-            .args([
-                "-fsS",
-                "--max-time",
-                "6",
-                "-X",
-                "POST",
-                "-H",
-                "content-type: application/json",
-                "--data",
-                &body,
-                &url,
-            ])
-            .output()
-            .await;
-        match out {
-            Ok(o) if o.status.success() => {
+        // SECURITY (sec-findings #3): the Slack webhook is operator/tenant
+        // supplied (profile webhooks come in via ProfilesManage, not just
+        // super-admin) and this runs as root inside the trust boundary. Route it
+        // through the SAME SSRF guard the monitor alert path uses — refuse
+        // loopback/private/link-local (incl. 169.254.169.254 cloud metadata),
+        // pin curl to the resolved IP, forbid redirects, and restrict the
+        // protocol so gopher://… Redis injection can't reach internal services.
+        match http_post_json(&url, &body).await {
+            Ok(()) => {
                 self.append_audit(
                     "notify.slack",
                     None,
@@ -6650,25 +6689,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 )
                 .await;
             }
-            Ok(o) => {
+            Err(e) => {
                 self.append_audit(
                     "notify.slack",
                     None,
                     &serde_json::json!({
                         "message": message,
-                        "stderr": String::from_utf8_lossy(&o.stderr).to_string(),
+                        "error": e,
                     })
                     .to_string(),
-                    "failed",
-                )
-                .await;
-            }
-            Err(e) => {
-                self.append_audit(
-                    "notify.slack",
-                    None,
-                    &serde_json::json!({"message": message, "spawn_error": e.to_string()})
-                        .to_string(),
                     "failed",
                 )
                 .await;
@@ -10426,11 +10455,42 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .map_err(|e| RpcError::Internal_with(format!("consume backup: {e}")))?
         };
         if !accepted {
+            // SECURITY (sec-findings #7): a server-side, per-account failure cap
+            // is the topology-independent backstop against TOTP/backup-code
+            // brute-force (the per-IP throttle alone is defeated by XFF rotation
+            // / a botnet). Mirror web_login: increment the SHARED failed_logins
+            // counter and HARD-LOCK the account at the threshold. The counter is
+            // reset by record_login on the next successful auth.
+            const WEB_2FA_MAX_FAILS: i64 = 8;
+            let n = hyperion_state::web_users::record_failed_login(&self.pool, user.id, now_secs())
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("track 2fa failed: {e}")))?;
+            if n >= WEB_2FA_MAX_FAILS {
+                let _ = hyperion_state::web_users::set_locked(
+                    &self.pool,
+                    user.id,
+                    true,
+                    Some("too many failed 2FA attempts"),
+                    now_secs(),
+                )
+                .await;
+                self.append_audit(
+                    "web.user.locked",
+                    None,
+                    &serde_json::json!({"user_id": user.id, "reason": "failed_2fa"}).to_string(),
+                    "ok",
+                )
+                .await;
+            }
             self.append_audit(
                 "web.login.2fa_failed",
                 None,
-                &serde_json::json!({"user_id": user.id, "via": if is_totp {"totp"} else {"backup_code"}})
-                    .to_string(),
+                &serde_json::json!({
+                    "user_id": user.id,
+                    "via": if is_totp {"totp"} else {"backup_code"},
+                    "failed_count": n,
+                })
+                .to_string(),
                 "failed",
             )
             .await;
@@ -15718,6 +15778,22 @@ fn validate_profile(mut p: ProfileInput) -> Result<ProfileInput, RpcError> {
     if p.expiry_warning_offsets.trim().is_empty() {
         p.expiry_warning_offsets = "30,7,1".into();
     }
+    // SECURITY (sec-findings #3): the Slack webhook is later fired by the root
+    // agent from inside the trust boundary. Pin the scheme to https:// at the
+    // boundary (the SSRF guard in notify_slack blocks internal IPs at send
+    // time; this rejects http://internal and gopher:// up front), matching how
+    // set_monitor_config validates alert_slack_webhook.
+    p.slack_webhook = p
+        .slack_webhook
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    if let Some(ref u) = p.slack_webhook {
+        if !u.starts_with("https://") {
+            return Err(RpcError::Validation {
+                message: "slack webhook must start with https://".into(),
+            });
+        }
+    }
     if let Some(c) = &p.price_currency {
         if !c.chars().all(|ch| ch.is_ascii_uppercase()) || c.len() != 3 {
             return Err(RpcError::Validation {
@@ -19652,15 +19728,21 @@ mod tests {
         let root = tmp.path();
         let mig_a = root.join("mig_aaa");
         let mig_b = root.join("mig_bbb");
+        let bundle_dir = root.join("bundle-01ABC"); // panel-import staging dir
         let other = root.join("keepme");
         let plain_file = root.join("README");
-        for d in [&mig_a, &mig_b, &other] {
+        for d in [&mig_a, &mig_b, &bundle_dir, &other] {
             tokio::fs::create_dir_all(d).await.unwrap();
             tokio::fs::write(d.join("archive.tar.gz"), b"x")
                 .await
                 .unwrap();
         }
         tokio::fs::write(&plain_file, b"hi").await.unwrap();
+        // Self-service ingested bundle (flat file) + a loose .tar that's NOT ours.
+        let bundle_tar = root.join("bundle-99.tar");
+        let loose_tar = root.join("operator-backup.tar");
+        tokio::fs::write(&bundle_tar, b"secret-dump").await.unwrap();
+        tokio::fs::write(&loose_tar, b"keep").await.unwrap();
 
         // Sleep ~10ms so created dirs' mtime < now() at the call
         // site — without this the cutoff check (mtime < cutoff)
@@ -19670,11 +19752,15 @@ mod tests {
         let n = prune_migration_bundle_dir(root, std::time::Duration::from_millis(0))
             .await
             .unwrap();
-        assert_eq!(n, 2, "both mig_* dirs should have been removed");
+        // 2 mig_* dirs + 1 bundle-* dir + 1 bundle-*.tar file.
+        assert_eq!(n, 4, "all mig_*/bundle-* artifacts should be removed");
         assert!(!mig_a.exists());
         assert!(!mig_b.exists());
-        assert!(other.exists(), "non-mig_ dirs are off-limits");
+        assert!(!bundle_dir.exists(), "bundle-* staging dirs are swept");
+        assert!(!bundle_tar.exists(), "bundle-*.tar files are swept");
+        assert!(other.exists(), "non-mig_/bundle- dirs are off-limits");
         assert!(plain_file.exists(), "loose files are off-limits");
+        assert!(loose_tar.exists(), "non-bundle .tar files are off-limits");
     }
 
     #[tokio::test]

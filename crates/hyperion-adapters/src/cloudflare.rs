@@ -77,18 +77,26 @@ pub fn write_token(token: &str) -> Result<(), AdapterError> {
 }
 
 async fn curl_json(token: &str, args: &[&str]) -> Result<serde_json::Value, AdapterError> {
-    let auth = format!("Authorization: Bearer {token}");
+    // SECURITY (sec-findings #11): NEVER put the bearer token on argv — it would
+    // leak to /proc/<pid>/cmdline (readable by any local user, e.g. a site's
+    // PHP-FPM uid) and to debug logs/error strings. Feed the Authorization
+    // header to curl via a config file on stdin (`curl --config -`); curl reads
+    // it from there and the token never appears in the process command line.
+    // `--config -` is consumed before the URL/method args we append on argv.
     let mut full: Vec<&str> = vec![
         "-fsS",
         "--max-time",
         "30",
-        "-H",
-        &auth,
+        "--config",
+        "-",
         "-H",
         "Content-Type: application/json",
     ];
     full.extend_from_slice(args);
-    let out = crate::cmd::run("/usr/bin/curl", &full).await?;
+    // curl config syntax: one directive per line; the header value is quoted so
+    // it survives intact. The token is confined to this stdin payload.
+    let config = format!("header = \"Authorization: Bearer {token}\"\n");
+    let out = crate::cmd::run_with_stdin("/usr/bin/curl", &full, config.as_bytes()).await?;
     serde_json::from_str(&out).map_err(|e| AdapterError::Other(format!("cloudflare json: {e}")))
 }
 

@@ -14,6 +14,7 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Form;
 use base64::Engine;
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
+use hyperion_state::capabilities::Capability;
 use hyperion_types::{HostingFileContent, HostingFileEntry};
 use serde::Deserialize;
 
@@ -77,7 +78,15 @@ pub async fn get_files(
         crate::handlers::hostings::find_hosting_anywhere(&state, sel.clone()).await?;
     let target = owner_node.as_deref();
     // RBAC: same guard as detail page — read level is fine.
-    if let Err(r) = require_hosting_access(&state, &ctx, detail.id.as_str(), false).await {
+    if let Err(r) = require_hosting_access(
+        &state,
+        &ctx,
+        detail.id.as_str(),
+        false,
+        Capability::HostingFiles,
+    )
+    .await
+    {
         return Ok(r);
     }
 
@@ -222,7 +231,14 @@ async fn authorize_file_write(
     let (detail, owner_node) = crate::handlers::hostings::find_hosting_anywhere(state, sel.clone())
         .await
         .map_err(|e| e.into_response())?;
-    require_hosting_access(state, ctx, detail.id.as_str(), true).await?;
+    require_hosting_access(
+        state,
+        ctx,
+        detail.id.as_str(),
+        true,
+        Capability::HostingFiles,
+    )
+    .await?;
     Ok(owner_node)
 }
 
@@ -487,7 +503,15 @@ pub async fn get_download(
         crate::handlers::hostings::find_hosting_anywhere(&state, sel.clone()).await?;
     let target = owner_node.as_deref();
     // Read access is enough for download — same as the inline reader.
-    if let Err(r) = require_hosting_access(&state, &ctx, detail.id.as_str(), false).await {
+    if let Err(r) = require_hosting_access(
+        &state,
+        &ctx,
+        detail.id.as_str(),
+        false,
+        Capability::HostingFiles,
+    )
+    .await
+    {
         return Ok(r);
     }
     let resp = crate::dispatcher::dispatch_to_node(

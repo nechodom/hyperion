@@ -4,11 +4,34 @@ use crate::AdapterError;
 use tokio::process::Command;
 use tracing::debug;
 
+/// Redact args that may carry a secret before they reach a log line or an error
+/// string.
+///
+/// SECURITY (sec-findings #11): args like `Authorization: Bearer <token>`, an
+/// `--header` value, or a `?token=…`/`--password` argument must never be logged
+/// (`debug!(?args)`) or embedded in `AdapterError::Command`'s `cmd` field, where
+/// they'd leak to log files / error responses. We mask any arg whose lowercased
+/// text mentions a known secret marker. The actual command still runs with the
+/// real args — only the *displayed* copy is redacted.
+fn redact_args(args: &[&str]) -> Vec<String> {
+    const MARKERS: [&str; 5] = ["authorization", "bearer", "token", "password", "secret"];
+    args.iter()
+        .map(|a| {
+            let lc = a.to_ascii_lowercase();
+            if MARKERS.iter().any(|m| lc.contains(m)) {
+                "<redacted>".to_string()
+            } else {
+                (*a).to_string()
+            }
+        })
+        .collect()
+}
+
 /// Run a command and require zero exit. Returns stdout (UTF-8 lossy).
 /// On failure produces an `AdapterError::Command` carrying the last
 /// 4 KiB of stderr.
 pub async fn run(program: &str, args: &[&str]) -> Result<String, AdapterError> {
-    debug!(program, ?args, "exec");
+    debug!(program, args = ?redact_args(args), "exec");
     let out = Command::new(program).args(args).output().await?;
     if !out.status.success() {
         let code = out.status.code().unwrap_or(-1);
@@ -22,7 +45,7 @@ pub async fn run(program: &str, args: &[&str]) -> Result<String, AdapterError> {
             .rev()
             .collect();
         return Err(AdapterError::Command {
-            cmd: format!("{program} {}", args.join(" ")),
+            cmd: format!("{program} {}", redact_args(args).join(" ")),
             code,
             stderr_tail: tail,
         });
@@ -37,7 +60,7 @@ pub async fn run_with_stdin(
     stdin: &[u8],
 ) -> Result<String, AdapterError> {
     use tokio::io::AsyncWriteExt;
-    debug!(program, ?args, stdin_bytes = stdin.len(), "exec with stdin");
+    debug!(program, args = ?redact_args(args), stdin_bytes = stdin.len(), "exec with stdin");
     let mut child = Command::new(program)
         .args(args)
         .stdin(std::process::Stdio::piped())
@@ -61,7 +84,7 @@ pub async fn run_with_stdin(
             .rev()
             .collect();
         return Err(AdapterError::Command {
-            cmd: format!("{program} {}", args.join(" ")),
+            cmd: format!("{program} {}", redact_args(args).join(" ")),
             code,
             stderr_tail: tail,
         });
@@ -100,6 +123,27 @@ mod tests {
             }
             other => panic!("wrong: {other:?}"),
         }
+    }
+
+    #[test]
+    fn redacts_secret_bearing_args() {
+        let args = [
+            "-H",
+            "Authorization: Bearer cf-abc123",
+            "https://api/x?token=zzz",
+            "--data",
+            "{\"type\":\"TXT\"}",
+        ];
+        let red = redact_args(&args);
+        assert_eq!(red[0], "-H");
+        assert_eq!(red[1], "<redacted>", "Authorization header must be masked");
+        assert_eq!(red[2], "<redacted>", "token query arg must be masked");
+        assert_eq!(red[3], "--data");
+        assert_eq!(red[4], "{\"type\":\"TXT\"}", "non-secret args pass through");
+        assert!(
+            !red.join(" ").contains("cf-abc123"),
+            "the secret must not survive redaction"
+        );
     }
 
     #[tokio::test]

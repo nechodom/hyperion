@@ -36,6 +36,61 @@ pub fn site_dir(domain: &str) -> String {
         .collect()
 }
 
+/// Create a private, mode-0700 working directory under the system temp dir with
+/// a randomized (non-pid-derived) name.
+///
+/// SECURITY (sec-findings #5): the source MariaDB ROOT password is written into
+/// this dir's defaults-file. On a multi-tenant source box, a predictable
+/// `/tmp/hyperion-mysql-<pid>-<db>.cnf` path lets a local attacker pre-plant a
+/// symlink (root follows it, leaking the password) or race the 0644 window. A
+/// 0700 dir created with `create_dir` (which fails on a pre-existing path,
+/// O_EXCL-style) plus a randomized name means the attacker can neither enter the
+/// dir nor predict/pre-create the file inside it.
+async fn secure_private_dir(prefix: &str) -> std::io::Result<PathBuf> {
+    use rand::Rng;
+    #[cfg(unix)]
+    use std::os::unix::fs::DirBuilderExt;
+    for _ in 0..16 {
+        let rnd: u64 = rand::thread_rng().gen();
+        let dir = std::env::temp_dir().join(format!("{prefix}-{rnd:016x}"));
+        let mut b = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        b.mode(0o700);
+        // `create` (not create_all) fails if the path already exists — so a
+        // pre-planted dir/symlink with this name can't be reused.
+        match b.create(&dir) {
+            Ok(()) => return Ok(dir),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "could not create a unique private temp dir",
+    ))
+}
+
+/// Securely create-and-write a file with mode 0600 using O_EXCL semantics, so it
+/// can never be a pre-existing symlink and is never momentarily world-readable.
+async fn secure_write_0600(path: &Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = path.to_path_buf();
+    let contents = contents.to_string();
+    // std fs is fine here (small file); keep it off the async reactor.
+    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)?;
+        f.write_all(contents.as_bytes())?;
+        Ok(())
+    })
+    .await
+    .map_err(|e| std::io::Error::other(format!("secure write join: {e}")))?
+}
+
 /// Read + parse the manifest (the serialized IR) from an already-extracted
 /// bundle directory. `None` if absent or unparseable (→ "not a valid bundle").
 pub async fn read_manifest(dir: &Path) -> Option<ImportIR> {
@@ -251,28 +306,24 @@ async fn cloudpanel_creds_dump(name: &str) -> Result<Option<Vec<u8>>, ImportErro
     let pass = field("password");
     let port = nonempty(field("port"), "3306");
 
-    let cnf = std::env::temp_dir().join(format!(
-        "hyperion-mysql-{}-{}.cnf",
-        std::process::id(),
-        site_dir(name)
-    ));
-    tokio::fs::write(
+    // SECURITY (sec-findings #5): the .cnf holds the source MariaDB ROOT
+    // password. Put it in a 0700 private dir under a randomized name and create
+    // it with O_EXCL + mode 0600, so it's never world-readable and can't be a
+    // pre-planted symlink (TOCTOU).
+    let dir = secure_private_dir("hyperion-mysql").await?;
+    let cnf = dir.join(format!("{}.cnf", site_dir(name)));
+    secure_write_0600(
         &cnf,
-        format!("[client]\nhost={host}\nuser={user}\npassword={pass}\nport={port}\n"),
+        &format!("[client]\nhost={host}\nuser={user}\npassword={pass}\nport={port}\n"),
     )
     .await?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = tokio::fs::set_permissions(&cnf, std::fs::Permissions::from_mode(0o600)).await;
-    }
     let cnf_q = shell_quote(&cnf.display().to_string());
     let res = sh_capture(&format!(
         "mysqldump --defaults-extra-file={cnf_q} --single-transaction --routines --triggers --events -- {}",
         shell_quote(name)
     ))
     .await;
-    let _ = tokio::fs::remove_file(&cnf).await;
+    let _ = tokio::fs::remove_dir_all(&dir).await;
     Ok(Some(res?))
 }
 
@@ -291,13 +342,10 @@ async fn cloudpanel_creds_dump(name: &str) -> Result<Option<Vec<u8>>, ImportErro
 /// what we target) uses `db:export`. On a v1 box this errors → the DB is
 /// skipped-and-reported, never silently corrupted.
 async fn clpctl_export(name: &str, dest: &Path) -> Result<bool, ImportError> {
-    let dir = std::env::temp_dir().join(format!(
-        "hyperion-clpexp-{}-{}",
-        std::process::id(),
-        site_dir(name)
-    ));
-    let _ = tokio::fs::remove_dir_all(&dir).await;
-    tokio::fs::create_dir_all(&dir).await?;
+    // SECURITY (sec-findings #5): the DB dump (tenant data) lands here. Use a
+    // 0700 private dir with a randomized name rather than a predictable
+    // `/tmp/hyperion-clpexp-<pid>-<db>` path other local users could read/race.
+    let dir = secure_private_dir("hyperion-clpexp").await?;
     let want = dir.join(format!("{}.sql.gz", site_dir(name)));
     let result = clpctl_export_inner(name, &dir, &want, dest).await;
     let _ = tokio::fs::remove_dir_all(&dir).await;

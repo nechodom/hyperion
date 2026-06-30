@@ -3,7 +3,7 @@ use crate::auth::{clear_cookie, set_cookie, AuthCtx};
 use crate::error::AppError;
 use crate::state::SharedState;
 use askama::Template;
-use axum::extract::{Query, State};
+use axum::extract::{ConnectInfo, Query, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Form;
@@ -12,6 +12,7 @@ use hyperion_auth::{
     PURPOSE_SESSION_2FA_PENDING,
 };
 use serde::Deserialize;
+use std::net::SocketAddr;
 use std::sync::Mutex;
 
 /// Per-IP failed-login tracker. Token bucket with a 5-attempt cap over
@@ -45,6 +46,9 @@ const FIREWALL_BAN_AFTER_BLOCKS: u32 = 20;
 const THROTTLE_WINDOW_SECS: i64 = 15 * 60;
 const THROTTLE_LIMIT: u32 = 5;
 
+/// Display / audit IP — best-effort, honours `X-Forwarded-For` so the audit
+/// trail shows the client's apparent address behind a proxy. NOT used for the
+/// rate-limit bucket (that would be spoofable); see [`throttle_key`].
 fn caller_ip(headers: &HeaderMap) -> String {
     headers
         .get("x-forwarded-for")
@@ -57,6 +61,19 @@ fn caller_ip(headers: &HeaderMap) -> String {
                 .map(String::from)
         })
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// Rate-limit bucket key — the REAL connection peer IP, never a header.
+///
+/// SECURITY (sec-findings #7): the throttle bucket must key on the immutable
+/// TCP peer, otherwise an attacker rotates `X-Forwarded-For` per request and
+/// every guess lands in a fresh bucket, defeating the limiter entirely (TOTP
+/// brute-force). We don't have a trusted-proxy allow-list, so we never trust
+/// XFF for the bucket; behind a reverse proxy this collapses all clients onto
+/// the proxy's IP — the safe (over-limit) failure mode, and the per-account 2FA
+/// counter in `web_verify_2fa` is the real backstop regardless of topology.
+fn throttle_key(peer: SocketAddr) -> String {
+    peer.ip().to_string()
 }
 
 fn check_throttle(ip: &str) -> bool {
@@ -153,21 +170,26 @@ pub async fn get_login(
 
 pub async fn post_login(
     State(state): State<SharedState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Form(form): Form<LoginForm>,
 ) -> Result<Response, AppError> {
+    // `ip` is the display/audit address; `tkey` is the spoof-proof rate-limit
+    // bucket keyed on the real TCP peer (sec-findings #7).
     let ip = caller_ip(&headers);
-    if !check_throttle(&ip) {
-        tracing::warn!(ip = %ip, "login throttled");
+    let tkey = throttle_key(peer);
+    if !check_throttle(&tkey) {
+        tracing::warn!(ip = %ip, peer = %tkey, "login throttled");
         // Defense in depth: an IP that keeps hammering AFTER the 429 is a
         // bot, not a human — drop it at the firewall (nftables) so it
         // can't keep hitting the panel. Fire exactly once at the
         // threshold; ban_add is idempotent + auto-expires in an hour.
-        if ip != "unknown" && register_block(&ip) == FIREWALL_BAN_AFTER_BLOCKS {
+        // Ban the real peer, not the spoofable header IP.
+        if register_block(&tkey) == FIREWALL_BAN_AFTER_BLOCKS {
             let _ = hyperion_rpc_client::call(
                 &state.agent_socket,
                 hyperion_rpc::codec::Request::BanAdd {
-                    ip: ip.clone(),
+                    ip: tkey.clone(),
                     hosting_id: None,
                     reason: "auto: panel login brute force".into(),
                     ttl_secs: 3600,
@@ -175,7 +197,7 @@ pub async fn post_login(
                 },
             )
             .await;
-            tracing::warn!(ip = %ip, "fail2ban: firewall-banned persistent panel attacker");
+            tracing::warn!(peer = %tkey, "fail2ban: firewall-banned persistent panel attacker");
         }
         return Ok((
             StatusCode::TOO_MANY_REQUESTS,
@@ -200,15 +222,16 @@ pub async fn post_login(
     );
 
     if db_has_users {
-        return post_login_via_rpc(state, &ip, form, headers).await;
+        return post_login_via_rpc(state, &ip, &tkey, form, headers).await;
     }
     // Bootstrap path: verify against the JSON file, then seed.
-    post_login_bootstrap(state, &ip, form, headers).await
+    post_login_bootstrap(state, &tkey, form, headers).await
 }
 
 async fn post_login_via_rpc(
     state: SharedState,
     ip: &str,
+    tkey: &str,
     form: LoginForm,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
@@ -230,7 +253,7 @@ async fn post_login_via_rpc(
                 role,
                 ..
             } => {
-                clear_throttle(ip);
+                clear_throttle(tkey);
                 // Admin+ without 2FA enrolled → gate them into enrolment
                 // before they can use the panel (purpose marks the
                 // session; the enforce_2fa_gate handles the redirects).
@@ -250,7 +273,7 @@ async fn post_login_via_rpc(
                 // the signed remember-device cookie, which was issued at
                 // a prior fully-authenticated login).
                 if let Some(rd) = read_remember_device(&state, &headers, user_id) {
-                    clear_throttle(ip);
+                    clear_throttle(tkey);
                     return mint_session_redirect(
                         &state,
                         user_id,
@@ -278,7 +301,7 @@ async fn post_login_via_rpc(
                 Ok(Redirect::to("/login?error=locked").into_response())
             }
             hyperion_types::WebLoginResult::Invalid => {
-                record_failure(ip);
+                record_failure(tkey);
                 Ok(login_failed(&form.next))
             }
         },
@@ -289,23 +312,23 @@ async fn post_login_via_rpc(
 
 async fn post_login_bootstrap(
     state: SharedState,
-    ip: &str,
+    tkey: &str,
     form: LoginForm,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
     // Verify against the on-disk single-admin JSON file.
     let user = state.admin_user.clone();
     if !subtle_eq(&form.username, &user.username) {
-        record_failure(ip);
+        record_failure(tkey);
         return Ok(login_failed(&form.next));
     }
     let ok =
         admin_user::verify(&user, &form.password).map_err(|e| AppError::Internal(e.to_string()))?;
     if !ok {
-        record_failure(ip);
+        record_failure(tkey);
         return Ok(login_failed(&form.next));
     }
-    clear_throttle(ip);
+    clear_throttle(tkey);
     // Bootstrap user is super_admin — gate into 2FA enrolment when
     // enforcement is on (off in the test harness).
     let bootstrap_purpose = if state.enforce_admin_2fa() {
@@ -442,17 +465,23 @@ pub async fn get_login_2fa(
 
 pub async fn post_login_2fa(
     State(state): State<SharedState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers_in: HeaderMap,
     Form(form): Form<Login2faForm>,
 ) -> Result<Response, AppError> {
     // Throttle the second factor too — without this, an attacker who
     // captured the password could brute-force the 6-digit TOTP from
     // the pending-2fa cookie (~1M attempts to enumerate). Reuses the
-    // same per-IP bucket as the password step, so a failed-password
-    // burst also blocks 2FA tries from that IP and vice-versa.
-    let ip = caller_ip(&headers_in);
-    if !check_throttle(&ip) {
-        tracing::warn!(ip = %ip, "2fa verify throttled");
+    // same per-peer bucket as the password step, so a failed-password
+    // burst also blocks 2FA tries from that peer and vice-versa.
+    //
+    // SECURITY (sec-findings #7): bucket on the real TCP peer, never XFF —
+    // otherwise per-request XFF rotation defeats the limiter. The server-side
+    // per-account counter in `web_verify_2fa` is the topology-independent
+    // backstop.
+    let tkey = throttle_key(peer);
+    if !check_throttle(&tkey) {
+        tracing::warn!(peer = %tkey, "2fa verify throttled");
         return Ok((
             StatusCode::TOO_MANY_REQUESTS,
             [("retry-after", "900")],
@@ -505,9 +534,9 @@ pub async fn post_login_2fa(
             role,
             ..
         }) => {
-            // Second factor succeeded — NOW clear the per-IP throttle
+            // Second factor succeeded — NOW clear the per-peer throttle
             // (the password step deliberately no longer does).
-            clear_throttle(&ip);
+            clear_throttle(&tkey);
             // A user who just passed 2FA gets a full session (purpose
             // session) — never a 2fa-pending one, even for admins.
             let want_remember = form.remember.as_deref() == Some("on");
@@ -540,11 +569,11 @@ pub async fn post_login_2fa(
         hyperion_rpc::codec::Response::WebVerify2fa(
             hyperion_types::WebVerify2faResult::Invalid,
         ) => {
-            // Record the failure in the IP bucket so a wrong-code burst
+            // Record the failure in the peer bucket so a wrong-code burst
             // contributes to the same throttle as wrong-password tries.
             // Without this, an attacker could try unlimited 6-digit
             // codes per session-cookie issuance.
-            record_failure(&ip);
+            record_failure(&tkey);
             Ok(Redirect::to("/login/2fa?error=invalid").into_response())
         }
         hyperion_rpc::codec::Response::Error(e) => Err(AppError::Rpc(e.to_string())),
