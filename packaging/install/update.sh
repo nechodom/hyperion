@@ -431,61 +431,81 @@ install -d -m 0755 /var/lib/hyperion/maintenance
 MAINT_HTML="/var/lib/hyperion/maintenance/maintenance.html"
 if [[ ! -f "$MAINT_HTML" ]] || grep -q "x-hyperion-maintenance" "$MAINT_HTML" 2>/dev/null; then
   cat > "$MAINT_HTML" <<'HTML'
-<!-- x-hyperion-maintenance: v2 - operator may replace this file freely -->
+<!-- x-hyperion-maintenance: v3 - operator may replace this file freely -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>We'll be right back · Hyperion</title>
+  <meta name="color-scheme" content="light dark">
+  <meta name="robots" content="noindex,nofollow">
+  <!-- Briefly down during an update: auto-retry so the page reloads itself the
+       moment the service is back (nothing the visitor has to do). -->
+  <meta http-equiv="refresh" content="15">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23000000'/%3E%3Cpath d='M9 9 L9 23 M9 16 L17 16 M17 9 L17 23 M21 14 L24 14 L24 23 M21 11 L21 14' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E">
   <style>
-    :root{
-      --bg:#000; --surface:#0a0a0a; --border:#1f1f1f; --text:#fafafa;
-      --dim:#a1a1aa; --soft:#71717a; --accent:#00d97e;
+    /* Standalone styles (nginx serves this while hyperion-web is down, so there
+       is no app.css). Deliberately mirrors the panel's themed error page
+       (templates/error.html) so the 503 and the 404 look identical. */
+    :root {
+      --bg:#000000; --surface:#0a0a0a; --surface-1:#161616; --border:#1f1f1f;
+      --text:#fafafa; --text-soft:#a1a1aa; --accent:#fafafa; --accent-fg:#000000;
       color-scheme: dark light;
     }
-    @media (prefers-color-scheme: light){
-      :root{ --bg:#fafafa; --surface:#fff; --border:#eaeaea; --text:#0a0a0a; --dim:#52525b; --soft:#a1a1aa; }
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg:#fafafa; --surface:#ffffff; --surface-1:#f4f4f5; --border:#eaeaea;
+        --text:#0a0a0a; --text-soft:#52525b; --accent:#0a0a0a; --accent-fg:#ffffff;
+      }
     }
-    *{ box-sizing:border-box; }
-    body{
-      margin:0; min-height:100vh;
-      display:flex; align-items:center; justify-content:center;
-      font-family:"Geist","Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
-      background:var(--bg); color:var(--text); padding:1.5rem;
-      -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
+    * { box-sizing:border-box; }
+    .err-page {
+      margin:0; min-height:100vh; display:grid; place-items:center; padding:2rem 1rem;
+      background:var(--bg); color:var(--text);
+      font:15px/1.55 "Geist","Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+      -webkit-font-smoothing:antialiased;
     }
-    .card{
-      max-width:460px; width:100%; padding:2.75rem 2rem; text-align:center;
-      background:var(--surface); border:1px solid var(--border);
-      border-radius:14px; box-shadow:0 24px 48px rgba(0,0,0,.5);
+    .err-card {
+      background:var(--surface); border:1px solid var(--border); border-radius:14px;
+      max-width:38rem; width:100%; padding:2rem 2.2rem; box-shadow:0 20px 50px rgba(0,0,0,.30);
     }
-    .pulse{ position:relative; width:60px; height:60px; margin:0 auto 1.6rem;
-            display:flex; align-items:center; justify-content:center; }
-    .pulse::before, .pulse::after{
-      content:""; position:absolute; inset:0; border-radius:50%;
-      border:2px solid var(--accent); opacity:0; animation:ring 2.4s ease-out infinite;
+    .err-eyebrow {
+      display:inline-flex; align-items:center; gap:.4rem; font-size:.78rem; font-weight:600;
+      letter-spacing:.05em; text-transform:uppercase; color:var(--text-soft); margin-bottom:.6rem;
     }
-    .pulse::after{ animation-delay:1.2s; }
-    @keyframes ring{ 0%{ transform:scale(.5); opacity:.7; } 100%{ transform:scale(1.35); opacity:0; } }
-    .dot{ width:14px; height:14px; border-radius:50%;
-          background:var(--accent); box-shadow:0 0 18px var(--accent); }
-    .brand{ margin:0 0 1.1rem; font-size:.72rem; font-weight:600;
-            letter-spacing:.18em; text-transform:uppercase; color:var(--soft); }
-    h1{ margin:0 0 .6rem; font-size:1.45rem; font-weight:700; letter-spacing:-.01em; }
-    p.msg{ margin:0; font-size:.95rem; line-height:1.6; color:var(--dim); }
-    .foot{ margin-top:1.8rem; padding-top:1.1rem; border-top:1px solid var(--border);
-           font-size:.74rem; color:var(--soft); font-variant-numeric:tabular-nums; }
-    @media (prefers-reduced-motion: reduce){ .pulse::before, .pulse::after{ animation:none; } }
+    .err-eyebrow .err-code {
+      background:var(--surface-1); border:1px solid var(--border); padding:.15rem .45rem;
+      border-radius:6px; color:var(--text); font-feature-settings:"tnum";
+    }
+    .err-headline { font-size:1.45rem; font-weight:700; margin:0 0 .5rem; letter-spacing:-.01em; }
+    .err-body { color:var(--text-soft); margin:0 0 1.2rem; }
+    .err-actions { display:flex; gap:.55rem; flex-wrap:wrap; }
+    .err-btn {
+      display:inline-block; padding:.55rem 1.05rem; border-radius:8px;
+      border:1px solid var(--accent); background:var(--accent); color:var(--accent-fg);
+      text-decoration:none; font-weight:600; font-size:.92rem;
+    }
+    .err-btn:hover { filter:brightness(1.08); }
+    .err-brand {
+      margin-top:1.5rem; font-size:.78rem; color:var(--text-soft);
+      letter-spacing:.05em; text-align:center;
+    }
+    .err-brand strong { color:var(--accent); letter-spacing:.08em; }
   </style>
 </head>
-<body>
-  <main class="card">
-    <div class="pulse"><span class="dot"></span></div>
-    <p class="brand">Hyperion</p>
-    <h1>We'll be right back</h1>
-    <p class="msg">This service is updating. It will return automatically in a few moments — no need to refresh.</p>
-    <div class="foot">HTTP 503 · Service Temporarily Unavailable</div>
+<body class="err-page">
+  <main class="err-card" role="alert" aria-live="polite">
+    <div class="err-eyebrow">
+      <span class="err-code">503</span>
+      <span>Service unavailable</span>
+    </div>
+    <h1 class="err-headline">We'll be right back</h1>
+    <p class="err-body">This service is updating and will be back automatically in a few moments — this page refreshes itself, so there's nothing you need to do.</p>
+    <div class="err-actions">
+      <a class="err-btn" href=".">Reload now</a>
+    </div>
+    <div class="err-brand"><strong>HY · PERION</strong></div>
   </main>
 </body>
 </html>
