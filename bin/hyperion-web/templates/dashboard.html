@@ -81,6 +81,13 @@
 {% endif %}
 
 {% for a in alerts %}
+  {# Keep the dashboard tidy: show the first 3 notifications, fold the rest into
+     an expander so a cluster full of (e.g.) self-signed-cert warnings doesn't
+     push everything else off-screen. #}
+  {% if loop.index == 4 %}
+  <details class="alerts-more" style="margin-bottom:1rem">
+    <summary class="text-soft" style="cursor:pointer;padding:.45rem .2rem">Show {{ alerts.len() - 3 }} more notification(s)…</summary>
+  {% endif %}
   <div class="flash {% if a.severity == "error" %}error{% else if a.severity == "warn" %}warn{% else %}info{% endif %}">
     <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
       {% if a.severity == "error" %}<circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/>
@@ -93,6 +100,7 @@
       {% endif %}
     </div>
   </div>
+  {% if loop.last && alerts.len() > 3 %}</details>{% endif %}
 {% endfor %}
 
 {# Service health summary banner — only when something is down. Links to the full /services page. #}
