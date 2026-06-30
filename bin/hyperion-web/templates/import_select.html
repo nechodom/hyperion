@@ -40,7 +40,7 @@
             <td><input type="checkbox" class="hyp-site" checked></td>
             <td>
               <strong>{{ s.domain }}</strong>
-              <div class="text-soft small">{{ s.owner }} · PHP {{ s.php }} · {{ s.dbs }} DB</div>
+              <div class="text-soft small">{{ s.owner }} · PHP {{ s.php }} · {{ s.dbs }} DB{% if s.dbs != 1 %}s{% endif %}</div>
             </td>
             <td>
               <input type="text" class="hyp-target" value="{{ s.domain }}" autocomplete="off"
