@@ -74,6 +74,58 @@ log()  { printf '\033[36m[hyperion]\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m[warn]\033[0m %s\n' "$*"; }
 fail() { printf '\033[31m[error]\033[0m %s\n' "$*" >&2; exit 1; }
 
+# Run `cargo "$@"` with a live progress bar driven by the number of compiled
+# crates vs a total remembered from the previous successful build (so a from-
+# source build shows real progress instead of a silent multi-minute hang).
+# Purely cosmetic: returns cargo's real exit status, and rustc diagnostics still
+# print (they go to stderr; only the JSON artifact stream on stdout is counted).
+build_with_progress() {
+  local tgt="${CARGO_TARGET_DIR:-target}"
+  local total_file="$tgt/.hyperion_build_units"
+  local count_file; count_file="$(mktemp)"
+  local total=0
+  [[ -r "$total_file" ]] && total="$(cat "$total_file" 2>/dev/null || echo 0)"
+  [[ "$total" =~ ^[0-9]+$ ]] || total=0
+  printf 0 > "$count_file"
+  local width=34 tty=0
+  [[ -t 2 ]] && tty=1
+
+  # Capture cargo's REAL exit via a file: the brace group records $? right after
+  # cargo, before the pipe to the counter closes (PIPESTATUS is unreliable across
+  # the `local` that follows). stdout = JSON artifacts (counted); stderr =
+  # rendered rustc diagnostics, which flow straight to the operator's terminal.
+  local rc_file; rc_file="$(mktemp)"
+  printf 1 > "$rc_file"
+  { cargo "$@" --message-format=json-render-diagnostics; printf '%s' "$?" > "$rc_file"; } \
+    | while IFS= read -r line; do
+        [[ "$line" == *'"reason":"compiler-artifact"'* ]] || continue
+        local n; n=$(( $(cat "$count_file") + 1 )); printf '%s' "$n" > "$count_file"
+        if (( total > 0 )); then
+          local pct=$(( n * 100 / total )); (( pct > 100 )) && pct=100
+          local fill=$(( pct * width / 100 ))
+          local bar="$(printf '%*s' "$fill" '' | tr ' ' '=')$(printf '%*s' $(( width - fill )) '')"
+          if (( tty )); then
+            printf '\r\033[36m[hyperion]\033[0m building [%s] %3d%% (%d/%d)' "$bar" "$pct" "$n" "$total" >&2
+          elif (( n % 25 == 0 )); then
+            printf '[hyperion] building … %d%% (%d/%d)\n' "$pct" "$n" "$total" >&2
+          fi
+        elif (( tty )); then
+          printf '\r\033[36m[hyperion]\033[0m building … %d crate(s) compiled' "$n" >&2
+        elif (( n % 25 == 0 )); then
+          printf '[hyperion] building … %d crate(s) compiled\n' "$n" >&2
+        fi
+      done
+  local rc; rc="$(cat "$rc_file" 2>/dev/null || echo 1)"; [[ "$rc" =~ ^[0-9]+$ ]] || rc=1
+  local final; final="$(cat "$count_file" 2>/dev/null || echo 0)"
+  rm -f "$count_file" "$rc_file"
+  (( tty )) && printf '\n' >&2
+  # Remember the unit count for the next run's denominator (success only).
+  if (( rc == 0 )) && [[ "$final" =~ ^[0-9]+$ ]] && (( final > 0 )); then
+    printf '%s' "$final" > "$total_file" 2>/dev/null || true
+  fi
+  return "$rc"
+}
+
 [[ $EUID -eq 0 ]] || fail "Run as root."
 
 #-------- 0. Pre-flight ---------------------------------------------------
@@ -289,14 +341,34 @@ if (( DO_BUILD && PREBUILT_OK == 0 )); then
     fi
   fi
 
+  # Speed up the from-source path. Both are best-effort + safe to skip:
+  #  - incremental compilation reuses the persistent target/ across updates so
+  #    only changed crates (+ the three bins, which re-stamp the SHA) recompile;
+  #  - a faster linker (mold > lld > gold) when one is installed — link time is a
+  #    real slice now that lto=off. (Setting RUSTFLAGS invalidates the cache once
+  #    on first adoption; nodes without an alt linker are untouched.)
+  export CARGO_INCREMENTAL=1
+  for _ld in mold ld.lld lld ld.gold; do
+    if command -v "$_ld" >/dev/null 2>&1; then
+      case "$_ld" in
+        mold)        _lf="-C link-arg=-fuse-ld=mold" ;;
+        ld.lld|lld)  _lf="-C link-arg=-fuse-ld=lld" ;;
+        ld.gold)     _lf="-C link-arg=-fuse-ld=gold" ;;
+      esac
+      export RUSTFLAGS="${RUSTFLAGS:-} $_lf"
+      log "  using $_ld for faster linking"
+      break
+    fi
+  done
+
   # Stamp the exact checked-out commit into the binaries. build.rs reads this
   # env first, and `rerun-if-env-changed=HYPERION_GIT_SHA` forces a rebuild if
   # a previous incremental build had baked a different SHA — so a source build
   # can never embed a stale commit. `|| rc=$?` keeps the swap cleanup reachable
   # under `set -e`.
   build_rc=0
-  HYPERION_GIT_SHA="$HEAD_FULL" cargo build --release \
-    --bin hyperion-agent --bin hyperion-web --bin hctl --quiet || build_rc=$?
+  HYPERION_GIT_SHA="$HEAD_FULL" build_with_progress build --release \
+    --bin hyperion-agent --bin hyperion-web --bin hctl || build_rc=$?
   if [ -n "$SWAPFILE" ]; then
     swapoff "$SWAPFILE" 2>/dev/null || true
     rm -f "$SWAPFILE"
