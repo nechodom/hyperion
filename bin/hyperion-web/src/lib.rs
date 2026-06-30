@@ -465,6 +465,7 @@ pub fn build_router(state: SharedState) -> Router {
             "/api/jobs-running-count",
             get(handlers::jobs::get_running_count),
         )
+        .route("/api/jobs-active", get(handlers::jobs::get_active_jobs))
         .route("/emails", get(handlers::emails::get_emails))
         .route("/install", get(handlers::install::get_install))
         .route("/install/invite", post(handlers::install::post_invite))
