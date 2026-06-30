@@ -151,6 +151,12 @@ fi
 #-------- 2. Pull ---------------------------------------------------------
 cd "$INSTALL_DIR"
 PREV=$(git rev-parse --short HEAD)
+# A from-source build can legitimately rewrite Cargo.lock in place (cargo
+# refreshes it during the build). That's a generated, committed file the
+# `git reset --hard` below overwrites anyway, so don't let it block the NEXT
+# update with "local changes". Discard just that file; any OTHER local change
+# is a real edit you'd lose on reset, so we still refuse + report it.
+git checkout -- Cargo.lock 2>/dev/null || true
 if [[ -n "$(git status --porcelain)" ]]; then
   fail "Working tree at $INSTALL_DIR has local changes:
 $(git status --short | sed 's/^/    /')
