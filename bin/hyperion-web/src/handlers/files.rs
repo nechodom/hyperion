@@ -83,7 +83,10 @@ pub async fn get_files(
         &ctx,
         detail.id.as_str(),
         false,
-        Capability::HostingFiles,
+        // READ-only browsing/download: gate on view, not the write cap, so a
+        // read-only role (Viewer) can still inspect files. The WRITE handlers go
+        // through authorize_file_write → HostingFiles.
+        Capability::HostingView,
     )
     .await
     {
@@ -508,7 +511,10 @@ pub async fn get_download(
         &ctx,
         detail.id.as_str(),
         false,
-        Capability::HostingFiles,
+        // READ-only browsing/download: gate on view, not the write cap, so a
+        // read-only role (Viewer) can still inspect files. The WRITE handlers go
+        // through authorize_file_write → HostingFiles.
+        Capability::HostingView,
     )
     .await
     {
