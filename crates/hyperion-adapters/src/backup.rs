@@ -157,7 +157,8 @@ pub async fn restore_archive(archive: &Path, target_root: &Path) -> Result<u64, 
 }
 
 /// Extract a gzip-compressed tar over `target_root`, refusing any member that
-/// would escape the root.
+/// would escape the root. Public wrapper over [`extract_archive_sandboxed`]
+/// (gzip-decoded). Signature unchanged so existing callers keep working.
 ///
 /// SECURITY: backup archives can be fully attacker-controlled — a tenant can
 /// upload a `.tar.gz` to restore over their own hosting, and cross-node /clone
@@ -165,7 +166,33 @@ pub async fn restore_archive(archive: &Path, target_root: &Path) -> Result<u64, 
 /// This runs as **root** on the worker, so a bare `tar -xzf` honouring `../`
 /// members, absolute paths, or a symlink-then-write-through-it sequence would be
 /// an arbitrary root-level file write (→ full node + cross-tenant compromise).
-/// We therefore:
+/// See [`extract_archive_sandboxed`] for the per-member containment checks.
+pub fn extract_tar_gz_sandboxed(archive: &Path, target_root: &Path) -> Result<u64, AdapterError> {
+    let archive_len = std::fs::metadata(archive)?.len();
+    let file = std::fs::File::open(archive)?;
+    let gz = flate2::read::GzDecoder::new(file);
+    extract_archive_sandboxed(gz, target_root)?;
+    Ok(archive_len)
+}
+
+/// Extract a *plain* (non-gzip) tar over `target_root`, refusing any member that
+/// would escape the root. Same containment guarantees as
+/// [`extract_tar_gz_sandboxed`]; used for uncompressed bundle archives (the
+/// panel-import outer `bundle.tar`).
+pub fn extract_tar_sandboxed(archive: &Path, target_root: &Path) -> Result<u64, AdapterError> {
+    let archive_len = std::fs::metadata(archive)?.len();
+    let file = std::fs::File::open(archive)?;
+    extract_archive_sandboxed(file, target_root)?;
+    Ok(archive_len)
+}
+
+/// Core sandboxed tar extractor. Reads tar entries from `reader` (already
+/// decompressed if needed) and unpacks them under `target_root`, applying the
+/// full per-member containment validation. Returns the number of members
+/// unpacked.
+///
+/// SECURITY (this runs as **root** on the worker against attacker-controlled
+/// archives, so a bare `tar` would be an arbitrary root file write):
 ///   * reject members with absolute paths or any `..`/root/prefix component;
 ///   * reject symlink/hardlink members whose target is absolute or contains `..`;
 ///   * re-check the joined destination stays under the canonical root, and rely
@@ -173,21 +200,22 @@ pub async fn restore_archive(archive: &Path, target_root: &Path) -> Result<u64, 
 ///   * NOT preserve permissions/ownership from the archive, so a crafted
 ///     setuid-root file or attacker uid can't be planted (the service layer
 ///     re-chowns the restored tree to the hosting's own user afterwards).
-fn extract_tar_gz_sandboxed(archive: &Path, target_root: &Path) -> Result<u64, AdapterError> {
+fn extract_archive_sandboxed<R: std::io::Read>(
+    reader: R,
+    target_root: &Path,
+) -> Result<u64, AdapterError> {
     use std::path::Component;
 
-    let archive_len = std::fs::metadata(archive)?.len();
     let target_canon = std::fs::canonicalize(target_root)
         .map_err(|e| AdapterError::Other(format!("restore target canonicalize: {e}")))?;
 
-    let file = std::fs::File::open(archive)?;
-    let gz = flate2::read::GzDecoder::new(file);
-    let mut ar = tar::Archive::new(gz);
+    let mut ar = tar::Archive::new(reader);
     // Do NOT trust archive-recorded perms/owner/setuid bits.
     ar.set_preserve_permissions(false);
     ar.set_preserve_mtime(true);
     ar.set_overwrite(true);
 
+    let mut count = 0u64;
     let entries = ar
         .entries()
         .map_err(|e| AdapterError::Other(format!("restore read entries: {e}")))?;
@@ -246,8 +274,9 @@ fn extract_tar_gz_sandboxed(archive: &Path, target_root: &Path) -> Result<u64, A
                 path.display()
             )));
         }
+        count += 1;
     }
-    Ok(archive_len)
+    Ok(count)
 }
 
 /// Restore a `mariadb-dump` SQL dump file into the named DB. Drops +
@@ -622,6 +651,120 @@ pub fn engine_str(engine: DbProvision) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Build a plain `.tar` at `path` from `(name, kind, body_or_linktarget)`
+    /// members. `kind` is "file" or "symlink".
+    fn build_plain_tar(path: &Path, members: &[(&str, &str, &str)]) {
+        let f = std::fs::File::create(path).expect("create tar");
+        let mut b = tar::Builder::new(f);
+        for (name, kind, payload) in members {
+            if *kind == "symlink" {
+                let mut h = tar::Header::new_gnu();
+                h.set_entry_type(tar::EntryType::Symlink);
+                h.set_size(0);
+                h.set_mode(0o777);
+                b.append_link(&mut h, name, payload)
+                    .expect("append symlink");
+            } else {
+                let mut h = tar::Header::new_gnu();
+                h.set_size(payload.len() as u64);
+                h.set_mode(0o644);
+                h.set_cksum();
+                b.append_data(&mut h, name, payload.as_bytes())
+                    .expect("append file");
+            }
+        }
+        b.finish().expect("finish tar");
+    }
+
+    #[test]
+    fn extract_tar_sandboxed_happy_path() {
+        let d = tempfile::tempdir().expect("dir");
+        let tar = d.path().join("bundle.tar");
+        build_plain_tar(&tar, &[("ok/inside.txt", "file", "hello")]);
+        let dest = d.path().join("dest");
+        std::fs::create_dir_all(&dest).expect("dest");
+        let n = extract_tar_sandboxed(&tar, &dest).expect("extract");
+        assert!(n > 0);
+        assert_eq!(
+            std::fs::read_to_string(dest.join("ok/inside.txt")).unwrap(),
+            "hello"
+        );
+    }
+
+    /// Write a single-member tar by hand, so we can plant a `..` path that
+    /// `tar::Builder` would otherwise refuse to encode (mirrors a real attacker
+    /// who hand-crafts the bytes, which is exactly the threat the extractor
+    /// guards against).
+    fn build_raw_traversal_tar(path: &Path, member: &str, body: &[u8]) {
+        let mut header = [0u8; 512];
+        let name = member.as_bytes();
+        header[..name.len()].copy_from_slice(name);
+        // mode "0000644\0"
+        header[100..108].copy_from_slice(b"0000644\0");
+        // uid/gid
+        header[108..116].copy_from_slice(b"0000000\0");
+        header[116..124].copy_from_slice(b"0000000\0");
+        // size (octal, 11 digits + space)
+        let size = format!("{:011o} ", body.len());
+        header[124..136].copy_from_slice(size.as_bytes());
+        // mtime
+        header[136..148].copy_from_slice(b"00000000000 ");
+        // typeflag '0' = regular file
+        header[156] = b'0';
+        // ustar magic
+        header[257..263].copy_from_slice(b"ustar\0");
+        header[263..265].copy_from_slice(b"00");
+        // checksum: 8 spaces while computing, then octal sum.
+        for b in &mut header[148..156] {
+            *b = b' ';
+        }
+        let sum: u32 = header.iter().map(|&b| b as u32).sum();
+        let cksum = format!("{sum:06o}\0 ");
+        header[148..156].copy_from_slice(cksum.as_bytes());
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&header);
+        out.extend_from_slice(body);
+        // pad body to 512
+        let pad = (512 - (body.len() % 512)) % 512;
+        out.extend(std::iter::repeat_n(0u8, pad));
+        // two zero blocks = end of archive
+        out.extend(std::iter::repeat_n(0u8, 1024));
+        std::fs::write(path, &out).expect("write raw tar");
+    }
+
+    #[test]
+    fn extract_tar_sandboxed_rejects_traversal() {
+        let d = tempfile::tempdir().expect("dir");
+        let tar = d.path().join("bundle.tar");
+        build_raw_traversal_tar(&tar, "../escape.txt", b"pwn");
+        let dest = d.path().join("dest");
+        std::fs::create_dir_all(&dest).expect("dest");
+        let err = extract_tar_sandboxed(&tar, &dest).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("unsafe archive member")
+                || format!("{err:?}").contains("escapes target root"),
+            "got: {err:?}"
+        );
+        assert!(!d.path().join("escape.txt").exists());
+    }
+
+    #[test]
+    fn extract_tar_sandboxed_rejects_absolute_symlink() {
+        let d = tempfile::tempdir().expect("dir");
+        let tar = d.path().join("bundle.tar");
+        // Symlink member pointing outside the root (the panel-import zip-slip class).
+        build_plain_tar(&tar, &[("leak", "symlink", "/etc/passwd")]);
+        let dest = d.path().join("dest");
+        std::fs::create_dir_all(&dest).expect("dest");
+        let err = extract_tar_sandboxed(&tar, &dest).unwrap_err();
+        assert!(
+            format!("{err:?}").contains("unsafe link member"),
+            "got: {err:?}"
+        );
+        assert!(!dest.join("leak").exists());
+    }
 
     #[test]
     fn parse_backup_ts_handles_dashes_and_extensions() {

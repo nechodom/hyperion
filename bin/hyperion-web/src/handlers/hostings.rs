@@ -1525,7 +1525,15 @@ pub async fn get_detail(
     // super_admin + admin pass through. Unauthenticated redirects to
     // /login earlier (require_auth middleware), so unwrap to /hostings
     // for the no-access case.
-    if let Err(r) = require_hosting_access(&state, &ctx, detail.id.as_str(), false).await {
+    if let Err(r) = require_hosting_access(
+        &state,
+        &ctx,
+        detail.id.as_str(),
+        false,
+        Capability::HostingView,
+    )
+    .await
+    {
         return Ok(r);
     }
     let sel_id = HostingSelector::Id(detail.id.clone());
@@ -2248,7 +2256,9 @@ pub async fn post_backup_now(
     // tar of the whole docroot, DB dump, optional S3 upload, which on a
     // big site is minutes — moves into the detached worker so closing
     // the browser no longer aborts the backup.
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector, Capability::BackupRun)
+        .await
+    {
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
@@ -2333,7 +2343,14 @@ pub async fn post_set_expiry(
     ctx: AuthCtx,
     Form(form): Form<SetExpiryForm>,
 ) -> Result<Response, AppError> {
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+    let sel = match require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::HostingEditConfig,
+    )
+    .await
+    {
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
@@ -2404,7 +2421,14 @@ pub async fn post_clear_expiry(
     ctx: AuthCtx,
     Form(form): Form<ClearExpiryForm>,
 ) -> Result<Response, AppError> {
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+    let sel = match require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::HostingEditConfig,
+    )
+    .await
+    {
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
@@ -2456,7 +2480,9 @@ pub async fn post_wp_install(
     ctx: AuthCtx,
     Form(form): Form<WpInstallForm>,
 ) -> Result<Response, AppError> {
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector, Capability::WpManage)
+        .await
+    {
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
@@ -2584,10 +2610,13 @@ pub async fn post_delete(
     ctx: AuthCtx,
     Form(form): Form<DeleteForm>,
 ) -> Result<Response, AppError> {
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
-        Ok(s) => s,
-        Err(r) => return Ok(r),
-    };
+    let sel =
+        match require_manage_for_selector(&state, &ctx, &form.selector, Capability::HostingDelete)
+            .await
+        {
+            Ok(s) => s,
+            Err(r) => return Ok(r),
+        };
     let opts = DeleteOpts {
         keep_user: form.keep_user.as_deref() == Some("on"),
         keep_database: form.keep_db.as_deref() == Some("on"),
@@ -2705,7 +2734,14 @@ pub async fn post_set_notes(
     ctx: AuthCtx,
     Form(form): Form<NotesForm>,
 ) -> Result<Response, AppError> {
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+    let sel = match require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::HostingEditConfig,
+    )
+    .await
+    {
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
@@ -2796,7 +2832,14 @@ pub async fn post_set_php_ini(
     ctx: AuthCtx,
     Form(form): Form<PhpIniForm>,
 ) -> Result<Response, AppError> {
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+    let sel = match require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::HostingEditConfig,
+    )
+    .await
+    {
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
@@ -2914,10 +2957,13 @@ pub async fn post_suspend(
     ctx: AuthCtx,
     Form(form): Form<SuspendForm>,
 ) -> Result<Response, AppError> {
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
-        Ok(s) => s,
-        Err(r) => return Ok(r),
-    };
+    let sel =
+        match require_manage_for_selector(&state, &ctx, &form.selector, Capability::HostingSuspend)
+            .await
+        {
+            Ok(s) => s,
+            Err(r) => return Ok(r),
+        };
     let reason = hyperion_types::SuspendReason::Manual {
         message: if form.reason.trim().is_empty() {
             None
@@ -2953,10 +2999,13 @@ pub async fn post_resume(
     ctx: AuthCtx,
     Form(form): Form<ResumeForm>,
 ) -> Result<Response, AppError> {
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
-        Ok(s) => s,
-        Err(r) => return Ok(r),
-    };
+    let sel =
+        match require_manage_for_selector(&state, &ctx, &form.selector, Capability::HostingSuspend)
+            .await
+        {
+            Ok(s) => s,
+            Err(r) => return Ok(r),
+        };
     let target = node_target(&form.target_node);
     let resp =
         crate::dispatcher::dispatch_to_node(&state, target, Request::HostingResume(sel)).await?;
@@ -3018,7 +3067,14 @@ pub async fn post_vhost_options(
     ctx: AuthCtx,
     Form(form): Form<VhostOptionsForm>,
 ) -> Result<Response, AppError> {
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+    let sel = match require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::HostingEditConfig,
+    )
+    .await
+    {
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
@@ -3093,7 +3149,14 @@ pub async fn post_set_aliases(
     ctx: AuthCtx,
     Form(form): Form<AliasesForm>,
 ) -> Result<Response, AppError> {
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+    let sel = match require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::HostingEditConfig,
+    )
+    .await
+    {
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
@@ -3182,7 +3245,9 @@ pub async fn post_wp_debug(
     ctx: AuthCtx,
     Form(form): Form<WpDebugForm>,
 ) -> Result<Response, AppError> {
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector, Capability::WpManage)
+        .await
+    {
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
@@ -3220,7 +3285,9 @@ pub async fn post_wp_debug_log_rotate(
     ctx: AuthCtx,
     Form(form): Form<WpRotateForm>,
 ) -> Result<Response, AppError> {
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector, Capability::WpManage)
+        .await
+    {
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
@@ -3256,7 +3323,9 @@ pub async fn post_wp_redis(
     ctx: AuthCtx,
     Form(form): Form<WpRedisForm>,
 ) -> Result<Response, AppError> {
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector, Capability::WpManage)
+        .await
+    {
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
@@ -3285,7 +3354,9 @@ pub async fn post_wp_redis_rotate(
     ctx: AuthCtx,
     Form(form): Form<WpRotateForm>,
 ) -> Result<Response, AppError> {
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector, Capability::WpManage)
+        .await
+    {
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
@@ -3345,7 +3416,9 @@ pub async fn post_backup_delete(
     // selector because non-admins can only see the backup list for
     // hostings they have access to; a viewer probing arbitrary
     // backup_ids without a matching access grant gets 403 here.
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector, Capability::BackupRun)
+        .await
+    {
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
@@ -3393,10 +3466,13 @@ pub async fn post_set_acme_email(
     ctx: AuthCtx,
     Form(form): Form<SetAcmeEmailForm>,
 ) -> Result<Response, AppError> {
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
-        Ok(s) => s,
-        Err(r) => return Ok(r),
-    };
+    let sel =
+        match require_manage_for_selector(&state, &ctx, &form.selector, Capability::CertManage)
+            .await
+        {
+            Ok(s) => s,
+            Err(r) => return Ok(r),
+        };
     let trimmed = form.acme_email.trim();
     let email = if trimmed.is_empty() {
         None
@@ -3452,7 +3528,14 @@ pub async fn post_set_php_version(
     ctx: AuthCtx,
     Form(form): Form<SetPhpVersionForm>,
 ) -> Result<Response, AppError> {
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+    let sel = match require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::HostingEditConfig,
+    )
+    .await
+    {
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
@@ -3485,7 +3568,14 @@ pub async fn post_set_limits(
     ctx: AuthCtx,
     Form(form): Form<SetLimitsForm>,
 ) -> Result<Response, AppError> {
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+    let sel = match require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::HostingEditConfig,
+    )
+    .await
+    {
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
@@ -3636,7 +3726,15 @@ pub async fn post_monitor_set(
     let (detail, owner_node) = find_hosting_anywhere(&state, sel.clone()).await?;
     let target = owner_node.as_deref();
     // Guard with manage-level access. super_admin / admin bypass.
-    if let Err(r) = require_hosting_access(&state, &ctx, detail.id.as_str(), true).await {
+    if let Err(r) = require_hosting_access(
+        &state,
+        &ctx,
+        detail.id.as_str(),
+        true,
+        Capability::MonitoringManage,
+    )
+    .await
+    {
         return Ok(r);
     }
     let enabled = form.enabled == "on" || form.enabled == "true" || form.enabled == "1";
@@ -3711,7 +3809,15 @@ pub async fn post_monitor_probe(
     let sel = parse_selector(&form.selector)?;
     let (detail, owner_node) = find_hosting_anywhere(&state, sel.clone()).await?;
     let target = owner_node.as_deref();
-    if let Err(r) = require_hosting_access(&state, &ctx, detail.id.as_str(), true).await {
+    if let Err(r) = require_hosting_access(
+        &state,
+        &ctx,
+        detail.id.as_str(),
+        true,
+        Capability::MonitoringManage,
+    )
+    .await
+    {
         return Ok(r);
     }
     let _ = crate::dispatcher::dispatch_to_node(&state, target, Request::MonitorProbeNow { sel })
@@ -3778,12 +3884,8 @@ pub async fn require_hosting_access(
     ctx: &AuthCtx,
     hosting_id: &str,
     require_manage: bool,
+    cap: Capability,
 ) -> Result<(), Response> {
-    // Admins and any all-scope role (built-in admin/super, or a custom role with
-    // "all hostings" scope) reach every hosting without a per-hosting grant.
-    if ctx.is_admin_or_higher() || ctx.scope_all() {
-        return Ok(());
-    }
     let forbidden = || {
         (
             axum::http::StatusCode::FORBIDDEN,
@@ -3792,6 +3894,22 @@ pub async fn require_hosting_access(
         )
             .into_response()
     };
+    // Admins (built-in admin/super) are the only unconditional escape hatch.
+    if ctx.is_admin_or_higher() {
+        return Ok(());
+    }
+    // SECURITY (sec-findings #1): an "all hostings" scope (a custom role with
+    // scope=all) must NOT imply the action capability. A scope_all role still
+    // has to hold `cap` for THIS action — otherwise a read-only-but-all-scope
+    // role could write files / delete / reset DBs across the whole cluster.
+    if !ctx.can(cap) {
+        return Err(forbidden());
+    }
+    // With the capability held, an all-scope role reaches every hosting without
+    // a per-hosting grant.
+    if ctx.scope_all() {
+        return Ok(());
+    }
     let Some(sess) = ctx.session.as_ref() else {
         return Err(forbidden());
     };
@@ -3827,6 +3945,7 @@ pub async fn require_manage_for_selector(
     state: &SharedState,
     ctx: &AuthCtx,
     sel_str: &str,
+    cap: Capability,
 ) -> Result<HostingSelector, Response> {
     let forbidden = || {
         (
@@ -3837,7 +3956,16 @@ pub async fn require_manage_for_selector(
             .into_response()
     };
     let sel = parse_selector(sel_str).map_err(|_| forbidden())?;
-    if ctx.is_admin_or_higher() || ctx.scope_all() {
+    // Admins (built-in admin/super) are the only unconditional escape hatch.
+    if ctx.is_admin_or_higher() {
+        return Ok(sel);
+    }
+    // SECURITY (sec-findings #1): scope_all must NOT bypass the per-action
+    // capability — a scope_all custom role still has to hold `cap`.
+    if !ctx.can(cap) {
+        return Err(forbidden());
+    }
+    if ctx.scope_all() {
         return Ok(sel);
     }
     let hosting_id = match &sel {
@@ -3852,7 +3980,7 @@ pub async fn require_manage_for_selector(
             }
         }
     };
-    require_hosting_access(state, ctx, &hosting_id, true).await?;
+    require_hosting_access(state, ctx, &hosting_id, true, cap).await?;
     Ok(sel)
 }
 
@@ -4650,10 +4778,13 @@ pub async fn post_dns_check(
 ) -> Result<Response, AppError> {
     // DNS check is non-mutating but ties to a specific hosting; gate
     // at manage so a viewer can't probe via this endpoint.
-    let detail_sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
-        Ok(s) => s,
-        Err(r) => return Ok(r),
-    };
+    let detail_sel =
+        match require_manage_for_selector(&state, &ctx, &form.selector, Capability::HostingView)
+            .await
+        {
+            Ok(s) => s,
+            Err(r) => return Ok(r),
+        };
     // Find the hosting across the cluster — the operator may be
     // looking at a worker-hosted row whose master row doesn't
     // exist. DnsCheck itself runs from the MASTER (dig from our
@@ -4741,7 +4872,15 @@ pub async fn get_dns_panel(
 ) -> Result<Response, AppError> {
     let sel = parse_selector(&selector)?;
     let (detail, owner_node) = find_hosting_anywhere(&state, sel).await?;
-    if let Err(r) = require_hosting_access(&state, &ctx, detail.id.as_str(), false).await {
+    if let Err(r) = require_hosting_access(
+        &state,
+        &ctx,
+        detail.id.as_str(),
+        false,
+        Capability::HostingView,
+    )
+    .await
+    {
         return Ok(r);
     }
     // On any failure return an empty fragment — the placeholder just
@@ -4781,7 +4920,15 @@ pub async fn get_spf_panel(
 ) -> Result<Response, AppError> {
     let sel = parse_selector(&selector)?;
     let (detail, owner_node) = find_hosting_anywhere(&state, sel).await?;
-    if let Err(r) = require_hosting_access(&state, &ctx, detail.id.as_str(), false).await {
+    if let Err(r) = require_hosting_access(
+        &state,
+        &ctx,
+        detail.id.as_str(),
+        false,
+        Capability::HostingView,
+    )
+    .await
+    {
         return Ok(r);
     }
     let Ok(domain) = Domain::parse(&detail.domain) else {
@@ -4823,7 +4970,15 @@ pub async fn get_vuln_panel(
 ) -> Result<Response, AppError> {
     let sel = parse_selector(&selector)?;
     let (detail, owner_node) = find_hosting_anywhere(&state, sel.clone()).await?;
-    if let Err(r) = require_hosting_access(&state, &ctx, detail.id.as_str(), false).await {
+    if let Err(r) = require_hosting_access(
+        &state,
+        &ctx,
+        detail.id.as_str(),
+        false,
+        Capability::WpVulnView,
+    )
+    .await
+    {
         return Ok(r);
     }
     // Auto-update toggle state lives in the OWNING node's hosting_kv
@@ -4891,7 +5046,9 @@ pub async fn post_wp_auto_update(
     ctx: AuthCtx,
     Form(form): Form<WpAutoUpdateForm>,
 ) -> Result<Response, AppError> {
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector, Capability::WpManage)
+        .await
+    {
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
@@ -4934,7 +5091,9 @@ pub async fn post_set_backup_cadence(
     ctx: AuthCtx,
     Form(form): Form<BackupCadenceForm>,
 ) -> Result<Response, AppError> {
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector, Capability::BackupRun)
+        .await
+    {
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
@@ -4987,7 +5146,15 @@ pub async fn get_sftp_panel(
 ) -> Result<Response, AppError> {
     let sel = parse_selector(&selector)?;
     let (detail, owner_node) = find_hosting_anywhere(&state, sel.clone()).await?;
-    if let Err(r) = require_hosting_access(&state, &ctx, detail.id.as_str(), false).await {
+    if let Err(r) = require_hosting_access(
+        &state,
+        &ctx,
+        detail.id.as_str(),
+        false,
+        Capability::HostingView,
+    )
+    .await
+    {
         return Ok(r);
     }
     let csrf_sftp = csrf_token_for(&state, &ctx, "/hostings/sftp");
@@ -5042,7 +5209,14 @@ pub async fn post_sftp(
     ctx: AuthCtx,
     Form(form): Form<SftpForm>,
 ) -> Result<Response, AppError> {
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+    let sel = match require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::HostingEditConfig,
+    )
+    .await
+    {
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
@@ -5104,7 +5278,15 @@ pub async fn get_bans_panel(
 ) -> Result<Response, AppError> {
     let sel = parse_selector(&selector)?;
     let (detail, owner_node) = find_hosting_anywhere(&state, sel).await?;
-    if let Err(r) = require_hosting_access(&state, &ctx, detail.id.as_str(), false).await {
+    if let Err(r) = require_hosting_access(
+        &state,
+        &ctx,
+        detail.id.as_str(),
+        false,
+        Capability::HostingView,
+    )
+    .await
+    {
         return Ok(r);
     }
     let csrf_ban = csrf_token_for(&state, &ctx, "/hostings/ban");
@@ -5145,10 +5327,13 @@ pub async fn post_ban(
     ctx: AuthCtx,
     Form(form): Form<BanForm>,
 ) -> Result<Response, AppError> {
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
-        Ok(s) => s,
-        Err(r) => return Ok(r),
-    };
+    let sel =
+        match require_manage_for_selector(&state, &ctx, &form.selector, Capability::SecurityManage)
+            .await
+        {
+            Ok(s) => s,
+            Err(r) => return Ok(r),
+        };
     let sel_url = urlencoding(&form.selector);
     let hosting_id = match find_hosting_anywhere(&state, sel.clone()).await {
         Ok((d, _)) => Some(d.id.as_str().to_string()),
@@ -5206,10 +5391,13 @@ pub async fn post_cert_issue(
     ctx: AuthCtx,
     Form(form): Form<CertIssueForm>,
 ) -> Result<Response, AppError> {
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
-        Ok(s) => s,
-        Err(r) => return Ok(r),
-    };
+    let sel =
+        match require_manage_for_selector(&state, &ctx, &form.selector, Capability::CertManage)
+            .await
+        {
+            Ok(s) => s,
+            Err(r) => return Ok(r),
+        };
     let req = CertIssueRequest {
         staging: form.staging.as_deref() == Some("on"),
         require_dns_match: form.require_dns_match.as_deref() != Some("off"),
@@ -5346,10 +5534,11 @@ pub async fn post_cert_upload(
     }
     let selector = selector.ok_or_else(|| AppError::BadRequest("missing selector".into()))?;
     // Authorize before doing anything with the (sensitive) key material.
-    let sel = match require_manage_for_selector(&state, &ctx, &selector).await {
-        Ok(s) => s,
-        Err(r) => return Ok(r),
-    };
+    let sel =
+        match require_manage_for_selector(&state, &ctx, &selector, Capability::CertManage).await {
+            Ok(s) => s,
+            Err(r) => return Ok(r),
+        };
     let cert_pem = cert_pem
         .filter(|s| !s.trim().is_empty())
         .ok_or_else(|| AppError::BadRequest("missing certificate PEM".into()))?;
@@ -5422,10 +5611,13 @@ pub async fn post_cert_dns01_begin(
     ctx: AuthCtx,
     Form(form): Form<Dns01BeginForm>,
 ) -> Result<Response, AppError> {
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
-        Ok(s) => s,
-        Err(r) => return Ok(r),
-    };
+    let sel =
+        match require_manage_for_selector(&state, &ctx, &form.selector, Capability::CertManage)
+            .await
+        {
+            Ok(s) => s,
+            Err(r) => return Ok(r),
+        };
     let sel_url = urlencoding(&form.selector);
     let (detail, owner_node) = find_hosting_anywhere(&state, sel.clone()).await?;
     let staging = form.staging.as_deref() == Some("on");
@@ -5485,10 +5677,13 @@ pub async fn post_cert_dns01_finish(
     ctx: AuthCtx,
     Form(form): Form<Dns01FinishForm>,
 ) -> Result<Response, AppError> {
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
-        Ok(s) => s,
-        Err(r) => return Ok(r),
-    };
+    let sel =
+        match require_manage_for_selector(&state, &ctx, &form.selector, Capability::CertManage)
+            .await
+        {
+            Ok(s) => s,
+            Err(r) => return Ok(r),
+        };
     let sel_url = urlencoding(&form.selector);
     let target_owned: Option<String> = find_hosting_anywhere(&state, sel.clone())
         .await
@@ -5549,10 +5744,13 @@ pub async fn post_logs(
 ) -> Result<Response, AppError> {
     // Logs can carry sensitive request data and stack traces — gate
     // them at manage level just like the other per-hosting writes.
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
-        Ok(s) => s,
-        Err(r) => return Ok(r),
-    };
+    let sel =
+        match require_manage_for_selector(&state, &ctx, &form.selector, Capability::HostingView)
+            .await
+        {
+            Ok(s) => s,
+            Err(r) => return Ok(r),
+        };
     // Per-site nginx/php logs live on the OWNING node's disk — dispatch
     // there, not the master local socket (which NotFounds for a
     // worker-hosted site). This is an HTMX target (#logs-output), so on
@@ -5615,10 +5813,13 @@ pub async fn post_cron_save(
     ctx: AuthCtx,
     Form(form): Form<CronForm>,
 ) -> Result<Response, AppError> {
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
-        Ok(s) => s,
-        Err(r) => return Ok(r),
-    };
+    let sel =
+        match require_manage_for_selector(&state, &ctx, &form.selector, Capability::HostingCron)
+            .await
+        {
+            Ok(s) => s,
+            Err(r) => return Ok(r),
+        };
     let sel_url = urlencoding(&form.selector);
     // The crontab lives on the owning node (the editor reads it from
     // there) — write to the same node, not the master local socket.
@@ -5700,7 +5901,9 @@ pub async fn post_restore_upload(
     // Authorize BEFORE touching the filesystem — a viewer must not be
     // able to dump arbitrary tarballs into /var/lib/hyperion/backups
     // even if they can't ultimately trigger the restore.
-    let sel = match require_manage_for_selector(&state, &ctx, &selector).await {
+    let sel = match require_manage_for_selector(&state, &ctx, &selector, Capability::BackupRestore)
+        .await
+    {
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
@@ -5995,7 +6198,9 @@ pub async fn post_wp_theme_action(
     ctx: AuthCtx,
     Form(form): Form<WpThemeActionForm>,
 ) -> Result<Response, AppError> {
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector, Capability::WpManage)
+        .await
+    {
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
@@ -6100,7 +6305,15 @@ pub async fn get_transfer(
     let sel = parse_selector(&selector)?;
     let (detail, owner_node) = find_hosting_anywhere(&state, sel).await?;
     // Moving/copying is a manage action — read-only users don't get the wizard.
-    if let Err(r) = require_hosting_access(&state, &ctx, detail.id.as_str(), true).await {
+    if let Err(r) = require_hosting_access(
+        &state,
+        &ctx,
+        detail.id.as_str(),
+        true,
+        Capability::HostingView,
+    )
+    .await
+    {
         return Ok(r);
     }
     let all_nodes = fetch_remote_nodes(&state).await.unwrap_or_default();
@@ -6204,7 +6417,14 @@ pub async fn post_hosting_clone(
     headers: axum::http::HeaderMap,
     Form(form): Form<HostingCloneForm>,
 ) -> Result<Response, AppError> {
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+    let sel = match require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::HostingMigrateClone,
+    )
+    .await
+    {
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
@@ -6596,7 +6816,14 @@ pub async fn post_quota_set(
     ctx: AuthCtx,
     Form(form): Form<QuotaSetForm>,
 ) -> Result<Response, AppError> {
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+    let sel = match require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::HostingEditConfig,
+    )
+    .await
+    {
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
@@ -6721,7 +6948,14 @@ pub async fn post_migration_move(
     headers: axum::http::HeaderMap,
     Form(form): Form<MigrationMoveForm>,
 ) -> Result<Response, AppError> {
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+    let sel = match require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::HostingMigrateClone,
+    )
+    .await
+    {
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
@@ -7455,7 +7689,14 @@ pub async fn post_migration_export(
     headers: axum::http::HeaderMap,
     Form(form): Form<MigrationExportForm>,
 ) -> Result<Response, AppError> {
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+    let sel = match require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::HostingMigrateClone,
+    )
+    .await
+    {
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
@@ -7509,7 +7750,9 @@ pub async fn post_wp_plugin_action(
     ctx: AuthCtx,
     Form(form): Form<WpPluginActionForm>,
 ) -> Result<Response, AppError> {
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector, Capability::WpManage)
+        .await
+    {
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
@@ -7605,7 +7848,9 @@ pub async fn post_wp_reset(
     ctx: AuthCtx,
     Form(form): Form<WpResetForm>,
 ) -> Result<Response, AppError> {
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector, Capability::WpManage)
+        .await
+    {
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
@@ -7649,7 +7894,14 @@ pub async fn post_db_reset(
     ctx: AuthCtx,
     Form(form): Form<DbResetForm>,
 ) -> Result<Response, AppError> {
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+    let sel = match require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::HostingDatabases,
+    )
+    .await
+    {
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
@@ -7693,7 +7945,14 @@ pub async fn post_ftp_set(
     ctx: AuthCtx,
     Form(form): Form<FtpSetForm>,
 ) -> Result<Response, AppError> {
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+    let sel = match require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::HostingEditConfig,
+    )
+    .await
+    {
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
@@ -7741,7 +8000,14 @@ pub async fn post_ftp_disable(
     ctx: AuthCtx,
     Form(form): Form<FtpDisableForm>,
 ) -> Result<Response, AppError> {
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+    let sel = match require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::HostingEditConfig,
+    )
+    .await
+    {
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
@@ -7779,10 +8045,13 @@ pub async fn post_restore(
     ctx: AuthCtx,
     Form(form): Form<RestoreForm>,
 ) -> Result<Response, AppError> {
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
-        Ok(s) => s,
-        Err(r) => return Ok(r),
-    };
+    let sel =
+        match require_manage_for_selector(&state, &ctx, &form.selector, Capability::BackupRestore)
+            .await
+        {
+            Ok(s) => s,
+            Err(r) => return Ok(r),
+        };
     // ── Synchronous pre-flight (authz, form parse, restore-mode parse,
     // owner-node lookup). Only the BackupRestore dispatch — untar of the
     // whole archive plus a DB import, minutes on a large site — detaches
@@ -7873,7 +8142,15 @@ pub async fn get_backup_download(
     use base64::Engine;
     let sel = parse_selector(&selector)?;
     let (detail, owner_node) = find_hosting_anywhere(&state, sel).await?;
-    if let Err(r) = require_hosting_access(&state, &ctx, detail.id.as_str(), false).await {
+    if let Err(r) = require_hosting_access(
+        &state,
+        &ctx,
+        detail.id.as_str(),
+        false,
+        Capability::BackupRun,
+    )
+    .await
+    {
         return Ok(r);
     }
     // Metadata probe (len=0): total size + filename, and it validates
@@ -7974,7 +8251,14 @@ pub async fn post_restore_as_new(
     ctx: AuthCtx,
     Form(form): Form<RestoreAsNewForm>,
 ) -> Result<Response, AppError> {
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+    let sel = match require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::HostingMigrateClone,
+    )
+    .await
+    {
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
@@ -8055,7 +8339,9 @@ pub async fn post_wp_staging_create(
     ctx: AuthCtx,
     Form(form): Form<StagingForm>,
 ) -> Result<Response, AppError> {
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector, Capability::WpManage)
+        .await
+    {
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
@@ -8121,7 +8407,9 @@ pub async fn post_wp_staging_push(
     ctx: AuthCtx,
     Form(form): Form<StagingForm>,
 ) -> Result<Response, AppError> {
-    let sel = match require_manage_for_selector(&state, &ctx, &form.selector).await {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector, Capability::WpManage)
+        .await
+    {
         Ok(s) => s,
         Err(r) => return Ok(r),
     };

@@ -317,6 +317,19 @@ pub(crate) async fn run_panel_import_job(
     req: hyperion_import::ImportPanelReq,
 ) {
     let source = req.source_kind.clone();
+    // SECURITY (sec-findings #6): the ingested bundle (plaintext DB dumps +
+    // wp-config secrets) must be deleted once the import finishes — success OR
+    // failure. Capture the path now (it's moved into the RPC below) and only
+    // ever delete our own `<migration>/bundle-*.tar` files, never an arbitrary
+    // operator-supplied archive_path.
+    let cleanup_bundle: Option<String> =
+        req.archive_path.as_deref().map(str::to_string).filter(|p| {
+            std::path::Path::new(p)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("bundle-") && n.ends_with(".tar"))
+                && p.starts_with("/var/lib/hyperion/migration/")
+        });
     let where_ = if req.mode == "remote" {
         format!(
             "{} over SSH",
@@ -363,6 +376,13 @@ pub(crate) async fn run_panel_import_job(
                 .await
         }
         Err(e) => reporter.finish(false, Some(e.to_string())).await,
+    }
+
+    // Always shred the ingested bundle once the job is done (any outcome).
+    if let Some(p) = cleanup_bundle {
+        if let Err(e) = tokio::fs::remove_file(&p).await {
+            tracing::warn!(path = %p, error = %e, "could not delete ingested import bundle");
+        }
     }
 }
 

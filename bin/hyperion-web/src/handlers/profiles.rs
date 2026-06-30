@@ -382,6 +382,13 @@ pub async fn get_edit(
     axum::extract::Path(id): axum::extract::Path<i64>,
     Query(q): Query<EditQuery>,
 ) -> Result<Response, AppError> {
+    // SECURITY (sec-findings #2): the edit page renders per-profile pricing and
+    // the Slack incoming-webhook secret. Gate it like the sibling profile
+    // handlers — without ProfilesManage any authenticated user could IDOR-read
+    // every profile's secret by walking /profiles/N/edit.
+    if !ctx.can(Capability::ProfilesManage) {
+        return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
+    }
     let resp = hyperion_rpc_client::call(&state.agent_socket, Request::ProfileGet { id }).await?;
     let mut profile = match resp {
         RpcResponse::ProfileGet(p) => p,
@@ -561,7 +568,13 @@ pub async fn post_apply(
     // other per-hosting mutation: manage-level access to THAT hosting.
     // Previously this had no authz at all — any authenticated user could
     // apply any profile to any hosting cluster-wide.
-    let sel = match super::hostings::require_manage_for_selector(&state, &ctx, &form.selector).await
+    let sel = match super::hostings::require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::ProfilesManage,
+    )
+    .await
     {
         Ok(s) => s,
         Err(r) => return Ok(r),

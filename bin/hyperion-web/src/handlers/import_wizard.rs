@@ -703,6 +703,14 @@ pub async fn post_ingest(
     };
 
     let _ = tokio::fs::create_dir_all(MIGRATION_DIR).await;
+    // SECURITY (sec-findings #6): the bundle holds plaintext DB dumps +
+    // wp-config secrets. Lock the dir to 0700 so other local users (e.g. a site
+    // PHP-FPM uid) can't traverse in and read bundle-*.tar.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ =
+            tokio::fs::set_permissions(MIGRATION_DIR, std::fs::Permissions::from_mode(0o700)).await;
+    }
     if let Some(avail) = avail_bytes(MIGRATION_DIR).await {
         if avail < MIN_FREE_BYTES {
             update(&state, info.id, Some("failed"), None, None).await;
@@ -715,11 +723,18 @@ pub async fn post_ingest(
     }
 
     let path = format!("{MIGRATION_DIR}/bundle-{}.tar", info.id);
-    let mut file = match tokio::fs::File::create(&path).await {
-        Ok(f) => f,
-        Err(e) => {
-            update(&state, info.id, Some("failed"), None, None).await;
-            return Err(AppError::Internal(format!("create bundle file: {e}")));
+    // SECURITY (sec-findings #6): create the bundle 0600 at creation (before any
+    // bytes), not the default 0644 — otherwise it's world-readable while it
+    // streams and forever after.
+    let mut file = {
+        let mut opts = tokio::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true).mode(0o600);
+        match opts.open(&path).await {
+            Ok(f) => f,
+            Err(e) => {
+                update(&state, info.id, Some("failed"), None, None).await;
+                return Err(AppError::Internal(format!("create bundle file: {e}")));
+            }
         }
     };
 

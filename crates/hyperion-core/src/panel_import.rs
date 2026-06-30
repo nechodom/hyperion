@@ -422,24 +422,33 @@ async fn build_location(req: &ImportPanelReq) -> Result<(Location, Option<PathBu
                     stage: "import_bundle_dir".into(),
                     reason: e.to_string(),
                 })?;
-            let out = tokio::process::Command::new("tar")
-                .arg("xf")
-                .arg(src)
-                .arg("-C")
-                .arg(&dir)
-                .output()
-                .await
-                .map_err(|e| RpcError::ProvisioningFailed {
-                    stage: "import_bundle_unpack".into(),
-                    reason: e.to_string(),
-                })?;
-            if !out.status.success() {
+            // The staging dir holds plaintext DB dumps + wp-config secrets from
+            // the (untrusted-content) bundle — lock it down to 0700 so other
+            // local users can't read it during the unpack window.
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let _ =
+                    tokio::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).await;
+            }
+            // SECURITY: the outer bundle is attacker-controlled content (the
+            // source box is untrusted, and `/import/ingest/:token` accepts an
+            // arbitrary body). A bare `tar xf` running as root would honour `..`
+            // members and write-through planted symlinks → root file write / RCE
+            // (sec-findings #8/#9). Use the audited in-process sandbox instead.
+            let src_path = PathBuf::from(src);
+            let dir_clone = dir.clone();
+            let unpacked = tokio::task::spawn_blocking(move || {
+                hyperion_adapters::backup::extract_tar_sandboxed(&src_path, &dir_clone)
+            })
+            .await
+            .map_err(|e| RpcError::ProvisioningFailed {
+                stage: "import_bundle_unpack".into(),
+                reason: format!("unpack task join: {e}"),
+            })?;
+            if let Err(e) = unpacked {
                 let _ = tokio::fs::remove_dir_all(&dir).await;
                 return Err(RpcError::Validation {
-                    message: format!(
-                        "could not unpack bundle: {}",
-                        String::from_utf8_lossy(&out.stderr).trim()
-                    ),
+                    message: format!("could not unpack bundle: {e}"),
                 });
             }
             Ok((Location::Archive(dir.clone()), Some(dir)))
@@ -487,7 +496,17 @@ async fn fetch_files(
                 .join(hyperion_import::bundle::site_dir(domain))
                 .join("docroot.tar.gz");
             if tgz.is_file() {
-                run_cmd("tar", &["xzf", &tgz.display().to_string(), "-C", dest]).await
+                // SECURITY: the docroot tarball is attacker-controlled content.
+                // A bare `tar xzf` as root would honour `..` members and plant
+                // symlinks (e.g. `leak -> /etc/passwd`) that nginx/PHP-FPM then
+                // serves cross-tenant (sec-findings #8/#10). Sandboxed extract.
+                let dest_path = PathBuf::from(dest);
+                let unpacked = tokio::task::spawn_blocking(move || {
+                    hyperion_adapters::backup::extract_tar_gz_sandboxed(&tgz, &dest_path)
+                })
+                .await
+                .map_err(|e| format!("docroot unpack task join: {e}"))?;
+                unpacked.map(|_| ()).map_err(|e| e.to_string())
             } else {
                 Ok(())
             }
