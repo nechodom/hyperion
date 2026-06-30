@@ -405,6 +405,7 @@ async fn call(cli: &Cli) -> anyhow::Result<Response> {
                 mode: mode.clone(),
                 ssh,
                 archive_path: archive.clone(),
+                site_overrides: Vec::new(),
             };
             if *dry_run {
                 Request::HostingImportPanelPlan { req }

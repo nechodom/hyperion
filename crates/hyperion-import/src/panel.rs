@@ -23,6 +23,30 @@ pub struct ImportPanelReq {
     /// removes that temp dir afterwards.
     #[serde(default)]
     pub archive_path: Option<String>,
+    /// Per-site overrides chosen in the interactive wizard (keyed by the
+    /// SOURCE domain). Empty = import every site as-is (the default). Lets the
+    /// operator rename a site, attach a profile, and set a billing date at
+    /// import time.
+    #[serde(default)]
+    pub site_overrides: Vec<SiteImportOverride>,
+}
+
+/// One imported site's operator-chosen overrides, applied during the import
+/// engine's create step. Matched to a discovered site by `source_domain`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SiteImportOverride {
+    /// The domain as the source reported it (the match key).
+    pub source_domain: String,
+    /// Create the hosting under THIS domain instead of `source_domain`
+    /// (WordPress URLs are search-replaced from source→target). `None` = keep.
+    #[serde(default)]
+    pub target_domain: Option<String>,
+    /// Apply this profile (limits + price + billing clock) after create.
+    #[serde(default)]
+    pub profile_id: Option<i64>,
+    /// Override the first-billing timestamp (epoch secs) set by the profile.
+    #[serde(default)]
+    pub next_billing_at: Option<i64>,
 }
 
 /// SSH connection to a remote source box. `key` carries the private key

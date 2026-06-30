@@ -248,6 +248,13 @@ struct SiteRow {
     dbs: usize,
 }
 
+/// A profile choice for the per-site dropdown on the import checklist.
+struct ProfileOpt {
+    id: i64,
+    name: String,
+    price: String,
+}
+
 #[derive(Template)]
 #[template(path = "import_select.html")]
 struct ImportSelectTpl<'a> {
@@ -260,6 +267,7 @@ struct ImportSelectTpl<'a> {
     token_id: i64,
     source_kind: String,
     sites: Vec<SiteRow>,
+    profiles: Vec<ProfileOpt>,
 }
 
 /// `GET /import/select/:id` — the checklist of reported sites for one transfer.
@@ -305,6 +313,19 @@ pub async fn get_select(
     if sites.is_empty() {
         return Ok(Redirect::to("/import?flash_error=no+sites+reported+yet").into_response());
     }
+    // Profiles for the per-site dropdown (best-effort; empty = no profile column).
+    let profiles: Vec<ProfileOpt> =
+        match hyperion_rpc_client::call(&state.agent_socket, Request::ProfileList).await {
+            Ok(RpcResponse::ProfileList(v)) => v
+                .into_iter()
+                .map(|p| ProfileOpt {
+                    id: p.id,
+                    name: p.name.clone(),
+                    price: p.pretty_price(),
+                })
+                .collect(),
+            _ => Vec::new(),
+        };
     let tpl = ImportSelectTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -315,6 +336,7 @@ pub async fn get_select(
         token_id: id,
         source_kind: info.source_kind,
         sites,
+        profiles,
     };
     Ok(Html(tpl.render()?).into_response())
 }
@@ -324,9 +346,12 @@ pub struct SelectForm {
     #[serde(default)]
     pub _csrf: String,
     pub id: i64,
-    /// Comma-separated domains (the page's JS fills this from the ticked boxes).
+    /// JSON array the page's JS builds from the ticked rows — one object per
+    /// chosen site: `{source, target, profile_id, billing_at}` (target/profile/
+    /// billing optional). A JSON blob (not repeated form keys) sidesteps
+    /// serde_urlencoded's no-Vec limitation and carries the whole per-site config.
     #[serde(default)]
-    pub selected: String,
+    pub config: String,
 }
 
 /// `POST /import/select` — record the operator's pick; the waiting source script
@@ -352,20 +377,48 @@ pub async fn post_select(
                 .unwrap_or_default(),
             _ => Default::default(),
         };
-    let domains: Vec<String> = form
-        .selected
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty() && manifest.contains(s))
+    // The page posts a JSON array of per-site config. Keep only rows whose
+    // source the manifest actually reported (verbatim domains — no mangling),
+    // and turn each into a SiteImportOverride the import engine applies.
+    #[derive(serde::Deserialize)]
+    struct RowIn {
+        source: String,
+        #[serde(default)]
+        target: String,
+        #[serde(default)]
+        profile_id: Option<i64>,
+        #[serde(default)]
+        billing_at: Option<i64>,
+    }
+    let rows: Vec<RowIn> = serde_json::from_str(&form.config).unwrap_or_default();
+    let overrides: Vec<hyperion_import::SiteImportOverride> = rows
+        .into_iter()
+        .filter(|r| manifest.contains(&r.source))
+        .map(|r| {
+            let t = r.target.trim();
+            // Only treat as a rename when a non-empty, different target is given.
+            let target_domain = if t.is_empty() || t == r.source {
+                None
+            } else {
+                Some(t.to_string())
+            };
+            hyperion_import::SiteImportOverride {
+                source_domain: r.source.clone(),
+                target_domain,
+                profile_id: r.profile_id.filter(|&p| p > 0),
+                next_billing_at: r.billing_at.filter(|&b| b > 0),
+            }
+        })
         .collect();
-    if domains.is_empty() {
+    if overrides.is_empty() {
         return Ok(Redirect::to(&format!(
             "/import/select/{}?flash_error=pick+at+least+one+site",
             form.id
         ))
         .into_response());
     }
-    let selection_json = serde_json::to_string(&domains).unwrap_or_else(|_| "[]".into());
+    let n = overrides.len();
+    let selection_json = serde_json::to_string(&overrides).unwrap_or_else(|_| "[]".into());
     token_rpc(
         &state,
         ImportTokenOp::SetSelection {
@@ -374,10 +427,7 @@ pub async fn post_select(
         },
     )
     .await?;
-    let msg = format!(
-        "Selected {} site(s) — the source is now exporting them.",
-        domains.len()
-    );
+    let msg = format!("Selected {n} site(s) — the source is now exporting them.");
     Ok(Redirect::to(&format!("/import?flash={}", urlencode(&msg))).into_response())
 }
 
@@ -477,11 +527,9 @@ done
 if [ -z "$SEL" ]; then echo "[hyperion] timed out waiting for a selection." >&2; rm -f "$TMP" "$LIST"; exit 1; fi
 echo "[hyperion] exporting the selected sites and streaming to Hyperion …" >&2
 set -o pipefail
-if [ "$SEL" = "*" ]; then
-  "$TMP" --kind "$K" --out - | curl -fsS --max-time 86400 -X POST -T - "$B/import/ingest/$T"
-else
-  "$TMP" --kind "$K" --only "$SEL" --out - | curl -fsS --max-time 86400 -X POST -T - "$B/import/ingest/$T"
-fi
+# The panel always sends an explicit comma-separated list of the chosen SOURCE
+# domains (never a wildcard), so the source exports exactly those.
+"$TMP" --kind "$K" --only "$SEL" --out - | curl -fsS --max-time 86400 -X POST -T - "$B/import/ingest/$T"
 rm -f "$TMP" "$LIST"
 echo "[hyperion] done — watch progress in Hyperion -> Import." >&2
 "#
@@ -526,7 +574,8 @@ pub async fn post_manifest(
 
 /// `GET /import/selection/:token` (public, token-gated, NOT consumed) — the
 /// source polls this and blocks until the operator picks. Plain-text reply:
-/// `pending` (keep waiting), `*` (all), `a.com,b.com` (those), or `cancelled`.
+/// `pending` (keep waiting), `a.com,b.com` (export those source domains), or
+/// `cancelled`.
 pub async fn get_selection(
     State(state): State<SharedState>,
     Path(token): Path<String>,
@@ -547,13 +596,17 @@ fn selection_reply(selection_json: &str) -> String {
     if selection_json.trim().is_empty() {
         return "pending".into();
     }
-    let Ok(v) = serde_json::from_str::<Vec<String>>(selection_json) else {
+    let Ok(v) = serde_json::from_str::<Vec<hyperion_import::SiteImportOverride>>(selection_json)
+    else {
         return "pending".into();
     };
-    if v.iter().any(|d| d == "*") {
-        return "*".into();
-    }
-    let domains: Vec<String> = v.into_iter().filter(|d| wire_safe_domain(d)).collect();
+    // The source exports by SOURCE domain (the bundle is keyed that way); any
+    // operator rename is applied on the import side, not here.
+    let domains: Vec<String> = v
+        .into_iter()
+        .map(|o| o.source_domain)
+        .filter(|d| wire_safe_domain(d))
+        .collect();
     if domains.is_empty() {
         "pending".into()
     } else {
@@ -693,12 +746,18 @@ pub async fn post_ingest(
     let _ = file.flush().await;
     update(&state, info.id, None, None, Some(total)).await;
 
+    // The operator's per-site overrides (domain rename / profile / billing) were
+    // stored on the token as the selection; hand them to the import engine.
+    let site_overrides: Vec<hyperion_import::SiteImportOverride> =
+        serde_json::from_str(&info.selection_json).unwrap_or_default();
+
     // Kick off the archive import as a background job (reuses Location::Archive).
     let req = hyperion_import::ImportPanelReq {
         source_kind: info.source_kind.clone(),
         mode: "archive".into(),
         ssh: None,
         archive_path: Some(path),
+        site_overrides,
     };
     let node = if info.target_node.is_empty() || info.target_node == "local" {
         None
@@ -920,16 +979,31 @@ mod tests {
         assert_eq!(selection_reply("   "), "pending");
         assert_eq!(selection_reply("not json"), "pending");
         assert_eq!(selection_reply("[]"), "pending");
-        // "select all" sentinel and explicit lists (verbatim, incl. underscore).
-        assert_eq!(selection_reply("[\"*\"]"), "*");
-        assert_eq!(selection_reply("[\"a.com\",\"b.com\"]"), "a.com,b.com");
+        // The selection is now a per-site override list; the poll reply is the
+        // comma-joined SOURCE domains (verbatim, incl. underscore).
         assert_eq!(
-            selection_reply("[\"my_app.example.com\"]"),
+            selection_reply(r#"[{"source_domain":"a.com"},{"source_domain":"b.com"}]"#),
+            "a.com,b.com"
+        );
+        assert_eq!(
+            selection_reply(r#"[{"source_domain":"my_app.example.com"}]"#),
             "my_app.example.com"
         );
+        // A rename target / profile never leaks into the source poll — the
+        // source always exports by its OWN (source) domain.
+        assert_eq!(
+            selection_reply(r#"[{"source_domain":"a.com","target_domain":"b.cz","profile_id":2}]"#),
+            "a.com"
+        );
         // Wire-unsafe entries dropped; all-unsafe → pending.
-        assert_eq!(selection_reply("[\"a.com\",\"bad;rm\"]"), "a.com");
-        assert_eq!(selection_reply("[\"bad;rm\"]"), "pending");
+        assert_eq!(
+            selection_reply(r#"[{"source_domain":"a.com"},{"source_domain":"bad;rm"}]"#),
+            "a.com"
+        );
+        assert_eq!(
+            selection_reply(r#"[{"source_domain":"bad;rm"}]"#),
+            "pending"
+        );
     }
 
     #[test]
