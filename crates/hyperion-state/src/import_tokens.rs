@@ -151,9 +151,12 @@ pub async fn set_manifest(
     manifest_json: &str,
     now: i64,
 ) -> Result<bool, StateError> {
+    // `selection_json IS NULL` freezes the manifest once the operator has picked,
+    // so a late/replayed report can't swap the list out from under their choice.
     let n = sqlx::query(
         "UPDATE import_tokens SET manifest_json = ? \
-         WHERE token_hash = ? AND status = 'pending' AND expires_at > ?",
+         WHERE token_hash = ? AND status = 'pending' AND expires_at > ? \
+           AND selection_json IS NULL",
     )
     .bind(manifest_json)
     .bind(token_hash)

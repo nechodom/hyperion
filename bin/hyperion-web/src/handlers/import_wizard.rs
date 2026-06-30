@@ -26,7 +26,10 @@ use hyperion_types::{ImportTokenInfo, ImportTokenOp, ImportTokenResult};
 use serde::Deserialize;
 use std::path::PathBuf;
 
-const TOKEN_TTL_SECS: i64 = 2 * 60 * 60; // 2h
+// 4h: must exceed the source's poll budget (≈3h40m, see get_agent_script) plus
+// run/scan startup, so a deliberating operator can't outlive the token mid-wait
+// (which would read as a false "cancelled" and 403 a late ingest).
+const TOKEN_TTL_SECS: i64 = 4 * 60 * 60;
 const MIGRATION_DIR: &str = "/var/lib/hyperion/migration";
 const MIN_FREE_BYTES: i64 = 2 * 1024 * 1024 * 1024; // 2 GiB floor before accepting
 
@@ -209,7 +212,7 @@ pub async fn post_mint(
         ImportTokenResult::Minted { token, .. } => token,
         _ => return Err(AppError::Internal("mint returned unexpected result".into())),
     };
-    let base = base_url(&state, &headers);
+    let base = base_url(&state, &headers).await;
     let one_liner = format!("curl -fsSL \"{base}/import/agent/{token}\" | sudo bash");
     render(
         &state,
@@ -336,11 +339,24 @@ pub async fn post_select(
     if !ctx.can(Capability::PanelImport) {
         return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
     }
+    // Only accept domains the source actually reported for THIS token. This (a)
+    // keeps domains verbatim (no char-mangling → underscores/IDN survive), and
+    // (b) guarantees the pick will match on export, so a selection can never
+    // wedge the transfer at "selected" or silently drop a site.
+    let manifest: std::collections::HashSet<String> =
+        match token_rpc(&state, ImportTokenOp::List).await? {
+            ImportTokenResult::Listed(v) => v
+                .into_iter()
+                .find(|i| i.id == form.id)
+                .map(|i| manifest_domain_set(&i.manifest_json))
+                .unwrap_or_default(),
+            _ => Default::default(),
+        };
     let domains: Vec<String> = form
         .selected
         .split(',')
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+        .filter(|s| !s.is_empty() && manifest.contains(s))
         .collect();
     if domains.is_empty() {
         return Ok(Redirect::to(&format!(
@@ -426,18 +442,21 @@ pub async fn get_agent_script(
     let Some(info) = resolve(&state, &token, false).await? else {
         return Ok((StatusCode::NOT_FOUND, "invalid or expired import token\n").into_response());
     };
-    let base = base_url(&state, &headers);
+    let base = base_url(&state, &headers).await;
     let kind = info.source_kind;
     // $T/$B/$K/$TMP/$SEL use no braces, so they pass through format! untouched.
+    // Values are SINGLE-quoted: token is hex, kind is a fixed enum, base is
+    // charset-stripped in base_url — none can contain a single quote, so this
+    // cannot be broken out of (defense-in-depth atop base_url sanitization).
     let script = format!(
         r#"#!/bin/bash
 # Hyperion self-service import — runs on the SOURCE panel box (as root).
 # It reports your sites to Hyperion, waits for you to pick them in the panel,
 # then exports only those and streams them back. Nothing touches your machine.
 set -eu
-T="{token}"
-B="{base}"
-K="{kind}"
+T='{token}'
+B='{base}'
+K='{kind}'
 echo "[hyperion] downloading exporter from $B …" >&2
 TMP="$(mktemp)"; LIST="$(mktemp)"
 curl -fsSL "$B/import/agent-bin/$T" -o "$TMP"
@@ -447,11 +466,11 @@ echo "[hyperion] scanning $K and reporting the sites to Hyperion …" >&2
 curl -fsS -X POST -H 'Content-Type: application/json' --data-binary @"$LIST" "$B/import/manifest/$T" >/dev/null
 echo "[hyperion] reported. Open Hyperion -> Import, tick the sites you want, click Import. Waiting…" >&2
 SEL=""
-for _ in $(seq 1 1440); do
+for _ in $(seq 1 2640); do
   R="$(curl -fsS "$B/import/selection/$T" || true)"
   case "$R" in
     pending|"") sleep 5 ;;
-    cancelled) echo "[hyperion] cancelled in the panel." >&2; rm -f "$TMP" "$LIST"; exit 0 ;;
+    cancelled) echo "[hyperion] cancelled (or token expired) in the panel." >&2; rm -f "$TMP" "$LIST"; exit 0 ;;
     *) SEL="$R"; break ;;
   esac
 done
@@ -488,8 +507,10 @@ pub async fn post_manifest(
     if resolve(&state, &token, false).await?.is_none() {
         return Ok((StatusCode::NOT_FOUND, "invalid or expired import token\n").into_response());
     }
-    // Cap the manifest size (defensive) and require it to parse as a JSON array.
-    if body.len() > 512 * 1024 || serde_json::from_str::<serde_json::Value>(&body).is_err() {
+    // Cap the manifest size (defensive) and require it to parse as a JSON ARRAY
+    // (the site list) — not just any JSON, else a `{}` would advance the row to a
+    // dead-end "Choose sites (0)" stage.
+    if body.len() > 512 * 1024 || serde_json::from_str::<Vec<serde_json::Value>>(&body).is_err() {
         return Ok((StatusCode::BAD_REQUEST, "bad manifest\n").into_response());
     }
     token_rpc(
@@ -519,6 +540,9 @@ pub async fn get_selection(
 }
 
 /// Map the stored selection JSON to the source script's plain-text protocol.
+/// Domains are kept VERBATIM (post_select already constrained them to the
+/// reported manifest) — only wire-unsafe entries are dropped, so underscores /
+/// IDN survive instead of being silently mangled.
 fn selection_reply(selection_json: &str) -> String {
     if selection_json.trim().is_empty() {
         return "pending".into();
@@ -529,12 +553,7 @@ fn selection_reply(selection_json: &str) -> String {
     if v.iter().any(|d| d == "*") {
         return "*".into();
     }
-    // Domain chars only, comma-joined — can't inject into the bootstrap's shell.
-    let domains: Vec<String> = v
-        .iter()
-        .map(|d| sanitize_domains(d))
-        .filter(|d| !d.is_empty())
-        .collect();
+    let domains: Vec<String> = v.into_iter().filter(|d| wire_safe_domain(d)).collect();
     if domains.is_empty() {
         "pending".into()
     } else {
@@ -542,12 +561,33 @@ fn selection_reply(selection_json: &str) -> String {
     }
 }
 
-/// Keep only characters valid in a domain, so a stored selection can never
-/// inject shell into the generated bootstrap.
-fn sanitize_domains(s: &str) -> String {
-    s.chars()
-        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
-        .collect()
+/// Parse the reported-manifest JSON into the set of domains, for validating an
+/// operator's pick against what the source actually reported.
+fn manifest_domain_set(manifest_json: &str) -> std::collections::HashSet<String> {
+    #[derive(serde::Deserialize)]
+    struct D {
+        domain: String,
+    }
+    serde_json::from_str::<Vec<D>>(manifest_json)
+        .map(|v| v.into_iter().map(|d| d.domain).collect())
+        .unwrap_or_default()
+}
+
+/// A domain is safe to carry in the plain-text poll reply AND a double-quoted
+/// shell arg (`--only "$SEL"`, runtime-expanded so not re-parsed): non-empty,
+/// no comma (the list delimiter), no whitespace/control, no quote/shell-meta.
+/// Real panel domains (incl. underscores and punycode IDN) pass — this rejects,
+/// never rewrites, so a legitimate domain is never silently mangled.
+fn wire_safe_domain(s: &str) -> bool {
+    !s.is_empty()
+        && !s.chars().any(|c| {
+            c.is_whitespace()
+                || c.is_control()
+                || matches!(
+                    c,
+                    ',' | '"' | '\'' | '`' | '\\' | '$' | ';' | '&' | '|' | '<' | '>' | '(' | ')'
+                )
+        })
 }
 
 /// `GET /import/agent-bin/:token` — serve the portable `hyperion-export` binary
@@ -698,17 +738,38 @@ pub async fn post_ingest(
 
 // ---- helpers ------------------------------------------------------------------
 
-fn base_url(state: &SharedState, headers: &HeaderMap) -> String {
-    let host = headers
-        .get(axum::http::header::HOST)
-        .and_then(|h| h.to_str().ok())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("localhost");
+/// Build the panel base URL that gets baked into the root-run bootstrap script.
+/// SECURITY: prefer the operator-configured `panel_hostname` (trusted) over the
+/// request `Host` header (attacker-controlled), and strip whatever we use to a
+/// strict host[:port] charset so no shell metacharacter can ever reach the
+/// generated script. Combined with single-quoting in the script, this closes the
+/// Host-header → RCE-on-source vector.
+async fn base_url(state: &SharedState, headers: &HeaderMap) -> String {
     let scheme = if state.cfg.web.tls_enabled {
         "https"
     } else {
         "http"
+    };
+    let configured = state.panel_hostname.read().await.clone();
+    let raw = if !configured.trim().is_empty() {
+        configured.trim().to_string()
+    } else {
+        headers
+            .get(axum::http::header::HOST)
+            .and_then(|h| h.to_str().ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "localhost".into())
+    };
+    // host[:port] / [ipv6] only — drops quotes, $, ;, spaces, backticks, etc.
+    let host: String = raw
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '[' | ']'))
+        .collect();
+    let host = if host.is_empty() {
+        "localhost".to_string()
+    } else {
+        host
     };
     format!("{scheme}://{host}")
 }
@@ -783,12 +844,16 @@ fn transfers_html(rows: &[TransferRow], csrf: &str) -> String {
                 "scanning source…".to_string(),
                 "<span class=\"text-soft\">waiting for the source to report…</span>".to_string(),
             ),
-            "awaiting_selection" => (
+            "awaiting_selection" if r.site_count > 0 => (
                 format!("{} site(s) found", r.site_count),
                 format!(
                     "<a class=\"btn small primary\" href=\"/import/select/{}\">Choose sites →</a>",
                     r.id
                 ),
+            ),
+            "awaiting_selection" => (
+                "reported 0 sites".to_string(),
+                "<span class=\"text-soft\">nothing to import on the source</span>".to_string(),
             ),
             "selected" => (
                 "selected".to_string(),
@@ -831,17 +896,21 @@ fn transfers_html(rows: &[TransferRow], csrf: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{sanitize_domains, selection_reply};
+    use super::{manifest_domain_set, selection_reply, wire_safe_domain};
 
     #[test]
-    fn sanitize_domains_keeps_only_domain_chars() {
-        assert_eq!(sanitize_domains("a.com"), "a.com");
-        assert_eq!(sanitize_domains("b-c.example.org"), "b-c.example.org");
-        // Shell metacharacters (and commas) are stripped, so a tampered
-        // selection can't inject into the generated bootstrap shell.
-        assert_eq!(sanitize_domains("a.com;rm$(id)"), "a.comrmid");
-        assert_eq!(sanitize_domains("x.com `whoami` \"q\""), "x.comwhoamiq");
-        assert_eq!(sanitize_domains(""), "");
+    fn wire_safe_domain_accepts_real_domains_rejects_meta() {
+        // Real domains — including underscore + punycode IDN — are KEPT verbatim.
+        assert!(wire_safe_domain("a.com"));
+        assert!(wire_safe_domain("b-c.example.org"));
+        assert!(wire_safe_domain("my_app.example.com"));
+        assert!(wire_safe_domain("xn--mnchen-3ya.de"));
+        // Wire/shell-unsafe entries rejected (never rewritten).
+        assert!(!wire_safe_domain(""));
+        assert!(!wire_safe_domain("a.com;rm"));
+        assert!(!wire_safe_domain("a b.com"));
+        assert!(!wire_safe_domain("a\".com"));
+        assert!(!wire_safe_domain("a,b")); // comma is the list delimiter
     }
 
     #[test]
@@ -851,10 +920,24 @@ mod tests {
         assert_eq!(selection_reply("   "), "pending");
         assert_eq!(selection_reply("not json"), "pending");
         assert_eq!(selection_reply("[]"), "pending");
-        // "select all" sentinel and explicit lists.
+        // "select all" sentinel and explicit lists (verbatim, incl. underscore).
         assert_eq!(selection_reply("[\"*\"]"), "*");
         assert_eq!(selection_reply("[\"a.com\",\"b.com\"]"), "a.com,b.com");
-        // Sanitized; empty entries dropped.
-        assert_eq!(selection_reply("[\"a.com\",\"\"]"), "a.com");
+        assert_eq!(
+            selection_reply("[\"my_app.example.com\"]"),
+            "my_app.example.com"
+        );
+        // Wire-unsafe entries dropped; all-unsafe → pending.
+        assert_eq!(selection_reply("[\"a.com\",\"bad;rm\"]"), "a.com");
+        assert_eq!(selection_reply("[\"bad;rm\"]"), "pending");
+    }
+
+    #[test]
+    fn manifest_domain_set_extracts_domains() {
+        let set = manifest_domain_set(
+            r#"[{"domain":"a.com","owner":"u","php":"8.2","dbs":[]},{"domain":"b.com"}]"#,
+        );
+        assert!(set.contains("a.com") && set.contains("b.com") && set.len() == 2);
+        assert!(manifest_domain_set("garbage").is_empty());
     }
 }
