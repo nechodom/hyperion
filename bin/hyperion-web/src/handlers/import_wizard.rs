@@ -759,7 +759,39 @@ pub async fn post_ingest(
         }
     }
     let _ = file.flush().await;
+    drop(file);
     update(&state, info.id, None, None, Some(total)).await;
+
+    // Validate it's actually a tar BEFORE spawning the import job — a truncated or
+    // contaminated upload otherwise dies deep inside the job with an opaque
+    // "tar: This does not look like a tar archive". Surface what we really got
+    // (a stray log line / error text here points straight at the cause).
+    let tar_ok = tokio::process::Command::new("tar")
+        .arg("tf")
+        .arg(&path)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !tar_ok {
+        let head = tokio::fs::read(&path).await.unwrap_or_default();
+        let preview: String = String::from_utf8_lossy(&head[..head.len().min(160)])
+            .chars()
+            .map(|c| if c.is_control() { '·' } else { c })
+            .collect();
+        let _ = tokio::fs::remove_file(&path).await;
+        update(&state, info.id, Some("failed"), None, Some(total)).await;
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "received {total} bytes, but it is NOT a valid tar bundle — the exporter's \
+                 output was truncated or contaminated before upload. First bytes: {preview:?}\n"
+            ),
+        )
+            .into_response());
+    }
 
     // The operator's per-site overrides (domain rename / profile / billing) were
     // stored on the token as the selection; hand them to the import engine.

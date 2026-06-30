@@ -1291,5 +1291,55 @@ function isShortcutContext(ev) {
   setInterval(pollJobs, 10_000);
 })();
 </script>
+
+{# ============================================================
+   Global background-job toast — bottom-right popup that shows a
+   live progress bar for every running job (import, backup, cert
+   issuance, …) so the operator always sees work in flight, even
+   after navigating away from /jobs/<id>. Auto-hides when idle.
+   Fed by /api/jobs-active (admins only); styles are inline so it
+   needs no CSS-file change.
+   ============================================================ #}
+<div id="job-toast" hidden
+     style="position:fixed;right:16px;bottom:16px;width:320px;max-width:calc(100vw - 32px);z-index:9999;display:flex;flex-direction:column;gap:8px"></div>
+<script>
+(function () {
+  'use strict';
+  const box = document.getElementById('job-toast');
+  if (!box) return;
+  function el(tag, css) { const e = document.createElement(tag); if (css) e.style.cssText = css; return e; }
+  function human(k) { return (k || 'job').replace(/_/g, ' '); }
+  async function poll() {
+    try {
+      const r = await fetch('/api/jobs-active', { credentials: 'same-origin', headers: { accept: 'application/json' } });
+      if (!r.ok) return;
+      const jobs = await r.json();
+      if (!Array.isArray(jobs) || !jobs.length) { box.hidden = true; box.replaceChildren(); return; }
+      box.hidden = false;
+      const frag = document.createDocumentFragment();
+      const head = el('div', 'font-size:.7rem;letter-spacing:.04em;text-transform:uppercase;opacity:.7;padding:0 2px');
+      head.textContent = jobs.length + ' job' + (jobs.length > 1 ? 's' : '') + ' running';
+      frag.appendChild(head);
+      jobs.forEach(function (j) {
+        const pct = Math.max(0, Math.min(100, Number(j.pct) || 0));
+        const a = el('a', 'display:block;text-decoration:none;color:inherit;background:var(--surface-1,#1c1c20);border:1px solid var(--border,#333);border-radius:8px;padding:.5rem .6rem;box-shadow:0 4px 14px rgba(0,0,0,.3)');
+        a.href = '/jobs/' + encodeURIComponent(j.id);
+        const t = el('div', 'font-size:.82rem;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis');
+        t.textContent = human(j.kind) + (j.target ? (' · ' + j.target) : '');
+        const s = el('div', 'font-size:.72rem;opacity:.7;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin:.15rem 0 .35rem');
+        s.textContent = (j.step ? j.step + ' · ' : '') + pct + '%';
+        const bar = el('div', 'height:5px;background:var(--border,#333);border-radius:3px;overflow:hidden');
+        const fill = el('div', 'height:100%;width:' + pct + '%;background:var(--accent,#6aa3ff);transition:width .4s ease');
+        bar.appendChild(fill);
+        a.appendChild(t); a.appendChild(s); a.appendChild(bar);
+        frag.appendChild(a);
+      });
+      box.replaceChildren(frag);
+    } catch (_) { /* swallow */ }
+  }
+  poll();
+  setInterval(poll, 3000);
+})();
+</script>
 </body>
 </html>

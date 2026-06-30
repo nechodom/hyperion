@@ -98,6 +98,44 @@ pub async fn get_running_count(
     Ok(axum::Json(serde_json::json!({"count": n})).into_response())
 }
 
+/// Feed for the global bottom progress-toast: every running job with its live
+/// step + percent, so the operator always sees work in flight (import, backup,
+/// cert issuance…) even after leaving the job page. Admins only; `[]` when idle.
+pub async fn get_active_jobs(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+) -> Result<Response, AppError> {
+    if !ctx.is_admin_or_higher() {
+        return Ok(axum::Json(serde_json::Value::Array(vec![])).into_response());
+    }
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::JobList {
+            kind: None,
+            state: Some("running".to_string()),
+            limit: 50,
+        },
+    )
+    .await?;
+    let jobs = match resp {
+        RpcResponse::JobList(v) => v,
+        _ => Vec::new(),
+    };
+    let out: Vec<serde_json::Value> = jobs
+        .into_iter()
+        .map(|j| {
+            serde_json::json!({
+                "id": j.id,
+                "kind": j.kind,
+                "target": j.target,
+                "step": j.step_label,
+                "pct": j.progress_pct,
+            })
+        })
+        .collect();
+    Ok(axum::Json(serde_json::Value::Array(out)).into_response())
+}
+
 /// POST /jobs/<id>/retry — replay a failed/cancelled job by
 /// reconstructing the spawn from the original `payload_json`.
 /// Currently understands `migration` + `hosting_clone` (the two
