@@ -298,7 +298,15 @@ fn build_app_with_signer(
         // enforcement gate off so the existing flows render as before.
         enforce_admin_2fa: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
     });
-    (hyperion_web::build_router(state), signer)
+    // The login/2FA + enroll handlers extract `ConnectInfo<SocketAddr>` (real
+    // peer IP for the rate-limit bucket). `.oneshot()` doesn't go through
+    // `into_make_service_with_connect_info`, so inject a mock peer addr the same
+    // way axum's own tests do — otherwise those handlers 500 on extraction.
+    let router =
+        hyperion_web::build_router(state).layer(axum::extract::connect_info::MockConnectInfo(
+            "127.0.0.1:34567".parse::<std::net::SocketAddr>().unwrap(),
+        ));
+    (router, signer)
 }
 
 async fn body_string(resp: axum::response::Response) -> String {

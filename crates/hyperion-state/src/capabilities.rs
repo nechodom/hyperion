@@ -319,17 +319,30 @@ impl WebRole {
             ]
             .into_iter()
             .collect(),
-            // Customer = operate their own sites, slim surface.
+            // Customer = SAME per-hosting access model as Operator (the UI just
+            // shows a slimmer nav) — they fully manage their OWN granted sites.
+            // This MUST match Operator's per-hosting caps so the capability gate
+            // (now enforced on every per-hosting mutation) doesn't silently strip
+            // actions customers already had via their per-hosting grant. The one
+            // difference is HostingCreate: spinning up brand-new hostings is not a
+            // per-hosting action and stays an operator/admin grant.
             WebRole::Customer => [
                 HostingView,
+                HostingDelete,
+                HostingSuspend,
+                HostingEditConfig,
                 HostingFiles,
                 HostingDatabases,
+                HostingCron,
+                HostingMigrateClone,
                 WpManage,
                 WpVulnView,
                 BackupRun,
                 BackupRestore,
                 CertManage,
+                SecurityManage,
                 MonitoringView,
+                MonitoringManage,
             ]
             .into_iter()
             .collect(),
