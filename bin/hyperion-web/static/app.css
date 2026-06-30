@@ -631,6 +631,16 @@ pre code {
   gap: 0.85rem;
   margin-bottom: 1rem;
 }
+/* Small uppercase header that groups a KPI grid (e.g. cluster totals vs this
+   node's live metrics) so a long strip of tiles reads as labelled sections. */
+.kpi-section-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-soft, #9aa);
+  margin: 0 0 0.5rem 0.15rem;
+}
 .kpi-card {
   background: var(--surface);
   border: 1px solid var(--border);
