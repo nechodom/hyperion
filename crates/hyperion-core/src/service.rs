@@ -17143,7 +17143,9 @@ fn read_notifications_section(
     }
 }
 
-fn read_cluster_section(cfg_path: Option<&std::path::Path>) -> hyperion_types::ClusterConfigView {
+pub(crate) fn read_cluster_section(
+    cfg_path: Option<&std::path::Path>,
+) -> hyperion_types::ClusterConfigView {
     let Some(path) = cfg_path else {
         return hyperion_types::ClusterConfigView::default();
     };

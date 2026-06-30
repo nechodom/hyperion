@@ -550,6 +550,13 @@
     <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
     Open site
   </a>
+  {% if let Some(preview) = preview_domain %}
+  <a class="btn ghost" href="https://{{ preview }}" target="_blank" rel="noopener noreferrer"
+     title="Internal preview on this node's wildcard cert — works before DNS cutover">
+    <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+    Preview site
+  </a>
+  {% endif %}
   <a class="btn" href="/hostings/{{ detail.id.as_str() }}/files">
     <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
     File manager
@@ -569,6 +576,12 @@
     </button>
   </form>
 </div>
+{% if let Some(preview) = preview_domain %}
+<p class="text-soft" style="font-size:0.8rem;margin:-0.4rem 0 1rem">
+  Preview opens <code>{{ preview }}</code> on this node's wildcard cert with valid
+  TLS — an internal URL for viewing the site before pointing real DNS at this node.
+</p>
+{% endif %}
 
 {% if let Some(h) = health %}
 {# Composite health snapshot. The amber/red rows double as an

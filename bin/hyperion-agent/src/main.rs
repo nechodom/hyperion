@@ -233,6 +233,11 @@ async fn main() -> anyhow::Result<()> {
         acme_email: cfg.acme.contact_email.clone(),
         acme_directory_url: cfg.acme.directory_url.clone(),
         acme_challenge_root: cfg.acme.challenge_dir.clone(),
+        // Give the adapter the local state DB + agent.toml path so
+        // nginx_write_vhost can emit the internal-preview server block
+        // when this node carries a `*.<base>` wildcard cert.
+        state_pool: Some(pool.clone()),
+        agent_config_path: Some(cli.config.clone()),
         ..Default::default()
     };
     adapter_inner.detect_nginx_user().await;

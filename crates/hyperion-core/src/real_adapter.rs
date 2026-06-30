@@ -63,6 +63,15 @@ pub struct RealAdapter {
     /// so nginx can `connect(2)` to the socket. Defaults to
     /// "www-data" until `detect_nginx_user_blocking()` runs.
     pub nginx_user: String,
+    /// Local state DB — used by `nginx_write_vhost` to look up whether
+    /// this node carries a `*.<base>` wildcard cert (so it can emit the
+    /// internal-preview server block). `None` in unit tests that don't
+    /// exercise preview rendering; the preview is then simply skipped.
+    pub state_pool: Option<sqlx::SqlitePool>,
+    /// Path to this node's `agent.toml` — read to resolve the cluster
+    /// `test_domain_template` → wildcard base for the preview vhost.
+    /// `None` ⇒ no preview (same as no wildcard).
+    pub agent_config_path: Option<PathBuf>,
 }
 
 impl Default for RealAdapter {
@@ -74,6 +83,8 @@ impl Default for RealAdapter {
             acme_email: "admin@example.com".into(),
             acme_directory_url: "https://acme-v02.api.letsencrypt.org/directory".into(),
             nginx_user: hyperion_adapters::nginx::DEFAULT_NGINX_USER.to_string(),
+            state_pool: None,
+            agent_config_path: None,
         }
     }
 }
@@ -92,6 +103,73 @@ impl RealAdapter {
         hyperion_adapters::nginx::warn_if_user_missing(&detected).await;
         self.nginx_user = detected;
     }
+
+    /// Resolve the internal-preview vhost for `primary_domain` on THIS
+    /// node, or `None` when no preview applies. The rule (shared with the
+    /// web detail page via `ClusterConfigView::preview_subdomain`):
+    ///   1. the cluster `test_domain_template` resolves to a wildcard
+    ///      base for this node (`node_wildcard_base`), AND
+    ///   2. a `*.<base>` wildcard cert actually exists on disk
+    ///      (`is_wildcard` in the local state DB), AND
+    ///   3. `primary_domain` isn't already under `<base>`.
+    /// The cert/key paths come from the wildcard's `certificates` row, so
+    /// the preview block reuses the exact same files `create()` does.
+    async fn compute_preview(&self, primary_domain: &str) -> Option<PreviewVhost> {
+        let pool = self.state_pool.as_ref()?;
+        let cluster = crate::service::read_cluster_section(self.agent_config_path.as_deref());
+        let (node_id, hostname) = local_node_identity();
+        let base = cluster.node_wildcard_base(&node_id, &hostname)?;
+        // server_name + the "already under base?" skip live in one shared
+        // helper so the agent vhost and the web link can never disagree.
+        let server_name =
+            hyperion_types::ClusterConfigView::preview_subdomain(primary_domain, &base)?;
+        // Accurate cert check: the wildcard must really exist on THIS node.
+        if !hyperion_state::certificates::is_wildcard(pool, &base)
+            .await
+            .unwrap_or(false)
+        {
+            return None;
+        }
+        let cert = hyperion_state::certificates::get(pool, &base)
+            .await
+            .ok()
+            .flatten()?;
+        Some(PreviewVhost {
+            server_name,
+            cert_path: cert.cert_path,
+            key_path: cert.key_path,
+        })
+    }
+}
+
+/// Resolved internal-preview server block for one hosting.
+struct PreviewVhost {
+    server_name: String,
+    cert_path: String,
+    key_path: String,
+}
+
+/// `(node_id, hostname)` for this node, matching `Service::current_node_id`
+/// semantics: `HYPERION_NODE_ID` env wins for the id, else `/etc/hostname`;
+/// the hostname is always `/etc/hostname`. Used to resolve the wildcard
+/// base from the cluster test-domain template.
+fn local_node_identity() -> (String, String) {
+    let hostname = std::fs::read_to_string("/etc/hostname")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_default();
+    let node_id = std::env::var("HYPERION_NODE_ID")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| {
+            if hostname.is_empty() {
+                "unknown".into()
+            } else {
+                hostname.clone()
+            }
+        });
+    (node_id, hostname)
 }
 
 #[async_trait]
@@ -772,6 +850,14 @@ impl AdapterPort for RealAdapter {
             return hyperion_adapters::nginx::write_redirect_vhost(&self.nginx_paths, &input).await;
         }
         let php = detail.php_version.map(|v| v.as_str());
+        // Internal preview vhost: when THIS node carries a `*.<base>`
+        // wildcard cert and the hosting's primary domain isn't already
+        // under that base, emit a second server block on the wildcard so
+        // an operator can open the site before cutting over real DNS.
+        // Computed here (not at every call site) so all write paths —
+        // create, alias change, PHP bump, cert re-issue — get it for free,
+        // and an ordinary hosting on a non-wildcard node renders unchanged.
+        let preview = self.compute_preview(&detail.domain).await;
         let input = hyperion_adapters::nginx::VhostInput {
             domain: &detail.domain,
             aliases: &detail.aliases,
@@ -784,6 +870,9 @@ impl AdapterPort for RealAdapter {
             acme_challenge_root: &acme_root,
             hosting_id: detail.id.as_str(),
             options: &detail.vhost_options,
+            preview_server_name: preview.as_ref().map(|p| p.server_name.as_str()),
+            preview_cert_path: preview.as_ref().map(|p| p.cert_path.as_str()),
+            preview_cert_key_path: preview.as_ref().map(|p| p.key_path.as_str()),
         };
         hyperion_adapters::nginx::write_vhost(&self.nginx_paths, &input).await
     }
