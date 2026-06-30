@@ -151,6 +151,12 @@ fi
 #-------- 2. Pull ---------------------------------------------------------
 cd "$INSTALL_DIR"
 PREV=$(git rev-parse --short HEAD)
+# A from-source build can legitimately rewrite Cargo.lock in place (cargo
+# refreshes it during the build). That's a generated, committed file the
+# `git reset --hard` below overwrites anyway, so don't let it block the NEXT
+# update with "local changes". Discard just that file; any OTHER local change
+# is a real edit you'd lose on reset, so we still refuse + report it.
+git checkout -- Cargo.lock 2>/dev/null || true
 if [[ -n "$(git status --porcelain)" ]]; then
   fail "Working tree at $INSTALL_DIR has local changes:
 $(git status --short | sed 's/^/    /')
@@ -344,16 +350,16 @@ if (( DO_BUILD && PREBUILT_OK == 0 )); then
   # Speed up the from-source path. Both are best-effort + safe to skip:
   #  - incremental compilation reuses the persistent target/ across updates so
   #    only changed crates (+ the three bins, which re-stamp the SHA) recompile;
-  #  - a faster linker (mold > lld > gold) when one is installed — link time is a
-  #    real slice now that lto=off. (Setting RUSTFLAGS invalidates the cache once
-  #    on first adoption; nodes without an alt linker are untouched.)
+  #  - a faster linker (mold > lld) when one is installed — link time is a real
+  #    slice now that lto=off. (Setting RUSTFLAGS invalidates the cache once on
+  #    first adoption; nodes without an alt linker are untouched.) gold is
+  #    deliberately NOT used: it's deprecated and rustc warns it has known bugs.
   export CARGO_INCREMENTAL=1
-  for _ld in mold ld.lld lld ld.gold; do
+  for _ld in mold ld.lld lld; do
     if command -v "$_ld" >/dev/null 2>&1; then
       case "$_ld" in
         mold)        _lf="-C link-arg=-fuse-ld=mold" ;;
         ld.lld|lld)  _lf="-C link-arg=-fuse-ld=lld" ;;
-        ld.gold)     _lf="-C link-arg=-fuse-ld=gold" ;;
       esac
       export RUSTFLAGS="${RUSTFLAGS:-} $_lf"
       log "  using $_ld for faster linking"
