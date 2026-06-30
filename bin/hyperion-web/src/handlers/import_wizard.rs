@@ -956,7 +956,7 @@ fn transfers_html(rows: &[TransferRow], csrf: &str) -> String {
         return "<p class=\"text-soft\">No transfers in flight. Generate a command above and run it on your source server.</p>".to_string();
     }
     let mut h = String::from(
-        "<table class=\"table\"><thead><tr><th>Source</th><th>By</th><th>Stage</th><th>Received</th><th></th></tr></thead><tbody>",
+        "<div class=\"table-wrap\"><table class=\"table\"><thead><tr><th>Source</th><th>By</th><th>Stage</th><th>Received</th><th></th></tr></thead><tbody>",
     );
     for r in rows {
         // Stage label + the primary action cell.
@@ -1011,7 +1011,7 @@ fn transfers_html(rows: &[TransferRow], csrf: &str) -> String {
             cancel,
         ));
     }
-    h.push_str("</tbody></table>");
+    h.push_str("</tbody></table></div>");
     h
 }
 
