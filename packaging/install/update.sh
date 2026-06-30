@@ -431,48 +431,60 @@ install -d -m 0755 /var/lib/hyperion/maintenance
 MAINT_HTML="/var/lib/hyperion/maintenance/maintenance.html"
 if [[ ! -f "$MAINT_HTML" ]] || grep -q "x-hyperion-maintenance" "$MAINT_HTML" 2>/dev/null; then
   cat > "$MAINT_HTML" <<'HTML'
-<!-- x-hyperion-maintenance: v1 - operator may replace this file freely -->
+<!-- x-hyperion-maintenance: v2 - operator may replace this file freely -->
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <title>We'll be right back</title>
+  <title>We'll be right back · Hyperion</title>
   <style>
-    :root { color-scheme: light dark; }
-    body {
-      margin: 0; min-height: 100vh;
-      display: flex; align-items: center; justify-content: center;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-      background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
-      color: #e2e8f0; padding: 1.5rem;
+    :root{
+      --bg:#000; --surface:#0a0a0a; --border:#1f1f1f; --text:#fafafa;
+      --dim:#a1a1aa; --soft:#71717a; --accent:#00d97e;
+      color-scheme: dark light;
     }
-    .card {
-      max-width: 480px; padding: 2.5rem 2rem;
-      background: rgba(255,255,255,0.04);
-      border: 1px solid rgba(255,255,255,0.08);
-      border-radius: 12px;
-      text-align: center; backdrop-filter: blur(8px);
+    @media (prefers-color-scheme: light){
+      :root{ --bg:#fafafa; --surface:#fff; --border:#eaeaea; --text:#0a0a0a; --dim:#52525b; --soft:#a1a1aa; }
     }
-    .icon {
-      width: 56px; height: 56px; margin: 0 auto 1.4rem;
-      border-radius: 14px; background: rgba(99,102,241,0.18);
-      display: flex; align-items: center; justify-content: center;
+    *{ box-sizing:border-box; }
+    body{
+      margin:0; min-height:100vh;
+      display:flex; align-items:center; justify-content:center;
+      font-family:"Geist","Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+      background:var(--bg); color:var(--text); padding:1.5rem;
+      -webkit-font-smoothing:antialiased; text-rendering:optimizeLegibility;
     }
-    h1 { margin: 0 0 0.6rem; font-size: 1.5rem; font-weight: 700; }
-    p { margin: 0 0 1rem; font-size: 0.95rem; line-height: 1.55; opacity: 0.85; }
-    .foot { margin-top: 1.4rem; font-size: 0.78rem; opacity: 0.5; }
+    .card{
+      max-width:460px; width:100%; padding:2.75rem 2rem; text-align:center;
+      background:var(--surface); border:1px solid var(--border);
+      border-radius:14px; box-shadow:0 24px 48px rgba(0,0,0,.5);
+    }
+    .pulse{ position:relative; width:60px; height:60px; margin:0 auto 1.6rem;
+            display:flex; align-items:center; justify-content:center; }
+    .pulse::before, .pulse::after{
+      content:""; position:absolute; inset:0; border-radius:50%;
+      border:2px solid var(--accent); opacity:0; animation:ring 2.4s ease-out infinite;
+    }
+    .pulse::after{ animation-delay:1.2s; }
+    @keyframes ring{ 0%{ transform:scale(.5); opacity:.7; } 100%{ transform:scale(1.35); opacity:0; } }
+    .dot{ width:14px; height:14px; border-radius:50%;
+          background:var(--accent); box-shadow:0 0 18px var(--accent); }
+    .brand{ margin:0 0 1.1rem; font-size:.72rem; font-weight:600;
+            letter-spacing:.18em; text-transform:uppercase; color:var(--soft); }
+    h1{ margin:0 0 .6rem; font-size:1.45rem; font-weight:700; letter-spacing:-.01em; }
+    p.msg{ margin:0; font-size:.95rem; line-height:1.6; color:var(--dim); }
+    .foot{ margin-top:1.8rem; padding-top:1.1rem; border-top:1px solid var(--border);
+           font-size:.74rem; color:var(--soft); font-variant-numeric:tabular-nums; }
+    @media (prefers-reduced-motion: reduce){ .pulse::before, .pulse::after{ animation:none; } }
   </style>
 </head>
 <body>
   <main class="card">
-    <div class="icon">
-      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="#a5b4fc" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
-      </svg>
-    </div>
+    <div class="pulse"><span class="dot"></span></div>
+    <p class="brand">Hyperion</p>
     <h1>We'll be right back</h1>
-    <p>This site is under brief maintenance. Please check back in a few minutes.</p>
+    <p class="msg">This service is updating. It will return automatically in a few moments — no need to refresh.</p>
     <div class="foot">HTTP 503 · Service Temporarily Unavailable</div>
   </main>
 </body>
