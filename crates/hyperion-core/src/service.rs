@@ -10797,6 +10797,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 expires_at: r.expires_at,
                 created_by: r.created_by,
                 created_at: r.created_at,
+                manifest_json: r.manifest_json.unwrap_or_default(),
+                selection_json: r.selection_json.unwrap_or_default(),
             }
         }
         let map = |what: &'static str| {
@@ -10880,6 +10882,22 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 Ok(ImportTokenResult::Listed(
                     rows.into_iter().map(to_info).collect(),
                 ))
+            }
+            ImportTokenOp::SetManifest {
+                token,
+                manifest_json,
+            } => {
+                let hash = hex::encode(blake3::hash(token.as_bytes()).as_bytes());
+                toks::set_manifest(&self.pool, &hash, &manifest_json, now_secs())
+                    .await
+                    .map_err(map("set_manifest"))?;
+                Ok(ImportTokenResult::Ack)
+            }
+            ImportTokenOp::SetSelection { id, selection_json } => {
+                toks::set_selection(&self.pool, id, &selection_json)
+                    .await
+                    .map_err(map("set_selection"))?;
+                Ok(ImportTokenResult::Ack)
             }
             ImportTokenOp::Cancel { id } => {
                 toks::cancel(&self.pool, id).await.map_err(map("cancel"))?;

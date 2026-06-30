@@ -484,6 +484,12 @@ pub fn build_router(state: SharedState) -> Router {
             get(handlers::import_wizard::get_transfers),
         )
         .route(
+            "/import/select/:id",
+            get(handlers::import_wizard::get_select),
+        )
+        .route("/import/select", post(handlers::import_wizard::post_select))
+        .route("/import/cancel", post(handlers::import_wizard::post_cancel))
+        .route(
             "/install/invite/revoke",
             post(handlers::install::post_revoke),
         )
@@ -597,6 +603,16 @@ pub fn build_router(state: SharedState) -> Router {
         .route(
             "/import/agent-bin/:token",
             get(handlers::import_wizard::get_agent_bin),
+        )
+        // Interactive flow: the source reports its site list, then long-polls for
+        // the operator's pick. Both are token-gated and do NOT consume the token.
+        .route(
+            "/import/manifest/:token",
+            post(handlers::import_wizard::post_manifest),
+        )
+        .route(
+            "/import/selection/:token",
+            get(handlers::import_wizard::get_selection),
         )
         .route(
             "/import/ingest/:token",

@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Choose sites to import · Hyperion{% endblock %}
+{% block main %}
+
+<div class="page-header">
+  <div>
+    <h1>Choose sites to import</h1>
+    <div class="subtitle">From your <strong>{{ source_kind }}</strong> server — {{ sites.len() }} site(s) found. Tick the ones you want; the waiting source exports just those and streams them here.</div>
+  </div>
+  <span class="grow"></span>
+  <div class="actions"><a class="btn small ghost" href="/import">← Back</a></div>
+</div>
+
+<div class="card">
+  {# The page's JS folds the ticked rows into the hidden `selected` field on
+     submit (avoids serde_urlencoded's no-repeated-keys limit). All boxes start
+     ticked — the common case for a migration is "import everything". #}
+  <form method="post" action="/import/select"
+        onsubmit="this.selected.value=Array.from(this.querySelectorAll('.hyp-site:checked')).map(function(c){return c.value;}).join(',');">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <input type="hidden" name="id" value="{{ token_id }}">
+    <input type="hidden" name="selected" value="">
+    <label class="field-checkbox" style="margin-bottom:.6rem">
+      <input type="checkbox" checked
+             onclick="var ck=this.checked;this.closest('form').querySelectorAll('.hyp-site').forEach(function(c){c.checked=ck;});">
+      <strong>Select all</strong>
+    </label>
+    <div class="table-wrap">
+      <table class="table">
+        <thead><tr><th></th><th>Domain</th><th>Owner</th><th>PHP</th><th>Databases</th></tr></thead>
+        <tbody>
+        {% for s in sites %}
+          <tr>
+            <td><input type="checkbox" class="hyp-site" value="{{ s.domain }}" checked></td>
+            <td><strong>{{ s.domain }}</strong></td>
+            <td>{{ s.owner }}</td>
+            <td>{{ s.php }}</td>
+            <td>{{ s.dbs }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    <div style="margin-top:1rem;display:flex;gap:.5rem;flex-wrap:wrap">
+      <button class="btn primary" type="submit">Import selected</button>
+      <a class="btn ghost" href="/import">Cancel</a>
+    </div>
+    <p class="text-soft small" style="margin:.7rem 0 0">Mail &amp; DNS are out of scope (reported, never imported). You can close the terminal on the source — it keeps waiting until you click Import here.</p>
+  </form>
+</div>
+
+{% endblock %}

@@ -23,6 +23,7 @@ pub async fn run(
     out: &Path,
     only: Option<&str>,
     list: bool,
+    json: bool,
 ) -> Result<usize, ImportError> {
     let loc = Location::InPlace;
 
@@ -70,14 +71,47 @@ pub async fn run(
     let n = ir.hostings.len();
 
     if list {
-        // Dry run: show what would be exported, pack nothing.
-        print_plan(&ir);
+        // Dry run: report what would be exported, pack nothing. `--json` emits a
+        // machine-readable site list (the interactive wizard POSTs this to
+        // Hyperion); otherwise a human table.
+        if json {
+            print_plan_json(&ir);
+        } else {
+            print_plan(&ir);
+        }
         return Ok(n);
     }
 
     eprintln!("• packing {n} site(s) (docroots + DB dumps) …");
     crate::bundle::build(&ir, out).await?;
     Ok(n)
+}
+
+/// Emit the would-be-exported sites as a JSON array to STDOUT — the contract the
+/// interactive wizard parses to render its checklist. Shape:
+/// `[{"domain","owner","php","dbs":[...]}]`.
+fn print_plan_json(ir: &crate::ir::ImportIR) {
+    #[derive(serde::Serialize)]
+    struct ListSite<'a> {
+        domain: &'a str,
+        owner: &'a str,
+        php: &'a str,
+        dbs: Vec<&'a str>,
+    }
+    let sites: Vec<ListSite> = ir
+        .hostings
+        .iter()
+        .map(|h| ListSite {
+            domain: &h.domain,
+            owner: &h.owner_user,
+            php: h.php_version.as_deref().unwrap_or("static"),
+            dbs: h.databases.iter().map(|d| d.name.as_str()).collect(),
+        })
+        .collect();
+    println!(
+        "{}",
+        serde_json::to_string(&sites).unwrap_or_else(|_| "[]".into())
+    );
 }
 
 /// Print a human-readable preview of the sites an export would include. Goes to

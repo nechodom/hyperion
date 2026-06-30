@@ -13,27 +13,17 @@
   </div>
 </div>
 
+{% if let Some(m) = flash %}<div class="flash success"><div class="flash-body">{{ m }}</div></div>{% endif %}
+{% if let Some(m) = flash_error %}<div class="flash error"><div class="flash-body">{{ m }}</div></div>{% endif %}
+
 {% if let Some(m) = minted %}
 <div class="card" style="margin-bottom:1rem;border-color:var(--accent)">
   <h3>Run on your {{ m.kind }} server, as root</h3>
   <p class="text-soft">Token valid for 2 hours, single use. Everything runs server-to-server — your laptop is never in the middle. Needs <code>sudo</code>/root on the source (to read the panel DB).</p>
-
-  <p style="margin:.85rem 0 .25rem"><strong>1. Preview (optional)</strong> — lists the sites that would be imported. Exports nothing; safe and reusable.</p>
-  <pre class="code-block" style="white-space:pre-wrap;word-break:break-all;user-select:all"><code>{{ m.preview_liner }}</code></pre>
+  <pre class="code-block" style="white-space:pre-wrap;word-break:break-all;user-select:all"><code>{{ m.one_liner }}</code></pre>
   <button class="btn small" type="button"
-          onclick="navigator.clipboard.writeText(this.previousElementSibling.innerText.trim());this.textContent='Copied ✓';">Copy preview</button>
-
-  <p style="margin:1.1rem 0 .25rem"><strong>2. Import</strong> — exports and streams the bundle here, then imports in the background.</p>
-  <div class="field" style="margin-bottom:.5rem">
-    <label>Only these domains <span class="text-soft">(optional, comma-separated — blank = all)</span></label>
-    <input type="text" id="only-domains" placeholder="site1.com, site2.com" autocomplete="off"
-           data-base="{{ m.base }}" data-token="{{ m.token }}"
-           oninput="var c=this.value.replace(/[^A-Za-z0-9.,-]/g,'');var q=String.fromCharCode(34);var u=this.dataset.base+'/import/agent/'+this.dataset.token+(c?('?only='+encodeURIComponent(c)):'');document.querySelector('#import-cmd code').textContent='curl -fsSL '+q+u+q+' | sudo bash';">
-  </div>
-  <pre class="code-block" id="import-cmd" style="white-space:pre-wrap;word-break:break-all;user-select:all"><code>{{ m.one_liner }}</code></pre>
-  <button class="btn small" type="button"
-          onclick="navigator.clipboard.writeText(document.querySelector('#import-cmd code').innerText.trim());this.textContent='Copied ✓';">Copy import</button>
-  <p class="text-soft" style="margin-top:.5rem">You can close this page — the transfer keeps running and shows below.</p>
+          onclick="navigator.clipboard.writeText(this.previousElementSibling.innerText.trim());this.textContent='Copied ✓';">Copy command</button>
+  <p class="text-soft" style="margin-top:.6rem">It scans the server, reports the sites here, then <strong>waits</strong>. Below under <em>Transfers</em> a <strong>Choose sites</strong> button appears — tick the ones you want and click Import. The script then exports just those and streams them back. You can close this page; it keeps running.</p>
 </div>
 {% endif %}
 
@@ -58,25 +48,10 @@
 
 <div class="card">
   <h3>Transfers</h3>
+  {# Single source of truth = the /import/wizard/transfers fragment (transfers_html),
+     polled so the "Choose sites" button appears as soon as the source reports. #}
   <div hx-get="/import/wizard/transfers" hx-trigger="load, every 3s" hx-swap="innerHTML">
-    {% if transfers.is_empty() %}
-      <p class="text-soft">No transfers in flight. Generate a command above and run it on your source server.</p>
-    {% else %}
-      <table class="table">
-        <thead><tr><th>Source</th><th>By</th><th>Status</th><th>Received</th><th></th></tr></thead>
-        <tbody>
-        {% for t in transfers %}
-          <tr>
-            <td>{{ t.source_kind }}</td>
-            <td>{{ t.created_by }}</td>
-            <td><span class="pill">{{ t.status }}</span></td>
-            <td>{{ t.received }}</td>
-            <td>{% if let Some(j) = t.job_id %}<a href="/jobs/{{ j }}">progress →</a>{% else %}<span class="text-soft">waiting for source…</span>{% endif %}</td>
-          </tr>
-        {% endfor %}
-        </tbody>
-      </table>
-    {% endif %}
+    <p class="text-soft">Loading…</p>
   </div>
 </div>
 

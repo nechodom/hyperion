@@ -27,15 +27,23 @@ struct Cli {
     /// Dry run: print the sites that WOULD be exported and pack nothing.
     #[arg(long)]
     list: bool,
+    /// With --list, emit the site list as JSON (for the interactive wizard).
+    #[arg(long)]
+    json: bool,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
-    let n =
-        hyperion_import::export::run(cli.kind.as_deref(), &cli.out, cli.only.as_deref(), cli.list)
-            .await
-            .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let n = hyperion_import::export::run(
+        cli.kind.as_deref(),
+        &cli.out,
+        cli.only.as_deref(),
+        cli.list,
+        cli.json,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
     // Keep all non-list output on stderr — stdout may be the bundle stream
     // (`--out -`). In --list mode the plan is printed to stdout by the driver.
     if cli.list {

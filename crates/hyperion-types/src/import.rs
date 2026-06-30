@@ -28,6 +28,15 @@ pub enum ImportTokenOp {
     },
     /// List in-flight tokens (wizard "transfers" panel + status polling).
     List,
+    /// Record the site list the source reported (interactive import). By token
+    /// plaintext (the source has no session); only updates a still-pending row.
+    SetManifest {
+        token: String,
+        manifest_json: String,
+    },
+    /// Record the operator's site pick (`["*"]` = all). By row id (set from the
+    /// authenticated wizard).
+    SetSelection { id: i64, selection_json: String },
     /// Revoke a token.
     Cancel { id: i64 },
 }
@@ -44,6 +53,12 @@ pub struct ImportTokenInfo {
     pub expires_at: i64,
     pub created_by: String,
     pub created_at: i64,
+    /// JSON site list the source reported (empty until it does).
+    #[serde(default)]
+    pub manifest_json: String,
+    /// JSON of the operator's pick (empty until chosen; `["*"]` = all).
+    #[serde(default)]
+    pub selection_json: String,
 }
 
 /// Result of an [`ImportTokenOp`].
