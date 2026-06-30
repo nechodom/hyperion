@@ -28,7 +28,7 @@ pub use ir::{
     ImportIR, IrCert, IrDatabase, IrDbEngine, IrHosting, IrSiteKind, IrUnsupported, SourceSummary,
 };
 pub use panel::{
-    adapter_for, location_for, ImportPanelReq, ImportPanelResult, ImportedHosting, SkippedHosting,
-    SshConn,
+    adapter_for, location_for, ImportPanelReq, ImportPanelResult, ImportedHosting,
+    SiteImportOverride, SkippedHosting, SshConn,
 };
 pub use planner::{Action, ImportPlan, ImportPlanner, PlannedHosting};

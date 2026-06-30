@@ -15298,7 +15298,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// WordPress install. Runs wp-cli directly (same path as
     /// wp_reset_password). A non-WP site or wp-cli hiccup is logged, not
     /// fatal — the caller has already moved the files + DB.
-    async fn wp_rewrite_domain(&self, system_user: &str, root_dir: &str, from: &str, to: &str) {
+    pub(crate) async fn wp_rewrite_domain(
+        &self,
+        system_user: &str,
+        root_dir: &str,
+        from: &str,
+        to: &str,
+    ) {
         let old_url = format!("//{from}");
         let new_url = format!("//{to}");
         let sr = [

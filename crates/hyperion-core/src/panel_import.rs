@@ -24,6 +24,10 @@ use hyperion_rpc::RpcError;
 use hyperion_validate::Domain;
 use std::path::{Path, PathBuf};
 
+/// hosting_kv key under which each imported hosting records the source panel's
+/// site key, so a re-run can detect "already imported" (idempotency).
+const IMPORT_SOURCE_KEY_KV: &str = "import_source_key";
+
 impl<A: AdapterPort + 'static> HostingService<A> {
     /// Dry-run: detect + extract the source panel and classify every site as
     /// Create / Skip / Conflict / Unsupported. Side-effect-free.
@@ -89,7 +93,19 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 message: format!("extract failed: {e}"),
             })?;
         let existing: Vec<String> = self.list().await?.into_iter().map(|s| s.domain).collect();
-        Ok(ImportPlanner::plan(ir, &existing, &[]))
+        // `already_imported` are the source_keys recorded on prior imports (step 6
+        // of apply_one_import). Wiring them makes a re-run idempotent: a site
+        // that was already imported — including one RENAMED to a different target
+        // domain (whose source domain no longer appears in `existing`) — is
+        // classified Skip instead of being created again.
+        let already_imported: Vec<String> =
+            hyperion_state::hosting_kv::list_by_key(&self.pool, IMPORT_SOURCE_KEY_KV)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(_hosting_id, source_key)| source_key)
+                .collect();
+        Ok(ImportPlanner::plan(ir, &existing, &already_imported))
     }
 
     /// Apply against an already-resolved location.
@@ -102,15 +118,27 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let mut created = Vec::new();
         let mut skipped = Vec::new();
         for item in &plan.items {
+            // Operator override for this site (keyed by source domain), if any.
+            let ov = req
+                .site_overrides
+                .iter()
+                .find(|o| o.source_domain == item.hosting.domain);
+            // The domain the site actually lands under (target override or source).
+            let final_domain = ov
+                .and_then(|o| o.target_domain.as_deref())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or(item.domain.as_str())
+                .to_string();
             match item.action {
-                Action::Create => match self.apply_one_import(&item.hosting, loc).await {
+                Action::Create => match self.apply_one_import(&item.hosting, loc, ov).await {
                     Ok(id) => created.push(ImportedHosting {
-                        domain: item.domain.clone(),
+                        domain: final_domain,
                         hosting_id: id,
                         databases: item.hosting.databases.len(),
                     }),
                     Err(e) => skipped.push(SkippedHosting {
-                        domain: item.domain.clone(),
+                        domain: final_domain,
                         reason: format!("failed: {e}"),
                     }),
                 },
@@ -134,11 +162,25 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     }
 
     /// Provision one hosting and pull its files + DB across (local or remote).
-    async fn apply_one_import(&self, h: &IrHosting, loc: &Location) -> Result<String, RpcError> {
+    async fn apply_one_import(
+        &self,
+        h: &IrHosting,
+        loc: &Location,
+        ov: Option<&hyperion_import::SiteImportOverride>,
+    ) -> Result<String, RpcError> {
         // 1. Provision a fresh Hyperion hosting — reuses ALL of create()
         //    (system user, dirs, nginx vhost, php-fpm pool, DB if any).
-        let domain = Domain::parse(&h.domain).map_err(|e| RpcError::Validation {
-            message: format!("domain: {e}"),
+        //    The operator may RENAME the site at import: create under the chosen
+        //    target domain, but keep locating the SOURCE files/DB in the bundle
+        //    by `h.domain`.
+        let target = ov
+            .and_then(|o| o.target_domain.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(h.domain.as_str())
+            .to_string();
+        let domain = Domain::parse(&target).map_err(|e| RpcError::Validation {
+            message: format!("target domain '{target}': {e}"),
         })?;
         let php_version = h.php_version.as_deref().and_then(|v| v.parse().ok());
         let database = h.databases.first().map(|d| match d.engine {
@@ -242,12 +284,58 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .await;
         }
 
+        // 5b. Operator per-site overrides (interactive wizard):
+        //   - rename: rewrite WordPress URLs from the source domain to the new
+        //     one (best-effort; no-op on non-WP) so the site isn't full of links
+        //     back to the old host;
+        //   - profile: apply limits/quota + price + billing clock;
+        //   - billing date: override the profile's first-billing timestamp.
+        //
+        // NOTE (multi-node): profiles + billing live in the master-only
+        // `hosting_profile_apply`/`hosting_profiles` tables, and the self-service
+        // wizard always lands the bundle on the master (mint sets
+        // target_node="local"), so `profile_apply(..., None)` resolves the
+        // profile locally here. If a future flow imports straight onto a WORKER,
+        // the resolved `HostingProfile` must be passed inline (the 4th arg) —
+        // a bare profile_id can't be looked up off-master. We surface a failure
+        // loudly rather than silently dropping the operator's choice.
+        if let Some(o) = ov {
+            if target != h.domain {
+                self.wp_rewrite_domain(&created.system_user, &created.root_dir, &h.domain, &target)
+                    .await;
+            }
+            if let Some(pid) = o.profile_id {
+                if let Err(e) = self
+                    .profile_apply(
+                        hyperion_rpc::wire::HostingSelector::Id(created.id.clone()),
+                        pid,
+                        false,
+                        None,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        hosting = %created.id.as_str(), profile = pid, error = %e,
+                        "import: profile apply failed — site imported WITHOUT the chosen \
+                         profile or billing date (profile not resolvable on this node?)"
+                    );
+                } else if let Some(nb) = o.next_billing_at {
+                    let _ = hyperion_state::profiles::set_next_billing(
+                        &self.pool,
+                        &created.id,
+                        Some(nb),
+                    )
+                    .await;
+                }
+            }
+        }
+
         // 6. Record the source key so a re-run reports this site as already
         //    imported instead of recreating it.
         let _ = hyperion_state::hosting_kv::set(
             &self.pool,
             created.id.as_str(),
-            "import_source_key",
+            IMPORT_SOURCE_KEY_KV,
             &h.source_key,
             now_secs(),
         )

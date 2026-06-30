@@ -12,14 +12,13 @@
 </div>
 
 <div class="card">
-  {# The page's JS folds the ticked rows into the hidden `selected` field on
-     submit (avoids serde_urlencoded's no-repeated-keys limit). All boxes start
-     ticked — the common case for a migration is "import everything". #}
-  <form method="post" action="/import/select"
-        onsubmit="this.selected.value=Array.from(this.querySelectorAll('.hyp-site:checked')).map(function(c){return c.value;}).join(',');">
+  {# The page's JS folds the ticked rows into the hidden `config` JSON field on
+     submit (one object per chosen site: source/target/profile/billing). All
+     boxes start ticked — a migration usually means "import everything". #}
+  <form method="post" action="/import/select" onsubmit="return hypBuildImportConfig(this);">
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <input type="hidden" name="id" value="{{ token_id }}">
-    <input type="hidden" name="selected" value="">
+    <input type="hidden" name="config" value="">
     <label class="field-checkbox" style="margin-bottom:.6rem">
       <input type="checkbox" checked
              onclick="var ck=this.checked;this.closest('form').querySelectorAll('.hyp-site').forEach(function(c){c.checked=ck;});">
@@ -27,20 +26,47 @@
     </label>
     <div class="table-wrap">
       <table class="table">
-        <thead><tr><th></th><th>Domain</th><th>Owner</th><th>PHP</th><th>Databases</th></tr></thead>
+        <thead>
+          <tr>
+            <th></th>
+            <th>Source site</th>
+            <th>Import as</th>
+            {% if !profiles.is_empty() %}<th>Profile</th><th>Bill from</th>{% endif %}
+          </tr>
+        </thead>
         <tbody>
         {% for s in sites %}
-          <tr>
-            <td><input type="checkbox" class="hyp-site" value="{{ s.domain }}" checked></td>
-            <td><strong>{{ s.domain }}</strong></td>
-            <td>{{ s.owner }}</td>
-            <td>{{ s.php }}</td>
-            <td>{{ s.dbs }}</td>
+          <tr class="hyp-row" data-source="{{ s.domain }}">
+            <td><input type="checkbox" class="hyp-site" checked></td>
+            <td>
+              <strong>{{ s.domain }}</strong>
+              <div class="text-soft small">{{ s.owner }} · PHP {{ s.php }} · {{ s.dbs }} DB</div>
+            </td>
+            <td>
+              <input type="text" class="hyp-target" value="{{ s.domain }}" autocomplete="off"
+                     spellcheck="false" style="min-width:14rem">
+            </td>
+            {% if !profiles.is_empty() %}
+            <td>
+              <select class="hyp-profile">
+                <option value="0">— none —</option>
+                {% for p in profiles %}
+                  <option value="{{ p.id }}">{{ p.name }}{% if p.price != "—" %} · {{ p.price }}{% endif %}</option>
+                {% endfor %}
+              </select>
+            </td>
+            <td><input type="date" class="hyp-bill"></td>
+            {% endif %}
           </tr>
         {% endfor %}
         </tbody>
       </table>
     </div>
+    <p class="text-soft small" style="margin:.6rem 0 0">
+      <strong>Import as</strong> renames the site at import — keep the subdomain, swap the base domain
+      (e.g. <code>shop.old.cz</code> → <code>shop.new.cz</code>). WordPress URLs are rewritten automatically.
+      {% if !profiles.is_empty() %}A <strong>profile</strong> applies limits + price; <strong>Bill from</strong> sets the first billing date (else it starts one interval from now).{% endif %}
+    </p>
     <div style="margin-top:1rem;display:flex;gap:.5rem;flex-wrap:wrap">
       <button class="btn primary" type="submit">Import selected</button>
       <a class="btn ghost" href="/import">Cancel</a>
@@ -48,5 +74,31 @@
     <p class="text-soft small" style="margin:.7rem 0 0">Mail &amp; DNS are out of scope (reported, never imported). You can close the terminal on the source — it keeps waiting until you click Import here.</p>
   </form>
 </div>
+
+<script>
+function hypBuildImportConfig(form) {
+  var rows = form.querySelectorAll('.hyp-row');
+  var out = [];
+  for (var i = 0; i < rows.length; i++) {
+    var row = rows[i];
+    var cb = row.querySelector('.hyp-site');
+    if (!cb || !cb.checked) continue;
+    var obj = { source: row.getAttribute('data-source') };
+    var te = row.querySelector('.hyp-target');
+    if (te) { obj.target = te.value.trim().toLowerCase(); }
+    var pe = row.querySelector('.hyp-profile');
+    if (pe) { var pid = parseInt(pe.value, 10); if (pid > 0) obj.profile_id = pid; }
+    var be = row.querySelector('.hyp-bill');
+    if (be && be.value) {
+      var ts = Math.floor(new Date(be.value + 'T00:00:00Z').getTime() / 1000);
+      if (ts > 0) obj.billing_at = ts;
+    }
+    out.push(obj);
+  }
+  if (out.length === 0) { alert('Tick at least one site to import.'); return false; }
+  form.config.value = JSON.stringify(out);
+  return true;
+}
+</script>
 
 {% endblock %}

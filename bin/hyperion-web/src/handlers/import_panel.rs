@@ -212,6 +212,9 @@ pub async fn post_plan(
         mode: form.mode.clone(),
         ssh: build_ssh(&form),
         archive_path: opt_archive(&form),
+        // The non-interactive panel-import path imports every site as-is; the
+        // per-site rename/profile/billing overrides only come from the wizard.
+        site_overrides: Vec::new(),
     };
     let resp = crate::dispatcher::dispatch_to_node(
         &state,
@@ -275,6 +278,9 @@ pub async fn post_apply(
         mode: form.mode.clone(),
         ssh: build_ssh(&form),
         archive_path: opt_archive(&form),
+        // The non-interactive panel-import path imports every site as-is; the
+        // per-site rename/profile/billing overrides only come from the wizard.
+        site_overrides: Vec::new(),
     };
     // Owned bits captured by the detached task (no secrets in the job payload —
     // the ssh key lives only in `req`, in memory, never persisted to the row).
