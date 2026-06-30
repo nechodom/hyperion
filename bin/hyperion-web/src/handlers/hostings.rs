@@ -279,6 +279,13 @@ struct DetailTpl<'a> {
     /// Operator php.ini overrides (applied via .user.ini).
     php_ini: PhpIniSettings,
     csrf_php_ini: String,
+    /// Internal preview hostname on the owner node's `*.<base>` wildcard
+    /// cert (e.g. `shop-example-com.s4.testovaciverze.cz`), or `None`
+    /// when no preview applies. `Some` ⇒ the detail page shows a
+    /// "Preview site" link that works before real DNS cutover. Computed
+    /// with the SAME rule the agent uses to render the preview vhost, so
+    /// the link always matches a server block that actually exists.
+    preview_domain: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1179,6 +1186,7 @@ pub async fn post_create(
                 .await
                 .unwrap_or_else(|_| hyperion_types::HostingLimits::defaults());
             let staging_domain_default = format!("staging.{}", detail.domain);
+            let preview_domain = compute_preview_domain(&state, target, &detail.domain).await;
             let tpl = DetailTpl {
                 username: &ctx.username,
                 user_initial: super::user_initial(&ctx.username),
@@ -1275,6 +1283,7 @@ pub async fn post_create(
                 staging_domain: staging_domain_default,
                 php_ini: PhpIniSettings::default(),
                 csrf_php_ini: csrf_token_for(&state, &ctx, "/hostings/php-ini"),
+                preview_domain,
             };
             Ok(Html(tpl.render()?).into_response())
         }
@@ -1903,6 +1912,9 @@ pub async fn get_detail(
             .unwrap_or_else(|| "off".into()),
         _ => "off".into(),
     };
+    // Internal preview URL on the owner node's wildcard cert (shown only
+    // when the node actually has one + the domain isn't already under it).
+    let preview_domain = compute_preview_domain(&state, target, &detail.domain).await;
     let tpl = DetailTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -2019,6 +2031,7 @@ pub async fn get_detail(
         staging_domain,
         php_ini: PhpIniSettings::from_kv(&kv_pairs),
         csrf_php_ini: csrf_token_for(&state, &ctx, "/hostings/php-ini"),
+        preview_domain,
     };
     Ok(Html(tpl.render()?).into_response())
 }
@@ -4371,6 +4384,57 @@ pub(crate) async fn fetch_cluster_config(state: &SharedState) -> hyperion_types:
     match hyperion_rpc_client::call(&state.agent_socket, Request::AgentConfigView).await {
         Ok(RpcResponse::AgentConfigView(c)) => c.cluster,
         _ => hyperion_types::ClusterConfigView::default(),
+    }
+}
+
+/// Internal preview hostname for a hosting on its owner node, mirroring
+/// the agent's vhost rule so the link we show always matches a server
+/// block that actually exists. `None` ⇒ no preview link (no wildcard,
+/// or the domain is already under it).
+///
+/// The wildcard base is resolved from the cluster `test_domain_template`
+/// (master-local config) using the owner node's id + hostname label.
+///
+/// Cross-node accuracy: we don't have a dedicated "does node X carry a
+/// wildcard for base B" RPC, so we reuse the existing per-node
+/// `CertOverview` (dispatched to the OWNER node) and confirm a cert
+/// whose `domain == base` exists there. By construction that base
+/// hostname (a node's auto-subdomain parent) only ever receives the
+/// `*.<base>` wildcard cert issued in Settings → Test nodes, so a cert
+/// at that exact domain on that node IS the wildcard. This is strictly
+/// more accurate than assuming "test node ⇒ has wildcard" and needs no
+/// new RPC, schema, or wire change.
+pub(crate) async fn compute_preview_domain(
+    state: &SharedState,
+    owner_node: Option<&str>,
+    primary_domain: &str,
+) -> Option<String> {
+    let cluster = fetch_cluster_config(state).await;
+    // Owner node id + its hostname label (so `{node}` → "s4", not the
+    // long node_id). Empty node_id ⇒ master / local.
+    let node_id = owner_node.unwrap_or("").to_string();
+    let node_hostname = fetch_remote_nodes(state)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .find(|n| n.node_id == node_id)
+        .map(|n| n.label)
+        .unwrap_or_default();
+    let base = cluster.node_wildcard_base(&node_id, &node_hostname)?;
+    // server_name derivation + the "already under base?" skip live in the
+    // shared helper, so the URL here can't diverge from the agent's vhost.
+    let server_name = hyperion_types::ClusterConfigView::preview_subdomain(primary_domain, &base)?;
+    // Confirm the wildcard cert actually exists on the owner node.
+    let resp = crate::dispatcher::dispatch_to_node(state, owner_node, Request::CertOverview).await;
+    let has_wildcard = matches!(
+        resp,
+        Ok(RpcResponse::CertOverview(ref items))
+            if items.iter().any(|c| c.domain.eq_ignore_ascii_case(&base))
+    );
+    if has_wildcard {
+        Some(server_name)
+    } else {
+        None
     }
 }
 

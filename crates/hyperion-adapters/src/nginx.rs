@@ -21,6 +21,20 @@ pub struct VhostInput<'a> {
     pub hosting_id: &'a str,
     /// Operator-controlled vhost knobs from migration 020.
     pub options: &'a hyperion_types::VhostOptions,
+    /// Internal preview hostname on the node's wildcard cert (e.g.
+    /// `shop-example-com.s4.testovaciverze.cz`), or `None` when no
+    /// preview applies — i.e. the node has no wildcard, or the primary
+    /// domain already lives under it. When `Some`, a SECOND `server`
+    /// block is rendered serving the SAME docroot/PHP from this name
+    /// under the wildcard cert below, so the site is viewable before
+    /// DNS cutover. `None` ⇒ the vhost renders byte-identically to a
+    /// non-preview hosting (no churn for ordinary sites).
+    pub preview_server_name: Option<&'a str>,
+    /// Wildcard cert/key the preview block points at — the node's
+    /// `*.<base>` files. Required (and only used) when
+    /// `preview_server_name` is `Some`.
+    pub preview_cert_path: Option<&'a str>,
+    pub preview_cert_key_path: Option<&'a str>,
 }
 
 #[derive(Template)]
@@ -51,6 +65,14 @@ struct VhostTpl<'a> {
     /// allowlist disabled (every entry has already been checked to
     /// parse as an IpAddr or addr/prefix, so they're safe to inline).
     wp_admin_allow: Vec<String>,
+    /// Preview hostname + wildcard cert paths for the optional second
+    /// server block. `preview_enabled` gates the whole block so an
+    /// ordinary hosting renders unchanged. The string fields are empty
+    /// when disabled (never referenced because the `{% if %}` guards them).
+    preview_enabled: bool,
+    preview_server_name: &'a str,
+    preview_cert_path: &'a str,
+    preview_cert_key_path: &'a str,
 }
 
 /// Parse the operator's comma/newline-separated wp-admin allowlist into
@@ -482,6 +504,15 @@ pub fn render(input: &VhostInput<'_>) -> Result<String, AdapterError> {
         fastcgi_cache_ttl: input.options.fastcgi_cache_ttl,
         waf_enabled: input.options.waf_enabled,
         wp_admin_allow: parse_admin_allowlist(&input.options.wp_admin_allowlist),
+        // The preview block needs ALL THREE of name/cert/key — a
+        // half-supplied set (name but no cert) would render an nginx
+        // config that fails `nginx -t`, so treat it as "off".
+        preview_enabled: input.preview_server_name.is_some()
+            && input.preview_cert_path.is_some()
+            && input.preview_cert_key_path.is_some(),
+        preview_server_name: input.preview_server_name.unwrap_or(""),
+        preview_cert_path: input.preview_cert_path.unwrap_or(""),
+        preview_cert_key_path: input.preview_cert_key_path.unwrap_or(""),
     };
     Ok(tpl.render()?)
 }
@@ -991,6 +1022,9 @@ mod tests {
             acme_challenge_root: "/var/lib/lm/acme-challenges",
             hosting_id: "01HMOD",
             options: &opts,
+            preview_server_name: None,
+            preview_cert_path: None,
+            preview_cert_key_path: None,
         })
         .expect("render");
         assert!(
@@ -1022,6 +1056,9 @@ mod tests {
             acme_challenge_root: "/var/lib/lm/acme-challenges",
             hosting_id: "01H0000000000000000000",
             options: &opts,
+            preview_server_name: None,
+            preview_cert_path: None,
+            preview_cert_key_path: None,
         })
         .expect("render");
         assert!(out.contains("server_name example.cz;"));
@@ -1064,11 +1101,135 @@ mod tests {
             acme_challenge_root: "/var/lib/lm/acme-challenges",
             hosting_id: "01H0000000000000000000",
             options: &opts,
+            preview_server_name: None,
+            preview_cert_path: None,
+            preview_cert_key_path: None,
         })
         .expect("render");
         assert!(out.contains("server_name example.cz www.example.cz example.com;"));
         assert!(out.contains("fastcgi_pass unix:/run/php/8.3/example_cz.sock"));
         assert!(out.contains("try_files $uri $uri/ /index.php?$args"));
+    }
+
+    /// WITHOUT a preview (the common case), the rendered vhost must be
+    /// byte-identical to the pre-preview output: exactly ONE HTTPS
+    /// `server` block, no second cert, no churn for ordinary sites.
+    #[test]
+    fn render_no_preview_emits_single_https_block() {
+        let aliases = vec!["www.example.cz".to_string()];
+        let opts = hyperion_types::VhostOptions::default();
+        let out = render(&VhostInput {
+            domain: "example.cz",
+            aliases: &aliases,
+            root_dir: "/home/example_cz/example.cz/htdocs",
+            logs_dir: "/home/example_cz/example.cz/logs",
+            system_user: "example_cz",
+            php_version: Some("8.3"),
+            cert_path: "/etc/lm/certs/example.cz/fullchain.pem",
+            key_path: "/etc/lm/certs/example.cz/privkey.pem",
+            acme_challenge_root: "/var/lib/lm/acme-challenges",
+            hosting_id: "01H0000000000000000000",
+            options: &opts,
+            preview_server_name: None,
+            preview_cert_path: None,
+            preview_cert_key_path: None,
+        })
+        .expect("render");
+        // Exactly one HTTPS listener ⇒ no preview block leaked in.
+        assert_eq!(
+            out.matches("listen 443 ssl http2;").count(),
+            1,
+            "non-preview vhost must have a single HTTPS server block:\n{out}"
+        );
+        assert!(!out.contains("Internal preview vhost"));
+        assert!(!out.contains("server_name example-cz"));
+    }
+
+    /// WITH a preview, a SECOND HTTPS `server` block is emitted for the
+    /// preview hostname pointing at the node WILDCARD cert/key, while the
+    /// primary block keeps the per-site cert. Both serve the same docroot
+    /// + PHP-FPM socket (shared macro — can't drift).
+    #[test]
+    fn render_preview_emits_second_server_block_on_wildcard() {
+        let aliases: Vec<String> = vec![];
+        let opts = hyperion_types::VhostOptions::default();
+        let out = render(&VhostInput {
+            domain: "shop.example.com",
+            aliases: &aliases,
+            root_dir: "/home/shop/shop.example.com/htdocs",
+            logs_dir: "/home/shop/shop.example.com/logs",
+            system_user: "shop",
+            php_version: Some("8.3"),
+            cert_path: "/etc/hyperion/certs/shop.example.com/fullchain.pem",
+            key_path: "/etc/hyperion/certs/shop.example.com/privkey.pem",
+            acme_challenge_root: "/var/lib/hyperion/acme-challenges",
+            hosting_id: "01H0000000000000000001",
+            options: &opts,
+            preview_server_name: Some("shop-example-com.s4.testovaciverze.cz"),
+            preview_cert_path: Some("/etc/hyperion/certs/s4.testovaciverze.cz/fullchain.pem"),
+            preview_cert_key_path: Some("/etc/hyperion/certs/s4.testovaciverze.cz/privkey.pem"),
+        })
+        .expect("render");
+        // TWO HTTPS server blocks now.
+        assert_eq!(
+            out.matches("listen 443 ssl http2;").count(),
+            2,
+            "preview vhost must add a second HTTPS server block:\n{out}"
+        );
+        // Preview server_name present.
+        assert!(out.contains("server_name shop-example-com.s4.testovaciverze.cz;"));
+        // Primary block keeps the per-site cert.
+        assert!(
+            out.contains("ssl_certificate     /etc/hyperion/certs/shop.example.com/fullchain.pem;")
+        );
+        // Preview block points at the WILDCARD cert/key.
+        assert!(out.contains(
+            "ssl_certificate     /etc/hyperion/certs/s4.testovaciverze.cz/fullchain.pem;"
+        ));
+        assert!(out
+            .contains("ssl_certificate_key /etc/hyperion/certs/s4.testovaciverze.cz/privkey.pem;"));
+        // Shared body: both blocks serve the same root + FPM socket. The
+        // root appears in each server block (twice total).
+        assert_eq!(
+            out.matches("root /home/shop/shop.example.com/htdocs;")
+                .count(),
+            2
+        );
+        assert_eq!(
+            out.matches("fastcgi_pass unix:/run/php/8.3/shop.sock")
+                .count(),
+            2
+        );
+        // Marker comment for the preview block.
+        assert!(out.contains("Internal preview vhost"));
+    }
+
+    /// A half-supplied preview (server_name but a missing cert) must NOT
+    /// render a second block — that would produce a config `nginx -t`
+    /// rejects. `render` treats it as "off".
+    #[test]
+    fn render_preview_requires_all_three_fields() {
+        let aliases: Vec<String> = vec![];
+        let opts = hyperion_types::VhostOptions::default();
+        let out = render(&VhostInput {
+            domain: "shop.example.com",
+            aliases: &aliases,
+            root_dir: "/home/shop/htdocs",
+            logs_dir: "/home/shop/logs",
+            system_user: "shop",
+            php_version: Some("8.3"),
+            cert_path: "/etc/hyperion/certs/shop.example.com/fullchain.pem",
+            key_path: "/etc/hyperion/certs/shop.example.com/privkey.pem",
+            acme_challenge_root: "/var/lib/hyperion/acme-challenges",
+            hosting_id: "01H0000000000000000002",
+            options: &opts,
+            preview_server_name: Some("shop-example-com.s4.testovaciverze.cz"),
+            preview_cert_path: None,
+            preview_cert_key_path: None,
+        })
+        .expect("render");
+        assert_eq!(out.matches("listen 443 ssl http2;").count(), 1);
+        assert!(!out.contains("Internal preview vhost"));
     }
 
     #[test]
@@ -1097,6 +1258,9 @@ mod tests {
             acme_challenge_root: "/var/lib/lm/acme-challenges",
             hosting_id: "01HVHOST",
             options: &opts,
+            preview_server_name: None,
+            preview_cert_path: None,
+            preview_cert_key_path: None,
         })
         .expect("render");
         assert!(out.contains("auth_basic           \"Restricted\";"));
@@ -1127,6 +1291,9 @@ mod tests {
             acme_challenge_root: "/var/lib/lm/acme-challenges",
             hosting_id: "01HMAINT",
             options: &opts,
+            preview_server_name: None,
+            preview_cert_path: None,
+            preview_cert_key_path: None,
         })
         .expect("render");
         assert!(out.contains("location / { return 503; }"));
@@ -1159,6 +1326,9 @@ mod tests {
             acme_challenge_root: "/var/lib/lm/acme-challenges",
             hosting_id: "01HCACHE",
             options: &opts,
+            preview_server_name: None,
+            preview_cert_path: None,
+            preview_cert_key_path: None,
         })
         .expect("render");
         assert!(out.contains("fastcgi_cache hyperion_01HCACHE;"));
@@ -1199,6 +1369,9 @@ mod tests {
             acme_challenge_root: "/var/lib/lm/acme-challenges",
             hosting_id: "01HWAF",
             options: &opts,
+            preview_server_name: None,
+            preview_cert_path: None,
+            preview_cert_key_path: None,
         })
         .expect("render");
         // WAF rules present.

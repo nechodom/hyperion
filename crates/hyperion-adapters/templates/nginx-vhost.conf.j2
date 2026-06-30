@@ -1,83 +1,17 @@
-{%- if maintenance_mode %}
-# Maintenance mode toggled ON via /hostings/<domain> detail page.
-# Every request returns 503 with a generic page. ACME challenges
-# still served so LE renewals don't break.
-server {
-    listen 80;
-    listen [::]:80;
-    server_name {{ domain }}{% for a in aliases %} {{ a }}{% endfor %};
-    location /.well-known/acme-challenge/ {
-        alias {{ acme_challenge_root }}/;
-        try_files $uri =404;
-        default_type "text/plain";
-        autoindex off;
-    }
-    location / { return 503; }
-}
-server {
-    # `http2` as listen parameter — see nginx-panel.conf.j2 for the
-    # rationale. Standalone `http2 on;` only works on nginx ≥ 1.25.1;
-    # Debian 12 ships 1.22 and would emit
-    # `unknown directive "http2"` on every reload.
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
-    server_name {{ domain }}{% for a in aliases %} {{ a }}{% endfor %};
-    ssl_certificate     {{ cert_path }};
-    ssl_certificate_key {{ key_path }};
-    ssl_protocols TLSv1.2 TLSv1.3;
-    error_page 503 @maintenance;
-    location @maintenance {
-        root /var/lib/hyperion/maintenance;
-        try_files /maintenance.html =503;
-        internal;
-        add_header Cache-Control "no-store" always;
-        add_header Retry-After "300" always;
-    }
-    location / { return 503; }
-}
-{%- else %}
-server {
-    listen 80;
-    listen [::]:80;
-    server_name {{ domain }}{% for a in aliases %} {{ a }}{% endfor %};
+{#- ───────────────────────────────────────────────────────────────
+   The HTTPS server-block body (headers, WAF, auth, ACME, PHP-FPM
+   and the location blocks) is identical for the primary vhost and
+   the optional internal-preview vhost — only `server_name` and the
+   ssl_certificate pair differ. It's factored into one macro so the
+   two blocks can't drift. The per-block `listen` / `server_name` /
+   `root` / `index` / `ssl_certificate*` lines stay at the call site
+   because they're tiny and differ between the two.
 
-    # `alias` (not `root`) so nginx serves
-    # <acme_challenge_root>/<token>, not
-    # <acme_challenge_root>/.well-known/acme-challenge/<token>.
-    # The trailing slash on both location and alias is required.
-    location /.well-known/acme-challenge/ {
-        alias {{ acme_challenge_root }}/;
-        try_files $uri =404;
-        default_type "text/plain";
-        autoindex off;
-    }
-
-    location / {
-        return 301 https://$host$request_uri;
-    }
-}
-
-{%- if fastcgi_cache_enabled %}
-# Per-hosting FastCGI cache (operator-enabled, TTL {{ fastcgi_cache_ttl }}s).
-# zone name + path namespaced by hosting_id so multiple hostings on
-# the same node don't collide and a Purge button can clear ONE cache
-# at a time. The fastcgi_cache_path declaration MUST live at http{}
-# level — the agent writes it to /etc/nginx/conf.d/hyperion-cache-{{ hosting_id }}.conf
-# parallel to writing the vhost, and the include directive there
-# picks it up.
-{%- endif %}
-
-server {
-    # `http2` as listen parameter — Debian 12 nginx 1.22 doesn't
-    # understand standalone `http2 on;`. See top of file for context.
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
-    server_name {{ domain }}{% for a in aliases %} {{ a }}{% endfor %};
-    root {{ root_dir }};
-    index index.php index.html index.htm;
-
-    ssl_certificate     {{ cert_path }};
-    ssl_certificate_key {{ key_path }};
+   Askama requires macro/import/extends blocks at the TOP LEVEL of the
+   template (never nested inside an {% if %}), so it lives up here and
+   is only *called* from the non-maintenance branch below.
+   ─────────────────────────────────────────────────────────────── -#}
+{% macro https_body() %}
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
     ssl_prefer_server_ciphers on;
@@ -238,5 +172,106 @@ server {
     {{ custom_nginx_snippet }}
     # ─── end custom snippet ───
     {%- endif %}
+{%- endmacro %}
+{%- if maintenance_mode %}
+# Maintenance mode toggled ON via /hostings/<domain> detail page.
+# Every request returns 503 with a generic page. ACME challenges
+# still served so LE renewals don't break.
+server {
+    listen 80;
+    listen [::]:80;
+    server_name {{ domain }}{% for a in aliases %} {{ a }}{% endfor %};
+    location /.well-known/acme-challenge/ {
+        alias {{ acme_challenge_root }}/;
+        try_files $uri =404;
+        default_type "text/plain";
+        autoindex off;
+    }
+    location / { return 503; }
 }
+server {
+    # `http2` as listen parameter — see nginx-panel.conf.j2 for the
+    # rationale. Standalone `http2 on;` only works on nginx ≥ 1.25.1;
+    # Debian 12 ships 1.22 and would emit
+    # `unknown directive "http2"` on every reload.
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name {{ domain }}{% for a in aliases %} {{ a }}{% endfor %};
+    ssl_certificate     {{ cert_path }};
+    ssl_certificate_key {{ key_path }};
+    ssl_protocols TLSv1.2 TLSv1.3;
+    error_page 503 @maintenance;
+    location @maintenance {
+        root /var/lib/hyperion/maintenance;
+        try_files /maintenance.html =503;
+        internal;
+        add_header Cache-Control "no-store" always;
+        add_header Retry-After "300" always;
+    }
+    location / { return 503; }
+}
+{%- else %}
+server {
+    listen 80;
+    listen [::]:80;
+    server_name {{ domain }}{% for a in aliases %} {{ a }}{% endfor %};
+
+    # `alias` (not `root`) so nginx serves
+    # <acme_challenge_root>/<token>, not
+    # <acme_challenge_root>/.well-known/acme-challenge/<token>.
+    # The trailing slash on both location and alias is required.
+    location /.well-known/acme-challenge/ {
+        alias {{ acme_challenge_root }}/;
+        try_files $uri =404;
+        default_type "text/plain";
+        autoindex off;
+    }
+
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+{%- if fastcgi_cache_enabled %}
+# Per-hosting FastCGI cache (operator-enabled, TTL {{ fastcgi_cache_ttl }}s).
+# zone name + path namespaced by hosting_id so multiple hostings on
+# the same node don't collide and a Purge button can clear ONE cache
+# at a time. The fastcgi_cache_path declaration MUST live at http{}
+# level — the agent writes it to /etc/nginx/conf.d/hyperion-cache-{{ hosting_id }}.conf
+# parallel to writing the vhost, and the include directive there
+# picks it up.
+{%- endif %}
+
+server {
+    # `http2` as listen parameter — Debian 12 nginx 1.22 doesn't
+    # understand standalone `http2 on;`. See top of file for context.
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name {{ domain }}{% for a in aliases %} {{ a }}{% endfor %};
+    root {{ root_dir }};
+    index index.php index.html index.htm;
+
+    ssl_certificate     {{ cert_path }};
+    ssl_certificate_key {{ key_path }};
+{%- call https_body() %}
+}
+{%- if preview_enabled %}
+
+# ─── Internal preview vhost (Hyperion) ───
+# Serves the SAME docroot/PHP under the node's `*.<base>` wildcard cert
+# so an operator can open this site BEFORE pointing real DNS at the
+# node. Auto-rendered whenever the node has a wildcard and the primary
+# domain isn't already under it; removed with the hosting (same file).
+server {
+    listen 443 ssl http2;
+    listen [::]:443 ssl http2;
+    server_name {{ preview_server_name }};
+    root {{ root_dir }};
+    index index.php index.html index.htm;
+
+    ssl_certificate     {{ preview_cert_path }};
+    ssl_certificate_key {{ preview_cert_key_path }};
+{%- call https_body() %}
+}
+{%- endif %}
 {%- endif %}

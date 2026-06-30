@@ -500,6 +500,85 @@ impl ClusterConfigView {
         }
         Some(rest.to_string())
     }
+
+    /// Internal preview hostname for `primary_domain` under the node's
+    /// wildcard `base`, or `None` when no preview applies. A preview lets
+    /// an operator open an imported site on the node's `*.<base>` cert
+    /// BEFORE cutting over real DNS — `shop.example.com` becomes
+    /// `shop-example-com.<base>`, served from the same docroot with the
+    /// wildcard's valid TLS.
+    ///
+    /// Returns `None` when `primary_domain` is already a subdomain of
+    /// `base` (it's already reachable on the wildcard — no second vhost
+    /// needed) or when no safe label can be derived.
+    ///
+    /// This is the canonical rule shared by the agent (which renders the
+    /// preview server block) and the web detail page (which links to it),
+    /// so the URL shown always matches the vhost actually written.
+    pub fn preview_subdomain(primary_domain: &str, base: &str) -> Option<String> {
+        let domain = primary_domain
+            .trim()
+            .trim_end_matches('.')
+            .to_ascii_lowercase();
+        let base = base.trim().trim_end_matches('.').to_ascii_lowercase();
+        if domain.is_empty() || base.is_empty() {
+            return None;
+        }
+        // Already under the wildcard (== base, or *.base) ⇒ already
+        // previewable, skip. Guard the dotted suffix so `notexample.com`
+        // isn't treated as a child of `example.com`.
+        if domain == base || domain.ends_with(&format!(".{base}")) {
+            return None;
+        }
+        let label = preview_label(&domain);
+        if label.is_empty() {
+            return None;
+        }
+        Some(format!("{label}.{base}"))
+    }
+}
+
+/// Turn a primary domain into a single DNS-safe label: dots → hyphens,
+/// keep `[a-z0-9-]`, drop a leading/trailing hyphen. When the result
+/// would exceed the 63-char per-label DNS limit, truncate and append a
+/// short deterministic hash suffix so two long domains can't collide
+/// onto the same preview hostname.
+fn preview_label(domain: &str) -> String {
+    let mut s: String = domain
+        .chars()
+        .map(|c| match c {
+            '.' => '-',
+            'a'..='z' | '0'..='9' | '-' => c,
+            'A'..='Z' => c.to_ascii_lowercase(),
+            _ => '-',
+        })
+        .collect();
+    // Collapse runs of '-' so `a..b` / `a__b` don't yield `a--b`.
+    while s.contains("--") {
+        s = s.replace("--", "-");
+    }
+    let s = s.trim_matches('-').to_string();
+    if s.len() <= 63 {
+        return s;
+    }
+    // Deterministic FNV-1a suffix keyed on the FULL domain so the
+    // truncated label stays unique (and stable across renders).
+    let h = fnv1a(domain.as_bytes());
+    let suffix = format!("-{h:08x}");
+    let keep = 63 - suffix.len();
+    let head = s[..keep].trim_end_matches('-');
+    format!("{head}{suffix}")
+}
+
+/// 32-bit FNV-1a — no external dep, just needs to be deterministic and
+/// well-distributed enough to disambiguate truncated preview labels.
+fn fnv1a(bytes: &[u8]) -> u32 {
+    let mut hash: u32 = 0x811c_9dc5;
+    for &b in bytes {
+        hash ^= b as u32;
+        hash = hash.wrapping_mul(0x0100_0193);
+    }
+    hash
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -1181,6 +1260,73 @@ mod tests {
         assert_eq!(
             c.node_wildcard_base("node-xyz", "Lab01").as_deref(),
             Some("lab01.lab.example.com")
+        );
+    }
+
+    #[test]
+    fn preview_subdomain_dots_to_hyphens() {
+        assert_eq!(
+            ClusterConfigView::preview_subdomain("shop.example.com", "s4.testovaciverze.cz")
+                .as_deref(),
+            Some("shop-example-com.s4.testovaciverze.cz")
+        );
+        // Lower-cases + trims trailing dots on both sides.
+        assert_eq!(
+            ClusterConfigView::preview_subdomain("Shop.Example.COM.", "S4.Test.cz").as_deref(),
+            Some("shop-example-com.s4.test.cz")
+        );
+    }
+
+    #[test]
+    fn preview_subdomain_skips_when_already_under_base() {
+        // Already a child of the wildcard ⇒ no preview.
+        assert_eq!(
+            ClusterConfigView::preview_subdomain(
+                "foo.s4.testovaciverze.cz",
+                "s4.testovaciverze.cz"
+            ),
+            None
+        );
+        // Exactly the base ⇒ no preview.
+        assert_eq!(
+            ClusterConfigView::preview_subdomain("s4.testovaciverze.cz", "s4.testovaciverze.cz"),
+            None
+        );
+        // But a confusable non-child (suffix without the dot) DOES get one.
+        assert_eq!(
+            ClusterConfigView::preview_subdomain("nots4.testovaciverze.cz", "s4.testovaciverze.cz")
+                .as_deref(),
+            Some("nots4-testovaciverze-cz.s4.testovaciverze.cz")
+        );
+    }
+
+    #[test]
+    fn preview_subdomain_truncates_long_labels_deterministically() {
+        let long = format!("{}.example.com", "a".repeat(80));
+        let base = "s4.testovaciverze.cz";
+        let a = ClusterConfigView::preview_subdomain(&long, base).expect("some");
+        let b = ClusterConfigView::preview_subdomain(&long, base).expect("some");
+        assert_eq!(a, b, "must be deterministic");
+        let label = a.strip_suffix(&format!(".{base}")).expect("base suffix");
+        assert!(
+            label.len() <= 63,
+            "label too long: {} ({})",
+            label,
+            label.len()
+        );
+        assert!(!label.is_empty());
+        // A different long domain yields a different label (hash suffix).
+        let other = format!("{}.example.org", "a".repeat(80));
+        let c = ClusterConfigView::preview_subdomain(&other, base).expect("some");
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn preview_subdomain_rejects_empty() {
+        assert_eq!(ClusterConfigView::preview_subdomain("", "s4.test.cz"), None);
+        assert_eq!(
+            ClusterConfigView::preview_subdomain("shop.example.com", ""),
+            None
         );
     }
 
