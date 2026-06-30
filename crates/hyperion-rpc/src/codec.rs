@@ -680,6 +680,36 @@ pub enum Request {
         sid: String,
         revoked_by: i64,
     },
+    /// Mint an API key owned by `owner_user_id`. `caps`/`scope_all` are
+    /// clamped server-side to the owner's effective caps. The agent is
+    /// the source of truth for `api_keys` (master-only table).
+    ApiKeyCreate {
+        label: String,
+        owner_user_id: i64,
+        caps: u64,
+        #[serde(default)]
+        scope_all: bool,
+        #[serde(default)]
+        expires_at: Option<i64>,
+    },
+    /// Newest-first list of every API key (admin Settings card). Never
+    /// returns the hash or the raw key.
+    ApiKeyList,
+    /// Resolve a presented key by its SHA-256 hash → owner + caps, or
+    /// `None` (unknown / revoked / expired). Backs the Bearer extractor.
+    ApiKeyResolve {
+        key_hash: String,
+    },
+    /// Best-effort `last_used_at` stamp by key hash (fired after a
+    /// successful API request).
+    ApiKeyTouch {
+        key_hash: String,
+    },
+    /// Flip `revoked_at` for the key with this id.
+    ApiKeyRevoke {
+        id: i64,
+        revoked_by: i64,
+    },
     /// List configured off-site backup destinations.
     BackupTargetList,
     /// Create or update a backup target. `id=None` ⇒ insert.
@@ -1507,6 +1537,14 @@ pub enum Response {
     WebSessionTouch(bool),
     /// `/settings/sessions` list payload.
     WebSessionList(Vec<hyperion_types::WebSessionView>),
+    /// Newly-minted API key — carries the RAW key (shown once).
+    ApiKeyCreated(hyperion_types::ApiKeyCreated),
+    /// Admin "API keys" card list payload (never the hash/raw).
+    ApiKeyList(Vec<hyperion_types::ApiKeyView>),
+    /// Bearer resolve result. `None` ⇒ unknown / revoked / expired.
+    ApiKeyResolved(Option<hyperion_types::ApiKeyResolved>),
+    /// Plain ack for write ops on api_keys (touch / revoke).
+    ApiKeyAck,
     /// Audit chain verification result. `ok=true` means every
     /// row's `row_hash` reproduces from `prev_hash + canonical
     /// fields`; `message` is the empty string on success.

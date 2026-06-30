@@ -1,3 +1,4 @@
+pub mod api_v1;
 pub mod audit;
 pub mod avatar;
 pub mod backups;

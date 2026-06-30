@@ -56,11 +56,16 @@ pub enum Capability {
     EmailLogView,
     PanelImport,
     TrashManage,
+    // — API —
+    // Appended at the END so the CapSet bit numbering of every existing
+    // variant stays stable (a stored bitmask keeps meaning across the
+    // upgrade). Never reorder the variants above this point.
+    ApiKeysManage,
 }
 
 impl Capability {
     /// Every capability, in display order. Keep in sync with the enum.
-    pub const ALL: [Capability; 30] = [
+    pub const ALL: [Capability; 31] = [
         Capability::HostingView,
         Capability::HostingCreate,
         Capability::HostingDelete,
@@ -91,6 +96,7 @@ impl Capability {
         Capability::EmailLogView,
         Capability::PanelImport,
         Capability::TrashManage,
+        Capability::ApiKeysManage,
     ];
 
     /// Bit for this capability in a [`CapSet`].
@@ -131,6 +137,7 @@ impl Capability {
             Capability::EmailLogView => "email_log_view",
             Capability::PanelImport => "panel_import",
             Capability::TrashManage => "trash_manage",
+            Capability::ApiKeysManage => "api_keys_manage",
         }
     }
 
@@ -167,6 +174,7 @@ impl Capability {
             Capability::EmailLogView => "View email log",
             Capability::PanelImport => "Import from another panel",
             Capability::TrashManage => "Manage trash (restore / purge)",
+            Capability::ApiKeysManage => "Manage API keys (remote management API)",
         }
     }
 
@@ -283,6 +291,7 @@ pub fn groups() -> Vec<(&'static str, Vec<Capability>)> {
                 EmailLogView,
                 PanelImport,
                 TrashManage,
+                ApiKeysManage,
             ],
         ),
     ]
@@ -366,10 +375,10 @@ mod tests {
 
     #[test]
     fn all_array_matches_count() {
-        // 30 distinct bits, none above 63.
+        // 31 distinct bits, none above 63.
         let s = CapSet::all();
-        assert_eq!(s.count(), 30);
-        assert_eq!(Capability::ALL.len(), 30);
+        assert_eq!(s.count(), 31);
+        assert_eq!(Capability::ALL.len(), 31);
     }
 
     #[test]

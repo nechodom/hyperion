@@ -404,6 +404,38 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.web_session_revoke(&sid, revoked_by).await
     }
 
+    async fn api_key_create(
+        &self,
+        label: String,
+        owner_user_id: i64,
+        caps: u64,
+        scope_all: bool,
+        expires_at: Option<i64>,
+    ) -> Result<hyperion_types::ApiKeyCreated, RpcError> {
+        self.svc
+            .api_key_create(&label, owner_user_id, caps, scope_all, expires_at)
+            .await
+    }
+
+    async fn api_key_list(&self) -> Result<Vec<hyperion_types::ApiKeyView>, RpcError> {
+        self.svc.api_key_list().await
+    }
+
+    async fn api_key_resolve(
+        &self,
+        key_hash: String,
+    ) -> Result<Option<hyperion_types::ApiKeyResolved>, RpcError> {
+        self.svc.api_key_resolve(&key_hash).await
+    }
+
+    async fn api_key_touch(&self, key_hash: String) -> Result<(), RpcError> {
+        self.svc.api_key_touch(&key_hash).await
+    }
+
+    async fn api_key_revoke(&self, id: i64, revoked_by: i64) -> Result<bool, RpcError> {
+        self.svc.api_key_revoke(id, revoked_by).await
+    }
+
     async fn hosting_set_expiry(
         &self,
         sel: HostingSelector,

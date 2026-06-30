@@ -28,17 +28,50 @@ pub async fn resolve_caps(state: &SharedState, user_id: i64) -> (u64, bool, bool
     }
 }
 
+/// Identity behind a Bearer API key, resolved from the `api_keys`
+/// ledger. When present on an [`AuthCtx`], it is the authority source
+/// for `caps()` / `scope_all()` / `username` instead of a cookie
+/// session. Carries the key's SHA-256 hash so the request can fire a
+/// best-effort `last_used_at` touch.
+#[derive(Clone)]
+pub struct ApiKeyCtx {
+    pub id: i64,
+    pub label: String,
+    pub owner_username: String,
+    pub caps: u64,
+    pub scope_all: bool,
+    /// SHA-256 hash of the presented key — used only for the touch RPC.
+    pub key_hash: String,
+}
+
 /// Cookie-extracted session, available in handlers via the State extractor
 /// chain. Absence is represented by `None`.
+///
+/// EITHER a cookie `session` OR a Bearer `api_key` may be present (never
+/// both on the same request: the `/api/v1` edge is Bearer-only, the UI
+/// is cookie-only). `caps()` / `scope_all()` / `username` read the
+/// api_key context when present, exactly as they read a session's
+/// stamped caps otherwise.
 #[derive(Clone)]
 pub struct AuthCtx {
     pub session: Option<Session>,
+    /// Set when the request authenticated via `Authorization: Bearer
+    /// hyp_…`. Mutually exclusive with `session` in practice.
+    pub api_key: Option<ApiKeyCtx>,
     pub username: String,
 }
 
 impl AuthCtx {
     pub fn is_authenticated(&self) -> bool {
         self.session.is_some()
+    }
+
+    /// True when this request authenticated via a Bearer API key (the
+    /// `/api/v1` edge). Distinct from `is_authenticated()`, which is
+    /// cookie-session only — an API key must NOT satisfy a UI route's
+    /// `require_auth`.
+    pub fn is_api_key(&self) -> bool {
+        self.api_key.is_some()
     }
 
     /// Role string from the session, or "viewer" if unauthenticated.
@@ -88,10 +121,15 @@ impl AuthCtx {
             .unwrap_or(false)
     }
 
-    /// Effective capability set: the session's stamped caps when present
-    /// (built-in or custom role), else derived from the built-in `role` string
-    /// (pre-capability cookies). Unauthenticated → empty.
+    /// Effective capability set. A Bearer API key carries its own
+    /// (owner-clamped) caps and takes precedence; otherwise the session's
+    /// stamped caps when present (built-in or custom role), else derived
+    /// from the built-in `role` string (pre-capability cookies).
+    /// Unauthenticated → empty.
     fn caps(&self) -> CapSet {
+        if let Some(k) = &self.api_key {
+            return CapSet::from_bits(k.caps);
+        }
         match &self.session {
             Some(s) if s.caps_present => CapSet::from_bits(s.caps),
             Some(s) => WebRole::from_str(&s.role)
@@ -117,7 +155,11 @@ impl AuthCtx {
     }
 
     /// Acts on all hostings (vs only `web_user_hosting_access` grants)?
+    /// A Bearer API key carries its own (owner-clamped) `scope_all`.
     pub fn scope_all(&self) -> bool {
+        if let Some(k) = &self.api_key {
+            return k.scope_all;
+        }
         match &self.session {
             Some(s) if s.caps_present => s.scope_all,
             Some(s) => WebRole::from_str(&s.role)
@@ -181,6 +223,66 @@ pub async fn require_auth(
 }
 
 async fn extract_auth(parts: &mut Parts, state: &SharedState) -> AuthCtx {
+    let fallback_username_for_anon = state.admin_user.username.clone();
+    // Bearer API key takes precedence: the `/api/v1` edge presents
+    // `Authorization: Bearer hyp_…` and carries no cookie. Hash the raw
+    // key (SHA-256), resolve it against the master's `api_keys` ledger,
+    // and on success build an AuthCtx whose caps/scope_all/username come
+    // from the key (session stays None). A best-effort `touch` stamps
+    // last_used_at. An invalid/expired/revoked key resolves to None →
+    // anonymous AuthCtx; the `/api/v1` extractor turns that into 401.
+    if let Some(raw) = bearer_api_key(parts) {
+        let key_hash = hyperion_state::api_keys::hash_key(&raw);
+        let resolved = match hyperion_rpc_client::call(
+            &state.agent_socket,
+            hyperion_rpc::codec::Request::ApiKeyResolve {
+                key_hash: key_hash.clone(),
+            },
+        )
+        .await
+        {
+            Ok(hyperion_rpc::codec::Response::ApiKeyResolved(opt)) => opt,
+            // RPC failure (socket blip) — fail closed for API keys: there
+            // is no legacy-cookie concern here, so treat as anonymous.
+            _ => None,
+        };
+        if let Some(k) = resolved {
+            // Best-effort last_used_at stamp; never block / fail the
+            // request on a touch error.
+            let _ = hyperion_rpc_client::call(
+                &state.agent_socket,
+                hyperion_rpc::codec::Request::ApiKeyTouch {
+                    key_hash: key_hash.clone(),
+                },
+            )
+            .await;
+            let owner_username = if k.label.is_empty() {
+                format!("apikey:{}", k.id)
+            } else {
+                k.label.clone()
+            };
+            return AuthCtx {
+                session: None,
+                api_key: Some(ApiKeyCtx {
+                    id: k.id,
+                    label: k.label,
+                    owner_username: owner_username.clone(),
+                    caps: k.caps,
+                    scope_all: k.scope_all,
+                    key_hash,
+                }),
+                username: owner_username,
+            };
+        }
+        // Bearer present but invalid → anonymous (no cookie fallthrough
+        // for an API request).
+        return AuthCtx {
+            session: None,
+            api_key: None,
+            username: fallback_username_for_anon,
+        };
+    }
+
     let cookie_name = state.cookie_name();
     let token = parts
         .headers
@@ -237,6 +339,7 @@ async fn extract_auth(parts: &mut Parts, state: &SharedState) -> AuthCtx {
                         // Row present + revoked. Treat as anonymous.
                         AuthCtx {
                             session: None,
+                            api_key: None,
                             username: fallback_username,
                         }
                     } else {
@@ -251,20 +354,43 @@ async fn extract_auth(parts: &mut Parts, state: &SharedState) -> AuthCtx {
                         };
                         AuthCtx {
                             session: Some(s),
+                            api_key: None,
                             username,
                         }
                     }
                 }
                 _ => AuthCtx {
                     session: None,
+                    api_key: None,
                     username: fallback_username,
                 },
             }
         }
         None => AuthCtx {
             session: None,
+            api_key: None,
             username: fallback_username,
         },
+    }
+}
+
+/// Extract the raw API key from an `Authorization: Bearer hyp_…` header.
+/// Returns `None` if the header is absent, not Bearer, or the token
+/// doesn't carry the `hyp_` API-key prefix (so an unrelated bearer
+/// token never triggers an api_keys lookup).
+fn bearer_api_key(parts: &Parts) -> Option<String> {
+    let raw = parts
+        .headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())?;
+    let token = raw
+        .strip_prefix("Bearer ")
+        .or_else(|| raw.strip_prefix("bearer "))?;
+    let token = token.trim();
+    if token.starts_with(hyperion_state::api_keys::KEY_PREFIX) {
+        Some(token.to_string())
+    } else {
+        None
     }
 }
 

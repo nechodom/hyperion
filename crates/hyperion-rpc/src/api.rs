@@ -202,6 +202,37 @@ pub trait AgentApi: Send + Sync + 'static {
     /// still live.
     async fn web_session_revoke(&self, sid: String, revoked_by: i64) -> Result<bool, RpcError>;
 
+    /// Mint an API key owned by `owner_user_id`. The requested `caps` /
+    /// `scope_all` are clamped server-side to the owner's effective
+    /// caps. Returns the RAW key once (never recoverable after).
+    /// `api_keys` is master-only, so this always goes over RPC.
+    async fn api_key_create(
+        &self,
+        label: String,
+        owner_user_id: i64,
+        caps: u64,
+        scope_all: bool,
+        expires_at: Option<i64>,
+    ) -> Result<hyperion_types::ApiKeyCreated, RpcError>;
+
+    /// Newest-first list of every API key (for the admin Settings card).
+    /// Never returns the hash or the raw key.
+    async fn api_key_list(&self) -> Result<Vec<hyperion_types::ApiKeyView>, RpcError>;
+
+    /// Resolve a presented key by its SHA-256 hash. `None` ⇒ unknown /
+    /// revoked / expired. Powers the Bearer auth extractor.
+    async fn api_key_resolve(
+        &self,
+        key_hash: String,
+    ) -> Result<Option<hyperion_types::ApiKeyResolved>, RpcError>;
+
+    /// Best-effort `last_used_at` stamp by key hash.
+    async fn api_key_touch(&self, key_hash: String) -> Result<(), RpcError>;
+
+    /// Flip `revoked_at` by id. Returns true if the row existed and was
+    /// still live.
+    async fn api_key_revoke(&self, id: i64, revoked_by: i64) -> Result<bool, RpcError>;
+
     async fn hosting_set_expiry(
         &self,
         sel: HostingSelector,

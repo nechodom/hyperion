@@ -266,6 +266,14 @@ pub fn build_router(state: SharedState) -> Router {
             "/api/email-autodetect",
             post(handlers::settings::post_email_autodetect),
         )
+        .route(
+            "/settings/api-keys",
+            post(handlers::settings::post_api_key_create),
+        )
+        .route(
+            "/settings/api-keys/revoke",
+            post(handlers::settings::post_api_key_revoke),
+        )
         .route("/settings/config", post(handlers::settings::post_config))
         .route(
             "/settings/cloudflare/token",
@@ -574,8 +582,23 @@ pub fn build_router(state: SharedState) -> Router {
         .layer(from_fn_with_state(state.clone(), auth::check_csrf))
         .layer(from_fn_with_state(state.clone(), auth::require_auth));
 
+    // The Bearer-authenticated remote management API. A SEPARATE branch
+    // with NO session `require_auth` and NO `check_csrf` — API keys are
+    // not cookies, so there's no CSRF and no ambient authority. Each
+    // handler authenticates via the `ApiAuth` extractor (401 JSON on a
+    // missing/invalid key) and gates on `ctx.can(cap)` (403 JSON). The
+    // shared `security_headers` layer below applies; HTTPS is the
+    // server's job. READ-only this slice — see handlers::api_v1.
+    let api_v1 = Router::new()
+        .route("/api/v1/me", get(handlers::api_v1::get_me))
+        .route("/api/v1/hostings", get(handlers::api_v1::get_hostings))
+        .route("/api/v1/hostings/:id", get(handlers::api_v1::get_hosting))
+        .route("/api/v1/nodes", get(handlers::api_v1::get_nodes))
+        .route("/api/v1/jobs/:id", get(handlers::api_v1::get_job));
+
     Router::new()
         .merge(protected)
+        .merge(api_v1)
         .route("/login", get(handlers::login::get_login))
         .route("/login", post(handlers::login::post_login))
         .route("/login/2fa", get(handlers::login::get_login_2fa))

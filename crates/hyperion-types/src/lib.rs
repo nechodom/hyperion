@@ -40,8 +40,9 @@ pub use hosting::{
 pub use ids::{AgentId, HostingId, SecretId};
 pub use import::{ImportTokenInfo, ImportTokenOp, ImportTokenResult};
 pub use jobs::{
-    BackupTargetProbe, BackupTargetView, HostingQuotaReport, HostingQuotaView, JobView,
-    QuotaEnableSummary, S3BackupTarget, WebSessionView,
+    ApiKeyCreated, ApiKeyResolved, ApiKeyView, BackupTargetProbe, BackupTargetView,
+    HostingQuotaReport, HostingQuotaView, JobView, QuotaEnableSummary, S3BackupTarget,
+    WebSessionView,
 };
 pub use limits::{
     BackupRestoreMode, BackupRunWire, ExpiringHosting, HostingExpiry, HostingLimits,
