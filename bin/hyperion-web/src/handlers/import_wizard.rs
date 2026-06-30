@@ -391,25 +391,40 @@ pub async fn post_select(
         billing_at: Option<i64>,
     }
     let rows: Vec<RowIn> = serde_json::from_str(&form.config).unwrap_or_default();
-    let overrides: Vec<hyperion_import::SiteImportOverride> = rows
-        .into_iter()
-        .filter(|r| manifest.contains(&r.source))
-        .map(|r| {
-            let t = r.target.trim();
-            // Only treat as a rename when a non-empty, different target is given.
-            let target_domain = if t.is_empty() || t == r.source {
-                None
-            } else {
-                Some(t.to_string())
-            };
-            hyperion_import::SiteImportOverride {
-                source_domain: r.source.clone(),
-                target_domain,
-                profile_id: r.profile_id.filter(|&p| p > 0),
-                next_billing_at: r.billing_at.filter(|&b| b > 0),
-            }
-        })
-        .collect();
+    let mut overrides: Vec<hyperion_import::SiteImportOverride> = Vec::new();
+    let mut bad_targets: Vec<String> = Vec::new();
+    for r in rows.into_iter().filter(|r| manifest.contains(&r.source)) {
+        let t = r.target.trim().to_lowercase();
+        // Only a rename when a non-empty, *different* (case-insensitive) target is
+        // given. Validate it up-front so a typo'd domain is surfaced here rather
+        // than silently dropped during apply (Domain::parse is the final gate).
+        let target_domain = if t.is_empty() || t == r.source.to_lowercase() {
+            None
+        } else if wire_safe_domain(&t) {
+            Some(t)
+        } else {
+            bad_targets.push(r.target.trim().to_string());
+            continue;
+        };
+        overrides.push(hyperion_import::SiteImportOverride {
+            source_domain: r.source.clone(),
+            target_domain,
+            profile_id: r.profile_id.filter(|&p| p > 0),
+            next_billing_at: r.billing_at.filter(|&b| b > 0),
+        });
+    }
+    if !bad_targets.is_empty() {
+        let msg = format!(
+            "invalid \"import as\" domain(s): {}",
+            bad_targets.join(", ")
+        );
+        return Ok(Redirect::to(&format!(
+            "/import/select/{}?flash_error={}",
+            form.id,
+            urlencode(&msg)
+        ))
+        .into_response());
+    }
     if overrides.is_empty() {
         return Ok(Redirect::to(&format!(
             "/import/select/{}?flash_error=pick+at+least+one+site",

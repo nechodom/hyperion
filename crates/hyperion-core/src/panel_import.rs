@@ -24,6 +24,10 @@ use hyperion_rpc::RpcError;
 use hyperion_validate::Domain;
 use std::path::{Path, PathBuf};
 
+/// hosting_kv key under which each imported hosting records the source panel's
+/// site key, so a re-run can detect "already imported" (idempotency).
+const IMPORT_SOURCE_KEY_KV: &str = "import_source_key";
+
 impl<A: AdapterPort + 'static> HostingService<A> {
     /// Dry-run: detect + extract the source panel and classify every site as
     /// Create / Skip / Conflict / Unsupported. Side-effect-free.
@@ -89,7 +93,19 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 message: format!("extract failed: {e}"),
             })?;
         let existing: Vec<String> = self.list().await?.into_iter().map(|s| s.domain).collect();
-        Ok(ImportPlanner::plan(ir, &existing, &[]))
+        // `already_imported` are the source_keys recorded on prior imports (step 6
+        // of apply_one_import). Wiring them makes a re-run idempotent: a site
+        // that was already imported — including one RENAMED to a different target
+        // domain (whose source domain no longer appears in `existing`) — is
+        // classified Skip instead of being created again.
+        let already_imported: Vec<String> =
+            hyperion_state::hosting_kv::list_by_key(&self.pool, IMPORT_SOURCE_KEY_KV)
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(_hosting_id, source_key)| source_key)
+                .collect();
+        Ok(ImportPlanner::plan(ir, &existing, &already_imported))
     }
 
     /// Apply against an already-resolved location.
@@ -274,6 +290,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         //     back to the old host;
         //   - profile: apply limits/quota + price + billing clock;
         //   - billing date: override the profile's first-billing timestamp.
+        //
+        // NOTE (multi-node): profiles + billing live in the master-only
+        // `hosting_profile_apply`/`hosting_profiles` tables, and the self-service
+        // wizard always lands the bundle on the master (mint sets
+        // target_node="local"), so `profile_apply(..., None)` resolves the
+        // profile locally here. If a future flow imports straight onto a WORKER,
+        // the resolved `HostingProfile` must be passed inline (the 4th arg) —
+        // a bare profile_id can't be looked up off-master. We surface a failure
+        // loudly rather than silently dropping the operator's choice.
         if let Some(o) = ov {
             if target != h.domain {
                 self.wp_rewrite_domain(&created.system_user, &created.root_dir, &h.domain, &target)
@@ -291,7 +316,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 {
                     tracing::warn!(
                         hosting = %created.id.as_str(), profile = pid, error = %e,
-                        "import: profile apply failed (site imported without profile)"
+                        "import: profile apply failed — site imported WITHOUT the chosen \
+                         profile or billing date (profile not resolvable on this node?)"
                     );
                 } else if let Some(nb) = o.next_billing_at {
                     let _ = hyperion_state::profiles::set_next_billing(
@@ -309,7 +335,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let _ = hyperion_state::hosting_kv::set(
             &self.pool,
             created.id.as_str(),
-            "import_source_key",
+            IMPORT_SOURCE_KEY_KV,
             &h.source_key,
             now_secs(),
         )
