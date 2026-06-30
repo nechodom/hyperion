@@ -164,18 +164,30 @@ pub struct SettingsQuery {
     /// "" / "local" = master. Drives the per-node MtaDiagnostics fetch.
     #[serde(default)]
     mail_node: String,
-    /// A freshly-minted raw API key to reveal exactly once. Passed back
-    /// from the create handler's redirect so the key never lives in the
-    /// session or the DB — it's shown, then gone on the next reload.
-    #[serde(default)]
-    api_key_new: Option<String>,
+}
+
+/// Read one cookie value from the request's `Cookie` header (none if absent).
+fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(axum::http::header::COOKIE)?
+        .to_str()
+        .ok()?
+        .split(';')
+        .filter_map(|kv| kv.split_once('='))
+        .find(|(k, _)| k.trim() == name)
+        .map(|(_, v)| v.trim().to_string())
 }
 
 pub async fn get_settings(
     State(state): State<SharedState>,
     ctx: AuthCtx,
+    headers: HeaderMap,
     axum::extract::Query(q): axum::extract::Query<SettingsQuery>,
 ) -> Result<Response, AppError> {
+    // A freshly-minted API key is handed over via a one-time HttpOnly cookie
+    // (set by post_api_key_create) instead of the URL; read + clear it here so
+    // it's shown exactly once.
+    let new_api_key = cookie_value(&headers, "hyp_new_api_key");
     // Cluster/agent configuration, node topology, and the recent outbound-email
     // log across ALL hostings. Every POST under /settings is admin-gated, but
     // the GET page was reachable by any logged-in user (the nav only hides the
@@ -332,9 +344,18 @@ pub async fn get_settings(
         api_key_cap_groups,
         api_keys,
         can_manage_api_keys,
-        new_api_key: q.api_key_new,
+        new_api_key: new_api_key.clone(),
     };
-    Ok(Html(tpl.render()?).into_response())
+    let mut resp = Html(tpl.render()?).into_response();
+    // One-shot: clear the reveal cookie so a refresh doesn't show the key again.
+    if new_api_key.is_some() {
+        if let Ok(v) = axum::http::HeaderValue::from_str(
+            "hyp_new_api_key=; Max-Age=0; Path=/settings; HttpOnly; SameSite=Strict",
+        ) {
+            resp.headers_mut().insert(axum::http::header::SET_COOKIE, v);
+        }
+    }
+    Ok(resp)
 }
 
 /// `POST /settings/api-keys` — mint a new API key. Gated by
@@ -401,10 +422,19 @@ pub async fn post_api_key_create(
         RpcResponse::Error(e) => return Err(AppError::Rpc(e.to_string())),
         _ => return Err(AppError::Internal("unexpected response".into())),
     };
-    // Reveal the raw key once via the redirect query param. It's never
-    // stored anywhere recoverable.
-    let enc: String = url::form_urlencoded::byte_serialize(created.raw_key.as_bytes()).collect();
-    Ok(Redirect::to(&format!("/settings?api_key_new={enc}#api")).into_response())
+    // Reveal the raw key exactly once via a short-lived HttpOnly cookie rather
+    // than the URL: a key in a redirect query string lands in browser history
+    // and the reverse-proxy access log. The settings page reads it once and
+    // clears it. (`hyp_<base62>` is cookie-safe — no encoding needed.)
+    let cookie = format!(
+        "hyp_new_api_key={}; Max-Age=120; Path=/settings; HttpOnly; SameSite=Strict",
+        created.raw_key
+    );
+    let mut resp = Redirect::to("/settings#api").into_response();
+    if let Ok(v) = axum::http::HeaderValue::from_str(&cookie) {
+        resp.headers_mut().insert(axum::http::header::SET_COOKIE, v);
+    }
+    Ok(resp)
 }
 
 /// `POST /settings/api-keys/revoke` — revoke a key by id. Gated by

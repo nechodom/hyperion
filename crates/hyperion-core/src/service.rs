@@ -8912,6 +8912,21 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             Some(er) => (er.caps, er.scope_all),
             None => (CapSet::empty(), false),
         };
+        // P1 safety gate: the `/api/v1` read endpoints are not yet tenant-scoped
+        // (that lands with the write endpoints in p1b). Until then a key whose
+        // owner lacks cluster-wide scope could still read the WHOLE cluster's
+        // hosting inventory, so refuse to mint it. Built-in Admin/SuperAdmin are
+        // scope_all and unaffected; this only blocks a custom role that holds
+        // ApiKeysManage but is tenant-scoped. Enforced here (server-side) so it
+        // can't be bypassed by a crafted request.
+        if !owner_scope_all {
+            return Err(RpcError::Validation {
+                message: "API keys currently require an account with cluster-wide \
+                          (all-hostings) scope. Per-tenant API keys arrive in a later \
+                          release."
+                    .into(),
+            });
+        }
         let created = hyperion_state::api_keys::create(
             &self.pool,
             label,
