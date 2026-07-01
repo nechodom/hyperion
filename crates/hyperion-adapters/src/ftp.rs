@@ -9,7 +9,32 @@
 //! track per-hosting on/off state — if the user has a password they
 //! can FTP; if not, they can't.
 
+use crate::fs::atomic_write;
 use crate::{cmd, AdapterError};
+use std::path::Path;
+
+const VSFTPD_CONF: &str = "/etc/vsftpd.conf";
+const VSFTPD_CONF_ORIG: &str = "/etc/vsftpd.conf.hyperion-orig";
+/// The local-user FTP config Hyperion needs. `$USER` is a vsftpd token it
+/// expands per-login (chroot each user to their own /home/<user>). Mirrors the
+/// block install-node.sh/install-master.sh write at first install.
+const HYPERION_VSFTPD_CONF: &str = "\
+listen=YES
+listen_ipv6=NO
+anonymous_enable=NO
+local_enable=YES
+write_enable=YES
+local_umask=022
+chroot_local_user=YES
+allow_writeable_chroot=YES
+pam_service_name=vsftpd
+secure_chroot_dir=/var/run/vsftpd/empty
+user_sub_token=$USER
+local_root=/home/$USER
+xferlog_enable=YES
+xferlog_std_format=YES
+seccomp_sandbox=NO
+";
 
 /// Set / replace the Linux password for `user` via `chpasswd`. Used
 /// after generating a fresh FTP password so the client can connect.
@@ -98,6 +123,65 @@ pub async fn ensure_vsftpd_running() -> Result<(), AdapterError> {
         }
         Err(e) => Err(e),
     }
+}
+
+/// Ensure vsftpd is CONFIGURED for Hyperion local-user FTP — not just running.
+///
+/// This setup lived ONLY in the one-time install script, so a node installed
+/// before that block existed, or where vsftpd was auto-installed later by
+/// `ensure_vsftpd_running`, ends up with:
+///   - Debian's STOCK `/etc/vsftpd.conf` (`local_enable` commented → NO), so
+///     local users can't log in at all; and/or
+///   - an `/etc/shells` without `/usr/sbin/nologin`, so the vsftpd PAM's
+///     `pam_shells` refuses every hosting user (they have a nologin shell).
+///
+/// Either makes vsftpd answer "530 Login incorrect" even though the password is
+/// correct. This self-heals both, idempotently, so FTP works regardless of when
+/// or how the node was set up. Restarts vsftpd only when the config was wrong.
+pub async fn ensure_vsftpd_configured() -> Result<(), AdapterError> {
+    // 1. /etc/shells must list the hosting users' shell, or pam_shells rejects
+    //    them. Append the nologin/false shells once (idempotent).
+    let shells = tokio::fs::read_to_string("/etc/shells")
+        .await
+        .unwrap_or_default();
+    let mut updated = shells.clone();
+    for shell in ["/usr/sbin/nologin", "/bin/false"] {
+        if !shells.lines().any(|l| l.trim() == shell) {
+            if !updated.is_empty() && !updated.ends_with('\n') {
+                updated.push('\n');
+            }
+            updated.push_str(shell);
+            updated.push('\n');
+        }
+    }
+    if updated != shells {
+        atomic_write(Path::new("/etc/shells"), updated.as_bytes(), 0o644)
+            .await
+            .map_err(|e| AdapterError::Other(format!("update /etc/shells: {e}")))?;
+    }
+
+    // 2. vsftpd.conf: install the Hyperion config unless it's already ours
+    //    (missing local_enable=YES / pam_service_name=vsftpd ⇒ stock or unset).
+    //    Back up the original once (mirrors the install script's *.hyperion-orig).
+    let current = tokio::fs::read_to_string(VSFTPD_CONF)
+        .await
+        .unwrap_or_default();
+    let already_ours =
+        current.contains("local_enable=YES") && current.contains("pam_service_name=vsftpd");
+    if !already_ours {
+        if !current.is_empty() && tokio::fs::metadata(VSFTPD_CONF_ORIG).await.is_err() {
+            let _ = tokio::fs::copy(VSFTPD_CONF, VSFTPD_CONF_ORIG).await;
+        }
+        atomic_write(
+            Path::new(VSFTPD_CONF),
+            HYPERION_VSFTPD_CONF.as_bytes(),
+            0o644,
+        )
+        .await
+        .map_err(|e| AdapterError::Other(format!("write {VSFTPD_CONF}: {e}")))?;
+        cmd::run("/usr/bin/systemctl", &["restart", "vsftpd"]).await?;
+    }
+    Ok(())
 }
 
 /// Names of every system user that currently has an FTP-usable
@@ -197,5 +281,23 @@ mod tests {
     fn unit_not_found_phrase_matches() {
         let sample = "Failed to enable unit: Unit file vsftpd.service does not exist.";
         assert!(sample.contains("does not exist"));
+    }
+
+    #[test]
+    fn hyperion_vsftpd_conf_has_the_login_critical_directives() {
+        // The exact directives whose absence causes "530 Login incorrect" for
+        // local users. `already_ours` in ensure_vsftpd_configured() keys off the
+        // first two — keep them present.
+        for needle in [
+            "local_enable=YES",
+            "pam_service_name=vsftpd",
+            "chroot_local_user=YES",
+            "allow_writeable_chroot=YES",
+        ] {
+            assert!(
+                super::HYPERION_VSFTPD_CONF.contains(needle),
+                "vsftpd config missing: {needle}"
+            );
+        }
     }
 }
