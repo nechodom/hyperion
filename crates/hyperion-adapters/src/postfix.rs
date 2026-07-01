@@ -33,6 +33,28 @@ const SASL_PASSWD_PATH: &str = "/etc/postfix/sasl_passwd";
 /// breadcrumb the operator can `cat` for diagnostics.
 const HYPERION_MARKER: &str = "/etc/postfix/hyperion-relay.marker";
 
+/// True when an SMTP relay host refers to THIS machine — `localhost`, a loopback
+/// IP, or our own (short or fully-qualified) hostname. Such a "relay" can't be a
+/// postfix smart-host: postfix would try to relay through itself and defer every
+/// message with "mail for localhost loops back to myself". Callers must fall back
+/// to direct-MX delivery instead. `my_fqdn` is this node's `hostname -f`.
+pub fn host_is_local(smtp_host: &str, my_fqdn: &str) -> bool {
+    let (h, _) = crate::email::normalize_smtp_host(smtp_host);
+    let h = h.trim().trim_matches(['[', ']']).to_ascii_lowercase();
+    if h.is_empty()
+        || h == "localhost"
+        || h == "::1"
+        || h == "0.0.0.0"
+        || h == "::"
+        || h.starts_with("127.")
+        || h.ends_with(".localhost")
+    {
+        return true;
+    }
+    let fqdn = my_fqdn.trim().to_ascii_lowercase();
+    !fqdn.is_empty() && (h == fqdn || fqdn.split('.').next() == Some(h.as_str()))
+}
+
 /// Decide whether postfix is even on this node. Used by callers to
 /// skip the configure-step on nodes that haven't installed an MTA.
 /// `systemctl cat` is the canonical "unit known" probe — same shape
@@ -420,6 +442,35 @@ mod tests {
                     .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-'),
                 "false-positive reject for: {fqdn}"
             );
+        }
+    }
+
+    #[test]
+    fn host_is_local_detects_self_and_loopback() {
+        let fqdn = "s4.digitalka.cz";
+        // Self-referential relays → must be treated as local (→ direct MX).
+        for h in [
+            "localhost",
+            "localhost:25",
+            "127.0.0.1",
+            "127.0.0.53",
+            "::1",
+            "[::1]:25",
+            "s4",              // our short hostname
+            "s4.digitalka.cz", // our fqdn
+            "S4.DIGITALKA.CZ", // case-insensitive
+            "",                // empty ⇒ no relay
+        ] {
+            assert!(host_is_local(h, fqdn), "should be local: {h:?}");
+        }
+        // Real external relays → NOT local.
+        for h in [
+            "smtp.postmarkapp.com",
+            "smtp.mailgun.org:587",
+            "10.0.0.5",
+            "mail.digitalka.cz", // different host under same domain
+        ] {
+            assert!(!host_is_local(h, fqdn), "should NOT be local: {h:?}");
         }
     }
 }

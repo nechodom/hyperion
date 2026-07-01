@@ -316,7 +316,18 @@ async fn main() -> anyhow::Result<()> {
                 return;
             }
             match email_cfg_for_postfix {
-                Some(cfg) if !cfg.smtp_host.trim().is_empty() => {
+                // A relay host that points at THIS node (localhost / loopback /
+                // our own hostname) can't be a smart-host — postfix would loop
+                // back to itself ("mail for localhost loops back to myself").
+                // Fall through to direct-MX in that case, same as the reconfigure
+                // RPC path does.
+                Some(cfg)
+                    if !cfg.smtp_host.trim().is_empty()
+                        && !hyperion_core::postfix_host_is_local(
+                            &cfg.smtp_host,
+                            &agent_hostname,
+                        ) =>
+                {
                     match hyperion_core::postfix_ensure_relay_config(&cfg).await {
                         Ok(()) => {
                             tracing::info!(
