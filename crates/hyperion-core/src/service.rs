@@ -13416,31 +13416,46 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .filter(|c| !c.smtp_host.trim().is_empty())
                 .cloned(),
         };
+        // This node's own FQDN — postfix's `myhostname` in direct-MX mode, and
+        // the yardstick for spotting a self-referential "relay" below.
+        let fqdn = tokio::process::Command::new("/bin/hostname")
+            .arg("-f")
+            .output()
+            .await
+            .ok()
+            .and_then(|o| {
+                if !o.status.success() {
+                    return None;
+                }
+                let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if s.is_empty() {
+                    None
+                } else {
+                    Some(s)
+                }
+            })
+            .unwrap_or_else(|| "localhost".to_string());
+
+        // A relay host that points back at THIS node (localhost / a loopback IP /
+        // our own hostname) can't be a postfix smart-host: postfix would try to
+        // relay through itself and defer every message with
+        // "mail for localhost loops back to myself". Treat such a "relay" as no
+        // external relay and deliver DIRECTLY (MX) instead. (The "detect local
+        // relay" button pre-fills localhost:25 — the intent there is "send via
+        // the local postfix", which IS direct delivery, not relay-to-self.)
+        let use_smart_host = relay_cfg
+            .as_ref()
+            .map(|c| !hyperion_adapters::postfix::host_is_local(&c.smtp_host, &fqdn))
+            .unwrap_or(false);
+
         match relay_cfg.as_ref() {
-            Some(cfg) => {
+            Some(cfg) if use_smart_host => {
                 hyperion_adapters::postfix::ensure_relay_config(cfg)
                     .await
                     .map_err(|e| RpcError::Internal_with(format!("postfix relay: {e}")))?;
                 Ok("smart-host".to_string())
             }
-            None => {
-                let fqdn = tokio::process::Command::new("/bin/hostname")
-                    .arg("-f")
-                    .output()
-                    .await
-                    .ok()
-                    .and_then(|o| {
-                        if !o.status.success() {
-                            return None;
-                        }
-                        let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                        if s.is_empty() {
-                            None
-                        } else {
-                            Some(s)
-                        }
-                    })
-                    .unwrap_or_else(|| "localhost".to_string());
+            _ => {
                 hyperion_adapters::postfix::ensure_direct_delivery_config(&fqdn)
                     .await
                     .map_err(|e| RpcError::Internal_with(format!("postfix direct: {e}")))?;
