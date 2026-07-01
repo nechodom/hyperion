@@ -178,6 +178,29 @@ pub async fn derive_master_url(
     )
 }
 
+/// The bare host — no scheme, no port — that the operator reached this
+/// panel on. Same `Host`-header → cached-public-IP precedence as
+/// [`derive_master_url`], but stripped down so it can be dropped into a
+/// non-HTTP context (an FTP/FTPS host handed to a client, an SSH host, …).
+///
+/// Only meaningful for a resource served by *this* (master) box. For one
+/// that lives on a worker node, resolve that node's `public_ip` instead —
+/// this host would point a client straight at the wrong machine.
+pub async fn panel_host(headers: &axum::http::HeaderMap) -> String {
+    if let Some(h) = headers.get("host").and_then(|v| v.to_str().ok()) {
+        if !host_is_useless(h) {
+            return host_without_port(h).to_string();
+        }
+    }
+    if let Some(ip) = cached_public_ip().await {
+        return ip;
+    }
+    // No Host header AND public-IP detection failed (offline box). Surface
+    // a clear marker rather than a bogus host a client would silently fail
+    // to reach.
+    "CHANGE-ME-server-host".to_string()
+}
+
 /// Extract the explicit port from a Host header. Returns None
 /// when the header has no port (browser elided the default 80/443).
 /// Handles bracketed IPv6 (`[::1]:8443`) + bare hostnames + IPv4.
@@ -222,6 +245,27 @@ fn host_is_useless(host: &str) -> bool {
         }
     };
     matches!(bare, "0.0.0.0" | "127.0.0.1" | "localhost" | "::1" | "::")
+}
+
+/// Strip an explicit `:port` off a `Host` header while preserving a
+/// bracketed IPv6 literal (`[2001:db8::1]:8443` → `[2001:db8::1]`).
+/// Bare hostnames / IPv4 drop a trailing `:port`; an unbracketed IPv6
+/// (2+ colons, so no port) is returned untouched. No allocation.
+fn host_without_port(host: &str) -> &str {
+    if host.starts_with('[') {
+        // Bracketed IPv6 — keep through the closing bracket, dropping any
+        // `:port` that follows it.
+        return match host.find(']') {
+            Some(end) => &host[..=end],
+            None => host,
+        };
+    }
+    // Unbracketed IPv6 (2+ colons) carries no port — leave as-is.
+    if host.matches(':').count() > 1 {
+        return host;
+    }
+    // hostname / IPv4, optionally suffixed with `:port`.
+    host.split(':').next().unwrap_or(host)
 }
 
 /// Parse the port out of the listen address. Returns None for
@@ -338,5 +382,25 @@ mod tests {
         assert_eq!(port_from_host_header("2a00:1450:4001:830::200e"), None);
         // Garbage after the colon is not a port.
         assert_eq!(port_from_host_header("master.tld:not-a-port"), None);
+    }
+
+    #[test]
+    fn host_without_port_strips_port_and_keeps_ipv6_brackets() {
+        // hostname / IPv4 — drop the :port, keep the host.
+        assert_eq!(host_without_port("s4.digitalka.cz"), "s4.digitalka.cz");
+        assert_eq!(host_without_port("s4.digitalka.cz:8443"), "s4.digitalka.cz");
+        assert_eq!(host_without_port("178.105.99.35:443"), "178.105.99.35");
+        // Bracketed IPv6 — strip the :port but keep the literal intact
+        // (an FTP client needs the brackets to parse it).
+        assert_eq!(
+            host_without_port("[2a00:1450:4001:830::200e]:443"),
+            "[2a00:1450:4001:830::200e]"
+        );
+        assert_eq!(host_without_port("[::1]"), "[::1]");
+        // Unbracketed IPv6 carries no port — must not lose a segment.
+        assert_eq!(
+            host_without_port("2a00:1450:4001:830::200e"),
+            "2a00:1450:4001:830::200e"
+        );
     }
 }
