@@ -4613,6 +4613,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 stage: "vsftpd".into(),
                 reason: e.to_string(),
             })?;
+        // Ensure vsftpd is actually CONFIGURED for local-user FTP (config +
+        // /etc/shells). Without this, a node whose vsftpd wasn't set up by the
+        // installer refuses every login with 530 even though the password is set.
+        hyperion_adapters::ftp::ensure_vsftpd_configured()
+            .await
+            .map_err(|e| RpcError::ProvisioningFailed {
+                stage: "vsftpd_config".into(),
+                reason: e.to_string(),
+            })?;
         hyperion_adapters::ftp::set_user_password(&detail.system_user, &password)
             .await
             .map_err(|e| RpcError::ProvisioningFailed {
