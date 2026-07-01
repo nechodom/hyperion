@@ -72,6 +72,52 @@ impl WebSessionView {
     }
 }
 
+/// One row from `api_keys`, projected for admin display. NEVER carries
+/// the raw key or its hash — only the safe-to-show `key_prefix`. Backs
+/// the "API keys" Settings card + the `ApiKeyList` RPC.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ApiKeyView {
+    pub id: i64,
+    pub key_prefix: String,
+    pub label: String,
+    pub owner_user_id: i64,
+    /// CapSet u64 bitmask (already clamped to the owner at creation).
+    pub caps: u64,
+    pub scope_all: bool,
+    pub created_at: i64,
+    pub last_used_at: Option<i64>,
+    pub expires_at: Option<i64>,
+    pub revoked_at: Option<i64>,
+    pub revoked_by: Option<i64>,
+}
+
+impl ApiKeyView {
+    pub fn is_revoked(&self) -> bool {
+        self.revoked_at.is_some()
+    }
+}
+
+/// The identity behind a presented API key, resolved by hash. Returned
+/// from the `ApiKeyResolve` RPC; `None` ⇒ the key is unknown, revoked,
+/// or expired. The web Bearer extractor builds an `AuthCtx` from this.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ApiKeyResolved {
+    pub id: i64,
+    pub label: String,
+    pub owner_user_id: i64,
+    pub caps: u64,
+    pub scope_all: bool,
+}
+
+/// Result of minting an API key: the row id + the **raw** key, shown to
+/// the operator exactly once (and never recoverable afterwards).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct ApiKeyCreated {
+    pub id: i64,
+    pub raw_key: String,
+    pub key_prefix: String,
+}
+
 /// Per-hosting quota policy + last-applied state. Powers the
 /// "Quota" tab on the hosting detail page and the QuotaSet /
 /// QuotaGet RPCs. Zero values mean "no cap".

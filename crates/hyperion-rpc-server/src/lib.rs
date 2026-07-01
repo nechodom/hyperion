@@ -277,6 +277,37 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::ApiKeyCreate {
+            label,
+            owner_user_id,
+            caps,
+            scope_all,
+            expires_at,
+        } => match api
+            .api_key_create(label, owner_user_id, caps, scope_all, expires_at)
+            .await
+        {
+            Ok(v) => Response::ApiKeyCreated(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::ApiKeyList => match api.api_key_list().await {
+            Ok(v) => Response::ApiKeyList(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::ApiKeyResolve { key_hash } => match api.api_key_resolve(key_hash).await {
+            Ok(v) => Response::ApiKeyResolved(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::ApiKeyTouch { key_hash } => match api.api_key_touch(key_hash).await {
+            Ok(()) => Response::ApiKeyAck,
+            Err(e) => Response::Error(e),
+        },
+        Request::ApiKeyRevoke { id, revoked_by } => {
+            match api.api_key_revoke(id, revoked_by).await {
+                Ok(_) => Response::ApiKeyAck,
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::BackupTargetList => match api.backup_target_list().await {
             Ok(v) => Response::BackupTargetList(v),
             Err(e) => Response::Error(e),
@@ -1575,6 +1606,31 @@ mod tests {
             Ok(Vec::new())
         }
         async fn web_session_revoke(&self, _: String, _: i64) -> Result<bool, RpcError> {
+            Ok(true)
+        }
+        async fn api_key_create(
+            &self,
+            _: String,
+            _: i64,
+            _: u64,
+            _: bool,
+            _: Option<i64>,
+        ) -> Result<hyperion_types::ApiKeyCreated, RpcError> {
+            Ok(hyperion_types::ApiKeyCreated::default())
+        }
+        async fn api_key_list(&self) -> Result<Vec<hyperion_types::ApiKeyView>, RpcError> {
+            Ok(Vec::new())
+        }
+        async fn api_key_resolve(
+            &self,
+            _: String,
+        ) -> Result<Option<hyperion_types::ApiKeyResolved>, RpcError> {
+            Ok(None)
+        }
+        async fn api_key_touch(&self, _: String) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn api_key_revoke(&self, _: i64, _: i64) -> Result<bool, RpcError> {
             Ok(true)
         }
         async fn audit_list(&self, _: i64) -> Result<Vec<AuditEntryWire>, RpcError> {

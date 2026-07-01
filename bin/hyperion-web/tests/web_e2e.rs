@@ -1420,6 +1420,170 @@ async fn migration_import_page_renders() {
     assert!(body.contains("name=\"token\""));
 }
 
+/// `/api/v1` Bearer auth: a valid key → 200 on a HostingView endpoint;
+/// no/invalid key → 401; a key lacking HostingView → 403. Exercises the
+/// whole edge against a real agent + the api_keys ledger.
+#[tokio::test]
+async fn api_v1_bearer_auth_and_cap_gating() {
+    use hyperion_rpc::codec::{Request as RpcReq, Response as RpcResp};
+
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+
+    // api_keys.owner_user_id references web_users(id). Create a real
+    // admin row via RPC so the FK is satisfied, and use its id as the
+    // key owner (the bootstrap-admin fallback isn't a DB row).
+    let owner_id = match hyperion_rpc_client::call(
+        &sock,
+        RpcReq::WebUserCreate {
+            username: "apikey-owner".into(),
+            email: "apikey-owner@example.invalid".into(),
+            password: "owner-pw-1".into(),
+            role: "admin".into(),
+        },
+    )
+    .await
+    .expect("create owner")
+    {
+        RpcResp::WebUserCreate { id } => id,
+        other => panic!("unexpected create response: {other:?}"),
+    };
+
+    // 1. No key → 401 JSON.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/hostings")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "no key → 401");
+    let body = body_string(resp).await;
+    assert!(body.contains("\"error\""), "401 JSON envelope: {body}");
+
+    // 2. Garbage / non-existent key → 401.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/hostings")
+                .header(
+                    header::AUTHORIZATION,
+                    "Bearer hyp_totallyboguskey000000000000000000",
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED, "bad key → 401");
+
+    // 3. Mint a key WITH HostingView via RPC.
+    let view_cap = hyperion_state::capabilities::Capability::HostingView.bit();
+    let good = match hyperion_rpc_client::call(
+        &sock,
+        RpcReq::ApiKeyCreate {
+            label: "ci-good".into(),
+            owner_user_id: owner_id,
+            caps: view_cap,
+            scope_all: true,
+            expires_at: None,
+        },
+    )
+    .await
+    .expect("create good key")
+    {
+        RpcResp::ApiKeyCreated(c) => c.raw_key,
+        other => panic!("unexpected: {other:?}"),
+    };
+    assert!(good.starts_with("hyp_"), "raw key carries prefix");
+
+    // Valid key → 200 on a HostingView endpoint.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/hostings")
+                .header(header::AUTHORIZATION, format!("Bearer {good}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert_eq!(resp.status(), StatusCode::OK, "valid key → 200");
+
+    // /api/v1/me works for any valid key and reports the cap.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/me")
+                .header(header::AUTHORIZATION, format!("Bearer {good}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let me = body_string(resp).await;
+    assert!(me.contains("ci-good"), "me reports label: {me}");
+    assert!(me.contains("hosting_view"), "me lists the cap: {me}");
+
+    // 4. Mint a key WITHOUT HostingView (NodesView only) → 403 on /hostings.
+    let nodes_cap = hyperion_state::capabilities::Capability::NodesView.bit();
+    let weak = match hyperion_rpc_client::call(
+        &sock,
+        RpcReq::ApiKeyCreate {
+            label: "ci-weak".into(),
+            owner_user_id: owner_id,
+            caps: nodes_cap,
+            scope_all: true,
+            expires_at: None,
+        },
+    )
+    .await
+    .expect("create weak key")
+    {
+        RpcResp::ApiKeyCreated(c) => c.raw_key,
+        other => panic!("unexpected: {other:?}"),
+    };
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/hostings")
+                .header(header::AUTHORIZATION, format!("Bearer {weak}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert_eq!(
+        resp.status(),
+        StatusCode::FORBIDDEN,
+        "key lacking HostingView → 403",
+    );
+    let body = body_string(resp).await;
+    assert!(body.contains("\"error\""), "403 JSON envelope: {body}");
+
+    // The same weak key CAN read nodes (it holds NodesView).
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/nodes")
+                .header(header::AUTHORIZATION, format!("Bearer {weak}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert_eq!(resp.status(), StatusCode::OK, "weak key → 200 on /nodes");
+}
+
 fn extract_cookie(resp: &axum::response::Response) -> String {
     let raw = resp
         .headers()

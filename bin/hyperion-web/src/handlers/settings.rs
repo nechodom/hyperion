@@ -64,10 +64,84 @@ struct SettingsTpl<'a> {
     flash: Option<String>,
     flash_error: Option<String>,
     csrf_token: String,
+    /// Capability groups for the "create API key" multiselect (reuses the
+    /// roles capability groups). Empty when the user can't manage keys.
+    api_key_cap_groups: Vec<ApiKeyCapGroup>,
+    /// Existing API keys (prefix · label · caps summary · last used · expires).
+    api_keys: Vec<ApiKeyRowView>,
+    /// True ⇒ render the "API keys" card (user holds ApiKeysManage).
+    can_manage_api_keys: bool,
+    /// A freshly-minted raw key to reveal exactly once (via ?api_key_new=).
+    new_api_key: Option<String>,
 }
 
 fn short_sha(s: &str) -> String {
     s.chars().take(12).collect()
+}
+
+/// One capability checkbox in the API-key create form.
+pub struct ApiKeyCapRow {
+    pub machine: &'static str,
+    pub label: &'static str,
+}
+
+/// One capability group (e.g. "Hosting") for the API-key form.
+pub struct ApiKeyCapGroup {
+    pub label: &'static str,
+    pub caps: Vec<ApiKeyCapRow>,
+}
+
+/// A pre-decorated API-key row for the Settings list.
+pub struct ApiKeyRowView {
+    pub id: i64,
+    pub key_prefix: String,
+    pub label: String,
+    pub caps_summary: String,
+    pub last_used: String,
+    pub expires: String,
+    pub is_revoked: bool,
+}
+
+/// Build the capability-group checkboxes for the create form, reusing the
+/// canonical roles capability groups.
+fn api_key_cap_groups() -> Vec<ApiKeyCapGroup> {
+    hyperion_state::capabilities::groups()
+        .into_iter()
+        .map(|(label, members)| ApiKeyCapGroup {
+            label,
+            caps: members
+                .into_iter()
+                .map(|c| ApiKeyCapRow {
+                    machine: c.as_str(),
+                    label: c.label(),
+                })
+                .collect(),
+        })
+        .collect()
+}
+
+/// Short human summary of a CapSet for the list ("3 caps" / "all caps").
+fn caps_summary(caps: u64) -> String {
+    let set = hyperion_state::capabilities::CapSet::from_bits(caps);
+    let n = set.count();
+    let all = hyperion_state::capabilities::CapSet::all().count();
+    if n == 0 {
+        "no caps".to_string()
+    } else if n == all {
+        "all caps".to_string()
+    } else {
+        format!("{n} cap{}", if n == 1 { "" } else { "s" })
+    }
+}
+
+/// Render a unix timestamp as a short YYYY-MM-DD (UTC), or "—" for None.
+fn fmt_date(ts: Option<i64>) -> String {
+    match ts {
+        Some(t) => chrono::DateTime::from_timestamp(t, 0)
+            .map(|d| d.format("%Y-%m-%d").to_string())
+            .unwrap_or_else(|| "—".to_string()),
+        None => "—".to_string(),
+    }
 }
 
 /// One test node's wildcard-cert row in the Settings card.
@@ -92,11 +166,28 @@ pub struct SettingsQuery {
     mail_node: String,
 }
 
+/// Read one cookie value from the request's `Cookie` header (none if absent).
+fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    headers
+        .get(axum::http::header::COOKIE)?
+        .to_str()
+        .ok()?
+        .split(';')
+        .filter_map(|kv| kv.split_once('='))
+        .find(|(k, _)| k.trim() == name)
+        .map(|(_, v)| v.trim().to_string())
+}
+
 pub async fn get_settings(
     State(state): State<SharedState>,
     ctx: AuthCtx,
+    headers: HeaderMap,
     axum::extract::Query(q): axum::extract::Query<SettingsQuery>,
 ) -> Result<Response, AppError> {
+    // A freshly-minted API key is handed over via a one-time HttpOnly cookie
+    // (set by post_api_key_create) instead of the URL; read + clear it here so
+    // it's shown exactly once.
+    let new_api_key = cookie_value(&headers, "hyp_new_api_key");
     // Cluster/agent configuration, node topology, and the recent outbound-email
     // log across ALL hostings. Every POST under /settings is admin-gated, but
     // the GET page was reachable by any logged-in user (the nav only hides the
@@ -200,6 +291,34 @@ pub async fn get_settings(
                 })
         })
         .collect();
+    // API keys card (gated by ApiKeysManage). Fetch the list best-effort;
+    // a failed RPC just shows an empty list. The capability multiselect
+    // reuses the canonical roles groups.
+    let can_manage_api_keys = ctx.can(Capability::ApiKeysManage);
+    let api_keys: Vec<ApiKeyRowView> = if can_manage_api_keys {
+        match hyperion_rpc_client::call(&state.agent_socket, Request::ApiKeyList).await {
+            Ok(RpcResponse::ApiKeyList(rows)) => rows
+                .into_iter()
+                .map(|r| ApiKeyRowView {
+                    id: r.id,
+                    is_revoked: r.is_revoked(),
+                    key_prefix: r.key_prefix,
+                    caps_summary: caps_summary(r.caps),
+                    last_used: fmt_date(r.last_used_at),
+                    expires: fmt_date(r.expires_at),
+                    label: r.label,
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    } else {
+        Vec::new()
+    };
+    let api_key_cap_groups = if can_manage_api_keys {
+        api_key_cap_groups()
+    } else {
+        Vec::new()
+    };
     let csrf_token = super::session_csrf_token(&state, &ctx);
     let tpl = SettingsTpl {
         username: &ctx.username,
@@ -222,8 +341,145 @@ pub async fn get_settings(
         flash: q.flash,
         flash_error: q.flash_error,
         csrf_token,
+        api_key_cap_groups,
+        api_keys,
+        can_manage_api_keys,
+        new_api_key: new_api_key.clone(),
     };
-    Ok(Html(tpl.render()?).into_response())
+    let mut resp = Html(tpl.render()?).into_response();
+    // One-shot: clear the reveal cookie so a refresh doesn't show the key again.
+    if new_api_key.is_some() {
+        if let Ok(v) = axum::http::HeaderValue::from_str(
+            "hyp_new_api_key=; Max-Age=0; Path=/settings; HttpOnly; SameSite=Strict",
+        ) {
+            resp.headers_mut().insert(axum::http::header::SET_COOKIE, v);
+        }
+    }
+    Ok(resp)
+}
+
+/// `POST /settings/api-keys` — mint a new API key. Gated by
+/// ApiKeysManage. Caps are folded from the checked capability checkboxes
+/// (named by machine string) and clamped server-side to the owner's
+/// effective caps. The raw key is revealed once via the redirect.
+pub async fn post_api_key_create(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<ApiKeyCreateForm>,
+) -> Result<Response, AppError> {
+    if !ctx.can(Capability::ApiKeysManage) {
+        return Ok(
+            Redirect::to("/?flash_error=API+key+management+requires+permission").into_response(),
+        );
+    }
+    let Some(session) = ctx.session.as_ref() else {
+        // API-key management is a UI-only action (the create form lives
+        // in Settings); reject Bearer-driven self-minting here.
+        return Ok(Redirect::to("/login").into_response());
+    };
+    let label = form.label.trim();
+    if label.is_empty() {
+        return Ok(
+            Redirect::to("/settings?flash_error=API+key+label+is+required#api").into_response(),
+        );
+    }
+    // Fold checked capability checkboxes into a CapSet bitmask.
+    let mut caps = hyperion_state::capabilities::CapSet::empty();
+    for (k, v) in &form.extra {
+        if v == "on" {
+            if let Some(c) = hyperion_state::capabilities::Capability::from_machine_str(k) {
+                caps.insert(c);
+            }
+        }
+    }
+    // Optional expiry (YYYY-MM-DD → end-of-day UTC unix). Empty = never.
+    let expires_at = match form.expires.trim() {
+        "" => None,
+        s => match chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+            Ok(d) => d.and_hms_opt(23, 59, 59).map(|dt| dt.and_utc().timestamp()),
+            Err(_) => {
+                return Ok(Redirect::to(
+                    "/settings?flash_error=Invalid+expiry+date+(use+YYYY-MM-DD)#api",
+                )
+                .into_response())
+            }
+        },
+    };
+    let scope_all = ctx.scope_all();
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::ApiKeyCreate {
+            label: label.to_string(),
+            owner_user_id: session.user_id,
+            caps: caps.bits(),
+            scope_all,
+            expires_at,
+        },
+    )
+    .await?;
+    let created = match resp {
+        RpcResponse::ApiKeyCreated(c) => c,
+        RpcResponse::Error(e) => return Err(AppError::Rpc(e.to_string())),
+        _ => return Err(AppError::Internal("unexpected response".into())),
+    };
+    // Reveal the raw key exactly once via a short-lived HttpOnly cookie rather
+    // than the URL: a key in a redirect query string lands in browser history
+    // and the reverse-proxy access log. The settings page reads it once and
+    // clears it. (`hyp_<base62>` is cookie-safe — no encoding needed.)
+    let cookie = format!(
+        "hyp_new_api_key={}; Max-Age=120; Path=/settings; HttpOnly; SameSite=Strict",
+        created.raw_key
+    );
+    let mut resp = Redirect::to("/settings#api").into_response();
+    if let Ok(v) = axum::http::HeaderValue::from_str(&cookie) {
+        resp.headers_mut().insert(axum::http::header::SET_COOKIE, v);
+    }
+    Ok(resp)
+}
+
+/// `POST /settings/api-keys/revoke` — revoke a key by id. Gated by
+/// ApiKeysManage.
+pub async fn post_api_key_revoke(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<ApiKeyRevokeForm>,
+) -> Result<Response, AppError> {
+    if !ctx.can(Capability::ApiKeysManage) {
+        return Ok(
+            Redirect::to("/?flash_error=API+key+management+requires+permission").into_response(),
+        );
+    }
+    let revoked_by = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
+    let _ = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::ApiKeyRevoke {
+            id: form.id,
+            revoked_by,
+        },
+    )
+    .await?;
+    Ok(Redirect::to("/settings?flash=API+key+revoked#api").into_response())
+}
+
+#[derive(Deserialize)]
+pub struct ApiKeyCreateForm {
+    #[serde(default)]
+    pub _csrf: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub expires: String,
+    /// The capability checkboxes (named by machine string) + any other
+    /// fields. Each checked box arrives as `<machine>=on`.
+    #[serde(flatten)]
+    pub extra: std::collections::HashMap<String, String>,
+}
+
+#[derive(Deserialize)]
+pub struct ApiKeyRevokeForm {
+    #[serde(default)]
+    pub _csrf: String,
+    pub id: i64,
 }
 
 #[derive(Deserialize)]

@@ -1844,6 +1844,38 @@ fn print_pretty(resp: &Response) {
                 }
             }
         }
+        Response::ApiKeyAck => println!("api-key ack"),
+        Response::ApiKeyCreated(k) => {
+            println!("api key {} created (prefix {})", k.id, k.key_prefix);
+            // Raw key is shown once — hctl prints it for scripting.
+            println!("  raw: {}", k.raw_key);
+        }
+        Response::ApiKeyResolved(opt) => match opt {
+            Some(k) => println!(
+                "api key {} ({}) owner={} caps={:#x} scope_all={}",
+                k.id, k.label, k.owner_user_id, k.caps, k.scope_all
+            ),
+            None => println!("api key not found / revoked / expired"),
+        },
+        Response::ApiKeyList(rows) => {
+            if rows.is_empty() {
+                println!("no api keys");
+            } else {
+                println!(
+                    "{:<14} {:<20} {:<10} {:<8}",
+                    "prefix", "label", "last_used", "state"
+                );
+                for r in rows {
+                    println!(
+                        "{:<14} {:<20} {:<10} {:<8}",
+                        r.key_prefix,
+                        r.label,
+                        r.last_used_at.map(|t| t.to_string()).unwrap_or_default(),
+                        if r.is_revoked() { "revoked" } else { "live" }
+                    );
+                }
+            }
+        }
         Response::WebSessionAck => println!("session ack"),
         Response::WebSessionTouch(b) => {
             println!("session {}", if *b { "live" } else { "revoked/unknown" })

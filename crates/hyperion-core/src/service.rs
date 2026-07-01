@@ -8883,6 +8883,146 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(r)
     }
 
+    // ============================================================
+    //  api_keys — bearer credentials for the /api/v1 remote API.
+    //  Master-only table (like web_sessions); the web tier reaches
+    //  these over RPC.
+    // ============================================================
+
+    /// Mint an API key. The requested `caps`/`scope_all` are clamped to
+    /// the OWNER's effective caps (a key can never out-grant its owner),
+    /// resolved here so the clamp can't be bypassed by a crafted RPC.
+    /// Returns the RAW key once; only its SHA-256 is stored.
+    pub async fn api_key_create(
+        &self,
+        label: &str,
+        owner_user_id: i64,
+        caps: u64,
+        scope_all: bool,
+        expires_at: Option<i64>,
+    ) -> Result<hyperion_types::ApiKeyCreated, RpcError> {
+        use hyperion_state::capabilities::CapSet;
+        // Resolve the owner's effective caps for the clamp. A missing
+        // user resolves to no caps → the minted key gets nothing, which
+        // is the safe failure mode.
+        let owner = hyperion_state::web_users::effective_role(&self.pool, owner_user_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("api_key_create owner lookup: {e}")))?;
+        let (owner_caps, owner_scope_all) = match owner {
+            Some(er) => (er.caps, er.scope_all),
+            None => (CapSet::empty(), false),
+        };
+        // P1 safety gate: the `/api/v1` read endpoints are not yet tenant-scoped
+        // (that lands with the write endpoints in p1b). Until then a key whose
+        // owner lacks cluster-wide scope could still read the WHOLE cluster's
+        // hosting inventory, so refuse to mint it. Built-in Admin/SuperAdmin are
+        // scope_all and unaffected; this only blocks a custom role that holds
+        // ApiKeysManage but is tenant-scoped. Enforced here (server-side) so it
+        // can't be bypassed by a crafted request.
+        if !owner_scope_all {
+            return Err(RpcError::Validation {
+                message: "API keys currently require an account with cluster-wide \
+                          (all-hostings) scope. Per-tenant API keys arrive in a later \
+                          release."
+                    .into(),
+            });
+        }
+        let created = hyperion_state::api_keys::create(
+            &self.pool,
+            label,
+            owner_user_id,
+            CapSet::from_bits(caps),
+            scope_all,
+            owner_caps,
+            owner_scope_all,
+            now_secs(),
+            expires_at,
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("api_key_create: {e}")))?;
+        // Audit the mint. The raw key + hash are NEVER logged — only the
+        // display prefix + label, mirroring the import-token discipline.
+        self.append_audit(
+            "api_key.create",
+            Some(&created.key_prefix),
+            &serde_json::json!({
+                "label": label,
+                "owner_user_id": owner_user_id,
+                "key_prefix": created.key_prefix,
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+        Ok(hyperion_types::ApiKeyCreated {
+            id: created.id,
+            raw_key: created.raw_key,
+            key_prefix: created.key_prefix,
+        })
+    }
+
+    pub async fn api_key_list(&self) -> Result<Vec<hyperion_types::ApiKeyView>, RpcError> {
+        let rows = hyperion_state::api_keys::list(&self.pool, 500)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("api_key_list: {e}")))?;
+        Ok(rows
+            .into_iter()
+            .map(|r| hyperion_types::ApiKeyView {
+                id: r.id,
+                key_prefix: r.key_prefix,
+                label: r.label,
+                owner_user_id: r.owner_user_id,
+                caps: r.caps,
+                scope_all: r.scope_all,
+                created_at: r.created_at,
+                last_used_at: r.last_used_at,
+                expires_at: r.expires_at,
+                revoked_at: r.revoked_at,
+                revoked_by: r.revoked_by,
+            })
+            .collect())
+    }
+
+    pub async fn api_key_resolve(
+        &self,
+        key_hash: &str,
+    ) -> Result<Option<hyperion_types::ApiKeyResolved>, RpcError> {
+        let r = hyperion_state::api_keys::resolve_active(&self.pool, key_hash, now_secs())
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("api_key_resolve: {e}")))?;
+        Ok(r.map(|k| hyperion_types::ApiKeyResolved {
+            id: k.id,
+            label: k.label,
+            owner_user_id: k.owner_user_id,
+            caps: k.caps,
+            scope_all: k.scope_all,
+        }))
+    }
+
+    pub async fn api_key_touch(&self, key_hash: &str) -> Result<(), RpcError> {
+        // Best-effort: a failed touch must never fail the API request,
+        // so swallow the error (still surface it in the unlikely RPC
+        // wiring failure by returning Ok regardless).
+        let _ = hyperion_state::api_keys::touch(&self.pool, key_hash, now_secs()).await;
+        Ok(())
+    }
+
+    pub async fn api_key_revoke(&self, id: i64, revoked_by: i64) -> Result<bool, RpcError> {
+        let r = hyperion_state::api_keys::revoke(&self.pool, id, revoked_by, now_secs())
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("api_key_revoke: {e}")))?;
+        if r {
+            self.append_audit(
+                "api_key.revoke",
+                Some(&id.to_string()),
+                &serde_json::json!({"revoked_by": revoked_by}).to_string(),
+                "ok",
+            )
+            .await;
+        }
+        Ok(r)
+    }
+
     /// Walk the full audit log and verify each row's row_hash
     /// against `BLAKE3(prev_hash || canonical fields)`. Returns
     /// `(ok, rows_checked, message)` — the message names the first
