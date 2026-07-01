@@ -146,6 +146,10 @@ struct DetailTpl<'a> {
     csrf_ftp_set: String,
     csrf_ftp_disable: String,
     ftp_new_password: Option<String>,
+    /// Bare host (no scheme/port) the client should point their FTP/FTPS
+    /// client at — the owning node's reachable address, resolved in
+    /// [`ftp_host_for`]. Only rendered inside the "new password" block.
+    ftp_host: String,
     error: Option<&'a str>,
     wp_error: Option<String>,
     wp_flash: Option<String>,
@@ -1225,6 +1229,9 @@ pub async fn post_create(
                 csrf_ftp_set: csrf_token_for(&state, &ctx, "/hostings/ftp/set"),
                 csrf_ftp_disable: csrf_token_for(&state, &ctx, "/hostings/ftp/disable"),
                 ftp_new_password: None,
+                // The FTP "new password" block never renders on the create
+                // path (ftp_new_password is None), so the host is unused here.
+                ftp_host: String::new(),
                 error: None,
                 wp_error: wp_install_error,
                 wp_flash: wp_install_job_id.as_ref().map(|_| {
@@ -1515,10 +1522,41 @@ impl PhpIniSettings {
     }
 }
 
+/// Bare host (no scheme/port) an FTP/FTPS client should connect to for a
+/// hosting owned by `owner_node`.
+///
+/// * Master-local hosting (`owner_node` None) → the host the operator
+///   reached the panel on, which on a single-node box IS the FTP host.
+/// * Worker hosting (`Some(node_id)`) → that worker's `public_ip`
+///   (its enrollment `label`, then the panel host, as fallbacks) —
+///   FTP connects straight to the owning box, never the master.
+async fn ftp_host_for(
+    state: &SharedState,
+    headers: &axum::http::HeaderMap,
+    owner_node: Option<&str>,
+) -> String {
+    if let Some(nid) = owner_node {
+        if let Ok(RpcResponse::NodesList(nodes)) =
+            hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await
+        {
+            if let Some(n) = nodes.iter().find(|n| n.node_id == nid) {
+                if let Some(ip) = n.public_ip.as_deref().filter(|s| !s.is_empty()) {
+                    return ip.to_string();
+                }
+                if !n.label.is_empty() {
+                    return n.label.clone();
+                }
+            }
+        }
+    }
+    super::panel_host(headers).await
+}
+
 pub async fn get_detail(
     State(state): State<SharedState>,
     ctx: AuthCtx,
     Path(selector): Path<String>,
+    headers: axum::http::HeaderMap,
     axum::extract::Query(q): axum::extract::Query<DetailQuery>,
 ) -> Result<Response, AppError> {
     let sel = parse_selector(&selector)?;
@@ -1530,6 +1568,9 @@ pub async fn get_detail(
     // lives on a worker.
     let (detail, owner_node) = find_hosting_anywhere(&state, sel).await?;
     let target = owner_node.as_deref();
+    // Reachable FTP host for THIS hosting's node — a worker's own address,
+    // not the master's (FTP talks straight to the owning box).
+    let ftp_host = ftp_host_for(&state, &headers, target).await;
     // RBAC guard: operator + viewer must have an access grant.
     // super_admin + admin pass through. Unauthenticated redirects to
     // /login earlier (require_auth middleware), so unwrap to /hostings
@@ -1953,6 +1994,7 @@ pub async fn get_detail(
         csrf_ftp_set: csrf_token_for(&state, &ctx, "/hostings/ftp/set"),
         csrf_ftp_disable: csrf_token_for(&state, &ctx, "/hostings/ftp/disable"),
         ftp_new_password: q.ftp_pw,
+        ftp_host,
         error: None,
         wp_error: q.wp_error,
         wp_flash: q.wp.map(|s| {
