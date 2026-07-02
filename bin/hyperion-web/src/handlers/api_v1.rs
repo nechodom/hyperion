@@ -7,12 +7,16 @@
 //! into an [`AuthCtx`] carrying the key's owner-clamped caps/scope_all.
 //! The SAME `ctx.can(cap)` gates the UI uses apply here verbatim.
 //!
-//! This slice ships the READ + key-identity endpoints only:
-//!   * `GET /api/v1/me`            — the key's label + caps + scope_all
-//!   * `GET /api/v1/hostings`      — cap HostingView
-//!   * `GET /api/v1/hostings/:id`  — cap HostingView
-//!   * `GET /api/v1/nodes`         — cap NodesView
-//!   * `GET /api/v1/jobs/:id`      — cluster-scoped (scope_all) key, job polling
+//! Read + key-identity:
+//!   * `GET /api/v1/me`                    — the key's label + caps + scope_all
+//!   * `GET /api/v1/hostings`              — cap HostingView
+//!   * `GET /api/v1/hostings/:id`          — cap HostingView
+//!   * `GET /api/v1/nodes`                 — cap NodesView
+//!   * `GET /api/v1/jobs/:id`              — cluster-scoped (scope_all) key
+//! Write / lifecycle (p1b) — per-hosting manage access enforced:
+//!   * `POST   /api/v1/hostings/:id/suspend` — cap HostingSuspend, sync
+//!   * `POST   /api/v1/hostings/:id/resume`  — cap HostingSuspend, sync
+//!   * `DELETE /api/v1/hostings/:id`         — cap HostingDelete → 202 {job_id}
 //!
 //! JSON shapes are the existing serde types serialized directly — no
 //! parallel DTOs. Errors use the envelope `{"error":{"code","message"}}`
@@ -22,12 +26,14 @@
 
 use crate::auth::AuthCtx;
 use crate::state::SharedState;
-use axum::extract::{FromRequestParts, Path, State};
+use axum::extract::{FromRequestParts, Path, Query, State};
 use axum::http::{request::Parts, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
+use hyperion_rpc::wire::{DeleteOpts, HostingSelector};
 use hyperion_state::capabilities::Capability;
+use serde::Deserialize;
 use serde_json::json;
 
 /// JSON error envelope `{"error":{"code","message"}}` + an HTTP status.
@@ -202,13 +208,191 @@ pub async fn get_job(
     }
 }
 
-// TODO(api-p1b): write / lifecycle endpoints from the spec's Phase-1
-// table — these mutate, so they additionally gate on the write caps and
-// (for create/delete) return 202 { job_id } + are audited as
-// actor="apikey:<label>". They slot in here as new handlers + routes:
-//   * POST   /api/v1/hostings                  HostingCreate   → 202 {job_id}
-//   * DELETE /api/v1/hostings/:id              HostingDelete   → 202 {job_id}
-//   * POST   /api/v1/hostings/:id/suspend      HostingSuspend
-//   * POST   /api/v1/hostings/:id/resume       HostingSuspend
-// Reuse the existing hosting_create / hosting_delete / suspend / resume
-// RPCs the UI handlers already call (no new async model).
+// ─── Write / lifecycle endpoints (p1b) ──────────────────────────────────
+//
+// These MUTATE, so on top of the Bearer auth they enforce per-hosting
+// manage access for the specific write capability, reusing the UI's own
+// `require_hosting_access` gate (same rules: capability held, scope_all
+// reaches every hosting, a non-scope_all key fails closed until per-key
+// grants land). Delete runs as a background job → 202 { job_id }; the
+// synchronous suspend/resume return the new state directly. All are
+// audited as actor `apikey:<label>` via the job/RPC actor plumbing.
+//
+// Still TODO(api-p1b): POST /api/v1/hostings (create) — its large request
+// body + node placement deserve their own slice — and tenant read-scoping
+// so non-scope_all keys can finally be minted (see get_hostings).
+
+/// Resolve `:id` (hosting id OR domain) to its detail + owning node, then
+/// enforce manage access for `cap`. Mirrors the UI's
+/// `require_manage_for_selector`, but returns the JSON error envelope
+/// instead of an HTML 403 / redirect. On success the caller gets the
+/// canonical id (for dispatch/audit) and the node the hosting lives on.
+async fn resolve_manage(
+    state: &SharedState,
+    ctx: &AuthCtx,
+    id: &str,
+    cap: Capability,
+) -> Result<(hyperion_types::HostingDetail, Option<String>), Response> {
+    let sel = crate::handlers::hostings::parse_selector_public(id)
+        .map_err(|_| not_found("no such hosting"))?;
+    let (detail, node) = match crate::handlers::hostings::find_hosting_anywhere(state, sel).await {
+        Ok(v) => v,
+        Err(crate::error::AppError::NotFound) => return Err(not_found("no such hosting")),
+        Err(e) => return Err(upstream(&e.to_string())),
+    };
+    // Reuse the exact per-hosting authz gate the browser UI uses; it only
+    // ever fails as a 403, so swap its HTML body for our JSON envelope.
+    if crate::handlers::hostings::require_hosting_access(state, ctx, detail.id.as_str(), true, cap)
+        .await
+        .is_err()
+    {
+        return Err(forbidden(cap));
+    }
+    Ok((detail, node))
+}
+
+/// `POST /api/v1/hostings/:id/suspend` — cap HostingSuspend. Synchronous.
+pub async fn post_suspend(
+    State(state): State<SharedState>,
+    ApiAuth(ctx): ApiAuth,
+    Path(id): Path<String>,
+) -> Response {
+    let (detail, node) = match resolve_manage(&state, &ctx, &id, Capability::HostingSuspend).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let reason = hyperion_types::SuspendReason::Manual {
+        message: Some(format!("suspended via API key '{}'", ctx.username)),
+    };
+    let sel = HostingSelector::Id(detail.id.clone());
+    match crate::dispatcher::dispatch_to_node(
+        &state,
+        node.as_deref(),
+        Request::HostingSuspend { sel, reason },
+    )
+    .await
+    {
+        Ok(RpcResponse::HostingSuspend) => {
+            Json(json!({ "id": detail.id.as_str(), "state": "suspended" })).into_response()
+        }
+        Ok(RpcResponse::Error(e)) => upstream(&e.to_string()),
+        Ok(_) => upstream("unexpected agent response"),
+        Err(e) => upstream(&e.to_string()),
+    }
+}
+
+/// `POST /api/v1/hostings/:id/resume` — cap HostingSuspend. Synchronous.
+pub async fn post_resume(
+    State(state): State<SharedState>,
+    ApiAuth(ctx): ApiAuth,
+    Path(id): Path<String>,
+) -> Response {
+    let (detail, node) = match resolve_manage(&state, &ctx, &id, Capability::HostingSuspend).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let sel = HostingSelector::Id(detail.id.clone());
+    match crate::dispatcher::dispatch_to_node(&state, node.as_deref(), Request::HostingResume(sel))
+        .await
+    {
+        Ok(RpcResponse::HostingResume) => {
+            Json(json!({ "id": detail.id.as_str(), "state": "active" })).into_response()
+        }
+        Ok(RpcResponse::Error(e)) => upstream(&e.to_string()),
+        Ok(_) => upstream("unexpected agent response"),
+        Err(e) => upstream(&e.to_string()),
+    }
+}
+
+/// Query knobs for `DELETE /api/v1/hostings/:id`. Both default false — a
+/// bare DELETE removes the site AND its system user AND its database, the
+/// same destructive default as the UI's delete form with nothing ticked.
+#[derive(Deserialize, Default)]
+pub struct DeleteQuery {
+    #[serde(default)]
+    pub keep_user: bool,
+    #[serde(default)]
+    pub keep_database: bool,
+}
+
+/// `DELETE /api/v1/hostings/:id` — cap HostingDelete → 202 { job_id }.
+///
+/// Deleting is the slowest mutation (nginx reload, acme cleanup, DROP
+/// DATABASE, rm -rf, userdel), so it runs as a background job exactly like
+/// the UI. Poll `GET /api/v1/jobs/:id` for completion.
+pub async fn delete_hosting(
+    State(state): State<SharedState>,
+    ApiAuth(ctx): ApiAuth,
+    Path(id): Path<String>,
+    Query(q): Query<DeleteQuery>,
+) -> Response {
+    let (detail, node) = match resolve_manage(&state, &ctx, &id, Capability::HostingDelete).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let opts = DeleteOpts {
+        keep_user: q.keep_user,
+        keep_database: q.keep_database,
+    };
+    let hid = detail.id.as_str().to_string();
+    let payload = json!({
+        "selector": hid,
+        "keep_user": opts.keep_user,
+        "keep_database": opts.keep_database,
+        "via": "api",
+    })
+    .to_string();
+    let actor_label = format!("apikey:{}", ctx.username);
+    let sel = HostingSelector::Id(detail.id.clone());
+    let job_state = state.clone();
+    let job_node = node.clone();
+    let job_hid = hid.clone();
+    let job_id = match crate::handlers::jobs::spawn_job(
+        state.clone(),
+        "hosting_delete",
+        Some(&hid),
+        &payload,
+        &actor_label,
+        0, // no session user behind an API key
+        move |reporter| async move {
+            reporter
+                .step(
+                    &format!("Deleting {job_hid} — vhost, certificate, database, files…"),
+                    20,
+                    "",
+                )
+                .await;
+            let resp = crate::dispatcher::dispatch_to_node(
+                &job_state,
+                job_node.as_deref(),
+                Request::HostingDelete { sel, opts },
+            )
+            .await;
+            match resp {
+                Ok(RpcResponse::HostingDelete) => {
+                    reporter
+                        .step("Hosting deleted.", 100, "✓ hosting removed")
+                        .await;
+                    reporter.finish(true, None).await;
+                }
+                Ok(RpcResponse::Error(e)) => reporter.finish(false, Some(e.to_string())).await,
+                Ok(_) => {
+                    reporter
+                        .finish(false, Some("unexpected agent response".into()))
+                        .await
+                }
+                Err(e) => reporter.finish(false, Some(e.to_string())).await,
+            }
+        },
+    )
+    .await
+    {
+        Ok(id) => id,
+        Err(e) => return upstream(&e.to_string()),
+    };
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({ "job_id": job_id, "status": "accepted" })),
+    )
+        .into_response()
+}
