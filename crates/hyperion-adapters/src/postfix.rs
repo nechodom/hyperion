@@ -52,7 +52,24 @@ pub fn host_is_local(smtp_host: &str, my_fqdn: &str) -> bool {
         return true;
     }
     let fqdn = my_fqdn.trim().to_ascii_lowercase();
-    !fqdn.is_empty() && (h == fqdn || fqdn.split('.').next() == Some(h.as_str()))
+    if fqdn.is_empty() {
+        return false;
+    }
+    // Relay is exactly our FQDN, or our FQDN's short label (relay typed as
+    // the bare hostname while we know our full name).
+    if h == fqdn || fqdn.split('.').next() == Some(h.as_str()) {
+        return true;
+    }
+    // Degraded: we only know our SHORT name (`hostname -f` returned no
+    // domain), so `h == fqdn` can't catch a relay typed as our full FQDN.
+    // Fall back to a short-label compare in THAT case only — when we DO
+    // know our real FQDN we skip this, so a legitimate external relay that
+    // merely shares our short label (our `mail.acme.com` vs a relay
+    // `mail.sendgrid.net`) is still configured as a smart-host.
+    if !fqdn.contains('.') && h.split('.').next() == Some(fqdn.as_str()) {
+        return true;
+    }
+    false
 }
 
 /// Decide whether postfix is even on this node. Used by callers to
@@ -472,5 +489,28 @@ mod tests {
         ] {
             assert!(!host_is_local(h, fqdn), "should NOT be local: {h:?}");
         }
+    }
+
+    #[test]
+    fn host_is_local_degraded_short_fqdn() {
+        // Boot regression: `hostname -f` returned no domain, so we only know
+        // the SHORT name "s4". A relay typed as the node's OWN full FQDN must
+        // STILL be caught as local — otherwise it becomes relayhost= and
+        // postfix loops back to itself.
+        assert!(
+            host_is_local("s4.digitalka.cz", "s4"),
+            "relay = our full fqdn while we only know our short name → local"
+        );
+        assert!(host_is_local("s4", "s4"), "short == short → local");
+
+        // But sharing a short label with an EXTERNAL relay must NOT be
+        // treated as local when it can't be our own box. With a short-only
+        // self-name this is unavoidable (we can't tell them apart), so the
+        // guard is deliberately scoped: once we DO know our full fqdn, a
+        // relay sharing only the short label is external.
+        assert!(
+            !host_is_local("mail.sendgrid.net", "mail.acme.com"),
+            "external relay sharing our short label, full fqdn known → NOT local"
+        );
     }
 }

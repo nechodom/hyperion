@@ -315,6 +315,30 @@ async fn main() -> anyhow::Result<()> {
                 tracing::debug!("boot: postfix not installed — skipping mail config");
                 return;
             }
+            // This node's own FQDN — the yardstick for spotting a
+            // self-referential "relay" AND postfix's `myhostname` in
+            // direct-MX mode. Resolve it ONCE via `hostname -f` (fall back
+            // to the short hostname). The smart-host guard below MUST use
+            // the FQDN, not the short name: with the short name a relay set
+            // to the node's OWN fqdn (e.g. `s4.example.com` on host `s4`)
+            // slips past `host_is_local` into `relayhost=`, reintroducing
+            // the "loops back to myself" self-relay loop. This mirrors the
+            // runtime `mta_reconfigure` path, whose `fqdn` is already `-f`.
+            let fqdn = match tokio::process::Command::new("/bin/hostname")
+                .arg("-f")
+                .output()
+                .await
+            {
+                Ok(o) if o.status.success() => {
+                    let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                    if s.is_empty() {
+                        agent_hostname.clone()
+                    } else {
+                        s
+                    }
+                }
+                _ => agent_hostname.clone(),
+            };
             match email_cfg_for_postfix {
                 // A relay host that points at THIS node (localhost / loopback /
                 // our own hostname) can't be a smart-host — postfix would loop
@@ -323,10 +347,7 @@ async fn main() -> anyhow::Result<()> {
                 // RPC path does.
                 Some(cfg)
                     if !cfg.smtp_host.trim().is_empty()
-                        && !hyperion_core::postfix_host_is_local(
-                            &cfg.smtp_host,
-                            &agent_hostname,
-                        ) =>
+                        && !hyperion_core::postfix_host_is_local(&cfg.smtp_host, &fqdn) =>
                 {
                     match hyperion_core::postfix_ensure_relay_config(&cfg).await {
                         Ok(()) => {
@@ -346,27 +367,11 @@ async fn main() -> anyhow::Result<()> {
                     }
                 }
                 _ => {
-                    // Direct-MX mode. Resolve a real FQDN from
-                    // `hostname -f`; fall back to the short hostname
-                    // if the box doesn't have a configured DNS
-                    // domain (operator can still send, just from an
-                    // unqualified HELO — many receivers reject this,
-                    // so we log a warning).
-                    let fqdn = match tokio::process::Command::new("/bin/hostname")
-                        .arg("-f")
-                        .output()
-                        .await
-                    {
-                        Ok(o) if o.status.success() => {
-                            let s = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                            if s.is_empty() {
-                                agent_hostname.clone()
-                            } else {
-                                s
-                            }
-                        }
-                        _ => agent_hostname.clone(),
-                    };
+                    // Direct-MX mode. `fqdn` was resolved above (from
+                    // `hostname -f`, falling back to the short hostname if
+                    // the box has no configured DNS domain — the operator
+                    // can still send, just from an unqualified HELO, which
+                    // many receivers reject, so we log a warning).
                     if !fqdn.contains('.') {
                         tracing::warn!(
                             hostname = %fqdn,
