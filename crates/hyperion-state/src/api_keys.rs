@@ -190,6 +190,38 @@ pub async fn resolve_active(
     )
 }
 
+/// The owning web user's CURRENT standing, re-read at resolve time so a
+/// key tracks its owner live (not just the mint-time snapshot).
+pub struct OwnerStanding {
+    pub locked: bool,
+    pub caps: u64,
+    pub scope_all: bool,
+}
+
+/// Fold the owner's live standing into an already key-valid resolution.
+///
+/// [`resolve_active`] only checks the *key* row (not revoked, not expired).
+/// This applies the other half of the module's contract — that a key can
+/// "never be *exceeded* by revoking/down-scoping the owner":
+///   * a **locked or vanished** owner makes the key inert → `None`
+///     (surfaces as a 401, exactly like a revoked key);
+///   * otherwise the key's caps/scope_all are **re-clamped** to ≤ the
+///     owner's live effective grant, so a role demotion takes effect on
+///     the very next call.
+///
+/// A no-op for the common case (admin owner, `scope_all`, full caps).
+pub fn clamp_to_owner(
+    key_caps: u64,
+    key_scope_all: bool,
+    owner: Option<OwnerStanding>,
+) -> Option<(u64, bool)> {
+    let o = owner?;
+    if o.locked {
+        return None;
+    }
+    Some((key_caps & o.caps, key_scope_all && o.scope_all))
+}
+
 /// Newest-first list of every key (revoked + expired included), for the
 /// admin Settings card. Never returns the hash or the raw key.
 pub async fn list(pool: &SqlitePool, limit: i64) -> Result<Vec<ApiKeyRow>, StateError> {
@@ -471,5 +503,61 @@ mod tests {
         );
         // A touch on an unknown hash must not error.
         touch(&p, "deadbeef", 999).await.expect("touch-unknown");
+    }
+
+    #[test]
+    fn clamp_to_owner_enforces_live_owner_standing() {
+        let all = CapSet::all().bits();
+        let view_only = {
+            let mut s = CapSet::empty();
+            s.insert(Capability::HostingView);
+            s.bits()
+        };
+
+        // Absent owner (deleted) → key inert.
+        assert_eq!(clamp_to_owner(all, true, None), None);
+
+        // Locked owner → key inert even with full caps.
+        assert_eq!(
+            clamp_to_owner(
+                all,
+                true,
+                Some(OwnerStanding {
+                    locked: true,
+                    caps: all,
+                    scope_all: true
+                })
+            ),
+            None
+        );
+
+        // Healthy admin owner → unchanged (the common no-op path).
+        assert_eq!(
+            clamp_to_owner(
+                all,
+                true,
+                Some(OwnerStanding {
+                    locked: false,
+                    caps: all,
+                    scope_all: true
+                })
+            ),
+            Some((all, true))
+        );
+
+        // Owner down-scoped after mint → caps re-clamped, scope_all dropped.
+        assert_eq!(
+            clamp_to_owner(
+                all,
+                true,
+                Some(OwnerStanding {
+                    locked: false,
+                    caps: view_only,
+                    scope_all: false
+                })
+            ),
+            Some((view_only, false)),
+            "a key can never exceed its owner's CURRENT grant"
+        );
     }
 }

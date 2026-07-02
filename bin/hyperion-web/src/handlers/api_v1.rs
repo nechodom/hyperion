@@ -12,7 +12,7 @@
 //!   * `GET /api/v1/hostings`      — cap HostingView
 //!   * `GET /api/v1/hostings/:id`  — cap HostingView
 //!   * `GET /api/v1/nodes`         — cap NodesView
-//!   * `GET /api/v1/jobs/:id`      — any valid key (job polling)
+//!   * `GET /api/v1/jobs/:id`      — cluster-scoped (scope_all) key, job polling
 //!
 //! JSON shapes are the existing serde types serialized directly — no
 //! parallel DTOs. Errors use the envelope `{"error":{"code","message"}}`
@@ -175,12 +175,24 @@ pub async fn get_nodes(State(state): State<SharedState>, ApiAuth(ctx): ApiAuth) 
     }
 }
 
-/// `GET /api/v1/jobs/:id` — background job poll. Any valid key.
+/// `GET /api/v1/jobs/:id` — background job poll. Cluster-scoped keys only.
+///
+/// Job records describe cluster-wide operations; the cookie UI gates every
+/// `/jobs` route on admin. Mirror that: only a `scope_all` key may poll.
+/// (Every P1 key is `scope_all`, so this is a no-op today; it becomes
+/// "poll your OWN jobs" once per-tenant write endpoints land in p1b.)
 pub async fn get_job(
     State(state): State<SharedState>,
-    ApiAuth(_ctx): ApiAuth,
+    ApiAuth(ctx): ApiAuth,
     Path(id): Path<String>,
 ) -> Response {
+    if !ctx.scope_all() {
+        return err(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "job polling requires a cluster-wide (scope_all) API key",
+        );
+    }
     match hyperion_rpc_client::call(&state.agent_socket, Request::JobGet { id }).await {
         Ok(RpcResponse::JobGet(Some(j))) => Json(j).into_response(),
         Ok(RpcResponse::JobGet(None)) => not_found("no such job"),
