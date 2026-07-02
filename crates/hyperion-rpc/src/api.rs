@@ -206,6 +206,7 @@ pub trait AgentApi: Send + Sync + 'static {
     /// `scope_all` are clamped server-side to the owner's effective
     /// caps. Returns the RAW key once (never recoverable after).
     /// `api_keys` is master-only, so this always goes over RPC.
+    #[allow(clippy::too_many_arguments)]
     async fn api_key_create(
         &self,
         label: String,
@@ -213,6 +214,8 @@ pub trait AgentApi: Send + Sync + 'static {
         caps: u64,
         scope_all: bool,
         expires_at: Option<i64>,
+        ip_allowlist: Vec<String>,
+        rate_limit_per_min: i64,
     ) -> Result<hyperion_types::ApiKeyCreated, RpcError>;
 
     /// Newest-first list of every API key (for the admin Settings card).

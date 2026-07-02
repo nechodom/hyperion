@@ -60,12 +60,35 @@ struct BucketState {
 /// v6 callers consistently.
 pub struct RateLimiter {
     inner: Mutex<HashMap<(&'static str, IpAddr), BucketState>>,
+    /// Per-API-key buckets, keyed by key id (independent of source IP).
+    /// Used by the `/api/v1` Bearer edge where the limit is a property of
+    /// the key, not the caller's address.
+    keyed: Mutex<HashMap<i64, BucketState>>,
+}
+
+/// Refill `state` for the elapsed time and consume one token. Returns
+/// true if a token was available (request allowed). Shared by the
+/// per-IP and per-key checks so the token math lives in one place.
+fn refill_and_consume(state: &mut BucketState, bucket: Bucket, now: Instant) -> bool {
+    let elapsed = now
+        .saturating_duration_since(state.last_refill)
+        .as_secs_f64();
+    let rate = bucket.capacity as f64 / bucket.refill_period.as_secs_f64();
+    state.tokens = (state.tokens + elapsed * rate).min(bucket.capacity as f64);
+    state.last_refill = now;
+    if state.tokens >= 1.0 {
+        state.tokens -= 1.0;
+        true
+    } else {
+        false
+    }
 }
 
 impl RateLimiter {
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(HashMap::new()),
+            keyed: Mutex::new(HashMap::new()),
         }
     }
 
@@ -90,20 +113,23 @@ impl RateLimiter {
             tokens: bucket.capacity as f64,
             last_refill: now,
         });
-        // Refill: capacity tokens over refill_period seconds → rate
-        // = capacity / refill_period.
-        let elapsed = now
-            .saturating_duration_since(state.last_refill)
-            .as_secs_f64();
-        let rate = bucket.capacity as f64 / bucket.refill_period.as_secs_f64();
-        state.tokens = (state.tokens + elapsed * rate).min(bucket.capacity as f64);
-        state.last_refill = now;
-        if state.tokens >= 1.0 {
-            state.tokens -= 1.0;
-            true
-        } else {
-            false
+        refill_and_consume(state, bucket, now)
+    }
+
+    /// Per-API-key variant of [`check`], bucketed by the key id so the
+    /// limit follows the key regardless of which IP presents it.
+    pub fn check_key(&self, key_id: i64, bucket: Bucket) -> bool {
+        let mut guard = self.keyed.lock().unwrap_or_else(|p| p.into_inner());
+        let now = Instant::now();
+        if guard.len() > 4096 {
+            let stale_cutoff = now - Duration::from_secs(600);
+            guard.retain(|_, s| s.last_refill > stale_cutoff);
         }
+        let state = guard.entry(key_id).or_insert(BucketState {
+            tokens: bucket.capacity as f64,
+            last_refill: now,
+        });
+        refill_and_consume(state, bucket, now)
     }
 }
 
@@ -159,6 +185,15 @@ mod tests {
         assert!(!rl.check("enroll", ip, b));
         // Different endpoint, same IP — separate bucket.
         assert!(rl.check("heartbeat", ip, b));
+    }
+
+    #[test]
+    fn check_key_buckets_per_key_id() {
+        let rl = RateLimiter::new();
+        let b = Bucket::per_minute(1);
+        assert!(rl.check_key(1, b));
+        assert!(!rl.check_key(1, b), "key 1 exhausted");
+        assert!(rl.check_key(2, b), "key 2 has its own bucket");
     }
 
     #[test]

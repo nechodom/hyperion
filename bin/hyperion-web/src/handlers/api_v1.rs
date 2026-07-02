@@ -25,8 +25,9 @@
 //! See `docs/superpowers/specs/2026-06-30-remote-management-api-design.md`.
 
 use crate::auth::AuthCtx;
+use crate::ratelimit::Bucket;
 use crate::state::SharedState;
-use axum::extract::{FromRequestParts, Path, Query, State};
+use axum::extract::{ConnectInfo, FromRequestParts, Path, Query, State};
 use axum::http::{request::Parts, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
@@ -35,6 +36,7 @@ use hyperion_rpc::wire::{DeleteOpts, HostingSelector};
 use hyperion_state::capabilities::Capability;
 use serde::Deserialize;
 use serde_json::json;
+use std::net::{IpAddr, SocketAddr};
 
 /// JSON error envelope `{"error":{"code","message"}}` + an HTTP status.
 fn err(status: StatusCode, code: &str, message: &str) -> Response {
@@ -74,6 +76,69 @@ fn upstream(message: &str) -> Response {
     err(StatusCode::BAD_GATEWAY, "upstream_error", message)
 }
 
+/// 409 — the request conflicts with existing state (e.g. create for a
+/// domain that already exists). Used by the write endpoints (Slice B).
+#[allow(dead_code)]
+fn conflict(message: &str) -> Response {
+    err(StatusCode::CONFLICT, "conflict", message)
+}
+
+/// 429 — per-key rate limit exceeded, with a `Retry-After` hint.
+fn rate_limited() -> Response {
+    let mut r = err(
+        StatusCode::TOO_MANY_REQUESTS,
+        "rate_limited",
+        "rate limit exceeded for this API key",
+    );
+    r.headers_mut().insert(
+        axum::http::header::RETRY_AFTER,
+        axum::http::HeaderValue::from_static("60"),
+    );
+    r
+}
+
+/// The client's effective source IP for allowlist matching. hyperion-web
+/// normally sits behind nginx, so the connection peer is the proxy — the
+/// real client arrives in `X-Forwarded-For` (first hop) / `X-Real-IP`.
+/// Mirrors the enroll/heartbeat rate-limit bucketing so an allowlist means
+/// the same address in both places. Falls back to the connection peer.
+fn client_ip(parts: &Parts) -> Option<IpAddr> {
+    if let Some(v) = parts
+        .headers
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+    {
+        if let Some(first) = v.split(',').next() {
+            if let Ok(ip) = first.trim().parse::<IpAddr>() {
+                return Some(ip);
+            }
+        }
+    }
+    if let Some(v) = parts.headers.get("x-real-ip").and_then(|v| v.to_str().ok()) {
+        if let Ok(ip) = v.trim().parse::<IpAddr>() {
+            return Some(ip);
+        }
+    }
+    parts
+        .extensions
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|ci| ci.0.ip())
+}
+
+/// True iff `ip` falls within the CIDR (or bare IP) `entry`. A bare
+/// address is treated as a host route (`/32` · `/128`). A malformed
+/// entry matches nothing — a bad allowlist row can't silently widen access.
+fn cidr_contains(entry: &str, ip: IpAddr) -> bool {
+    let entry = entry.trim();
+    if let Ok(net) = entry.parse::<ipnet::IpNet>() {
+        return net.contains(&ip);
+    }
+    if let Ok(single) = entry.parse::<IpAddr>() {
+        return single == ip;
+    }
+    false
+}
+
 /// Extractor that REQUIRES a valid Bearer API key. Builds on the shared
 /// [`AuthCtx`] extractor; if the request carried no valid API key it
 /// rejects with a 401 JSON envelope (vs the UI's redirect-to-login).
@@ -89,11 +154,32 @@ impl FromRequestParts<SharedState> for ApiAuth {
         let ctx = AuthCtx::from_request_parts(parts, state)
             .await
             .map_err(|_| unauthorized())?;
-        if ctx.is_api_key() {
-            Ok(ApiAuth(ctx))
-        } else {
-            Err(unauthorized())
+        let Some(k) = ctx.api_key.as_ref() else {
+            return Err(unauthorized());
+        };
+        // Per-key hardening (both properties of the key, not owner-clamped).
+        let peer_ip = client_ip(parts);
+        // IP allowlist (empty = allow any). With an allowlist set but no peer
+        // info available, fail closed rather than wave the request through.
+        if !k.ip_allowlist.is_empty() {
+            let allowed =
+                peer_ip.is_some_and(|ip| k.ip_allowlist.iter().any(|c| cidr_contains(c, ip)));
+            if !allowed {
+                return Err(err(
+                    StatusCode::FORBIDDEN,
+                    "forbidden",
+                    "source IP not allowed for this API key",
+                ));
+            }
         }
+        // Rate limit (0 = unlimited), bucketed by key id.
+        if k.rate_limit_per_min > 0 {
+            let cap = k.rate_limit_per_min.min(u32::MAX as i64) as u32;
+            if !state.ratelimit.check_key(k.id, Bucket::per_minute(cap)) {
+                return Err(rate_limited());
+            }
+        }
+        Ok(ApiAuth(ctx))
     }
 }
 
@@ -129,21 +215,76 @@ pub async fn get_me(ApiAuth(ctx): ApiAuth) -> Response {
     .into_response()
 }
 
-/// `GET /api/v1/hostings` — list. Cap HostingView.
-pub async fn get_hostings(State(state): State<SharedState>, ApiAuth(ctx): ApiAuth) -> Response {
+/// Query knobs for `GET /api/v1/hostings` — keyset pagination + filters.
+#[derive(Deserialize, Default)]
+pub struct HostingsQuery {
+    /// Page size, 1..200 (default 50).
+    pub limit: Option<usize>,
+    /// Opaque keyset cursor = the last item's id from the previous page.
+    pub cursor: Option<String>,
+    /// Filter by lifecycle state (`active` | `suspended` | `provisioning` | `failed`).
+    pub state: Option<String>,
+    /// Filter by owning node id.
+    pub node: Option<String>,
+    /// Case-insensitive domain substring.
+    pub q: Option<String>,
+}
+
+/// `GET /api/v1/hostings` — paginated, filterable list. Cap HostingView.
+///
+/// Returns `{ items, next_cursor, total }`. `total` is the filtered count;
+/// follow `next_cursor` (when non-null) to page. Ordering is a stable
+/// keyset on id (ULIDs sort by creation time).
+pub async fn get_hostings(
+    State(state): State<SharedState>,
+    ApiAuth(ctx): ApiAuth,
+    Query(query): Query<HostingsQuery>,
+) -> Response {
     if let Some(r) = require(&ctx, Capability::HostingView) {
         return r;
     }
     // Reuse the exact aggregation the /hostings page uses (master +
     // fan-out across enrolled nodes, node_id normalised).
-    match crate::handlers::hostings::list_hostings(&state).await {
-        Ok(rows) => Json(rows).into_response(),
-        Err(e) => upstream(&e),
+    let mut rows = match crate::handlers::hostings::list_hostings(&state).await {
+        Ok(rows) => rows,
+        Err(e) => return upstream(&e),
+    };
+    // Filters.
+    if let Some(st) = query
+        .state
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        rows.retain(|h| h.state.as_str() == st);
     }
-    // TODO(api-p1b): tenant scoping. For non-scope_all keys this should
-    // filter to the owner's `web_user_hosting_access` grants, matching
-    // the UI. P1 ships admin-minted keys (scope_all), so the unfiltered
-    // list is correct for them; narrow this when per-owner scoping lands.
+    if let Some(nd) = query
+        .node
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        rows.retain(|h| h.node_id.as_deref() == Some(nd));
+    }
+    if let Some(q) = query.q.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let ql = q.to_ascii_lowercase();
+        rows.retain(|h| h.domain.to_ascii_lowercase().contains(&ql));
+    }
+    // Stable keyset order, then page after the cursor.
+    rows.sort_by(|a, b| a.id.as_str().cmp(b.id.as_str()));
+    let total = rows.len();
+    if let Some(cur) = query.cursor.as_deref().filter(|s| !s.is_empty()) {
+        rows.retain(|h| h.id.as_str() > cur);
+    }
+    let limit = query.limit.unwrap_or(50).clamp(1, 200);
+    let has_more = rows.len() > limit;
+    rows.truncate(limit);
+    let next_cursor = has_more
+        .then(|| rows.last().map(|h| h.id.as_str().to_string()))
+        .flatten();
+    Json(json!({ "items": rows, "next_cursor": next_cursor, "total": total })).into_response()
+    // NOTE(api-p1b): still cluster-wide (every key is scope_all). Tenant
+    // read-scoping for per-tenant keys lands with the mint-gate lift.
 }
 
 /// `GET /api/v1/hostings/:id` — detail. Cap HostingView.

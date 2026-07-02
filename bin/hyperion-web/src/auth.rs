@@ -42,6 +42,10 @@ pub struct ApiKeyCtx {
     pub scope_all: bool,
     /// SHA-256 hash of the presented key — used only for the touch RPC.
     pub key_hash: String,
+    /// CIDRs the key may connect from; empty = any peer IP.
+    pub ip_allowlist: Vec<String>,
+    /// Requests/min ceiling; 0 = unlimited.
+    pub rate_limit_per_min: i64,
 }
 
 /// Cookie-extracted session, available in handlers via the State extractor
@@ -270,6 +274,8 @@ async fn extract_auth(parts: &mut Parts, state: &SharedState) -> AuthCtx {
                     caps: k.caps,
                     scope_all: k.scope_all,
                     key_hash,
+                    ip_allowlist: k.ip_allowlist,
+                    rate_limit_per_min: k.rate_limit_per_min,
                 }),
                 username: owner_username,
             };

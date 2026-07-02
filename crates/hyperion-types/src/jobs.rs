@@ -89,6 +89,12 @@ pub struct ApiKeyView {
     pub expires_at: Option<i64>,
     pub revoked_at: Option<i64>,
     pub revoked_by: Option<i64>,
+    /// CIDRs the key may connect from; empty = any peer IP.
+    #[serde(default)]
+    pub ip_allowlist: Vec<String>,
+    /// Requests/min ceiling; 0 = unlimited.
+    #[serde(default)]
+    pub rate_limit_per_min: i64,
 }
 
 impl ApiKeyView {
@@ -107,6 +113,12 @@ pub struct ApiKeyResolved {
     pub owner_user_id: i64,
     pub caps: u64,
     pub scope_all: bool,
+    /// CIDRs the key may connect from; empty = any peer IP.
+    #[serde(default)]
+    pub ip_allowlist: Vec<String>,
+    /// Requests/min ceiling; 0 = unlimited.
+    #[serde(default)]
+    pub rate_limit_per_min: i64,
 }
 
 /// Result of minting an API key: the row id + the **raw** key, shown to
