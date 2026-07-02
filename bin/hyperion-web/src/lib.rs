@@ -588,11 +588,23 @@ pub fn build_router(state: SharedState) -> Router {
     // handler authenticates via the `ApiAuth` extractor (401 JSON on a
     // missing/invalid key) and gates on `ctx.can(cap)` (403 JSON). The
     // shared `security_headers` layer below applies; HTTPS is the
-    // server's job. READ-only this slice — see handlers::api_v1.
+    // server's job. Read + lifecycle (suspend/resume/delete) — see
+    // handlers::api_v1.
     let api_v1 = Router::new()
         .route("/api/v1/me", get(handlers::api_v1::get_me))
         .route("/api/v1/hostings", get(handlers::api_v1::get_hostings))
-        .route("/api/v1/hostings/:id", get(handlers::api_v1::get_hosting))
+        .route(
+            "/api/v1/hostings/:id",
+            get(handlers::api_v1::get_hosting).delete(handlers::api_v1::delete_hosting),
+        )
+        .route(
+            "/api/v1/hostings/:id/suspend",
+            post(handlers::api_v1::post_suspend),
+        )
+        .route(
+            "/api/v1/hostings/:id/resume",
+            post(handlers::api_v1::post_resume),
+        )
         .route("/api/v1/nodes", get(handlers::api_v1::get_nodes))
         .route("/api/v1/jobs/:id", get(handlers::api_v1::get_job));
 

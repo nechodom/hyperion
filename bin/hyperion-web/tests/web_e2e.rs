@@ -1679,3 +1679,59 @@ async fn transfer_wizard_renders_three_modes() {
     assert!(html.contains("/hostings/clone"), "copy action");
     assert!(html.contains("/hostings/migration/export"), "export action");
 }
+
+/// The p1b write endpoints are wired and gated: every one rejects a
+/// request that carries no valid Bearer key with a 401 (never a redirect,
+/// a 404, or a 405 — those would mean a routing/extractor mistake). A
+/// cookie session must NOT satisfy the Bearer-only edge either.
+#[tokio::test]
+async fn api_v1_write_endpoints_reject_without_bearer() {
+    let admin = admin_user::create("kevin", "secret-pw-1").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock, admin);
+
+    // (method, uri) for each mutating endpoint.
+    let cases = [
+        (Method::DELETE, "/api/v1/hostings/anything"),
+        (Method::POST, "/api/v1/hostings/anything/suspend"),
+        (Method::POST, "/api/v1/hostings/anything/resume"),
+    ];
+    for (method, uri) in cases {
+        // No Authorization header at all.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method.clone())
+                    .uri(uri)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("call");
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "{method} {uri} without a key must be 401"
+        );
+
+        // A syntactically-plausible but unknown Bearer key → still 401.
+        let resp = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method.clone())
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, "Bearer hyp_deadbeefdeadbeef")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .expect("call");
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "{method} {uri} with an unknown key must be 401"
+        );
+    }
+}
