@@ -51,6 +51,10 @@ pub struct ApiKeyRow {
     pub expires_at: Option<i64>,
     pub revoked_at: Option<i64>,
     pub revoked_by: Option<i64>,
+    /// CIDRs the key may connect from; empty = any peer IP.
+    pub ip_allowlist: Vec<String>,
+    /// Requests/min ceiling; 0 = unlimited.
+    pub rate_limit_per_min: i64,
 }
 
 /// The resolved identity behind a presented key: who owns it + what it
@@ -62,6 +66,10 @@ pub struct ResolvedKey {
     pub owner_user_id: i64,
     pub caps: u64,
     pub scope_all: bool,
+    /// CIDRs the key may connect from; empty = any peer IP.
+    pub ip_allowlist: Vec<String>,
+    /// Requests/min ceiling; 0 = unlimited.
+    pub rate_limit_per_min: i64,
 }
 
 /// Outcome of [`create`]: the row id + the **raw** key, shown to the
@@ -117,6 +125,8 @@ pub async fn create(
     owner_scope_all: bool,
     created_at: i64,
     expires_at: Option<i64>,
+    ip_allowlist: &[String],
+    rate_limit_per_min: i64,
 ) -> Result<CreatedKey, StateError> {
     // Clamp: caps &= owner_caps, scope_all &= owner_scope_all.
     let clamped_caps = CapSet::from_bits(requested_caps.bits() & owner_caps.bits());
@@ -125,12 +135,15 @@ pub async fn create(
     let raw_key = generate_raw_key();
     let key_hash = hash_key(&raw_key);
     let key_prefix: String = raw_key.chars().take(DISPLAY_PREFIX_LEN).collect();
+    // Serialize the allowlist as a JSON array; resolve_active parses it back.
+    let ip_allowlist_json = serde_json::to_string(ip_allowlist).unwrap_or_else(|_| "[]".into());
 
     let id = sqlx::query(
         r#"INSERT INTO api_keys
             (key_hash, key_prefix, label, owner_user_id, caps, scope_all,
-             created_at, last_used_at, expires_at, revoked_at, revoked_by)
-           VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL)"#,
+             created_at, last_used_at, expires_at, revoked_at, revoked_by,
+             ip_allowlist, rate_limit_per_min)
+           VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, NULL, NULL, ?, ?)"#,
     )
     .bind(&key_hash)
     .bind(&key_prefix)
@@ -140,6 +153,8 @@ pub async fn create(
     .bind(clamped_scope_all as i64)
     .bind(created_at)
     .bind(expires_at)
+    .bind(&ip_allowlist_json)
+    .bind(rate_limit_per_min.max(0))
     .execute(pool)
     .await?
     .last_insert_rowid();
@@ -162,8 +177,9 @@ pub async fn resolve_active(
     key_hash: &str,
     now: i64,
 ) -> Result<Option<ResolvedKey>, StateError> {
-    let row: Option<(i64, String, i64, i64, i64, Option<i64>)> = sqlx::query_as(
-        r#"SELECT id, label, owner_user_id, caps, scope_all, expires_at
+    let row: Option<(i64, String, i64, i64, i64, Option<i64>, String, i64)> = sqlx::query_as(
+        r#"SELECT id, label, owner_user_id, caps, scope_all, expires_at,
+                  ip_allowlist, rate_limit_per_min
              FROM api_keys
             WHERE key_hash = ?
               AND revoked_at IS NULL"#,
@@ -171,8 +187,17 @@ pub async fn resolve_active(
     .bind(key_hash)
     .fetch_optional(pool)
     .await?;
-    Ok(
-        row.and_then(|(id, label, owner_user_id, caps, scope_all, expires_at)| {
+    Ok(row.and_then(
+        |(
+            id,
+            label,
+            owner_user_id,
+            caps,
+            scope_all,
+            expires_at,
+            ip_allowlist,
+            rate_limit_per_min,
+        )| {
             // Expired keys are inert even though the row is still present.
             if let Some(exp) = expires_at {
                 if exp <= now {
@@ -185,9 +210,13 @@ pub async fn resolve_active(
                 owner_user_id,
                 caps: caps as u64,
                 scope_all: scope_all != 0,
+                // Stored as a JSON array of CIDR strings; a malformed value
+                // fails safe to "no restriction" rather than locking the key out.
+                ip_allowlist: serde_json::from_str(&ip_allowlist).unwrap_or_default(),
+                rate_limit_per_min,
             })
-        }),
-    )
+        },
+    ))
 }
 
 /// The owning web user's CURRENT standing, re-read at resolve time so a
@@ -226,6 +255,7 @@ pub fn clamp_to_owner(
 /// admin Settings card. Never returns the hash or the raw key.
 pub async fn list(pool: &SqlitePool, limit: i64) -> Result<Vec<ApiKeyRow>, StateError> {
     let limit = limit.clamp(1, 500);
+    #[allow(clippy::type_complexity)]
     let rows: Vec<(
         i64,
         String,
@@ -238,9 +268,12 @@ pub async fn list(pool: &SqlitePool, limit: i64) -> Result<Vec<ApiKeyRow>, State
         Option<i64>,
         Option<i64>,
         Option<i64>,
+        String,
+        i64,
     )> = sqlx::query_as(
         r#"SELECT id, key_prefix, label, owner_user_id, caps, scope_all,
-                  created_at, last_used_at, expires_at, revoked_at, revoked_by
+                  created_at, last_used_at, expires_at, revoked_at, revoked_by,
+                  ip_allowlist, rate_limit_per_min
              FROM api_keys
             ORDER BY created_at DESC
             LIMIT ?"#,
@@ -263,6 +296,8 @@ pub async fn list(pool: &SqlitePool, limit: i64) -> Result<Vec<ApiKeyRow>, State
                 expires_at,
                 revoked_at,
                 revoked_by,
+                ip_allowlist,
+                rate_limit_per_min,
             )| ApiKeyRow {
                 id,
                 key_prefix,
@@ -275,6 +310,8 @@ pub async fn list(pool: &SqlitePool, limit: i64) -> Result<Vec<ApiKeyRow>, State
                 expires_at,
                 revoked_at,
                 revoked_by,
+                ip_allowlist: serde_json::from_str(&ip_allowlist).unwrap_or_default(),
+                rate_limit_per_min,
             },
         )
         .collect())
@@ -367,7 +404,7 @@ mod tests {
         let want = [Capability::HostingView, Capability::NodesView]
             .into_iter()
             .collect::<CapSet>();
-        let created = create(&p, "ci", 1, want, false, owner, true, 1000, None)
+        let created = create(&p, "ci", 1, want, false, owner, true, 1000, None, &[], 0)
             .await
             .expect("create");
         assert!(created.raw_key.starts_with(KEY_PREFIX));
@@ -401,6 +438,8 @@ mod tests {
             true,
             100,
             None,
+            &[],
+            0,
         )
         .await
         .expect("create");
@@ -426,6 +465,8 @@ mod tests {
             true,
             100,
             Some(1000),
+            &[],
+            0,
         )
         .await
         .expect("create");
@@ -457,7 +498,7 @@ mod tests {
         let want = [Capability::HostingView, Capability::NodesView]
             .into_iter()
             .collect::<CapSet>();
-        let created = create(&p, "k", 1, want, true, owner, false, 100, None)
+        let created = create(&p, "k", 1, want, true, owner, false, 100, None, &[], 0)
             .await
             .expect("create");
         let resolved = resolve_active(&p, &hash_key(&created.raw_key), 200)
@@ -490,6 +531,8 @@ mod tests {
             true,
             100,
             None,
+            &[],
+            0,
         )
         .await
         .expect("create");
@@ -559,5 +602,60 @@ mod tests {
             Some((view_only, false)),
             "a key can never exceed its owner's CURRENT grant"
         );
+    }
+
+    #[tokio::test]
+    async fn hardening_fields_round_trip() {
+        let p = fresh().await;
+        let allow = vec!["10.0.0.0/8".to_string(), "192.168.1.5/32".to_string()];
+        let created = create(
+            &p,
+            "hardened",
+            1,
+            CapSet::all(),
+            true,
+            CapSet::all(),
+            true,
+            1000,
+            None,
+            &allow,
+            60,
+        )
+        .await
+        .expect("create");
+        let hash = hash_key(&created.raw_key);
+        // resolve_active surfaces the parsed allowlist + rate limit.
+        let r = resolve_active(&p, &hash, 2000)
+            .await
+            .expect("resolve")
+            .expect("active");
+        assert_eq!(r.ip_allowlist, allow);
+        assert_eq!(r.rate_limit_per_min, 60);
+        // list surfaces them too.
+        let row = &list(&p, 10).await.expect("list")[0];
+        assert_eq!(row.ip_allowlist, allow);
+        assert_eq!(row.rate_limit_per_min, 60);
+        // Defaults: a key minted with no hardening → empty allowlist, 0 limit.
+        let plain = create(
+            &p,
+            "plain",
+            1,
+            CapSet::all(),
+            true,
+            CapSet::all(),
+            true,
+            1000,
+            None,
+            &[],
+            0,
+        )
+        .await
+        .expect("create2");
+        let pr = resolve_active(&p, &hash_key(&plain.raw_key), 2000)
+            .await
+            .expect("resolve2")
+            .expect("active2");
+        assert!(pr.ip_allowlist.is_empty());
+        assert_eq!(pr.rate_limit_per_min, 0);
     }
 }

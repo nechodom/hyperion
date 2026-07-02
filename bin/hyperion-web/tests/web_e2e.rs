@@ -1492,6 +1492,8 @@ async fn api_v1_bearer_auth_and_cap_gating() {
             caps: view_cap,
             scope_all: true,
             expires_at: None,
+            ip_allowlist: vec![],
+            rate_limit_per_min: 0,
         },
     )
     .await
@@ -1543,6 +1545,8 @@ async fn api_v1_bearer_auth_and_cap_gating() {
             caps: nodes_cap,
             scope_all: true,
             expires_at: None,
+            ip_allowlist: vec![],
+            rate_limit_per_min: 0,
         },
     )
     .await
@@ -1734,4 +1738,217 @@ async fn api_v1_write_endpoints_reject_without_bearer() {
             "{method} {uri} with an unknown key must be 401"
         );
     }
+}
+
+/// Create a real admin web_user (api_keys.owner_user_id FK) and return its id.
+async fn seed_key_owner(sock: &std::path::Path) -> i64 {
+    use hyperion_rpc::codec::{Request as RpcReq, Response as RpcResp};
+    match hyperion_rpc_client::call(
+        sock,
+        RpcReq::WebUserCreate {
+            username: "apikey-owner".into(),
+            email: "apikey-owner@example.invalid".into(),
+            password: "owner-pw-1".into(),
+            role: "admin".into(),
+        },
+    )
+    .await
+    .expect("create owner")
+    {
+        RpcResp::WebUserCreate { id } => id,
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+/// Mint an API key (scope_all) with optional hardening; returns the raw key.
+async fn seed_key(
+    sock: &std::path::Path,
+    owner_id: i64,
+    caps: u64,
+    ip_allowlist: Vec<String>,
+    rate_limit_per_min: i64,
+) -> String {
+    use hyperion_rpc::codec::{Request as RpcReq, Response as RpcResp};
+    match hyperion_rpc_client::call(
+        sock,
+        RpcReq::ApiKeyCreate {
+            label: "ci".into(),
+            owner_user_id: owner_id,
+            caps,
+            scope_all: true,
+            expires_at: None,
+            ip_allowlist,
+            rate_limit_per_min,
+        },
+    )
+    .await
+    .expect("mint")
+    {
+        RpcResp::ApiKeyCreated(c) => c.raw_key,
+        other => panic!("unexpected: {other:?}"),
+    }
+}
+
+/// GET a /api/v1 path with a Bearer key; returns (status, body).
+async fn api_get(app: &axum::Router, uri: &str, key: &str) -> (StatusCode, String) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header(header::AUTHORIZATION, format!("Bearer {key}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    let status = resp.status();
+    (status, body_string(resp).await)
+}
+
+#[tokio::test]
+async fn api_v1_hostings_paginates_and_filters() {
+    use hyperion_rpc::codec::{Request as RpcReq, Response as RpcResp};
+    use hyperion_rpc::wire::HostingCreateReq;
+
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+    let owner_id = seed_key_owner(&sock).await;
+
+    // Seed three hostings.
+    for d in ["aaa.example.com", "bbb.example.com", "ccc.example.com"] {
+        match hyperion_rpc_client::call(
+            &sock,
+            RpcReq::HostingCreate(HostingCreateReq {
+                domain: hyperion_validate::Domain::parse(d).expect("domain"),
+                aliases: vec![],
+                php_version: None,
+                database: None,
+                system_user: None,
+                kind: "php".into(),
+                proxy_upstream_url: None,
+            }),
+        )
+        .await
+        .expect("seed hosting")
+        {
+            RpcResp::HostingCreate(_) => {}
+            other => panic!("unexpected create: {other:?}"),
+        }
+    }
+
+    let view = hyperion_state::capabilities::Capability::HostingView.bit();
+    let key = seed_key(&sock, owner_id, view, vec![], 0).await;
+
+    // First page of 2 → 2 items + a cursor + total=3.
+    let (st, body) = api_get(&app, "/api/v1/hostings?limit=2", &key).await;
+    assert_eq!(st, StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert_eq!(v["items"].as_array().unwrap().len(), 2, "page 1 size");
+    assert_eq!(v["total"].as_i64(), Some(3), "total is the filtered count");
+    let cursor = v["next_cursor"]
+        .as_str()
+        .expect("cursor present")
+        .to_string();
+
+    // Follow the cursor → the remaining 1, no further cursor.
+    let (_st, body) = api_get(
+        &app,
+        &format!("/api/v1/hostings?limit=2&cursor={cursor}"),
+        &key,
+    )
+    .await;
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json2");
+    assert_eq!(v["items"].as_array().unwrap().len(), 1, "page 2 size");
+    assert!(v["next_cursor"].is_null(), "no more pages");
+
+    // Filters: q substring, and state.
+    let (_s, body) = api_get(&app, "/api/v1/hostings?q=bbb", &key).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["total"].as_i64(), Some(1), "q=bbb matches one");
+    let (_s, body) = api_get(&app, "/api/v1/hostings?state=suspended", &key).await;
+    let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(v["total"].as_i64(), Some(0), "none suspended yet");
+}
+
+/// GET a /api/v1 path with a Bearer key AND an X-Forwarded-For (the real
+/// client IP behind the nginx panel vhost). Returns (status, body).
+async fn api_get_xff(app: &axum::Router, uri: &str, key: &str, xff: &str) -> (StatusCode, String) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri(uri)
+                .header(header::AUTHORIZATION, format!("Bearer {key}"))
+                .header("x-forwarded-for", xff)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    let status = resp.status();
+    (status, body_string(resp).await)
+}
+
+#[tokio::test]
+async fn api_v1_ip_allowlist_matches_client_ip() {
+    // hyperion-web sits behind nginx, so the real client IP is the first
+    // X-Forwarded-For hop — that's what the allowlist must match.
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+    let owner_id = seed_key_owner(&sock).await;
+    let view = hyperion_state::capabilities::Capability::HostingView.bit();
+
+    // Key restricted to 10.0.0.0/8.
+    let key = seed_key(&sock, owner_id, view, vec!["10.0.0.0/8".into()], 0).await;
+
+    // A client outside the range → 403 before the handler runs.
+    let (st, body) = api_get_xff(&app, "/api/v1/me", &key, "203.0.113.5").await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "client outside allowlist → 403");
+    assert!(body.contains("source IP not allowed"), "reason: {body}");
+
+    // A client inside the range → 200.
+    let (st, _b) = api_get_xff(&app, "/api/v1/me", &key, "10.1.2.3").await;
+    assert_eq!(st, StatusCode::OK, "client inside allowlist → 200");
+
+    // A key with no allowlist ignores the source IP entirely.
+    let open = seed_key(&sock, owner_id, view, vec![], 0).await;
+    let (st, _b) = api_get_xff(&app, "/api/v1/me", &open, "203.0.113.5").await;
+    assert_eq!(st, StatusCode::OK, "no allowlist → any IP allowed");
+}
+
+#[tokio::test]
+async fn api_v1_rate_limit_returns_429() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+    let owner_id = seed_key_owner(&sock).await;
+    let view = hyperion_state::capabilities::Capability::HostingView.bit();
+
+    // One request/min. First passes, second is throttled.
+    let key = seed_key(&sock, owner_id, view, vec![], 1).await;
+    let (st1, _) = api_get(&app, "/api/v1/me", &key).await;
+    assert_eq!(st1, StatusCode::OK, "first request allowed");
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/me")
+                .header(header::AUTHORIZATION, format!("Bearer {key}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert_eq!(
+        resp.status(),
+        StatusCode::TOO_MANY_REQUESTS,
+        "second request within the minute is throttled"
+    );
+    assert!(
+        resp.headers().contains_key(header::RETRY_AFTER),
+        "429 carries Retry-After"
+    );
 }

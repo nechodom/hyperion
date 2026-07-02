@@ -691,6 +691,12 @@ pub enum Request {
         scope_all: bool,
         #[serde(default)]
         expires_at: Option<i64>,
+        /// CIDRs the key may connect from; empty = any peer IP.
+        #[serde(default)]
+        ip_allowlist: Vec<String>,
+        /// Requests/min ceiling; 0 = unlimited.
+        #[serde(default)]
+        rate_limit_per_min: i64,
     },
     /// Newest-first list of every API key (admin Settings card). Never
     /// returns the hash or the raw key.

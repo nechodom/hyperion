@@ -100,6 +100,26 @@ pub struct ApiKeyRowView {
     pub last_used: String,
     pub expires: String,
     pub is_revoked: bool,
+    /// Human summary of the key's hardening ("2 IPs · 60/min", or "—").
+    pub restrictions: String,
+}
+
+/// Compact one-line summary of a key's IP allowlist + rate limit for the
+/// Settings list. "—" when the key has neither restriction.
+fn restrictions_summary(ip_allowlist: &[String], rate_limit_per_min: i64) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if !ip_allowlist.is_empty() {
+        let n = ip_allowlist.len();
+        parts.push(format!("{n} IP{}", if n == 1 { "" } else { "s" }));
+    }
+    if rate_limit_per_min > 0 {
+        parts.push(format!("{rate_limit_per_min}/min"));
+    }
+    if parts.is_empty() {
+        "—".to_string()
+    } else {
+        parts.join(" · ")
+    }
 }
 
 /// Build the capability-group checkboxes for the create form, reusing the
@@ -306,6 +326,7 @@ pub async fn get_settings(
                     caps_summary: caps_summary(r.caps),
                     last_used: fmt_date(r.last_used_at),
                     expires: fmt_date(r.expires_at),
+                    restrictions: restrictions_summary(&r.ip_allowlist, r.rate_limit_per_min),
                     label: r.label,
                 })
                 .collect(),
@@ -416,6 +437,34 @@ pub async fn post_api_key_create(
         )
         .into_response());
     }
+    // Optional hardening. CIDRs are split on comma/whitespace/newline; each must
+    // parse as an IP network (a bare IP works too — ipnet accepts /32 · /128).
+    let mut ip_allowlist: Vec<String> = Vec::new();
+    for tok in form.ip_allowlist.split([',', '\n', '\r', ' ', '\t']) {
+        let tok = tok.trim();
+        if tok.is_empty() {
+            continue;
+        }
+        if tok.parse::<ipnet::IpNet>().is_err() && tok.parse::<std::net::IpAddr>().is_err() {
+            return Ok(Redirect::to(
+                "/settings?flash_error=Invalid+IP/CIDR+in+the+allowlist+(use+e.g.+203.0.113.0/24).#api",
+            )
+            .into_response());
+        }
+        ip_allowlist.push(tok.to_string());
+    }
+    let rate_limit_per_min: i64 = match form.rate_limit.trim() {
+        "" => 0,
+        s => match s.parse::<i64>() {
+            Ok(n) if n >= 0 => n,
+            _ => {
+                return Ok(Redirect::to(
+                    "/settings?flash_error=Rate+limit+must+be+a+non-negative+number+(0+%3D+unlimited).#api",
+                )
+                .into_response())
+            }
+        },
+    };
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
         Request::ApiKeyCreate {
@@ -424,6 +473,8 @@ pub async fn post_api_key_create(
             caps: caps.bits(),
             scope_all,
             expires_at,
+            ip_allowlist,
+            rate_limit_per_min,
         },
     )
     .await?;
@@ -479,6 +530,13 @@ pub struct ApiKeyCreateForm {
     pub label: String,
     #[serde(default)]
     pub expires: String,
+    /// Optional comma/newline-separated CIDRs the key may connect from
+    /// (e.g. "203.0.113.0/24, 198.51.100.7"). Empty = any peer IP.
+    #[serde(default)]
+    pub ip_allowlist: String,
+    /// Optional requests/min ceiling; empty or "0" = unlimited.
+    #[serde(default)]
+    pub rate_limit: String,
     /// The capability checkboxes (named by machine string) + any other
     /// fields. Each checked box arrives as `<machine>=on`.
     #[serde(flatten)]

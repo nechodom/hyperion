@@ -1311,6 +1311,18 @@
           <input id="api_key_expires" name="expires" type="date">
         </div>
       </div>
+      <div class="field-row" style="display:flex;gap:1rem;flex-wrap:wrap;align-items:flex-end;margin-top:0.6rem">
+        <div class="field" style="flex:1;min-width:14rem">
+          <label for="api_key_ips">Allowed IPs / CIDRs (optional)</label>
+          <input id="api_key_ips" name="ip_allowlist" type="text" placeholder="203.0.113.0/24, 198.51.100.7" autocomplete="off">
+          <span class="text-soft small">Comma-separated. Empty = any address.</span>
+        </div>
+        <div class="field">
+          <label for="api_key_rate">Rate limit (req/min)</label>
+          <input id="api_key_rate" name="rate_limit" type="number" min="0" step="1" placeholder="0" style="width:9rem">
+          <span class="text-soft small">0 = unlimited</span>
+        </div>
+      </div>
       <fieldset style="border:1px solid var(--border);border-radius:8px;padding:0.8rem 1rem;margin:0.9rem 0">
         <legend class="text-soft small" style="padding:0 0.4rem">Capabilities</legend>
         <div class="cap-groups" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(16rem,1fr));gap:0.8rem 1.4rem">
@@ -1339,7 +1351,7 @@
     <table class="data-table" style="width:100%">
       <thead>
         <tr>
-          <th>Prefix</th><th>Label</th><th>Capabilities</th><th>Last used</th><th>Expires</th><th></th>
+          <th>Prefix</th><th>Label</th><th>Capabilities</th><th>Restrictions</th><th>Last used</th><th>Expires</th><th></th>
         </tr>
       </thead>
       <tbody>
@@ -1348,6 +1360,7 @@
           <td><code>{{ k.key_prefix }}…</code></td>
           <td>{{ k.label }}</td>
           <td class="text-soft small">{{ k.caps_summary }}</td>
+          <td class="text-soft small">{{ k.restrictions }}</td>
           <td class="text-soft small">{{ k.last_used }}</td>
           <td class="text-soft small">{{ k.expires }}</td>
           <td style="text-align:right">

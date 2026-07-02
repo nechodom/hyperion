@@ -283,8 +283,18 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             caps,
             scope_all,
             expires_at,
+            ip_allowlist,
+            rate_limit_per_min,
         } => match api
-            .api_key_create(label, owner_user_id, caps, scope_all, expires_at)
+            .api_key_create(
+                label,
+                owner_user_id,
+                caps,
+                scope_all,
+                expires_at,
+                ip_allowlist,
+                rate_limit_per_min,
+            )
             .await
         {
             Ok(v) => Response::ApiKeyCreated(v),
@@ -1615,6 +1625,8 @@ mod tests {
             _: u64,
             _: bool,
             _: Option<i64>,
+            _: Vec<String>,
+            _: i64,
         ) -> Result<hyperion_types::ApiKeyCreated, RpcError> {
             Ok(hyperion_types::ApiKeyCreated::default())
         }

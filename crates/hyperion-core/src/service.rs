@@ -8902,6 +8902,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// the OWNER's effective caps (a key can never out-grant its owner),
     /// resolved here so the clamp can't be bypassed by a crafted RPC.
     /// Returns the RAW key once; only its SHA-256 is stored.
+    #[allow(clippy::too_many_arguments)]
     pub async fn api_key_create(
         &self,
         label: &str,
@@ -8909,6 +8910,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         caps: u64,
         scope_all: bool,
         expires_at: Option<i64>,
+        ip_allowlist: &[String],
+        rate_limit_per_min: i64,
     ) -> Result<hyperion_types::ApiKeyCreated, RpcError> {
         use hyperion_state::capabilities::CapSet;
         // Resolve the owner's effective caps for the clamp. A missing
@@ -8946,6 +8949,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             owner_scope_all,
             now_secs(),
             expires_at,
+            ip_allowlist,
+            rate_limit_per_min,
         )
         .await
         .map_err(|e| RpcError::Internal_with(format!("api_key_create: {e}")))?;
@@ -8988,6 +8993,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 expires_at: r.expires_at,
                 revoked_at: r.revoked_at,
                 revoked_by: r.revoked_by,
+                ip_allowlist: r.ip_allowlist,
+                rate_limit_per_min: r.rate_limit_per_min,
             })
             .collect())
     }
@@ -9034,6 +9041,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             owner_user_id: k.owner_user_id,
             caps,
             scope_all,
+            // Hardening is not owner-clamped — it constrains the key itself.
+            ip_allowlist: k.ip_allowlist,
+            rate_limit_per_min: k.rate_limit_per_min,
         }))
     }
 

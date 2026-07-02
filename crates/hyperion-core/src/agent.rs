@@ -404,6 +404,7 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.web_session_revoke(&sid, revoked_by).await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn api_key_create(
         &self,
         label: String,
@@ -411,9 +412,19 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         caps: u64,
         scope_all: bool,
         expires_at: Option<i64>,
+        ip_allowlist: Vec<String>,
+        rate_limit_per_min: i64,
     ) -> Result<hyperion_types::ApiKeyCreated, RpcError> {
         self.svc
-            .api_key_create(&label, owner_user_id, caps, scope_all, expires_at)
+            .api_key_create(
+                &label,
+                owner_user_id,
+                caps,
+                scope_all,
+                expires_at,
+                &ip_allowlist,
+                rate_limit_per_min,
+            )
             .await
     }
 
