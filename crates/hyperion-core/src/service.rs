@@ -8996,15 +8996,44 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         &self,
         key_hash: &str,
     ) -> Result<Option<hyperion_types::ApiKeyResolved>, RpcError> {
-        let r = hyperion_state::api_keys::resolve_active(&self.pool, key_hash, now_secs())
+        let Some(k) = hyperion_state::api_keys::resolve_active(&self.pool, key_hash, now_secs())
             .await
-            .map_err(|e| RpcError::Internal_with(format!("api_key_resolve: {e}")))?;
-        Ok(r.map(|k| hyperion_types::ApiKeyResolved {
+            .map_err(|e| RpcError::Internal_with(format!("api_key_resolve: {e}")))?
+        else {
+            return Ok(None);
+        };
+        // Live owner enforcement. `resolve_active` only vetted the KEY row
+        // (not revoked / not expired); the module contract also promises a
+        // key can "never be exceeded by revoking/down-scoping the owner", so
+        // re-read the owner's CURRENT standing on every call: a locked/gone
+        // owner makes the key inert, a demoted owner re-clamps its caps. For
+        // the usual admin-owned scope_all key this is a no-op.
+        let owner = hyperion_state::web_users::get_by_id(&self.pool, k.owner_user_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("api_key_resolve owner: {e}")))?;
+        let eff = hyperion_state::web_users::effective_role(&self.pool, k.owner_user_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("api_key_resolve role: {e}")))?;
+        let standing = match (owner, eff) {
+            (Some(u), Some(er)) => Some(hyperion_state::api_keys::OwnerStanding {
+                locked: u.locked,
+                caps: er.caps.bits(),
+                scope_all: er.scope_all,
+            }),
+            // Owner deleted, or has no resolvable role → treat as gone.
+            _ => None,
+        };
+        let Some((caps, scope_all)) =
+            hyperion_state::api_keys::clamp_to_owner(k.caps, k.scope_all, standing)
+        else {
+            return Ok(None);
+        };
+        Ok(Some(hyperion_types::ApiKeyResolved {
             id: k.id,
             label: k.label,
             owner_user_id: k.owner_user_id,
-            caps: k.caps,
-            scope_all: k.scope_all,
+            caps,
+            scope_all,
         }))
     }
 

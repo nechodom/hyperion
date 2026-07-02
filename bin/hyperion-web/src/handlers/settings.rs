@@ -406,6 +406,16 @@ pub async fn post_api_key_create(
         },
     };
     let scope_all = ctx.scope_all();
+    // A tenant-scoped account can't own an API key yet — the /api/v1 read
+    // endpoints aren't tenant-filtered (that lands in p1b). The RPC refuses
+    // this too (authoritative backstop), but catch it here so the operator
+    // gets a clear flash on the Settings page instead of a bare 502.
+    if !scope_all {
+        return Ok(Redirect::to(
+            "/settings?flash_error=API+keys+require+an+account+with+cluster-wide+scope.+Per-tenant+keys+arrive+in+a+later+release.#api",
+        )
+        .into_response());
+    }
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
         Request::ApiKeyCreate {
