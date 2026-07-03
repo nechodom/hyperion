@@ -4628,6 +4628,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 stage: "chpasswd".into(),
                 reason: e.to_string(),
             })?;
+        // Land the FTP client directly in the site's writable web root
+        // (htdocs, owned by the user) rather than the root-owned home — else
+        // STOR at the chroot root fails with 550. `root_dir` is the hosting
+        // root (`/home/<user>/<domain>`); htdocs lives one level down.
+        let web_root = format!("{}/htdocs", detail.root_dir);
+        hyperion_adapters::ftp::set_user_web_root(&detail.system_user, &web_root)
+            .await
+            .map_err(|e| RpcError::ProvisioningFailed {
+                stage: "vsftpd_user_root".into(),
+                reason: e.to_string(),
+            })?;
         self.append_audit(
             "hosting.ftp.set_password",
             Some(detail.id.as_str()),
@@ -4647,6 +4658,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 stage: "passwd_disable".into(),
                 reason: e.to_string(),
             })?;
+        // Best-effort: drop the per-user vsftpd override (no password ⇒ no login
+        // anyway, but keep the config dir tidy).
+        let _ = hyperion_adapters::ftp::clear_user_web_root(&detail.system_user).await;
         self.append_audit(
             "hosting.ftp.disable",
             Some(detail.id.as_str()),

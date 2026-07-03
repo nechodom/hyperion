@@ -277,12 +277,15 @@ pam_service_name=vsftpd
 secure_chroot_dir=/var/run/vsftpd/empty
 user_sub_token=$USER
 local_root=/home/$USER
+user_config_dir=/etc/vsftpd/user_conf
 xferlog_enable=YES
 xferlog_std_format=YES
 seccomp_sandbox=NO
 EOFV
     [[ "$FTP_PORT" != "21" ]] && echo "listen_port=${FTP_PORT}" >> /etc/vsftpd.conf
   fi
+  # Per-user configs (agent points each user's local_root at their htdocs).
+  install -d -m 0755 /etc/vsftpd/user_conf
   systemctl enable --now vsftpd || true
 else
   log "Skipping vsftpd (per selection) — per-hosting FTP will be unavailable."
