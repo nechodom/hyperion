@@ -89,6 +89,29 @@ pub async fn set_user_web_root(user: &str, web_root: &str) -> Result<(), Adapter
     Ok(())
 }
 
+/// Ensure `user` actually OWNS their web root, so FTP uploads / MKD work.
+///
+/// A site restored or imported from another box keeps the SOURCE uid on its
+/// files (`tar`/`rsync` run as root preserve ownership), so the local system
+/// user can't write — `STOR`/`MKD` then fail with 550 even though login + LIST
+/// work. chown the tree to the hosting user at FTP-enable time to self-heal
+/// that. Safe: PHP-FPM already runs as this user, and nginx reads via the
+/// world-readable bits + traversable ancestors, so ownership = the user is the
+/// correct end state anyway. `web_root` is the hosting's htdocs.
+pub async fn ensure_web_root_owned(user: &str, web_root: &str) -> Result<(), AdapterError> {
+    if user.is_empty() || user.contains([':', '\n', '\r', '\0']) {
+        return Err(AdapterError::Other(
+            "ftp user has an illegal character for chown".into(),
+        ));
+    }
+    cmd::run(
+        "/usr/bin/chown",
+        &["-R", &format!("{user}:{user}"), web_root],
+    )
+    .await?;
+    Ok(())
+}
+
 /// Remove `user`'s per-user vsftpd override (on FTP disable). Idempotent.
 pub async fn clear_user_web_root(user: &str) -> Result<(), AdapterError> {
     if user.contains(['/', '\n', '\r', '\0', ':', '.']) {
@@ -363,6 +386,20 @@ mod tests {
     #[test]
     fn hyperion_vsftpd_conf_wires_per_user_web_root() {
         assert!(super::HYPERION_VSFTPD_CONF.contains("user_config_dir=/etc/vsftpd/user_conf"));
+    }
+
+    #[tokio::test]
+    async fn ensure_web_root_owned_rejects_injection() {
+        // A user with ':' / newline would break the chown spec — refuse before
+        // shelling out.
+        for bad in ["a:b", "u\nv", ""] {
+            assert!(
+                super::ensure_web_root_owned(bad, "/home/x/site/htdocs")
+                    .await
+                    .is_err(),
+                "should reject user {bad:?}"
+            );
+        }
     }
 
     #[test]
