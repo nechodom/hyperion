@@ -2173,3 +2173,102 @@ async fn api_v1_patch_limits_applies() {
     .await;
     assert_eq!(st, StatusCode::FORBIDDEN, "no manage cap → 403");
 }
+
+#[tokio::test]
+async fn api_v1_ops_endpoints() {
+    use hyperion_rpc::codec::{Request as RpcReq, Response as RpcResp};
+    use hyperion_rpc::wire::HostingCreateReq;
+
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+    let owner_id = seed_key_owner(&sock).await;
+
+    // Seed a hosting to operate on.
+    match hyperion_rpc_client::call(
+        &sock,
+        RpcReq::HostingCreate(HostingCreateReq {
+            domain: hyperion_validate::Domain::parse("api-ops.example.com").expect("domain"),
+            aliases: vec![],
+            php_version: None,
+            database: None,
+            system_user: None,
+            kind: "php".into(),
+            proxy_upstream_url: None,
+        }),
+    )
+    .await
+    .expect("seed")
+    {
+        RpcResp::HostingCreate(_) => {}
+        other => panic!("unexpected: {other:?}"),
+    }
+
+    // An all-caps key satisfies BackupRun / CertManage / HostingEditConfig.
+    let key = seed_key(
+        &sock,
+        owner_id,
+        hyperion_state::capabilities::CapSet::all().bits(),
+        vec![],
+        0,
+    )
+    .await;
+    let base = "/api/v1/hostings/api-ops.example.com";
+
+    // Backup → 202 with a job id.
+    let (st, body) = api_send(&app, Method::POST, &format!("{base}/backup"), &key, "").await;
+    assert_eq!(st, StatusCode::ACCEPTED, "backup → 202: {body}");
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert!(v["job_id"].is_string(), "backup returns a job id: {body}");
+
+    // Backups list → 200 with an items array.
+    let (st, body) = api_send(&app, Method::GET, &format!("{base}/backups"), &key, "").await;
+    assert_eq!(st, StatusCode::OK, "backups list → 200");
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json");
+    assert!(v["items"].is_array(), "backups envelope has items: {body}");
+
+    // Cert issue (staging) → 202 with a job id.
+    let (st, body) = api_send(
+        &app,
+        Method::POST,
+        &format!("{base}/cert"),
+        &key,
+        r#"{"staging":true}"#,
+    )
+    .await;
+    assert_eq!(st, StatusCode::ACCEPTED, "cert → 202: {body}");
+
+    // Expiry (PATCH) → 200.
+    let (st, body) = api_send(
+        &app,
+        Method::PATCH,
+        &format!("{base}/expiry"),
+        &key,
+        r#"{"expires_at":9999999999,"owner_email":null,"grace_days":7,"warning_offsets_days":"30,7,1"}"#,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "expiry → 200: {body}");
+
+    // Quota (PATCH) → 200.
+    let (st, body) = api_send(
+        &app,
+        Method::PATCH,
+        &format!("{base}/quota"),
+        &key,
+        r#"{"disk_soft_kib":1000000,"disk_hard_kib":2000000,"mem_limit_mib":512,"bw_soft_mib":0,"bw_hard_mib":0,"exceed_action":"notify"}"#,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "quota → 200: {body}");
+
+    // A key lacking BackupRun → 403 on backup.
+    let weak = seed_key(
+        &sock,
+        owner_id,
+        hyperion_state::capabilities::Capability::HostingView.bit(),
+        vec![],
+        0,
+    )
+    .await;
+    let (st, _b) = api_send(&app, Method::POST, &format!("{base}/backup"), &weak, "").await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "no BackupRun cap → 403");
+}

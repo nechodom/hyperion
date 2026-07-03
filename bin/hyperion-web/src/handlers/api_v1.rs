@@ -864,3 +864,279 @@ pub async fn patch_vhost(
         Err(e) => upstream(&e.to_string()),
     }
 }
+
+// ─── Ops endpoints (Slice C) ─────────────────────────────────────────────
+//
+// Per-hosting operations. Backup + cert issuance are slow (tar + upload;
+// ACME round-trips) so they run as background jobs → 202 { job_id }, reusing
+// the exact job workers the UI spawns. Backups-list, expiry and quota are
+// synchronous. All go through the same resolve_manage gate, audited as
+// actor `apikey:<label>`.
+
+/// `POST /api/v1/hostings/:id/backup` — run a backup now. Cap BackupRun → 202.
+#[utoipa::path(
+    post, path = "/api/v1/hostings/{id}/backup", tag = "hostings",
+    params(("id" = String, Path, description = "Hosting id or domain")),
+    responses(
+        (status = 202, description = "Accepted — { job_id, status }; poll GET /api/v1/jobs/{job_id}"),
+        (status = 403, description = "Key lacks the BackupRun capability"),
+        (status = 404, description = "No such hosting"),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn post_backup(
+    State(state): State<SharedState>,
+    ApiAuth(ctx): ApiAuth,
+    Path(id): Path<String>,
+) -> Response {
+    let (detail, node) = match resolve_manage(&state, &ctx, &id, Capability::BackupRun).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let sel = HostingSelector::Id(detail.id.clone());
+    let s3_targets = crate::handlers::hostings::resolve_s3_targets(&state).await;
+    let actor_label = format!("apikey:{}", ctx.username);
+    let job_state = state.clone();
+    let job_node = node.clone();
+    let job_id = match crate::handlers::jobs::spawn_job(
+        state.clone(),
+        "hosting_backup",
+        Some(detail.id.as_str()),
+        "{}",
+        &actor_label,
+        0,
+        move |reporter| async move {
+            crate::handlers::hostings::run_backup_now_job(
+                reporter, job_state, job_node, sel, s3_targets,
+            )
+            .await;
+        },
+    )
+    .await
+    {
+        Ok(id) => id,
+        Err(e) => return upstream(&e.to_string()),
+    };
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({ "job_id": job_id, "status": "accepted" })),
+    )
+        .into_response()
+}
+
+/// `GET /api/v1/hostings/:id/backups` — list recent backups. Cap BackupRun.
+#[utoipa::path(
+    get, path = "/api/v1/hostings/{id}/backups", tag = "hostings",
+    params(
+        ("id" = String, Path, description = "Hosting id or domain"),
+        ("limit" = Option<i64>, Query, description = "Max rows (default 50)"),
+    ),
+    responses(
+        (status = 200, description = "{ items: [backup run] }"),
+        (status = 403, description = "Key lacks the BackupRun capability"),
+        (status = 404, description = "No such hosting"),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn get_backups(
+    State(state): State<SharedState>,
+    ApiAuth(ctx): ApiAuth,
+    Path(id): Path<String>,
+    Query(q): Query<HostingsQuery>,
+) -> Response {
+    let (detail, node) = match resolve_manage(&state, &ctx, &id, Capability::BackupRun).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let sel = HostingSelector::Id(detail.id.clone());
+    let limit = q.limit.unwrap_or(50).clamp(1, 500) as i64;
+    match crate::dispatcher::dispatch_to_node(
+        &state,
+        node.as_deref(),
+        Request::BackupList { sel, limit },
+    )
+    .await
+    {
+        Ok(RpcResponse::BackupList(items)) => Json(json!({ "items": items })).into_response(),
+        Ok(RpcResponse::Error(e)) => map_rpc_error(&e),
+        Ok(_) => upstream("unexpected agent response"),
+        Err(e) => upstream(&e.to_string()),
+    }
+}
+
+/// Body for `POST /api/v1/hostings/:id/cert`.
+#[derive(Deserialize, Default)]
+pub struct CertBody {
+    /// Issue against the Let's Encrypt STAGING environment (untrusted, for
+    /// testing). Default false = a real production certificate.
+    #[serde(default)]
+    pub staging: bool,
+}
+
+/// `POST /api/v1/hostings/:id/cert` — issue an ACME cert. Cap CertManage → 202.
+#[utoipa::path(
+    post, path = "/api/v1/hostings/{id}/cert", tag = "hostings",
+    params(("id" = String, Path, description = "Hosting id or domain")),
+    request_body(content_type = "application/json", description = "{ staging?: bool }"),
+    responses(
+        (status = 202, description = "Accepted — { job_id, status }; poll GET /api/v1/jobs/{job_id}"),
+        (status = 403, description = "Key lacks the CertManage capability"),
+        (status = 404, description = "No such hosting"),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn post_cert(
+    State(state): State<SharedState>,
+    ApiAuth(ctx): ApiAuth,
+    Path(id): Path<String>,
+    body: Option<Json<CertBody>>,
+) -> Response {
+    let (detail, node) = match resolve_manage(&state, &ctx, &id, Capability::CertManage).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let staging = body.map(|Json(b)| b.staging).unwrap_or(false);
+    let req = hyperion_types::CertIssueRequest {
+        staging,
+        require_dns_match: true,
+        extra_sans: vec![],
+    };
+    let sel = HostingSelector::Id(detail.id.clone());
+    let actor_label = format!("apikey:{}", ctx.username);
+    let job_state = state.clone();
+    let job_node = node.clone();
+    let job_id = match crate::handlers::jobs::spawn_job(
+        state.clone(),
+        "acme_issue",
+        Some(detail.id.as_str()),
+        "{}",
+        &actor_label,
+        0,
+        move |reporter| async move {
+            crate::handlers::hostings::run_cert_issue_job(
+                reporter, job_state, job_node, sel, req, staging,
+            )
+            .await;
+        },
+    )
+    .await
+    {
+        Ok(id) => id,
+        Err(e) => return upstream(&e.to_string()),
+    };
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({ "job_id": job_id, "status": "accepted" })),
+    )
+        .into_response()
+}
+
+/// `PATCH /api/v1/hostings/:id/expiry` — set/clear expiry. Cap manage.
+/// A body with `expires_at: null` clears the expiry.
+#[utoipa::path(
+    patch, path = "/api/v1/hostings/{id}/expiry", tag = "hostings",
+    params(("id" = String, Path, description = "Hosting id or domain")),
+    request_body(content_type = "application/json", description =
+        "A HostingExpiry object; expires_at null = no expiry"),
+    responses(
+        (status = 200, description = "Applied — returns the new expiry"),
+        (status = 400, description = "Invalid body"),
+        (status = 403, description = "Key lacks manage access"),
+        (status = 404, description = "No such hosting"),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn patch_expiry(
+    State(state): State<SharedState>,
+    ApiAuth(ctx): ApiAuth,
+    Path(id): Path<String>,
+    body: Result<Json<hyperion_types::HostingExpiry>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let Json(expiry) = match body {
+        Ok(b) => b,
+        Err(e) => return validation(&e.body_text()),
+    };
+    let (detail, node) =
+        match resolve_manage(&state, &ctx, &id, Capability::HostingEditConfig).await {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+    let sel = HostingSelector::Id(detail.id.clone());
+    match crate::dispatcher::dispatch_to_node(
+        &state,
+        node.as_deref(),
+        Request::HostingSetExpiry { sel, expiry },
+    )
+    .await
+    {
+        Ok(RpcResponse::HostingSetExpiry(e)) => Json(e).into_response(),
+        Ok(RpcResponse::Error(e)) => map_rpc_error(&e),
+        Ok(_) => upstream("unexpected agent response"),
+        Err(e) => upstream(&e.to_string()),
+    }
+}
+
+/// Body for `PATCH /api/v1/hostings/:id/quota` — disk/mem/bandwidth caps.
+#[derive(Deserialize)]
+pub struct QuotaBody {
+    pub disk_soft_kib: i64,
+    pub disk_hard_kib: i64,
+    pub mem_limit_mib: i64,
+    pub bw_soft_mib: i64,
+    pub bw_hard_mib: i64,
+    /// On disk-hard breach: "notify" (default) or "suspend".
+    #[serde(default)]
+    pub exceed_action: String,
+}
+
+/// `PATCH /api/v1/hostings/:id/quota` — set disk/mem/bw quota. Cap manage.
+#[utoipa::path(
+    patch, path = "/api/v1/hostings/{id}/quota", tag = "hostings",
+    params(("id" = String, Path, description = "Hosting id or domain")),
+    request_body(content_type = "application/json", description =
+        "{ disk_soft_kib, disk_hard_kib, mem_limit_mib, bw_soft_mib, bw_hard_mib, exceed_action? }"),
+    responses(
+        (status = 200, description = "Applied — returns the persisted quota view"),
+        (status = 400, description = "Invalid body"),
+        (status = 403, description = "Key lacks manage access"),
+        (status = 404, description = "No such hosting"),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn patch_quota(
+    State(state): State<SharedState>,
+    ApiAuth(ctx): ApiAuth,
+    Path(id): Path<String>,
+    body: Result<Json<QuotaBody>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let Json(b) = match body {
+        Ok(b) => b,
+        Err(e) => return validation(&e.body_text()),
+    };
+    let (detail, node) =
+        match resolve_manage(&state, &ctx, &id, Capability::HostingEditConfig).await {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+    let sel = HostingSelector::Id(detail.id.clone());
+    match crate::dispatcher::dispatch_to_node(
+        &state,
+        node.as_deref(),
+        Request::QuotaSet {
+            hosting: sel,
+            disk_soft_kib: b.disk_soft_kib,
+            disk_hard_kib: b.disk_hard_kib,
+            mem_limit_mib: b.mem_limit_mib,
+            bw_soft_mib: b.bw_soft_mib,
+            bw_hard_mib: b.bw_hard_mib,
+            exceed_action: b.exceed_action,
+        },
+    )
+    .await
+    {
+        Ok(RpcResponse::QuotaApplied(v)) => Json(v).into_response(),
+        Ok(RpcResponse::Error(e)) => map_rpc_error(&e),
+        Ok(_) => upstream("unexpected agent response"),
+        Err(e) => upstream(&e.to_string()),
+    }
+}
