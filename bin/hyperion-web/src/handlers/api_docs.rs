@@ -60,6 +60,11 @@ impl utoipa::Modify for SecurityAddon {
         crate::handlers::api_v1::patch_limits,
         crate::handlers::api_v1::patch_php,
         crate::handlers::api_v1::patch_vhost,
+        crate::handlers::api_v1::post_backup,
+        crate::handlers::api_v1::get_backups,
+        crate::handlers::api_v1::post_cert,
+        crate::handlers::api_v1::patch_expiry,
+        crate::handlers::api_v1::patch_quota,
     ),
     modifiers(&SecurityAddon),
     tags(

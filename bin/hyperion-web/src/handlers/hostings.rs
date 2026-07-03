@@ -2342,7 +2342,7 @@ pub async fn post_backup_now(
 
 /// Background worker: run the backup on the owning node and fold the
 /// resulting archive path / size into the job log.
-async fn run_backup_now_job(
+pub(crate) async fn run_backup_now_job(
     reporter: crate::handlers::jobs::JobReporter,
     state: SharedState,
     node: Option<String>,
@@ -5545,7 +5545,7 @@ pub async fn post_cert_issue(
 
 /// Background worker: run the ACME issuance on the owning node and fold
 /// the issued cert's issuer + expiry into the job log.
-async fn run_cert_issue_job(
+pub(crate) async fn run_cert_issue_job(
     reporter: crate::handlers::jobs::JobReporter,
     state: SharedState,
     node: Option<String>,
