@@ -4639,6 +4639,18 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 stage: "vsftpd_user_root".into(),
                 reason: e.to_string(),
             })?;
+        // Self-heal ownership: a restored/imported site keeps the source box's
+        // uid, so the local user can't write (STOR/MKD → 550) even though login
+        // works. Best-effort — a partial chown shouldn't block setting the
+        // password; the operator can retry.
+        if let Err(e) =
+            hyperion_adapters::ftp::ensure_web_root_owned(&detail.system_user, &web_root).await
+        {
+            tracing::warn!(
+                error = %e, user = %detail.system_user, web_root = %web_root,
+                "ftp: chown of web root failed — uploads may still be denied"
+            );
+        }
         self.append_audit(
             "hosting.ftp.set_password",
             Some(detail.id.as_str()),
