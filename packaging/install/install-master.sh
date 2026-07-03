@@ -285,6 +285,7 @@ pam_service_name=vsftpd
 secure_chroot_dir=/var/run/vsftpd/empty
 user_sub_token=$USER
 local_root=/home/$USER
+user_config_dir=/etc/vsftpd/user_conf
 xferlog_enable=YES
 xferlog_std_format=YES
 seccomp_sandbox=NO
@@ -293,6 +294,10 @@ EOFV
     # only write the directive when it differs — keeps the file clean.
     [[ "$FTP_PORT" != "21" ]] && echo "listen_port=${FTP_PORT}" >> /etc/vsftpd.conf
   fi
+  # Per-user configs: the agent drops <user> files here pointing local_root at
+  # each hosting's writable htdocs, so FTP lands in the web root (not the
+  # root-owned home) and STOR works.
+  install -d -m 0755 /etc/vsftpd/user_conf
   systemctl enable --now vsftpd || true
 else
   log "Skipping vsftpd (per selection) — per-hosting FTP will be unavailable."

@@ -2373,7 +2373,7 @@
     FTP access
   </h2>
   <p class="muted" style="font-size:0.85rem;margin-top:-0.4rem;margin-bottom:0.8rem">
-    Give the client FTP/FTPS credentials for <code>{{ detail.system_user }}</code>. vsftpd authenticates against the system user and chroots them to <code>/home/{{ detail.system_user }}</code>.
+    Give the client FTP/FTPS credentials for <code>{{ detail.system_user }}</code>. vsftpd authenticates against the system user and lands them directly in the site's writable web root (<code>{{ detail.domain }}/htdocs</code>) — upload files there and they're served straight away.
   </p>
 
   {% if let Some(m) = ftp_flash %}<div class="flash success" style="margin-bottom:1rem"><div class="flash-body">{{ m }}</div></div>{% endif %}
@@ -2389,7 +2389,7 @@
         </div>
         <div class="muted" style="font-size:0.82rem;margin-top:0.5rem">
           Connect with:<br>
-          <code style="font-size:0.8rem">ftp://{{ detail.system_user }}@{{ ftp_host }}</code> · port 21 (FTPS) · chroot <code>/home/{{ detail.system_user }}</code>
+          <code style="font-size:0.8rem">ftp://{{ detail.system_user }}@{{ ftp_host }}</code> · port 21 (FTPS) · lands in <code>{{ detail.domain }}/htdocs</code>
         </div>
       </div>
     </div>
@@ -2397,8 +2397,7 @@
 
   <dl class="kv">
     <dt>System user</dt><dd><code>{{ detail.system_user }}</code></dd>
-    <dt>Chroot dir</dt><dd><code>/home/{{ detail.system_user }}</code></dd>
-    <dt>Files at</dt><dd><code>/home/{{ detail.system_user }}/{{ detail.domain }}/htdocs</code></dd>
+    <dt>Lands in</dt><dd><code>/home/{{ detail.system_user }}/{{ detail.domain }}/htdocs</code> (writable web root)</dd>
   </dl>
 
   <div class="row" style="margin-top:0.7rem;gap:0.5rem">

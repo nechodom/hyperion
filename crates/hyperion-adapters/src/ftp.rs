@@ -1,13 +1,17 @@
 //! FTP/FTPS access via vsftpd in local-user mode.
 //!
-//! Architecture: vsftpd is installed once cluster-wide and configured
-//! to authenticate Linux users via PAM, chroot them to their home
-//! (`/home/<system_user>`) and write to their `<domain>/htdocs` dir.
+//! Architecture: vsftpd is installed once cluster-wide and configured to
+//! authenticate Linux users via PAM and chroot each hosting user **directly
+//! into their writable web root** (`<domain>/htdocs`, owned by the user) via a
+//! per-user `local_root`. The home itself (`/home/<user>`) is deliberately
+//! root-owned when key-only SFTP is enabled (sshd's chroot rule), so landing
+//! FTP in the home would leave the user unable to `STOR` there — 550. Landing
+//! in htdocs (which the user owns) makes uploads work in either case, and puts
+//! files straight where nginx serves them.
 //!
-//! "Enable FTP for hosting X" reduces to: set a password on hosting
-//! X's system user, and make sure vsftpd accepts that user. We don't
-//! track per-hosting on/off state — if the user has a password they
-//! can FTP; if not, they can't.
+//! "Enable FTP for hosting X" reduces to: set a password on hosting X's system
+//! user, point that user's vsftpd `local_root` at its htdocs, and make sure
+//! vsftpd accepts the user. No per-hosting on/off state — password ⇒ can FTP.
 
 use crate::fs::atomic_write;
 use crate::{cmd, AdapterError};
@@ -15,6 +19,9 @@ use std::path::Path;
 
 const VSFTPD_CONF: &str = "/etc/vsftpd.conf";
 const VSFTPD_CONF_ORIG: &str = "/etc/vsftpd.conf.hyperion-orig";
+/// vsftpd `user_config_dir` — per-user override files (one per system user)
+/// that set `local_root` to that hosting's htdocs.
+const VSFTPD_USER_CONF_DIR: &str = "/etc/vsftpd/user_conf";
 /// The local-user FTP config Hyperion needs. `$USER` is a vsftpd token it
 /// expands per-login (chroot each user to their own /home/<user>). Mirrors the
 /// block install-node.sh/install-master.sh write at first install.
@@ -31,6 +38,7 @@ pam_service_name=vsftpd
 secure_chroot_dir=/var/run/vsftpd/empty
 user_sub_token=$USER
 local_root=/home/$USER
+user_config_dir=/etc/vsftpd/user_conf
 xferlog_enable=YES
 xferlog_std_format=YES
 seccomp_sandbox=NO
@@ -54,6 +62,39 @@ pub async fn set_user_password(user: &str, password: &str) -> Result<(), Adapter
     // chpasswd reads "user:password\n" from stdin.
     let line = format!("{}:{}\n", user, password);
     cmd::run_with_stdin("/usr/sbin/chpasswd", &[], line.as_bytes()).await?;
+    Ok(())
+}
+
+/// Point `user`'s vsftpd `local_root` at `web_root` (the hosting's htdocs) via a
+/// per-user config in `user_config_dir`, so an FTP client lands directly in the
+/// writable web root and `STOR` works — instead of the root-owned home. vsftpd
+/// re-reads this per login, so no reload is needed. `web_root` must exist and be
+/// owned by the user (it's the htdocs created at hosting-create time).
+pub async fn set_user_web_root(user: &str, web_root: &str) -> Result<(), AdapterError> {
+    // The user becomes a filename under user_config_dir — reject path/newline
+    // injection (already a validated SystemUserName upstream; defence in depth).
+    if user.is_empty() || user.contains(['/', '\n', '\r', '\0', ':', '.']) {
+        return Err(AdapterError::Other(
+            "ftp user has an illegal character for a per-user config".into(),
+        ));
+    }
+    tokio::fs::create_dir_all(VSFTPD_USER_CONF_DIR)
+        .await
+        .map_err(|e| AdapterError::Other(format!("mkdir {VSFTPD_USER_CONF_DIR}: {e}")))?;
+    let path = format!("{VSFTPD_USER_CONF_DIR}/{user}");
+    let body = format!("local_root={web_root}\nwrite_enable=YES\n");
+    atomic_write(Path::new(&path), body.as_bytes(), 0o644)
+        .await
+        .map_err(|e| AdapterError::Other(format!("write {path}: {e}")))?;
+    Ok(())
+}
+
+/// Remove `user`'s per-user vsftpd override (on FTP disable). Idempotent.
+pub async fn clear_user_web_root(user: &str) -> Result<(), AdapterError> {
+    if user.contains(['/', '\n', '\r', '\0', ':', '.']) {
+        return Ok(());
+    }
+    let _ = tokio::fs::remove_file(format!("{VSFTPD_USER_CONF_DIR}/{user}")).await;
     Ok(())
 }
 
@@ -181,6 +222,28 @@ pub async fn ensure_vsftpd_configured() -> Result<(), AdapterError> {
         .map_err(|e| AdapterError::Other(format!("write {VSFTPD_CONF}: {e}")))?;
         cmd::run("/usr/bin/systemctl", &["restart", "vsftpd"]).await?;
     }
+
+    // 3. Ensure the per-user config dir is wired, so each hosting user's FTP
+    //    lands in their OWN writable web root (htdocs) rather than the
+    //    root-owned home (where STOR would 550). This upgrades EXISTING "ours"
+    //    configs that predate the per-user local_root. Idempotent.
+    tokio::fs::create_dir_all(VSFTPD_USER_CONF_DIR).await.ok();
+    let cfg = tokio::fs::read_to_string(VSFTPD_CONF)
+        .await
+        .unwrap_or_default();
+    if !cfg.contains("user_config_dir=") {
+        let mut c = cfg;
+        if !c.is_empty() && !c.ends_with('\n') {
+            c.push('\n');
+        }
+        c.push_str(&format!("user_config_dir={VSFTPD_USER_CONF_DIR}\n"));
+        atomic_write(Path::new(VSFTPD_CONF), c.as_bytes(), 0o644)
+            .await
+            .map_err(|e| {
+                AdapterError::Other(format!("add user_config_dir to {VSFTPD_CONF}: {e}"))
+            })?;
+        cmd::run("/usr/bin/systemctl", &["restart", "vsftpd"]).await?;
+    }
     Ok(())
 }
 
@@ -281,6 +344,25 @@ mod tests {
     fn unit_not_found_phrase_matches() {
         let sample = "Failed to enable unit: Unit file vsftpd.service does not exist.";
         assert!(sample.contains("does not exist"));
+    }
+
+    #[tokio::test]
+    async fn set_user_web_root_rejects_path_injection() {
+        // A user with a '/' or '.' would escape user_config_dir as a filename —
+        // must be refused BEFORE any filesystem work.
+        for bad in ["a/b", "..", "x.y", "u:v", "l\nine"] {
+            assert!(
+                super::set_user_web_root(bad, "/home/x/site/htdocs")
+                    .await
+                    .is_err(),
+                "should reject user {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hyperion_vsftpd_conf_wires_per_user_web_root() {
+        assert!(super::HYPERION_VSFTPD_CONF.contains("user_config_dir=/etc/vsftpd/user_conf"));
     }
 
     #[test]
