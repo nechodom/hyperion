@@ -56,6 +56,10 @@ impl utoipa::Modify for SecurityAddon {
         crate::handlers::api_v1::post_suspend,
         crate::handlers::api_v1::post_resume,
         crate::handlers::api_v1::delete_hosting,
+        crate::handlers::api_v1::post_create,
+        crate::handlers::api_v1::patch_limits,
+        crate::handlers::api_v1::patch_php,
+        crate::handlers::api_v1::patch_vhost,
     ),
     modifiers(&SecurityAddon),
     tags(
