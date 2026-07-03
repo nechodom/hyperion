@@ -111,3 +111,52 @@ about the management plane.
 2. Acceptable **RTO** — minutes (warm standby) enough, or is automatic failover
    required?
 3. Willing to run **Postgres** eventually (unlocks B), or keep SQLite + standby?
+
+---
+
+## S3-free variant (added 2026-07-03 — "lze to bez S3?")
+
+**Yes — HA does not need S3 at all.** In Approach A, S3 is only the *store* for
+the replicated SQLite; the replication itself is transport-agnostic. Nothing
+about keeping a standby in sync is S3-specific. Swap the store and the whole
+design stands.
+
+What actually has to reach the standby is small and fixed:
+
+- the **SQLite state** (`/var/lib/hyperion/state.db` — the authoritative data);
+- the **identity material** the workers pin — `master-rpc.key` (Ed25519) + the
+  **panel TLS cert/key** + `/etc/hyperion/*.toml`. (Without this the promoted
+  standby is rejected by every worker's cert-pinning — the make-or-break point
+  from Approach A, unchanged.)
+
+### Replication transports without S3 (pick one)
+
+| # | Mechanism | RPO | New infra | Notes |
+|---|---|---|---|---|
+| **1** | **Litestream → SFTP** (or a `file://` path the standby rsync-pulls) | seconds | Litestream only | Litestream ships an `sftp` replica type — point it at the standby, done. Closest swap for the S3 design. |
+| **2** | **Periodic snapshot over SSH** — `sqlite3 VACUUM INTO` (or the existing backup path) + `rsync`/`scp` to the standby on a timer | minutes | none | Dead simple, zero new daemons, uses the SSH we already use for remote import. Best **DR-now** option. |
+| **3** | **WAL streaming over Hyperion's own signed RPC** — enroll the standby as a special peer; the master ships WAL frames on the existing Ed25519 channel | seconds | none (new code) | Most "native": reuses the master↔node transport + pinning, no third-party tool. More implementation than 1/2. |
+| **4** | **LiteFS (no-S3 mode)** / **rqlite** — replicated SQLite with its own peer protocol | seconds | a replicated-DB layer | Bigger change to the DB access layer; overkill unless heading toward Approach B. |
+| **5** | **DRBD / block-level replication** of the state volume | seconds | kernel/infra | Infra-level, outside the app; standard but heavier ops. |
+
+The identity material (small, rarely-changing) rides along the same channel — or
+is copied once at standby provisioning and refreshed whenever it rotates.
+
+### Promotion — identical to Approach A
+
+Standby restores the replica but stays **idle** (web read-only,
+schedulers/ACME/billing **OFF**) to avoid split-brain. On master failure:
+promote (start the write path + schedulers), and the standby — presenting the
+**same RPC key + panel cert** — is accepted by workers with no re-pin. Repoint
+the panel **DNS/VIP** at it. RPO/RTO as in A (seconds / minutes).
+
+### Recommendation (S3-free)
+
+Ship **#2 (snapshot over SSH) as A-P0** — it's the immediate "don't lose
+everything if the master dies" win with **no new dependencies**, and it's pure
+DR. Graduate to **#1 (Litestream→SFTP)** or **#3 (WAL-over-RPC)** for a warm
+standby with RPO seconds when you want real availability, not just recovery.
+
+**Bonus:** the off-site *backup* path is already S3-free-capable too — Hyperion
+supports **FTP/FTPS/SFTP** targets alongside S3 — so a deployment can be S3-free
+end to end (backups **and** HA) using only your own boxes + SSH.
