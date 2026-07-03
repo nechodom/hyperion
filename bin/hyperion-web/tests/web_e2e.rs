@@ -2272,3 +2272,86 @@ async fn api_v1_ops_endpoints() {
     let (st, _b) = api_send(&app, Method::POST, &format!("{base}/backup"), &weak, "").await;
     assert_eq!(st, StatusCode::FORBIDDEN, "no BackupRun cap → 403");
 }
+
+#[tokio::test]
+async fn api_v1_ops_completion_endpoints() {
+    use hyperion_rpc::codec::{Request as RpcReq, Response as RpcResp};
+    use hyperion_rpc::wire::HostingCreateReq;
+
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+    let owner_id = seed_key_owner(&sock).await;
+
+    match hyperion_rpc_client::call(
+        &sock,
+        RpcReq::HostingCreate(HostingCreateReq {
+            domain: hyperion_validate::Domain::parse("api-ops2.example.com").expect("domain"),
+            aliases: vec![],
+            php_version: None,
+            database: None,
+            system_user: None,
+            kind: "php".into(),
+            proxy_upstream_url: None,
+        }),
+    )
+    .await
+    .expect("seed")
+    {
+        RpcResp::HostingCreate(_) => {}
+        other => panic!("unexpected: {other:?}"),
+    }
+
+    let key = seed_key(
+        &sock,
+        owner_id,
+        hyperion_state::capabilities::CapSet::all().bits(),
+        vec![],
+        0,
+    )
+    .await;
+    let base = "/api/v1/hostings/api-ops2.example.com";
+
+    // WordPress install → 202 job.
+    let wp = r#"{"site_url":"https://api-ops2.example.com","title":"Site","admin_user":"admin","admin_email":"a@example.invalid","admin_password":"pw-12345678"}"#;
+    let (st, body) = api_send(&app, Method::POST, &format!("{base}/wp/install"), &key, wp).await;
+    assert_eq!(st, StatusCode::ACCEPTED, "wp install → 202: {body}");
+
+    // Restore → 202 job.
+    let (st, body) = api_send(
+        &app,
+        Method::POST,
+        &format!("{base}/restore"),
+        &key,
+        r#"{"archive_path":"/var/lib/hyperion/backups/local/snap.tar.gz"}"#,
+    )
+    .await;
+    assert_eq!(st, StatusCode::ACCEPTED, "restore → 202: {body}");
+
+    // Restore without a path → 400.
+    let (st, _b) = api_send(
+        &app,
+        Method::POST,
+        &format!("{base}/restore"),
+        &key,
+        r#"{"archive_path":""}"#,
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "empty archive_path → 400");
+
+    // Cluster cert renew-all → 202 job.
+    let (st, body) = api_send(&app, Method::POST, "/api/v1/certs/renew-all", &key, "").await;
+    assert_eq!(st, StatusCode::ACCEPTED, "renew-all → 202: {body}");
+
+    // A key lacking WpManage → 403 on wp install.
+    let weak = seed_key(
+        &sock,
+        owner_id,
+        hyperion_state::capabilities::Capability::HostingView.bit(),
+        vec![],
+        0,
+    )
+    .await;
+    let (st, _b) = api_send(&app, Method::POST, &format!("{base}/wp/install"), &weak, wp).await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "no WpManage cap → 403");
+}

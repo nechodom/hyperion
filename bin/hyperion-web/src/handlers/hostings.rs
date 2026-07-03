@@ -2599,7 +2599,7 @@ pub async fn post_wp_install(
 
 /// Background worker: run the WordPress install on the owning node and
 /// fold the installed version into the job log.
-async fn run_wp_install_job(
+pub(crate) async fn run_wp_install_job(
     reporter: crate::handlers::jobs::JobReporter,
     state: SharedState,
     node: Option<String>,
@@ -8193,7 +8193,7 @@ pub async fn post_restore(
 }
 
 /// Background worker: restore a backup archive on the owning node.
-async fn run_restore_job(
+pub(crate) async fn run_restore_job(
     reporter: crate::handlers::jobs::JobReporter,
     state: SharedState,
     node: Option<String>,

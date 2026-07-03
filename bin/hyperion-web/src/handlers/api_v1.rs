@@ -1140,3 +1140,227 @@ pub async fn patch_quota(
         Err(e) => upstream(&e.to_string()),
     }
 }
+
+// ─── Ops completion (wp-install, restore, cluster cert renew) ────────────
+
+/// `POST /api/v1/hostings/:id/wp/install` — install WordPress. Cap WpManage → 202.
+#[utoipa::path(
+    post, path = "/api/v1/hostings/{id}/wp/install", tag = "hostings",
+    params(("id" = String, Path, description = "Hosting id or domain")),
+    request_body(content_type = "application/json", description =
+        "A WpInstallRequest: { site_url, title, admin_user, admin_email, admin_password, locale?, version? }"),
+    responses(
+        (status = 202, description = "Accepted — { job_id, status }; poll GET /api/v1/jobs/{job_id}"),
+        (status = 400, description = "Invalid body"),
+        (status = 403, description = "Key lacks the WpManage capability"),
+        (status = 404, description = "No such hosting"),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn post_wp_install(
+    State(state): State<SharedState>,
+    ApiAuth(ctx): ApiAuth,
+    Path(id): Path<String>,
+    body: Result<Json<hyperion_types::WpInstallRequest>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let Json(req) = match body {
+        Ok(b) => b,
+        Err(e) => return validation(&e.body_text()),
+    };
+    let (detail, node) = match resolve_manage(&state, &ctx, &id, Capability::WpManage).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let sel = HostingSelector::Id(detail.id.clone());
+    let actor_label = format!("apikey:{}", ctx.username);
+    let job_state = state.clone();
+    let job_node = node.clone();
+    let job_id = match crate::handlers::jobs::spawn_job(
+        state.clone(),
+        "wp_install",
+        Some(detail.id.as_str()),
+        "{}",
+        &actor_label,
+        0,
+        move |reporter| async move {
+            crate::handlers::hostings::run_wp_install_job(reporter, job_state, job_node, sel, req)
+                .await;
+        },
+    )
+    .await
+    {
+        Ok(id) => id,
+        Err(e) => return upstream(&e.to_string()),
+    };
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({ "job_id": job_id, "status": "accepted" })),
+    )
+        .into_response()
+}
+
+/// Body for `POST /api/v1/hostings/:id/restore`.
+#[derive(Deserialize)]
+pub struct RestoreBody {
+    /// The owning node's archive path, from a `GET .../backups` item.
+    pub archive_path: String,
+    /// Which parts to restore: files_and_db (default) | db_only | files_only.
+    #[serde(default)]
+    pub mode: hyperion_types::BackupRestoreMode,
+}
+
+/// `POST /api/v1/hostings/:id/restore` — restore a backup. Cap BackupRestore → 202.
+#[utoipa::path(
+    post, path = "/api/v1/hostings/{id}/restore", tag = "hostings",
+    params(("id" = String, Path, description = "Hosting id or domain")),
+    request_body(content_type = "application/json", description =
+        "{ archive_path (from GET .../backups), mode? }"),
+    responses(
+        (status = 202, description = "Accepted — { job_id, status }; poll GET /api/v1/jobs/{job_id}"),
+        (status = 400, description = "Invalid body"),
+        (status = 403, description = "Key lacks the BackupRestore capability"),
+        (status = 404, description = "No such hosting"),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn post_restore(
+    State(state): State<SharedState>,
+    ApiAuth(ctx): ApiAuth,
+    Path(id): Path<String>,
+    body: Result<Json<RestoreBody>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let Json(b) = match body {
+        Ok(b) => b,
+        Err(e) => return validation(&e.body_text()),
+    };
+    if b.archive_path.trim().is_empty() {
+        return validation("archive_path is required");
+    }
+    let (detail, node) = match resolve_manage(&state, &ctx, &id, Capability::BackupRestore).await {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let sel = HostingSelector::Id(detail.id.clone());
+    let archive_path = b.archive_path;
+    let mode = b.mode;
+    let actor_label = format!("apikey:{}", ctx.username);
+    let job_state = state.clone();
+    let job_node = node.clone();
+    let job_id = match crate::handlers::jobs::spawn_job(
+        state.clone(),
+        "hosting_restore",
+        Some(detail.id.as_str()),
+        "{}",
+        &actor_label,
+        0,
+        move |reporter| async move {
+            crate::handlers::hostings::run_restore_job(
+                reporter,
+                job_state,
+                job_node,
+                sel,
+                archive_path,
+                mode,
+            )
+            .await;
+        },
+    )
+    .await
+    {
+        Ok(id) => id,
+        Err(e) => return upstream(&e.to_string()),
+    };
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({ "job_id": job_id, "status": "accepted" })),
+    )
+        .into_response()
+}
+
+/// `POST /api/v1/certs/renew-all` — renew certs across the whole cluster.
+/// Cap CertManage + scope_all (it's a cluster operation) → 202 job.
+#[utoipa::path(
+    post, path = "/api/v1/certs/renew-all", tag = "hostings",
+    responses(
+        (status = 202, description = "Accepted — { job_id, status }; poll GET /api/v1/jobs/{job_id}"),
+        (status = 403, description = "Requires a cluster-wide (scope_all) key with CertManage"),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn post_certs_renew_all(
+    State(state): State<SharedState>,
+    ApiAuth(ctx): ApiAuth,
+) -> Response {
+    if let Some(r) = require(&ctx, Capability::CertManage) {
+        return r;
+    }
+    if !ctx.scope_all() {
+        return err(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "cluster certificate renewal requires a cluster-wide (scope_all) API key",
+        );
+    }
+    let actor_label = format!("apikey:{}", ctx.username);
+    let job_state = state.clone();
+    let job_id = match crate::handlers::jobs::spawn_job(
+        state.clone(),
+        "cert_renew_all",
+        None,
+        "{}",
+        &actor_label,
+        0,
+        move |reporter| async move {
+            reporter
+                .step("Renewing certificates across the cluster…", 10, "")
+                .await;
+            let mut nodes_hit = 0u32;
+            let mut nodes_failed = 0u32;
+            // Master first.
+            nodes_hit += 1;
+            if !matches!(
+                hyperion_rpc_client::call(&job_state.agent_socket, Request::CertRenewAll).await,
+                Ok(RpcResponse::CertRenewAll(_))
+            ) {
+                nodes_failed += 1;
+            }
+            // Then each enrolled worker.
+            if let Ok(RpcResponse::NodesList(nodes)) =
+                hyperion_rpc_client::call(&job_state.agent_socket, Request::NodesList).await
+            {
+                for n in nodes {
+                    nodes_hit += 1;
+                    if !matches!(
+                        crate::dispatcher::dispatch_to_node(
+                            &job_state,
+                            Some(n.node_id.as_str()),
+                            Request::CertRenewAll,
+                        )
+                        .await,
+                        Ok(RpcResponse::CertRenewAll(_))
+                    ) {
+                        nodes_failed += 1;
+                    }
+                }
+            }
+            reporter
+                .step(
+                    &format!("Swept {nodes_hit} node(s); {nodes_failed} unreachable."),
+                    100,
+                    "✓ renew sweep done",
+                )
+                .await;
+            reporter.finish(nodes_failed == 0, None).await;
+        },
+    )
+    .await
+    {
+        Ok(id) => id,
+        Err(e) => return upstream(&e.to_string()),
+    };
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({ "job_id": job_id, "status": "accepted" })),
+    )
+        .into_response()
+}

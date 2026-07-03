@@ -640,6 +640,18 @@ pub fn build_router(state: SharedState) -> Router {
             "/api/v1/hostings/:id/quota",
             patch(handlers::api_v1::patch_quota),
         )
+        .route(
+            "/api/v1/hostings/:id/wp/install",
+            post(handlers::api_v1::post_wp_install),
+        )
+        .route(
+            "/api/v1/hostings/:id/restore",
+            post(handlers::api_v1::post_restore),
+        )
+        .route(
+            "/api/v1/certs/renew-all",
+            post(handlers::api_v1::post_certs_renew_all),
+        )
         .route("/api/v1/nodes", get(handlers::api_v1::get_nodes))
         .route("/api/v1/jobs/:id", get(handlers::api_v1::get_job))
         // Public contract — no ApiAuth (a spec leaks no data, just shapes).

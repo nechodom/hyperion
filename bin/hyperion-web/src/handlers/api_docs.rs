@@ -65,6 +65,9 @@ impl utoipa::Modify for SecurityAddon {
         crate::handlers::api_v1::post_cert,
         crate::handlers::api_v1::patch_expiry,
         crate::handlers::api_v1::patch_quota,
+        crate::handlers::api_v1::post_wp_install,
+        crate::handlers::api_v1::post_restore,
+        crate::handlers::api_v1::post_certs_renew_all,
     ),
     modifiers(&SecurityAddon),
     tags(
