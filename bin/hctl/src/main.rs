@@ -8,6 +8,8 @@ use hyperion_validate::{Domain, SystemUserName};
 use std::path::PathBuf;
 use std::str::FromStr;
 
+mod remote;
+
 /// `--version` output: human git-describe version + full git SHA stamped at
 /// build time (build.rs), e.g. `v1.2.0-5-gf718fd1 (f718fd1a…40 chars…)`. See
 /// hyperion-agent's HYPERION_VERSION for the rationale.
@@ -52,6 +54,13 @@ enum Cmd {
     /// Cluster node registry maintenance (run on the master).
     #[command(subcommand)]
     Node(NodeCmd),
+    /// Drive the remote /api/v1 HTTP API with a Bearer key (works from any host).
+    Remote {
+        #[command(flatten)]
+        conn: remote::RemoteConn,
+        #[command(subcommand)]
+        cmd: remote::RemoteCmd,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -262,6 +271,10 @@ fn build_create(
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    // Remote commands talk to the HTTP /api/v1 edge, not the local RPC socket.
+    if let Cmd::Remote { conn, cmd } = &cli.cmd {
+        return remote::run(conn, cmd).await;
+    }
     let resp = call(&cli).await?;
     if cli.json {
         println!("{}", serde_json::to_string_pretty(&resp)?);
@@ -277,6 +290,9 @@ async fn main() -> anyhow::Result<()> {
 async fn call(cli: &Cli) -> anyhow::Result<Response> {
     let req = match &cli.cmd {
         Cmd::Info => Request::AgentInfo,
+        // Remote (HTTP API) commands are dispatched in `main` before we reach
+        // the socket path — this arm only keeps the match exhaustive.
+        Cmd::Remote { .. } => unreachable!("remote handled in main()"),
         Cmd::Agent(AgentCmd::Repin) => Request::AgentRepin,
         Cmd::Node(NodeCmd::Reassign { from, to }) => Request::NodeReassignHostings {
             from_node_id: from.clone(),

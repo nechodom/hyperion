@@ -18,7 +18,12 @@ hyperion-validate = { path = "../../crates/hyperion-validate" }
 tokio = { workspace = true }
 anyhow.workspace = true
 clap.workspace = true
+serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+# `hctl remote` — HTTP client for the /api/v1 Bearer API. rustls (no OpenSSL)
+# to match the rest of the workspace; blocking off (main is async).
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+toml.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt"] }
