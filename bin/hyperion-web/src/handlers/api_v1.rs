@@ -33,6 +33,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
 use hyperion_rpc::wire::{DeleteOpts, HostingSelector};
+use hyperion_rpc::RpcError;
 use hyperion_state::capabilities::Capability;
 use serde::Deserialize;
 use serde_json::json;
@@ -78,9 +79,25 @@ fn upstream(message: &str) -> Response {
 
 /// 409 — the request conflicts with existing state (e.g. create for a
 /// domain that already exists). Used by the write endpoints (Slice B).
-#[allow(dead_code)]
 fn conflict(message: &str) -> Response {
     err(StatusCode::CONFLICT, "conflict", message)
+}
+
+/// 400 — the request body / params failed validation.
+fn validation(message: &str) -> Response {
+    err(StatusCode::BAD_REQUEST, "validation", message)
+}
+
+/// Map an agent `RpcError` to the right HTTP status + JSON envelope, so a
+/// duplicate-domain create is a clean 409 (not a catch-all 502), a bad field
+/// is 400, and a missing resource is 404.
+fn map_rpc_error(e: &RpcError) -> Response {
+    match e {
+        RpcError::AlreadyExists { .. } | RpcError::Conflict { .. } => conflict(&e.to_string()),
+        RpcError::Validation { message } => validation(message),
+        RpcError::NotFound { .. } => not_found(&e.to_string()),
+        _ => upstream(&e.to_string()),
+    }
 }
 
 /// 429 — per-key rate limit exceeded, with a `Retry-After` hint.
@@ -618,4 +635,232 @@ pub async fn delete_hosting(
         Json(json!({ "job_id": job_id, "status": "accepted" })),
     )
         .into_response()
+}
+
+// ─── Provisioning endpoints (Slice B) ───────────────────────────────────
+//
+// Create a hosting and tune its config. Create is synchronous (the base
+// provision mirrors the UI's HostingCreate dispatch) → 201; a duplicate
+// domain → 409. The PATCHes reuse the same HostingEditConfig manage gate as
+// the UI and the existing set-limits / set-php / vhost RPCs.
+
+/// Body for `POST /api/v1/hostings`: the create request plus optional node
+/// placement. `HostingCreateReq` validates the domain on deserialize.
+#[derive(Deserialize)]
+pub struct CreateBody {
+    #[serde(flatten)]
+    pub req: hyperion_rpc::wire::HostingCreateReq,
+    /// Target node id. Absent / empty / "local" = the master node.
+    #[serde(default)]
+    pub node: Option<String>,
+}
+
+/// `POST /api/v1/hostings` — create a hosting. Cap HostingCreate.
+#[utoipa::path(
+    post, path = "/api/v1/hostings", tag = "hostings",
+    request_body(content_type = "application/json", description =
+        "{ domain, php_version?, database?, aliases?, kind?, system_user?, node? }"),
+    responses(
+        (status = 201, description = "Created — returns the new hosting"),
+        (status = 400, description = "Invalid body (e.g. malformed domain)"),
+        (status = 403, description = "Key lacks the HostingCreate capability"),
+        (status = 409, description = "A hosting for this domain already exists"),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn post_create(
+    State(state): State<SharedState>,
+    ApiAuth(ctx): ApiAuth,
+    body: Result<Json<CreateBody>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    if let Some(r) = require(&ctx, Capability::HostingCreate) {
+        return r;
+    }
+    let Json(body) = match body {
+        Ok(b) => b,
+        Err(e) => return validation(&e.body_text()),
+    };
+    let domain = body.req.domain.as_str().to_string();
+    // Cluster-wide duplicate-domain guard: the same domain on ANOTHER node
+    // would create a second vhost and collide in nginx. Mirrors the UI wizard.
+    if let Ok(rows) = crate::handlers::hostings::list_hostings(&state).await {
+        if rows.iter().any(|h| h.domain.eq_ignore_ascii_case(&domain)) {
+            return conflict(&format!("a hosting for {domain} already exists"));
+        }
+    }
+    let node = body
+        .node
+        .clone()
+        .filter(|s| !s.is_empty() && s != crate::dispatcher::LOCAL_NODE_SENTINEL);
+    match crate::dispatcher::dispatch_to_node(
+        &state,
+        node.as_deref(),
+        Request::HostingCreate(body.req),
+    )
+    .await
+    {
+        Ok(RpcResponse::HostingCreate(created)) => {
+            (StatusCode::CREATED, Json(created)).into_response()
+        }
+        Ok(RpcResponse::Error(e)) => map_rpc_error(&e),
+        Ok(_) => upstream("unexpected agent response"),
+        Err(e) => upstream(&e.to_string()),
+    }
+}
+
+/// `PATCH /api/v1/hostings/:id/limits` — replace resource limits. Cap manage.
+#[utoipa::path(
+    patch, path = "/api/v1/hostings/{id}/limits", tag = "hostings",
+    params(("id" = String, Path, description = "Hosting id or domain")),
+    request_body(content_type = "application/json", description = "A full HostingLimits object"),
+    responses(
+        (status = 200, description = "Applied — returns the new limits"),
+        (status = 400, description = "Invalid body"),
+        (status = 403, description = "Key lacks manage access"),
+        (status = 404, description = "No such hosting"),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn patch_limits(
+    State(state): State<SharedState>,
+    ApiAuth(ctx): ApiAuth,
+    Path(id): Path<String>,
+    body: Result<Json<hyperion_types::HostingLimits>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let Json(limits) = match body {
+        Ok(b) => b,
+        Err(e) => return validation(&e.body_text()),
+    };
+    let (detail, node) =
+        match resolve_manage(&state, &ctx, &id, Capability::HostingEditConfig).await {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+    let sel = HostingSelector::Id(detail.id.clone());
+    match crate::dispatcher::dispatch_to_node(
+        &state,
+        node.as_deref(),
+        Request::HostingSetLimits { sel, limits },
+    )
+    .await
+    {
+        Ok(RpcResponse::HostingSetLimits(l)) => Json(l).into_response(),
+        Ok(RpcResponse::Error(e)) => map_rpc_error(&e),
+        Ok(_) => upstream("unexpected agent response"),
+        Err(e) => upstream(&e.to_string()),
+    }
+}
+
+/// Body for `PATCH /api/v1/hostings/:id/php`.
+#[derive(Deserialize)]
+pub struct PhpBody {
+    pub version: hyperion_types::PhpVersion,
+}
+
+/// `PATCH /api/v1/hostings/:id/php` — switch PHP version. Cap manage.
+#[utoipa::path(
+    patch, path = "/api/v1/hostings/{id}/php", tag = "hostings",
+    params(("id" = String, Path, description = "Hosting id or domain")),
+    request_body(content_type = "application/json", description = "{ version: \"8.3\" }"),
+    responses(
+        (status = 200, description = "Switched — returns the new version"),
+        (status = 400, description = "Invalid version, or hosting is not PHP-kind"),
+        (status = 403, description = "Key lacks manage access"),
+        (status = 404, description = "No such hosting"),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn patch_php(
+    State(state): State<SharedState>,
+    ApiAuth(ctx): ApiAuth,
+    Path(id): Path<String>,
+    body: Result<Json<PhpBody>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let Json(body) = match body {
+        Ok(b) => b,
+        Err(e) => return validation(&e.body_text()),
+    };
+    let (detail, node) =
+        match resolve_manage(&state, &ctx, &id, Capability::HostingEditConfig).await {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+    let sel = HostingSelector::Id(detail.id.clone());
+    match crate::dispatcher::dispatch_to_node(
+        &state,
+        node.as_deref(),
+        Request::HostingSetPhpVersion {
+            sel,
+            version: body.version,
+        },
+    )
+    .await
+    {
+        Ok(RpcResponse::HostingSetPhpVersion(v)) => {
+            Json(json!({ "id": detail.id.as_str(), "php_version": v })).into_response()
+        }
+        Ok(RpcResponse::Error(e)) => map_rpc_error(&e),
+        Ok(_) => upstream("unexpected agent response"),
+        Err(e) => upstream(&e.to_string()),
+    }
+}
+
+/// Body for `PATCH /api/v1/hostings/:id/vhost`: the vhost options plus an
+/// optional basic-auth password (absent = leave the existing hash alone).
+#[derive(Deserialize)]
+pub struct VhostBody {
+    #[serde(flatten)]
+    pub options: hyperion_types::VhostOptions,
+    #[serde(default)]
+    pub basic_auth_password: Option<String>,
+}
+
+/// `PATCH /api/v1/hostings/:id/vhost` — vhost knobs (force-https, basic-auth,
+/// maintenance, redirect, fastcgi cache). Cap manage.
+#[utoipa::path(
+    patch, path = "/api/v1/hostings/{id}/vhost", tag = "hostings",
+    params(("id" = String, Path, description = "Hosting id or domain")),
+    request_body(content_type = "application/json", description =
+        "A VhostOptions object; optional basic_auth_password"),
+    responses(
+        (status = 200, description = "Applied — returns the new vhost options"),
+        (status = 400, description = "Invalid body"),
+        (status = 403, description = "Key lacks manage access"),
+        (status = 404, description = "No such hosting"),
+    ),
+    security(("bearer" = []))
+)]
+pub async fn patch_vhost(
+    State(state): State<SharedState>,
+    ApiAuth(ctx): ApiAuth,
+    Path(id): Path<String>,
+    body: Result<Json<VhostBody>, axum::extract::rejection::JsonRejection>,
+) -> Response {
+    let Json(body) = match body {
+        Ok(b) => b,
+        Err(e) => return validation(&e.body_text()),
+    };
+    let (detail, node) =
+        match resolve_manage(&state, &ctx, &id, Capability::HostingEditConfig).await {
+            Ok(v) => v,
+            Err(r) => return r,
+        };
+    let sel = HostingSelector::Id(detail.id.clone());
+    let basic_auth_password = body.basic_auth_password.filter(|s| !s.is_empty());
+    match crate::dispatcher::dispatch_to_node(
+        &state,
+        node.as_deref(),
+        Request::HostingSetVhostOptions {
+            sel,
+            options: body.options,
+            basic_auth_password,
+        },
+    )
+    .await
+    {
+        Ok(RpcResponse::HostingSetVhostOptions(o)) => Json(o).into_response(),
+        Ok(RpcResponse::Error(e)) => map_rpc_error(&e),
+        Ok(_) => upstream("unexpected agent response"),
+        Err(e) => upstream(&e.to_string()),
+    }
 }

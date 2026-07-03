@@ -2022,3 +2022,154 @@ async fn api_v1_openapi_spec_and_docs_are_served() {
     assert!(html.contains("Hyperion Remote API"), "docs title present");
     assert!(html.contains("/api/v1/openapi.json"), "docs links the spec");
 }
+
+/// Send a JSON body to a /api/v1 path with a Bearer key. Returns (status, body).
+async fn api_send(
+    app: &axum::Router,
+    method: Method,
+    uri: &str,
+    key: &str,
+    json_body: &str,
+) -> (StatusCode, String) {
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .header(header::AUTHORIZATION, format!("Bearer {key}"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(json_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    let status = resp.status();
+    (status, body_string(resp).await)
+}
+
+#[tokio::test]
+async fn api_v1_create_hosting_conflict_and_validation() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+    let owner_id = seed_key_owner(&sock).await;
+    let create_cap = hyperion_state::capabilities::Capability::HostingCreate.bit();
+    let key = seed_key(&sock, owner_id, create_cap, vec![], 0).await;
+
+    // Fresh domain → 201 Created.
+    let (st, body) = api_send(
+        &app,
+        Method::POST,
+        "/api/v1/hostings",
+        &key,
+        r#"{"domain":"api-create.example.com"}"#,
+    )
+    .await;
+    assert_eq!(st, StatusCode::CREATED, "create → 201: {body}");
+
+    // Same domain again → 409 Conflict (cluster duplicate guard).
+    let (st, _b) = api_send(
+        &app,
+        Method::POST,
+        "/api/v1/hostings",
+        &key,
+        r#"{"domain":"api-create.example.com"}"#,
+    )
+    .await;
+    assert_eq!(st, StatusCode::CONFLICT, "duplicate domain → 409");
+
+    // Malformed domain → 400 validation (Domain::try_from rejects it).
+    let (st, body) = api_send(
+        &app,
+        Method::POST,
+        "/api/v1/hostings",
+        &key,
+        r#"{"domain":"nodots"}"#,
+    )
+    .await;
+    assert_eq!(st, StatusCode::BAD_REQUEST, "invalid domain → 400: {body}");
+
+    // A key lacking HostingCreate → 403.
+    let view = hyperion_state::capabilities::Capability::HostingView.bit();
+    let weak = seed_key(&sock, owner_id, view, vec![], 0).await;
+    let (st, _b) = api_send(
+        &app,
+        Method::POST,
+        "/api/v1/hostings",
+        &weak,
+        r#"{"domain":"nope.example.com"}"#,
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "no HostingCreate cap → 403");
+}
+
+#[tokio::test]
+async fn api_v1_patch_limits_applies() {
+    use hyperion_rpc::codec::{Request as RpcReq, Response as RpcResp};
+    use hyperion_rpc::wire::HostingCreateReq;
+
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock.clone(), admin);
+    let owner_id = seed_key_owner(&sock).await;
+
+    // Seed a hosting to patch.
+    match hyperion_rpc_client::call(
+        &sock,
+        RpcReq::HostingCreate(HostingCreateReq {
+            domain: hyperion_validate::Domain::parse("api-patch.example.com").expect("domain"),
+            aliases: vec![],
+            php_version: None,
+            database: None,
+            system_user: None,
+            kind: "php".into(),
+            proxy_upstream_url: None,
+        }),
+    )
+    .await
+    .expect("seed")
+    {
+        RpcResp::HostingCreate(_) => {}
+        other => panic!("unexpected: {other:?}"),
+    }
+
+    let key = seed_key(
+        &sock,
+        owner_id,
+        hyperion_state::capabilities::Capability::HostingEditConfig.bit(),
+        vec![],
+        0,
+    )
+    .await;
+    let limits_json =
+        serde_json::to_string(&hyperion_types::HostingLimits::defaults()).expect("serialize");
+    let (st, body) = api_send(
+        &app,
+        Method::PATCH,
+        "/api/v1/hostings/api-patch.example.com/limits",
+        &key,
+        &limits_json,
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "patch limits → 200: {body}");
+
+    // A key lacking the manage cap → 403.
+    let weak = seed_key(
+        &sock,
+        owner_id,
+        hyperion_state::capabilities::Capability::HostingView.bit(),
+        vec![],
+        0,
+    )
+    .await;
+    let (st, _b) = api_send(
+        &app,
+        Method::PATCH,
+        "/api/v1/hostings/api-patch.example.com/limits",
+        &weak,
+        &limits_json,
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "no manage cap → 403");
+}

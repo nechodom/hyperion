@@ -26,7 +26,7 @@ pub mod state;
 use crate::state::SharedState;
 use axum::extract::State;
 use axum::middleware::from_fn_with_state;
-use axum::routing::{get, post};
+use axum::routing::{get, patch, post};
 use axum::Router;
 
 pub fn build_router(state: SharedState) -> Router {
@@ -592,7 +592,10 @@ pub fn build_router(state: SharedState) -> Router {
     // handlers::api_v1.
     let api_v1 = Router::new()
         .route("/api/v1/me", get(handlers::api_v1::get_me))
-        .route("/api/v1/hostings", get(handlers::api_v1::get_hostings))
+        .route(
+            "/api/v1/hostings",
+            get(handlers::api_v1::get_hostings).post(handlers::api_v1::post_create),
+        )
         .route(
             "/api/v1/hostings/:id",
             get(handlers::api_v1::get_hosting).delete(handlers::api_v1::delete_hosting),
@@ -604,6 +607,18 @@ pub fn build_router(state: SharedState) -> Router {
         .route(
             "/api/v1/hostings/:id/resume",
             post(handlers::api_v1::post_resume),
+        )
+        .route(
+            "/api/v1/hostings/:id/limits",
+            patch(handlers::api_v1::patch_limits),
+        )
+        .route(
+            "/api/v1/hostings/:id/php",
+            patch(handlers::api_v1::patch_php),
+        )
+        .route(
+            "/api/v1/hostings/:id/vhost",
+            patch(handlers::api_v1::patch_vhost),
         )
         .route("/api/v1/nodes", get(handlers::api_v1::get_nodes))
         .route("/api/v1/jobs/:id", get(handlers::api_v1::get_job))
