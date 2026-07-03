@@ -42,6 +42,113 @@ SKIP_CLONE="${HYPERION_SKIP_CLONE:-}"
 log()  { printf '\033[36m[hyperion]\033[0m %s\n' "$*"; }
 fail() { printf '\033[31m[error]\033[0m %s\n' "$*" >&2; exit 1; }
 
+# ── port conflict pre-flight ───────────────────────────────────────────────
+# Hyperion drives HOST services (nginx, the panel, vsftpd, MariaDB, Postgres);
+# if a port it needs is already held by a FOREIGN process — most often
+# docker-proxy for a published container — that service silently fails to bind
+# and hostings/panel break. Reads the ports from the PREFLIGHT_SPECS array
+# ("port;label;owner-regex"), finds the holder via `ss` and (for nftables-DNAT
+# setups where nothing listens on the host) via `docker ps`, and on a conflict
+# offers to STOP the holder or ABORT. A port already owned by the service that
+# SHOULD hold it (a re-run) is not a conflict. Env knobs:
+#   HYPERION_PREFLIGHT_ONLY=1  run the checks and exit (installs nothing)
+#   HYPERION_STOP_CONFLICTS=1  auto-stop holders in a non-interactive run
+#   HYPERION_ALLOW_SHARED=1    proceed despite conflicts (services may fail to bind)
+port_preflight() {
+  command -v ss >/dev/null 2>&1 || { log "WARN: 'ss' not found — skipping port pre-flight."; return 0; }
+  local have_docker=0
+  command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1 && have_docker=1
+
+  local -a conflicts=()
+  local spec port label owner line name pid unit container holder
+  for spec in "${PREFLIGHT_SPECS[@]}"; do
+    IFS=';' read -r port label owner <<<"$spec"
+    [[ -z "$port" ]] && continue
+    line="$(ss -Hltnp "sport = :$port" 2>/dev/null | head -1 || true)"
+    name=""; pid=""; unit=""; container=""
+    if [[ -n "$line" ]]; then
+      name="$(sed -nE 's/.*users:\(\("([^"]+)".*/\1/p' <<<"$line")"
+      pid="$(sed -nE 's/.*pid=([0-9]+).*/\1/p' <<<"$line")"
+      # Legit owner already listening (a re-run) → not a conflict.
+      [[ -n "$name" && "$name" =~ $owner ]] && continue
+      [[ -n "$pid" ]] && unit="$(grep -aoE '[a-zA-Z0-9@._-]+\.service' "/proc/$pid/cgroup" 2>/dev/null | tail -1 || true)"
+    fi
+    if [[ "$have_docker" == "1" ]]; then
+      container="$(docker ps --format '{{.Names}};{{.Ports}}' 2>/dev/null | awk -F';' -v p=":$port->" 'index($2,p){print $1; exit}' || true)"
+    fi
+    [[ -z "$line" && -z "$container" ]] && continue  # port free
+    holder="${name:-unknown}"
+    [[ -n "$container" && ( -z "$name" || "$name" == "docker-proxy" ) ]] && holder="docker container '$container'"
+    conflicts+=("$port;$label;$holder;$pid;$unit;$container")
+  done
+
+  if [[ ${#conflicts[@]} -eq 0 ]]; then
+    log "Port pre-flight OK — every required port is free (or already ours)."
+    return 0
+  fi
+
+  printf '\033[31m[hyperion]\033[0m Port pre-flight found %d conflict(s) — required ports already in use:\n' "${#conflicts[@]}" >&2
+  local c cport clabel cholder cpid cunit ccont
+  for c in "${conflicts[@]}"; do
+    IFS=';' read -r cport clabel cholder cpid cunit ccont <<<"$c"
+    printf '  \033[31m✗\033[0m %-5s %-18s held by %s%s%s\n' \
+      "$cport" "$clabel" "$cholder" "${cpid:+ (pid $cpid)}" "${cunit:+ [unit: $cunit]}" >&2
+  done
+
+  if [[ "${HYPERION_ALLOW_SHARED:-}" == "1" ]]; then
+    log "HYPERION_ALLOW_SHARED=1 — continuing anyway (those services may fail to bind)."
+    return 0
+  fi
+  [[ "${HYPERION_PREFLIGHT_ONLY:-}" == "1" ]] && fail "Resolve the conflict(s) above before installing."
+
+  local choice=""
+  if [[ "${HYPERION_STOP_CONFLICTS:-}" == "1" ]]; then
+    choice="s"
+  elif [[ -r /dev/tty ]]; then
+    { printf '\nHyperion needs these ports. [s] STOP the holder(s) above and continue, '
+      printf 'or [a] ABORT and free them yourself.\nChoose [s/a] (default a): '; } > /dev/tty
+    IFS= read -r choice < /dev/tty || choice="a"
+  else
+    choice="a"
+  fi
+
+  case "$choice" in
+    s|S|y|Y)
+      for c in "${conflicts[@]}"; do
+        IFS=';' read -r cport clabel cholder cpid cunit ccont <<<"$c"
+        if [[ -n "$ccont" ]]; then
+          log "Stopping docker container '$ccont' (frees port $cport)…"
+          docker stop "$ccont" >/dev/null || fail "could not stop container '$ccont' — resolve manually."
+        elif [[ -n "$cunit" ]]; then
+          log "Stopping systemd unit '$cunit' (frees port $cport)…"
+          systemctl stop "$cunit" || fail "could not stop '$cunit' — resolve manually."
+        elif [[ -n "$cpid" ]]; then
+          log "Terminating pid $cpid ($cholder) on port $cport…"
+          kill "$cpid" 2>/dev/null || true; sleep 2
+          if kill -0 "$cpid" 2>/dev/null; then kill -9 "$cpid" 2>/dev/null || true; fi
+        else
+          fail "port $cport is held but the holder can't be stopped automatically — resolve manually."
+        fi
+      done
+      sleep 1
+      local -a leftover=()
+      for c in "${conflicts[@]}"; do
+        IFS=';' read -r cport _ <<<"$c"
+        [[ -n "$(ss -Hltnp "sport = :$cport" 2>/dev/null | head -1 || true)" ]] && leftover+=("$cport")
+      done
+      [[ ${#leftover[@]} -gt 0 ]] && fail "ports still in use after stop: ${leftover[*]} — resolve manually and re-run."
+      log "Conflicts cleared — continuing."
+      ;;
+    *)
+      fail "Aborting so you can free the port(s) above.
+       Stop the listed process / container / unit, then re-run this installer. Or use:
+         HYPERION_STOP_CONFLICTS=1  auto-stop the holders
+         HYPERION_ALLOW_SHARED=1    ignore and proceed (risky — services may fail to bind)
+         HYPERION_PREFLIGHT_ONLY=1  just check, install nothing"
+      ;;
+  esac
+}
+
 if [[ $EUID -ne 0 ]]; then
   fail "Run me as root."
 fi
@@ -50,6 +157,19 @@ fi
 . /etc/os-release || fail "/etc/os-release missing — not a Debian-family box?"
 [[ "$ID" == "debian" ]] || fail "Debian required (got '$ID')."
 [[ "${VERSION_ID%%.*}" -ge 12 ]] || fail "Debian 12+ required (got $VERSION_ID)."
+
+#-------- 1b. Port pre-flight (runs BEFORE anything is installed/started) --
+LISTEN_PORT="${LISTEN##*:}"
+PREFLIGHT_SPECS=(
+  "80;nginx (HTTP);^nginx$"
+  "443;nginx (HTTPS);^nginx$"
+  "${LISTEN_PORT};Hyperion panel;^hyperion-web$"
+  "21;vsftpd (FTP);^vsftpd$"
+  "3306;MariaDB;^(mariadbd|mysqld)$"
+  "5432;PostgreSQL;^(postgres|postmaster)$"
+)
+port_preflight
+[[ "${HYPERION_PREFLIGHT_ONLY:-}" == "1" ]] && { log "Pre-flight only — nothing installed."; exit 0; }
 
 log "Debian $VERSION_ID detected. Updating apt cache..."
 export DEBIAN_FRONTEND=noninteractive
