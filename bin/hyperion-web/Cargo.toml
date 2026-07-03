@@ -51,6 +51,9 @@ hex.workspace = true
 askama_escape = "0.10"
 # CIDR parse/match for per-API-key IP allowlists (/api/v1 hardening).
 ipnet = "2"
+# OpenAPI 3 document generation for the /api/v1 contract (served at
+# /api/v1/openapi.json). Derive-based so the doc can't drift from the routes.
+utoipa = "5"
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }
 base64 = { workspace = true }
 regex.workspace = true

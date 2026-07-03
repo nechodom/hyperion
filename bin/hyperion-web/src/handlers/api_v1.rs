@@ -196,6 +196,11 @@ fn require(ctx: &AuthCtx, cap: Capability) -> Option<Response> {
 }
 
 /// `GET /api/v1/me` — the key's identity. Any valid key.
+#[utoipa::path(
+    get, path = "/api/v1/me", tag = "identity",
+    responses((status = 200, description = "The key's identity: id, label, caps[], scope_all")),
+    security(("bearer" = []))
+)]
 pub async fn get_me(ApiAuth(ctx): ApiAuth) -> Response {
     // Always present here: ApiAuth guarantees an api_key.
     let Some(k) = ctx.api_key.as_ref() else {
@@ -235,6 +240,21 @@ pub struct HostingsQuery {
 /// Returns `{ items, next_cursor, total }`. `total` is the filtered count;
 /// follow `next_cursor` (when non-null) to page. Ordering is a stable
 /// keyset on id (ULIDs sort by creation time).
+#[utoipa::path(
+    get, path = "/api/v1/hostings", tag = "hostings",
+    params(
+        ("limit" = Option<usize>, Query, description = "Page size 1..200 (default 50)"),
+        ("cursor" = Option<String>, Query, description = "Keyset cursor = previous page's last item id"),
+        ("state" = Option<String>, Query, description = "Filter: active | suspended | provisioning | failed"),
+        ("node" = Option<String>, Query, description = "Filter by owning node id"),
+        ("q" = Option<String>, Query, description = "Case-insensitive domain substring"),
+    ),
+    responses(
+        (status = 200, description = "List envelope { items: [hosting summary], next_cursor: string|null, total: int }"),
+        (status = 403, description = "Key lacks the HostingView capability"),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn get_hostings(
     State(state): State<SharedState>,
     ApiAuth(ctx): ApiAuth,
@@ -288,6 +308,16 @@ pub async fn get_hostings(
 }
 
 /// `GET /api/v1/hostings/:id` — detail. Cap HostingView.
+#[utoipa::path(
+    get, path = "/api/v1/hostings/{id}", tag = "hostings",
+    params(("id" = String, Path, description = "Hosting id or domain")),
+    responses(
+        (status = 200, description = "Full hosting detail object"),
+        (status = 403, description = "Key lacks the HostingView capability"),
+        (status = 404, description = "No such hosting"),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn get_hosting(
     State(state): State<SharedState>,
     ApiAuth(ctx): ApiAuth,
@@ -310,6 +340,14 @@ pub async fn get_hosting(
 }
 
 /// `GET /api/v1/nodes` — cluster nodes. Cap NodesView.
+#[utoipa::path(
+    get, path = "/api/v1/nodes", tag = "nodes",
+    responses(
+        (status = 200, description = "Array of enrolled cluster nodes"),
+        (status = 403, description = "Key lacks the NodesView capability"),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn get_nodes(State(state): State<SharedState>, ApiAuth(ctx): ApiAuth) -> Response {
     if let Some(r) = require(&ctx, Capability::NodesView) {
         return r;
@@ -328,6 +366,16 @@ pub async fn get_nodes(State(state): State<SharedState>, ApiAuth(ctx): ApiAuth) 
 /// `/jobs` route on admin. Mirror that: only a `scope_all` key may poll.
 /// (Every P1 key is `scope_all`, so this is a no-op today; it becomes
 /// "poll your OWN jobs" once per-tenant write endpoints land in p1b.)
+#[utoipa::path(
+    get, path = "/api/v1/jobs/{id}", tag = "jobs",
+    params(("id" = String, Path, description = "Job id (from a 202 Accepted response)")),
+    responses(
+        (status = 200, description = "Job record: id, kind, state, progress, message, error"),
+        (status = 403, description = "Job polling requires a cluster-wide (scope_all) key"),
+        (status = 404, description = "No such job"),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn get_job(
     State(state): State<SharedState>,
     ApiAuth(ctx): ApiAuth,
@@ -393,6 +441,16 @@ async fn resolve_manage(
 }
 
 /// `POST /api/v1/hostings/:id/suspend` — cap HostingSuspend. Synchronous.
+#[utoipa::path(
+    post, path = "/api/v1/hostings/{id}/suspend", tag = "hostings",
+    params(("id" = String, Path, description = "Hosting id or domain")),
+    responses(
+        (status = 200, description = "Suspended — returns { id, state: \"suspended\" }"),
+        (status = 403, description = "Key lacks manage access for this hosting"),
+        (status = 404, description = "No such hosting"),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn post_suspend(
     State(state): State<SharedState>,
     ApiAuth(ctx): ApiAuth,
@@ -423,6 +481,16 @@ pub async fn post_suspend(
 }
 
 /// `POST /api/v1/hostings/:id/resume` — cap HostingSuspend. Synchronous.
+#[utoipa::path(
+    post, path = "/api/v1/hostings/{id}/resume", tag = "hostings",
+    params(("id" = String, Path, description = "Hosting id or domain")),
+    responses(
+        (status = 200, description = "Resumed — returns { id, state: \"active\" }"),
+        (status = 403, description = "Key lacks manage access for this hosting"),
+        (status = 404, description = "No such hosting"),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn post_resume(
     State(state): State<SharedState>,
     ApiAuth(ctx): ApiAuth,
@@ -461,6 +529,20 @@ pub struct DeleteQuery {
 /// Deleting is the slowest mutation (nginx reload, acme cleanup, DROP
 /// DATABASE, rm -rf, userdel), so it runs as a background job exactly like
 /// the UI. Poll `GET /api/v1/jobs/:id` for completion.
+#[utoipa::path(
+    delete, path = "/api/v1/hostings/{id}", tag = "hostings",
+    params(
+        ("id" = String, Path, description = "Hosting id or domain"),
+        ("keep_user" = Option<bool>, Query, description = "Keep the system user (default false)"),
+        ("keep_database" = Option<bool>, Query, description = "Keep the database (default false)"),
+    ),
+    responses(
+        (status = 202, description = "Accepted — returns { job_id, status }; poll GET /api/v1/jobs/{job_id}"),
+        (status = 403, description = "Key lacks manage access for this hosting"),
+        (status = 404, description = "No such hosting"),
+    ),
+    security(("bearer" = []))
+)]
 pub async fn delete_hosting(
     State(state): State<SharedState>,
     ApiAuth(ctx): ApiAuth,
