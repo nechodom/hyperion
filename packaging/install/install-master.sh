@@ -6,7 +6,11 @@
 #
 # What it does:
 #   - Verifies Debian 12+
-#   - apt installs nginx, MariaDB, PostgreSQL, PHP 8.3 (via deb.sury.org)
+#   - Port pre-flight: refuses (or offers to stop) whatever holds a needed port
+#   - Configurator: nginx + PHP always; MariaDB / PostgreSQL / vsftpd are
+#     selectable (interactive [Y/n], or HYPERION_WITH_MARIADB/_POSTGRES/_VSFTPD
+#     =0|1), and ports are adjustable (HYPERION_LISTEN panel, HYPERION_FTP_PORT)
+#   - apt installs the chosen packages + PHP 8.3 (via deb.sury.org)
 #   - Installs Rust if missing, builds hyperion from source (one-time)
 #   - Drops binaries into /usr/sbin and /usr/bin
 #   - Creates /etc/hyperion, /var/lib/hyperion, /var/log/hyperion
@@ -149,6 +153,40 @@ port_preflight() {
   esac
 }
 
+# ── interactive configurator helpers ──────────────────────────────────────
+# Let the operator pick which optional services Hyperion installs & manages,
+# and on which ports, so it can coexist with an existing stack. Interactive
+# [Y/n] on a TTY; non-interactive via env (HYPERION_WITH_MARIADB/_POSTGRES/
+# _VSFTPD=0|1, HYPERION_FTP_PORT, HYPERION_RPC_PORT, HYPERION_LISTEN, and
+# HYPERION_NONINTERACTIVE=1 to accept all defaults without prompting).
+norm_bool() {  # raw → 1 / 0 / "" (unset)
+  case "${1,,}" in
+    "") printf '' ;;
+    0|n|no|false|off) printf '0' ;;
+    *) printf '1' ;;
+  esac
+}
+ask_yn() {  # $1 prompt, $2 default(Y|N) → 1 / 0
+  local ans="" alt
+  alt="$([[ "${2^^}" == "Y" ]] && echo n || echo y)"
+  if [[ "${HYPERION_NONINTERACTIVE:-}" != "1" && -r /dev/tty ]]; then
+    printf '%s [%s/%s]: ' "$1" "${2^^}" "$alt" > /dev/tty
+    IFS= read -r ans < /dev/tty || ans=""
+  fi
+  ans="${ans:-$2}"
+  [[ "$ans" =~ ^[Yy] ]] && printf '1' || printf '0'
+}
+ask_port() {  # $1 prompt, $2 default → a validated 1..65535 port
+  local ans="$2"
+  if [[ "${HYPERION_NONINTERACTIVE:-}" != "1" && -r /dev/tty ]]; then
+    printf '%s [%s]: ' "$1" "$2" > /dev/tty
+    IFS= read -r ans < /dev/tty || ans="$2"
+    ans="${ans:-$2}"
+  fi
+  [[ "$ans" =~ ^[0-9]+$ && "$ans" -ge 1 && "$ans" -le 65535 ]] || fail "invalid port: '$ans'"
+  printf '%s' "$ans"
+}
+
 if [[ $EUID -ne 0 ]]; then
   fail "Run me as root."
 fi
@@ -158,16 +196,34 @@ fi
 [[ "$ID" == "debian" ]] || fail "Debian required (got '$ID')."
 [[ "${VERSION_ID%%.*}" -ge 12 ]] || fail "Debian 12+ required (got $VERSION_ID)."
 
-#-------- 1b. Port pre-flight (runs BEFORE anything is installed/started) --
+#-------- 1b. Component + port selection (before anything is installed) ----
+# nginx + PHP-FPM are always installed (Hyperion can't serve hostings without
+# them); MariaDB / PostgreSQL / vsftpd are opt-out. Defaults = install (== the
+# historical behaviour), so a plain run is unchanged.
+WITH_MARIADB="$(norm_bool "${HYPERION_WITH_MARIADB:-}")"
+WITH_POSTGRES="$(norm_bool "${HYPERION_WITH_POSTGRES:-}")"
+WITH_VSFTPD="$(norm_bool "${HYPERION_WITH_VSFTPD:-}")"
+[[ -z "$WITH_MARIADB"  ]] && WITH_MARIADB="$(ask_yn  'Install & manage MariaDB (database for hostings)?' Y)"
+[[ -z "$WITH_POSTGRES" ]] && WITH_POSTGRES="$(ask_yn 'Install & manage PostgreSQL (only for Postgres apps)?' Y)"
+[[ -z "$WITH_VSFTPD"   ]] && WITH_VSFTPD="$(ask_yn   'Install & manage vsftpd (per-hosting FTP/FTPS)?' Y)"
+FTP_PORT=21
+[[ "$WITH_VSFTPD" == "1" ]] && FTP_PORT="$(ask_port 'FTP control port' "${HYPERION_FTP_PORT:-21}")"
+# Panel port: honour HYPERION_LISTEN if set, else offer to change it.
+if [[ -z "${HYPERION_LISTEN:-}" ]]; then
+  LISTEN="0.0.0.0:$(ask_port 'Hyperion panel port' "${LISTEN##*:}")"
+fi
 LISTEN_PORT="${LISTEN##*:}"
+log "Plan: nginx + PHP (always), MariaDB=$WITH_MARIADB PostgreSQL=$WITH_POSTGRES vsftpd=$WITH_VSFTPD; panel :$LISTEN_PORT, FTP :$FTP_PORT"
+
+#-------- 1c. Port pre-flight (only the ports we'll actually use) ----------
 PREFLIGHT_SPECS=(
   "80;nginx (HTTP);^nginx$"
   "443;nginx (HTTPS);^nginx$"
   "${LISTEN_PORT};Hyperion panel;^hyperion-web$"
-  "21;vsftpd (FTP);^vsftpd$"
-  "3306;MariaDB;^(mariadbd|mysqld)$"
-  "5432;PostgreSQL;^(postgres|postmaster)$"
 )
+[[ "$WITH_VSFTPD"   == "1" ]] && PREFLIGHT_SPECS+=("${FTP_PORT};vsftpd (FTP);^vsftpd$")
+[[ "$WITH_MARIADB"  == "1" ]] && PREFLIGHT_SPECS+=("3306;MariaDB;^(mariadbd|mysqld)$")
+[[ "$WITH_POSTGRES" == "1" ]] && PREFLIGHT_SPECS+=("5432;PostgreSQL;^(postgres|postmaster)$")
 port_preflight
 [[ "${HYPERION_PREFLIGHT_ONLY:-}" == "1" ]] && { log "Pre-flight only — nothing installed."; exit 0; }
 
@@ -177,9 +233,13 @@ apt-get update -qq
 
 #-------- 2. Base packages -------------------------------------------------
 log "Installing base packages..."
+optional_pkgs=()
+[[ "$WITH_MARIADB"  == "1" ]] && optional_pkgs+=(mariadb-server)
+[[ "$WITH_POSTGRES" == "1" ]] && optional_pkgs+=(postgresql)
+[[ "$WITH_VSFTPD"   == "1" ]] && optional_pkgs+=(vsftpd)
 apt-get install -y -qq \
   curl ca-certificates gnupg lsb-release pkg-config build-essential git \
-  nginx mariadb-server postgresql vsftpd
+  nginx "${optional_pkgs[@]}"
 
 mkdir -p /etc/apt/keyrings
 
@@ -197,19 +257,22 @@ apt-get install -y -qq \
   php8.3-fpm php8.3-cli php8.3-mysql php8.3-pgsql \
   php8.3-curl php8.3-gd php8.3-mbstring php8.3-xml php8.3-zip
 systemctl enable --now php8.3-fpm
-# nginx + mariadb + postgres also need to be running for hostings to work.
-systemctl enable --now nginx mariadb postgresql || true
+# nginx is required; the DBs are enabled only if selected.
+systemctl enable --now nginx || true
+[[ "$WITH_MARIADB"  == "1" ]] && { systemctl enable --now mariadb    || true; }
+[[ "$WITH_POSTGRES" == "1" ]] && { systemctl enable --now postgresql || true; }
 
 # vsftpd: PAM-auth + chroot + local users. Operator opts in per hosting
 # via "Set FTP password" in the UI. We tighten the default config and
 # allow /usr/sbin/nologin so the hosting system_users (who have that
 # shell to block SSH) can still FTP in.
-if ! grep -q "/usr/sbin/nologin" /etc/shells 2>/dev/null; then
-  echo "/usr/sbin/nologin" >> /etc/shells
-fi
-if [[ ! -f /etc/vsftpd.conf.hyperion-orig && -f /etc/vsftpd.conf ]]; then
-  cp /etc/vsftpd.conf /etc/vsftpd.conf.hyperion-orig
-  cat > /etc/vsftpd.conf <<'EOFV'
+if [[ "$WITH_VSFTPD" == "1" ]]; then
+  if ! grep -q "/usr/sbin/nologin" /etc/shells 2>/dev/null; then
+    echo "/usr/sbin/nologin" >> /etc/shells
+  fi
+  if [[ ! -f /etc/vsftpd.conf.hyperion-orig && -f /etc/vsftpd.conf ]]; then
+    cp /etc/vsftpd.conf /etc/vsftpd.conf.hyperion-orig
+    cat > /etc/vsftpd.conf <<'EOFV'
 listen=YES
 listen_ipv6=NO
 anonymous_enable=NO
@@ -226,8 +289,14 @@ xferlog_enable=YES
 xferlog_std_format=YES
 seccomp_sandbox=NO
 EOFV
+    # Custom control port (default 21). vsftpd's built-in default is 21, so we
+    # only write the directive when it differs — keeps the file clean.
+    [[ "$FTP_PORT" != "21" ]] && echo "listen_port=${FTP_PORT}" >> /etc/vsftpd.conf
+  fi
+  systemctl enable --now vsftpd || true
+else
+  log "Skipping vsftpd (per selection) — per-hosting FTP will be unavailable."
 fi
-systemctl enable --now vsftpd || true
 
 #-------- 3b. wp-cli (WordPress installer dependency) ----------------------
 # wpcli adapter shells out to /usr/local/bin/wp; without it WordPress
@@ -427,7 +496,7 @@ if [[ -f "$tmpfiles_src" ]]; then
 fi
 
 #-------- 9. MariaDB hardening (one-shot) ---------------------------------
-if ! mariadb -e "SELECT 1" >/dev/null 2>&1; then
+if [[ "$WITH_MARIADB" == "1" ]] && ! mariadb -e "SELECT 1" >/dev/null 2>&1; then
   log "NOTE: mariadb-secure-installation requires interactive input."
   log "Run it manually after this installer if you haven't already."
 fi

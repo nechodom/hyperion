@@ -8,7 +8,11 @@
 #
 # What it does:
 #   - Verifies Debian 12+
-#   - apt installs nginx, MariaDB, PostgreSQL, PHP 8.3 (via deb.sury.org)
+#   - Port pre-flight: refuses (or offers to stop) whatever holds a needed port
+#   - Configurator: nginx + PHP always; MariaDB / PostgreSQL / vsftpd selectable
+#     (interactive [Y/n] or HYPERION_WITH_MARIADB/_POSTGRES/_VSFTPD=0|1); ports
+#     adjustable (HYPERION_RPC_PORT, HYPERION_FTP_PORT)
+#   - apt installs the chosen packages + PHP 8.3 (via deb.sury.org)
 #   - Installs Rust if missing, builds hyperion-agent + hctl from source
 #   - Drops binaries into /usr/sbin and /usr/bin
 #   - Persists the invite token + master URL into /etc/hyperion/agent.toml
@@ -151,6 +155,39 @@ port_preflight() {
   esac
 }
 
+# ── interactive configurator helpers ──────────────────────────────────────
+# Pick which optional services this node installs & manages, and on which
+# ports. Interactive [Y/n] on a TTY; non-interactive via env
+# (HYPERION_WITH_MARIADB/_POSTGRES/_VSFTPD=0|1, HYPERION_FTP_PORT,
+# HYPERION_RPC_PORT, HYPERION_NONINTERACTIVE=1 = accept defaults).
+norm_bool() {
+  case "${1,,}" in
+    "") printf '' ;;
+    0|n|no|false|off) printf '0' ;;
+    *) printf '1' ;;
+  esac
+}
+ask_yn() {
+  local ans="" alt
+  alt="$([[ "${2^^}" == "Y" ]] && echo n || echo y)"
+  if [[ "${HYPERION_NONINTERACTIVE:-}" != "1" && -r /dev/tty ]]; then
+    printf '%s [%s/%s]: ' "$1" "${2^^}" "$alt" > /dev/tty
+    IFS= read -r ans < /dev/tty || ans=""
+  fi
+  ans="${ans:-$2}"
+  [[ "$ans" =~ ^[Yy] ]] && printf '1' || printf '0'
+}
+ask_port() {
+  local ans="$2"
+  if [[ "${HYPERION_NONINTERACTIVE:-}" != "1" && -r /dev/tty ]]; then
+    printf '%s [%s]: ' "$1" "$2" > /dev/tty
+    IFS= read -r ans < /dev/tty || ans="$2"
+    ans="${ans:-$2}"
+  fi
+  [[ "$ans" =~ ^[0-9]+$ && "$ans" -ge 1 && "$ans" -le 65535 ]] || fail "invalid port: '$ans'"
+  printf '%s' "$ans"
+}
+
 [[ $EUID -eq 0 ]] || fail "Run me as root."
 [[ -n "$TOKEN"  ]] || fail "Missing --token=<invite-token>."
 [[ -n "$MASTER" ]] || fail "Missing --master=<https://your-master>."
@@ -160,17 +197,32 @@ port_preflight() {
 [[ "$ID" == "debian" ]] || fail "Debian required (got '$ID')."
 [[ "${VERSION_ID%%.*}" -ge 12 ]] || fail "Debian 12+ required (got $VERSION_ID)."
 
-#-------- 1b. Port pre-flight (runs BEFORE anything is installed/started) --
+#-------- 1b. Component + port selection (before anything is installed) ----
+# nginx + PHP-FPM are always installed; MariaDB / PostgreSQL / vsftpd are
+# opt-out (defaults = install, unchanged from before).
+WITH_MARIADB="$(norm_bool "${HYPERION_WITH_MARIADB:-}")"
+WITH_POSTGRES="$(norm_bool "${HYPERION_WITH_POSTGRES:-}")"
+WITH_VSFTPD="$(norm_bool "${HYPERION_WITH_VSFTPD:-}")"
+[[ -z "$WITH_MARIADB"  ]] && WITH_MARIADB="$(ask_yn  'Install & manage MariaDB (database for hostings)?' Y)"
+[[ -z "$WITH_POSTGRES" ]] && WITH_POSTGRES="$(ask_yn 'Install & manage PostgreSQL (only for Postgres apps)?' Y)"
+[[ -z "$WITH_VSFTPD"   ]] && WITH_VSFTPD="$(ask_yn   'Install & manage vsftpd (per-hosting FTP/FTPS)?' Y)"
+FTP_PORT=21
+[[ "$WITH_VSFTPD" == "1" ]] && FTP_PORT="$(ask_port 'FTP control port' "${HYPERION_FTP_PORT:-21}")"
+# Inbound master→node RPC port.
+RPC_PORT="$(ask_port 'master→node RPC port' "${HYPERION_RPC_PORT:-9443}")"
+log "Plan: nginx + PHP (always), MariaDB=$WITH_MARIADB PostgreSQL=$WITH_POSTGRES vsftpd=$WITH_VSFTPD; RPC :$RPC_PORT, FTP :$FTP_PORT"
+
+#-------- 1c. Port pre-flight (only the ports we'll actually use) ----------
 # A node runs nginx/DBs/vsftpd like the master, plus the inbound master→node
-# RPC listener on 9443. No panel (8443) — that's the master only.
+# RPC listener. No panel (8443) — that's the master only.
 PREFLIGHT_SPECS=(
   "80;nginx (HTTP);^nginx$"
   "443;nginx (HTTPS);^nginx$"
-  "21;vsftpd (FTP);^vsftpd$"
-  "3306;MariaDB;^(mariadbd|mysqld)$"
-  "5432;PostgreSQL;^(postgres|postmaster)$"
-  "9443;master→node RPC;^hyperion-agent$"
+  "${RPC_PORT};master→node RPC;^hyperion-agent$"
 )
+[[ "$WITH_VSFTPD"   == "1" ]] && PREFLIGHT_SPECS+=("${FTP_PORT};vsftpd (FTP);^vsftpd$")
+[[ "$WITH_MARIADB"  == "1" ]] && PREFLIGHT_SPECS+=("3306;MariaDB;^(mariadbd|mysqld)$")
+[[ "$WITH_POSTGRES" == "1" ]] && PREFLIGHT_SPECS+=("5432;PostgreSQL;^(postgres|postmaster)$")
 port_preflight
 [[ "${HYPERION_PREFLIGHT_ONLY:-}" == "1" ]] && { log "Pre-flight only — nothing installed."; exit 0; }
 
@@ -178,9 +230,13 @@ port_preflight
 export DEBIAN_FRONTEND=noninteractive
 log "Installing base packages..."
 apt-get update -qq
+optional_pkgs=()
+[[ "$WITH_MARIADB"  == "1" ]] && optional_pkgs+=(mariadb-server)
+[[ "$WITH_POSTGRES" == "1" ]] && optional_pkgs+=(postgresql)
+[[ "$WITH_VSFTPD"   == "1" ]] && optional_pkgs+=(vsftpd)
 apt-get install -y -qq \
   curl ca-certificates gnupg lsb-release pkg-config build-essential git \
-  nginx mariadb-server postgresql vsftpd
+  nginx "${optional_pkgs[@]}"
 
 mkdir -p /etc/apt/keyrings
 if [[ ! -f /etc/apt/keyrings/sury-php.gpg ]]; then
@@ -197,15 +253,18 @@ apt-get install -y -qq \
   php8.3-fpm php8.3-cli php8.3-mysql php8.3-pgsql \
   php8.3-curl php8.3-gd php8.3-mbstring php8.3-xml php8.3-zip
 systemctl enable --now php8.3-fpm
-systemctl enable --now nginx mariadb postgresql || true
+systemctl enable --now nginx || true
+[[ "$WITH_MARIADB"  == "1" ]] && { systemctl enable --now mariadb    || true; }
+[[ "$WITH_POSTGRES" == "1" ]] && { systemctl enable --now postgresql || true; }
 
 # vsftpd setup (same as install-master.sh)
-if ! grep -q "/usr/sbin/nologin" /etc/shells 2>/dev/null; then
-  echo "/usr/sbin/nologin" >> /etc/shells
-fi
-if [[ ! -f /etc/vsftpd.conf.hyperion-orig && -f /etc/vsftpd.conf ]]; then
-  cp /etc/vsftpd.conf /etc/vsftpd.conf.hyperion-orig
-  cat > /etc/vsftpd.conf <<'EOFV'
+if [[ "$WITH_VSFTPD" == "1" ]]; then
+  if ! grep -q "/usr/sbin/nologin" /etc/shells 2>/dev/null; then
+    echo "/usr/sbin/nologin" >> /etc/shells
+  fi
+  if [[ ! -f /etc/vsftpd.conf.hyperion-orig && -f /etc/vsftpd.conf ]]; then
+    cp /etc/vsftpd.conf /etc/vsftpd.conf.hyperion-orig
+    cat > /etc/vsftpd.conf <<'EOFV'
 listen=YES
 listen_ipv6=NO
 anonymous_enable=NO
@@ -222,8 +281,12 @@ xferlog_enable=YES
 xferlog_std_format=YES
 seccomp_sandbox=NO
 EOFV
+    [[ "$FTP_PORT" != "21" ]] && echo "listen_port=${FTP_PORT}" >> /etc/vsftpd.conf
+  fi
+  systemctl enable --now vsftpd || true
+else
+  log "Skipping vsftpd (per selection) — per-hosting FTP will be unavailable."
 fi
-systemctl enable --now vsftpd || true
 
 # wp-cli — required for WordPress install requests dispatched from master.
 if [[ ! -x /usr/local/bin/wp ]]; then
@@ -378,7 +441,7 @@ verify_tls   = false
 # (or scope wider if your topology needs it.)
 [remote_rpc]
 enabled       = true
-bind          = "0.0.0.0:9443"
+bind          = "0.0.0.0:${RPC_PORT}"
 tls_cert_file = "/etc/hyperion/agent-rpc.crt"
 tls_key_file  = "/etc/hyperion/agent-rpc.key"
 EOF
@@ -389,8 +452,8 @@ chmod 0600 /etc/hyperion/agent.toml
 # from anywhere. Operator can tighten this later via
 # `ufw delete allow 9443/tcp && ufw allow proto tcp from <master> to any port 9443`.
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
-  ufw allow 9443/tcp comment 'hyperion master->node RPC' || true
-  echo "  Opened ufw 9443/tcp for master→node RPC."
+  ufw allow "${RPC_PORT}/tcp" comment 'hyperion master->node RPC' || true
+  echo "  Opened ufw ${RPC_PORT}/tcp for master→node RPC."
 fi
 
 #-------- 7. systemd unit + start ------------------------------------------
