@@ -606,7 +606,13 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::api_v1::post_resume),
         )
         .route("/api/v1/nodes", get(handlers::api_v1::get_nodes))
-        .route("/api/v1/jobs/:id", get(handlers::api_v1::get_job));
+        .route("/api/v1/jobs/:id", get(handlers::api_v1::get_job))
+        // Public contract — no ApiAuth (a spec leaks no data, just shapes).
+        .route(
+            "/api/v1/openapi.json",
+            get(handlers::api_docs::get_openapi_json),
+        )
+        .route("/api/v1/docs", get(handlers::api_docs::get_docs));
 
     Router::new()
         .merge(protected)

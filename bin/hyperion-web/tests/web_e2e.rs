@@ -1952,3 +1952,73 @@ async fn api_v1_rate_limit_returns_429() {
         "429 carries Retry-After"
     );
 }
+
+#[tokio::test]
+async fn api_v1_openapi_spec_and_docs_are_served() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock, admin);
+
+    // openapi.json is PUBLIC (no Bearer) and is a valid OpenAPI 3 document.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/openapi.json")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert_eq!(resp.status(), StatusCode::OK, "openapi.json is public");
+    let spec: serde_json::Value = serde_json::from_str(&body_string(resp).await).expect("json");
+    assert!(
+        spec["openapi"].as_str().unwrap_or("").starts_with("3."),
+        "declares OpenAPI 3.x: {:?}",
+        spec["openapi"]
+    );
+
+    // Drift guard: every registered /api/v1 operation must appear in the spec.
+    let paths = spec["paths"].as_object().expect("paths object");
+    for p in [
+        "/api/v1/me",
+        "/api/v1/hostings",
+        "/api/v1/hostings/{id}",
+        "/api/v1/hostings/{id}/suspend",
+        "/api/v1/hostings/{id}/resume",
+        "/api/v1/nodes",
+        "/api/v1/jobs/{id}",
+    ] {
+        assert!(paths.contains_key(p), "spec is missing path {p}");
+    }
+    // The two methods that share /hostings/{id} are both documented.
+    assert!(
+        paths["/api/v1/hostings/{id}"]["get"].is_object(),
+        "GET /hostings/{{id}} documented"
+    );
+    assert!(
+        paths["/api/v1/hostings/{id}"]["delete"].is_object(),
+        "DELETE /hostings/{{id}} documented"
+    );
+    // The bearer security scheme is declared.
+    assert!(
+        spec["components"]["securitySchemes"]["bearer"].is_object(),
+        "bearer security scheme present"
+    );
+
+    // The human docs page renders (self-hosted, no external deps).
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/docs")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert_eq!(resp.status(), StatusCode::OK, "docs page renders");
+    let html = body_string(resp).await;
+    assert!(html.contains("Hyperion Remote API"), "docs title present");
+    assert!(html.contains("/api/v1/openapi.json"), "docs links the spec");
+}
