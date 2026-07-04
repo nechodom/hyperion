@@ -902,16 +902,20 @@ impl AdapterPort for RealAdapter {
     async fn nginx_apply_suspended(
         &self,
         domain: &str,
+        aliases: Vec<String>,
         reason_message: Option<String>,
     ) -> Result<(), AdapterError> {
         let cert_path = format!("{}/{}/fullchain.pem", self.certs_root.display(), domain);
         let key_path = format!("{}/{}/privkey.pem", self.certs_root.display(), domain);
+        let acme_root = self.acme_challenge_root.display().to_string();
         let msg =
             reason_message.unwrap_or_else(|| "This site is temporarily unavailable.".to_string());
         let input = hyperion_adapters::nginx::SuspendedInput {
             domain,
+            aliases: &aliases,
             cert_path: &cert_path,
             key_path: &key_path,
+            acme_challenge_root: &acme_root,
             reason_message: &msg,
         };
         hyperion_adapters::nginx::apply_suspended(&self.nginx_paths, &input).await

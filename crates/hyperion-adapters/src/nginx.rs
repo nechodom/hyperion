@@ -116,16 +116,24 @@ pub(crate) fn parse_admin_allowlist(raw: &str) -> Vec<String> {
 #[template(path = "nginx-vhost-suspended.conf.j2", escape = "none")]
 struct SuspendedTpl<'a> {
     domain: &'a str,
+    aliases: &'a [String],
     cert_path: &'a str,
     key_path: &'a str,
+    acme_challenge_root: &'a str,
     reason_message: &'a str,
 }
 
 #[derive(Debug, Clone)]
 pub struct SuspendedInput<'a> {
     pub domain: &'a str,
+    /// Alias/`www` names — MUST be listed or a suspended aliased site's
+    /// alias traffic falls through to another tenant's vhost (no
+    /// default_server exists).
+    pub aliases: &'a [String],
     pub cert_path: &'a str,
     pub key_path: &'a str,
+    /// ACME HTTP-01 challenge dir, so LE renewals still pass while suspended.
+    pub acme_challenge_root: &'a str,
     pub reason_message: &'a str,
 }
 
@@ -463,8 +471,10 @@ pub fn render_suspended(input: &SuspendedInput<'_>) -> Result<String, AdapterErr
         .collect();
     let tpl = SuspendedTpl {
         domain: input.domain,
+        aliases: input.aliases,
         cert_path: input.cert_path,
         key_path: input.key_path,
+        acme_challenge_root: input.acme_challenge_root,
         reason_message: &safe_reason,
     };
     Ok(tpl.render()?)
@@ -1334,6 +1344,77 @@ mod tests {
         assert!(out.contains("fastcgi_cache hyperion_01HCACHE;"));
         assert!(out.contains("fastcgi_cache_valid 200 301 302 300s;"));
         assert!(out.contains("fastcgi_no_cache $cookie_wordpress_logged_in"));
+        // X-Cache-Status must be emitted at SERVER level, never inside the
+        // PHP location: a location-level add_header REPLACES the inherited
+        // set and would silently drop HSTS/XFO/nosniff on PHP responses.
+        let cache_hdr = out
+            .find("add_header X-Cache-Status")
+            .expect("cache header present");
+        let php_loc = out.find("location ~ \\.php$").expect("php location");
+        assert!(
+            cache_hdr < php_loc,
+            "X-Cache-Status must be declared before (outside) the PHP location"
+        );
+        assert_eq!(
+            out.matches("add_header X-Cache-Status").count(),
+            1,
+            "exactly one X-Cache-Status declaration (server level)"
+        );
+    }
+
+    /// nginx's default client_max_body_size is 1M — smaller than the
+    /// pool's upload_max_filesize/post_max_size (64M), so without an
+    /// explicit directive every real upload dies with 413 before PHP
+    /// sees it. The vhost must match the PHP cap.
+    #[test]
+    fn render_sets_client_max_body_size_matching_php() {
+        let aliases: Vec<String> = vec![];
+        let opts = hyperion_types::VhostOptions::default();
+        let out = render(&VhostInput {
+            domain: "example.cz",
+            aliases: &aliases,
+            root_dir: "/home/example_cz/example.cz/htdocs",
+            logs_dir: "/home/example_cz/example.cz/logs",
+            system_user: "example_cz",
+            php_version: Some("8.3"),
+            cert_path: "/etc/lm/certs/example.cz/fullchain.pem",
+            key_path: "/etc/lm/certs/example.cz/privkey.pem",
+            acme_challenge_root: "/var/lib/lm/acme-challenges",
+            hosting_id: "01HBODY",
+            options: &opts,
+            preview_server_name: None,
+            preview_cert_path: None,
+            preview_cert_key_path: None,
+        })
+        .expect("render");
+        assert!(
+            out.contains("client_max_body_size 64m;"),
+            "vhost must raise the 1M nginx default to the PHP cap. got: {out}"
+        );
+    }
+
+    #[test]
+    fn render_suspended_keeps_aliases_and_acme() {
+        let aliases = vec!["www.example.cz".to_string(), "example.com".to_string()];
+        let out = render_suspended(&SuspendedInput {
+            domain: "example.cz",
+            aliases: &aliases,
+            cert_path: "/c/fullchain.pem",
+            key_path: "/c/privkey.pem",
+            acme_challenge_root: "/var/lib/hyperion/acme-challenges",
+            reason_message: "unpaid",
+        })
+        .expect("render");
+        // Aliases MUST be on the server_name or their traffic falls to
+        // another tenant's vhost while suspended.
+        assert!(out.contains("server_name example.cz www.example.cz example.com;"));
+        // ACME challenge still served so the cert can renew during suspension.
+        assert!(out.contains("location /.well-known/acme-challenge/"));
+        // Suspended pages must NOT force HSTS (the platform treats it as opt-in);
+        // a 2-year pin here can outlive the cert and brick the site.
+        assert!(!out.contains("Strict-Transport-Security"));
+        assert!(out.contains("Retry-After"));
+        assert!(out.contains("location / { return 503; }"));
     }
 
     #[test]

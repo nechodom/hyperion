@@ -68,19 +68,42 @@ struct PoolTpl<'a> {
     max_exec_secs: u32,
     listen_owner: &'a str,
     listen_group: &'a str,
+    /// pm.* spare-server knobs DERIVED from max_children (below). FPM
+    /// refuses to start when `pm.max_spare_servers > pm.max_children`,
+    /// so hardcoding start=2/min=1/max=3 breaks any pool whose operator
+    /// set max_children to 1 or 2.
+    start_servers: u32,
+    min_spare_servers: u32,
+    max_spare_servers: u32,
+    /// request_terminate_timeout — the FPM backstop, kept ABOVE
+    /// max_execution_time so PHP's own limit fires first.
+    request_terminate_secs: u32,
 }
 
 pub fn render(input: &PoolInput<'_>) -> Result<String, AdapterError> {
+    // Clamp the pm.* family so the pool is valid for ANY max_children ≥ 1:
+    // max_spare ≤ max_children, min_spare ≥ 1, min ≤ start ≤ max_spare.
+    let max_children = input.max_children.max(1);
+    let max_spare_servers = max_children.min(3);
+    let min_spare_servers = 1;
+    let start_servers = max_spare_servers.min(2);
+    // FPM backstop above PHP's own max_execution_time (+30s headroom) so a
+    // worker blocked in a syscall past its exec limit still gets reaped.
+    let request_terminate_secs = input.max_exec_secs.saturating_add(30);
     let tpl = PoolTpl {
         system_user: input.system_user,
         domain: input.domain,
         php_version: input.php_version.as_str(),
-        max_children: input.max_children,
+        max_children,
         max_requests: input.max_requests,
         memory_mb: input.memory_mb,
         max_exec_secs: input.max_exec_secs,
         listen_owner: input.listen_owner,
         listen_group: input.listen_group,
+        start_servers,
+        min_spare_servers,
+        max_spare_servers,
+        request_terminate_secs,
     };
     Ok(tpl.render()?)
 }
@@ -390,6 +413,48 @@ mod tests {
         assert!(out.contains("memory_limit] = 1024M"));
         assert!(out.contains("max_execution_time] = 120"));
         assert!(out.contains("pm.max_requests = 5000"));
+        // Hardening + FPM backstop.
+        assert!(out.contains("clear_env = yes"));
+        assert!(out.contains("expose_php] = Off"));
+        // request_terminate_timeout = max_exec + 30 headroom.
+        assert!(
+            out.contains("request_terminate_timeout = 150"),
+            "terminate must sit above max_execution_time. got: {out}"
+        );
+    }
+
+    /// FPM refuses to start when `pm.max_spare_servers > pm.max_children`
+    /// (and start/min must fit inside). The spare-server family must
+    /// therefore be DERIVED from max_children, or an operator setting
+    /// max_children=1 kills their pool on the next reload.
+    #[test]
+    fn render_clamps_spare_servers_to_max_children() {
+        // Tiny pool: everything collapses to 1.
+        let mut input = PoolInput::defaults("u", "u.cz", PhpVersion::V8_3);
+        input.max_children = 1;
+        let out = render(&input).expect("render");
+        assert!(out.contains("pm.max_children = 1"));
+        assert!(out.contains("pm.start_servers = 1"));
+        assert!(out.contains("pm.min_spare_servers = 1"));
+        assert!(out.contains("pm.max_spare_servers = 1"));
+
+        // max_children = 2 → max_spare 2, start 2.
+        input.max_children = 2;
+        let out = render(&input).expect("render");
+        assert!(out.contains("pm.max_spare_servers = 2"));
+        assert!(out.contains("pm.start_servers = 2"));
+
+        // Default 5 keeps the historical 2/1/3 shape.
+        input.max_children = 5;
+        let out = render(&input).expect("render");
+        assert!(out.contains("pm.start_servers = 2"));
+        assert!(out.contains("pm.min_spare_servers = 1"));
+        assert!(out.contains("pm.max_spare_servers = 3"));
+
+        // A zero from a bad caller is clamped to a working 1-child pool.
+        input.max_children = 0;
+        let out = render(&input).expect("render");
+        assert!(out.contains("pm.max_children = 1"));
     }
 
     #[test]
