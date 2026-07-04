@@ -1341,5 +1341,50 @@ function isShortcutContext(ev) {
   setInterval(poll, 3000);
 })();
 </script>
+<script>
+// Flicker-free live refresh. Any element with `data-live-refresh="<secs>"` and
+// an `id` re-fetches THIS page in the background and swaps ONLY that element's
+// innerHTML from the fresh copy — no full-page reload, so scroll, focus, and
+// everything outside the region are untouched (that's what caused the flicker).
+(function () {
+  'use strict';
+  const nodes = document.querySelectorAll('[data-live-refresh][id]');
+  if (!nodes.length) return;
+  let lastClick = 0;
+  document.addEventListener('click', () => { lastClick = Date.now(); }, true);
+  function inputFocused(root) {
+    const a = document.activeElement;
+    if (!a || !root.contains(a)) return false;
+    const t = (a.tagName || '').toLowerCase();
+    return t === 'input' || t === 'textarea' || t === 'select' || a.isContentEditable;
+  }
+  nodes.forEach((node) => {
+    const secs = parseInt(node.getAttribute('data-live-refresh'), 10);
+    if (!secs || secs < 2) return;
+    const id = node.id;
+    async function tick() {
+      // Skip while hidden, mid-interaction, or typing inside the region.
+      if (document.hidden) return;
+      if (Date.now() - lastClick < 4000) return;
+      if (inputFocused(node)) return;
+      try {
+        const r = await fetch(location.href, { credentials: 'same-origin' });
+        if (!r.ok) return;
+        const doc = new DOMParser().parseFromString(await r.text(), 'text/html');
+        const fresh = doc.getElementById(id);
+        const cur = document.getElementById(id);
+        if (fresh && cur && fresh.innerHTML !== cur.innerHTML) {
+          cur.innerHTML = fresh.innerHTML;
+        }
+      } catch (_) { /* swallow — try again next tick */ }
+    }
+    let timer = setInterval(tick, secs * 1000);
+    document.addEventListener('visibilitychange', () => {
+      clearInterval(timer);
+      if (!document.hidden) timer = setInterval(tick, secs * 1000);
+    });
+  });
+})();
+</script>
 </body>
 </html>

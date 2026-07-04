@@ -103,7 +103,7 @@
 </div>
 {% endif %}
 
-<div class="card no-pad-table">
+<div class="card no-pad-table" id="svc-health-live" data-live-refresh="15">
   <div class="table-wrap">
     <table>
       <thead>
@@ -306,9 +306,8 @@
 <p class="text-soft small" style="margin-top:1rem">
   Status is live, re-evaluated on every page load via
   <code>systemctl show -p ActiveState -p SubState -p UnitFileState</code>.
-  The page refreshes every 15 s so a service mid-restart clears to
-  "running" without a manual reload; it pauses while you are typing or
-  using a dialog.
+  The status table above refreshes every 15 s in the background (no full
+  reload, so it never flickers); it pauses while you are typing or clicking.
   {% if is_super_admin %}
     <strong>Install</strong> runs <code>apt-get install -y</code> and <code>systemctl enable --now</code>;
     <strong>Restart</strong> runs <code>systemctl restart &lt;name&gt;</code>.
@@ -319,56 +318,6 @@
   {% endif %}
 </p>
 
-<script>
-// Auto-refresh every 15s. Refinements over the naive
-// `setInterval(location.reload, 15000)`:
-//
-//   1. Pause when tab is hidden — don't hammer the agent in
-//      background tabs.
-//   2. Pause when ANY form input is focused — refresh would
-//      destroy the operator's in-progress text.
-//   3. Pause on click — operator might be opening a confirm
-//      dialog; reload would nuke it.
-//   4. Save scroll position to sessionStorage before reload +
-//      restore on load — so the operator's place is kept.
-(function () {
-  'use strict';
-  const SCROLL_KEY = 'hyperion.services.scroll';
-  // Restore scroll position on load if we saved one in the last
-  // 30s (anything older was a manual nav, leave alone).
-  try {
-    const saved = sessionStorage.getItem(SCROLL_KEY);
-    if (saved) {
-      const { y, ts } = JSON.parse(saved);
-      if (Date.now() - ts < 30000 && typeof y === 'number') {
-        window.scrollTo(0, y);
-      }
-    }
-    sessionStorage.removeItem(SCROLL_KEY);
-  } catch (_) {}
-
-  let timer = setInterval(tick, 15000);
-  document.addEventListener('visibilitychange', () => {
-    clearInterval(timer);
-    if (!document.hidden) timer = setInterval(tick, 15000);
-  });
-  document.addEventListener('click', (ev) => {
-    if (ev.target.closest('button, a, form')) clearInterval(timer);
-  });
-  function isInputFocused() {
-    const a = document.activeElement;
-    if (!a) return false;
-    const tag = (a.tagName || '').toLowerCase();
-    return tag === 'input' || tag === 'textarea' || tag === 'select' || a.isContentEditable;
-  }
-  function tick() {
-    if (document.hidden) return;
-    if (isInputFocused()) return;
-    try {
-      sessionStorage.setItem(SCROLL_KEY, JSON.stringify({ y: window.scrollY, ts: Date.now() }));
-    } catch (_) {}
-    location.reload();
-  }
-})();
-</script>
+{# Live refresh of #svc-health-live is handled flicker-free by the shared
+   data-live-refresh driver in base.html — no full-page reload. #}
 {% endblock %}
