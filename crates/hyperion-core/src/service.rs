@@ -186,6 +186,7 @@ pub trait AdapterPort: Send + Sync {
     async fn nginx_apply_suspended(
         &self,
         domain: &str,
+        aliases: Vec<String>,
         reason_message: Option<String>,
     ) -> Result<(), AdapterError>;
 
@@ -2543,7 +2544,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // Mirror the suspend side-effects.
         let _ = self
             .adapters
-            .nginx_apply_suspended(&detail.domain, Some("Hosting is in trash".into()))
+            .nginx_apply_suspended(
+                &detail.domain,
+                detail.aliases.clone(),
+                Some("Hosting is in trash".into()),
+            )
             .await;
         if let Some(ver) = detail.php_version {
             let _ = self.adapters.fpm_delete(&detail.system_user, ver).await;
@@ -3011,7 +3016,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     })?;
                 let _ = self
                     .adapters
-                    .nginx_apply_suspended(&detail.domain, reason.message().map(|s| s.to_string()))
+                    .nginx_apply_suspended(
+                        &detail.domain,
+                        detail.aliases.clone(),
+                        reason.message().map(|s| s.to_string()),
+                    )
                     .await;
                 self.append_audit(
                     "hosting.suspend",
@@ -3058,7 +3067,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
         let _ = self
             .adapters
-            .nginx_apply_suspended(&detail.domain, reason.message().map(|s| s.to_string()))
+            .nginx_apply_suspended(
+                &detail.domain,
+                detail.aliases.clone(),
+                reason.message().map(|s| s.to_string()),
+            )
             .await;
         if let Some(ver) = detail.php_version {
             let _ = self.adapters.fpm_delete(&detail.system_user, ver).await;
@@ -20642,7 +20655,7 @@ mod tests {
 
     fn suspend_mocks() -> MockAdapterPort {
         let mut a = happy_mocks();
-        a.expect_nginx_apply_suspended().returning(|_, _| Ok(()));
+        a.expect_nginx_apply_suspended().returning(|_, _, _| Ok(()));
         a.expect_fpm_delete().returning(|_, _| Ok(()));
         a.expect_db_lock().returning(|_, _| Ok(()));
         a.expect_linux_lock_login().returning(|_| Ok(()));
@@ -20658,7 +20671,7 @@ mod tests {
         a.expect_db_create().returning(|_, _, _| Ok(db_creds()));
         a.expect_acme_issue().returning(|d, _| Ok(cert_for(d)));
         a.expect_nginx_write_vhost().returning(|_| Ok(()));
-        a.expect_nginx_apply_suspended().returning(|_, _| Ok(()));
+        a.expect_nginx_apply_suspended().returning(|_, _, _| Ok(()));
         a.expect_fpm_delete().returning(|_, _| Ok(()));
         a.expect_db_lock().returning(|_, _| Ok(()));
         a.expect_linux_lock_login().returning(|_| Ok(()));

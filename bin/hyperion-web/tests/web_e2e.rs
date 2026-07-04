@@ -92,7 +92,12 @@ impl hyperion_core::AdapterPort for StubAdapters {
     async fn nginx_delete_htpasswd(&self, _: &str) -> Result<(), AdapterError> {
         Ok(())
     }
-    async fn nginx_apply_suspended(&self, _: &str, _: Option<String>) -> Result<(), AdapterError> {
+    async fn nginx_apply_suspended(
+        &self,
+        _: &str,
+        _: Vec<String>,
+        _: Option<String>,
+    ) -> Result<(), AdapterError> {
         Ok(())
     }
     async fn apply_php_limits(

@@ -5,19 +5,29 @@ server {
     listen [::]:80;
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
-    server_name {{ domain }};
+    server_name {{ domain }}{% for a in aliases %} {{ a }}{% endfor %};
 
     ssl_certificate     {{ cert_path }};
     ssl_certificate_key {{ key_path }};
     ssl_protocols TLSv1.2 TLSv1.3;
-    add_header Strict-Transport-Security "max-age=63072000" always;
     server_tokens off;
 
-    return 503;
+    # Keep ACME HTTP-01 working WHILE suspended, or the cert silently
+    # expires during the suspension and the site becomes unreachable
+    # behind a non-bypassable cert error even after resume.
+    location /.well-known/acme-challenge/ {
+        alias {{ acme_challenge_root }}/;
+        try_files $uri =404;
+        default_type "text/plain";
+        autoindex off;
+    }
+
+    location / { return 503; }
     error_page 503 @suspended;
     location @suspended {
         internal;
         default_type text/html;
+        add_header Retry-After "3600" always;
         return 503 '<!doctype html><html lang="en"><head><meta charset="utf-8"><title>{{ domain }} unavailable</title><style>body{font:14px/1.5 system-ui,-apple-system,BlinkMacSystemFont,Segoe UI,sans-serif;max-width:36rem;margin:4rem auto;padding:0 1rem;color:#222}h1{font-size:1.4rem}.muted{color:#666}</style></head><body><h1>This site is temporarily unavailable.</h1><p>{{ reason_message }}</p><p class="muted">If you are the site owner, please contact your hosting provider.</p></body></html>';
     }
 }

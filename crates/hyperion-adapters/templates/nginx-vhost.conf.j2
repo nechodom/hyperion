@@ -13,9 +13,17 @@
    ─────────────────────────────────────────────────────────────── -#}
 {% macro https_body() %}
     ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_ciphers ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
+    ssl_ciphers ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
     ssl_prefer_server_ciphers on;
     ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 1d;
+    # Session tickets off: without key rotation they undercut TLS forward secrecy.
+    ssl_session_tickets off;
+
+    # Match the pool's PHP caps (upload_max_filesize / post_max_size = 64M).
+    # Without this nginx's 1M default rejects any real upload with 413
+    # before PHP ever sees it.
+    client_max_body_size 64m;
 
     {%- if hsts_max_age > 0 %}
     add_header Strict-Transport-Security "max-age={{ hsts_max_age }}; includeSubDomains" always;
@@ -23,6 +31,14 @@
     add_header X-Frame-Options "SAMEORIGIN" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    {%- if fastcgi_cache_enabled %}
+    # Cache-status debug header. Declared HERE (server level) and not inside
+    # the PHP location: a location-level add_header would REPLACE the whole
+    # inherited set, silently dropping HSTS/XFO/nosniff on every PHP response.
+    # nginx omits headers whose value is empty, so non-FastCGI responses
+    # simply don't carry it.
+    add_header X-Cache-Status $upstream_cache_status always;
+    {%- endif %}
     server_tokens off;
 
     {%- if waf_enabled %}
@@ -149,7 +165,8 @@
         fastcgi_cache_bypass $cookie_wordpress_logged_in $cookie_PHPSESSID;
         fastcgi_no_cache $cookie_wordpress_logged_in $cookie_PHPSESSID;
         fastcgi_cache_key "$scheme$request_method$host$request_uri";
-        add_header X-Cache-Status $upstream_cache_status;
+        {#- X-Cache-Status is emitted at SERVER level (see https_body top) —
+            an add_header here would drop the inherited security headers. #}
         {%- endif %}
     }
     {%- endif %}

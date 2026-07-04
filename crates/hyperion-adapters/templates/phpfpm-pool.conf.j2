@@ -8,15 +8,17 @@ listen.mode = 0660
 
 pm = dynamic
 pm.max_children = {{ max_children }}
-pm.start_servers = 2
-pm.min_spare_servers = 1
-pm.max_spare_servers = 3
+pm.start_servers = {{ start_servers }}
+pm.min_spare_servers = {{ min_spare_servers }}
+pm.max_spare_servers = {{ max_spare_servers }}
 pm.max_requests = {{ max_requests }}
 
 php_admin_value[memory_limit] = {{ memory_mb }}M
 php_admin_value[max_execution_time] = {{ max_exec_secs }}
 php_admin_value[upload_max_filesize] = 64M
 php_admin_value[post_max_size] = 64M
+; Don't advertise the exact PHP version in X-Powered-By / error pages.
+php_admin_value[expose_php] = Off
 php_admin_value[open_basedir] = /home/{{ system_user }}/{{ domain }}:/tmp
 ; Debian's default session.save_path (/var/lib/php/sessions) sits
 ; OUTSIDE open_basedir, so any hosted app calling session_start()
@@ -41,4 +43,12 @@ php_admin_value[sendmail_path] = /usr/local/lib/hyperion/site-mail-wrapper -u {{
 
 catch_workers_output = yes
 chdir = /
-clear_env = no
+; Hard backstop for hung/IO-blocked requests: kill a worker still running
+; this long AFTER max_execution_time (which the request itself can ignore
+; while blocked in a syscall). Without it a slow upstream can pin every
+; worker forever and 502 the whole pool. Sits above max_execution_time.
+request_terminate_timeout = {{ request_terminate_secs }}
+; PHP-FPM's own secure default is clear_env = yes. Leaving the service's
+; environment visible to tenant PHP (getenv/$_ENV) is a needless leak on a
+; shared box; start each worker with a clean environment.
+clear_env = yes
