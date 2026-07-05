@@ -15,8 +15,11 @@ pm.max_requests = {{ max_requests }}
 
 php_admin_value[memory_limit] = {{ memory_mb }}M
 php_admin_value[max_execution_time] = {{ max_exec_secs }}
-php_admin_value[upload_max_filesize] = 64M
-php_admin_value[post_max_size] = 64M
+; php_VALUE (not admin_value) so the operator CAN raise these per site via
+; the php.ini override UI (.user.ini). nginx client_max_body_size gives 256M
+; of headroom above this default.
+php_value[upload_max_filesize] = 64M
+php_value[post_max_size] = 64M
 ; Don't advertise the exact PHP version in X-Powered-By / error pages.
 php_admin_value[expose_php] = Off
 php_admin_value[open_basedir] = /home/{{ system_user }}/{{ domain }}:/tmp

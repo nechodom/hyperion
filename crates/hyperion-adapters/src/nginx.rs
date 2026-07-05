@@ -1388,9 +1388,12 @@ mod tests {
         })
         .expect("render");
         assert!(
-            out.contains("client_max_body_size 64m;"),
-            "vhost must raise the 1M nginx default to the PHP cap. got: {out}"
+            out.contains("client_max_body_size 256m;"),
+            "vhost must raise the 1M nginx default well above the PHP upload cap. got: {out}"
         );
+        // Timeout defers to PHP max_execution_time / FPM terminate, not a low
+        // hardcode that 504s a legit long request when the operator raises exec.
+        assert!(out.contains("fastcgi_read_timeout 3600s;"));
     }
 
     #[test]
