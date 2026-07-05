@@ -884,7 +884,7 @@
 /* Profile picker — single-column on phones, 2-up otherwise. */
 .profile-picker {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
   gap: 0.6rem;
   margin: 0.5rem 0 0.4rem;
 }

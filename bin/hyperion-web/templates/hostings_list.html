@@ -115,7 +115,7 @@
     {% if !wp_assets.is_empty() %}
     <details class="inline-action" style="position:relative">
       <summary class="btn small" style="list-style:none;cursor:pointer" id="bulk-install-summary" data-bulk-summary="install_asset">Install WordPress asset</summary>
-      <div style="position:absolute;right:0;z-index:10;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:0.7rem;margin-top:0.4rem;box-shadow:var(--shadow);min-width:24rem">
+      <div style="position:absolute;right:0;z-index:10;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:0.7rem;margin-top:0.4rem;box-shadow:var(--shadow);min-width:24rem;max-width:calc(100vw - 1.5rem)">
         <div class="field" style="margin:0">
           <label for="bulk-asset-select">Asset
             <a href="/profiles/wp-assets" class="text-soft" style="font-weight:400;font-size:0.78rem;margin-left:0.4rem">manage library →</a>
