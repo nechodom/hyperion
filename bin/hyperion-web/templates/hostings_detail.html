@@ -801,7 +801,7 @@
   {# Stat grid with inline sparklines. Each cell: big number,
      label, then a trend mini-chart over the last 48 hourly
      buckets. Sparklines are empty when there's <2 samples yet. #}
-  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:1rem;margin-bottom:0.6rem">
+  <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(180px, 100%), 1fr));gap:1rem;margin-bottom:0.6rem">
     <div>
       <div class="text-soft small">Disk used</div>
       <div style="font-size:1.3rem;font-weight:600;margin:0.15rem 0 0.3rem">{{ crate::handlers::stats::fmt_bytes(s.disk_bytes) }}</div>
@@ -1288,7 +1288,7 @@
     <details class="inline-action" style="position:relative">
       <summary class="btn small primary" style="list-style:none;cursor:pointer">+ Install plugin</summary>
       <form method="post" action="/hostings/wp/plugin-action" autocomplete="off"
-            style="position:absolute;z-index:10;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:0.7rem;margin-top:0.4rem;box-shadow:var(--shadow);min-width:22rem">
+            style="position:absolute;z-index:10;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:0.7rem;margin-top:0.4rem;box-shadow:var(--shadow);min-width:22rem;max-width:calc(100vw - 1.5rem)">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
         <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
         <input type="hidden" name="action" value="install">
@@ -1313,7 +1313,7 @@
     <details class="inline-action" style="position:relative">
       <summary class="btn small" style="list-style:none;cursor:pointer">+ Install from library</summary>
       <form method="post" action="/hostings/wp/install-from-asset" autocomplete="off"
-            style="position:absolute;z-index:10;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:0.7rem;margin-top:0.4rem;box-shadow:var(--shadow);min-width:24rem">
+            style="position:absolute;z-index:10;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:0.7rem;margin-top:0.4rem;box-shadow:var(--shadow);min-width:24rem;max-width:calc(100vw - 1.5rem)">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
         <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
         <div class="field" style="margin:0">
@@ -1636,7 +1636,7 @@
     <details class="inline-action" style="position:relative">
       <summary class="btn small primary" style="list-style:none;cursor:pointer">+ Install theme</summary>
       <form method="post" action="/hostings/wp/theme-action" autocomplete="off"
-            style="position:absolute;z-index:10;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:0.7rem;margin-top:0.4rem;box-shadow:var(--shadow);min-width:22rem">
+            style="position:absolute;z-index:10;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:0.7rem;margin-top:0.4rem;box-shadow:var(--shadow);min-width:22rem;max-width:calc(100vw - 1.5rem)">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
         <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
         <input type="hidden" name="action" value="install">
@@ -1656,7 +1656,7 @@
     <details class="inline-action" style="position:relative">
       <summary class="btn small" style="list-style:none;cursor:pointer">+ Install theme from library</summary>
       <form method="post" action="/hostings/wp/install-from-asset" autocomplete="off"
-            style="position:absolute;z-index:10;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:0.7rem;margin-top:0.4rem;box-shadow:var(--shadow);min-width:24rem">
+            style="position:absolute;z-index:10;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:0.7rem;margin-top:0.4rem;box-shadow:var(--shadow);min-width:24rem;max-width:calc(100vw - 1.5rem)">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
         <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
         <div class="field" style="margin:0">
@@ -2305,7 +2305,7 @@
   <form method="post" action="/hostings/php-ini">
     <input type="hidden" name="_csrf" value="{{ csrf_php_ini }}">
     <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:1rem">
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(180px, 100%), 1fr));gap:1rem">
       <div class="field" style="margin:0">
         <label for="pi_memory_limit"><code>memory_limit</code></label>
         <input id="pi_memory_limit" name="memory_limit" value="{{ php_ini.memory_limit }}" placeholder="256M" autocomplete="off">

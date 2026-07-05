@@ -1325,7 +1325,7 @@
       </div>
       <fieldset style="border:1px solid var(--border);border-radius:8px;padding:0.8rem 1rem;margin:0.9rem 0">
         <legend class="text-soft small" style="padding:0 0.4rem">Capabilities</legend>
-        <div class="cap-groups" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(16rem,1fr));gap:0.8rem 1.4rem">
+        <div class="cap-groups" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(min(16rem, 100%), 1fr));gap:0.8rem 1.4rem">
           {% for g in api_key_cap_groups %}
           <div class="cap-group">
             <div class="text-soft small" style="font-weight:600;margin-bottom:0.3rem">{{ g.label }}</div>

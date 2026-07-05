@@ -563,9 +563,9 @@ pre code {
   display: grid;
   gap: 1rem;
 }
-.grid.cols-2 { grid-template-columns: repeat(auto-fit, minmax(min(20rem, 100%), 1fr)); }
-.grid.cols-3 { grid-template-columns: repeat(auto-fit, minmax(min(15rem, 100%), 1fr)); }
-.grid.cols-4 { grid-template-columns: repeat(auto-fit, minmax(min(12rem, 100%), 1fr)); }
+.grid.cols-2 { grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr)); }
+.grid.cols-3 { grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr)); }
+.grid.cols-4 { grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr)); }
 
 /* ─────────────────────────────────────────────────────────────
    Stats page — node switcher, KPI strip, sparklines, kv-grid
@@ -627,7 +627,7 @@ pre code {
   display: grid;
   /* Bumped from 11rem so tiles never look cramped on wide monitors
      and still wrap cleanly at laptop widths. */
-  grid-template-columns: repeat(auto-fit, minmax(min(13rem, 100%), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
   gap: 0.85rem;
   margin-bottom: 1rem;
 }
@@ -702,7 +702,7 @@ pre code {
 /* Sparkline mini-charts grid. */
 .spark-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(18rem, 100%), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr));
   gap: 0.85rem;
 }
 .spark-card {
@@ -770,7 +770,7 @@ pre code {
 /* Generic key-value grid used in node detail card. */
 .kv-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(11rem, 100%), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
   gap: 0.75rem 1.5rem;
 }
 .kv-grid > div {
@@ -815,7 +815,7 @@ pre code {
 }
 .creds-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(20rem, 100%), 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(20rem, 1fr));
   gap: 1rem 1.4rem;
   margin-top: 1rem;
 }
@@ -1952,7 +1952,7 @@ hr.divider {
 
 .dashboard-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.6fr) minmax(min(18rem, 100%), 1fr);
+  grid-template-columns: minmax(0, 1.6fr) minmax(18rem, 1fr);
   gap: 1rem;
   margin-top: 1.5rem;
   align-items: start;
@@ -2932,7 +2932,7 @@ hr.divider {
   .field + .field { margin-top: 0.6rem; }
 
   /* Stats card sparkline 4-up → 2-up on phones (saves vertical space). */
-  .card [style*="grid-template-columns:repeat(auto-fit,minmax(min(180px, 100%), 1fr))"] {
+  .card [style*="grid-template-columns:repeat(auto-fit,minmax(180px,1fr))"] {
     grid-template-columns: 1fr 1fr !important;
   }
 }
@@ -3195,40 +3195,4 @@ body.role-customer .header-action-new { display: none !important; }
 .sort-arrow {
   font-size: 0.8em;
   opacity: 0.85;
-}
-
-/* ───────────────────────────────────────────────────────────────
- *  Responsive audit fixes (phone/tablet)
- *  See docs: grids with a FIXED minmax minimum are min()-wrapped at
- *  their source so a lone auto-fit column can shrink below the min.
- *  Below we collapse the remaining FIXED N-column inline grids (which
- *  can't be reached by a class rule since inline styles win) via
- *  attribute selectors + !important, matching the existing pattern.
- * ─────────────────────────────────────────────────────────────── */
-
-/* Belt-and-braces: never let a stray wide child scroll the whole page
- * sideways. The mobile top-bar keeps its own overflow-x:auto. */
-html, body { overflow-x: clip; }
-
-@media (max-width: 700px) {
-  /* Fixed multi-column inline grids → single column on phones. */
-  [style*="grid-template-columns:1fr 1fr"],
-  [style*="grid-template-columns:1fr 1fr;"],
-  [style*="grid-template-columns:1fr 1fr auto"],
-  [style*="grid-template-columns:1fr 1fr 2fr auto"],
-  [style*="grid-template-columns:1fr 1fr 1fr 1fr auto"],
-  [style*="minmax(0,2fr) minmax(0,1fr)"],
-  [style*="minmax(0, 2fr) minmax(0, 1fr)"] {
-    grid-template-columns: 1fr !important;
-    max-width: 100% !important;
-  }
-  .node-card__inline-form { grid-template-columns: 1fr !important; }
-}
-
-/* Touch: bump the small controls to a comfortable 40px tap target. */
-@media (pointer: coarse) {
-  .search-clear, .node-tab, .chip, .creds-copy, .row-menu-toggle {
-    min-height: 40px;
-    min-width: 40px;
-  }
 }

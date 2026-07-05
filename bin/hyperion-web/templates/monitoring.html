@@ -13,7 +13,7 @@
   <div class="grow"></div>
 </div>
 
-<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:1rem;margin-bottom:1.2rem">
+<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(13rem, 100%), 1fr));gap:1rem;margin-bottom:1.2rem">
   <div class="card" style="padding:1rem 1.2rem">
     <div class="text-soft small">Alerting</div>
     <div style="font-size:1.6rem;font-weight:700;color:var(--danger);margin-top:0.2rem">{{ alerting_count }}</div>
