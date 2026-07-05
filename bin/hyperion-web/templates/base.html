@@ -1358,17 +1358,22 @@ function isShortcutContext(ev) {
     const t = (a.tagName || '').toLowerCase();
     return t === 'input' || t === 'textarea' || t === 'select' || a.isContentEditable;
   }
+  const ticks = [];
   nodes.forEach((node) => {
     const secs = parseInt(node.getAttribute('data-live-refresh'), 10);
     if (!secs || secs < 2) return;
     const id = node.id;
-    async function tick() {
+    async function tick(force) {
       // Skip while hidden, mid-interaction, or typing inside the region.
+      // `force` (bfcache restore) bypasses the click cooldown but still
+      // respects hidden + focus so we never clobber what the user is doing.
       if (document.hidden) return;
-      if (Date.now() - lastClick < 4000) return;
+      if (!force && Date.now() - lastClick < 4000) return;
       if (inputFocused(node)) return;
       try {
-        const r = await fetch(location.href, { credentials: 'same-origin' });
+        // no-store: the whole point is to defeat the stale HTTP cache the
+        // user had to F5 past. Always pull a fresh render.
+        const r = await fetch(location.href, { credentials: 'same-origin', cache: 'no-store' });
         if (!r.ok) return;
         const doc = new DOMParser().parseFromString(await r.text(), 'text/html');
         const fresh = doc.getElementById(id);
@@ -1378,11 +1383,18 @@ function isShortcutContext(ev) {
         }
       } catch (_) { /* swallow — try again next tick */ }
     }
+    ticks.push(tick);
     let timer = setInterval(tick, secs * 1000);
     document.addEventListener('visibilitychange', () => {
       clearInterval(timer);
       if (!document.hidden) timer = setInterval(tick, secs * 1000);
     });
+  });
+  // Back/forward navigation restores a frozen page from the bfcache with
+  // whatever data it had when the user left — the exact "I had to F5 to see
+  // the new backup" case. Refresh every region promptly on restore.
+  window.addEventListener('pageshow', (e) => {
+    if (e.persisted) ticks.forEach((t) => t(true));
   });
 })();
 </script>

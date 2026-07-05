@@ -48,6 +48,33 @@ impl JobView {
     pub fn is_terminal(&self) -> bool {
         matches!(self.state.as_str(), "done" | "failed" | "cancelled")
     }
+
+    /// When this job's `target` is a single hosting selector (domain
+    /// or id) that resolves at `/hostings/<sel>`, return it so the UI
+    /// can render a "back to hosting" link on the progress page.
+    /// Cluster-wide / multi-target / panel-import jobs (`bulk`,
+    /// `panel_import`, `cert_renew_all`, `profile_reapply_all`) carry
+    /// a label or nothing there, so they're excluded.
+    pub fn hosting_target(&self) -> Option<&str> {
+        const HOSTING_KINDS: &[&str] = &[
+            "backup",
+            "hosting_backup",
+            "install",
+            "hosting_delete",
+            "acme_issue",
+            "hosting_clone",
+            "migration",
+            "restore",
+            "hosting_restore",
+            "post_create_setup",
+            "profile_apply",
+            "wp_install",
+        ];
+        match &self.target {
+            Some(t) if HOSTING_KINDS.contains(&self.kind.as_str()) => Some(t.as_str()),
+            _ => None,
+        }
+    }
 }
 
 /// One row from `web_sessions`. The signed-cookie Session in

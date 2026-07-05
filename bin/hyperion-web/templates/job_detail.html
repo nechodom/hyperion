@@ -34,7 +34,10 @@
         </form>
       {% endif %}
     {% endif %}
-    <a href="/jobs" class="btn ghost">← All jobs</a>
+    {% if let Some(h) = job.hosting_target() %}
+      <a href="/hostings/{{ h }}" class="btn">← Back to {{ h }}</a>
+    {% endif %}
+    <a href="/jobs" class="btn ghost">All jobs</a>
   </div>
 </div>
 
