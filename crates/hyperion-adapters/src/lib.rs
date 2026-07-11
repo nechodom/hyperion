@@ -18,6 +18,7 @@ pub mod cmd;
 pub mod email;
 pub mod fs;
 pub mod ftp;
+pub mod logscan;
 pub mod mariadb;
 pub mod nginx;
 pub mod nodejs;

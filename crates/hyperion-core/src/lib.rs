@@ -30,7 +30,9 @@ pub mod wp_updates;
 pub use agent::AgentImpl;
 pub use real_adapter::RealAdapter;
 pub use secrets::{SecretsError, SecretsStore};
-pub use service::{AdapterPort, BackupRetention, HostingPaths, HostingService, RemoteBackupConfig};
+pub use service::{
+    AdapterPort, BackupRetention, Fail2banConfig, HostingPaths, HostingService, RemoteBackupConfig,
+};
 // Re-export the email config struct so the agent binary can construct
 // it without depending on hyperion-adapters directly.
 pub use hyperion_adapters::email::EmailConfig;

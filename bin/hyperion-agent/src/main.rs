@@ -442,6 +442,20 @@ async fn main() -> anyhow::Result<()> {
         .with_slack_webhook(slack_webhook)
         .with_acme_email(cfg.acme.contact_email.clone())
         .with_email(email_cfg, email_to)
+        .with_fail2ban(
+            hyperion_core::Fail2banConfig {
+                enabled: cfg.fail2ban.enabled,
+                window_secs: cfg.fail2ban.window_secs,
+                ban_ttl_secs: cfg.fail2ban.ban_ttl_secs,
+                repeat_ttl_secs: cfg.fail2ban.repeat_ttl_secs,
+                repeat_lookback_secs: cfg.fail2ban.repeat_lookback_secs,
+                http_threshold: cfg.fail2ban.http_threshold,
+                ssh_threshold: cfg.fail2ban.ssh_threshold,
+                ftp_threshold: cfg.fail2ban.ftp_threshold,
+                mail_threshold: cfg.fail2ban.mail_threshold,
+            }
+            .sanitized(),
+        )
         .with_agent_config_path(cli.config.clone())
         .with_node_state_file(state_file_for_svc)
         .with_git_sha(env!("HYPERION_GIT_SHA"));
