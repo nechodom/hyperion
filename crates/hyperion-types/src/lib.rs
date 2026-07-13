@@ -15,13 +15,13 @@
 
 pub mod cert;
 pub mod db;
+pub mod dkim;
 pub mod dns;
 pub mod hosting;
 pub mod ids;
 pub mod import;
 pub mod jobs;
 pub mod limits;
-pub mod dkim;
 pub mod migration;
 pub mod php;
 pub mod profile;
@@ -34,6 +34,7 @@ pub use cert::{
     PanelCertProgress,
 };
 pub use db::{DbProvision, DbSummary};
+pub use dkim::DkimStatus;
 pub use dns::{CertIssueRequest, DnsCheckResult};
 pub use hosting::{
     HostingDetail, HostingState, HostingSummary, SftpStatus, VhostOptions, WpExtras, WpRedisConfig,
@@ -52,7 +53,6 @@ pub use limits::{
 pub use migration::{HostingImportResult, HostingMigrationBundle, HostingMigrationManifest};
 pub use php::PhpVersion;
 pub use profile::{HostingProfile, ProfileApply, ProfileInput, WpAssetSummary};
-pub use dkim::DkimStatus;
 pub use spf::SpfCheckResult;
 pub use stats::{
     AcmeConfigView, AgentConfigView, BackupRemoteConfigView, BackupRetentionConfigView,

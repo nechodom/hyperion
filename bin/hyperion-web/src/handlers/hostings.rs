@@ -5115,11 +5115,7 @@ pub async fn get_dkim_panel(
 /// Render a DKIM card carrying just an error banner (default status) — used
 /// when the owner lookup or the RPC transport itself fails, so the HTMX swap
 /// shows a message instead of collapsing to a 500.
-fn render_dkim_error_card(
-    selector: &str,
-    csrf: String,
-    err: String,
-) -> Result<Response, AppError> {
+fn render_dkim_error_card(selector: &str, csrf: String, err: String) -> Result<Response, AppError> {
     Ok(Html(
         DkimCardTpl {
             st: hyperion_types::DkimStatus::default(),
@@ -5142,17 +5138,13 @@ async fn dkim_action(
     req: impl FnOnce(HostingSelector) -> Request,
     take: impl FnOnce(RpcResponse) -> Result<hyperion_types::DkimStatus, RpcResponse>,
 ) -> Result<Response, AppError> {
-    let sel = match require_manage_for_selector(
-        &state,
-        &ctx,
-        &selector,
-        Capability::HostingEditConfig,
-    )
-    .await
-    {
-        Ok(s) => s,
-        Err(r) => return Ok(r),
-    };
+    let sel =
+        match require_manage_for_selector(&state, &ctx, &selector, Capability::HostingEditConfig)
+            .await
+        {
+            Ok(s) => s,
+            Err(r) => return Ok(r),
+        };
     let csrf = super::session_csrf_token(&state, &ctx);
     // Resolve the owning node EXPLICITLY — a DKIM write must land where the
     // key + mail live. `.ok()`-to-None (as the read panels do) would silently

@@ -1,7 +1,7 @@
 //! DKIM signing for outbound mail via OpenDKIM, driven as a postfix milter.
 //!
 //! Architecture: OpenDKIM runs once per node as a milter on a loopback socket
-//! (`inet:8891@localhost`). Postfix is wired to call it for BOTH SMTP-received
+//! (`inet:8891@127.0.0.1`). Postfix is wired to call it for BOTH SMTP-received
 //! and locally-injected mail — `non_smtpd_milters` is the load-bearing one,
 //! because a hosted site's `mail()` reaches postfix through the local
 //! `/usr/sbin/sendmail` pickup path, never over SMTP. `milter_default_action =
@@ -86,7 +86,9 @@ fn signing_table_line(domain: &str, selector: &str) -> String {
 
 /// Absolute path of a domain's private key.
 fn key_path(domain: &str, selector: &str) -> PathBuf {
-    PathBuf::from(KEYS_DIR).join(domain).join(format!("{selector}.private"))
+    PathBuf::from(KEYS_DIR)
+        .join(domain)
+        .join(format!("{selector}.private"))
 }
 
 /// The DNS TXT *value* an operator should publish for `pubkey`.
@@ -160,7 +162,12 @@ pub fn extract_p_tag(dkim_txt: &str) -> Option<String> {
 /// key matches `our_pubkey`? Both sides are reduced to their `p=` base64.
 pub fn published_key_matches(published: &str, our_pubkey: &str) -> bool {
     match extract_p_tag(published) {
-        Some(p) => p == our_pubkey.chars().filter(|c| !c.is_whitespace()).collect::<String>(),
+        Some(p) => {
+            p == our_pubkey
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect::<String>()
+        }
         None => false,
     }
 }
@@ -315,7 +322,11 @@ pub async fn enable_signing(domain: &str, selector: &str) -> Result<(), AdapterE
         return Err(AdapterError::Other("unsafe DKIM domain/selector".into()));
     }
     let kp = key_path(domain, selector);
-    ensure_line(KEY_TABLE, &key_table_line(domain, selector, &kp.to_string_lossy())).await?;
+    ensure_line(
+        KEY_TABLE,
+        &key_table_line(domain, selector, &kp.to_string_lossy()),
+    )
+    .await?;
     ensure_line(SIGNING_TABLE, &signing_table_line(domain, selector)).await?;
     reload().await
 }
@@ -450,7 +461,10 @@ mod tests {
         // Must match the postfix milter endpoint exactly (literal 127.0.0.1,
         // never `localhost`) and use relaxed/relaxed so a forwarder's whitespace
         // fixups don't break the signature.
-        assert!(c.contains("Socket                  inet:8891@127.0.0.1"), "{c}");
+        assert!(
+            c.contains("Socket                  inet:8891@127.0.0.1"),
+            "{c}"
+        );
         assert!(c.contains("Canonicalization        relaxed/relaxed"), "{c}");
         assert_eq!(MILTER_SOCKET_POSTFIX, "inet:127.0.0.1:8891");
     }
