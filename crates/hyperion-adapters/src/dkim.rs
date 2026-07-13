@@ -172,9 +172,21 @@ pub fn published_key_matches(published: &str, our_pubkey: &str) -> bool {
     }
 }
 
-/// Is OpenDKIM installed on this node?
+/// `opendkim-genkey` candidate paths. Debian 12 ships it in `/usr/sbin`;
+/// other builds use `/usr/bin`. Probe both rather than hard-coding one path
+/// and spawning ENOENT ("No such file or directory") at genkey time.
+const GENKEY_BINS: &[&str] = &["/usr/sbin/opendkim-genkey", "/usr/bin/opendkim-genkey"];
+const DAEMON_BINS: &[&str] = &["/usr/sbin/opendkim", "/usr/bin/opendkim"];
+
+/// First existing path among `candidates`, if any.
+fn resolve_bin(candidates: &[&'static str]) -> Option<&'static str> {
+    candidates.iter().copied().find(|p| Path::new(p).exists())
+}
+
+/// Is OpenDKIM installed on this node? True once either the daemon or the
+/// genkey tool is present (both come from the packages we install).
 pub async fn is_installed() -> bool {
-    Path::new("/usr/sbin/opendkim").exists() || Path::new("/usr/bin/opendkim-genkey").exists()
+    resolve_bin(DAEMON_BINS).is_some() || resolve_bin(GENKEY_BINS).is_some()
 }
 
 /// Install OpenDKIM. No-op if already present. Robust against the two ways a
@@ -312,8 +324,14 @@ pub async fn genkey(domain: &str, selector: &str) -> Result<String, AdapterError
     let priv_path = key_path(domain, selector);
     let txt_path = dir.join(format!("{selector}.txt"));
     if !priv_path.exists() {
+        let genkey_bin = resolve_bin(GENKEY_BINS).ok_or_else(|| {
+            AdapterError::Other(
+                "opendkim-genkey not found in /usr/sbin or /usr/bin — is opendkim-tools installed?"
+                    .into(),
+            )
+        })?;
         cmd::run(
-            "/usr/bin/opendkim-genkey",
+            genkey_bin,
             &[
                 "-b",
                 "2048",
@@ -491,6 +509,16 @@ mod tests {
     fn extract_p_tag_none_when_empty_or_missing() {
         assert_eq!(extract_p_tag("v=DKIM1; k=rsa; p="), None); // revoked key
         assert_eq!(extract_p_tag("v=spf1 a mx ~all"), None);
+    }
+
+    #[test]
+    fn resolve_bin_picks_first_existing() {
+        // /bin/sh exists on both the dev mac and CI linux; the fakes don't.
+        assert_eq!(
+            resolve_bin(&["/nonexistent-lm-xyz", "/bin/sh"]),
+            Some("/bin/sh")
+        );
+        assert_eq!(resolve_bin(&["/nope-a-lm", "/nope-b-lm"]), None);
     }
 
     #[test]
