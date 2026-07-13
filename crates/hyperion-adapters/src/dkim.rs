@@ -9,11 +9,11 @@
 //! (unsigned) rather than deferring in the queue.
 //!
 //! Per signing domain we keep an RSA keypair under
-//! `/etc/opendkim/keys/<domain>/<selector>.private` and two table entries:
-//!   * `KeyTable`     — `<sel>._domainkey.<domain> <domain>:<sel>:<keypath>`
-//!   * `SigningTable` — `*@<domain> <sel>._domainkey.<domain>`
-//! OpenDKIM re-reads the tables on reload, so enabling/disabling a domain is
-//! an edit + `systemctl reload opendkim`, never a restart.
+//! `/etc/opendkim/keys/<domain>/<selector>.private` and two table entries — a
+//! `KeyTable` row (`<sel>._domainkey.<domain> <domain>:<sel>:<keypath>`) and a
+//! `SigningTable` row (`*@<domain> <sel>._domainkey.<domain>`). OpenDKIM
+//! re-reads the tables on reload, so enabling/disabling a domain is an edit +
+//! `systemctl reload opendkim`, never a restart.
 //!
 //! Hyperion does NOT publish DNS. Enabling a domain generates the key and
 //! returns the public half; the operator publishes the
@@ -177,28 +177,66 @@ pub async fn is_installed() -> bool {
     Path::new("/usr/sbin/opendkim").exists() || Path::new("/usr/bin/opendkim-genkey").exists()
 }
 
-/// Install OpenDKIM (best-effort apt). No-op if already present.
+/// Install OpenDKIM. No-op if already present. Robust against the two ways a
+/// naive `apt-get install opendkim` fails when driven non-interactively from
+/// the panel on Debian 12:
+///
+/// 1. *postinst service-start aborts dpkg.* The package's postinst tries to
+///    start `opendkim.service` against the stock `/etc/opendkim.conf`; that
+///    start fails and dpkg returns 1 → `apt` exits 100 → the whole install is
+///    rolled into a half-configured state. We drop a `policy-rc.d` that tells
+///    `invoke-rc.d` "do not start anything" for the duration of the install,
+///    so the package configures cleanly; `ensure_configured` starts OpenDKIM
+///    ourselves afterwards with a working config.
+/// 2. *a prior attempt left dpkg half-configured.* `--fix-broken install` +
+///    `dpkg --configure -a` heal that before we retry.
+///
+/// The apt/dpkg step captures combined stdout+stderr, so a genuine failure
+/// (bad repo, unmet dep) surfaces the real `dpkg: error processing package …`
+/// line instead of the useless generic `E: Sub-process … returned 1`.
 pub async fn ensure_installed() -> Result<(), AdapterError> {
     if is_installed().await {
         return Ok(());
     }
-    // Force DEBIAN_FRONTEND=noninteractive via env(1): cmd::run doesn't set
-    // env vars, and opendkim's postinst can otherwise block on a debconf
-    // prompt and hang the whole enable request. -qq keeps apt output quiet.
-    cmd::run(
+    // Inhibit maintainer-script service starts for the install. Only remove it
+    // afterwards if WE created it (never clobber an operator's own policy).
+    let policy = Path::new("/usr/sbin/policy-rc.d");
+    let created_policy = if policy.exists() {
+        false
+    } else {
+        atomic_write(policy, b"#!/bin/sh\nexit 101\n", 0o755)
+            .await
+            .is_ok()
+    };
+
+    let apt = |args: &'static [&'static str]| async move {
+        let mut argv = vec!["DEBIAN_FRONTEND=noninteractive", "apt-get"];
+        argv.extend_from_slice(args);
+        cmd::run_capturing_all("/usr/bin/env", &argv).await
+    };
+
+    // Heal any half-configured state from an earlier failed attempt + refresh
+    // package lists. Both best-effort — a broken third-party repo mustn't block
+    // the install itself, which resolves against all configured sources.
+    let _ = cmd::run_capturing_all(
         "/usr/bin/env",
         &[
             "DEBIAN_FRONTEND=noninteractive",
-            "apt-get",
-            "install",
-            "-y",
-            "-qq",
-            "opendkim",
-            "opendkim-tools",
+            "dpkg",
+            "--configure",
+            "-a",
         ],
     )
-    .await?;
-    Ok(())
+    .await;
+    let _ = apt(&["--fix-broken", "install", "-y", "-qq"]).await;
+    let _ = apt(&["update", "-qq"]).await;
+
+    let res = apt(&["install", "-y", "-qq", "opendkim", "opendkim-tools"]).await;
+
+    if created_policy {
+        let _ = tokio::fs::remove_file(policy).await;
+    }
+    res.map(|_| ())
 }
 
 /// Ensure the node-wide OpenDKIM config, tables and the postfix milter wiring

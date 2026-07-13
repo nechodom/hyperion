@@ -53,6 +53,39 @@ pub async fn run(program: &str, args: &[&str]) -> Result<String, AdapterError> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Like [`run`], but on failure the error tail carries **stdout + stderr**
+/// combined. Some tools — notably `apt-get`/`dpkg` — print the decisive
+/// diagnostic ("dpkg: error processing package … post-installation script
+/// subprocess returned error exit status N") to STDOUT and only the generic
+/// "E: Sub-process … returned an error code" to stderr, so a stderr-only
+/// capture throws away the actual cause. Returns stdout on success.
+pub async fn run_capturing_all(program: &str, args: &[&str]) -> Result<String, AdapterError> {
+    debug!(program, args = ?redact_args(args), "exec (combined capture)");
+    let out = Command::new(program).args(args).output().await?;
+    if !out.status.success() {
+        let code = out.status.code().unwrap_or(-1);
+        let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
+        if !combined.is_empty() && !combined.ends_with('\n') {
+            combined.push('\n');
+        }
+        combined.push_str(&String::from_utf8_lossy(&out.stderr));
+        let tail: String = combined
+            .chars()
+            .rev()
+            .take(4096)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
+        return Err(AdapterError::Command {
+            cmd: format!("{program} {}", redact_args(args).join(" ")),
+            code,
+            stderr_tail: tail,
+        });
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 /// Run a command and feed stdin from the provided bytes.
 pub async fn run_with_stdin(
     program: &str,
@@ -120,6 +153,25 @@ mod tests {
         match err {
             AdapterError::Command { stderr_tail, .. } => {
                 assert!(!stderr_tail.is_empty());
+            }
+            other => panic!("wrong: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn run_capturing_all_includes_stdout_in_error() {
+        // `ls` of one real + one missing path lists the real one to STDOUT,
+        // writes the error to stderr, and exits non-zero — so the combined
+        // tail must contain the stdout portion (which plain `run` would drop).
+        let err = run_capturing_all("/bin/ls", &["/etc/hosts", "/nonexistent-lm-xyz-42"])
+            .await
+            .unwrap_err();
+        match err {
+            AdapterError::Command { stderr_tail, .. } => {
+                assert!(
+                    stderr_tail.contains("hosts"),
+                    "combined tail must include stdout: {stderr_tail}"
+                );
             }
             other => panic!("wrong: {other:?}"),
         }
