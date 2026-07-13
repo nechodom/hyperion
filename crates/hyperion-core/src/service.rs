@@ -4986,13 +4986,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// 127.0.0.1, the cluster master link, a NAT gateway) whose node-wide
     /// firewall drop would be a self-inflicted outage, not a defence.
     /// Operators can still ban any address manually via `ban_add`.
-    async fn auto_ban(
-        &self,
-        ip: &str,
-        hosting_id: Option<&str>,
-        reason: &str,
-        now: i64,
-    ) -> bool {
+    async fn auto_ban(&self, ip: &str, hosting_id: Option<&str>, reason: &str, now: i64) -> bool {
         let cfg = &self.fail2ban;
         if !hyperion_adapters::logscan::is_public_bannable_ip(ip) {
             return false;
@@ -5003,13 +4997,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         {
             return false;
         }
-        let repeat = hyperion_state::bans::was_banned_since(
-            &self.pool,
-            ip,
-            now - cfg.repeat_lookback_secs,
-        )
-        .await
-        .unwrap_or(false);
+        let repeat =
+            hyperion_state::bans::was_banned_since(&self.pool, ip, now - cfg.repeat_lookback_secs)
+                .await
+                .unwrap_or(false);
         let ttl = if repeat {
             cfg.repeat_ttl_secs
         } else {

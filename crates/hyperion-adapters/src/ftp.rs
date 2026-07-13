@@ -294,7 +294,9 @@ pub async fn ensure_vsftpd_configured() -> Result<(), AdapterError> {
     if c != cfg {
         atomic_write(Path::new(VSFTPD_CONF), c.as_bytes(), 0o644)
             .await
-            .map_err(|e| AdapterError::Other(format!("add syslog logging to {VSFTPD_CONF}: {e}")))?;
+            .map_err(|e| {
+                AdapterError::Other(format!("add syslog logging to {VSFTPD_CONF}: {e}"))
+            })?;
         cmd::run("/usr/bin/systemctl", &["restart", "vsftpd"]).await?;
     }
     Ok(())

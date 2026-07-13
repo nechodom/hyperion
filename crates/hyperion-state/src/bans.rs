@@ -143,11 +143,7 @@ pub async fn list_for_hosting(
 /// True when this IP has *any* ban row (active or already lifted/expired)
 /// with `banned_at >= since`. Backs ban-escalation: a repeat offender inside
 /// the look-back window earns a longer ban than a first-timer.
-pub async fn was_banned_since(
-    pool: &SqlitePool,
-    ip: &str,
-    since: i64,
-) -> Result<bool, StateError> {
+pub async fn was_banned_since(pool: &SqlitePool, ip: &str, since: i64) -> Result<bool, StateError> {
     let row: Option<(i64,)> =
         sqlx::query_as("SELECT id FROM ip_bans WHERE ip = ? AND banned_at >= ? LIMIT 1")
             .bind(ip)

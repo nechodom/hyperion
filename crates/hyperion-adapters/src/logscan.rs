@@ -163,17 +163,17 @@ Jul  6 12:00:04 s4 dovecot: imap-login: Login: user=<al>, rip=198.51.100.5
     #[test]
     fn private_and_special_ips_are_not_bannable() {
         for ip in [
-            "127.0.0.1",       // loopback
-            "10.0.0.5",        // private
-            "192.168.1.10",    // private
-            "172.16.4.4",      // private
-            "169.254.1.1",     // link-local
-            "100.64.0.1",      // CGNAT
-            "0.0.0.0",         // unspecified
-            "::1",             // v6 loopback
-            "fd00::1",         // v6 ULA
-            "fe80::1",         // v6 link-local
-            "not-an-ip",       // garbage
+            "127.0.0.1",    // loopback
+            "10.0.0.5",     // private
+            "192.168.1.10", // private
+            "172.16.4.4",   // private
+            "169.254.1.1",  // link-local
+            "100.64.0.1",   // CGNAT
+            "0.0.0.0",      // unspecified
+            "::1",          // v6 loopback
+            "fd00::1",      // v6 ULA
+            "fe80::1",      // v6 link-local
+            "not-an-ip",    // garbage
         ] {
             assert!(!is_public_bannable_ip(ip), "{ip} must not be bannable");
         }
