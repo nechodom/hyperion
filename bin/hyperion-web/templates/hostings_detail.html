@@ -790,6 +790,22 @@
   </div>
 </div>
 
+{# DKIM card — lazily loaded (status + key read on the owning node). The
+   skeleton is replaced by _hosting_dkim_card.html. #}
+<div hx-get="/hostings/{{ detail.id.as_str() }}/dkim-panel"
+     hx-trigger="load" hx-swap="outerHTML">
+  <div class="card hover">
+    <h2>
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+      DKIM signing
+    </h2>
+    <p class="muted" style="margin:0;font-size:0.85rem">
+      <span class="spinner-inline"></span>
+      Loading DKIM status…
+    </p>
+  </div>
+</div>
+
 {% if let Some(s) = stats %}
 <div class="card hover">
   <h2>

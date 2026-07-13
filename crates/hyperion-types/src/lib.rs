@@ -15,6 +15,7 @@
 
 pub mod cert;
 pub mod db;
+pub mod dkim;
 pub mod dns;
 pub mod hosting;
 pub mod ids;
@@ -33,6 +34,7 @@ pub use cert::{
     PanelCertProgress,
 };
 pub use db::{DbProvision, DbSummary};
+pub use dkim::DkimStatus;
 pub use dns::{CertIssueRequest, DnsCheckResult};
 pub use hosting::{
     HostingDetail, HostingState, HostingSummary, SftpStatus, VhostOptions, WpExtras, WpRedisConfig,

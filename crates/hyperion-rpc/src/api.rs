@@ -1050,6 +1050,29 @@ pub trait AgentApi: Send + Sync + 'static {
     ) -> Result<String, RpcError>;
     /// Disable FTP (passwd -d <user>).
     async fn ftp_disable(&self, sel: HostingSelector) -> Result<(), RpcError>;
+    /// DKIM signing status for a hosting's domain.
+    async fn dkim_status(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::DkimStatus, RpcError>;
+    /// Enable DKIM signing for a hosting: generate the key (if absent) and
+    /// add the domain to OpenDKIM's signing tables. Returns the record to
+    /// publish so the operator can add it to DNS.
+    async fn dkim_enable(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::DkimStatus, RpcError>;
+    /// Disable DKIM signing for a hosting (removes it from the signing
+    /// tables; key material is retained).
+    async fn dkim_disable(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::DkimStatus, RpcError>;
+    /// Verify the domain's published DKIM TXT record against our key.
+    async fn dkim_verify(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::DkimStatus, RpcError>;
     /// Read current key-only SFTP status for a hosting.
     async fn sftp_status(
         &self,

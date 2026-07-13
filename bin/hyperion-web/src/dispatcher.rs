@@ -168,6 +168,9 @@ fn timeout_for_request(req: &Request) -> u64 {
         | Request::HostingDelete { .. }
         | Request::WpInstall { .. }
         | Request::WpInstallFromAsset { .. } => 600,
+        // First-time enable apt-installs opendkim + opendkim-tools before it
+        // generates the key — well past 30s on a cold apt cache.
+        Request::DkimEnable { .. } => 600,
         _ => 30,
     }
 }

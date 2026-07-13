@@ -5057,6 +5057,194 @@ pub async fn get_spf_panel(
     Ok(Html(html).into_response())
 }
 
+/// DKIM card — lazily swapped into the detail page and re-rendered by the
+/// enable/verify/disable actions. All dispatched to the OWNING node (the
+/// OpenDKIM key + signing tables live where the site's mail is injected).
+#[derive(Template)]
+#[template(path = "_hosting_dkim_card.html")]
+struct DkimCardTpl {
+    st: hyperion_types::DkimStatus,
+    /// The URL selector these forms post back with.
+    selector: String,
+    csrf_token: String,
+    /// Set only when an action failed — surfaced above the card body.
+    error: Option<String>,
+}
+
+pub async fn get_dkim_panel(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Path(selector): Path<String>,
+) -> Result<Response, AppError> {
+    let sel = parse_selector(&selector)?;
+    let (detail, owner_node) = find_hosting_anywhere(&state, sel.clone()).await?;
+    if let Err(r) = require_hosting_access(
+        &state,
+        &ctx,
+        detail.id.as_str(),
+        false,
+        Capability::HostingView,
+    )
+    .await
+    {
+        return Ok(r);
+    }
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        owner_node.as_deref(),
+        Request::DkimStatus { sel },
+    )
+    .await;
+    let csrf = super::session_csrf_token(&state, &ctx);
+    match resp {
+        Ok(RpcResponse::DkimStatus(st)) => Ok(Html(
+            DkimCardTpl {
+                st,
+                selector,
+                csrf_token: csrf,
+                error: None,
+            }
+            .render()?,
+        )
+        .into_response()),
+        // A failed status probe just collapses the skeleton (like the SPF card).
+        _ => Ok(Html(String::new()).into_response()),
+    }
+}
+
+/// Render a DKIM card carrying just an error banner (default status) — used
+/// when the owner lookup or the RPC transport itself fails, so the HTMX swap
+/// shows a message instead of collapsing to a 500.
+fn render_dkim_error_card(selector: &str, csrf: String, err: String) -> Result<Response, AppError> {
+    Ok(Html(
+        DkimCardTpl {
+            st: hyperion_types::DkimStatus::default(),
+            selector: selector.to_string(),
+            csrf_token: csrf,
+            error: Some(err),
+        }
+        .render()?,
+    )
+    .into_response())
+}
+
+/// Shared body of the three DKIM actions: authorize (manage), dispatch to the
+/// owning node, then re-render the card for the HTMX swap. On an RPC error we
+/// still re-fetch the status so the card reflects reality plus the message.
+async fn dkim_action(
+    state: SharedState,
+    ctx: AuthCtx,
+    selector: String,
+    req: impl FnOnce(HostingSelector) -> Request,
+    take: impl FnOnce(RpcResponse) -> Result<hyperion_types::DkimStatus, RpcResponse>,
+) -> Result<Response, AppError> {
+    let sel =
+        match require_manage_for_selector(&state, &ctx, &selector, Capability::HostingEditConfig)
+            .await
+        {
+            Ok(s) => s,
+            Err(r) => return Ok(r),
+        };
+    let csrf = super::session_csrf_token(&state, &ctx);
+    // Resolve the owning node EXPLICITLY — a DKIM write must land where the
+    // key + mail live. `.ok()`-to-None (as the read panels do) would silently
+    // retarget a lookup failure to the master, generating a key on the wrong
+    // node. Surface the error in the card instead.
+    let owner: Option<String> = match find_hosting_anywhere(&state, sel.clone()).await {
+        Ok((_d, n)) => n,
+        Err(e) => return render_dkim_error_card(&selector, csrf, e.to_string()),
+    };
+    let resp = match crate::dispatcher::dispatch_to_node(&state, owner.as_deref(), req(sel.clone()))
+        .await
+    {
+        Ok(r) => r,
+        // Transport failure (node unreachable / timeout) — a graceful card, not a 500.
+        Err(e) => return render_dkim_error_card(&selector, csrf, e.to_string()),
+    };
+    let (st, error) = match take(resp) {
+        Ok(st) => (st, None),
+        Err(RpcResponse::Error(e)) => {
+            // Re-read current status so the card body stays accurate.
+            let st = match crate::dispatcher::dispatch_to_node(
+                &state,
+                owner.as_deref(),
+                Request::DkimStatus { sel },
+            )
+            .await
+            {
+                Ok(RpcResponse::DkimStatus(s)) => s,
+                _ => hyperion_types::DkimStatus::default(),
+            };
+            (st, Some(e.to_string()))
+        }
+        Err(_) => return Err(AppError::Internal("unexpected DKIM response".into())),
+    };
+    Ok(Html(
+        DkimCardTpl {
+            st,
+            selector,
+            csrf_token: csrf,
+            error,
+        }
+        .render()?,
+    )
+    .into_response())
+}
+
+pub async fn post_dkim_enable(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<DkimActionForm>,
+) -> Result<Response, AppError> {
+    dkim_action(
+        state,
+        ctx,
+        form.selector,
+        |sel| Request::DkimEnable { sel },
+        |r| match r {
+            RpcResponse::DkimEnable(s) => Ok(s),
+            other => Err(other),
+        },
+    )
+    .await
+}
+
+pub async fn post_dkim_disable(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<DkimActionForm>,
+) -> Result<Response, AppError> {
+    dkim_action(
+        state,
+        ctx,
+        form.selector,
+        |sel| Request::DkimDisable { sel },
+        |r| match r {
+            RpcResponse::DkimDisable(s) => Ok(s),
+            other => Err(other),
+        },
+    )
+    .await
+}
+
+pub async fn post_dkim_verify(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<DkimActionForm>,
+) -> Result<Response, AppError> {
+    dkim_action(
+        state,
+        ctx,
+        form.selector,
+        |sel| Request::DkimVerify { sel },
+        |r| match r {
+            RpcResponse::DkimVerify(s) => Ok(s),
+            other => Err(other),
+        },
+    )
+    .await
+}
+
 /// Lazily-loaded WordPress vulnerability panel (Wordfence feed match).
 /// Dispatched to the OWNING node — the feed cache + wp-cli both live
 /// where the site's files are.
@@ -8044,6 +8232,13 @@ pub struct FtpSetForm {
     /// Empty → server generates one.
     #[serde(default)]
     pub new_password: String,
+}
+
+/// Form for the DKIM enable/disable/verify buttons — just the hosting
+/// selector (the `_csrf` field is consumed by the CSRF middleware).
+#[derive(Deserialize)]
+pub struct DkimActionForm {
+    pub selector: String,
 }
 
 pub async fn post_ftp_set(

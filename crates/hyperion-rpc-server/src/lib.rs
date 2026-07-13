@@ -1295,6 +1295,22 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(_) => Response::FtpDisable,
             Err(e) => Response::Error(e),
         },
+        Request::DkimStatus { sel } => match api.dkim_status(sel).await {
+            Ok(s) => Response::DkimStatus(s),
+            Err(e) => Response::Error(e),
+        },
+        Request::DkimEnable { sel } => match api.dkim_enable(sel).await {
+            Ok(s) => Response::DkimEnable(s),
+            Err(e) => Response::Error(e),
+        },
+        Request::DkimDisable { sel } => match api.dkim_disable(sel).await {
+            Ok(s) => Response::DkimDisable(s),
+            Err(e) => Response::Error(e),
+        },
+        Request::DkimVerify { sel } => match api.dkim_verify(sel).await {
+            Ok(s) => Response::DkimVerify(s),
+            Err(e) => Response::Error(e),
+        },
         Request::SftpStatus { sel } => match api.sftp_status(sel).await {
             Ok(s) => Response::SftpStatus(s),
             Err(e) => Response::Error(e),
@@ -2482,6 +2498,30 @@ mod tests {
         }
         async fn ftp_disable(&self, _: HostingSelector) -> Result<(), RpcError> {
             Ok(())
+        }
+        async fn dkim_status(
+            &self,
+            _: HostingSelector,
+        ) -> Result<hyperion_types::DkimStatus, RpcError> {
+            Ok(hyperion_types::DkimStatus::default())
+        }
+        async fn dkim_enable(
+            &self,
+            _: HostingSelector,
+        ) -> Result<hyperion_types::DkimStatus, RpcError> {
+            Ok(hyperion_types::DkimStatus::default())
+        }
+        async fn dkim_disable(
+            &self,
+            _: HostingSelector,
+        ) -> Result<hyperion_types::DkimStatus, RpcError> {
+            Ok(hyperion_types::DkimStatus::default())
+        }
+        async fn dkim_verify(
+            &self,
+            _: HostingSelector,
+        ) -> Result<hyperion_types::DkimStatus, RpcError> {
+            Ok(hyperion_types::DkimStatus::default())
         }
         async fn sftp_status(
             &self,

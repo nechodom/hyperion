@@ -1,0 +1,82 @@
+{# DKIM card — lazily swapped in via hx-get="/hostings/:sel/dkim-panel",
+   and re-rendered in place by the enable/verify/disable forms (they
+   hx-target="#dkim-card"). Every action runs on the OWNING node: the RSA
+   key and OpenDKIM's signing tables live where the site's mail is injected.
+   Hyperion never touches DNS — it generates the key and shows the TXT
+   record for the operator to publish, exactly like the SPF card. #}
+<div class="card hover" id="dkim-card">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+    DKIM signing
+    {% if st.unavailable %}<span class="pill" style="margin-left:0.4rem;font-size:0.65rem;background:var(--surface-2);color:var(--text-soft)">unavailable</span>
+    {% else if st.enabled && st.verify_status == "verified" %}<span class="pill ok" style="margin-left:0.4rem;font-size:0.65rem">verified</span>
+    {% else if st.enabled && st.verify_status == "mismatch" %}<span class="pill warn" style="margin-left:0.4rem;font-size:0.65rem">key mismatch</span>
+    {% else if st.enabled %}<span class="pill warn" style="margin-left:0.4rem;font-size:0.65rem">publish DNS</span>
+    {% else %}<span class="pill" style="margin-left:0.4rem;font-size:0.65rem;background:var(--surface-2);color:var(--text-soft)">off</span>{% endif %}
+  </h2>
+
+  {% if let Some(e) = error %}
+    <p style="color:var(--danger);margin:-0.2rem 0 0.75rem;font-size:0.85rem">{{ e }}</p>
+  {% endif %}
+
+  {% if st.unavailable %}
+    <p class="muted" style="margin:0 0 0.75rem;font-size:0.85rem">
+      OpenDKIM isn't installed on this hosting's node yet. Enabling DKIM installs
+      and configures it, then generates this domain's signing key.
+    </p>
+    <form hx-post="/hostings/dkim/enable" hx-target="#dkim-card" hx-swap="outerHTML">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="selector" value="{{ selector }}">
+      <button class="btn primary" type="submit">Enable DKIM</button>
+    </form>
+
+  {% else if !st.enabled %}
+    <p class="muted" style="margin:0 0 0.75rem;font-size:0.85rem">
+      Sign <code>{{ st.domain }}</code>'s outbound mail so receivers can prove it
+      wasn't forged — a big inbox-delivery boost alongside SPF. Hyperion generates
+      the key; you publish one <code>TXT</code> record.
+    </p>
+    <form hx-post="/hostings/dkim/enable" hx-target="#dkim-card" hx-swap="outerHTML">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="selector" value="{{ selector }}">
+      <button class="btn primary" type="submit">Enable DKIM</button>
+    </form>
+
+  {% else %}
+    <p class="muted" style="margin:0 0 0.6rem;font-size:0.85rem">
+      Add this <code>TXT</code> record at your DNS provider for <code>{{ st.domain }}</code>,
+      then Verify. Mail is already being signed; receivers only trust the signature
+      once this record is live.
+    </p>
+    <dl class="kv">
+      <dt>Host / name</dt>
+      <dd><code style="font-size:0.8rem;word-break:break-all">{{ st.dns_name }}</code></dd>
+      <dt>Type</dt><dd><code>TXT</code></dd>
+      <dt>Value</dt>
+      <dd><code style="font-size:0.78rem;display:block;padding:0.5rem;background:var(--bg-2);border-radius:var(--radius-xs);word-break:break-all">{{ st.txt_value }}</code></dd>
+    </dl>
+
+    {% if st.verify_status == "verified" %}
+      <p style="color:var(--success);font-size:0.85rem;margin:0.4rem 0 0.75rem">✓ Published record matches — {{ st.domain }}'s mail is DKIM-signed and verifiable.</p>
+    {% else if st.verify_status == "mismatch" %}
+      <p style="color:var(--warn);font-size:0.85rem;margin:0.4rem 0 0.75rem">A DKIM record exists at that name but its key differs from ours — replace it with the value above, then Verify.</p>
+    {% else if st.verify_status == "missing" %}
+      <p style="color:var(--warn);font-size:0.85rem;margin:0.4rem 0 0.75rem">No matching record found yet. DNS can take a while to propagate — add it and Verify again.</p>
+    {% else if st.verify_status == "unknown" %}
+      <p style="color:var(--text-soft);font-size:0.85rem;margin:0.4rem 0 0.75rem">Couldn't reach DNS to check just now — try Verify again in a moment.</p>
+    {% endif %}
+
+    <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
+      <form hx-post="/hostings/dkim/verify" hx-target="#dkim-card" hx-swap="outerHTML" style="display:inline">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="selector" value="{{ selector }}">
+        <button class="btn" type="submit">Verify DNS</button>
+      </form>
+      <form hx-post="/hostings/dkim/disable" hx-target="#dkim-card" hx-swap="outerHTML" style="display:inline">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="selector" value="{{ selector }}">
+        <button class="btn ghost" type="submit">Disable</button>
+      </form>
+    </div>
+  {% endif %}
+</div>
