@@ -1222,6 +1222,26 @@ pub enum Request {
     FtpDisable {
         sel: HostingSelector,
     },
+    /// DKIM signing status for a hosting's domain (key present? in the
+    /// signing tables? last DNS verification?).
+    DkimStatus {
+        sel: HostingSelector,
+    },
+    /// Generate the key (if absent) + add the domain to OpenDKIM's signing
+    /// tables so its outbound mail is signed. Returns the record to publish.
+    DkimEnable {
+        sel: HostingSelector,
+    },
+    /// Remove the domain from the signing tables (key material is kept so a
+    /// re-enable doesn't invalidate a published TXT record).
+    DkimDisable {
+        sel: HostingSelector,
+    },
+    /// Look up `<selector>._domainkey.<domain>` in DNS and compare the
+    /// published public key to ours.
+    DkimVerify {
+        sel: HostingSelector,
+    },
     /// Current key-only SFTP status for a hosting's system user.
     SftpStatus {
         sel: HostingSelector,
@@ -1706,6 +1726,10 @@ pub enum Response {
         password: String,
     },
     FtpDisable,
+    DkimStatus(hyperion_types::DkimStatus),
+    DkimEnable(hyperion_types::DkimStatus),
+    DkimDisable(hyperion_types::DkimStatus),
+    DkimVerify(hyperion_types::DkimStatus),
     SftpStatus(hyperion_types::SftpStatus),
     SftpSet(hyperion_types::SftpStatus),
     BanList(Vec<hyperion_types::IpBanWire>),

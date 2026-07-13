@@ -21,6 +21,7 @@ pub mod ids;
 pub mod import;
 pub mod jobs;
 pub mod limits;
+pub mod dkim;
 pub mod migration;
 pub mod php;
 pub mod profile;
@@ -51,6 +52,7 @@ pub use limits::{
 pub use migration::{HostingImportResult, HostingMigrationBundle, HostingMigrationManifest};
 pub use php::PhpVersion;
 pub use profile::{HostingProfile, ProfileApply, ProfileInput, WpAssetSummary};
+pub use dkim::DkimStatus;
 pub use spf::SpfCheckResult;
 pub use stats::{
     AcmeConfigView, AgentConfigView, BackupRemoteConfigView, BackupRetentionConfigView,

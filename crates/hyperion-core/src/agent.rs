@@ -1461,6 +1461,34 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.ftp_disable(sel).await
     }
 
+    async fn dkim_status(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::DkimStatus, RpcError> {
+        self.svc.dkim_status(sel).await
+    }
+
+    async fn dkim_enable(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::DkimStatus, RpcError> {
+        self.svc.dkim_enable(sel).await
+    }
+
+    async fn dkim_disable(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::DkimStatus, RpcError> {
+        self.svc.dkim_disable(sel).await
+    }
+
+    async fn dkim_verify(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::DkimStatus, RpcError> {
+        self.svc.dkim_verify(sel).await
+    }
+
     async fn sftp_status(
         &self,
         sel: HostingSelector,

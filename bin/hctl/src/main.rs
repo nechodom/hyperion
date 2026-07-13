@@ -1058,6 +1058,26 @@ fn print_pretty(resp: &Response) {
             println!("  password (shown once): {password}");
         }
         Response::FtpDisable => println!("✓ FTP disabled (password cleared)"),
+        Response::DkimStatus(s)
+        | Response::DkimEnable(s)
+        | Response::DkimDisable(s)
+        | Response::DkimVerify(s) => {
+            println!("DKIM for {}", s.domain);
+            if s.unavailable {
+                println!("  status: unavailable (OpenDKIM not installed on the node)");
+            } else if s.enabled {
+                let v = if s.verify_status.is_empty() {
+                    "not yet verified"
+                } else {
+                    &s.verify_status
+                };
+                println!("  status:   enabled ({v})");
+                println!("  DNS name: {}", s.dns_name);
+                println!("  TXT:      {}", s.txt_value);
+            } else {
+                println!("  status: disabled");
+            }
+        }
         Response::BanList(bans) => {
             if bans.is_empty() {
                 println!("no active bans");

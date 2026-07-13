@@ -15,6 +15,7 @@ pub mod backup;
 pub mod cert;
 pub mod cloudflare;
 pub mod cmd;
+pub mod dkim;
 pub mod email;
 pub mod fs;
 pub mod ftp;

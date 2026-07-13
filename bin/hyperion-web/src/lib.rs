@@ -179,6 +179,22 @@ pub fn build_router(state: SharedState) -> Router {
             "/hostings/ftp/disable",
             post(handlers::hostings::post_ftp_disable),
         )
+        .route(
+            "/hostings/:selector/dkim-panel",
+            get(handlers::hostings::get_dkim_panel),
+        )
+        .route(
+            "/hostings/dkim/enable",
+            post(handlers::hostings::post_dkim_enable),
+        )
+        .route(
+            "/hostings/dkim/disable",
+            post(handlers::hostings::post_dkim_disable),
+        )
+        .route(
+            "/hostings/dkim/verify",
+            post(handlers::hostings::post_dkim_verify),
+        )
         .route("/hostings/sftp", post(handlers::hostings::post_sftp))
         .route(
             "/hostings/:selector/sftp-panel",
