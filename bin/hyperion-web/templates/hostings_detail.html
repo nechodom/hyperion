@@ -2539,6 +2539,9 @@
     </div>
     <button class="btn" type="submit">Save schedule</button>
   </form>
+  {# Live region: a running backup flips to ok, and a backup started from the
+     job progress page shows up on return — no F5. Driver in base.html. #}
+  <div id="backups-live" data-live-refresh="15">
   {% if backups.is_empty() %}
     <p class="muted" style="font-size:0.9rem">No backups yet. Run a backup to capture the files and database.</p>
   {% else %}
@@ -2612,6 +2615,7 @@
       </table>
     </div>
   {% endif %}
+  </div>{# #backups-live #}
 
   <div class="card-section">
     <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Restore from a .tar.gz upload</h2>
