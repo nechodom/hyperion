@@ -41,6 +41,8 @@ local_root=/home/$USER
 user_config_dir=/etc/vsftpd/user_conf
 xferlog_enable=YES
 xferlog_std_format=YES
+dual_log_enable=YES
+syslog_enable=YES
 seccomp_sandbox=NO
 ";
 
@@ -264,6 +266,36 @@ pub async fn ensure_vsftpd_configured() -> Result<(), AdapterError> {
             .await
             .map_err(|e| {
                 AdapterError::Other(format!("add user_config_dir to {VSFTPD_CONF}: {e}"))
+            })?;
+        cmd::run("/usr/bin/systemctl", &["restart", "vsftpd"]).await?;
+    }
+
+    // 4. Ensure vsftpd's auth events reach the journal (identifier `vsftpd`)
+    //    so the brute-force scanner can read its "FAIL LOGIN" lines. This
+    //    needs BOTH `syslog_enable=YES` (redirect the vsftpd-format log to
+    //    syslog) AND `dual_log_enable=YES` — because `xferlog_std_format=YES`
+    //    otherwise routes ALL output through the wu-ftpd xferlog writer, which
+    //    only records transfers (no FAIL LOGIN) and never touches syslog.
+    //    Upgrades EXISTING "ours" configs written before these lines existed.
+    let cfg = tokio::fs::read_to_string(VSFTPD_CONF)
+        .await
+        .unwrap_or_default();
+    let mut c = cfg.clone();
+    for directive in ["dual_log_enable=YES", "syslog_enable=YES"] {
+        let key = directive.split('=').next().unwrap_or(directive);
+        if !c.contains(&format!("{key}=")) {
+            if !c.is_empty() && !c.ends_with('\n') {
+                c.push('\n');
+            }
+            c.push_str(directive);
+            c.push('\n');
+        }
+    }
+    if c != cfg {
+        atomic_write(Path::new(VSFTPD_CONF), c.as_bytes(), 0o644)
+            .await
+            .map_err(|e| {
+                AdapterError::Other(format!("add syslog logging to {VSFTPD_CONF}: {e}"))
             })?;
         cmd::run("/usr/bin/systemctl", &["restart", "vsftpd"]).await?;
     }

@@ -340,6 +340,69 @@ pub struct PanelProgress {
     pub not_after: i64,
 }
 
+/// Tunables for the native brute-force scanner, sourced from agent.toml's
+/// `[fail2ban]` section. Every default reproduces the historical hardcoded
+/// behaviour, so an operator who never touches the section sees no change.
+#[derive(Debug, Clone)]
+pub struct Fail2banConfig {
+    /// Master switch. `false` makes `fail2ban_tick` a no-op (manual bans and
+    /// boot re-apply still work).
+    pub enabled: bool,
+    /// Look-back window applied to every log / journal source, in seconds.
+    pub window_secs: i64,
+    /// Ban duration for a first offence, in seconds.
+    pub ban_ttl_secs: i64,
+    /// Ban duration for a repeat offender (an IP with a prior ban inside
+    /// `repeat_lookback_secs`), in seconds.
+    pub repeat_ttl_secs: i64,
+    /// How far back to look for a prior ban when deciding "repeat offender".
+    pub repeat_lookback_secs: i64,
+    /// Failures-within-window thresholds, per source.
+    pub http_threshold: u32, // POST /wp-login.php | /xmlrpc.php floods
+    pub ssh_threshold: u32,
+    pub ftp_threshold: u32,
+    pub mail_threshold: u32,
+}
+
+impl Default for Fail2banConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            window_secs: 600,
+            ban_ttl_secs: 3600,
+            repeat_ttl_secs: 24 * 3600,
+            repeat_lookback_secs: 24 * 3600,
+            http_threshold: 12,
+            ssh_threshold: 8,
+            ftp_threshold: 8,
+            mail_threshold: 8,
+        }
+    }
+}
+
+impl Fail2banConfig {
+    /// Clamp operator-supplied values to sane floors. A `[fail2ban]` typo
+    /// like `ban_ttl_secs = 0` must never become a *permanent* node-wide
+    /// ban (ban_add treats ttl ≤ 0 as no-expiry), and a `0` threshold must
+    /// not mean "ban on the first observed failure". Called once when the
+    /// agent builds its config.
+    pub fn sanitized(mut self) -> Self {
+        self.window_secs = self.window_secs.max(1);
+        // TTLs of 0 / negative would persist as a permanent ban — floor at
+        // a minute so a bad value is short-lived, not forever.
+        self.ban_ttl_secs = self.ban_ttl_secs.max(60);
+        self.repeat_ttl_secs = self.repeat_ttl_secs.max(self.ban_ttl_secs);
+        self.repeat_lookback_secs = self.repeat_lookback_secs.max(0);
+        // A threshold of 0 would ban any IP with a single failure line
+        // (the count map only ever holds counts ≥ 1). Floor at 2.
+        self.http_threshold = self.http_threshold.max(2);
+        self.ssh_threshold = self.ssh_threshold.max(2);
+        self.ftp_threshold = self.ftp_threshold.max(2);
+        self.mail_threshold = self.mail_threshold.max(2);
+        self
+    }
+}
+
 pub struct HostingService<A: AdapterPort + 'static> {
     pub pool: SqlitePool,
     pub adapters: Arc<A>,
@@ -359,6 +422,8 @@ pub struct HostingService<A: AdapterPort + 'static> {
     pub email_config: Option<hyperion_adapters::email::EmailConfig>,
     /// Default operator address for cluster-wide notifications.
     pub email_default_to: Option<String>,
+    /// Brute-force scanner tunables (agent.toml `[fail2ban]`).
+    pub fail2ban: Fail2banConfig,
     /// Path to agent.toml on disk, for the per-section settings editor.
     /// None disables UI-driven config writes (operator hand-edits only).
     pub agent_config_path: Option<std::path::PathBuf>,
@@ -1606,6 +1671,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             acme_contact_email: "admin@hyperion.invalid".into(),
             email_config: None,
             email_default_to: None,
+            fail2ban: Fail2banConfig::default(),
             agent_config_path: None,
             update_cache: Arc::new(tokio::sync::RwLock::new(None)),
             current_git_sha: "dev-unknown".into(),
@@ -1705,6 +1771,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
     pub fn with_paths(mut self, paths: HostingPaths) -> Self {
         self.paths = paths;
+        self
+    }
+
+    pub fn with_fail2ban(mut self, cfg: Fail2banConfig) -> Self {
+        self.fail2ban = cfg;
         self
     }
 
@@ -4903,22 +4974,77 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(n)
     }
 
-    /// One tick of the brute-force scanner: sweep expired bans, then scan
-    /// every active hosting's access log for wp-login / xmlrpc floods and
-    /// auto-ban offenders. Returns the number of new bans applied.
-    pub async fn fail2ban_tick(&self) -> Result<i64, RpcError> {
-        const WINDOW_SECS: i64 = 600;
-        const THRESHOLD: u32 = 12;
-        const BAN_TTL_SECS: i64 = 3600;
+    /// Apply an automatic ban with escalation, unless the IP is already
+    /// banned this window. Returns true when a fresh ban was created. A
+    /// repeat offender — an IP with a prior ban inside the configured
+    /// look-back — earns the longer `repeat_ttl_secs` instead of the
+    /// first-offence `ban_ttl_secs`.
+    ///
+    /// Refuses to auto-ban anything that isn't a public, routable address:
+    /// a private / loopback / CGNAT / link-local IP in a log or journal is
+    /// almost always internal traffic (webmail hitting dovecot on
+    /// 127.0.0.1, the cluster master link, a NAT gateway) whose node-wide
+    /// firewall drop would be a self-inflicted outage, not a defence.
+    /// Operators can still ban any address manually via `ban_add`.
+    async fn auto_ban(&self, ip: &str, hosting_id: Option<&str>, reason: &str, now: i64) -> bool {
+        let cfg = &self.fail2ban;
+        if !hyperion_adapters::logscan::is_public_bannable_ip(ip) {
+            return false;
+        }
+        if hyperion_state::bans::is_active(&self.pool, ip, now)
+            .await
+            .unwrap_or(false)
+        {
+            return false;
+        }
+        let repeat =
+            hyperion_state::bans::was_banned_since(&self.pool, ip, now - cfg.repeat_lookback_secs)
+                .await
+                .unwrap_or(false);
+        let ttl = if repeat {
+            cfg.repeat_ttl_secs
+        } else {
+            cfg.ban_ttl_secs
+        };
+        let reason = if repeat {
+            format!("{reason} (repeat offender)")
+        } else {
+            reason.to_string()
+        };
+        self.ban_add(
+            ip.to_string(),
+            hosting_id.map(String::from),
+            reason,
+            ttl,
+            "auto".to_string(),
+        )
+        .await
+        .is_ok()
+    }
 
+    /// One tick of the brute-force scanner: sweep expired bans, then scan
+    /// every source (per-hosting HTTP access logs + node-wide ssh/ftp/mail
+    /// journals) for auth-failure floods and auto-ban offenders. Thresholds,
+    /// windows and ban durations come from `[fail2ban]`. Returns the number
+    /// of new bans applied.
+    pub async fn fail2ban_tick(&self) -> Result<i64, RpcError> {
+        let cfg = &self.fail2ban;
         let now = now_secs();
+        // Always sweep expired bans, even when scanning is disabled, so a
+        // lapsed ban is dropped from nftables promptly.
         if let Ok(expired) = hyperion_state::bans::reap_expired(&self.pool, now).await {
             for ip in &expired {
                 nft_unban(ip).await;
             }
         }
-        let summaries = self.list().await?;
+        if !cfg.enabled {
+            return Ok(0);
+        }
+        let since = now - cfg.window_secs;
         let mut new_bans = 0i64;
+
+        // Per-hosting HTTP brute force (wp-login / xmlrpc POST floods).
+        let summaries = self.list().await?;
         for s in &summaries {
             if s.state != HostingState::Active {
                 continue;
@@ -4931,55 +5057,38 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .join(&s.domain)
                 .join("logs")
                 .join("access.log");
-            let offenders =
-                scan_access_log_for_bruteforce(&access, now - WINDOW_SECS, THRESHOLD).await;
-            for ip in offenders {
-                if hyperion_state::bans::is_active(&self.pool, &ip, now)
-                    .await
-                    .unwrap_or(false)
-                {
-                    continue;
-                }
+            for ip in scan_access_log_for_bruteforce(&access, since, cfg.http_threshold).await {
                 if self
-                    .ban_add(
-                        ip.clone(),
-                        Some(s.id.as_str().to_string()),
-                        "auto: wp-login / xmlrpc brute force".into(),
-                        BAN_TTL_SECS,
-                        "auto".into(),
+                    .auto_ban(
+                        &ip,
+                        Some(s.id.as_str()),
+                        "auto: wp-login / xmlrpc brute force",
+                        now,
                     )
                     .await
-                    .is_ok()
                 {
                     new_bans += 1;
-                    tracing::info!(ip = %ip, domain = %s.domain, "fail2ban: auto-banned");
+                    tracing::info!(ip = %ip, domain = %s.domain, "fail2ban: auto-banned (http)");
                 }
             }
         }
 
-        // Node-wide source: sshd auth-failure floods. Banned with
-        // hosting_id = None since SSH isn't tied to one site.
-        const SSH_THRESHOLD: u32 = 8;
-        for ip in scan_sshd_journal_for_bruteforce(WINDOW_SECS, SSH_THRESHOLD).await {
-            if hyperion_state::bans::is_active(&self.pool, &ip, now)
-                .await
-                .unwrap_or(false)
-            {
-                continue;
-            }
-            if self
-                .ban_add(
-                    ip.clone(),
-                    None,
-                    "auto: ssh brute force".into(),
-                    BAN_TTL_SECS,
-                    "auto".into(),
-                )
-                .await
-                .is_ok()
-            {
+        // Node-wide sources: ssh, ftp, mail auth-failure floods. Not tied to
+        // one site, so banned with hosting_id = None.
+        let mut node_hits: Vec<(String, &str)> = Vec::new();
+        for ip in scan_sshd_journal_for_bruteforce(cfg.window_secs, cfg.ssh_threshold).await {
+            node_hits.push((ip, "auto: ssh brute force"));
+        }
+        for ip in scan_ftp_journal_for_bruteforce(cfg.window_secs, cfg.ftp_threshold).await {
+            node_hits.push((ip, "auto: ftp brute force"));
+        }
+        for ip in scan_mail_journal_for_bruteforce(cfg.window_secs, cfg.mail_threshold).await {
+            node_hits.push((ip, "auto: mail (smtp/imap) brute force"));
+        }
+        for (ip, reason) in node_hits {
+            if self.auto_ban(&ip, None, reason, now).await {
                 new_bans += 1;
-                tracing::info!(ip = %ip, "fail2ban: auto-banned (ssh)");
+                tracing::info!(ip = %ip, reason = reason, "fail2ban: auto-banned (node)");
             }
         }
         Ok(new_bans)
@@ -16772,6 +16881,51 @@ async fn scan_sshd_journal_for_bruteforce(window_secs: i64, threshold: u32) -> V
         .collect()
 }
 
+/// Read the recent journal for a set of syslog identifiers, `-o cat` (message
+/// only). Empty on any error (no journalctl / no systemd) so a scan is always
+/// best-effort, never a hard failure of the tick.
+async fn journal_by_identifiers(identifiers: &[&str], window_secs: i64) -> String {
+    let mins = (window_secs / 60).max(1);
+    let since = format!("{mins} min ago");
+    let mut argv: Vec<&str> = Vec::new();
+    for id in identifiers {
+        argv.push("-t");
+        argv.push(id);
+    }
+    argv.extend_from_slice(&["--since", &since, "--no-pager", "-q", "-o", "cat"]);
+    hyperion_adapters::cmd::run("/usr/bin/journalctl", &argv)
+        .await
+        .unwrap_or_default()
+}
+
+/// vsftpd failed logins from the journal (syslog identifier `vsftpd`; the
+/// agent sets `syslog_enable=YES` so these reach journald). Returns source
+/// IPs at/over `threshold` in the window.
+async fn scan_ftp_journal_for_bruteforce(window_secs: i64, threshold: u32) -> Vec<String> {
+    let out = journal_by_identifiers(&["vsftpd"], window_secs).await;
+    let counts = hyperion_adapters::logscan::parse_vsftpd_fail_logins(&out);
+    hyperion_adapters::logscan::over_threshold(&counts, threshold)
+}
+
+/// SMTP + IMAP/POP SASL auth failures from the postfix and dovecot journals.
+/// Returns source IPs at/over `threshold` in the window.
+async fn scan_mail_journal_for_bruteforce(window_secs: i64, threshold: u32) -> Vec<String> {
+    // SASL AUTH lands on 25 (smtpd), 587 (submission) and 465 (smtps), each a
+    // distinct journal identifier — include all so a 587-only brute is caught.
+    let out = journal_by_identifiers(
+        &[
+            "postfix/smtpd",
+            "postfix/submission/smtpd",
+            "postfix/smtps/smtpd",
+            "dovecot",
+        ],
+        window_secs,
+    )
+    .await;
+    let counts = hyperion_adapters::logscan::parse_mail_fail_logins(&out);
+    hyperion_adapters::logscan::over_threshold(&counts, threshold)
+}
+
 /// Scan an nginx access.log (combined format) for brute-force probes:
 /// repeated POSTs to wp-login.php / xmlrpc.php from one IPv4 address
 /// inside the `since` window. Returns IPs at/over `threshold`.
@@ -20332,6 +20486,7 @@ mod tests {
             acme_contact_email: "test@example.invalid".into(),
             email_config: None,
             email_default_to: None,
+            fail2ban: Fail2banConfig::default(),
             agent_config_path: None,
             update_cache: Arc::new(tokio::sync::RwLock::new(None)),
             current_git_sha: "dev-unknown".into(),
@@ -20410,6 +20565,7 @@ mod tests {
             acme_contact_email: "test@example.invalid".into(),
             email_config: None,
             email_default_to: None,
+            fail2ban: Fail2banConfig::default(),
             agent_config_path: None,
             update_cache: Arc::new(tokio::sync::RwLock::new(None)),
             current_git_sha: "dev-unknown".into(),
@@ -20455,6 +20611,7 @@ mod tests {
             acme_contact_email: "test@example.invalid".into(),
             email_config: None,
             email_default_to: None,
+            fail2ban: Fail2banConfig::default(),
             agent_config_path: None,
             update_cache: Arc::new(tokio::sync::RwLock::new(None)),
             current_git_sha: "dev-unknown".into(),
@@ -20572,6 +20729,7 @@ mod tests {
             acme_contact_email: "test@example.invalid".into(),
             email_config: None,
             email_default_to: None,
+            fail2ban: Fail2banConfig::default(),
             agent_config_path: None,
             update_cache: Arc::new(tokio::sync::RwLock::new(None)),
             current_git_sha: "dev-unknown".into(),

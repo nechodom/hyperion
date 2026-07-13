@@ -13,6 +13,40 @@ pub struct Config {
     pub slack: SlackSection,
     pub email: EmailSection,
     pub remote_rpc: RemoteRpcSection,
+    pub fail2ban: Fail2banSection,
+}
+
+/// Tunables for the native brute-force scanner. Every field defaults to the
+/// historical hardcoded behaviour, so an agent.toml without a `[fail2ban]`
+/// section behaves exactly as before. See `hyperion_core::Fail2banConfig`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct Fail2banSection {
+    pub enabled: bool,
+    pub window_secs: i64,
+    pub ban_ttl_secs: i64,
+    pub repeat_ttl_secs: i64,
+    pub repeat_lookback_secs: i64,
+    pub http_threshold: u32,
+    pub ssh_threshold: u32,
+    pub ftp_threshold: u32,
+    pub mail_threshold: u32,
+}
+
+impl Default for Fail2banSection {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            window_secs: 600,
+            ban_ttl_secs: 3600,
+            repeat_ttl_secs: 24 * 3600,
+            repeat_lookback_secs: 24 * 3600,
+            http_threshold: 12,
+            ssh_threshold: 8,
+            ftp_threshold: 8,
+            mail_threshold: 8,
+        }
+    }
 }
 
 /// Inbound master→node RPC listener. The master's hyperion-web

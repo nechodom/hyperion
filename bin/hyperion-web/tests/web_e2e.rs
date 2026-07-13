@@ -237,6 +237,7 @@ async fn start_agent() -> (PathBuf, tempfile::TempDir) {
         acme_contact_email: "test@example.invalid".into(),
         email_config: None,
         email_default_to: None,
+        fail2ban: hyperion_core::Fail2banConfig::default(),
         agent_config_path: None,
         update_cache: Arc::new(tokio::sync::RwLock::new(None)),
         current_git_sha: "dev-unknown".into(),

@@ -33,3 +33,31 @@ contact_email = "admin@example.com"
 # Where the HTTP-01 challenge files are written; nginx vhosts serve from
 # /.well-known/acme-challenge/ here.
 challenge_dir = "/var/lib/linux-manager/acme-challenges"
+
+[fail2ban]
+# Native brute-force scanner. Runs every scheduler tick, scans logs +
+# journals for auth-failure floods, and auto-bans offenders via nftables.
+# Every value below is the default — the whole section is optional.
+
+# Master switch. false = no scanning (manual bans + boot re-apply still work).
+enabled = true
+
+# Look-back window applied to every source, in seconds.
+window_secs = 600
+
+# Ban duration for a first offence; longer for a repeat offender (an IP with
+# a prior ban inside repeat_lookback_secs).
+ban_ttl_secs = 3600
+repeat_ttl_secs = 86400
+repeat_lookback_secs = 86400
+
+# Failures-within-window before a ban, per source. Floored at 2 (a value of
+# 0 would ban on the first observed failure):
+http_threshold = 12   # POST /wp-login.php | /xmlrpc.php floods (per site)
+ssh_threshold  = 8    # sshd auth failures
+ftp_threshold  = 8    # vsftpd FAIL LOGIN
+mail_threshold = 8    # postfix/dovecot SASL auth failures
+
+# NB: the panel (web UI) login has its own protection — a per-real-peer rate
+# limit + firewall ban and a per-account hard-lock — so it is deliberately NOT
+# driven from here (the panel's client IP can be a spoofable proxy header).

@@ -288,6 +288,8 @@ local_root=/home/$USER
 user_config_dir=/etc/vsftpd/user_conf
 xferlog_enable=YES
 xferlog_std_format=YES
+dual_log_enable=YES
+syslog_enable=YES
 seccomp_sandbox=NO
 EOFV
     # Custom control port (default 21). vsftpd's built-in default is 21, so we

@@ -280,6 +280,8 @@ local_root=/home/$USER
 user_config_dir=/etc/vsftpd/user_conf
 xferlog_enable=YES
 xferlog_std_format=YES
+dual_log_enable=YES
+syslog_enable=YES
 seccomp_sandbox=NO
 EOFV
     [[ "$FTP_PORT" != "21" ]] && echo "listen_port=${FTP_PORT}" >> /etc/vsftpd.conf

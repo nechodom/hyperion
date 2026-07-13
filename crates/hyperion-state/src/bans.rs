@@ -140,10 +140,40 @@ pub async fn list_for_hosting(
     Ok(rows.into_iter().map(to_ban).collect())
 }
 
+/// True when this IP has *any* ban row (active or already lifted/expired)
+/// with `banned_at >= since`. Backs ban-escalation: a repeat offender inside
+/// the look-back window earns a longer ban than a first-timer.
+pub async fn was_banned_since(pool: &SqlitePool, ip: &str, since: i64) -> Result<bool, StateError> {
+    let row: Option<(i64,)> =
+        sqlx::query_as("SELECT id FROM ip_bans WHERE ip = ? AND banned_at >= ? LIMIT 1")
+            .bind(ip)
+            .bind(since)
+            .fetch_optional(pool)
+            .await?;
+    Ok(row.is_some())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::db::open_memory;
+
+    #[tokio::test]
+    async fn was_banned_since_spots_repeat_offender() {
+        let pool = open_memory().await.expect("open");
+        // A ban at t=1000 that has since lapsed (expired at 2000).
+        add_or_refresh(&pool, "4.4.4.4", None, "auto", "auto", 1000, 2000)
+            .await
+            .expect("add");
+        deactivate(&pool, "4.4.4.4").await.unwrap();
+        // Look-back that includes t=1000 → repeat offender, even though the
+        // ban is no longer active.
+        assert!(was_banned_since(&pool, "4.4.4.4", 500).await.unwrap());
+        // Look-back that starts after the old ban → first-timer again.
+        assert!(!was_banned_since(&pool, "4.4.4.4", 1500).await.unwrap());
+        // Never-seen IP.
+        assert!(!was_banned_since(&pool, "7.7.7.7", 0).await.unwrap());
+    }
 
     #[tokio::test]
     async fn ban_lifecycle() {
