@@ -66,6 +66,17 @@ pub struct RemoteRpcSection {
     /// private interface. The port also has to be opened in
     /// whatever firewall is in front (ufw / iptables / cloud SG).
     pub bind: String,
+    /// Address the master should dial this node at, when it differs from the
+    /// auto-detected public IP. Set it to a PRIVATE-network IP (e.g. a Hetzner
+    /// vSwitch `10.0.0.5`) so the master↔node RPC never crosses the public
+    /// internet — the single biggest attack-surface reduction for the cluster
+    /// channel (a MITM must already be inside the private net). Empty =
+    /// advertise the auto-detected public IP. Pair with `bind = <this-ip>:9443`
+    /// (or `0.0.0.0:9443`) and a firewall that only admits the master.
+    /// Reported to the master at enrollment; changing it later needs a
+    /// re-enroll.
+    #[serde(default)]
+    pub advertise_addr: String,
     pub tls_cert_file: PathBuf,
     pub tls_key_file: PathBuf,
 }
@@ -78,6 +89,7 @@ impl Default for RemoteRpcSection {
             // behavior. install-node.sh sets this to true.
             enabled: false,
             bind: "0.0.0.0:9443".into(),
+            advertise_addr: String::new(),
             tls_cert_file: PathBuf::from("/etc/hyperion/agent-rpc.crt"),
             tls_key_file: PathBuf::from("/etc/hyperion/agent-rpc.key"),
         }

@@ -34,6 +34,10 @@ pub struct EnrollmentConfig {
     /// is best-effort — failures log a warning but don't abort
     /// enrollment.
     pub config_file: Option<PathBuf>,
+    /// Address to report to the master as this node's reachable RPC endpoint,
+    /// overriding the auto-detected public IP. `None`/empty ⇒ auto-detect.
+    /// Set to a private-network IP to keep master↔node RPC off the public net.
+    pub advertise_addr: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -145,7 +149,14 @@ pub async fn enroll_now(cfg: &EnrollmentConfig) -> Result<(), String> {
     // Real build SHA, not the hardcoded "0.1.0" — this populates the master's
     // nodes.agent_version column (cluster version-skew pill). See agent_version.
     let agent_version = crate::agent_version();
-    let public_ip = fetch_public_ip().await;
+    // Prefer an operator-configured advertise address (typically a private-
+    // network IP) over the auto-detected public IP, so the master dials this
+    // node on that network. The field name stays `public_ip` on the wire for
+    // compatibility — it means "the address the master reaches me at".
+    let public_ip = match cfg.advertise_addr.as_deref() {
+        Some(a) if !a.trim().is_empty() => Some(a.trim().to_string()),
+        _ => fetch_public_ip().await,
+    };
     let base = cfg.master_url.trim_end_matches('/').to_string();
     // Block B: if we still hold a node-id.json, present that identity so a
     // re-enroll reuses our node_id (continuity proven by the secret) rather
@@ -292,10 +303,10 @@ fn should_try_https_fallback(base: &str, err: &str) -> bool {
 
 async fn finish_enrollment(cfg: &EnrollmentConfig, stdout: &[u8]) -> Result<(), String> {
     let resp: EnrollResponse = serde_json::from_slice(stdout).map_err(|e| {
-        format!(
-            "parse response: {e} (raw: {})",
-            String::from_utf8_lossy(stdout)
-        )
+        // NEVER echo the raw body: a successful enrollment response carries the
+        // per-node `secret`, and dumping it into an error string leaks it to
+        // logs. The byte count is enough to tell "empty reply" from "garbage".
+        format!("parse enrollment response: {e} ({} bytes)", stdout.len())
     })?;
     // Persist the OPERATOR-supplied master_url (cfg.master_url), NOT
     // the URL returned in the enrollment response. The master is

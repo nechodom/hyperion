@@ -877,6 +877,10 @@ async fn main() -> anyhow::Result<()> {
             state_file: state_file.clone(),
             verify_tls: cfg.enrollment.verify_tls,
             config_file: Some(cli.config.clone()),
+            advertise_addr: {
+                let a = cfg.remote_rpc.advertise_addr.trim();
+                (!a.is_empty()).then(|| a.to_string())
+            },
         };
         // Outer loop — if the 5-attempt inner burst (~9 min) doesn't
         // succeed, sleep 30 min and try the burst again, indefinitely.

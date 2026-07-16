@@ -158,16 +158,21 @@ async fn handle_rpc(State(st): State<InboundState>, headers: HeaderMap, body: By
     let req: Request = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => {
-            return (StatusCode::BAD_REQUEST, format!("bad request body: {e}")).into_response();
+            // Log the detail locally; return a generic message so we never
+            // echo request-body fragments (which can carry secrets) back over
+            // the wire.
+            tracing::warn!(error=%e, "inbound RPC: undecodable request body");
+            return (StatusCode::BAD_REQUEST, "bad request body").into_response();
         }
     };
     let resp = hyperion_rpc_server::dispatch(st.agent.clone(), req).await;
     let body_json = match serde_json::to_vec(&resp) {
         Ok(b) => b,
         Err(e) => {
+            tracing::error!(error=%e, "inbound RPC: response serialize failed");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("response serialize: {e}"),
+                "response serialize error",
             )
                 .into_response();
         }
