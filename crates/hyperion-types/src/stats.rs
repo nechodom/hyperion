@@ -133,6 +133,15 @@ pub struct NodeSummary {
     /// so workers on the older wire format still deserialize.
     #[serde(default)]
     pub tls_spki_pin: Option<String>,
+    /// Base64 (no-pad) of the node's Ed25519 RESPONSE-signing public key,
+    /// as last published on enroll/heartbeat. `Some` ⇒ this node signs its
+    /// RPC responses and the master can verify them; `None` ⇒ the agent
+    /// predates response signing (or hasn't heartbeated since the upgrade)
+    /// and its responses are taken on trust. That PRESENCE is the whole
+    /// capability check — never `agent_version`. `#[serde(default)]` so
+    /// workers on the older wire format still deserialize.
+    #[serde(default)]
+    pub resp_pubkey: Option<String>,
 }
 
 /// Cluster-wide aggregate. Today single-node = node_stats[0]; later
@@ -423,6 +432,18 @@ pub struct ClusterConfigView {
     /// worker is still reachable until its first heartbeat.
     #[serde(default)]
     pub enforce_worker_cert_pinning: bool,
+
+    /// When true, the master REJECTS an RPC response from a worker that has
+    /// published a response-signing pubkey but returned an unsigned or
+    /// badly-signed body — closing the forged-response hole (substituted
+    /// reset passwords, faked provisioning success) that `curl -k` leaves
+    /// open. Defaults to OFF for the same reason as cert pinning: the
+    /// operator flips it only once the warn-only phase confirms every node
+    /// is signing, otherwise one un-upgraded worker takes the whole cluster
+    /// offline. Nodes that have not published a pubkey are never enforced
+    /// (nothing to verify against), so a mixed-version cluster still works.
+    #[serde(default)]
+    pub enforce_response_auth: bool,
 }
 
 fn default_true() -> bool {
@@ -446,6 +467,8 @@ impl Default for ClusterConfigView {
             // OFF by default — enforcement is an explicit operator flip
             // after the warn-only phase confirms pins are stable.
             enforce_worker_cert_pinning: false,
+            // Same story: warn-only until every node reports a signing key.
+            enforce_response_auth: false,
         }
     }
 }

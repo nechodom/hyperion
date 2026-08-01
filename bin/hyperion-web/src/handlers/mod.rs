@@ -69,6 +69,60 @@ pub fn htmx_version() -> &'static str {
     statics::htmx_version()
 }
 
+/// Banner text for the nodes a fan-out DROPPED because their response
+/// failed authentication, or `None` when none did.
+///
+/// Every cluster-aggregate page feeds the `failed` half of
+/// [`crate::dispatcher::fan_out_reporting`] through here and renders the
+/// result via `_node_auth_banner.html`. Staying silent is the real bug:
+/// a discarded response makes the page show FEWER rows, and "no sites"
+/// must never be mistaken for "the sites are gone". Nodes that merely
+/// timed out or were unreachable are NOT reported here — those are
+/// ordinary downtime, already visible as a stale-heartbeat pill, and
+/// mixing them in would train operators to ignore this banner.
+///
+/// Only the operator-chosen node label is interpolated — never the
+/// response body, the verifier's reason string, or the worker's IP.
+pub(crate) fn node_auth_warning(
+    failed: &[(
+        hyperion_types::NodeSummary,
+        crate::dispatcher::DispatchError,
+    )],
+) -> Option<String> {
+    let names: Vec<&str> = failed
+        .iter()
+        .filter(|(_, e)| {
+            matches!(
+                e,
+                crate::dispatcher::DispatchError::ResponseAuthFailed { .. }
+            )
+        })
+        .map(|(n, _)| {
+            if n.label.is_empty() {
+                n.node_id.as_str()
+            } else {
+                n.label.as_str()
+            }
+        })
+        .collect();
+    if names.is_empty() {
+        return None;
+    }
+    let (subject, possessive, responses, them) = if names.len() == 1 {
+        ("Node", "its", "response", "it")
+    } else {
+        ("Nodes", "their", "responses", "them")
+    };
+    Some(format!(
+        "{subject} {} could not be authenticated. The master rejected the signature on \
+         {possessive} {responses} and discarded {them}, so {possessive} rows are MISSING \
+         from this page — a short or empty list here does not mean the data is gone. \
+         This is a signature failure, not downtime: check `journalctl -u hyperion-agent` \
+         on the node, and whether anything is intercepting master→worker traffic.",
+        names.join(", "),
+    ))
+}
+
 /// Session-wide CSRF token. ONE token valid for any POST in the same
 /// session — way nicer for templates than minting a separate scoped
 /// token for every form. Verified by the middleware via the wildcard
@@ -316,6 +370,98 @@ async fn cached_public_ip() -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dispatcher::DispatchError;
+
+    fn node(node_id: &str, label: &str) -> hyperion_types::NodeSummary {
+        hyperion_types::NodeSummary {
+            node_id: node_id.to_string(),
+            label: label.to_string(),
+            master_url: None,
+            agent_version: String::new(),
+            public_ip: None,
+            enrolled_at: 0,
+            last_seen_at: 0,
+            is_drained: false,
+            drain_reason: String::new(),
+            tls_spki_pin: None,
+            resp_pubkey: None,
+        }
+    }
+
+    /// Downtime must NOT raise the banner. If it did, every routine
+    /// worker reboot would show the security warning and operators would
+    /// learn to scroll past the one case that matters.
+    #[test]
+    fn unreachable_node_does_not_raise_the_banner() {
+        let failed = vec![(
+            node("n1", "web-1"),
+            DispatchError::NodeUnreachable {
+                node_id: "n1".into(),
+                kind: "TCP connect refused".into(),
+            },
+        )];
+        assert!(node_auth_warning(&failed).is_none());
+        assert!(node_auth_warning(&[]).is_none());
+    }
+
+    /// The whole point: the page must say the rows are missing, and name
+    /// the node by its operator-chosen label.
+    #[test]
+    fn auth_failure_names_the_node_and_says_rows_are_missing() {
+        let failed = vec![(
+            node("n1", "web-1"),
+            DispatchError::ResponseAuthFailed {
+                node_id: "n1".into(),
+                reason: "signature verify failed".into(),
+            },
+        )];
+        let w = node_auth_warning(&failed).expect("auth failure must warn");
+        assert!(w.contains("web-1"), "{w}");
+        assert!(w.contains("MISSING"), "{w}");
+        // Never presented as downtime — that would send the operator off
+        // restarting a healthy agent.
+        assert!(w.contains("not downtime"), "{w}");
+    }
+
+    /// A node with no label falls back to its id — an unnamed node must
+    /// still be identifiable from the banner alone.
+    #[test]
+    fn auth_failure_falls_back_to_node_id_when_unlabelled() {
+        let failed = vec![(
+            node("n2", ""),
+            DispatchError::ResponseAuthFailed {
+                node_id: "n2".into(),
+                reason: "unsigned".into(),
+            },
+        )];
+        let w = node_auth_warning(&failed).expect("auth failure must warn");
+        assert!(w.contains("n2"), "{w}");
+    }
+
+    /// Mixed batch: only the auth failure is reported, and the plural
+    /// wording tracks the number of REPORTED nodes, not the batch size.
+    #[test]
+    fn mixed_failures_report_only_the_auth_ones() {
+        let failed = vec![
+            (
+                node("n1", "web-1"),
+                DispatchError::ResponseAuthFailed {
+                    node_id: "n1".into(),
+                    reason: "signature verify failed".into(),
+                },
+            ),
+            (
+                node("n2", "web-2"),
+                DispatchError::NodeUnreachable {
+                    node_id: "n2".into(),
+                    kind: "timeout".into(),
+                },
+            ),
+        ];
+        let w = node_auth_warning(&failed).expect("auth failure must warn");
+        assert!(w.starts_with("Node web-1"), "{w}");
+        assert!(!w.contains("web-2"), "{w}");
+    }
 
     #[test]
     fn host_is_useless_catches_loopback_variants() {

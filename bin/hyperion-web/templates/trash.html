@@ -29,6 +29,7 @@
     <div class="flash-body">{{ m }}</div>
   </div>
 {% endif %}
+{% include "_node_auth_banner.html" %}
 
 {% if entries.is_empty() %}
 <div class="card">
@@ -44,6 +45,7 @@
         Turn on trash in <a href="/settings#cluster">Settings → Cluster</a> to soft-delete hostings instead of removing them immediately.
       {% endif %}
     </p>
+    {% include "_node_auth_empty_note.html" %}
   </div>
 </div>
 {% else %}

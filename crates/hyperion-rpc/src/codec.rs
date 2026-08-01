@@ -1155,6 +1155,15 @@ pub enum Request {
         prior_node_id: Option<String>,
         #[serde(default)]
         prior_secret: Option<String>,
+        /// Base64 (no-pad) of this node's Ed25519 RESPONSE-signing public
+        /// key (/etc/hyperion/node-rpc.key), published at enrollment so the
+        /// master can verify responses from the very first RPC instead of
+        /// waiting for a heartbeat. `#[serde(default)]` so older agents
+        /// that don't send it still enroll — absent simply means "this
+        /// node's responses are unverifiable", which the master records as
+        /// a missing pubkey rather than a rejected enrollment.
+        #[serde(default)]
+        resp_pubkey: Option<String>,
     },
     NodesList,
     /// Cluster-wide certificate inventory — every cert this agent
@@ -1187,6 +1196,20 @@ pub enum Request {
         #[serde(default)]
         force: bool,
     },
+    /// Operator recovery: forget BOTH pinned crypto anchors for one
+    /// node (`resp_pubkey` + `tls_spki_pin`) so its next heartbeat
+    /// re-pins whatever the box now presents.
+    ///
+    /// The escape hatch for the refuse-on-change rule: reinstalling an
+    /// agent regenerates node-rpc.key and the inbound TLS cert while
+    /// `node-id.json` survives, so the node keeps its id but presents
+    /// new keys — which the master refuses forever as a possible
+    /// on-path attack. Master-state only; the remote agent is never
+    /// contacted, and nothing is re-pinned here (the node's own next
+    /// report supplies the new values).
+    NodeResetCrypto {
+        node_id: String,
+    },
     /// Block B orphan adoption: re-point every hosting routed to
     /// `from_node_id` onto the (enrolled) `to_node_id`. Used after a box
     /// re-enrolled under a new id so its hostings still carry the dead
@@ -1205,6 +1228,17 @@ pub enum Request {
         /// previously-recorded pin via COALESCE. Block C, warn-only.
         #[serde(default)]
         tls_spki_pin: Option<String>,
+        /// Base64 (no-pad) of this node's Ed25519 RESPONSE-signing public
+        /// key (/etc/hyperion/node-rpc.key). Re-sent on every heartbeat so
+        /// an already-enrolled node publishes its key within one tick of
+        /// being upgraded, and so a key rotation propagates without a
+        /// re-enrollment. `#[serde(default)]` so older agents that don't
+        /// send it still heartbeat — and PRESENCE of this key (never
+        /// `agent_version`, which is an unorderable git-describe string
+        /// that lags a restart by a full heartbeat) is what tells the
+        /// master this node's responses can be verified at all.
+        #[serde(default)]
+        resp_pubkey: Option<String>,
     },
     WpResetPassword {
         sel: HostingSelector,
@@ -1707,6 +1741,12 @@ pub enum Response {
     NodeRemoved {
         removed: bool,
         hostings_blocking: i64,
+    },
+    /// Result of NodeResetCrypto. `cleared=true` ⇒ the node's pinned
+    /// crypto anchors were dropped and its next heartbeat re-pins;
+    /// `cleared=false` ⇒ no such node_id (already removed?).
+    NodeCryptoReset {
+        cleared: bool,
     },
     /// Result of NodeReassignHostings: how many hostings were re-pointed.
     NodeHostingsReassigned {

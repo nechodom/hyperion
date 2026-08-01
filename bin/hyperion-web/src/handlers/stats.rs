@@ -69,6 +69,9 @@ struct StatsTpl<'a> {
     current_node: String,
     /// Human-friendly label of the displayed node ("master" / node label).
     current_label: String,
+    /// Set when a node's response failed authentication and its stats were
+    /// therefore discarded — the cluster totals below UNDERCOUNT.
+    node_auth_warning: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -113,11 +116,11 @@ pub async fn get_stats(
     // Cluster aggregate: fetch ClusterStats from master + every
     // enrolled node in parallel, sum the totals, concatenate the
     // nodes arrays. Single-node mode just hits one agent.
-    let (cluster, mut error) = if is_cluster_view {
+    let (cluster, mut error, node_auth_warning) = if is_cluster_view {
         let agg = aggregate_cluster_stats(&state, &all_nodes).await;
         match agg {
-            Ok(c) => (Some(c), None),
-            Err(e) => (None, Some(e)),
+            Ok((c, warning)) => (Some(c), None, warning),
+            Err(e) => (None, Some(e), None),
         }
     } else {
         let cluster_res =
@@ -138,11 +141,14 @@ pub async fn get_stats(
                 for n in &mut c.nodes {
                     n.node_id = id.clone();
                 }
-                (Some(c), None)
+                (Some(c), None, None)
             }
-            Ok(RpcResponse::Error(e)) => (None, Some(e.to_string())),
-            Ok(_) => (None, Some("unexpected agent response".into())),
-            Err(e) => (None, Some(e.to_string())),
+            Ok(RpcResponse::Error(e)) => (None, Some(e.to_string()), None),
+            Ok(_) => (None, Some("unexpected agent response".into()), None),
+            // Single-node view: DispatchError's own Display already spells
+            // out "response failed authentication", and it lands in the
+            // page's error banner, so there is nothing to add here.
+            Err(e) => (None, Some(e.to_string()), None),
         }
     };
 
@@ -247,6 +253,7 @@ pub async fn get_stats(
         all_nodes,
         current_node: query.node.clone(),
         current_label,
+        node_auth_warning,
     };
     Ok(Html(tpl.render()?).into_response())
 }
@@ -257,11 +264,15 @@ pub async fn get_stats(
 /// Sums the numeric totals, concatenates per-node arrays.
 /// Failing fetches are logged + skipped — partial answers are
 /// better than no answer.
+///
+/// Also returns the banner text for any node whose response failed
+/// AUTHENTICATION. Those nodes get no placeholder row: an `agent_online:
+/// false` line would file a possible forgery under "the worker is down",
+/// which is the one reading the operator must not take away.
 async fn aggregate_cluster_stats(
     state: &SharedState,
     nodes: &[hyperion_types::NodeSummary],
-) -> Result<ClusterStats, String> {
-    use hyperion_types::NodeStats;
+) -> Result<(ClusterStats, Option<String>), String> {
     let mut total = ClusterStats::default();
 
     // Master local. We rewrite the returned NodeStats's node_id
@@ -290,109 +301,81 @@ async fn aggregate_cluster_stats(
         _ => {}
     }
 
-    // Every enrolled node, in parallel via tokio::spawn so we
-    // don't add a `futures` crate dep just for join_all.
-    let mut handles: Vec<tokio::task::JoinHandle<(String, Result<RpcResponse, _>)>> =
-        Vec::with_capacity(nodes.len());
-    for n in nodes {
-        let s = state.clone();
-        let id = n.node_id.clone();
-        handles.push(tokio::spawn(async move {
-            let r = crate::dispatcher::dispatch_to_node(&s, Some(&id), Request::ClusterStats).await;
-            (id, r)
-        }));
-    }
-    let mut results: Vec<(String, _)> = Vec::with_capacity(handles.len());
-    for h in handles {
-        if let Ok(r) = h.await {
-            results.push(r);
-        }
-    }
-    for (node_id, r) in results {
-        match r {
-            Ok(RpcResponse::ClusterStats(mut c)) => {
+    // Every enrolled node, through the shared concurrent fan-out helper.
+    // Same helper as every other aggregate page: it logs an excluded node
+    // and hands back WHY, so a response that failed authentication stops
+    // being indistinguishable from a quiet worker.
+    let (answered, failed) =
+        crate::dispatcher::fan_out_reporting(state, nodes.to_vec(), Request::ClusterStats).await;
+    for (n, resp) in answered {
+        match resp {
+            RpcResponse::ClusterStats(mut c) => {
                 // Same node_id rewrite as for master — the worker
                 // returns its OWN hostname-based node_id, but the
                 // master's dispatcher only knows the enrolled id.
                 // Rewrite so per-node tab links route correctly.
-                for n in &mut c.nodes {
-                    n.node_id = node_id.clone();
+                for row in &mut c.nodes {
+                    row.node_id = n.node_id.clone();
                 }
                 merge_cluster(&mut total, &c);
             }
-            Ok(RpcResponse::Error(e)) => {
-                tracing::warn!(node=%node_id, error=%e, "cluster aggregate: remote fetch errored");
+            RpcResponse::Error(e) => {
+                tracing::warn!(node=%n.node_id, error=%e, "cluster aggregate: remote fetch errored");
                 // Surface as a placeholder NodeStats so the operator
                 // sees "this node didn't answer" instead of just
                 // missing from the table.
-                total.nodes.push(NodeStats {
-                    node_id: node_id.clone(),
-                    label: node_id.clone(),
-                    hostings_count: 0,
-                    hostings_active: 0,
-                    hostings_suspended: 0,
-                    hostings_failed: 0,
-                    total_disk_bytes: 0,
-                    hostings_disk_bytes: 0,
-                    node_disk_total_bytes: 0,
-                    total_bw_out_24h: 0,
-                    total_requests_24h: 0,
-                    loadavg_1m_x100: 0,
-                    mem_total_kib: 0,
-                    mem_used_kib: 0,
-                    uptime_secs: 0,
-                    sampled_at: 0,
-                    agent_version: String::new(),
-                    agent_online: false,
-                    cpu_pct_x100: 0,
-                    swap_total_kib: 0,
-                    swap_used_kib: 0,
-                    psi_cpu_x100: 0,
-                    psi_mem_x100: 0,
-                    psi_io_x100: 0,
-                    net_rx_bps: 0,
-                    net_tx_bps: 0,
-                    oom_kills_24h: 0,
-                    last_oom_at: 0,
-                });
-            }
-            Err(e) => {
-                tracing::warn!(node=%node_id, error=%e, "cluster aggregate: remote unreachable");
-                total.nodes.push(NodeStats {
-                    node_id: node_id.clone(),
-                    label: node_id.clone(),
-                    hostings_count: 0,
-                    hostings_active: 0,
-                    hostings_suspended: 0,
-                    hostings_failed: 0,
-                    total_disk_bytes: 0,
-                    hostings_disk_bytes: 0,
-                    node_disk_total_bytes: 0,
-                    total_bw_out_24h: 0,
-                    total_requests_24h: 0,
-                    loadavg_1m_x100: 0,
-                    mem_total_kib: 0,
-                    mem_used_kib: 0,
-                    uptime_secs: 0,
-                    sampled_at: 0,
-                    agent_version: String::new(),
-                    agent_online: false,
-                    cpu_pct_x100: 0,
-                    swap_total_kib: 0,
-                    swap_used_kib: 0,
-                    psi_cpu_x100: 0,
-                    psi_mem_x100: 0,
-                    psi_io_x100: 0,
-                    net_rx_bps: 0,
-                    net_tx_bps: 0,
-                    oom_kills_24h: 0,
-                    last_oom_at: 0,
-                });
+                total.nodes.push(offline_placeholder(&n.node_id));
             }
             _ => {}
         }
     }
-    Ok(total)
+    for (n, e) in &failed {
+        // Downtime keeps its "agent offline" placeholder row. A response
+        // that failed AUTHENTICATION does not get one — see this
+        // function's doc comment — the banner tells that story instead.
+        if !matches!(
+            e,
+            crate::dispatcher::DispatchError::ResponseAuthFailed { .. }
+        ) {
+            total.nodes.push(offline_placeholder(&n.node_id));
+        }
+    }
+    Ok((total, crate::handlers::node_auth_warning(&failed)))
+}
+
+/// A zeroed `NodeStats` row for a node that didn't answer, so the node
+/// table shows "agent offline" instead of quietly losing the row.
+fn offline_placeholder(node_id: &str) -> hyperion_types::NodeStats {
+    hyperion_types::NodeStats {
+        node_id: node_id.to_string(),
+        label: node_id.to_string(),
+        hostings_count: 0,
+        hostings_active: 0,
+        hostings_suspended: 0,
+        hostings_failed: 0,
+        total_disk_bytes: 0,
+        hostings_disk_bytes: 0,
+        node_disk_total_bytes: 0,
+        total_bw_out_24h: 0,
+        total_requests_24h: 0,
+        loadavg_1m_x100: 0,
+        mem_total_kib: 0,
+        mem_used_kib: 0,
+        uptime_secs: 0,
+        sampled_at: 0,
+        agent_version: String::new(),
+        agent_online: false,
+        cpu_pct_x100: 0,
+        swap_total_kib: 0,
+        swap_used_kib: 0,
+        psi_cpu_x100: 0,
+        psi_mem_x100: 0,
+        psi_io_x100: 0,
+        net_rx_bps: 0,
+        net_tx_bps: 0,
+        oom_kills_24h: 0,
+        last_oom_at: 0,
+    }
 }
 
 /// Add `src`'s totals into `dst` and append its nodes array.

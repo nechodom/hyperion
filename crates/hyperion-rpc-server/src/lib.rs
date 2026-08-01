@@ -1196,6 +1196,7 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             public_ip,
             prior_node_id,
             prior_secret,
+            resp_pubkey,
         } => match api
             .enroll_consume(
                 token,
@@ -1206,6 +1207,7 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 public_ip,
                 prior_node_id,
                 prior_secret,
+                resp_pubkey,
             )
             .await
         {
@@ -1221,8 +1223,9 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             secret,
             agent_version,
             tls_spki_pin,
+            resp_pubkey,
         } => match api
-            .node_heartbeat(node_id, secret, agent_version, tls_spki_pin)
+            .node_heartbeat(node_id, secret, agent_version, tls_spki_pin, resp_pubkey)
             .await
         {
             Ok(master_rpc_pubkey) => Response::NodeHeartbeat { master_rpc_pubkey },
@@ -1262,6 +1265,12 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 removed,
                 hostings_blocking,
             },
+            Err(e) => Response::Error(e),
+        },
+        // actor_uid 0 for the same reason as NodeSetDrain above — the
+        // panel records the operator identity in its own audit append.
+        Request::NodeResetCrypto { node_id } => match api.node_reset_crypto(node_id, 0).await {
+            Ok(cleared) => Response::NodeCryptoReset { cleared },
             Err(e) => Response::Error(e),
         },
         Request::NodeReassignHostings {
@@ -2442,6 +2451,7 @@ mod tests {
             _: Option<String>,
             _: Option<String>,
             _: Option<String>,
+            _: Option<String>,
         ) -> Result<(String, String, Option<String>), RpcError> {
             Ok(("test-node".into(), "test-secret".into(), None))
         }
@@ -2450,6 +2460,7 @@ mod tests {
             _: String,
             _: String,
             _: String,
+            _: Option<String>,
             _: Option<String>,
         ) -> Result<Option<String>, RpcError> {
             Ok(None)
@@ -2468,6 +2479,9 @@ mod tests {
         }
         async fn node_remove(&self, _: String, _: bool, _: i64) -> Result<(bool, i64), RpcError> {
             Ok((true, 0))
+        }
+        async fn node_reset_crypto(&self, _: String, _: i64) -> Result<bool, RpcError> {
+            Ok(true)
         }
         async fn node_reassign_hostings(&self, _: String, _: String) -> Result<i64, RpcError> {
             Ok(0)

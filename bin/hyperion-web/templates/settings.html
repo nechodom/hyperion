@@ -93,6 +93,11 @@
   <a class="tab" data-tab="cluster" href="#cluster" role="tab" title="Panel domain, hosting placement, and security policy">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
     Control plane
+    {# The "every node signs, enforcement still off" nag. The warning
+       itself lives in the Security card, and nobody opens this tab
+       unprompted — without the badge the downgrade branch stays open
+       forever because no one ever looks. #}
+    {% if resp_auth_total > 0 && resp_auth_pending.is_empty() && !config.cluster.enforce_response_auth %}<span class="tab-badge" style="background:var(--warn);color:white" title="Every node can sign its responses but enforcement is still off">!</span>{% endif %}
   </a>
   <a class="tab" data-tab="testnodes" href="#testnodes" role="tab">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
@@ -940,7 +945,7 @@
     <form method="post" action="/settings/config" autocomplete="off">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <input type="hidden" name="section" value="cluster">
-      <input type="hidden" name="_checkboxes" value="enforce_admin_2fa,enforce_worker_cert_pinning">
+      <input type="hidden" name="_checkboxes" value="enforce_admin_2fa,enforce_worker_cert_pinning,enforce_response_auth">
       <label class="field-checkbox" style="font-weight:600">
         <input type="checkbox" name="enforce_admin_2fa" value="true"
                {% if config.cluster.enforce_admin_2fa %}checked{% endif %}>
@@ -952,21 +957,103 @@
         up. Operators and read-only users are unaffected. Turn it off only briefly,
         for example during a server move. Applies within about 30 s; no restart needed.
       </p>
+
+      {# ─── Master → worker hardening ladder ────────────────────────
+         The two toggles below are rungs, not independent switches, and
+         the order is load-bearing: step 1 keeps an on-path attacker out
+         of the channel, step 2 keeps the master from believing what
+         comes back if the channel is defeated anyway. Turning on step 2
+         alone still leaves every secret in a reply (reset passwords,
+         enrollment tokens) readable on the wire, so the numbering is UI,
+         not decoration. #}
+      <div style="display:flex;align-items:center;gap:0.5rem;margin:1.4rem 0 0.4rem">
+        <svg class="h-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        <strong style="font-size:0.92rem">Master → worker channel hardening</strong>
+      </div>
+      <p class="text-soft small" style="margin:0 0 0.8rem;line-height:1.55">
+        Every command the master sends already carries an Ed25519 <em>request</em>
+        signature, so a worker never acts on a forged instruction. These two steps
+        protect the rest of the exchange — who can read the channel, and whether the
+        master can trust the answer. Work through them <strong>in order</strong>, and only
+        after <a href="/install">Nodes</a> shows the matching chip on every node.
+      </p>
+
       <label class="field-checkbox" style="font-weight:600">
         <input type="checkbox" name="enforce_worker_cert_pinning" value="true"
                {% if config.cluster.enforce_worker_cert_pinning %}checked{% endif %}>
-        Enforce worker TLS certificate pinning
+        Step 1 · Enforce worker TLS certificate pinning
       </label>
       <p class="text-soft small" style="margin:0.4rem 0 0.8rem;line-height:1.55">
         When on, the master refuses any RPC to a worker whose TLS certificate doesn't
-        match the SPKI pin that worker reported on its heartbeat. This hardens the
-        master→worker channel against a man-in-the-middle. <strong>Turn
-        this on only after</strong> the per-node pins on <a href="/install">Nodes</a>
+        match the SPKI pin that worker reported on its heartbeat. This shuts a
+        man-in-the-middle out of the channel entirely, which is why it comes first.
+        <strong>Turn this on only after</strong> the per-node pins on <a href="/install">Nodes</a>
         show <em>🔒 TLS pin on file</em> and you have seen no <code>warn-only</code>
         pin-mismatch warnings in the logs: a stale pin blocks management of
         that worker until its next heartbeat. Workers that haven't reported a pin
         yet are never blocked. Applies within about 30 s; no restart needed.
       </p>
+
+      <label class="field-checkbox" style="font-weight:600">
+        <input type="checkbox" name="enforce_response_auth" value="true"
+               {% if config.cluster.enforce_response_auth %}checked{% endif %}>
+        Step 2 · Enforce signed node responses
+      </label>
+      <p class="text-soft small" style="margin:0.4rem 0 0.8rem;line-height:1.55">
+        A node that has published a response-signing key signs every reply, and the master
+        verifies it. A <em>mis-signed</em> reply is discarded whether or not this is on.
+        What this toggle adds is refusing a reply that arrives <strong>unsigned</strong> from
+        a node known to sign — which is exactly what stripping the signature header on the
+        wire looks like. <strong>Turn this on only after</strong> Step 1 is on and every node
+        on <a href="/install">Nodes</a> shows <em>🔑 Response auth on file</em>; that chip,
+        not the agent version, is the readiness signal. While this is on, a node with
+        <strong>no key on file is refused too</strong> — an unverifiable node must not end up
+        more trusted than one that merely dropped its signature, and suppressing the key
+        report is how an attacker would arrange exactly that. So a worker that is still
+        mid-upgrade <em>will</em> be cut off until it publishes its key. Applies within about
+        30 s; no restart needed.
+      </p>
+
+      {# Readiness, computed server-side from nodes.resp_pubkey. The
+         "ready but off" branch is the reason this block exists: with
+         enforcement off, a stripped signature is logged and the reply is
+         used anyway, and nothing else in the panel ever mentions it — so
+         the realistic failure is that the rollout simply stops here. #}
+      {% if resp_auth_total > 0 %}
+        {% if config.cluster.enforce_response_auth && !config.cluster.enforce_worker_cert_pinning %}
+        <div class="alert alert-warn" role="alert" style="margin:0 0 0.8rem">
+          <strong>Out of order — Step 2 is on while Step 1 is off.</strong>
+          Signed replies prove <em>who</em> answered, but an unpinned channel still lets an
+          on-path attacker read them, and replies carry reset passwords and enrollment
+          tokens. Turn Step 1 on as well.
+        </div>
+        {% endif %}
+        {% if !resp_auth_pending.is_empty() %}
+        <div class="alert alert-warn" role="status" style="margin:0 0 0.8rem">
+          <strong>{{ resp_auth_pending.len() }} of {{ resp_auth_total }} node{% if resp_auth_total != 1 %}s{% endif %} can't sign responses yet:</strong>
+          {% for label in resp_auth_pending %}<code>{{ label }}</code>{% if !loop.last %}, {% endif %}{% endfor %}.
+          Update {% if resp_auth_pending.len() == 1 %}it{% else %}them{% endif %} from
+          <a href="/install">Nodes</a> and wait one heartbeat.
+          <strong>Do not turn Step 2 on yet</strong> — while it is on, a node with no key on
+          file is refused, so {% if resp_auth_pending.len() == 1 %}this node{% else %}these
+          nodes{% endif %} would be cut off (their sites would drop out of every list) until
+          the <em>🔑 Response auth on file</em> chip appears for each.
+        </div>
+        {% else if !config.cluster.enforce_response_auth %}
+        <div class="alert alert-warn" role="alert" style="margin:0 0 0.8rem">
+          <strong>All {{ resp_auth_total }} node{% if resp_auth_total != 1 %}s{% endif %} can sign responses — but Step 2 is off.</strong>
+          Until you tick it, an unsigned reply from a node known to sign is logged as a
+          warning and <em>accepted anyway</em>. That is precisely the downgrade an on-path
+          attacker would use. Nothing is blocking it — tick Step 2 and save.
+        </div>
+        {% endif %}
+      {% else %}
+      <p class="text-soft small" style="margin:0 0 0.8rem;line-height:1.55">
+        No worker nodes are enrolled. Both steps only affect master→worker RPC, so on a
+        single-node install they change nothing.
+      </p>
+      {% endif %}
+
       <button type="submit" class="btn primary">Save security settings</button>
     </form>
   </div>

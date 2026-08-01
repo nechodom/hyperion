@@ -66,6 +66,7 @@
     <div class="flash-body">{{ e }}</div>
   </div>
 {% endif %}
+{% include "_node_auth_banner.html" %}
 
 {% if update_status.update_available %}
   <div class="flash warn" style="margin-bottom:1rem">
@@ -240,6 +241,7 @@
       </div>
       <h3>No hostings yet</h3>
       <p>Create your first hosting to start serving a site. It will appear here once provisioned.</p>
+      {% include "_node_auth_empty_note.html" %}
       <a href="/hostings/new" class="btn primary" data-require-caps="hosting_create">Create first hosting</a>
     </div>
   {% else %}

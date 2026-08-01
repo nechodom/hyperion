@@ -43,6 +43,9 @@ struct CertsTpl<'a> {
     flash: Option<String>,
     flash_error: Option<String>,
     csrf_token: String,
+    /// Set when a node's response failed authentication and its certs
+    /// were therefore discarded — the table below is INCOMPLETE.
+    node_auth_warning: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -75,11 +78,16 @@ pub async fn get_certs(
     {
         all.extend(items);
     }
-    // Remote workers.
+    // Remote workers. A node whose response can't be AUTHENTICATED is
+    // dropped by the fan-out, which would otherwise read here as "that
+    // node has no certificates" — hence the banner.
+    let mut node_auth_warning = None;
     if let Ok(RpcResponse::NodesList(nodes)) =
         hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await
     {
-        for (n, resp) in crate::dispatcher::fan_out(&state, nodes, Request::CertOverview).await {
+        let (answered, failed) =
+            crate::dispatcher::fan_out_reporting(&state, nodes, Request::CertOverview).await;
+        for (n, resp) in answered {
             if let RpcResponse::CertOverview(mut items) = resp {
                 for item in items.iter_mut() {
                     item.node_id = n.label.clone();
@@ -87,6 +95,7 @@ pub async fn get_certs(
                 all.extend(items);
             }
         }
+        node_auth_warning = super::node_auth_warning(&failed);
     }
     // Already sorted ASC at agent level, but inter-node merge may
     // have produced an out-of-order interleave. Re-sort.
@@ -125,6 +134,7 @@ pub async fn get_certs(
         flash: q.flash.filter(|s| !s.is_empty()),
         flash_error: q.flash_error.filter(|s| !s.is_empty()),
         csrf_token: super::session_csrf_token(&state, &ctx),
+        node_auth_warning,
     };
     Ok(Html(tpl.render()?).into_response())
 }

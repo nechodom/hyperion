@@ -41,6 +41,9 @@ struct EmailsTpl<'a> {
     /// code but didn't restart hyperion-agent). Template renders a
     /// red banner with the fix command.
     rpc_error: Option<String>,
+    /// Set when a node's response failed authentication and its log
+    /// entries were therefore discarded — the list below is INCOMPLETE.
+    node_auth_warning: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -95,7 +98,9 @@ pub async fn get_emails(
     let workers = crate::handlers::hostings::fetch_remote_nodes(&state)
         .await
         .unwrap_or_default();
-    for (n, resp) in crate::dispatcher::fan_out(&state, workers, req).await {
+    let (answered, failed) = crate::dispatcher::fan_out_reporting(&state, workers, req).await;
+    let node_auth_warning = super::node_auth_warning(&failed);
+    for (n, resp) in answered {
         if let RpcResponse::EmailLogList(mut remote) = resp {
             let label = if n.label.is_empty() {
                 n.node_id.clone()
@@ -135,6 +140,7 @@ pub async fn get_emails(
         ok_count,
         failed_count,
         rpc_error,
+        node_auth_warning,
     };
     Ok(Html(tpl.render()?).into_response())
 }

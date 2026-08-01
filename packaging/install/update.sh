@@ -46,6 +46,83 @@
 #      from the GitHub release tagged $HYPERION_RELEASE_TAG.
 #   3. If the release isn't there OR checksum fails, cargo build from
 #      the freshly-fetched source.
+#
+#==========================================================================
+# CLUSTER ROLLOUT ORDER — READ BEFORE UPDATING A MULTI-NODE INSTALL
+#==========================================================================
+# This script updates exactly ONE box, the one it runs on. It has no
+# cluster awareness whatsoever: it does not know whether this box is the
+# master or a worker, it never contacts the other nodes, and it will
+# happily leave a cluster half-upgraded. The order below is not a
+# recommendation — get it wrong and the panel loses sight of its workers.
+#
+# Why order matters at all: master↔node RPC is versioned only by what
+# each side happens to understand. New request/response fields are all
+# additive and optional, so a NEW master can drive an OLD node and an OLD
+# master can drive a NEW node — but only one direction at a time is ever
+# TESTED in production, and that is the direction below.
+#
+#   1. MASTER FIRST, over SSH.
+#        sudo /opt/hyperion/packaging/install/update.sh
+#      It has to be SSH: the panel's Update action exists only on the
+#      worker cards of the Nodes page — there is no card for the master —
+#      and hyperion-web is stopped and replaced partway through this
+#      script anyway, so the page you clicked from would go 502 exactly
+#      when you need its log. (Workers are the opposite — see step 3.)
+#
+#   2. CONFIRM THE NEW MASTER STILL DRIVES THE OLD NODES.
+#      Before touching a single worker, open the panel's Nodes page
+#      (/install) and load a per-node view — its hostings list, its
+#      stats. Every node is still running the OLD agent at this point,
+#      and that combination must work. If it doesn't, you have one broken
+#      box to roll back instead of a whole cluster, and every worker is
+#      still healthy.
+#
+#   3. NODES ONE AT A TIME, and WAIT between them.
+#      Update a worker from the master's Nodes page (the node's "Update"
+#      action) or by SSH-ing to it and running this script. The panel is
+#      the only in-product way to reach a worker, which is exactly why
+#      step 1 has to come first: an un-upgraded master may not be able to
+#      drive the upgrade at all.
+#      After each node, WAIT for its readiness chips on /install before
+#      starting the next: "⚠ … out of sync" must disappear, and
+#      "⚠ No response auth" must become "🔑 Response auth on file".
+#      Those chips are driven by the node's HEARTBEAT, not by this script
+#      exiting, and they are the only proof the new agent came back up,
+#      re-registered and re-published its crypto material. Both the TLS
+#      SPKI pin and the response-signing pubkey are CLEARED on
+#      re-enrollment and only re-pin on the next heartbeat, so a node
+#      briefly shows neither chip — that is expected, wait it out.
+#      Doing several at once means a failure tells you nothing about
+#      which node broke, and leaves a stampede of re-enrollments.
+#
+#   4. ONLY THEN flip the enforcement toggles, in
+#      Settings → Control plane → Security:
+#        Step 1 · Enforce worker TLS certificate pinning
+#                 ([cluster] enforce_worker_cert_pinning)
+#        Step 2 · Enforce signed node responses
+#                 ([cluster] enforce_response_auth)
+#      Both default to OFF for exactly this reason, and step 2 is only
+#      meaningful once step 1 is on. Response-auth enforcement makes the
+#      master DISCARD any answer from a node that published a signing key
+#      but replied unsigned — which is indistinguishable from a node that
+#      was rolled back mid-rollout. (A MIS-signed reply is discarded
+#      either way; the toggle only governs UNsigned ones.)
+#      Leave both off for a day first and read the warn-only lines:
+#        journalctl -u hyperion-web -g SECURITY
+#      A clean log plus a chip on every node means it is safe to enforce.
+#
+# KNOWN EXCEPTION — cross-node migration during the rollout window.
+# Move/Copy between nodes runs a pre-flight that compares agent versions
+# and HARD-FAILS on any difference between master, source and target
+# ("agent version mismatch — master X, source Y, target Z"). It is a
+# deliberate guard: the export/import bundle format is not version-
+# tolerant, and a half-migrated hosting is far worse than a refused one.
+# So from the moment the master is updated until the last node is, ALL
+# cross-node moves and copies are blocked. Same-node operations, backups,
+# provisioning and every other RPC keep working normally. Plan migrations
+# outside the rollout window, or finish the rollout first.
+#==========================================================================
 
 set -euo pipefail
 
@@ -749,6 +826,12 @@ install -d -m 0700 /etc/hyperion/web-tls
 # master can't dispatch to this node from its UI. Patch it in via
 # a heredoc append — only when the section is missing. Operators
 # can later flip enabled to false by hand if they don't want this.
+#
+# This is the channel the CLUSTER ROLLOUT ORDER at the top of this file
+# governs. Nothing here is cluster-aware: the agent's response-signing
+# key and TLS pin are re-published by its next HEARTBEAT, not by this
+# script, which is why step 3 says to wait for the readiness pill rather
+# than for this script to exit.
 if [[ -f /etc/hyperion/agent.toml ]] \
    && ! grep -q '^\[remote_rpc\]' /etc/hyperion/agent.toml; then
   log "Adding [remote_rpc] section to /etc/hyperion/agent.toml ..."

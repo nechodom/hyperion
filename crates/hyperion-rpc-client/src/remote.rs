@@ -21,8 +21,21 @@
 //! - `-k` keeps working through the chicken-egg "node has a
 //!   self-signed cert" phase. The Ed25519 signature is the actual
 //!   auth — TLS is transport encryption only.
+//!
+//! ## Response authentication
+//!
+//! Because `-k` accepts any cert, an on-path attacker can rewrite what
+//! comes BACK. The node therefore signs its response with its own
+//! Ed25519 key and puts the signature in a header
+//! ([`hyperion_core::node_rpc::RESP_SIG_HEADER`]). Capturing a response
+//! header without an HTTP client means one more `--write-out` trailer,
+//! same trick as `%{certs}`. [`call_remote_attested`] hands the caller
+//! the RAW body bytes plus that header; the *verification decision*
+//! (which node published which key, whether enforcement is on) lives in
+//! the master's dispatcher, not here.
 
 use hyperion_core::master_rpc::{sign_envelope, MasterRpcSigner};
+use hyperion_core::node_rpc::RESP_SIG_HEADER;
 use hyperion_rpc::codec::{Request, Response};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -75,36 +88,75 @@ impl Default for RemoteCallOpts {
     }
 }
 
-/// Marker curl's `-w %{certs}` output is prefixed with so we can split
-/// the certificate chain off the end of stdout from the JSON response
-/// body. JSON (our `Response`) is UTF-8 and never contains this token,
-/// so the split is unambiguous.
-const CERT_MARKER: &[u8] = b"\n__HYPERION_CURL_CERTS__\n";
+/// Markers curl's `--write-out` trailers are prefixed with, so we can
+/// split them off the end of stdout from the JSON response body. curl
+/// appends them in this declaration order.
+///
+/// Both markers open AND close with a newline, which is load-bearing:
+/// an HTTP header value cannot contain a bare newline, so a hostile
+/// worker cannot smuggle a marker out through `%header{}` and re-cut
+/// the parse from inside a trailer.
+const CERT_MARKER: &str = "\n__HYPERION_CURL_CERTS__\n";
+const SIG_MARKER: &str = "\n__HYPERION_CURL_SIG__\n";
 
-/// Split curl stdout (response body, optionally followed by the marker +
-/// PEM cert chain) into `(body, certs_pem)`. When the marker is absent —
-/// older curl without `%{certs}`, or no cert captured — the whole buffer
-/// is the body and `certs_pem` is `None`. Pure + total: never panics.
-fn split_body_and_certs(stdout: &[u8]) -> (&[u8], Option<&str>) {
-    match stdout
-        .windows(CERT_MARKER.len())
-        .position(|w| w == CERT_MARKER)
-    {
-        Some(pos) => {
-            let body = &stdout[..pos];
-            let certs = &stdout[pos + CERT_MARKER.len()..];
-            (body, std::str::from_utf8(certs).ok().map(str::trim))
-        }
-        None => (stdout, None),
+/// Peel one `--write-out` trailer off the END of `buf`, returning
+/// `(everything before the marker, the trailer)`. Pure + total: never
+/// panics, and a missing marker just yields the whole buffer + `None`.
+///
+/// Searches for the LAST occurrence, never the first. The response body
+/// is worker-controlled and may contain a marker verbatim; curl always
+/// appends the real trailers *after* the body, so the rightmost match is
+/// the real one. A forward search would let a crafted body cut the parse
+/// short — handing the master a truncated body and a cert chain of the
+/// attacker's choosing.
+fn peel_trailer<'a>(buf: &'a [u8], marker: &str) -> (&'a [u8], Option<&'a str>) {
+    let m = marker.as_bytes();
+    match buf.windows(m.len()).rposition(|w| w == m) {
+        Some(pos) => (
+            &buf[..pos],
+            std::str::from_utf8(&buf[pos + m.len()..])
+                .ok()
+                .map(str::trim),
+        ),
+        None => (buf, None),
     }
+}
+
+/// Split curl stdout into `(body, certs_pem, resp_sig)`.
+///
+/// The layout curl produces is
+/// `<body><CERT_MARKER><certs><SIG_MARKER><resp-sig header>`, so the
+/// trailers are peeled right-to-left, the exact reverse of the order
+/// they were written. Either trailer being empty or absent (older curl
+/// that doesn't know `%{certs}` / `%header{}`, or a node that didn't
+/// sign) yields `None` for that piece and never a mis-cut body.
+fn split_body_and_trailers(stdout: &[u8]) -> (&[u8], Option<&str>, Option<&str>) {
+    let (head, sig) = peel_trailer(stdout, SIG_MARKER);
+    let (body, certs) = peel_trailer(head, CERT_MARKER);
+    (body, certs, sig)
+}
+
+/// Turn the captured signature trailer into "did the worker sign this
+/// response?".
+///
+/// Empty means the worker sent no such header — an agent that predates
+/// response signing. A value starting with `%` means curl is too old to
+/// know `%header{}` and echoed the directive back verbatim; that is also
+/// "no signature", NOT a bad one. Getting this wrong would be expensive:
+/// the master treats a *mis-signed* response as an attack, so an old
+/// curl would hard-fail every remote call instead of degrading.
+fn normalize_resp_sig(raw: Option<&str>) -> Option<String> {
+    raw.map(str::trim)
+        .filter(|s| !s.is_empty() && !s.starts_with('%'))
+        .map(str::to_string)
 }
 
 /// Sign + POST + decode. `endpoint_base` should be the full base URL
 /// of the target node's inbound listener, e.g. `https://1.2.3.4:9443`
 /// — caller is responsible for the IP + port lookup, this function
-/// only signs and ships. Thin wrapper over
-/// [`call_remote_with_observed_pin`] that discards the observed pin —
-/// kept stable for callers (integration tests) that don't pin.
+/// only signs and ships. Thin wrapper over [`call_remote_attested`]
+/// that discards everything but the decoded response — kept stable for
+/// callers (integration tests) that neither pin nor verify.
 pub async fn call_remote(
     endpoint_base: &str,
     signer: &Arc<MasterRpcSigner>,
@@ -112,9 +164,9 @@ pub async fn call_remote(
     req: Request,
     opts: RemoteCallOpts,
 ) -> Result<Response, RemoteClientError> {
-    call_remote_with_observed_pin(endpoint_base, signer, target_node_id, req, opts)
+    call_remote_attested(endpoint_base, signer, target_node_id, req, opts)
         .await
-        .map(|(resp, _pin)| resp)
+        .map(|out| out.resp)
 }
 
 /// Like [`call_remote`] but also returns the SPKI pin of the leaf
@@ -131,6 +183,57 @@ pub async fn call_remote_with_observed_pin(
     req: Request,
     opts: RemoteCallOpts,
 ) -> Result<(Response, Option<String>), RemoteClientError> {
+    call_remote_attested(endpoint_base, signer, target_node_id, req, opts)
+        .await
+        .map(|out| (out.resp, out.observed_pin))
+}
+
+/// Everything one remote call produced, in the form a caller needs to
+/// AUTHENTICATE it. Returned by [`call_remote_attested`].
+///
+/// `raw_body`, `resp_sig`, `req_ts` and `req_nonce` are exactly the
+/// inputs [`hyperion_core::node_rpc::verify_response`] takes. The raw
+/// bytes travel out deliberately: the node signed what it wrote to the
+/// socket, and re-serializing `resp` would produce *different* bytes
+/// (serde field order, string escaping, number formatting), silently
+/// failing every signature.
+#[derive(Debug)]
+pub struct RemoteCallOutcome {
+    /// The decoded response — what the caller actually asked for.
+    pub resp: Response,
+    /// The response body EXACTLY as curl received it, pre-parse.
+    pub raw_body: Vec<u8>,
+    /// SPKI pin of the leaf cert the worker presented, when curl could
+    /// report it. Same best-effort semantics as
+    /// [`call_remote_with_observed_pin`].
+    pub observed_pin: Option<String>,
+    /// The worker's response signature header, when it sent one.
+    /// `None` means "this response is unsigned" — an agent that
+    /// predates response signing, a curl too old to report headers, or
+    /// an on-path attacker stripping the header. Telling those apart is
+    /// the dispatcher's job; this layer only reports what arrived.
+    pub resp_sig: Option<String>,
+    /// The `ts` this call signed into the request envelope.
+    pub req_ts: i64,
+    /// The `nonce` this call signed into the request envelope. The
+    /// response signature covers it, which is what stops a captured
+    /// response being replayed as the answer to a different request.
+    pub req_nonce: String,
+}
+
+/// Sign + POST + decode, keeping every by-product the caller needs to
+/// authenticate the answer: the raw body bytes, the response signature
+/// header, the observed cert pin, and the `ts`/`nonce` that were signed
+/// into the request. [`call_remote`] and
+/// [`call_remote_with_observed_pin`] are thin wrappers that drop the
+/// parts they don't use.
+pub async fn call_remote_attested(
+    endpoint_base: &str,
+    signer: &Arc<MasterRpcSigner>,
+    target_node_id: &str,
+    req: Request,
+    opts: RemoteCallOpts,
+) -> Result<RemoteCallOutcome, RemoteClientError> {
     let body = serde_json::to_vec(&req).map_err(|e| RemoteClientError::Serialize(e.to_string()))?;
     let ts = chrono::Utc::now().timestamp();
     let nonce = ulid::Ulid::new().to_string();
@@ -147,11 +250,18 @@ pub async fn call_remote_with_observed_pin(
     // MAX_FRAME (128 MiB) + base64 overhead; curl exits 63 past it.
     args.push("--max-filesize".into());
     args.push((192 * 1024 * 1024).to_string());
-    // Append the presented cert chain (PEM) after the body so we can pin
-    // it. `%{certs}` needs curl ≥ 7.88 (Debian 12 ships 7.88.1); on older
-    // curl this yields no usable cert and we degrade to no observed pin.
+    // Append two out-of-band trailers after the body: the presented cert
+    // chain (PEM) so we can pin it, and the worker's response-signature
+    // header so we can authenticate the bytes. `%{certs}` needs curl ≥ 7.88
+    // (Debian 12 ships 7.88.1) and `%header{}` ≥ 7.84; on older curl each
+    // degrades to "not captured" rather than failing the call. The header
+    // NAME comes from the shared constant — if the two sides ever spelled
+    // it differently, verification would silently switch itself off.
     args.push("--write-out".into());
-    args.push("\n__HYPERION_CURL_CERTS__\n%{certs}".into());
+    args.push(format!(
+        "{CERT_MARKER}%{{certs}}{SIG_MARKER}%header{{{}}}",
+        RESP_SIG_HEADER.to_ascii_lowercase()
+    ));
     if !opts.verify_tls {
         args.push("-k".into());
     }
@@ -196,43 +306,120 @@ pub async fn call_remote_with_observed_pin(
             stderr: String::from_utf8_lossy(&out.stderr).trim().to_string(),
         });
     }
-    let (body_bytes, certs_pem) = split_body_and_certs(&out.stdout);
+    let (body_bytes, certs_pem, resp_sig) = split_body_and_trailers(&out.stdout);
+    let body_len = body_bytes.len();
     let resp: Response =
         serde_json::from_slice(body_bytes).map_err(|e| RemoteClientError::Parse(e.to_string()))?;
+    let certs_pem = certs_pem.map(str::to_string);
+    let resp_sig = normalize_resp_sig(resp_sig);
     // Best-effort pin of the leaf cert. Failure here must never fail the
     // call — the RPC already succeeded.
-    let observed_pin = match certs_pem {
+    let observed_pin = match &certs_pem {
         Some(pem) if !pem.is_empty() => hyperion_core::tls_pin::spki_pin_from_cert_pem(pem).await,
         _ => None,
     };
-    Ok((resp, observed_pin))
+    // Hand the body back byte-identical to what the node signed. Truncating
+    // curl's own buffer reuses the allocation instead of copying it — a
+    // response may be up to 192 MiB and a cluster fan-out holds several of
+    // these at once.
+    let mut raw_body = out.stdout;
+    raw_body.truncate(body_len);
+    Ok(RemoteCallOutcome {
+        resp,
+        raw_body,
+        observed_pin,
+        resp_sig,
+        req_ts: ts,
+        req_nonce: nonce,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Rebuild exactly what curl writes to stdout for our `--write-out`.
+    fn curl_stdout(body: &str, certs: &str, sig: &str) -> Vec<u8> {
+        format!("{body}{CERT_MARKER}{certs}{SIG_MARKER}{sig}").into_bytes()
+    }
+
     #[test]
     fn split_no_marker_is_all_body() {
-        let (body, certs) = split_body_and_certs(b"{\"ok\":true}");
+        let (body, certs, sig) = split_body_and_trailers(b"{\"ok\":true}");
         assert_eq!(body, b"{\"ok\":true}");
         assert_eq!(certs, None);
+        assert_eq!(sig, None);
     }
 
     #[test]
-    fn split_extracts_certs_after_marker() {
-        let raw = b"{\"ok\":true}\n__HYPERION_CURL_CERTS__\n-----BEGIN CERTIFICATE-----\nAAA\n-----END CERTIFICATE-----\n";
-        let (body, certs) = split_body_and_certs(raw);
+    fn split_extracts_both_trailers() {
+        let raw = curl_stdout(
+            "{\"ok\":true}",
+            "-----BEGIN CERTIFICATE-----\nAAA\n-----END CERTIFICATE-----\n",
+            "1700000000.c2ln",
+        );
+        let (body, certs, sig) = split_body_and_trailers(&raw);
         assert_eq!(body, b"{\"ok\":true}");
         assert!(certs.unwrap().starts_with("-----BEGIN CERTIFICATE-----"));
+        assert_eq!(sig, Some("1700000000.c2ln"));
     }
 
     #[test]
-    fn split_empty_certs_after_marker() {
-        let raw = b"{\"ok\":true}\n__HYPERION_CURL_CERTS__\n";
-        let (body, certs) = split_body_and_certs(raw);
+    fn split_empty_trailers_after_markers() {
+        // Node didn't sign and no cert was captured: both markers are
+        // present with nothing between/after them.
+        let raw = curl_stdout("{\"ok\":true}", "", "");
+        let (body, certs, sig) = split_body_and_trailers(&raw);
         assert_eq!(body, b"{\"ok\":true}");
-        // trimmed empty string — caller treats as no pin.
+        // trimmed empty strings — caller treats both as absent.
         assert_eq!(certs, Some(""));
+        assert_eq!(sig, Some(""));
+    }
+
+    #[test]
+    fn split_survives_only_the_cert_trailer() {
+        // curl old enough to know %{certs} but not %header{} — the sig
+        // marker never appears, and the body must still be cut correctly.
+        let raw = format!("{{\"ok\":true}}{CERT_MARKER}PEM").into_bytes();
+        let (body, certs, sig) = split_body_and_trailers(&raw);
+        assert_eq!(body, b"{\"ok\":true}");
+        assert_eq!(certs, Some("PEM"));
+        assert_eq!(sig, None);
+    }
+
+    #[test]
+    fn body_containing_markers_cannot_cut_the_parse() {
+        // A hostile worker echoes both markers inside the JSON it returns,
+        // trying to make the master parse a shorter body (which it would
+        // then verify a signature over) and a cert chain of its choosing.
+        // Peeling from the right defeats it: the real trailers are always
+        // the rightmost ones.
+        let evil = format!("{{\"x\":\"{CERT_MARKER}FAKEPEM{SIG_MARKER}9.FAKESIG\"}}");
+        let raw = curl_stdout(&evil, "REALPEM", "1700000000.REALSIG");
+        let (body, certs, sig) = split_body_and_trailers(&raw);
+        assert_eq!(
+            body,
+            evil.as_bytes(),
+            "body was truncated by its own content"
+        );
+        assert_eq!(certs, Some("REALPEM"));
+        assert_eq!(sig, Some("1700000000.REALSIG"));
+    }
+
+    #[test]
+    fn normalize_resp_sig_treats_absent_and_echoed_as_unsigned() {
+        assert_eq!(normalize_resp_sig(None), None);
+        assert_eq!(normalize_resp_sig(Some("")), None);
+        assert_eq!(normalize_resp_sig(Some("   ")), None);
+        // curl too old for %header{} echoes the directive back verbatim.
+        // That must read as "unsigned", never as "badly signed".
+        assert_eq!(
+            normalize_resp_sig(Some("%header{x-hyperion-resp-sig}")),
+            None
+        );
+        assert_eq!(
+            normalize_resp_sig(Some(" 1700000000.sig ")).as_deref(),
+            Some("1700000000.sig")
+        );
     }
 }

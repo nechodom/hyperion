@@ -1,0 +1,14 @@
+{# Fan-out authentication banner, included at the top of every
+   cluster-aggregate page. When a node's response fails the Ed25519
+   response-signature check the master DISCARDS it, so the table below
+   is short by that node's rows. Without this the operator reads a
+   forged or stripped answer as "the sites vanished". Standard
+   .flash error markup — this is wayfinding, not new chrome.
+   Requires a `node_auth_warning: Option<String>` field on the page's
+   template struct (handlers::node_auth_warning builds it). #}
+{% if let Some(warning) = node_auth_warning %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2l9 4v6c0 5-3.8 9.2-9 10-5.2-.8-9-5-9-10V6z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+    <div class="flash-body"><strong>Incomplete view.</strong> {{ warning }}</div>
+  </div>
+{% endif %}

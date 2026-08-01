@@ -9,10 +9,11 @@
 //! socket as before.
 
 use crate::state::SharedState;
+use hyperion_core::master_rpc::VerifyOpts;
+use hyperion_core::node_rpc::verify_response;
 use hyperion_rpc::codec::{Request, Response};
-use hyperion_rpc_client::{
-    call, call_remote_with_observed_pin, ClientError, RemoteCallOpts, RemoteClientError,
-};
+use hyperion_rpc_client::remote::{call_remote_attested, RemoteCallOutcome};
+use hyperion_rpc_client::{call, ClientError, RemoteCallOpts, RemoteClientError};
 
 /// Default port the agent's inbound listener binds. Mirrors
 /// `RemoteRpcSection::default().bind`. When a per-node endpoint
@@ -35,6 +36,17 @@ pub enum DispatchError {
     /// label so it's safe to display.
     #[error("node {node_id} unreachable: {kind}")]
     NodeUnreachable { node_id: String, kind: String },
+    /// The worker answered, but the master could not AUTHENTICATE the
+    /// answer: either the Ed25519 response signature didn't verify, or
+    /// the node has published a response-signing key and replied
+    /// unsigned while enforcement is on. Deliberately NOT folded into
+    /// `NodeUnreachable` — "unreachable" reads as downtime and invites a
+    /// retry, whereas this is a possible *forged* response (a
+    /// substituted password, a faked provisioning success) and has to
+    /// read as one. `reason` is a short fixed string from the verifier;
+    /// it never carries response content.
+    #[error("node {node_id} response failed authentication: {reason}")]
+    ResponseAuthFailed { node_id: String, reason: String },
     #[error("target node {0} is not enrolled")]
     UnknownNode(String),
     #[error("target node {0} has no public_ip on record — cannot reach")]
@@ -184,14 +196,21 @@ async fn dispatch_remote(
         .master_rpc_signer
         .as_ref()
         .ok_or(DispatchError::NoSigner)?;
-    let (endpoint, reported_pin) = resolve_node_endpoint(state, node_id).await?;
+    let route = resolve_node_endpoint(state, node_id).await?;
+    // Read both enforcement toggles in ONE local RPC, UNCONDITIONALLY.
+    // This used to be skipped for a node with neither a reported pin nor
+    // a published signing key ("nothing to enforce against, save a round
+    // trip") — but "this node has published nothing" is exactly the state
+    // an on-path attacker engineers by stripping resp_pubkey from the
+    // heartbeat, and skipping the read handed that node a hard-coded
+    // enforce=false. `check_response_auth` needs the real toggle value to
+    // refuse it. Cert pinning loses nothing either way: with no reported
+    // pin there is nothing to pass to --pinnedpubkey regardless.
+    let enforce = cluster_enforcement(state).await;
     // Block C enforce phase: when the cluster toggle is on AND this node
     // has a heartbeat-reported pin, pin it for real (curl --pinnedpubkey).
-    // Short-circuit so we only read the toggle when there's a pin to
-    // enforce — a node with no reported pin is never enforced (still
-    // reachable), so a brand-new worker isn't locked out pre-heartbeat.
-    let pinned_pubkey = match &reported_pin {
-        Some(pin) if cluster_enforces_cert_pinning(state).await => Some(pin.clone()),
+    let pinned_pubkey = match &route.reported_pin {
+        Some(pin) if enforce.cert_pinning => Some(pin.clone()),
         _ => None,
     };
     let opts = RemoteCallOpts {
@@ -199,10 +218,27 @@ async fn dispatch_remote(
         pinned_pubkey,
         ..RemoteCallOpts::default()
     };
-    match call_remote_with_observed_pin(&endpoint, signer, node_id, req, opts).await {
-        Ok((resp, observed_pin)) => {
-            warn_on_pin_mismatch(node_id, reported_pin.as_deref(), observed_pin.as_deref());
-            Ok(resp)
+    match call_remote_attested(&route.endpoint, signer, node_id, req, opts).await {
+        Ok(out) => {
+            warn_on_pin_mismatch(
+                node_id,
+                route.reported_pin.as_deref(),
+                out.observed_pin.as_deref(),
+            );
+            // Response authentication lives HERE, on the remote path
+            // only. The local Unix-socket branch of `dispatch_to_node`
+            // has no signed envelope and therefore no nonce to bind a
+            // response to, so the same check there would fail every call
+            // the master makes to itself. The gate is the dispatch path
+            // taken, never the node id — the master's own `nodes` row
+            // stores its hostname, not `LOCAL_NODE_SENTINEL`.
+            check_response_auth(
+                node_id,
+                route.resp_pubkey.as_deref(),
+                &out,
+                enforce.response_auth,
+            )?;
+            Ok(out.resp)
         }
         Err(RemoteClientError::HttpError { code, stderr }) => {
             // Upgrade TCP-layer failures to NodeUnreachable so the
@@ -250,47 +286,112 @@ async fn dispatch_remote(
 /// so the merged output is deterministic regardless of which task
 /// finishes first. Each pair carries the full `NodeSummary` so callers
 /// can tag rows with either `node_id` or the human `label`.
+///
+/// A node whose response failed AUTHENTICATION is dropped from the
+/// aggregate too — but never quietly. Use [`fan_out_reporting`] where
+/// the page can say so: "a node's sites are missing because it was
+/// down" and "a node's sites are missing because someone forged its
+/// answer" must not look identical to the operator.
 pub async fn fan_out(
     state: &SharedState,
     nodes: Vec<hyperion_types::NodeSummary>,
     req: Request,
 ) -> Vec<(hyperion_types::NodeSummary, Response)> {
-    let mut set: tokio::task::JoinSet<Option<(hyperion_types::NodeSummary, Response)>> =
-        tokio::task::JoinSet::new();
+    fan_out_reporting(state, nodes, req).await.0
+}
+
+/// One node's fan-out outcome: the answered pair, or the node plus why
+/// it dropped out of the aggregate.
+type FanOutResult =
+    Result<(hyperion_types::NodeSummary, Response), (hyperion_types::NodeSummary, DispatchError)>;
+
+/// [`fan_out`] that also hands back the nodes that dropped out, so an
+/// aggregate page can render a banner instead of silently showing
+/// fewer rows. Both vectors are sorted by `node_id`.
+///
+/// Callers should treat [`DispatchError::ResponseAuthFailed`] in the
+/// failure list as a security event, not as node churn: the node
+/// answered, and the master threw the answer away because it couldn't
+/// prove the node wrote it.
+pub async fn fan_out_reporting(
+    state: &SharedState,
+    nodes: Vec<hyperion_types::NodeSummary>,
+    req: Request,
+) -> (
+    Vec<(hyperion_types::NodeSummary, Response)>,
+    Vec<(hyperion_types::NodeSummary, DispatchError)>,
+) {
+    let mut set: tokio::task::JoinSet<FanOutResult> = tokio::task::JoinSet::new();
     for n in nodes {
         let st = state.clone();
         let r = req.clone();
         set.spawn(async move {
             let nid = n.node_id.clone();
             match dispatch_to_node(&st, Some(nid.as_str()), r).await {
-                Ok(resp) => Some((n, resp)),
+                Ok(resp) => Ok((n, resp)),
                 Err(e) => {
-                    tracing::warn!(node = %nid, error = %e, "fan_out: node excluded");
-                    None
+                    // A failed-authentication node is not "one more slow
+                    // worker". Log it at ERROR with the security wording
+                    // so it can't be lost among routine exclusions in
+                    // `journalctl -u hyperion-web -g fan_out`.
+                    if matches!(e, DispatchError::ResponseAuthFailed { .. }) {
+                        tracing::error!(
+                            node = %nid,
+                            error = %e,
+                            "SECURITY: fan_out excluded a node whose response failed \
+                             authentication — this page is rendering an INCOMPLETE \
+                             aggregate, not an empty one"
+                        );
+                    } else {
+                        tracing::warn!(node = %nid, error = %e, "fan_out: node excluded");
+                    }
+                    Err((n, e))
                 }
             }
         });
     }
     let mut out: Vec<(hyperion_types::NodeSummary, Response)> = Vec::new();
+    let mut failed: Vec<(hyperion_types::NodeSummary, DispatchError)> = Vec::new();
     while let Some(joined) = set.join_next().await {
-        if let Ok(Some(pair)) = joined {
-            out.push(pair);
+        match joined {
+            Ok(Ok(pair)) => out.push(pair),
+            Ok(Err(pair)) => failed.push(pair),
+            // JoinError: the task itself panicked or was cancelled. There
+            // is no NodeSummary to report against, same as before.
+            Err(_) => {}
         }
     }
     out.sort_by(|a, b| a.0.node_id.cmp(&b.0.node_id));
-    out
+    failed.sort_by(|a, b| a.0.node_id.cmp(&b.0.node_id));
+    (out, failed)
+}
+
+/// Where to reach one enrolled node, plus the crypto material the
+/// master has on file for it.
+struct NodeRoute {
+    /// `https://<ip>:9443` base URL.
+    endpoint: String,
+    /// Last heartbeat-reported TLS SPKI pin, if any.
+    reported_pin: Option<String>,
+    /// Last published Ed25519 response-signing pubkey, if any.
+    /// Two same-shaped `Option<String>`s are exactly the pair a
+    /// positional tuple lets a caller swap without the compiler
+    /// noticing — pinning against a signing key would fail every
+    /// connection — so they travel named.
+    resp_pubkey: Option<String>,
 }
 
 /// Look up the target node's public IP from the master's `nodes`
 /// table (via the local agent's `NodesList` RPC) and build the
-/// `https://<ip>:9443` base URL. Also returns the node's last
-/// heartbeat-reported TLS SPKI pin (if any) so the caller can compare
-/// it against the cert actually presented on the connection (Block C
-/// warn-only mismatch detection).
+/// `https://<ip>:9443` base URL, along with the node's last
+/// heartbeat-reported TLS SPKI pin and response-signing pubkey (either
+/// may be absent). Both come from the node's AUTHENTICATED heartbeat,
+/// which is what makes them usable as the reference to compare this
+/// connection against.
 async fn resolve_node_endpoint(
     state: &SharedState,
     node_id: &str,
-) -> Result<(String, Option<String>), DispatchError> {
+) -> Result<NodeRoute, DispatchError> {
     let list_resp = call(&state.agent_socket, Request::NodesList).await?;
     let nodes = match list_resp {
         Response::NodesList(v) => v,
@@ -301,6 +402,7 @@ async fn resolve_node_endpoint(
         .find(|n| n.node_id == node_id)
         .ok_or_else(|| DispatchError::UnknownNode(node_id.to_string()))?;
     let reported_pin = node.tls_spki_pin.clone();
+    let resp_pubkey = node.resp_pubkey.clone();
     let ip = node
         .public_ip
         .filter(|s| !s.is_empty())
@@ -311,20 +413,191 @@ async fn resolve_node_endpoint(
     } else {
         ip
     };
-    Ok((
-        format!("https://{host_part}:{}", DEFAULT_AGENT_RPC_PORT),
+    Ok(NodeRoute {
+        endpoint: format!("https://{host_part}:{}", DEFAULT_AGENT_RPC_PORT),
         reported_pin,
-    ))
+        resp_pubkey,
+    })
 }
 
-/// Read the cluster `enforce_worker_cert_pinning` toggle (agent.toml
-/// `[cluster]`, surfaced via AgentConfigView). FAIL-SAFE: any read
-/// failure returns `false` (never enforce), so a flaky config read can't
-/// accidentally lock the master out of its workers.
-async fn cluster_enforces_cert_pinning(state: &SharedState) -> bool {
+/// The cluster's two enforcement toggles.
+#[derive(Debug, Clone, Copy, Default)]
+struct Enforcement {
+    /// `[cluster] enforce_worker_cert_pinning` — pin the worker's TLS
+    /// cert for real (`curl --pinnedpubkey`).
+    cert_pinning: bool,
+    /// `[cluster] enforce_response_auth` — refuse an unsigned response
+    /// from a node that has published a response-signing key.
+    response_auth: bool,
+}
+
+/// Read both cluster enforcement toggles (agent.toml `[cluster]`,
+/// surfaced via AgentConfigView) in a SINGLE local RPC. They are wanted
+/// on the same dispatch, so a function per toggle would double the
+/// local round trips on every remote call.
+///
+/// FAIL-SAFE: any read failure returns all-false (never enforce), so a
+/// flaky config read can't accidentally lock the master out of its
+/// workers — for either toggle.
+async fn cluster_enforcement(state: &SharedState) -> Enforcement {
     match call(&state.agent_socket, Request::AgentConfigView).await {
-        Ok(Response::AgentConfigView(c)) => c.cluster.enforce_worker_cert_pinning,
-        _ => false,
+        Ok(Response::AgentConfigView(c)) => Enforcement {
+            cert_pinning: c.cluster.enforce_worker_cert_pinning,
+            response_auth: c.cluster.enforce_response_auth,
+        },
+        _ => Enforcement::default(),
+    }
+}
+
+/// The four-way response-authentication matrix, evaluated on every
+/// remote dispatch. `resp_pubkey` is the key the node published over
+/// its authenticated heartbeat; `out.resp_sig` is what arrived on
+/// *this* connection.
+///
+/// Capability is decided by PRESENCE of the pubkey, never by
+/// `agent_version`: git-describe strings don't order, and the version
+/// column lags a node restart by a full heartbeat tick.
+///
+/// `enforce` is the whole-cluster switch, so NO key on file is just as
+/// unverifiable as a stripped signature: once enforcement is on, every
+/// arm that cannot actually verify has to refuse. Otherwise an attacker
+/// who suppresses `resp_pubkey` from a node's heartbeat (leaving the
+/// column NULL) walks straight through the feature that exists to stop
+/// exactly that. Settings → Cluster is where the operator confirms every
+/// node shows its "🔑 Response auth on file" chip before flipping this;
+/// that chip, not `agent_version`, is the readiness signal.
+fn check_response_auth(
+    node_id: &str,
+    resp_pubkey: Option<&str>,
+    out: &RemoteCallOutcome,
+    enforce: bool,
+) -> Result<(), DispatchError> {
+    /// Shared `reason` for the two arms where the master simply has no
+    /// key to check against. Distinct from a verification failure on
+    /// purpose: the operator's fix is "get this node to publish its key"
+    /// (upgrade + one heartbeat, or `node reset crypto`), not "hunt for
+    /// a forgery".
+    const NO_KEY: &str = "no response-signing key on file for this node — nothing to verify \
+                          against while response auth is enforced";
+
+    match (out.resp_sig.as_deref(), resp_pubkey) {
+        // (1) Old node, nothing on file. The mandatory new-master /
+        //     old-node transient of a rolling upgrade: with enforcement
+        //     OFF there is no key to verify against, so accept silently.
+        //     With it ON this is a node that never published a key —
+        //     either genuinely un-upgraded, or one whose key report was
+        //     stripped on-path to keep the column NULL. Refuse: an
+        //     unverifiable node must not be more trusted than one that
+        //     merely dropped its signature.
+        (None, None) => {
+            if enforce {
+                tracing::error!(
+                    node = node_id,
+                    "SECURITY: worker answered UNSIGNED and has no response-signing key \
+                     on file. Response auth is enforced, so the response was discarded. \
+                     Upgrade the node (or run `node reset crypto`) and wait one heartbeat \
+                     so it publishes its key."
+                );
+                Err(DispatchError::ResponseAuthFailed {
+                    node_id: node_id.to_string(),
+                    reason: NO_KEY.to_string(),
+                })
+            } else {
+                Ok(())
+            }
+        }
+        // (2) Both halves present — verify for real, over the RAW bytes
+        //     curl received. A WRONG signature is a hard failure
+        //     regardless of the enforcement toggle: "unsigned" is a
+        //     compatibility state an operator opts out of on their own
+        //     schedule, "mis-signed" is an attack and no toggle makes it
+        //     benign.
+        (Some(sig), Some(pubkey)) => match verify_response(
+            sig,
+            pubkey,
+            node_id,
+            &out.req_nonce,
+            out.req_ts,
+            &out.raw_body,
+            chrono::Utc::now().timestamp(),
+            VerifyOpts::default(),
+        ) {
+            Ok(_) => Ok(()),
+            Err(reason) => {
+                tracing::error!(
+                    node = node_id,
+                    reason = reason,
+                    "SECURITY: worker response failed signature verification — the body \
+                     was not produced by the key this node published. Discarding it."
+                );
+                Err(DispatchError::ResponseAuthFailed {
+                    node_id: node_id.to_string(),
+                    reason: reason.to_string(),
+                })
+            }
+        },
+        // (3) The node signs but the master has no key for it yet: agent
+        //     upgraded, first heartbeat not landed. With enforcement OFF
+        //     accept — there is nothing to check against — but say so
+        //     once, so the operator can tell this apart from a node that
+        //     never signs. With it ON, refuse: a signature we cannot
+        //     check is not evidence of anything, and an attacker can mint
+        //     one trivially by keeping the pubkey column NULL and signing
+        //     with a key of their own.
+        (Some(_), None) => {
+            if enforce {
+                tracing::error!(
+                    node = node_id,
+                    "SECURITY: worker signed its response but has published no \
+                     response-signing key, so the signature cannot be checked against \
+                     anything. Response auth is enforced, so the response was discarded. \
+                     Wait one heartbeat for the node to publish its key."
+                );
+                Err(DispatchError::ResponseAuthFailed {
+                    node_id: node_id.to_string(),
+                    reason: NO_KEY.to_string(),
+                })
+            } else {
+                tracing::info!(
+                    node = node_id,
+                    "worker signed its response but has not published a response-signing \
+                     key yet — accepted unverified until its next heartbeat"
+                );
+                Ok(())
+            }
+        }
+        // (4) THE DOWNGRADE ATTACK: the node is known to sign, and this
+        //     answer came back unsigned. Either the worker was rolled
+        //     back, or someone on the path stripped the header to dodge
+        //     case (2) entirely. Warn-only until the operator flips
+        //     enforcement, because one un-upgraded worker would
+        //     otherwise take the whole cluster offline.
+        (None, Some(_)) => {
+            if enforce {
+                tracing::error!(
+                    node = node_id,
+                    "SECURITY: worker publishes a response-signing key but answered \
+                     UNSIGNED — possible stripped signature. Response auth is enforced, \
+                     so the response was discarded."
+                );
+                Err(DispatchError::ResponseAuthFailed {
+                    node_id: node_id.to_string(),
+                    reason: "node publishes a response-signing key but the response \
+                             arrived unsigned"
+                        .to_string(),
+                })
+            } else {
+                tracing::warn!(
+                    node = node_id,
+                    "SECURITY (warn-only): worker publishes a response-signing key but \
+                     answered UNSIGNED — a downgrade would look exactly like this. \
+                     Response auth is NOT enforced yet, so this request was allowed. \
+                     Turn on Enforce response authentication in Settings → Cluster once \
+                     every node signs."
+                );
+                Ok(())
+            }
+        }
     }
 }
 
@@ -369,6 +642,17 @@ impl From<DispatchError> for crate::error::AppError {
                 node_id,
                 hint: kind,
             },
+            // Routed through AppError::Rpc, NEVER AppError::NodeUnreachable:
+            // the node answered. Rendering a possible forgery as downtime
+            // would send the operator off restarting a healthy agent while
+            // an attacker holds the path. The body text carries the real
+            // story; `reason` is a fixed verifier string, never content.
+            DispatchError::ResponseAuthFailed { node_id, reason } => AppError::Rpc(format!(
+                "the response from node {node_id} could not be authenticated ({reason}), \
+                 so the master discarded it. This is a signature failure, not a \
+                 connectivity problem: check `journalctl -u hyperion-agent` on the node \
+                 and whether anything is intercepting master→worker traffic."
+            )),
             DispatchError::UnknownNode(n) => AppError::BadRequest(format!(
                 "node {n} is not enrolled — pick a different target"
             )),
@@ -384,5 +668,144 @@ impl From<DispatchError> for crate::error::AppError {
                 AppError::Internal("agent returned an unexpected NodesList shape".into())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hyperion_core::node_rpc::{sign_response, NodeRpcSigner};
+
+    const NODE: &str = "s4";
+    /// Stand-in for a response whose content an attacker would love to
+    /// rewrite (the password shown to the operator after a reset).
+    const BODY: &[u8] = br#"{"HostingResetPassword":{"password":"real-secret"}}"#;
+
+    fn fresh_signer() -> NodeRpcSigner {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        NodeRpcSigner::load_or_init(&tmp.path().join("node-rpc.key")).expect("key")
+    }
+
+    fn outcome(resp_sig: Option<&str>, req_ts: i64, body: &[u8]) -> RemoteCallOutcome {
+        RemoteCallOutcome {
+            resp: Response::HostingDelete,
+            raw_body: body.to_vec(),
+            observed_pin: None,
+            resp_sig: resp_sig.map(str::to_string),
+            req_ts,
+            req_nonce: "nonce-1".to_string(),
+        }
+    }
+
+    fn is_auth_failure(e: &DispatchError) -> bool {
+        matches!(e, DispatchError::ResponseAuthFailed { .. })
+    }
+
+    // (1) Old node: no signature, no key on file. The mandatory
+    //     new-master/old-node transient of a rolling upgrade — must pass
+    //     while enforcement is OFF, or upgrading the master bricks the
+    //     panel for every not-yet-upgraded worker.
+    #[test]
+    fn unsigned_from_unknown_key_node_is_accepted_when_not_enforced() {
+        let out = outcome(None, 0, BODY);
+        assert!(check_response_auth(NODE, None, &out, false).is_ok());
+    }
+
+    // (1) ...but once enforcement is ON, "no key on file" is exactly the
+    //     state an attacker engineers by stripping resp_pubkey from the
+    //     heartbeat. Accepting it would make the toggle meaningless.
+    #[test]
+    fn unsigned_from_unknown_key_node_is_refused_when_enforced() {
+        let out = outcome(None, 0, BODY);
+        let err = check_response_auth(NODE, None, &out, true)
+            .expect_err("unverifiable node must be refused under enforcement");
+        assert!(is_auth_failure(&err), "wrong variant: {err}");
+        assert!(
+            err.to_string().contains("no response-signing key on file"),
+            "reason must distinguish 'no key' from a signature mismatch: {err}"
+        );
+    }
+
+    // (2) Both halves present: the real verification path.
+    #[test]
+    fn valid_signature_is_accepted() {
+        let s = fresh_signer();
+        let now = chrono::Utc::now().timestamp();
+        let sig = sign_response(&s, NODE, "nonce-1", now, now, BODY);
+        let out = outcome(Some(&sig), now, BODY);
+        assert!(check_response_auth(NODE, Some(s.pubkey_b64()), &out, false).is_ok());
+    }
+
+    // (2) A forged body is a HARD failure with enforcement OFF. The
+    //     toggle governs "unsigned", never "mis-signed".
+    #[test]
+    fn forged_body_fails_even_when_enforcement_is_off() {
+        let s = fresh_signer();
+        let now = chrono::Utc::now().timestamp();
+        let sig = sign_response(&s, NODE, "nonce-1", now, now, BODY);
+        // On-path attacker swapped the password the operator will see.
+        let tampered = br#"{"HostingResetPassword":{"password":"attacker-chosen"}}"#;
+        let out = outcome(Some(&sig), now, tampered);
+        let err = check_response_auth(NODE, Some(s.pubkey_b64()), &out, false)
+            .expect_err("forged body must be refused");
+        assert!(is_auth_failure(&err), "wrong variant: {err}");
+    }
+
+    // (2) A response captured from one request must not pass as the
+    //     answer to another — the nonce is in the preimage.
+    #[test]
+    fn replayed_response_from_another_request_fails() {
+        let s = fresh_signer();
+        let now = chrono::Utc::now().timestamp();
+        let sig = sign_response(&s, NODE, "nonce-of-some-other-request", now, now, BODY);
+        let out = outcome(Some(&sig), now, BODY);
+        let err = check_response_auth(NODE, Some(s.pubkey_b64()), &out, false)
+            .expect_err("replay must be refused");
+        assert!(is_auth_failure(&err), "wrong variant: {err}");
+    }
+
+    // (3) Node upgraded, heartbeat not yet landed: accept while
+    //     enforcement is off (nothing to verify against), refuse once it
+    //     is on — an uncheckable signature proves nothing, and anyone can
+    //     produce one with a key of their own.
+    #[test]
+    fn signature_without_stored_key_is_accepted_only_while_unenforced() {
+        let out = outcome(Some("1700000000.whatever"), 1_700_000_000, BODY);
+        assert!(check_response_auth(NODE, None, &out, false).is_ok());
+        let err = check_response_auth(NODE, None, &out, true)
+            .expect_err("uncheckable signature must be refused under enforcement");
+        assert!(is_auth_failure(&err), "wrong variant: {err}");
+        assert!(
+            err.to_string().contains("no response-signing key on file"),
+            "reason must distinguish 'no key' from a signature mismatch: {err}"
+        );
+    }
+
+    // (4) The downgrade: known signer answered unsigned.
+    #[test]
+    fn missing_signature_from_known_signer_is_warn_only_until_enforced() {
+        let s = fresh_signer();
+        let out = outcome(None, 1_700_000_000, BODY);
+        assert!(check_response_auth(NODE, Some(s.pubkey_b64()), &out, false).is_ok());
+        let err = check_response_auth(NODE, Some(s.pubkey_b64()), &out, true)
+            .expect_err("enforced downgrade must be refused");
+        assert!(is_auth_failure(&err), "wrong variant: {err}");
+    }
+
+    /// A forged response must never reach the operator as "node
+    /// unreachable" — that reads as downtime and invites a retry.
+    #[test]
+    fn auth_failure_does_not_render_as_node_unreachable() {
+        let err = DispatchError::ResponseAuthFailed {
+            node_id: NODE.to_string(),
+            reason: "signature verify failed".to_string(),
+        };
+        let app: crate::error::AppError = err.into();
+        assert!(
+            !matches!(app, crate::error::AppError::NodeUnreachable { .. }),
+            "response auth failure must not present as downtime"
+        );
+        let text = app.to_string();
+        assert!(text.contains("could not be authenticated"), "{text}");
     }
 }

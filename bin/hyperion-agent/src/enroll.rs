@@ -38,6 +38,12 @@ pub struct EnrollmentConfig {
     /// overriding the auto-detected public IP. `None`/empty ⇒ auto-detect.
     /// Set to a private-network IP to keep master↔node RPC off the public net.
     pub advertise_addr: Option<String>,
+    /// Base64 of this node's Ed25519 response-signing public key, taken from
+    /// the signer main() loaded at startup. Sent WITH the enrollment — not
+    /// left to the first heartbeat — so the master can verify our responses
+    /// from its very first dispatch instead of trusting a ~60 s window of
+    /// unauthenticated ones. `None` when the key file couldn't be loaded.
+    pub resp_pubkey: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -54,6 +60,12 @@ struct EnrollRequest<'a> {
     prior_node_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     prior_secret: Option<&'a str>,
+    /// Our response-signing pubkey, so the master pins it at registration
+    /// time and every subsequent RPC answer is verifiable. Skipped when
+    /// absent, keeping the request byte-identical to the pre-signing shape
+    /// for a master that doesn't know the field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    resp_pubkey: Option<&'a str>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -176,6 +188,7 @@ pub async fn enroll_now(cfg: &EnrollmentConfig) -> Result<(), String> {
         public_ip,
         prior_node_id,
         prior_secret,
+        resp_pubkey: cfg.resp_pubkey.as_deref(),
     })
     .map_err(|e| format!("serialize: {e}"))?;
 
@@ -404,11 +417,18 @@ async fn clear_invite_token_in_config(path: &std::path::Path) -> Result<(), Stri
 /// `verify_tls` mirrors `EnrollmentConfig::verify_tls` — default
 /// off so self-signed master certs work. The bearer secret is the
 /// auth; TLS is just encryption-in-transit.
+///
+/// `resp_pubkey` is our response-signing pubkey, derived at startup
+/// from the loaded key and passed in rather than read here: it is
+/// the same value the enrollment already sent, and re-advertising it
+/// every tick is what lets a node enrolled before response signing
+/// existed get pinned without a re-enrollment.
 pub async fn heartbeat_loop(
     state_file: std::path::PathBuf,
     period_secs: u64,
     verify_tls: bool,
     inbound_cert: std::path::PathBuf,
+    resp_pubkey: Option<String>,
 ) {
     // Real build SHA (not "0.1.0") so the master's nodes.agent_version — and
     // thus the cluster version-skew pill — reflects the deployed commit.
@@ -441,6 +461,7 @@ pub async fn heartbeat_loop(
             "secret": p.secret,
             "agent_version": agent_version,
             "tls_spki_pin": tls_spki_pin,
+            "resp_pubkey": resp_pubkey,
         })) {
             Ok(b) => b,
             Err(e) => {

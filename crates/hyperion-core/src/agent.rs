@@ -1359,6 +1359,7 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         public_ip: Option<String>,
         prior_node_id: Option<String>,
         prior_secret: Option<String>,
+        resp_pubkey: Option<String>,
     ) -> Result<(String, String, Option<String>), RpcError> {
         let (effective_node_id, secret) = self
             .svc
@@ -1371,6 +1372,7 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
                 public_ip,
                 prior_node_id,
                 prior_secret,
+                resp_pubkey,
             )
             .await?;
         Ok((effective_node_id, secret, self.svc.master_rpc_pubkey_b64()))
@@ -1382,9 +1384,10 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         secret: String,
         agent_version: String,
         tls_spki_pin: Option<String>,
+        resp_pubkey: Option<String>,
     ) -> Result<Option<String>, RpcError> {
         self.svc
-            .node_heartbeat(node_id, secret, agent_version, tls_spki_pin)
+            .node_heartbeat(node_id, secret, agent_version, tls_spki_pin, resp_pubkey)
             .await?;
         Ok(self.svc.master_rpc_pubkey_b64())
     }
@@ -1420,6 +1423,10 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         actor_uid: i64,
     ) -> Result<(bool, i64), RpcError> {
         self.svc.node_remove(&node_id, force, actor_uid).await
+    }
+
+    async fn node_reset_crypto(&self, node_id: String, actor_uid: i64) -> Result<bool, RpcError> {
+        self.svc.node_reset_crypto(&node_id, actor_uid).await
     }
 
     async fn node_reassign_hostings(

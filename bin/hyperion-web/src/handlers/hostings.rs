@@ -50,6 +50,10 @@ struct ListTpl<'a> {
     /// WP asset library — drives the "Bulk install asset" dropdown.
     /// Empty list = the dropdown hides itself.
     wp_assets: Vec<hyperion_types::WpAssetSummary>,
+    /// Set when a node's response failed authentication and its
+    /// hostings were therefore discarded — the list below is INCOMPLETE.
+    /// Rendered by `_node_auth_banner.html`.
+    node_auth_warning: Option<String>,
 }
 
 #[derive(Template)]
@@ -316,7 +320,10 @@ pub async fn get_list(
     ctx: AuthCtx,
     axum::extract::Query(q): axum::extract::Query<ListQuery>,
 ) -> Result<Response, AppError> {
-    let rows = list_hostings(&state).await.map_err(AppError::Rpc)?;
+    let (rows, dropped) = list_hostings_reporting(&state)
+        .await
+        .map_err(AppError::Rpc)?;
+    let node_auth_warning = super::node_auth_warning(&dropped);
     let total_count = rows.len();
     // Role-based filter: operators + viewers only see hostings they
     // have an explicit access grant for. super_admin + admin see all.
@@ -430,6 +437,7 @@ pub async fn get_list(
         error: None,
         flash: q.bulk_flash,
         wp_assets: fetch_wp_assets(&state).await.unwrap_or_default(),
+        node_auth_warning,
     };
     Ok(Html(tpl.render()?).into_response())
 }
@@ -4786,6 +4794,26 @@ pub struct CheckDomainQuery {
 }
 
 pub(crate) async fn list_hostings(state: &SharedState) -> Result<Vec<HostingSummary>, String> {
+    list_hostings_reporting(state).await.map(|(rows, _)| rows)
+}
+
+/// [`list_hostings`] that also hands back the nodes the fan-out dropped,
+/// mirroring `dispatcher::fan_out` / `fan_out_reporting`. The /hostings
+/// page uses this one so a node whose response failed AUTHENTICATION
+/// gets a banner instead of quietly shrinking the table; the JSON/API
+/// callers keep the plain list.
+pub(crate) async fn list_hostings_reporting(
+    state: &SharedState,
+) -> Result<
+    (
+        Vec<HostingSummary>,
+        Vec<(
+            hyperion_types::NodeSummary,
+            crate::dispatcher::DispatchError,
+        )>,
+    ),
+    String,
+> {
     // 1. Master's own hostings (always included).
     let local_resp = hyperion_rpc_client::call(&state.agent_socket, Request::HostingList)
         .await
@@ -4809,7 +4837,9 @@ pub(crate) async fn list_hostings(state: &SharedState) -> Result<Vec<HostingSumm
     // Query every worker CONCURRENTLY (see dispatcher::fan_out): one slow or
     // wedged node no longer stalls the whole /hostings (+ search + domain-check)
     // page — wall-clock is bounded by the slowest single node, not the sum.
-    for (n, resp) in crate::dispatcher::fan_out(state, nodes, Request::HostingList).await {
+    let (answered, failed) =
+        crate::dispatcher::fan_out_reporting(state, nodes, Request::HostingList).await;
+    for (n, resp) in answered {
         if let RpcResponse::HostingList(mut remote) = resp {
             for r in &mut remote {
                 r.node_id = Some(n.node_id.clone());
@@ -4817,7 +4847,7 @@ pub(crate) async fn list_hostings(state: &SharedState) -> Result<Vec<HostingSumm
             all.extend(remote);
         }
     }
-    Ok(all)
+    Ok((all, failed))
 }
 
 // ==================================================================

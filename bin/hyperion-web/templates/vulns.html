@@ -9,6 +9,8 @@
   </div>
 </div>
 
+{% include "_node_auth_banner.html" %}
+
 <div class="grid cols-3" style="margin-bottom:1rem">
   <div class="kpi-card">
     <div class="kpi-label">Major updates (review)</div>
@@ -29,6 +31,7 @@
     <div class="empty" style="padding:2.5rem">
       <p class="muted">Every WordPress site across the cluster is up to date.</p>
       <p class="text-soft small">Sites are swept daily. Safe minor and patch updates apply automatically; major updates appear here and notify administrators.</p>
+      {% include "_node_auth_empty_note.html" %}
     </div>
   {% else %}
     <div class="table-wrap">

@@ -1867,6 +1867,15 @@ fn print_pretty(resp: &Response) {
                 eprintln!("✗ node not found");
             }
         }
+        Response::NodeCryptoReset { cleared } => {
+            if *cleared {
+                println!(
+                    "✓ pinned crypto cleared — the node re-pins its TLS pin and response-signing key on its next heartbeat"
+                );
+            } else {
+                eprintln!("✗ node not found");
+            }
+        }
         Response::CertOverview(items) => {
             if items.is_empty() {
                 println!("no certificates");

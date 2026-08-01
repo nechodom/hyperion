@@ -79,6 +79,7 @@
     <div class="flash-body">{{ e }}</div>
   </div>
 {% endif %}
+{% include "_node_auth_banner.html" %}
 
 {% if rows.is_empty() %}
 <div class="card">
@@ -88,6 +89,7 @@
     </div>
     <h3>No hostings yet</h3>
     <p>Create one to provision nginx, PHP-FPM, a database, and a TLS certificate in a single step.</p>
+    {% include "_node_auth_empty_note.html" %}
     <a href="/hostings/new" class="btn primary" data-require-caps="hosting_create">Create your first hosting</a>
   </div>
 </div>
