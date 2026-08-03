@@ -39,6 +39,37 @@ pub struct Sparkline {
     pub points_json: String,
 }
 
+/// One line of the per-site breakdown table.
+///
+/// [`hyperion_types::HostingStats`] carries no `node_id` — attribution
+/// comes from *which node answered* — so the node's display label is
+/// stapled on here as the rows are collected.
+#[derive(Debug, Clone)]
+pub struct SiteRow {
+    pub hosting_id: String,
+    pub domain: String,
+    /// Display label of the node this site lives on. Only rendered in
+    /// the cluster view; in a single-node view the column is dropped.
+    pub node_label: String,
+    pub cpu_pct_x100: i64,
+    pub mem_rss_bytes: i64,
+    pub disk_bytes: i64,
+    /// `bw_in + bw_out` over the last 24 h — what the Traffic column sorts on.
+    pub bw_bytes_24h: i64,
+    pub bw_in_bytes_24h: i64,
+    pub bw_out_bytes_24h: i64,
+    pub requests_24h: i64,
+    pub sampled_at: i64,
+    /// False when the sampler has not written a usage row for this site
+    /// yet. The row still renders, with zeros — "not measured yet" is not
+    /// an error, and dropping the row would make a fresh site look missing.
+    pub has_samples: bool,
+    /// Width % of the share bar drawn in the ACTIVE sort column, relative
+    /// to the heaviest row. 0 when that column is all zeros (or when
+    /// sorting by domain, where a bar would mean nothing).
+    pub bar_pct: i64,
+}
+
 #[derive(Template)]
 #[template(path = "stats.html")]
 struct StatsTpl<'a> {
@@ -72,12 +103,33 @@ struct StatsTpl<'a> {
     /// Set when a node's response failed authentication and its stats were
     /// therefore discarded — the cluster totals below UNDERCOUNT.
     node_auth_warning: Option<String>,
+    /// Per-site breakdown — "which site is eating the box?". Already
+    /// sorted heaviest-first by `sort`.
+    sites: Vec<SiteRow>,
+    /// Canonical sort key echoed back so the column headers can mark the
+    /// active one. One of disk|cpu|ram|traffic|requests|domain.
+    sort: &'static str,
+    /// True in the cluster view only — the Node column is dead weight
+    /// when every row belongs to the same node.
+    show_node_col: bool,
+    /// Column totals, so each cell can show its share via `fmt_percent`
+    /// and the table can foot with a Σ row.
+    sites_total_cpu_x100: i64,
+    sites_total_mem: i64,
+    sites_total_disk: i64,
+    sites_total_bw: i64,
+    sites_total_reqs: i64,
 }
 
 #[derive(Deserialize, Default)]
 pub struct StatsQuery {
     #[serde(default)]
     node: String,
+    /// Per-site table sort column. Server-side on purpose: the table
+    /// lives inside the 30 s live-refresh region, and client-side sorting
+    /// would be undone by every swap.
+    #[serde(default)]
+    sort: String,
 }
 
 pub async fn get_stats(
@@ -152,17 +204,41 @@ pub async fn get_stats(
         }
     };
 
+    let current_label = if is_cluster_view {
+        "cluster (all nodes)".to_string()
+    } else {
+        label_for_node(&query.node, &all_nodes)
+    };
+
     // History (sparklines) is per-node: in cluster mode we pull
     // master's history as a representative — sparklines for "the
     // cluster" don't have a single agent-level meaning. Operators
     // who want a node-specific history switch the dropdown.
     let history_target = if is_cluster_view { None } else { target };
-    let history_res = crate::dispatcher::dispatch_to_node(
-        &state,
-        history_target,
-        Request::NodeMetricsHistory { limit: 48 },
-    )
-    .await;
+    // The per-site breakdown is its own fan-out round. Run it CONCURRENTLY
+    // with the history fetch — serialising a third cluster-wide round trip
+    // would add a whole RPC latency to every /stats load on a multi-node
+    // setup, and the two answers don't depend on each other.
+    let (history_res, (mut sites, sites_auth_warning)) = tokio::join!(
+        crate::dispatcher::dispatch_to_node(
+            &state,
+            history_target,
+            Request::NodeMetricsHistory { limit: 48 },
+        ),
+        collect_site_rows(&state, target, is_cluster_view, &all_nodes, &current_label),
+    );
+
+    // A node whose sites were discarded for a bad signature must be
+    // reported even if the ClusterStats round happened to authenticate.
+    let node_auth_warning = node_auth_warning.or(sites_auth_warning);
+
+    let sort = normalize_site_sort(&query.sort);
+    sort_site_rows(&mut sites, sort);
+    let sites_total_cpu_x100 = sites.iter().map(|r| r.cpu_pct_x100).sum();
+    let sites_total_mem = sites.iter().map(|r| r.mem_rss_bytes).sum();
+    let sites_total_disk = sites.iter().map(|r| r.disk_bytes).sum();
+    let sites_total_bw = sites.iter().map(|r| r.bw_bytes_24h).sum();
+    let sites_total_reqs = sites.iter().map(|r| r.requests_24h).sum();
 
     let history: NodeMetricsHistory = match history_res {
         Ok(RpcResponse::NodeMetricsHistory(h)) => h,
@@ -173,12 +249,6 @@ pub async fn get_stats(
             NodeMetricsHistory::default()
         }
         _ => NodeMetricsHistory::default(),
-    };
-
-    let current_label = if is_cluster_view {
-        "cluster (all nodes)".to_string()
-    } else {
-        label_for_node(&query.node, &all_nodes)
     };
 
     let selected_node = cluster.as_ref().and_then(|c| {
@@ -254,8 +324,147 @@ pub async fn get_stats(
         current_node: query.node.clone(),
         current_label,
         node_auth_warning,
+        sites,
+        sort,
+        show_node_col: is_cluster_view,
+        sites_total_cpu_x100,
+        sites_total_mem,
+        sites_total_disk,
+        sites_total_bw,
+        sites_total_reqs,
     };
     Ok(Html(tpl.render()?).into_response())
+}
+
+/// Collect the per-site breakdown for the current view.
+///
+/// Mirrors the node switcher exactly: a specific node gets exactly that
+/// node's sites, the cluster view fans out over master + every enrolled
+/// node. Returns the rows plus the banner text for any node whose
+/// response failed AUTHENTICATION — those sites are missing from the
+/// table, and a short table must never read as "the sites are gone".
+async fn collect_site_rows(
+    state: &SharedState,
+    target: Option<&str>,
+    is_cluster_view: bool,
+    all_nodes: &[hyperion_types::NodeSummary],
+    single_node_label: &str,
+) -> (Vec<SiteRow>, Option<String>) {
+    let mut rows: Vec<SiteRow> = Vec::new();
+    if !is_cluster_view {
+        // Single node: one dispatch. A failure here is already spelled out
+        // by the ClusterStats round's error banner, so stay quiet.
+        if let Ok(RpcResponse::HostingStatsAll(v)) =
+            crate::dispatcher::dispatch_to_node(state, target, Request::HostingStatsAll).await
+        {
+            push_site_rows(&mut rows, v, single_node_label);
+        }
+        return (rows, None);
+    }
+
+    // Master first, then every enrolled node through the shared fan-out.
+    if let Ok(RpcResponse::HostingStatsAll(v)) =
+        crate::dispatcher::dispatch_to_node(state, None, Request::HostingStatsAll).await
+    {
+        // Just "master" — this label sits in a per-row tag in a table that
+        // is already tight on width; the long form belongs in the node
+        // switcher and the node detail card, not on every line.
+        push_site_rows(&mut rows, v, "master");
+    }
+    let (answered, failed) =
+        crate::dispatcher::fan_out_reporting(state, all_nodes.to_vec(), Request::HostingStatsAll)
+            .await;
+    for (n, resp) in answered {
+        if let RpcResponse::HostingStatsAll(v) = resp {
+            let label = if n.label.is_empty() {
+                n.node_id.clone()
+            } else {
+                n.label.clone()
+            };
+            push_site_rows(&mut rows, v, &label);
+        }
+    }
+    (rows, crate::handlers::node_auth_warning(&failed))
+}
+
+/// Convert one node's `HostingStats` batch into table rows, stamping the
+/// node label the answer arrived from.
+fn push_site_rows(out: &mut Vec<SiteRow>, stats: Vec<hyperion_types::HostingStats>, node: &str) {
+    out.extend(stats.into_iter().map(|s| SiteRow {
+        hosting_id: s.hosting_id.0,
+        domain: s.domain,
+        node_label: node.to_string(),
+        cpu_pct_x100: s.cpu_pct_x100,
+        mem_rss_bytes: s.mem_rss_bytes,
+        disk_bytes: s.disk_bytes,
+        bw_bytes_24h: s.bw_in_bytes_24h.saturating_add(s.bw_out_bytes_24h),
+        bw_in_bytes_24h: s.bw_in_bytes_24h,
+        bw_out_bytes_24h: s.bw_out_bytes_24h,
+        requests_24h: s.requests_24h,
+        sampled_at: s.sampled_at,
+        has_samples: s.last_request_at.is_some(),
+        bar_pct: 0,
+    }));
+}
+
+/// Map `?sort=` onto a canonical column key. Anything unrecognised
+/// (including the empty default) falls back to **disk**: it is the one
+/// column populated for every site from the first `du` sweep, so the
+/// default ordering is meaningful even before the CPU/RSS sampler has
+/// ticked.
+pub fn normalize_site_sort(s: &str) -> &'static str {
+    match s {
+        "cpu" => "cpu",
+        "ram" | "mem" => "ram",
+        "traffic" | "bw" => "traffic",
+        "requests" | "reqs" => "requests",
+        "domain" | "site" => "domain",
+        _ => "disk",
+    }
+}
+
+/// The numeric value the given column sorts on. `domain` has none.
+fn site_sort_key(r: &SiteRow, sort: &str) -> i64 {
+    match sort {
+        "cpu" => r.cpu_pct_x100,
+        "ram" => r.mem_rss_bytes,
+        "traffic" => r.bw_bytes_24h,
+        "requests" => r.requests_24h,
+        _ => r.disk_bytes,
+    }
+}
+
+/// Sort heaviest-first on `sort` (A→Z for `domain`) and fill in `bar_pct`
+/// for the active column, scaled against the heaviest row so the top site
+/// reads as a full bar.
+pub fn sort_site_rows(rows: &mut [SiteRow], sort: &str) {
+    if sort == "domain" {
+        rows.sort_by(|a, b| a.domain.cmp(&b.domain));
+        for r in rows.iter_mut() {
+            r.bar_pct = 0;
+        }
+        return;
+    }
+    // Domain is the tie-break so equal-usage rows (very common: a shelf of
+    // idle sites all at 0 CPU) keep a stable, alphabetical order instead of
+    // reshuffling on every 30 s live refresh.
+    rows.sort_by(|a, b| {
+        site_sort_key(b, sort)
+            .cmp(&site_sort_key(a, sort))
+            .then_with(|| a.domain.cmp(&b.domain))
+    });
+    let max = rows
+        .iter()
+        .map(|r| site_sort_key(r, sort))
+        .max()
+        .unwrap_or(0);
+    for r in rows.iter_mut() {
+        r.bar_pct = if max > 0 {
+            (site_sort_key(r, sort).saturating_mul(100) / max).clamp(0, 100)
+        } else {
+            0
+        };
+    }
 }
 
 /// Build a synthetic cluster-wide ClusterStats by fan-out:
@@ -789,6 +998,140 @@ pub fn fmt_action_label(s: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn site(domain: &str, cpu: i64, mem: i64, disk: i64, bw: i64, reqs: i64) -> SiteRow {
+        SiteRow {
+            hosting_id: format!("id-{domain}"),
+            domain: domain.to_string(),
+            node_label: "n1".into(),
+            cpu_pct_x100: cpu,
+            mem_rss_bytes: mem,
+            disk_bytes: disk,
+            bw_bytes_24h: bw,
+            bw_in_bytes_24h: bw / 2,
+            bw_out_bytes_24h: bw - bw / 2,
+            requests_24h: reqs,
+            sampled_at: 1_700_000_000,
+            has_samples: true,
+            bar_pct: 0,
+        }
+    }
+
+    #[test]
+    fn normalize_site_sort_defaults_to_disk() {
+        assert_eq!(normalize_site_sort(""), "disk");
+        assert_eq!(normalize_site_sort("nonsense"), "disk");
+        assert_eq!(normalize_site_sort("disk"), "disk");
+        // Aliases so an operator-typed URL still lands somewhere sane.
+        assert_eq!(normalize_site_sort("mem"), "ram");
+        assert_eq!(normalize_site_sort("bw"), "traffic");
+        assert_eq!(normalize_site_sort("reqs"), "requests");
+        assert_eq!(normalize_site_sort("site"), "domain");
+    }
+
+    #[test]
+    fn sort_site_rows_puts_heaviest_first_and_scales_bars() {
+        let mut rows = vec![
+            site("small.test", 100, 10, 1_000, 5, 5),
+            site("huge.test", 900, 90, 4_000, 50, 50),
+            site("mid.test", 500, 50, 2_000, 25, 25),
+        ];
+        sort_site_rows(&mut rows, "disk");
+        assert_eq!(
+            rows.iter().map(|r| r.domain.as_str()).collect::<Vec<_>>(),
+            ["huge.test", "mid.test", "small.test"],
+            "default column must lead with the biggest consumer"
+        );
+        // Bar is scaled against the heaviest row, so the top site is full.
+        assert_eq!(rows[0].bar_pct, 100);
+        assert_eq!(rows[1].bar_pct, 50);
+        assert_eq!(rows[2].bar_pct, 25);
+    }
+
+    #[test]
+    fn sort_site_rows_honours_every_column() {
+        let mut rows = vec![
+            site("a.test", 900, 10, 1_000, 5, 500),
+            site("b.test", 100, 90, 4_000, 50, 5),
+        ];
+        for (sort, want_first) in [
+            ("cpu", "a.test"),
+            ("ram", "b.test"),
+            ("disk", "b.test"),
+            ("traffic", "b.test"),
+            ("requests", "a.test"),
+        ] {
+            sort_site_rows(&mut rows, sort);
+            assert_eq!(rows[0].domain, want_first, "sort={sort}");
+        }
+        // Domain sort is alphabetical, and draws no share bar — "a is
+        // bigger than b" is not a claim an A→Z listing gets to make.
+        sort_site_rows(&mut rows, "domain");
+        assert_eq!(rows[0].domain, "a.test");
+        assert!(rows.iter().all(|r| r.bar_pct == 0));
+    }
+
+    #[test]
+    fn sort_site_rows_all_zero_column_does_not_divide_by_zero() {
+        // Every site freshly created, sampler hasn't ticked: the whole
+        // column is 0. Must render as empty bars, not panic.
+        let mut rows = vec![site("a.test", 0, 0, 0, 0, 0), site("b.test", 0, 0, 0, 0, 0)];
+        sort_site_rows(&mut rows, "cpu");
+        assert!(rows.iter().all(|r| r.bar_pct == 0));
+        // Ties fall back to domain order, so the 30 s live refresh can't
+        // reshuffle a shelf of idle sites on every swap.
+        assert_eq!(rows[0].domain, "a.test");
+        assert_eq!(rows[1].domain, "b.test");
+    }
+
+    #[test]
+    fn push_site_rows_keeps_unsampled_sites_with_zeros() {
+        let mut out = Vec::new();
+        push_site_rows(
+            &mut out,
+            vec![hyperion_types::HostingStats {
+                hosting_id: hyperion_types::HostingId("h1".into()),
+                domain: "fresh.test".into(),
+                disk_bytes: 0,
+                bw_in_bytes_24h: 0,
+                bw_out_bytes_24h: 0,
+                requests_24h: 0,
+                last_request_at: None,
+                sampled_at: 1_700_000_000,
+                mem_rss_bytes: 0,
+                cpu_pct_x100: 0,
+            }],
+            "worker-2",
+        );
+        assert_eq!(out.len(), 1, "a never-sampled site must still get a row");
+        assert!(!out[0].has_samples);
+        // HostingStats carries no node_id — attribution comes from the
+        // node that answered, and must survive the conversion.
+        assert_eq!(out[0].node_label, "worker-2");
+    }
+
+    #[test]
+    fn push_site_rows_traffic_is_in_plus_out() {
+        let mut out = Vec::new();
+        push_site_rows(
+            &mut out,
+            vec![hyperion_types::HostingStats {
+                hosting_id: hyperion_types::HostingId("h1".into()),
+                domain: "busy.test".into(),
+                disk_bytes: 10,
+                bw_in_bytes_24h: 300,
+                bw_out_bytes_24h: 700,
+                requests_24h: 42,
+                last_request_at: Some(1_700_000_000),
+                sampled_at: 1_700_000_000,
+                mem_rss_bytes: 5,
+                cpu_pct_x100: 250,
+            }],
+            "master (this node)",
+        );
+        assert_eq!(out[0].bw_bytes_24h, 1_000);
+        assert!(out[0].has_samples);
+    }
 
     #[test]
     fn build_sparkline_empty_returns_placeholder() {
