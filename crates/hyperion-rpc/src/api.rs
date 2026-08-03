@@ -346,6 +346,10 @@ pub trait AgentApi: Send + Sync + 'static {
         &self,
         sel: crate::wire::HostingSelector,
     ) -> Result<HostingStats, RpcError>;
+    /// Same snapshot for every ACTIVE hosting on this node, computed in
+    /// one query. Feeds the /stats per-site breakdown, which would
+    /// otherwise need one round-trip per site.
+    async fn hosting_stats_all(&self) -> Result<Vec<HostingStats>, RpcError>;
     /// Latest snapshot for this agent (single-node = this box).
     async fn node_stats(&self) -> Result<NodeStats, RpcError>;
     /// Cluster-wide aggregate. Single-node today = wraps node_stats.

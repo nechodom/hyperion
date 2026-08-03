@@ -10853,6 +10853,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(n)
     }
 
+    /// Stats for ONE hosting (the hosting detail page).
+    ///
+    /// The aggregation below is mirrored in SQL by
+    /// [`Self::hosting_stats_all`] / `limits::usage_rollup_all`, which
+    /// serves the whole-node breakdown in a single query. The two must
+    /// stay semantically identical — a site's numbers may not change
+    /// depending on which page you look at. Change one, change both.
     pub async fn hosting_stats(&self, sel: HostingSelector) -> Result<HostingStats, RpcError> {
         let detail = self.get(sel).await?;
         // Sum last 24h of hourly usage rows.
@@ -10888,6 +10895,49 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             mem_rss_bytes: mem_rss,
             cpu_pct_x100: cpu_pct,
         })
+    }
+
+    /// Stats for EVERY active hosting on this node, in one DB query.
+    ///
+    /// Backs the /stats per-site breakdown. Doing this with
+    /// [`Self::hosting_stats`] would be one RPC round-trip *and* one
+    /// query per site; here it is a single window-function rollup —
+    /// see `limits::usage_rollup_all`, whose aggregation deliberately
+    /// mirrors `hosting_stats`' Rust-side fold so the detail page and
+    /// the breakdown table can never disagree about the same site.
+    pub async fn hosting_stats_all(&self) -> Result<Vec<HostingStats>, RpcError> {
+        let summaries = self.list().await?;
+        let rollups = hyperion_state::limits::usage_rollup_all(&self.pool, 24)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("usage: {e}")))?;
+        let by_id: HashMap<&str, &hyperion_state::limits::UsageRollup> =
+            rollups.iter().map(|r| (r.hosting_id.as_str(), r)).collect();
+        let now = now_secs();
+        // Drive the list from the HOSTINGS, not from the usage rows: a
+        // site created since the last sampler tick has no usage rows
+        // yet, and it must still show up (all zeros) instead of
+        // silently vanishing from the breakdown.
+        Ok(summaries
+            .into_iter()
+            .filter(|s| matches!(s.state, HostingState::Active))
+            .map(|s| {
+                let r = by_id.get(s.id.as_str()).copied();
+                HostingStats {
+                    hosting_id: s.id,
+                    domain: s.domain,
+                    disk_bytes: r.map(|r| r.disk_used_bytes).unwrap_or(0),
+                    bw_in_bytes_24h: r.map(|r| r.bw_in_bytes).unwrap_or(0),
+                    bw_out_bytes_24h: r.map(|r| r.bw_out_bytes).unwrap_or(0),
+                    requests_24h: r.map(|r| r.php_requests).unwrap_or(0),
+                    // Same rule as hosting_stats: "we have at least one
+                    // sample" ⇒ stamp now; never sampled ⇒ None.
+                    last_request_at: r.filter(|r| r.periods > 0).map(|_| now),
+                    sampled_at: now,
+                    mem_rss_bytes: r.map(|r| r.mem_rss_bytes).unwrap_or(0),
+                    cpu_pct_x100: r.map(|r| r.cpu_pct_x100).unwrap_or(0),
+                }
+            })
+            .collect())
     }
 
     pub async fn node_stats(&self, hostname: &str, version: &str) -> Result<NodeStats, RpcError> {

@@ -259,6 +259,109 @@
     </div>
   </div>
 
+  {# ── Per-site breakdown ────────────────────────────────────────────
+     "Which site is eating the box?" — one row per active hosting, the
+     heaviest first. Sorting is a server-side ?sort= round trip on
+     purpose: this table sits inside #stats-live, so a client-side sort
+     would be thrown away by the next 30 s swap. #}
+  <div class="card no-pad-table" style="margin-top:1.25rem">
+    <div>
+      <h3 style="margin:0;font-size:1.05rem">Per-site usage</h3>
+      <div class="text-soft small">
+        {{ sites.len() }} active site{% if sites.len() != 1 %}s{% endif %}
+        {% if show_node_col %}across the cluster{% else %}on this node{% endif %} ·
+        {% if sort == "domain" %}A→Z by domain{% else %}heaviest {{ sort }} first{% endif %}.
+        CPU and RAM are the latest reading; bandwidth and requests cover the last 24 h.
+      </div>
+    </div>
+
+    {% if sites.is_empty() %}
+      <div class="empty" style="padding:1.6rem 0 2rem">
+        <h3>No active sites here yet</h3>
+        <p>
+          Every active hosting appears here as soon as it exists — its usage
+          columns fill in after the sampler's next 5 min tick.
+        </p>
+      </div>
+    {% else %}
+    <div class="table-wrap">
+      <table class="site-usage">
+        <thead>
+          <tr>
+            <th><a class="th-sort {% if sort == "domain" %}active{% endif %}" href="/stats?node={{ current_node|e }}&amp;sort=domain">Site{% if sort == "domain" %} ▾{% endif %}</a></th>
+            {% if show_node_col %}<th class="hide-on-phone">Node</th>{% endif %}
+            <th class="right"><a class="th-sort {% if sort == "cpu" %}active{% endif %}" href="/stats?node={{ current_node|e }}&amp;sort=cpu">CPU{% if sort == "cpu" %} ▾{% endif %}</a></th>
+            <th class="right"><a class="th-sort {% if sort == "ram" %}active{% endif %}" href="/stats?node={{ current_node|e }}&amp;sort=ram">RAM{% if sort == "ram" %} ▾{% endif %}</a></th>
+            <th class="right"><a class="th-sort {% if sort == "disk" %}active{% endif %}" href="/stats?node={{ current_node|e }}&amp;sort=disk">Disk{% if sort == "disk" %} ▾{% endif %}</a></th>
+            {# "· 24 h" lives in the card subtitle, not in these two headers:
+               spelled out here they are the widest cells in the table and
+               squeeze every byte figure into wrapping onto two lines. #}
+            <th class="right" title="Bandwidth in + out over the last 24 h"><a class="th-sort {% if sort == "traffic" %}active{% endif %}" href="/stats?node={{ current_node|e }}&amp;sort=traffic">Traffic{% if sort == "traffic" %} ▾{% endif %}</a></th>
+            <th class="right hide-on-phone" title="Requests served over the last 24 h"><a class="th-sort {% if sort == "requests" %}active{% endif %}" href="/stats?node={{ current_node|e }}&amp;sort=requests">Requests{% if sort == "requests" %} ▾{% endif %}</a></th>
+            <th class="hide-on-phone">Sampled</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for r in sites %}
+          <tr>
+            <td>
+              <a href="/hostings/{{ r.hosting_id|e }}"><strong>{{ r.domain }}</strong></a>
+              {% if !r.has_samples %}
+                <span class="text-soft small" title="The site exists and is active; the 5 min sampler simply has not written a usage row for it yet.">· not sampled yet</span>
+              {% endif %}
+            </td>
+            {% if show_node_col %}<td class="hide-on-phone"><span class="tag">{{ r.node_label }}</span></td>{% endif %}
+            <td class="right numeric">
+              {{ crate::handlers::stats::fmt_pct_x100(r.cpu_pct_x100) }}
+              {% if sort == "cpu" %}
+                <div class="progress-bar share" title="{{ crate::handlers::stats::fmt_percent(r.cpu_pct_x100, sites_total_cpu_x100) }} of the CPU used by the sites listed"><div class="progress-bar-fill" style="width:{{ r.bar_pct }}%"></div></div>
+              {% endif %}
+            </td>
+            <td class="right numeric">
+              {{ crate::handlers::stats::fmt_bytes(r.mem_rss_bytes) }}
+              {% if sort == "ram" %}
+                <div class="progress-bar share" title="{{ crate::handlers::stats::fmt_percent(r.mem_rss_bytes, sites_total_mem) }} of the RAM used by the sites listed"><div class="progress-bar-fill" style="width:{{ r.bar_pct }}%"></div></div>
+              {% endif %}
+            </td>
+            <td class="right numeric">
+              {{ crate::handlers::stats::fmt_bytes(r.disk_bytes) }}
+              {% if sort == "disk" %}
+                <div class="progress-bar share" title="{{ crate::handlers::stats::fmt_percent(r.disk_bytes, sites_total_disk) }} of the disk used by the sites listed"><div class="progress-bar-fill" style="width:{{ r.bar_pct }}%"></div></div>
+              {% endif %}
+            </td>
+            <td class="right numeric" title="in {{ crate::handlers::stats::fmt_bytes(r.bw_in_bytes_24h) }} · out {{ crate::handlers::stats::fmt_bytes(r.bw_out_bytes_24h) }}">
+              {{ crate::handlers::stats::fmt_bytes(r.bw_bytes_24h) }}
+              {% if sort == "traffic" %}
+                <div class="progress-bar share" title="{{ crate::handlers::stats::fmt_percent(r.bw_bytes_24h, sites_total_bw) }} of the traffic across the sites listed"><div class="progress-bar-fill" style="width:{{ r.bar_pct }}%"></div></div>
+              {% endif %}
+            </td>
+            <td class="right numeric hide-on-phone">
+              {{ r.requests_24h }}
+              {% if sort == "requests" %}
+                <div class="progress-bar share" title="{{ crate::handlers::stats::fmt_percent(r.requests_24h, sites_total_reqs) }} of the requests across the sites listed"><div class="progress-bar-fill" style="width:{{ r.bar_pct }}%"></div></div>
+              {% endif %}
+            </td>
+            <td class="hide-on-phone text-soft small">{{ crate::handlers::stats::fmt_ago(r.sampled_at) }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+        <tfoot>
+          <tr>
+            <td><strong>Σ all sites</strong></td>
+            {% if show_node_col %}<td class="hide-on-phone"></td>{% endif %}
+            <td class="right numeric"><strong>{{ crate::handlers::stats::fmt_pct_x100(sites_total_cpu_x100) }}</strong></td>
+            <td class="right numeric"><strong>{{ crate::handlers::stats::fmt_bytes(sites_total_mem) }}</strong></td>
+            <td class="right numeric"><strong>{{ crate::handlers::stats::fmt_bytes(sites_total_disk) }}</strong></td>
+            <td class="right numeric"><strong>{{ crate::handlers::stats::fmt_bytes(sites_total_bw) }}</strong></td>
+            <td class="right numeric hide-on-phone"><strong>{{ sites_total_reqs }}</strong></td>
+            <td class="hide-on-phone"></td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+    {% endif %}
+  </div>
+
   {# Selected node detail card — uptime, sampled, etc. #}
   {% if let Some(n) = selected_node %}
   <div class="card" style="margin-top:1.25rem">

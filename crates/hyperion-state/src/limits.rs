@@ -299,6 +299,87 @@ pub async fn usage_for(
         .collect())
 }
 
+/// One hosting's usage rolled up over its most recent `limit` periods.
+/// Produced by [`usage_rollup_all`] — the bulk sibling of [`usage_for`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageRollup {
+    pub hosting_id: HostingId,
+    /// MAX over the window: disk is a level, not a flow — summing it
+    /// would report 24× the real footprint.
+    pub disk_used_bytes: i64,
+    pub bw_in_bytes: i64,
+    pub bw_out_bytes: i64,
+    pub php_requests: i64,
+    /// From the SINGLE most recent period only — RSS and CPU% are
+    /// instantaneous gauges, so a sum is meaningless.
+    pub mem_rss_bytes: i64,
+    pub cpu_pct_x100: i64,
+    /// How many periods actually fed the aggregate (1..=limit). Lets
+    /// callers distinguish "sampled, and it was zero" from "never
+    /// sampled" without a second query.
+    pub periods: i64,
+}
+
+/// Roll up `hosting_usage` for EVERY hosting in one round-trip.
+///
+/// Exists because the /stats per-site breakdown needs N hostings at
+/// once and [`usage_for`] is per-hosting — N sites would be N queries
+/// per node. The aggregation must stay byte-for-byte identical to what
+/// `HostingService::hosting_stats` computes in Rust from `usage_for`,
+/// or the hosting detail page and the breakdown table would disagree
+/// about the same site.
+///
+/// The window function ranks each hosting's periods independently, so
+/// `rn <= limit` is a per-hosting "latest N" — a plain `LIMIT` would
+/// cut across hostings and starve the ones sorted last.
+pub async fn usage_rollup_all(
+    pool: &SqlitePool,
+    limit: i64,
+) -> Result<Vec<UsageRollup>, StateError> {
+    // NOTE: exactly ONE positional bind (`limit`, in the WHERE). Adding
+    // a filter here means adding its .bind() in the same left-to-right
+    // order — a misaligned bind silently yields empty/wrong rows.
+    let rows: Vec<(String, i64, i64, i64, i64, i64, i64, i64)> = sqlx::query_as(
+        "WITH ranked AS (
+             SELECT hosting_id, disk_used_bytes, bw_in_bytes, bw_out_bytes,
+                    php_requests, mem_rss_bytes, cpu_pct_x100,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY hosting_id ORDER BY period DESC
+                    ) AS rn
+             FROM hosting_usage
+         )
+         SELECT hosting_id,
+                MAX(disk_used_bytes)                                   AS disk_used_bytes,
+                SUM(bw_in_bytes)                                       AS bw_in_bytes,
+                SUM(bw_out_bytes)                                      AS bw_out_bytes,
+                SUM(php_requests)                                      AS php_requests,
+                COALESCE(MAX(CASE WHEN rn = 1 THEN mem_rss_bytes END), 0) AS mem_rss_bytes,
+                COALESCE(MAX(CASE WHEN rn = 1 THEN cpu_pct_x100  END), 0) AS cpu_pct_x100,
+                COUNT(*)                                               AS periods
+         FROM ranked
+         WHERE rn <= ?
+         GROUP BY hosting_id",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(
+            |(hosting_id, disk, bw_in, bw_out, php, mem_rss, cpu, periods)| UsageRollup {
+                hosting_id: HostingId(hosting_id),
+                disk_used_bytes: disk,
+                bw_in_bytes: bw_in,
+                bw_out_bytes: bw_out,
+                php_requests: php,
+                mem_rss_bytes: mem_rss,
+                cpu_pct_x100: cpu,
+                periods,
+            },
+        )
+        .collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -314,6 +395,54 @@ mod tests {
             .await
             .expect("hosting");
         id
+    }
+
+    /// Second/third hosting for the bulk-rollup tests — needs its own
+    /// system user because `system_users` is unique on name + uid.
+    async fn fixture_named(pool: &SqlitePool, user: &str, uid: i64, domain: &str) -> HostingId {
+        let suid = system_users::insert(pool, user, uid, &format!("/home/{user}"), "/x", 1)
+            .await
+            .expect("user");
+        let id = HostingId::new_v7();
+        hostings::insert(pool, &id, domain, suid, None, "/r", 1, None)
+            .await
+            .expect("hosting");
+        id
+    }
+
+    /// `period` is 'YYYY-MM-DD-HH'; callers pass the hour so the
+    /// lexicographic DESC ordering is also chronological.
+    async fn put_usage(
+        pool: &SqlitePool,
+        id: &HostingId,
+        hour: u32,
+        disk: i64,
+        bw_in: i64,
+        bw_out: i64,
+        reqs: i64,
+        mem: i64,
+        cpu: i64,
+    ) {
+        upsert_usage(
+            pool,
+            &UsageBucket {
+                hosting_id: id.clone(),
+                period: format!("2026-06-01-{hour:02}"),
+                disk_used_bytes: disk,
+                inodes_used: 0,
+                bw_in_bytes: bw_in,
+                bw_out_bytes: bw_out,
+                php_requests: reqs,
+                mem_rss_bytes: mem,
+                cpu_pct_x100: cpu,
+            },
+        )
+        .await
+        .expect("upsert usage");
+    }
+
+    fn find<'a>(rollups: &'a [UsageRollup], id: &HostingId) -> Option<&'a UsageRollup> {
+        rollups.iter().find(|r| &r.hosting_id == id)
     }
 
     #[tokio::test]
@@ -422,5 +551,149 @@ mod tests {
         let got = usage_for(&pool, &id, 10).await.expect("get");
         assert_eq!(got.len(), 1);
         assert_eq!(got[0], bucket);
+    }
+
+    #[tokio::test]
+    async fn usage_rollup_all_aggregates_each_hosting_independently() {
+        let pool = open_memory().await.expect("open");
+        let a = fixture(&pool).await;
+        let b = fixture_named(&pool, "v", 1043, "other.cz").await;
+
+        // Hosting A: disk peaks in the MIDDLE period, so a naive
+        // "latest disk" would report 100 instead of the 900 peak.
+        put_usage(&pool, &a, 10, 100, 1, 10, 100, 111, 11).await;
+        put_usage(&pool, &a, 11, 900, 2, 20, 200, 222, 22).await;
+        put_usage(&pool, &a, 12, 300, 4, 40, 400, 333, 33).await;
+        // Hosting B: different magnitudes, so cross-contamination shows.
+        put_usage(&pool, &b, 10, 7, 5, 50, 5, 777, 77).await;
+        put_usage(&pool, &b, 11, 9, 6, 60, 6, 888, 88).await;
+
+        let got = usage_rollup_all(&pool, 24).await.expect("rollup");
+        assert_eq!(got.len(), 2, "one row per hosting that has usage");
+
+        let ra = find(&got, &a).expect("hosting a present");
+        assert_eq!(ra.disk_used_bytes, 900, "disk is MAX over the window");
+        assert_eq!(ra.bw_in_bytes, 1 + 2 + 4);
+        assert_eq!(ra.bw_out_bytes, 10 + 20 + 40);
+        assert_eq!(ra.php_requests, 100 + 200 + 400);
+        // Instantaneous gauges come from period 12 only, never summed.
+        assert_eq!(ra.mem_rss_bytes, 333);
+        assert_eq!(ra.cpu_pct_x100, 33);
+        assert_eq!(ra.periods, 3);
+
+        let rb = find(&got, &b).expect("hosting b present");
+        assert_eq!(rb.disk_used_bytes, 9);
+        assert_eq!(rb.bw_in_bytes, 5 + 6);
+        assert_eq!(rb.bw_out_bytes, 50 + 60);
+        assert_eq!(rb.php_requests, 5 + 6);
+        assert_eq!(rb.mem_rss_bytes, 888);
+        assert_eq!(rb.cpu_pct_x100, 88);
+        assert_eq!(rb.periods, 2);
+    }
+
+    #[tokio::test]
+    async fn usage_rollup_all_limit_is_per_hosting_not_global() {
+        let pool = open_memory().await.expect("open");
+        let a = fixture(&pool).await;
+        let b = fixture_named(&pool, "v", 1043, "other.cz").await;
+
+        // 3 periods each, window = 2 → the oldest of each must drop.
+        // A's oldest carries an absurd disk + bw so leakage is loud.
+        put_usage(&pool, &a, 10, 999_999, 1_000, 1_000, 1_000, 1, 1).await;
+        put_usage(&pool, &a, 11, 10, 1, 2, 3, 2, 2).await;
+        put_usage(&pool, &a, 12, 20, 1, 2, 3, 42, 43).await;
+        put_usage(&pool, &b, 10, 888_888, 1_000, 1_000, 1_000, 1, 1).await;
+        put_usage(&pool, &b, 11, 30, 7, 8, 9, 3, 3).await;
+        put_usage(&pool, &b, 12, 40, 7, 8, 9, 55, 56).await;
+
+        let got = usage_rollup_all(&pool, 2).await.expect("rollup");
+        let ra = find(&got, &a).expect("hosting a present");
+        assert_eq!(ra.periods, 2, "a global LIMIT would starve one hosting");
+        assert_eq!(ra.disk_used_bytes, 20);
+        assert_eq!(ra.bw_in_bytes, 2);
+        assert_eq!(ra.bw_out_bytes, 4);
+        assert_eq!(ra.php_requests, 6);
+        assert_eq!(ra.mem_rss_bytes, 42);
+        assert_eq!(ra.cpu_pct_x100, 43);
+
+        let rb = find(&got, &b).expect("hosting b present");
+        assert_eq!(rb.periods, 2);
+        assert_eq!(rb.disk_used_bytes, 40);
+        assert_eq!(rb.bw_in_bytes, 14);
+        assert_eq!(rb.bw_out_bytes, 16);
+        assert_eq!(rb.php_requests, 18);
+        assert_eq!(rb.mem_rss_bytes, 55);
+        assert_eq!(rb.cpu_pct_x100, 56);
+    }
+
+    #[tokio::test]
+    async fn usage_rollup_all_omits_never_sampled_hostings() {
+        let pool = open_memory().await.expect("open");
+        let a = fixture(&pool).await;
+        let b = fixture_named(&pool, "v", 1043, "other.cz").await;
+        put_usage(&pool, &a, 10, 5, 1, 2, 3, 4, 5).await;
+
+        let got = usage_rollup_all(&pool, 24).await.expect("rollup");
+        // A brand-new site has no usage rows at all. The query simply
+        // omits it (GROUP BY over an empty set); the caller is the one
+        // that back-fills zeros from its hosting list, so a fresh site
+        // never silently vanishes from the breakdown.
+        assert_eq!(got.len(), 1);
+        assert!(find(&got, &b).is_none(), "no rows ⇒ no group");
+        assert_eq!(find(&got, &a).expect("a").periods, 1);
+    }
+
+    #[tokio::test]
+    async fn usage_rollup_all_on_empty_table_is_empty() {
+        let pool = open_memory().await.expect("open");
+        let _ = fixture(&pool).await;
+        let got = usage_rollup_all(&pool, 24).await.expect("rollup");
+        assert!(got.is_empty());
+    }
+
+    /// Guards the invariant the two call sites depend on: the bulk
+    /// rollup and `HostingService::hosting_stats`' Rust-side fold over
+    /// `usage_for` must produce identical numbers for the same rows.
+    #[tokio::test]
+    async fn usage_rollup_all_matches_usage_for_fold() {
+        let pool = open_memory().await.expect("open");
+        let a = fixture(&pool).await;
+        for h in 0..30u32 {
+            put_usage(
+                &pool,
+                &a,
+                h,
+                (h as i64 * 37) % 500,
+                h as i64,
+                h as i64 * 2,
+                h as i64 * 3,
+                h as i64 * 1000,
+                h as i64 * 7,
+            )
+            .await;
+        }
+
+        let rows = usage_for(&pool, &a, 24).await.expect("usage_for");
+        let (mut disk, mut bw_in, mut bw_out, mut reqs) = (0i64, 0i64, 0i64, 0i64);
+        for r in &rows {
+            disk = disk.max(r.disk_used_bytes);
+            bw_in += r.bw_in_bytes;
+            bw_out += r.bw_out_bytes;
+            reqs += r.php_requests;
+        }
+        let (mem, cpu) = rows
+            .first()
+            .map(|r| (r.mem_rss_bytes, r.cpu_pct_x100))
+            .unwrap_or((0, 0));
+
+        let got = usage_rollup_all(&pool, 24).await.expect("rollup");
+        let ra = find(&got, &a).expect("a");
+        assert_eq!(ra.disk_used_bytes, disk);
+        assert_eq!(ra.bw_in_bytes, bw_in);
+        assert_eq!(ra.bw_out_bytes, bw_out);
+        assert_eq!(ra.php_requests, reqs);
+        assert_eq!(ra.mem_rss_bytes, mem);
+        assert_eq!(ra.cpu_pct_x100, cpu);
+        assert_eq!(ra.periods, rows.len() as i64);
     }
 }

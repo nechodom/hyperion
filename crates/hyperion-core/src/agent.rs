@@ -613,6 +613,10 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.hosting_stats(sel).await
     }
 
+    async fn hosting_stats_all(&self) -> Result<Vec<HostingStats>, RpcError> {
+        self.svc.hosting_stats_all().await
+    }
+
     async fn node_stats(&self) -> Result<NodeStats, RpcError> {
         self.svc.node_stats(&self.hostname, &self.version).await
     }

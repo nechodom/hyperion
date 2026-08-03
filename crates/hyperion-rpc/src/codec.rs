@@ -309,6 +309,10 @@ pub enum Request {
     HostingStats {
         sel: HostingSelector,
     },
+    /// Stats for EVERY active hosting on the node, in one call. The
+    /// /stats per-site breakdown needs all of them; asking with N ×
+    /// `HostingStats` would be N round-trips per node.
+    HostingStatsAll,
     NodeStats,
     ClusterStats,
     NodeMetricsHistory {
@@ -1432,6 +1436,7 @@ pub enum Response {
     CertDns01FinishDomain(CertInfo),
     CertUpload(CertInfo),
     HostingStats(HostingStats),
+    HostingStatsAll(Vec<HostingStats>),
     NodeStats(NodeStats),
     ClusterStats(ClusterStats),
     NodeMetricsHistory(hyperion_types::NodeMetricsHistory),
