@@ -44,13 +44,17 @@ struct DashboardTpl<'a> {
     update_current_short: String,
     update_latest_short: String,
     error: Option<String>,
+    /// Set when a node's response failed authentication and its hostings
+    /// were therefore discarded — the "recent hostings" card is
+    /// INCOMPLETE.
+    node_auth_warning: Option<String>,
 }
 
 pub async fn get_dashboard(
     State(state): State<SharedState>,
     ctx: AuthCtx,
 ) -> Result<Response, AppError> {
-    let (info, recent, error) = fetch(&state).await;
+    let (info, recent, error, node_auth_warning) = fetch(&state).await;
     // Tenant-scoped roles (operator/customer/viewer) land on this shared page
     // too. They must NOT see other tenants' hostings or a cluster-wide audit
     // feed here: filter the hosting cards to their grants and (below) suppress
@@ -169,18 +173,30 @@ pub async fn get_dashboard(
         update_latest_short,
         error,
         hosting_domains,
+        node_auth_warning,
     };
     Ok(Html(tpl.render()?).into_response())
 }
 
-async fn fetch(state: &SharedState) -> (Option<AgentInfo>, Vec<HostingSummary>, Option<String>) {
+/// Returns `(agent info, recent hostings, page error, node-auth warning)`.
+/// The last element is `Some` when a node's hostings were dropped because
+/// its response failed authentication — the card must not read as "this
+/// operator has fewer sites than they do".
+async fn fetch(
+    state: &SharedState,
+) -> (
+    Option<AgentInfo>,
+    Vec<HostingSummary>,
+    Option<String>,
+    Option<String>,
+) {
     let info = match hyperion_rpc_client::call(&state.agent_socket, Request::AgentInfo).await {
         Ok(RpcResponse::AgentInfo(i)) => Some(i),
         Ok(RpcResponse::Error(e)) => {
-            return (None, vec![], Some(format!("agent: {e}")));
+            return (None, vec![], Some(format!("agent: {e}")), None);
         }
-        Ok(_) => return (None, vec![], Some("unexpected agent response".into())),
-        Err(e) => return (None, vec![], Some(format!("rpc: {e}"))),
+        Ok(_) => return (None, vec![], Some("unexpected agent response".into()), None),
+        Err(e) => return (None, vec![], Some(format!("rpc: {e}")), None),
     };
     // Recent hostings — fan-out across master + every enrolled
     // worker so a hosting created on `s4` shows up on the master's
@@ -188,11 +204,11 @@ async fn fetch(state: &SharedState) -> (Option<AgentInfo>, Vec<HostingSummary>, 
     // matched what /hostings did pre-fanout, but now the operator
     // expects parity. Bumped to 15 (was 8) with "View all →" on
     // the card linking to /hostings for the full table.
-    let recent = fetch_recent_multi_node(state).await;
-    (info, recent, None)
+    let (recent, node_auth_warning) = fetch_recent_multi_node(state).await;
+    (info, recent, None, node_auth_warning)
 }
 
-async fn fetch_recent_multi_node(state: &SharedState) -> Vec<HostingSummary> {
+async fn fetch_recent_multi_node(state: &SharedState) -> (Vec<HostingSummary>, Option<String>) {
     // Master's own hostings — tag with the LOCAL sentinel so the
     // dashboard's node-chip rendering keeps working.
     let mut all: Vec<HostingSummary> =
@@ -213,7 +229,9 @@ async fn fetch_recent_multi_node(state: &SharedState) -> Vec<HostingSummary> {
         };
     // Concurrent fan-out (see dispatcher::fan_out): the landing page must not
     // block on the slowest worker.
-    for (n, resp) in crate::dispatcher::fan_out(state, nodes, Request::HostingList).await {
+    let (answered, failed) =
+        crate::dispatcher::fan_out_reporting(state, nodes, Request::HostingList).await;
+    for (n, resp) in answered {
         if let RpcResponse::HostingList(mut remote) = resp {
             for r in &mut remote {
                 r.node_id = Some(n.node_id.clone());
@@ -222,5 +240,8 @@ async fn fetch_recent_multi_node(state: &SharedState) -> Vec<HostingSummary> {
         }
     }
     all.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-    all.into_iter().take(15).collect()
+    (
+        all.into_iter().take(15).collect(),
+        crate::handlers::node_auth_warning(&failed),
+    )
 }

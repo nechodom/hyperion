@@ -40,6 +40,9 @@ struct BansTpl<'a> {
     flash: Option<String>,
     flash_error: Option<String>,
     csrf_token: String,
+    /// Set when a node's response failed authentication and its bans were
+    /// therefore discarded — "no active bans" would be a lie for that node.
+    node_auth_warning: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -84,16 +87,22 @@ pub async fn get_bans(
         push(&mut rows, "local", "master", bans);
     }
     // Workers.
+    let mut node_auth_warning = None;
     if let Ok(RpcResponse::NodesList(nodes)) =
         hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await
     {
-        for (n, resp) in
-            crate::dispatcher::fan_out(&state, nodes, Request::BanList { hosting_id: None }).await
-        {
+        let (answered, failed) = crate::dispatcher::fan_out_reporting(
+            &state,
+            nodes,
+            Request::BanList { hosting_id: None },
+        )
+        .await;
+        for (n, resp) in answered {
             if let RpcResponse::BanList(bans) = resp {
                 push(&mut rows, n.node_id.as_str(), &n.label, bans);
             }
         }
+        node_auth_warning = super::node_auth_warning(&failed);
     }
     rows.sort_by(|a, b| b.banned_at.cmp(&a.banned_at));
     let auto = rows.iter().filter(|r| r.source == "auto").count();
@@ -111,6 +120,7 @@ pub async fn get_bans(
         flash: q.flash.filter(|s| !s.is_empty()),
         flash_error: q.flash_error.filter(|s| !s.is_empty()),
         csrf_token: super::session_csrf_token(&state, &ctx),
+        node_auth_warning,
     };
     Ok(Html(tpl.render()?).into_response())
 }

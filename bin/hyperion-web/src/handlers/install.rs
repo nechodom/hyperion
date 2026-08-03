@@ -475,6 +475,72 @@ pub async fn post_remove_node(
     Ok(Redirect::to(&format!("/install?{}={}{}", key, urlencode(&flash), anchor)).into_response())
 }
 
+#[derive(Deserialize)]
+pub struct ResetNodeCryptoForm {
+    pub node_id: String,
+}
+
+/// POST /install/reset-node-crypto — forget the pinned crypto anchors
+/// (`resp_pubkey` + `tls_spki_pin`) recorded for one node so its next
+/// heartbeat re-pins whatever the box now presents.
+///
+/// This is the escape hatch for the refuse-on-change rule. A legitimate
+/// agent reinstall regenerates node-rpc.key and the inbound TLS cert
+/// while `node-id.json` survives, so the node keeps its id but presents
+/// a new key — which the master refuses forever (loudly, as a possible
+/// on-path attack) with no in-product fix. Without this route the only
+/// recovery is hand-written SQL against the master's database.
+///
+/// Gated on `is_super_admin`, exactly like Remove / Drain / Rename: the
+/// action deliberately DROPS a security pin, so it must not be reachable
+/// by anyone who can't already remove the node outright. Nothing is sent
+/// to the node and nothing is re-pinned here — the node's own next
+/// report supplies the new values, so a mistaken click lands the
+/// operator back where they started rather than pinning a typed value.
+pub async fn post_reset_node_crypto(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<ResetNodeCryptoForm>,
+) -> Result<Response, AppError> {
+    if !ctx.is_super_admin() {
+        return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
+    }
+    let node_id = form.node_id.trim().to_string();
+    if node_id.is_empty() {
+        return Err(AppError::BadRequest("missing node_id".into()));
+    }
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::NodeResetCrypto {
+            node_id: node_id.clone(),
+        },
+    )
+    .await?;
+    let (success, flash): (bool, String) = match resp {
+        RpcResponse::NodeCryptoReset { cleared: true } => (
+            true,
+            format!(
+                "Pinned crypto cleared for {}. The TLS pin and response-signing key chips stay off until the node's next heartbeat (~30 s), which re-pins whatever it presents then.",
+                node_id
+            ),
+        ),
+        RpcResponse::NodeCryptoReset { cleared: false } => (
+            false,
+            format!("Node {} not found (already removed?)", node_id),
+        ),
+        RpcResponse::Error(e) => (false, format!("Reset failed: {e}")),
+        _ => (false, "Reset: unexpected response".into()),
+    };
+    let key = if success { "flash" } else { "flash_error" };
+    Ok(Redirect::to(&format!(
+        "/install?{}={}#node-{}",
+        key,
+        urlencode(&flash),
+        urlencode(&node_id)
+    ))
+    .into_response())
+}
+
 /// GET /install/update-node-status?node_id=… — returns a tiny HTML
 /// fragment with state pill + log tail. UI polls this via HTMX.
 #[derive(Deserialize)]

@@ -18,6 +18,10 @@
 //!   enrollment time (or via a later heartbeat ack).
 //! - Replay defense: in-memory nonce cache with the same 60 s
 //!   freshness window the signature timestamp uses.
+//! - The **response** is signed back with this node's own key (see
+//!   `hyperion_core::node_rpc`), so the same unverified TLS that
+//!   lets an attacker read the channel no longer lets them forge
+//!   what the master believes we answered.
 //!
 //! ## Why a separate HTTP server, not multiplex on hyperion-web?
 //!
@@ -29,11 +33,12 @@
 
 use axum::body::Bytes;
 use axum::extract::State;
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::Router;
 use hyperion_core::master_rpc::{verify_envelope, SignedAuthorization, VerifyOpts};
+use hyperion_core::node_rpc::{sign_response, NodeRpcSigner, RESP_SIG_HEADER};
 use hyperion_rpc::codec::Request;
 use hyperion_rpc::AgentApi;
 use std::collections::HashMap;
@@ -54,6 +59,12 @@ struct InboundState {
     /// `SignedEnvelope.nonce`; entries older than `MAX_NONCE_AGE`
     /// are pruned lazily on each lookup.
     nonce_cache: Arc<Mutex<HashMap<String, Instant>>>,
+    /// This node's response-signing key, loaded once at startup.
+    /// `None` when the key file couldn't be read — we then reply
+    /// unsigned, which is exactly what a pre-signing node does and
+    /// what the master still accepts from a node it holds no
+    /// `resp_pubkey` for.
+    resp_signer: Option<Arc<NodeRpcSigner>>,
 }
 
 /// How long a nonce stays in the cache. Slightly longer than the
@@ -66,13 +77,15 @@ const MAX_NONCE_AGE: Duration = Duration::from_secs(120);
 /// listener runs on a background tokio task until the process exits.
 /// `bind_addr` is the SocketAddr to listen on (e.g. `0.0.0.0:9443`).
 /// `tls_cert` / `tls_key` are autoprovisioned (self-signed) if
-/// missing.
+/// missing. `resp_signer` is this node's response-signing key
+/// (`None` ⇒ reply unsigned, see [`InboundState::resp_signer`]).
 pub async fn spawn_listener(
     bind_addr: SocketAddr,
     agent: Arc<dyn AgentApi>,
     state_file: PathBuf,
     tls_cert: PathBuf,
     tls_key: PathBuf,
+    resp_signer: Option<Arc<NodeRpcSigner>>,
 ) -> anyhow::Result<()> {
     // Initialize the rustls provider — same incantation as
     // hyperion-web's main(). Subsequent calls in tests are no-ops.
@@ -88,6 +101,7 @@ pub async fn spawn_listener(
         agent,
         state_file,
         nonce_cache: Arc::new(Mutex::new(HashMap::new())),
+        resp_signer,
     };
     let app = Router::new()
         .route("/agent-rpc", post(handle_rpc))
@@ -158,26 +172,75 @@ async fn handle_rpc(State(st): State<InboundState>, headers: HeaderMap, body: By
     let req: Request = match serde_json::from_slice(&body) {
         Ok(r) => r,
         Err(e) => {
-            return (StatusCode::BAD_REQUEST, format!("bad request body: {e}")).into_response();
+            // Log the detail locally; return a generic message so we never
+            // echo request-body fragments (which can carry secrets) back over
+            // the wire.
+            tracing::warn!(error=%e, "inbound RPC: undecodable request body");
+            return (StatusCode::BAD_REQUEST, "bad request body").into_response();
         }
     };
     let resp = hyperion_rpc_server::dispatch(st.agent.clone(), req).await;
     let body_json = match serde_json::to_vec(&resp) {
         Ok(b) => b,
         Err(e) => {
+            tracing::error!(error=%e, "inbound RPC: response serialize failed");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("response serialize: {e}"),
+                "response serialize error",
             )
                 .into_response();
         }
     };
-    (
+    // 5. Sign the EXACT bytes about to go on the wire, binding the
+    //    signature to THIS request (`env.nonce` + `env.ts`) so a
+    //    captured response can never be replayed as the answer to a
+    //    later dispatch.
+    //
+    //    `resp_ts` is taken now, NOT the `now` from step 2: dispatch
+    //    can legitimately run for minutes (provisioning, backups) and
+    //    the master checks response freshness against its own clock.
+    //
+    //    The signature rides in a HEADER and the body is byte-for-byte
+    //    what it always was. An old master deserializes the body
+    //    straight into `Response`, so an extra field or an outer
+    //    wrapper would be a hard parse error — while an unknown header
+    //    is simply ignored. We therefore never require anything new of
+    //    the master; it opts in by having stored our pubkey.
+    let sig_header = st.resp_signer.as_ref().map(|signer| {
+        let resp_ts = chrono::Utc::now().timestamp();
+        sign_response(
+            signer,
+            &persisted.node_id,
+            &env.nonce,
+            env.ts,
+            resp_ts,
+            &body_json,
+        )
+    });
+    let mut out = (
         StatusCode::OK,
         [("content-type", "application/json")],
         body_json,
     )
-        .into_response()
+        .into_response();
+    if let Some(v) = sig_header {
+        // `HeaderName::from_static` rejects the constant's canonical
+        // mixed case, so parse it (header names are case-insensitive
+        // on the wire). Neither half can realistically fail — the
+        // value is `<decimal>.<base64>` — but a dropped signature must
+        // never take down an otherwise-good response, so we log and
+        // send it unsigned rather than 500.
+        match (
+            HeaderName::from_bytes(RESP_SIG_HEADER.as_bytes()),
+            HeaderValue::from_str(&v),
+        ) {
+            (Ok(name), Ok(val)) => {
+                out.headers_mut().insert(name, val);
+            }
+            _ => tracing::warn!("inbound RPC: response signature header not representable"),
+        }
+    }
+    out
 }
 
 impl InboundState {
@@ -249,6 +312,25 @@ fn ensure_self_signed(cert_path: &Path, key_path: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resp_sig_header_is_representable() {
+        // handle_rpc falls back to sending the response UNSIGNED if
+        // either half of the header can't be built — a silent loss of
+        // response authentication. Pin both halves here so a rename of
+        // RESP_SIG_HEADER or a format change in sign_response can't
+        // quietly switch signing off in production.
+        let name = HeaderName::from_bytes(RESP_SIG_HEADER.as_bytes())
+            .expect("RESP_SIG_HEADER must be a valid header name");
+        assert_eq!(name.as_str(), "x-hyperion-resp-sig");
+        let tmp = tempfile::tempdir().unwrap();
+        let signer = NodeRpcSigner::load_or_init(&tmp.path().join("node-rpc.key")).unwrap();
+        let value = sign_response(&signer, "s4", "n1", 1_700_000_000, 1_700_000_001, b"{}");
+        assert!(
+            HeaderValue::from_str(&value).is_ok(),
+            "signature header value must be ASCII-safe: {value}"
+        );
+    }
 
     #[test]
     fn nonce_cache_rejects_replay() {

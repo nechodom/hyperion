@@ -1,0 +1,24 @@
+-- Per-node Ed25519 RESPONSE-signing public key, base64 (no-pad) of the
+-- 32-byte key the worker keeps in its own /etc/hyperion/node-rpc.key —
+-- deliberately NOT its TLS key and NOT master-rpc.key (on a worker that
+-- is a locally generated key the master has never seen). The node
+-- reports it over the secret-authenticated enroll/heartbeat channel and
+-- the master verifies every RPC response against it, which is what
+-- stops an on-path attacker from forging responses (substituting a
+-- reset password, faking provisioning success) on a link the master
+-- currently walks with `curl -k`.
+--
+-- Trust model: TOFU with refuse-on-change. NULL means "this node's
+-- responses cannot be verified" — an agent predating response signing,
+-- or one that hasn't heartbeated since being upgraded — and PRESENCE of
+-- this column is what gates verification per node. Never gate on
+-- agent_version: git-describe strings are unorderable and the column
+-- lags a node restart by a full heartbeat.
+--
+-- The first report fills the column in; a later heartbeat carrying a
+-- DIFFERENT key must never silently overwrite it, or a leaked node
+-- secret would be enough to swap in the attacker's signing key and
+-- forge every response from then on. The only thing that clears the pin
+-- is (re-)enrollment — exactly the moment a node's crypto may
+-- legitimately change — after which the next report re-pins.
+ALTER TABLE nodes ADD COLUMN resp_pubkey TEXT;

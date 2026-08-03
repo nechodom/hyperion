@@ -48,6 +48,7 @@
     <div class="flash-body">{{ e }}</div>
   </div>
 {% endif %}
+{% include "_node_auth_banner.html" %}
 
 {# Banner explaining what "cluster" means when that view is active.
    When the operator switched to a single node, this hides itself. #}
@@ -299,6 +300,7 @@
       </div>
       <h3>No stats yet</h3>
       <p>The sampler runs every 5 min. Wait one tick for the first snapshot.</p>
+      {% include "_node_auth_empty_note.html" %}
     </div>
   </div>
 {% endif %}

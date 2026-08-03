@@ -20,6 +20,7 @@
 pub mod agent;
 pub mod config_persist;
 pub mod master_rpc;
+pub mod node_rpc;
 pub mod panel_import;
 pub mod real_adapter;
 pub mod secrets;

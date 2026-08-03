@@ -27,7 +27,12 @@ env:
 
 jobs:
   check:
-    runs-on: ubuntu-22.04
+    # 24.04, not 22.04: the master↔node wire tests assert on curl's
+    # `--write-out` captures (`%{certs}` needs curl 7.88, `%header{}` 7.84).
+    # 22.04 ships 7.81, so those tests skipped themselves and the response-
+    # authentication path was never actually exercised in CI. Debian 12 — the
+    # deployment target — ships 7.88, so 24.04 is also the closer match.
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout
         uses: actions/checkout@v6

@@ -67,6 +67,8 @@
   </form>
 </div>
 
+{% include "_node_auth_banner.html" %}
+
 {# Tamper-evident verify button — walks every row in audit_log and
    re-computes row_hash from prev_hash + canonical fields. Lands a
    green/red pill into #audit-chain-result. The check is read-only,
@@ -102,6 +104,7 @@
         <h3>No entries match these filters</h3>
         <p>{{ total_count }} {% if total_count == 1 %}entry exists{% else %}entries exist{% endif %} in the log, but none match the current filters. <a href="/audit">Reset filters</a> to see them all.</p>
       {% endif %}
+      {% include "_node_auth_empty_note.html" %}
     </div>
   {% else %}
     <div class="table-wrap">

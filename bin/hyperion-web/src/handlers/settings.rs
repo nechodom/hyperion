@@ -43,6 +43,17 @@ struct SettingsTpl<'a> {
     /// each with its computed base domain. Drives the per-node wildcard
     /// issuance rows in the "Test nodes & staging sites" card.
     wildcard_nodes: Vec<NodeWildcardRow>,
+    /// Labels of enrolled nodes that have NOT published an Ed25519
+    /// response-signing key yet. Readiness is decided by PRESENCE of the
+    /// key, never by `agent_version` — git-describe strings don't order
+    /// and the version column lags a node restart by a heartbeat.
+    /// Empty + `resp_auth_total > 0` ⇒ every node is covered and
+    /// `enforce_response_auth` should be on.
+    resp_auth_pending: Vec<String>,
+    /// How many nodes are enrolled at all. Without it "every node is
+    /// ready" and "there are no worker nodes" are indistinguishable
+    /// through an empty `resp_auth_pending`.
+    resp_auth_total: usize,
     /// Read-only snapshot of agent.toml with secrets masked, for
     /// the "Raw TOML" tab. Failing to read shows "(could not
     /// read /etc/hyperion/agent.toml: …)".
@@ -311,6 +322,22 @@ pub async fn get_settings(
                 })
         })
         .collect();
+    // Response-auth readiness for the Security card's hardening ladder.
+    // A blank key counts as absent: the heartbeat boundary already
+    // trims, but an empty string here would render a node "ready" that
+    // the dispatcher treats as unverifiable.
+    let resp_auth_total = nodes.len();
+    let resp_auth_pending: Vec<String> = nodes
+        .iter()
+        .filter(|n| n.resp_pubkey.as_deref().unwrap_or("").trim().is_empty())
+        .map(|n| {
+            if n.label.is_empty() {
+                n.node_id.clone()
+            } else {
+                n.label.clone()
+            }
+        })
+        .collect();
     // API keys card (gated by ApiKeysManage). Fetch the list best-effort;
     // a failed RPC just shows an empty list. The capability multiselect
     // reuses the canonical roles groups.
@@ -354,6 +381,8 @@ pub async fn get_settings(
         recent_emails,
         nodes,
         wildcard_nodes,
+        resp_auth_pending,
+        resp_auth_total,
         raw_toml,
         mta,
         mail_node,

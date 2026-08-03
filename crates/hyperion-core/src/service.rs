@@ -8204,6 +8204,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 enrolled_at: r.enrolled_at,
                 last_seen_at: r.last_seen_at,
                 tls_spki_pin: r.tls_spki_pin,
+                // Safe to fan out: this is a PUBLIC key, unlike
+                // secret_hash which never leaves this struct's row. The
+                // panel needs it to show "responses verified / taken on
+                // trust" per node without a second round trip.
+                resp_pubkey: r.resp_pubkey,
             })
             .collect())
     }
@@ -8211,6 +8216,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// Master-side: validate `token`, mark the invite consumed, insert
     /// the node, and mint a per-node shared secret for heartbeat auth.
     /// Returns the plaintext secret — the master only stores its hash.
+    ///
+    /// `resp_pubkey` is the node's Ed25519 response-signing key. Pinning
+    /// it HERE rather than waiting for the first heartbeat means a node
+    /// is verifiable from its very first RPC; enrollment is also the one
+    /// moment a new key is legitimate, since `upsert_enrollment` clears
+    /// the previous pin.
     #[allow(clippy::too_many_arguments)]
     pub async fn enroll_consume(
         &self,
@@ -8222,6 +8233,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         public_ip: Option<String>,
         prior_node_id: Option<String>,
         prior_secret: Option<String>,
+        resp_pubkey: Option<String>,
     ) -> Result<(String, String), RpcError> {
         if token.trim().is_empty() {
             return Err(RpcError::Validation {
@@ -8280,6 +8292,37 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         hyperion_state::nodes::upsert_enrollment(&self.pool, &row, now)
             .await
             .map_err(|e| RpcError::Internal_with(format!("nodes upsert: {e}")))?;
+        // The upsert just cleared any previous pin, so this compare-and-set
+        // always lands on a fresh enrollment. Failing to pin is NOT fatal —
+        // the node re-publishes the key on every heartbeat and gets pinned
+        // then; refusing the enrollment over it would strand the box.
+        let presented_pubkey = resp_pubkey
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let resp_pubkey_pinned = match presented_pubkey {
+            Some(pk) => {
+                match hyperion_state::nodes::set_resp_pubkey_if_absent(
+                    &self.pool,
+                    &effective_node_id,
+                    pk,
+                )
+                .await
+                {
+                    Ok(pinned) => pinned,
+                    Err(e) => {
+                        tracing::warn!(
+                            node = %effective_node_id,
+                            error = %e,
+                            "pinning the node's response-signing pubkey at enrollment \
+                             failed — the next heartbeat will re-publish it"
+                        );
+                        false
+                    }
+                }
+            }
+            None => false,
+        };
         self.append_audit(
             "node.enroll",
             Some(&effective_node_id),
@@ -8287,6 +8330,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 "label": row.label,
                 "caller_ip": caller_ip,
                 "reused_identity": reused_identity,
+                "resp_pubkey_pinned": resp_pubkey_pinned,
             })
             .to_string(),
             "ok",
@@ -8382,6 +8426,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         secret: String,
         agent_version: String,
         tls_spki_pin: Option<String>,
+        resp_pubkey: Option<String>,
     ) -> Result<(), RpcError> {
         // Compute the candidate hash unconditionally — the same
         // amount of crypto work happens regardless of node_id state.
@@ -8422,16 +8467,78 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 message: "bad secret".into(),
             });
         }
+        // Trust-on-first-use for BOTH of the node's self-reported crypto
+        // anchors, using the row we already hold from the secret check. A
+        // heartbeat proves only possession of the shared secret over a
+        // `curl -k` channel, so it may FILL an empty pin but never replace
+        // one: otherwise leaking that secret (or landing one forged heartbeat
+        // on-path) would be enough to swap in an attacker's response-signing
+        // key and forge every RPC response afterwards — or to re-point the
+        // TLS pin at the attacker's cert, which would neuter `--pinnedpubkey`
+        // enforcement the instant an operator turned it on. Mirrors the
+        // node's own decide_pubkey_pin for the master's key.
+        let row = row_opt.as_ref();
+        let adopt_resp_pubkey = tofu_report(
+            &node_id,
+            "response pubkey",
+            row.and_then(|r| r.resp_pubkey.as_deref()),
+            resp_pubkey.as_deref(),
+        );
+        let adopt_tls_pin = tofu_report(
+            &node_id,
+            "TLS SPKI pin",
+            row.and_then(|r| r.tls_spki_pin.as_deref()),
+            tls_spki_pin.as_deref(),
+        );
+        // The heartbeat itself still succeeds on a refusal — failing it would
+        // let one forged key report keep a healthy node permanently "offline".
         hyperion_state::nodes::touch_last_seen(
             &self.pool,
             &node_id,
             now_secs(),
             Some(&agent_version),
-            tls_spki_pin.as_deref(),
+            adopt_tls_pin,
+            adopt_resp_pubkey,
         )
         .await
         .map_err(|e| RpcError::Internal_with(format!("touch: {e}")))?;
         Ok(())
+    }
+
+    /// Operator recovery: forget both pinned crypto anchors for one node
+    /// (`resp_pubkey` + `tls_spki_pin`) so the next heartbeat re-pins
+    /// whatever the box now presents.
+    ///
+    /// This exists because both pins are trust-on-first-use with
+    /// refuse-on-change, and a perfectly legitimate event — reinstalling
+    /// the agent, which regenerates node-rpc.key and the inbound TLS cert
+    /// while node-id.json survives — makes every later report mismatch.
+    /// Without this action that node is permanently unverifiable (and,
+    /// once pin enforcement is on, permanently unreachable) with no fix
+    /// short of hand-editing the master's database.
+    ///
+    /// Re-pinning is deliberately NOT done here: we only clear, and the
+    /// node's next report supplies the new values, so an operator who
+    /// runs this by mistake ends up back where they started rather than
+    /// pinning something they typed. Unknown node_id ⇒ `Ok(false)`.
+    pub async fn node_reset_crypto(&self, node_id: &str, actor_uid: i64) -> Result<bool, RpcError> {
+        let cleared = sqlx::query(
+            "UPDATE nodes SET resp_pubkey = NULL, tls_spki_pin = NULL WHERE node_id = ?",
+        )
+        .bind(node_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("node_reset_crypto: {e}")))?
+        .rows_affected()
+            > 0;
+        self.append_audit(
+            "node.reset_crypto",
+            Some(node_id),
+            &serde_json::json!({"actor_uid": actor_uid}).to_string(),
+            if cleared { "ok" } else { "noop" },
+        )
+        .await;
+        Ok(cleared)
     }
 
     pub async fn invite_create(
@@ -16224,6 +16331,79 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     }
 }
 
+/// Outcome of comparing a self-reported trust anchor a node just
+/// published against the one the master has pinned. See
+/// [`decide_tofu_pin`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TofuPin {
+    /// Nothing pinned yet — adopt this value (first value wins).
+    Adopt,
+    /// Already pinned to the same value — no-op.
+    Keep,
+    /// Already pinned to a DIFFERENT value — refuse (reinstalled box, or
+    /// an on-path attacker trying to become the signer).
+    Refuse,
+}
+
+/// Trust-on-first-use decision for a node's self-reported crypto
+/// anchors — its response-signing pubkey AND its inbound TLS SPKI pin —
+/// the mirror image of the agent's own `decide_pubkey_pin` for the
+/// master's key (bin/hyperion-agent/src/enroll.rs). ONE rule for both,
+/// because they carry the same weight: pin the first value seen and
+/// refuse any later report of a different one. The channel that carries
+/// them is authenticated by a shared secret over `curl -k`, while the
+/// values themselves are the trust anchors for every response the master
+/// accepts (`resp_pubkey`) and for `--pinnedpubkey` cert enforcement
+/// (`tls_spki_pin`), so a silent rotation of either would be a complete
+/// bypass. Rotation is therefore a deliberate operator action
+/// (`node_reset_crypto`, or re-enrollment, both of which clear the pins
+/// first).
+fn decide_tofu_pin(pinned: Option<&str>, presented: &str) -> TofuPin {
+    match pinned {
+        Some(p) if p != presented => TofuPin::Refuse,
+        Some(_) => TofuPin::Keep,
+        None => TofuPin::Adopt,
+    }
+}
+
+/// Apply [`decide_tofu_pin`] to ONE anchor on the heartbeat path and make
+/// a refusal audible. Returns the value to hand `touch_last_seen`: `Some`
+/// only when THIS report should adopt it, `None` meaning "keep whatever
+/// is on file". Storage enforces write-once independently (the COALESCE
+/// order in `touch_last_seen`); this layer is what stops a mismatch from
+/// being silent.
+///
+/// `anchor` names the value in the log line so an operator can tell a
+/// swapped signing key from a swapped TLS pin at a glance.
+fn tofu_report<'a>(
+    node_id: &str,
+    anchor: &str,
+    pinned: Option<&str>,
+    presented: Option<&'a str>,
+) -> Option<&'a str> {
+    let presented = presented.map(str::trim).filter(|s| !s.is_empty())?;
+    match decide_tofu_pin(pinned, presented) {
+        TofuPin::Adopt => Some(presented),
+        TofuPin::Keep => None,
+        TofuPin::Refuse => {
+            // Loud, because the benign explanation (agent reinstall that
+            // regenerated node-rpc.key / the inbound TLS cert while
+            // node-id.json survived) and the hostile one look identical
+            // here. The fix for the benign case is `node reset crypto` or
+            // a re-enrollment — both explicit operator actions.
+            tracing::warn!(
+                node = %node_id,
+                anchor = anchor,
+                "SECURITY: node {node_id} presented a changed {anchor} — REFUSING to \
+                 re-pin. Heartbeat accepted, pin unchanged. If this node was \
+                 legitimately reinstalled, reset its pinned crypto (or re-enrol it); \
+                 otherwise this may be an on-path attack."
+            );
+            None
+        }
+    }
+}
+
 fn node_stats_from(
     hostname: &str,
     version: &str,
@@ -17845,6 +18025,14 @@ pub(crate) fn read_cluster_section(
         .and_then(|s| s.get("enforce_worker_cert_pinning"))
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    // Same shape (and same fail-safe-to-false story) as cert pinning: an
+    // unreadable/unparseable agent.toml already returned the Default view
+    // above, where this is false, so a broken config can never silently
+    // switch enforcement ON and take a mixed-version cluster offline.
+    let enforce_response_auth = section
+        .and_then(|s| s.get("enforce_response_auth"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     hyperion_types::ClusterConfigView {
         master_accepts_hostings: accept,
         test_node_ids,
@@ -17856,6 +18044,7 @@ pub(crate) fn read_cluster_section(
         audit_retention_days,
         enforce_admin_2fa,
         enforce_worker_cert_pinning,
+        enforce_response_auth,
     }
 }
 
@@ -17906,7 +18095,8 @@ fn parse_agent_section_fields(
             | ("cluster", "test_wp_no_index")
             | ("cluster", "trash_enabled")
             | ("cluster", "enforce_admin_2fa")
-            | ("cluster", "enforce_worker_cert_pinning") => {
+            | ("cluster", "enforce_worker_cert_pinning")
+            | ("cluster", "enforce_response_auth") => {
                 crate::config_persist::FieldValue::Bool(parse_bool(v)?)
             }
             ("cluster", "test_node_ids")
@@ -20185,6 +20375,7 @@ mod tests {
                 Some("9.9.9.9".into()),
                 Some("ghost-node".into()),
                 Some("garbage".into()),
+                None,
             )
             .await
             .expect("enroll");
@@ -20216,6 +20407,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .expect("e1");
@@ -20232,6 +20424,7 @@ mod tests {
                 None,
                 Some(id1.clone()),
                 Some(secret1.clone()),
+                None,
             )
             .await
             .expect("e2");
@@ -20259,6 +20452,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             )
             .await
             .expect("e1");
@@ -20273,6 +20467,7 @@ mod tests {
                 None,
                 Some(id1.clone()),
                 Some("WRONG".into()),
+                None,
             )
             .await
             .expect("e2");
@@ -20282,6 +20477,269 @@ mod tests {
             2,
             "two distinct node rows — the in-use one was not hijacked"
         );
+    }
+
+    // ============================================================
+    //  Response-signing pubkey pinning. SECURITY: trust-on-first-
+    //  use with refuse-on-change. A heartbeat proves possession of
+    //  the shared secret over a `curl -k` channel, so it may FILL
+    //  an empty pin but never swap one — otherwise leaking that
+    //  secret would be enough to install an attacker's signing key
+    //  and forge every RPC response afterwards.
+    // ============================================================
+
+    #[test]
+    fn tofu_pin_state_machine() {
+        assert_eq!(decide_tofu_pin(None, "pk-a"), TofuPin::Adopt);
+        assert_eq!(decide_tofu_pin(Some("pk-a"), "pk-a"), TofuPin::Keep);
+        assert_eq!(decide_tofu_pin(Some("pk-a"), "pk-b"), TofuPin::Refuse);
+        // Byte-exact: base64 is case-sensitive and a near-miss key is
+        // still somebody else's key.
+        assert_eq!(decide_tofu_pin(Some("pk-a"), "PK-A"), TofuPin::Refuse);
+        // Same rule drives the TLS pin — a changed SPKI pin is refused,
+        // never newest-wins, or one forged heartbeat would re-point cert
+        // pinning at the attacker's cert.
+        assert_eq!(
+            decide_tofu_pin(Some("sha256//abc="), "sha256//EVIL="),
+            TofuPin::Refuse
+        );
+    }
+
+    /// Mint an invite and enroll `candidate`, optionally publishing a
+    /// response-signing pubkey. Returns (effective_node_id, secret).
+    async fn enroll_node(
+        s: &HostingService<MockAdapterPort>,
+        candidate: &str,
+        prior: Option<(&str, &str)>,
+        resp_pubkey: Option<&str>,
+    ) -> (String, String) {
+        let mint = s.invite_create("n".into(), 3600).await.expect("invite");
+        s.enroll_consume(
+            mint.token.clone(),
+            "1.2.3.4".into(),
+            candidate.into(),
+            "label".into(),
+            "v1".into(),
+            None,
+            prior.map(|(id, _)| id.to_string()),
+            prior.map(|(_, sec)| sec.to_string()),
+            resp_pubkey.map(String::from),
+        )
+        .await
+        .expect("enroll")
+    }
+
+    async fn pinned_key(s: &HostingService<MockAdapterPort>, node_id: &str) -> Option<String> {
+        hyperion_state::nodes::get_by_node_id(&s.pool, node_id)
+            .await
+            .expect("get")
+            .expect("row")
+            .resp_pubkey
+    }
+
+    async fn pinned_tls(s: &HostingService<MockAdapterPort>, node_id: &str) -> Option<String> {
+        hyperion_state::nodes::get_by_node_id(&s.pool, node_id)
+            .await
+            .expect("get")
+            .expect("row")
+            .tls_spki_pin
+    }
+
+    #[tokio::test]
+    async fn enroll_pins_pubkey_and_reenrollment_is_the_rotation_path() {
+        let pool = open_memory().await.expect("db");
+        let s = svc(pool, MockAdapterPort::new());
+        let (id, secret) = enroll_node(&s, "cand_1", None, Some("pk-a")).await;
+        assert_eq!(
+            pinned_key(&s, &id).await.as_deref(),
+            Some("pk-a"),
+            "pinned at enrollment so the very first RPC response is verifiable"
+        );
+        // The public key fans out to the panel; the secret hash never does.
+        let summary = s.nodes_list().await.expect("list");
+        assert_eq!(summary[0].resp_pubkey.as_deref(), Some("pk-a"));
+        // Re-enrolling with proven continuity is the sanctioned rotation:
+        // upsert_enrollment clears the pin, the new key takes its place.
+        let (id2, _s2) = enroll_node(&s, "cand_2", Some((&id, &secret)), Some("pk-b")).await;
+        assert_eq!(id2, id, "same identity reused");
+        assert_eq!(pinned_key(&s, &id).await.as_deref(), Some("pk-b"));
+    }
+
+    #[tokio::test]
+    async fn heartbeat_adopts_then_keeps_then_refuses_a_changed_pubkey() {
+        let pool = open_memory().await.expect("db");
+        let s = svc(pool, MockAdapterPort::new());
+        // Pre-upgrade agent: enrolls without publishing a key.
+        let (id, secret) = enroll_node(&s, "cand_1", None, None).await;
+        assert_eq!(pinned_key(&s, &id).await, None);
+        // Adopt: first key seen wins.
+        s.node_heartbeat(
+            id.clone(),
+            secret.clone(),
+            "v2".into(),
+            None,
+            Some("pk-a".into()),
+        )
+        .await
+        .expect("adopt");
+        assert_eq!(pinned_key(&s, &id).await.as_deref(), Some("pk-a"));
+        // Keep: same key, no-op.
+        s.node_heartbeat(
+            id.clone(),
+            secret.clone(),
+            "v2".into(),
+            None,
+            Some("pk-a".into()),
+        )
+        .await
+        .expect("keep");
+        assert_eq!(pinned_key(&s, &id).await.as_deref(), Some("pk-a"));
+        // Refuse: a changed key must NOT re-key the node — but the
+        // heartbeat itself still succeeds, because failing it would let a
+        // single forged key report keep a healthy node "offline" forever.
+        s.node_heartbeat(
+            id.clone(),
+            secret.clone(),
+            "v2".into(),
+            None,
+            Some("pk-EVIL".into()),
+        )
+        .await
+        .expect("refuse still heartbeats");
+        assert_eq!(
+            pinned_key(&s, &id).await.as_deref(),
+            Some("pk-a"),
+            "one MITMed heartbeat must never rotate the trust anchor"
+        );
+        // Omitting the field (older agent, or remote RPC disabled) likewise
+        // leaves the pin alone rather than nulling it.
+        s.node_heartbeat(id.clone(), secret, "v2".into(), None, None)
+            .await
+            .expect("absent");
+        assert_eq!(pinned_key(&s, &id).await.as_deref(), Some("pk-a"));
+    }
+
+    /// The TLS SPKI pin gets the SAME treatment as the response pubkey.
+    /// A newest-wins pin would mean cert-pinning enforcement could be
+    /// re-aimed at an attacker's cert by one forged heartbeat, at any
+    /// time — i.e. the enforcement toggle would be decorative.
+    #[tokio::test]
+    async fn heartbeat_refuses_a_changed_tls_pin() {
+        let pool = open_memory().await.expect("db");
+        let s = svc(pool, MockAdapterPort::new());
+        let (id, secret) = enroll_node(&s, "cand_1", None, None).await;
+        s.node_heartbeat(
+            id.clone(),
+            secret.clone(),
+            "v2".into(),
+            Some("sha256//good=".into()),
+            None,
+        )
+        .await
+        .expect("adopt");
+        assert_eq!(pinned_tls(&s, &id).await.as_deref(), Some("sha256//good="));
+        // Refuse: heartbeat still succeeds, pin unchanged.
+        s.node_heartbeat(
+            id.clone(),
+            secret,
+            "v2".into(),
+            Some("sha256//EVIL=".into()),
+            None,
+        )
+        .await
+        .expect("refuse still heartbeats");
+        assert_eq!(
+            pinned_tls(&s, &id).await.as_deref(),
+            Some("sha256//good="),
+            "one MITMed heartbeat must never re-point the TLS pin"
+        );
+    }
+
+    #[tokio::test]
+    async fn heartbeat_with_bad_secret_cannot_pin_a_pubkey() {
+        let pool = open_memory().await.expect("db");
+        let s = svc(pool, MockAdapterPort::new());
+        let (id, _secret) = enroll_node(&s, "cand_1", None, None).await;
+        let r = s
+            .node_heartbeat(
+                id.clone(),
+                "WRONG".into(),
+                "v2".into(),
+                None,
+                Some("pk-attacker".into()),
+            )
+            .await;
+        assert!(r.is_err(), "bad secret → refused before any write");
+        assert_eq!(
+            pinned_key(&s, &id).await,
+            None,
+            "an unauthenticated heartbeat must not seed the pin"
+        );
+    }
+
+    #[tokio::test]
+    async fn node_reset_crypto_unblocks_a_reinstalled_agent() {
+        let pool = open_memory().await.expect("db");
+        let s = svc(pool, MockAdapterPort::new());
+        let (id, secret) = enroll_node(&s, "cand_1", None, Some("pk-a")).await;
+        s.node_heartbeat(
+            id.clone(),
+            secret.clone(),
+            "v2".into(),
+            Some("sha256//abc=".into()),
+            Some("pk-a".into()),
+        )
+        .await
+        .expect("beat");
+        // The reinstall case: node-id.json (hence node_id + secret) survived,
+        // but node-rpc.key and the inbound cert were regenerated. Without
+        // this action the node is unverifiable for good.
+        assert!(s.node_reset_crypto(&id, 1).await.expect("reset"));
+        let row = hyperion_state::nodes::get_by_node_id(&s.pool, &id)
+            .await
+            .expect("get")
+            .expect("row");
+        assert_eq!(row.resp_pubkey, None, "response pubkey forgotten");
+        assert_eq!(row.tls_spki_pin, None, "TLS pin forgotten too");
+        s.node_heartbeat(id.clone(), secret, "v2".into(), None, Some("pk-b".into()))
+            .await
+            .expect("re-pin");
+        assert_eq!(pinned_key(&s, &id).await.as_deref(), Some("pk-b"));
+        // Unknown node is a forgiving no-op, matching node_remove.
+        assert!(!s.node_reset_crypto("ghost", 1).await.expect("noop"));
+    }
+
+    #[test]
+    fn enforce_response_auth_defaults_off_and_fails_safe() {
+        let tmp = tempfile::tempdir().expect("dir");
+        // No config path at all → Default view, enforcement OFF.
+        assert!(!read_cluster_section(None).enforce_response_auth);
+        // Unparseable config → also OFF. A broken agent.toml must never
+        // silently switch enforcement ON and strand a mixed-version cluster.
+        let broken = tmp.path().join("broken.toml");
+        std::fs::write(&broken, b"[cluster\nenforce_response_auth = true").expect("write");
+        assert!(!read_cluster_section(Some(broken.as_path())).enforce_response_auth);
+        // Section present but the key absent → OFF (opt-in only).
+        let quiet = tmp.path().join("quiet.toml");
+        std::fs::write(&quiet, b"[cluster]\npanel_hostname = \"p\"\n").expect("write");
+        assert!(!read_cluster_section(Some(quiet.as_path())).enforce_response_auth);
+        // Explicitly on → on.
+        let on = tmp.path().join("on.toml");
+        std::fs::write(&on, b"[cluster]\nenforce_response_auth = true\n").expect("write");
+        assert!(read_cluster_section(Some(on.as_path())).enforce_response_auth);
+    }
+
+    #[test]
+    fn enforce_response_auth_is_settings_writable() {
+        let fields = std::collections::BTreeMap::from([(
+            "enforce_response_auth".to_string(),
+            "on".to_string(),
+        )]);
+        let parsed = parse_agent_section_fields("cluster", &fields).expect("allow-listed");
+        assert!(matches!(
+            parsed.as_slice(),
+            [(_, crate::config_persist::FieldValue::Bool(true))]
+        ));
     }
 
     #[test]

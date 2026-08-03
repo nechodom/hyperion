@@ -210,7 +210,23 @@ FTP_PORT=21
 [[ "$WITH_VSFTPD" == "1" ]] && FTP_PORT="$(ask_port 'FTP control port' "${HYPERION_FTP_PORT:-21}")"
 # Inbound master→node RPC port.
 RPC_PORT="$(ask_port 'master→node RPC port' "${HYPERION_RPC_PORT:-9443}")"
-log "Plan: nginx + PHP (always), MariaDB=$WITH_MARIADB PostgreSQL=$WITH_POSTGRES vsftpd=$WITH_VSFTPD; RPC :$RPC_PORT, FTP :$FTP_PORT"
+# Private-network address for master↔node RPC. When set, the agent binds the
+# RPC listener to this IP and advertises it to the master, so the control
+# channel never crosses the public internet (big attack-surface reduction).
+# Blank = listen on all interfaces + advertise the auto-detected public IP.
+ADVERTISE_ADDR="${HYPERION_ADVERTISE_ADDR:-}"
+if [[ -z "$ADVERTISE_ADDR" && -r /dev/tty && "${HYPERION_NONINTERACTIVE:-}" != "1" ]]; then
+  { printf '\nPrivate IP for master↔node RPC (e.g. a Hetzner vSwitch 10.0.0.5),\n'
+    printf 'or blank to use the public IP: '; } > /dev/tty
+  IFS= read -r ADVERTISE_ADDR < /dev/tty || ADVERTISE_ADDR=""
+fi
+ADVERTISE_ADDR="$(printf '%s' "$ADVERTISE_ADDR" | tr -d '[:space:]')"
+if [[ -n "$ADVERTISE_ADDR" ]]; then
+  RPC_BIND="${ADVERTISE_ADDR}:${RPC_PORT}"
+else
+  RPC_BIND="0.0.0.0:${RPC_PORT}"
+fi
+log "Plan: nginx + PHP (always), MariaDB=$WITH_MARIADB PostgreSQL=$WITH_POSTGRES vsftpd=$WITH_VSFTPD; RPC :$RPC_PORT bind=$RPC_BIND${ADVERTISE_ADDR:+ (private)}, FTP :$FTP_PORT"
 
 #-------- 1c. Port pre-flight (only the ports we'll actually use) ----------
 # A node runs nginx/DBs/vsftpd like the master, plus the inbound master→node
@@ -441,24 +457,43 @@ verify_tls   = false
 # The signature is the actual authentication; TLS is transport
 # encryption.
 #
-# Make sure 9443 is OPEN in your firewall:
-#   ufw allow proto tcp from <master-ip> to any port 9443
-# (or scope wider if your topology needs it.)
+# The firewall is scoped below to the master (or the private subnet) — NOT
+# opened to the whole internet. Set advertise_addr to a private-network IP
+# to keep this channel off the public internet entirely.
 [remote_rpc]
 enabled       = true
-bind          = "0.0.0.0:${RPC_PORT}"
+bind          = "${RPC_BIND}"
+advertise_addr = "${ADVERTISE_ADDR}"
 tls_cert_file = "/etc/hyperion/agent-rpc.crt"
 tls_key_file  = "/etc/hyperion/agent-rpc.key"
 EOF
 chmod 0600 /etc/hyperion/agent.toml
 
 #-------- 6.5 firewall opening for master→node RPC --------------------------
-# Best-effort: when ufw is installed and active, allow port 9443
-# from anywhere. Operator can tighten this later via
-# `ufw delete allow 9443/tcp && ufw allow proto tcp from <master> to any port 9443`.
+# SCOPED, not world-open. The RPC port only needs to admit the master. We
+# derive the source to allow, in order of preference:
+#   1. the /24 of a private advertise_addr (Hetzner vSwitch etc.) — the master
+#      reaches us from inside that subnet;
+#   2. the master's resolved IP (from --master=), when we're on public IPs;
+#   3. as a last resort, warn and open to any (old behaviour) so the operator
+#      isn't locked out — but tell them to scope it.
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
-  ufw allow "${RPC_PORT}/tcp" comment 'hyperion master->node RPC' || true
-  echo "  Opened ufw ${RPC_PORT}/tcp for master→node RPC."
+  UFW_SRC=""
+  if [[ -n "$ADVERTISE_ADDR" && "$ADVERTISE_ADDR" =~ ^([0-9]+\.[0-9]+\.[0-9]+)\.[0-9]+$ ]]; then
+    UFW_SRC="${BASH_REMATCH[1]}.0/24"
+  elif [[ -n "$MASTER" ]]; then
+    _mhost="$(printf '%s' "$MASTER" | sed -E 's#^[a-z]+://##; s#[:/].*$##')"
+    _mip="$(getent ahostsv4 "$_mhost" 2>/dev/null | awk '{print $1; exit}')"
+    [[ -n "$_mip" ]] && UFW_SRC="$_mip"
+  fi
+  if [[ -n "$UFW_SRC" ]]; then
+    ufw allow proto tcp from "$UFW_SRC" to any port "${RPC_PORT}" comment 'hyperion master->node RPC' || true
+    echo "  Opened ufw ${RPC_PORT}/tcp from ${UFW_SRC} only (master→node RPC)."
+  else
+    ufw allow "${RPC_PORT}/tcp" comment 'hyperion master->node RPC (UNSCOPED)' || true
+    echo "  WARNING: opened ufw ${RPC_PORT}/tcp to ANY source — could not determine the master's IP."
+    echo "           Scope it: ufw delete allow ${RPC_PORT}/tcp && ufw allow proto tcp from <master-ip> to any port ${RPC_PORT}"
+  fi
 fi
 
 #-------- 7. systemd unit + start ------------------------------------------

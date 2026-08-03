@@ -1,0 +1,6 @@
+{# Empty-state qualifier, included INSIDE an aggregate page's empty
+   card. The banner above already names the node; this stops the empty
+   illustration underneath it from reading as "there is nothing here". #}
+{% if node_auth_warning.is_some() %}
+  <p class="text-soft"><strong>This list is incomplete</strong> — at least one node was excluded (see the warning above), so rows that exist there are not shown.</p>
+{% endif %}

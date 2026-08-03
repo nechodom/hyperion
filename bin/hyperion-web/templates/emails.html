@@ -79,6 +79,8 @@
   {% endfor %}
 </div>
 
+{% include "_node_auth_banner.html" %}
+
 {% if rows.is_empty() %}
 <div class="card">
   <div class="empty">
@@ -99,6 +101,7 @@
       <a href="/settings#email">Settings</a>.
     </p>
     {% endif %}
+    {% include "_node_auth_empty_note.html" %}
   </div>
 </div>
 {% else %}

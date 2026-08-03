@@ -61,6 +61,7 @@
     <div class="flash-body">{{ m }}</div>
   </div>
 {% endif %}
+{% include "_node_auth_banner.html" %}
 
 {# Top-line summary cards. Quickly answer "do I have anything
    on fire" without scanning the full table. #}
@@ -98,6 +99,7 @@
       self-signed bootstrap), they appear here with their expiry, issuer,
       and node.
     </p>
+    {% include "_node_auth_empty_note.html" %}
     <div style="margin-top:0.9rem;display:flex;gap:0.5rem;justify-content:center;flex-wrap:wrap">
       <a class="btn" href="/hostings/new">Create your first hosting</a>
       <a class="btn ghost" href="/settings#tab-tls">Configure ACME</a>

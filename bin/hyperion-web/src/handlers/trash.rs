@@ -33,6 +33,9 @@ struct TrashTpl<'a> {
     csrf_token: String,
     error: Option<String>,
     flash: Option<String>,
+    /// Set when a node's response failed authentication and its trashed
+    /// hostings were therefore discarded — the list below is INCOMPLETE.
+    node_auth_warning: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,7 +88,9 @@ pub async fn get_trash(
     let workers = crate::handlers::hostings::fetch_remote_nodes(&state)
         .await
         .unwrap_or_default();
-    for (n, resp) in crate::dispatcher::fan_out(&state, workers, Request::TrashList).await {
+    let (answered, failed) =
+        crate::dispatcher::fan_out_reporting(&state, workers, Request::TrashList).await;
+    for (n, resp) in answered {
         if let RpcResponse::TrashList(mut rows) = resp {
             for r in &mut rows {
                 r.node_id = n.node_id.clone();
@@ -93,6 +98,10 @@ pub async fn get_trash(
             entries.extend(rows);
         }
     }
+    // "Trash is empty" is a recovery decision — an operator who reads it
+    // stops looking for a site they could still restore. Say so when a
+    // node's entries were discarded for failing authentication.
+    let node_auth_warning = crate::handlers::node_auth_warning(&failed);
 
     // Soonest-purge first so the operator can act on the urgent
     // recovery candidates first.
@@ -111,6 +120,7 @@ pub async fn get_trash(
         csrf_token,
         error: q.error,
         flash: q.flash,
+        node_auth_warning,
     };
     Ok(Html(tpl.render()?).into_response())
 }

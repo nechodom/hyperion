@@ -13,6 +13,8 @@
   <div class="grow"></div>
 </div>
 
+{% include "_node_auth_banner.html" %}
+
 <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(13rem, 100%), 1fr));gap:1rem;margin-bottom:1.2rem">
   <div class="card" style="padding:1rem 1.2rem">
     <div class="text-soft small">Alerting</div>
@@ -37,6 +39,7 @@
       to track availability here. Probes run every 5 min by default; failures
       trigger email, Slack, or webhook alerts once the configured streak is reached.
     </p>
+    {% include "_node_auth_empty_note.html" %}
   </div>
 </div>
 {% else %}

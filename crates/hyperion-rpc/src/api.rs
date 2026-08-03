@@ -908,6 +908,13 @@ pub trait AgentApi: Send + Sync + 'static {
     /// Returns `(effective_node_id, secret, master_rpc_pubkey)`. The
     /// effective id is normally the minted candidate, but on an
     /// idempotent re-enroll it's the reused/adopted prior id.
+    ///
+    /// `resp_pubkey` is the node's base64 Ed25519 RESPONSE-signing
+    /// public key. Pinning it here rather than at the first heartbeat
+    /// makes the node verifiable from its very first RPC. It is
+    /// `Option` because older agents don't publish one, and its
+    /// PRESENCE on the master — never `agent_version` — is what gates
+    /// verification of that node's responses.
     #[allow(clippy::too_many_arguments)]
     async fn enroll_consume(
         &self,
@@ -919,6 +926,7 @@ pub trait AgentApi: Send + Sync + 'static {
         public_ip: Option<String>,
         prior_node_id: Option<String>,
         prior_secret: Option<String>,
+        resp_pubkey: Option<String>,
     ) -> Result<(String, String, Option<String>), RpcError>;
 
     /// Master-side heartbeat: verifies (node_id, secret) and bumps
@@ -926,12 +934,21 @@ pub trait AgentApi: Send + Sync + 'static {
     /// remote-RPC pubkey (base64, `None` when remote RPC isn't set
     /// up on this master) so existing enrolled nodes can pick it up
     /// without re-enrolling.
+    ///
+    /// `resp_pubkey` is the node's base64 Ed25519 RESPONSE-signing
+    /// public key, re-sent on every tick so an upgraded (or rotated)
+    /// node publishes it without a re-enrollment. `None` for older
+    /// agents that don't send one; its PRESENCE on the master is the
+    /// capability gate for verifying that node's responses, since
+    /// `agent_version` is an unorderable git-describe string that lags
+    /// a restart by a full heartbeat.
     async fn node_heartbeat(
         &self,
         node_id: String,
         secret: String,
         agent_version: String,
         tls_spki_pin: Option<String>,
+        resp_pubkey: Option<String>,
     ) -> Result<Option<String>, RpcError>;
 
     /// List enrolled nodes (master-side `nodes` table).
@@ -966,6 +983,16 @@ pub trait AgentApi: Send + Sync + 'static {
         force: bool,
         actor_uid: i64,
     ) -> Result<(bool, i64), RpcError>;
+
+    /// Operator recovery: clear a node's pinned crypto anchors
+    /// (`resp_pubkey` + `tls_spki_pin`) so its next heartbeat re-pins
+    /// whatever it now presents. This is the ONLY in-product way out of
+    /// the refuse-on-change rule after a legitimate agent reinstall —
+    /// without it the node is permanently unverifiable (and, with pin
+    /// enforcement on, unreachable) short of editing the master's DB.
+    /// Returns `true` iff a row was cleared; unknown node_id ⇒
+    /// `Ok(false)`, matching `node_remove`'s forgiving no-op.
+    async fn node_reset_crypto(&self, node_id: String, actor_uid: i64) -> Result<bool, RpcError>;
 
     /// Re-point hostings from a dead `from_node_id` onto the enrolled
     /// `to_node_id` (Block B orphan adoption). Returns rows moved.

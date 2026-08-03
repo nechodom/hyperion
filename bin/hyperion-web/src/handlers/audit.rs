@@ -40,6 +40,11 @@ struct AuditTpl<'a> {
     /// just one, but the verify card can grow more buttons
     /// without re-plumbing).
     csrf_token: String,
+    /// Set when a node's response failed authentication and its entries
+    /// were therefore discarded. On the audit log this matters twice
+    /// over: the missing rows are exactly the record of what happened on
+    /// a node the master can no longer authenticate.
+    node_auth_warning: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -113,8 +118,10 @@ pub async fn get_audit(
     let workers = crate::handlers::hostings::fetch_remote_nodes(&state)
         .await
         .unwrap_or_default();
-    for (n, resp) in crate::dispatcher::fan_out(&state, workers, Request::AuditList { limit }).await
-    {
+    let (answered, failed) =
+        crate::dispatcher::fan_out_reporting(&state, workers, Request::AuditList { limit }).await;
+    let node_auth_warning = super::node_auth_warning(&failed);
+    for (n, resp) in answered {
         if let RpcResponse::AuditList(mut remote) = resp {
             let label = if n.label.is_empty() {
                 n.node_id.clone()
@@ -211,6 +218,7 @@ pub async fn get_audit(
         since_filter: since_label,
         known_actions,
         csrf_token,
+        node_auth_warning,
     };
     Ok(Html(tpl.render()?).into_response())
 }

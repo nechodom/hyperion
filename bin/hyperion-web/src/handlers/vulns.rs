@@ -29,6 +29,10 @@ struct VulnsTpl<'a> {
     /// Total outdated components (any severity) across the fleet.
     outdated: usize,
     sites: usize,
+    /// Set when a node's response failed authentication and its findings
+    /// were therefore discarded — "everything is up to date" would be a
+    /// lie for that node.
+    node_auth_warning: Option<String>,
 }
 
 pub async fn get_vulns(
@@ -51,11 +55,13 @@ pub async fn get_vulns(
         }
     }
     // Workers.
+    let mut node_auth_warning = None;
     if let Ok(RpcResponse::NodesList(nodes)) =
         hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await
     {
-        for (n, resp) in crate::dispatcher::fan_out(&state, nodes, Request::VulnFindingsList).await
-        {
+        let (answered, failed) =
+            crate::dispatcher::fan_out_reporting(&state, nodes, Request::VulnFindingsList).await;
+        for (n, resp) in answered {
             if let RpcResponse::VulnFindingsList(items) = resp {
                 for mut it in items {
                     it.node_id = n.label.clone();
@@ -63,6 +69,7 @@ pub async fn get_vulns(
                 }
             }
         }
+        node_auth_warning = super::node_auth_warning(&failed);
     }
     // Most major (high-severity) updates first, then most outdated.
     all.sort_by(|a, b| {
@@ -85,6 +92,7 @@ pub async fn get_vulns(
         major,
         outdated,
         sites,
+        node_auth_warning,
     };
     Ok(Html(tpl.render()?).into_response())
 }

@@ -25,6 +25,11 @@ struct MonitoringTpl<'a> {
     alerting_count: usize,
     healthy_count: usize,
     unknown_count: usize,
+    /// Set when a node's response failed authentication and its monitors
+    /// were therefore discarded — the table below is INCOMPLETE. On an
+    /// availability page especially, a silently missing node reads as
+    /// "nothing is alerting".
+    node_auth_warning: Option<String>,
 }
 
 pub async fn get_monitoring(
@@ -59,22 +64,24 @@ pub async fn get_monitoring(
         items.extend(rows);
     }
 
-    // Every enrolled worker.
+    // Every enrolled worker. Goes through the shared fan-out helper (not a
+    // hand-rolled `if let Ok(..)` loop) so a node is queried concurrently AND
+    // a dropped node is logged + reportable — the old loop swallowed a failed
+    // response signature with no trace at all.
     let workers = crate::handlers::hostings::fetch_remote_nodes(&state)
         .await
         .unwrap_or_default();
-    for n in workers {
-        if let Ok(RpcResponse::MonitorOverview(rows)) =
-            crate::dispatcher::dispatch_to_node(&state, Some(&n.node_id), Request::MonitorOverview)
-                .await
-        {
-            let mut rows = rows;
+    let (answered, failed) =
+        crate::dispatcher::fan_out_reporting(&state, workers, Request::MonitorOverview).await;
+    for (n, resp) in answered {
+        if let RpcResponse::MonitorOverview(mut rows) = resp {
             for r in &mut rows {
                 r.node_id = n.node_id.clone();
             }
             items.extend(rows);
         }
     }
+    let node_auth_warning = crate::handlers::node_auth_warning(&failed);
 
     // Resort the merged list — agents already sort their own slice,
     // but the merge needs to re-apply the alerting-first rule globally.
@@ -105,6 +112,7 @@ pub async fn get_monitoring(
         alerting_count,
         healthy_count,
         unknown_count,
+        node_auth_warning,
     };
     Ok(Html(tpl.render()?).into_response())
 }

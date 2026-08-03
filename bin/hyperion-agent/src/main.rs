@@ -424,6 +424,45 @@ async fn main() -> anyhow::Result<()> {
             }
         };
 
+    // Node RESPONSE-signing key — the mirror image of the key above.
+    // That one authenticates requests master→node; this one
+    // authenticates the answers node→master, so an on-path attacker
+    // on the RPC connection can no longer forge a reply (substitute
+    // a reset password, fake a provisioning success).
+    //
+    // Deliberately a SEPARATE key file, not master-rpc.key: on a
+    // worker that file holds a locally generated key the master has
+    // never seen, so a response signed with it would verify against
+    // nothing. Not the inbound TLS key either — that one is
+    // self-signed and unverified by design.
+    //
+    // A load failure is not fatal: the master accepts unsigned
+    // responses from any node it has no pubkey for (rolling-upgrade
+    // compatibility), so a broken key file degrades this node to the
+    // old unauthenticated behaviour instead of taking it offline.
+    let node_rpc_key_path = PathBuf::from(hyperion_core::node_rpc::NODE_RPC_KEY_PATH);
+    let node_rpc_signer =
+        match hyperion_core::node_rpc::NodeRpcSigner::load_or_init(&node_rpc_key_path) {
+            Ok(s) => {
+                tracing::info!(path=%node_rpc_key_path.display(), "response-signing key ready");
+                Some(Arc::new(s))
+            }
+            Err(e) => {
+                tracing::warn!(
+                    error=%e,
+                    path=%node_rpc_key_path.display(),
+                    "node_rpc response-signing key unavailable — responses will be unsigned"
+                );
+                None
+            }
+        };
+    // Advertised to the master at enrollment AND on every heartbeat.
+    // Derived once, here, from the very key that will do the signing —
+    // so what we advertise and what we sign with can never drift
+    // apart, and the master's capability check (does it hold a pubkey
+    // for us?) flips at the same moment we start signing.
+    let resp_pubkey: Option<String> = node_rpc_signer.as_ref().map(|s| s.pubkey_b64().to_string());
+
     // The agent's enrollment state file path. Service checks its
     // existence at services_health() time as the "is this a worker?"
     // signal (workers have the file → hyperion-web is a non-issue;
@@ -877,6 +916,11 @@ async fn main() -> anyhow::Result<()> {
             state_file: state_file.clone(),
             verify_tls: cfg.enrollment.verify_tls,
             config_file: Some(cli.config.clone()),
+            advertise_addr: {
+                let a = cfg.remote_rpc.advertise_addr.trim();
+                (!a.is_empty()).then(|| a.to_string())
+            },
+            resp_pubkey: resp_pubkey.clone(),
         };
         // Outer loop — if the 5-attempt inner burst (~9 min) doesn't
         // succeed, sleep 30 min and try the burst again, indefinitely.
@@ -920,8 +964,12 @@ async fn main() -> anyhow::Result<()> {
         // Same cert the inbound listener serves — the heartbeat reports
         // its SPKI pin so the master can detect cert changes (Block C).
         let inbound_cert = cfg.remote_rpc.tls_cert_file.clone();
+        // Response-signing pubkey, re-advertised every tick. Nodes that
+        // were enrolled before this existed get pinned on their next
+        // heartbeat without needing a re-enrollment.
+        let hb_resp_pubkey = resp_pubkey.clone();
         tokio::spawn(async move {
-            enroll::heartbeat_loop(path, 60, verify, inbound_cert).await;
+            enroll::heartbeat_loop(path, 60, verify, inbound_cert, hb_resp_pubkey).await;
         });
     }
 
@@ -945,6 +993,7 @@ async fn main() -> anyhow::Result<()> {
                     state_file.clone(),
                     cfg.remote_rpc.tls_cert_file.clone(),
                     cfg.remote_rpc.tls_key_file.clone(),
+                    node_rpc_signer.clone(),
                 )
                 .await
                 {

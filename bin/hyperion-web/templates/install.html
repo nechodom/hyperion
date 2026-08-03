@@ -224,6 +224,16 @@
       <strong>Drain</strong> stops new hostings from being placed here without disturbing the ones already running.
       The <strong>Danger zone</strong> at the bottom of each card removes the node from the cluster. The remote agent keeps running locally afterward.
     </p>
+    <p class="text-soft small" style="margin:0 0 1rem">
+      The <strong>🔒 TLS pin</strong> and <strong>🔑 Response auth</strong> chips are the readiness
+      signal for the hardening ladder in <a href="/settings#cluster">Settings → Control plane → Security</a>.
+      Turn a step on only once <em>every</em> node below carries its chip: while a step is on,
+      a node missing that chip is <strong>refused</strong>, and its sites drop out of every
+      list until it publishes the key.
+      Both are pinned on first sight and a <em>changed</em> key is refused, so a node whose agent
+      you deliberately reinstalled stays refused until you use <strong>Clear pinned crypto</strong>
+      on its card. Only reach for that after a key change you expected.
+    </p>
     <div class="node-grid">
     {# Server-side pre-tagged: each `nodes` entry is `(NodeSummary,
        is_test, version_skew)` so the template doesn't string-search or
@@ -254,7 +264,43 @@
               {% if let Some(pin) = n.tls_spki_pin %}
               <span class="pill" style="background:var(--surface-2);color:var(--text-soft)" title="TLS certificate SPKI pin reported by this node — curl --pinnedpubkey sha256//{{ pin }}. Recorded for change detection only; enforcement is enabled separately.">🔒 TLS pin on file</span>
               {% endif %}
+              {# Response-signing readiness. Rendered in BOTH states, unlike
+                 the TLS pin above: the operator has to confirm that EVERY
+                 node is covered before turning on step 2 of the hardening
+                 ladder, and an absent chip is invisible when you're
+                 scanning a grid of cards. Readiness is the PRESENCE of the
+                 published key — never n.agent_version, which is an
+                 unorderable git-describe string and lags a node restart by
+                 a full heartbeat. #}
+              {% if let Some(key) = n.resp_pubkey %}
+              <span class="pill" style="background:var(--surface-2);color:var(--text-soft)" title="This node published the Ed25519 response-signing key {{ key }} and signs every RPC reply, so the master can prove an answer came from the node itself and not from an on-path attacker. Mis-signed replies are always refused; refusing UNSIGNED ones is step 2 in Settings → Control plane → Security.">🔑 Response auth on file</span>
+              {% else %}
+              <span class="pill" style="background:var(--warn);color:white" title="This node has not published a response-signing key, so the master takes its RPC replies on trust — a forged reply would be indistinguishable from a real one. Run Update below, then wait one heartbeat. Enforcing signed responses never blocks this node; it simply leaves it unprotected.">⚠ No response auth</span>
+              {% endif %}
             </div>
+            {# Escape hatch for the two chips directly above. Both pins
+               are trust-on-first-use with refuse-on-change, so a node
+               that legitimately regenerated its keys (agent reinstall —
+               node-id.json survives, node-rpc.key and the inbound TLS
+               cert do not) is refused on every later heartbeat with no
+               other way out. Rendered right here, next to the chips the
+               operator is staring at when that happens, and only when
+               there is actually something on file to clear. #}
+            {% if n.resp_pubkey.is_some() || n.tls_spki_pin.is_some() %}
+            <form method="post" action="/install/reset-node-crypto" class="node-card__pin-reset"
+                  data-confirm-title="Clear pinned crypto for {{ n.label }}"
+                  data-confirm-body="The master will forget the TLS pin and the response-signing key it has on file for this node, and will trust whatever the node presents on its next heartbeat (about 30 seconds) — so whichever machine answers next becomes the new trust anchor. Do this only if you deliberately reinstalled the agent or rotated its keys. If you did not expect this node's keys to change, a changed key is exactly what an on-path attacker looks like, and clearing the pins would accept them. Nothing is sent to the node; only master-side state changes. Type the label to confirm."
+                  data-confirm-confirm-label="Clear pinned crypto"
+                  data-confirm-variant="danger"
+                  data-confirm-require="{{ n.label }}">
+              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+              <input type="hidden" name="node_id" value="{{ n.node_id }}">
+              <button type="submit" class="btn small ghost"
+                      title="Forget the TLS pin and response-signing key recorded above so this node re-pins on its next heartbeat. The fix after a deliberate agent reinstall or key rotation — and the wrong move if you did not expect this node's keys to change.">
+                Clear pinned crypto
+              </button>
+            </form>
+            {% endif %}
           </div>
           <code class="node-card__id" title="Permanent enrollment identifier — does not change when you rename the node">{{ n.node_id }}</code>
         </header>
@@ -441,6 +487,10 @@
 .node-card__title { display: flex; flex-direction: column; gap: 0.3rem; min-width: 0; }
 .node-card__title h3 { margin: 0; font-size: 1.05rem; font-weight: 700; }
 .node-card__chips { display: flex; gap: 0.35rem; flex-wrap: wrap; }
+/* Sits directly under the readiness chips it undoes, so the fix is
+   where the operator is already looking. Not a primary action — it
+   stays out of the actions row and out of the danger zone. */
+.node-card__pin-reset { margin-top: 0.1rem; }
 .node-card__id {
   font-family: ui-monospace, Menlo, Consolas, monospace;
   font-size: 0.72rem;
