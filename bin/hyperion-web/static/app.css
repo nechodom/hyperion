@@ -1020,6 +1020,36 @@ td a:not(.btn) {
 }
 td a:not(.btn):hover { color: var(--primary-h); }
 td.numeric { font-variant-numeric: tabular-nums; }
+
+/* Sortable column header (per-site table on /stats). The link inherits
+   the <th> type styling so the header row still reads as a header rather
+   than a row of links; only the active column brightens. Sorting is a
+   ?sort= round trip, so these are plain anchors — no JS. */
+th a.th-sort {
+  color: inherit;
+  text-decoration: none;
+}
+th a.th-sort:hover { color: var(--text); text-decoration: underline; }
+th a.th-sort.active { color: var(--text); }
+
+/* Thin share-of-total bar drawn under the value in whichever numeric
+   column is currently sorted. Same idiom as the job .progress-bar, just
+   quieter and sized to sit inside a table cell without adding a row of
+   height. */
+.progress-bar.share {
+  height: 3px;
+  margin-top: 0.35rem;
+}
+.progress-bar.share .progress-bar-fill { opacity: 0.55; }
+
+/* Per-site usage table (/stats). Eight columns of byte figures in a
+   column that is already narrowed by the sidebar: without this a value
+   like "512.0 MiB" breaks across two lines and the rows go ragged.
+   Scoped to this table so the .table-wrap scrolls sideways instead —
+   which is the behaviour every other wide table here already has. */
+table.site-usage th,
+table.site-usage td.numeric { white-space: nowrap; }
+
 .table-empty {
   text-align: center;
   padding: 3rem 1rem;

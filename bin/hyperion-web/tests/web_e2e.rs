@@ -2361,3 +2361,140 @@ async fn api_v1_ops_completion_endpoints() {
     let (st, _b) = api_send(&app, Method::POST, &format!("{base}/wp/install"), &weak, wp).await;
     assert_eq!(st, StatusCode::FORBIDDEN, "no WpManage cap → 403");
 }
+
+/// /stats must carry a per-site breakdown, not just cluster + node cards.
+///
+/// The page's own subtitle has always promised "per-hosting snapshots";
+/// this locks in that the table is actually there, that a freshly created
+/// site appears in it BEFORE the 5 min sampler has written a usage row
+/// (all zeros, flagged "not sampled yet" — that is a state, not an
+/// error), and that column sorting is a server-side `?sort=` round trip.
+#[tokio::test]
+async fn stats_page_lists_sites_and_honours_sort() {
+    let admin = admin_user::create("kevin", "good-pw").expect("create");
+    let (sock, _d) = start_agent().await;
+    let app = build_app(sock, admin);
+
+    let login_body = b"username=kevin&password=good-pw&next=/";
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/login")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(login_body.to_vec()))
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    let cookie = extract_cookie(&resp);
+
+    // With no sites yet the table must say so in plain language — an
+    // empty breakdown is an empty box, not a failure to read it.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/stats")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let empty = body_string(resp).await;
+    assert!(empty.contains("Per-site usage"), "breakdown card missing");
+    assert!(
+        empty.contains("No active sites here yet"),
+        "empty state missing"
+    );
+
+    // Create a site.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/hostings/new")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    let csrf = extract_csrf(&body_string(resp).await);
+    let body = format!("_csrf={csrf}&domain=stats-e2e.cz&aliases=&php=8.3&db=mariadb&system_user=");
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/hostings")
+                .header(header::CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .header(header::COOKIE, &cookie)
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // Default view: sorted by disk, site linked to its detail page.
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/stats")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let page = body_string(resp).await;
+    assert!(
+        page.contains("stats-e2e.cz"),
+        "new site missing from the per-site table"
+    );
+    assert!(
+        page.contains("heaviest disk first"),
+        "default sort should be disk"
+    );
+    assert!(
+        page.contains("not sampled yet"),
+        "a site with no usage rows must render as a zero row, not vanish"
+    );
+    assert!(
+        !page.contains("No active sites here yet"),
+        "empty state must be gone once a site exists"
+    );
+    // The table has to live INSIDE the live-refresh region, otherwise it
+    // silently freezes while every other number on the page updates.
+    let live_at = page.find("id=\"stats-live\"").expect("live region");
+    let table_at = page.find("Per-site usage").expect("breakdown card");
+    assert!(live_at < table_at, "breakdown must sit inside #stats-live");
+
+    // Sorting is server-side: ?sort=cpu changes the rendered order.
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .uri("/stats?sort=cpu")
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .expect("call");
+    assert_eq!(resp.status(), StatusCode::OK);
+    let sorted = body_string(resp).await;
+    assert!(
+        sorted.contains("heaviest cpu first"),
+        "?sort=cpu must be honoured server-side"
+    );
+    assert!(
+        sorted.contains("th-sort active"),
+        "active column header should be marked"
+    );
+}

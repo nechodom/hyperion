@@ -975,6 +975,27 @@ fn print_pretty(resp: &Response) {
             println!("  bw_out:   {} B (24h)", s.bw_out_bytes_24h);
             println!("  requests: {} (24h)", s.requests_24h);
         }
+        Response::HostingStatsAll(rows) => {
+            // One line per site (raw bytes, like the single-hosting arm
+            // above) so the output stays awk/sort-able from a shell.
+            println!(
+                "{:<32} {:>14} {:>13} {:>14} {:>10} {:>13} {:>7}",
+                "DOMAIN", "DISK_B", "BW_IN_B/24H", "BW_OUT_B/24H", "REQS/24H", "MEM_RSS_B", "CPU%"
+            );
+            for s in rows {
+                println!(
+                    "{:<32} {:>14} {:>13} {:>14} {:>10} {:>13} {:>7.2}",
+                    s.domain,
+                    s.disk_bytes,
+                    s.bw_in_bytes_24h,
+                    s.bw_out_bytes_24h,
+                    s.requests_24h,
+                    s.mem_rss_bytes,
+                    s.cpu_pct_x100 as f64 / 100.0
+                );
+            }
+            println!("{} hostings", rows.len());
+        }
         Response::NodeStats(n) => {
             println!("{} ({})", n.label, n.node_id);
             println!(

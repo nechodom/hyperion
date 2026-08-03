@@ -493,6 +493,10 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::HostingStats(v),
             Err(e) => Response::Error(e),
         },
+        Request::HostingStatsAll => match api.hosting_stats_all().await {
+            Ok(v) => Response::HostingStatsAll(v),
+            Err(e) => Response::Error(e),
+        },
         Request::NodeStats => match api.node_stats().await {
             Ok(v) => Response::NodeStats(v),
             Err(e) => Response::Error(e),
@@ -1810,6 +1814,11 @@ mod tests {
             })
         }
         async fn hosting_stats(&self, _: HostingSelector) -> Result<HostingStats, RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
+        }
+        async fn hosting_stats_all(&self) -> Result<Vec<HostingStats>, RpcError> {
             Err(RpcError::Internal {
                 message: "not supported by this agent".into(),
             })
