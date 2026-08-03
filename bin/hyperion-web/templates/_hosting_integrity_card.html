@@ -1,0 +1,203 @@
+{# File integrity & malware card — lazily swapped into the hosting detail
+   page via hx-get="/hostings/:sel/integrity-panel", and re-rendered in
+   place by "Scan now" (hx-target="#integrity-card"). The tamper-detection
+   sibling of the WordPress-updates panel: that one answers "is anything
+   outdated?", this one answers "has anything been changed?".
+
+   Both signals are keyless — wp-cli's checksum comparison against
+   WordPress.org, and ClamAV where a scanner happens to exist on the node.
+   Either can be ABSENT, and the whole point of this card is that absence
+   renders as "couldn't check" and never as a green tick: the operator
+   sells this scan, so a false all-clear is the one failure mode that
+   costs a customer their site. #}
+<div class="card hover" id="integrity-card">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><circle cx="11.5" cy="15" r="2.5"/><path d="M13.4 16.9 16 19.5"/></svg>
+    File integrity &amp; malware
+    {# Findings win over a failed probe: something we DID see is more
+       actionable than something we couldn't. #}
+    {% if scan.total_findings() > 0 %}<span class="pill err" style="margin-left:0.4rem;font-size:0.65rem">{{ scan.total_findings() }} finding(s)</span>
+    {% else if !scan.wp_cli_ok %}<span class="pill warn" style="margin-left:0.4rem;font-size:0.65rem">couldn't check</span>
+    {% else if scan.is_clean() %}<span class="pill ok" style="margin-left:0.4rem;font-size:0.65rem">clean</span>
+    {% else %}<span class="pill" style="margin-left:0.4rem;font-size:0.65rem;background:var(--surface-2);color:var(--text-soft)">partly checked</span>{% endif %}
+  </h2>
+
+  {# ── Verdict. Four states, never three: "files verified but no malware
+     scanner" is its own answer and must not borrow the green one. ── #}
+  {% if scan.total_findings() > 0 %}
+    <div class="flash error" style="margin:-0.1rem 0 0.6rem">
+      <div class="flash-body">
+        <strong>{{ scan.total_findings() }} file(s) don't match what should be on disk.</strong>
+        Modified core files and files that shouldn't exist are how a backdoor
+        survives a password reset — treat this as a compromise until you've
+        looked at each path below.
+      </div>
+    </div>
+  {% else if !scan.wp_cli_ok %}
+    <div class="flash warn" style="margin:-0.1rem 0 0.6rem">
+      <div class="flash-body">
+        <strong>Nothing was verified — this is not a clean result.</strong>
+        wp-cli couldn't compare this site against WordPress.org, so no file was
+        checked at all. Usually a broken WordPress install, a missing wp-cli, or
+        a blocked outbound lookup.
+      </div>
+    </div>
+  {% else if scan.is_clean() %}
+    <div class="flash success" style="margin:-0.1rem 0 0.6rem">
+      <div class="flash-body">
+        <strong>Clean.</strong> Every core and plugin file matches the checksums
+        WordPress.org publishes for the installed versions, and ClamAV found no
+        known malware in the site's files.
+      </div>
+    </div>
+  {% else %}
+    <div class="flash warn" style="margin:-0.1rem 0 0.6rem">
+      <div class="flash-body">
+        <strong>Files verified — malware not scanned.</strong> Core and plugin
+        files match WordPress.org exactly. Nothing looked for webshells in
+        uploads, though, so this is a partial result.
+      </div>
+    </div>
+  {% endif %}
+
+  {# Coverage line: what actually ran, in one place, on every state. The
+     card is worthless without it — "no findings" only means something
+     once you know what was looked at. #}
+  <p class="text-soft small" style="margin:0 0 0.7rem">
+    Checksums:
+    {% if scan.wp_cli_ok %}core + {{ scan.plugins_checked }} of {{ scan.plugins_total }} plugin(s){% else %}<span style="color:var(--warn)">not verified</span>{% endif %}
+    · Malware:
+    {% if scan.clamav_available %}ClamAV scanned the site's files{% else %}<span style="color:var(--warn)">not scanned</span>{% endif %}
+    · {% if scan.scanned_at == 0 %}never run{% else %}{{ crate::handlers::stats::fmt_ago(scan.scanned_at) }}{% endif %}
+  </p>
+
+  {% if let Some(e) = scan.error %}
+    <p class="muted" style="margin:-0.3rem 0 0.7rem;font-size:0.82rem">Why: {{ e }}</p>
+  {% endif %}
+
+  {# ── WordPress core ──────────────────────────────────────────────── #}
+  {% if scan.core_issue_count() > 0 %}
+    <h3 style="font-size:0.9rem;margin:0.9rem 0 0.4rem">WordPress core — {{ scan.core_issue_count() }} file(s)</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>File</th><th>Finding</th></tr></thead>
+        <tbody>
+        {# Capped per bucket: a mass-injector compromise can touch a
+           thousand files, and a card that renders a thousand rows is one
+           nobody scrolls. The count above stays exact. #}
+        {% for p in scan.core_modified %}{% if loop.index0 < 50 %}
+          <tr>
+            <td><code>{{ p }}</code></td>
+            <td><span class="pill err" style="font-size:0.58rem">modified</span> <span class="muted small">content differs from the official release</span></td>
+          </tr>
+        {% endif %}{% endfor %}
+        {% for p in scan.core_unexpected %}{% if loop.index0 < 50 %}
+          <tr>
+            <td><code>{{ p }}</code></td>
+            <td><span class="pill err" style="font-size:0.58rem">shouldn't exist</span> <span class="muted small">not part of WordPress at all</span></td>
+          </tr>
+        {% endif %}{% endfor %}
+        {% for p in scan.core_missing %}{% if loop.index0 < 50 %}
+          <tr>
+            <td><code>{{ p }}</code></td>
+            <td><span class="pill warn" style="font-size:0.58rem">missing</span> <span class="muted small">official file is gone</span></td>
+          </tr>
+        {% endif %}{% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if scan.core_modified.len() > 50 || scan.core_unexpected.len() > 50 || scan.core_missing.len() > 50 %}
+      <p class="text-soft small" style="margin:0.4rem 0 0">Only the first 50 files of each kind are listed. Re-installing core (<code>wp core download --force</code>) restores every official file, but won't remove a dropper.</p>
+    {% endif %}
+  {% endif %}
+
+  {# ── Plugins that FAILED verification. Kept strictly apart from the
+     "no published checksums" list below — conflating the two would put
+     every premium plugin in the findings column and train the operator
+     to ignore this card. ─────────────────────────────────────────────── #}
+  {% if !scan.plugins_failed.is_empty() %}
+    <h3 style="font-size:0.9rem;margin:0.9rem 0 0.4rem">Plugins that failed verification — {{ scan.plugins_failed.len() }}</h3>
+    <div style="display:flex;flex-direction:column;gap:0.5rem">
+      {% for pl in scan.plugins_failed %}
+      <div style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.55rem 0.7rem;background:var(--bg-2)">
+        <div style="display:flex;align-items:center;gap:0.4rem;flex-wrap:wrap">
+          <span class="pill err" style="font-size:0.6rem">FAILED</span>
+          <strong style="font-size:0.9rem"><code>{{ pl.slug }}</code></strong>
+          <span class="text-soft small">— {{ pl.issues.len() }} file(s) don't match wordpress.org</span>
+        </div>
+        <div class="table-wrap" style="margin-top:0.45rem">
+          <table>
+            <thead><tr><th>File</th><th>wp-cli says</th></tr></thead>
+            <tbody>
+            {% for i in pl.issues %}{% if loop.index0 < 25 %}
+              <tr><td><code>{{ i.path }}</code></td><td class="muted small">{{ i.message }}</td></tr>
+            {% endif %}{% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% if pl.issues.len() > 25 %}
+          <p class="text-soft small" style="margin:0.4rem 0 0">Showing 25 of {{ pl.issues.len() }} files. Re-installing this plugin from wordpress.org overwrites every one of them.</p>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+  {# ── ClamAV ──────────────────────────────────────────────────────── #}
+  {% if !scan.clamav_available %}
+    <p class="muted" style="margin:0.9rem 0 0;font-size:0.85rem">
+      <strong>No malware scan ran.</strong> ClamAV isn't installed on this
+      hosting's node, so nothing looked inside <code>wp-content/uploads</code> —
+      the one place checksum verification can't help, because those files were
+      never part of an official release. Install <code>clamav</code> on the node
+      to turn this half of the scan on.
+    </p>
+  {% else if !scan.malware.is_empty() %}
+    <h3 style="font-size:0.9rem;margin:0.9rem 0 0.4rem">ClamAV detections — {{ scan.malware.len() }}</h3>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>File</th><th>Signature</th></tr></thead>
+        <tbody>
+        {% for m in scan.malware %}{% if loop.index0 < 50 %}
+          <tr>
+            <td><code>{{ m.path }}</code></td>
+            <td><span class="pill err" style="font-size:0.58rem">{{ m.signature }}</span></td>
+          </tr>
+        {% endif %}{% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% if scan.malware.len() > 50 %}
+      <p class="text-soft small" style="margin:0.4rem 0 0">Showing 50 of {{ scan.malware.len() }} detections.</p>
+    {% endif %}
+  {% endif %}
+
+  {# ── Plugins with no published checksums. Deliberately last, collapsed,
+     and worded as coverage rather than as a problem. ────────────────── #}
+  {% if !scan.plugins_unknown.is_empty() %}
+    <details style="margin-top:0.9rem">
+      <summary class="text-soft small" style="cursor:pointer">{{ scan.plugins_unknown.len() }} plugin(s) couldn't be verified — this is normal</summary>
+      <p class="muted" style="margin:0.45rem 0 0;font-size:0.82rem">
+        WordPress.org only publishes checksums for plugins it hosts. Premium and
+        private plugins (Elementor Pro, ACF Pro, WP Rocket, …) have none, so
+        there's nothing to compare them against. They're listed so you know what
+        the check <em>didn't</em> cover — not because anything is wrong with them.
+      </p>
+      <div style="display:flex;flex-wrap:wrap;gap:0.35rem;margin-top:0.5rem">
+        {% for s in scan.plugins_unknown %}<code class="text-soft small">{{ s }}</code>{% endfor %}
+      </div>
+    </details>
+  {% endif %}
+
+  <div style="margin-top:0.85rem;display:flex;gap:0.7rem;align-items:center;flex-wrap:wrap">
+    {# A POST, not a re-GET: this re-reads every file on disk and can walk
+       the whole docroot with clamscan. It is an action, not a refresh. #}
+    <form hx-post="/hostings/integrity/scan" hx-target="#integrity-card" hx-swap="outerHTML"
+          hx-indicator="#integrity-spinner" style="display:inline">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="selector" value="{{ selector }}">
+      <button class="btn small" type="submit">Scan now</button>
+    </form>
+    <span id="integrity-spinner" class="muted htmx-indicator" style="font-size:0.85rem">verifying files… this can take a minute</span>
+  </div>
+</div>

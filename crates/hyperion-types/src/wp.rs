@@ -186,6 +186,152 @@ impl HostingVulnSummary {
     }
 }
 
+/// One file inside a verified plugin that didn't match the checksums
+/// WordPress.org publishes for that exact plugin version.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct WpIntegrityFileIssue {
+    /// Path relative to the plugin directory (wp-cli reports it that way).
+    pub path: String,
+    /// wp-cli's own wording, passed through verbatim rather than
+    /// re-classified: "Checksum does not match" | "File was added" |
+    /// "File is missing". Keeping the source string means a wp-cli
+    /// version that adds a new message still renders something true.
+    pub message: String,
+}
+
+/// One plugin whose files failed checksum verification. Grouped per plugin
+/// (not a flat file list) because the operator acts per plugin — reinstall
+/// it, or look at it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct WpIntegrityPluginResult {
+    /// Plugin directory slug, as wp-cli reports it.
+    pub slug: String,
+    pub issues: Vec<WpIntegrityFileIssue>,
+}
+
+/// One ClamAV detection: the file, and the signature that matched it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct WpMalwareHit {
+    /// Absolute path on the node.
+    pub path: String,
+    /// ClamAV signature name, e.g. `Php.Trojan.Webshell-1`.
+    pub signature: String,
+}
+
+/// Result of a WordPress **integrity** scan — the sibling of
+/// [`WpVulnScanResult`]. Where the vuln scan answers "is anything
+/// outdated?", this answers "has anything been *tampered with*?" using
+/// two independent, keyless signals:
+///
+///   1. wp-cli checksum verification of core + plugins against the
+///      hashes WordPress.org publishes (catches injected/modified PHP),
+///   2. a ClamAV pass over the docroot (catches uploaded webshells in
+///      `wp-content`, which core checksum verification deliberately skips).
+///
+/// Both signals can be *absent*: wp-cli may fail to bootstrap a broken
+/// install and ClamAV is optional on a shared host. Those cases set
+/// `wp_cli_ok` / `clamav_available` to false so the UI says "couldn't
+/// check" instead of a false "all clear" — the same honesty
+/// `WpVulnScanResult::feed_unavailable` buys the vuln panel.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct WpIntegrityScanResult {
+    /// True only when core verification actually ran AND found nothing.
+    /// Never true when `wp_cli_ok` is false.
+    #[serde(default)]
+    pub core_ok: bool,
+    /// Core files present on disk whose content differs from the official
+    /// release ("File doesn't verify against checksum"). This is the
+    /// signal that matters: a modified `wp-includes/*.php` is a backdoor
+    /// until proven otherwise.
+    #[serde(default)]
+    pub core_modified: Vec<String>,
+    /// Files that are not part of the official release at all ("File
+    /// should not exist") — a dropper parked inside `wp-admin`.
+    #[serde(default)]
+    pub core_unexpected: Vec<String>,
+    /// Official files that are gone ("File doesn't exist"). Usually a
+    /// botched update or an over-eager "security" plugin, but it also
+    /// means the install no longer matches upstream.
+    #[serde(default)]
+    pub core_missing: Vec<String>,
+    /// Plugins with at least one file that failed verification.
+    #[serde(default)]
+    pub plugins_failed: Vec<WpIntegrityPluginResult>,
+    /// Slugs wp-cli could NOT verify because WordPress.org publishes no
+    /// checksums for them — every premium/private plugin (Elementor Pro,
+    /// ACF Pro, WP Rocket, …). This is explicitly **not** a finding:
+    /// conflating "unknown" with "failed" would cry wolf on every paying
+    /// customer's site and train the operator to ignore the panel.
+    #[serde(default)]
+    pub plugins_unknown: Vec<String>,
+    /// ClamAV detections under the docroot. Empty when `clamav_available`
+    /// is false — which means "not scanned", not "clean".
+    #[serde(default)]
+    pub malware: Vec<WpMalwareHit>,
+    /// Whether `clamscan` exists on the node. False is a normal, expected
+    /// state (clamd is heavy for a shared host) — never an error.
+    #[serde(default)]
+    pub clamav_available: bool,
+    /// Whether wp-cli was able to run the checksum comparison at all.
+    /// False for a broken install, a missing wp-cli, or a WordPress.org
+    /// lookup that failed.
+    #[serde(default)]
+    pub wp_cli_ok: bool,
+    /// Plugins wp-cli actually compared against published checksums
+    /// (excludes `plugins_unknown`) — the denominator behind "verified
+    /// N of M plugins".
+    #[serde(default)]
+    pub plugins_checked: i64,
+    /// Every plugin installed, checked or not.
+    #[serde(default)]
+    pub plugins_total: i64,
+    /// Why the scan couldn't complete, when it couldn't. `None` on a
+    /// successful run. Same role as `WpPluginListResponse::error`.
+    #[serde(default)]
+    pub error: Option<String>,
+    /// Unix seconds of the scan. 0 = never scanned.
+    #[serde(default)]
+    pub scanned_at: i64,
+}
+
+impl WpIntegrityScanResult {
+    /// Total core files flagged, across all three buckets.
+    pub fn core_issue_count(&self) -> usize {
+        self.core_modified.len() + self.core_unexpected.len() + self.core_missing.len()
+    }
+
+    /// Total plugin files flagged, across all failed plugins.
+    pub fn plugin_issue_count(&self) -> usize {
+        self.plugins_failed.iter().map(|p| p.issues.len()).sum()
+    }
+
+    /// Everything an operator would have to look at on this hosting.
+    pub fn total_findings(&self) -> usize {
+        self.core_issue_count() + self.plugin_issue_count() + self.malware.len()
+    }
+
+    /// True only when BOTH signals ran and both came back empty. A scan
+    /// where wp-cli failed or ClamAV is absent is "unknown", never clean —
+    /// the UI must not print a green tick for it.
+    pub fn is_clean(&self) -> bool {
+        self.wp_cli_ok && self.clamav_available && self.total_findings() == 0
+    }
+}
+
+/// One hosting's last stored integrity-scan result, for the cluster-wide
+/// integrity dashboard. Mirrors [`HostingVulnSummary`] so the two
+/// dashboards can share a layout.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct HostingIntegritySummary {
+    pub hosting_id: String,
+    pub domain: String,
+    /// Node the hosting lives on (filled by the web aggregator).
+    pub node_id: String,
+    /// Unix seconds of the scan. 0 = never scanned.
+    pub scanned_at: i64,
+    pub result: WpIntegrityScanResult,
+}
+
 /// Whitelisted plugin actions exposed via the web UI. Anything not
 /// in this enum cannot be invoked from a form — the wp-cli surface
 /// is large and we'd rather grow it deliberately than expose

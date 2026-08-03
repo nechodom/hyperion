@@ -453,6 +453,16 @@ pub trait AgentApi: Send + Sync + 'static {
     /// Every hosting's last stored vuln scan on this node.
     async fn vuln_findings_list(&self)
         -> Result<Vec<hyperion_types::HostingVulnSummary>, RpcError>;
+    /// Verify core + plugin checksums against WordPress.org and sweep the
+    /// docroot with ClamAV where it's installed.
+    async fn wp_integrity_scan(
+        &self,
+        hosting: HostingSelector,
+    ) -> Result<hyperion_types::WpIntegrityScanResult, RpcError>;
+    /// Every hosting's last stored integrity scan on this node.
+    async fn integrity_findings_list(
+        &self,
+    ) -> Result<Vec<hyperion_types::HostingIntegritySummary>, RpcError>;
     /// Create a staging.<domain> copy of a hosting. Returns the domain.
     /// `staging_domain` overrides the default hostname when Some + non-empty.
     async fn wp_staging_create(
