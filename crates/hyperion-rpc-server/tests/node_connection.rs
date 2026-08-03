@@ -480,8 +480,50 @@ async fn wire_rejects_request_signed_by_a_different_master() {
 
 // ---- Response authentication, over the real wire ----
 
+/// Can the local curl actually perform the `--write-out` captures these tests
+/// assert on? `%{certs}` landed in curl 7.88 and `%header{}` in 7.84. An older
+/// curl echoes the directive back verbatim, and the client deliberately reads
+/// that as "not captured" so the call still succeeds unsigned/unpinned — the
+/// documented compatibility path, not a failure.
+///
+/// So on old curl there is nothing to assert: the tests below are about the
+/// capture itself. Skipping keeps them honest instead of asserting a capability
+/// the host doesn't have. Debian 12 — the deployment target — ships 7.88, but
+/// CI still runs ubuntu-22.04 (curl 7.81), which is why this gate exists.
+fn curl_can_capture_writeout() -> bool {
+    let Ok(out) = std::process::Command::new("/usr/bin/curl")
+        .arg("--version")
+        .output()
+    else {
+        return false;
+    };
+    // First line is "curl <major>.<minor>.<patch> (platform) …".
+    let text = String::from_utf8_lossy(&out.stdout);
+    let Some(ver) = text.split_whitespace().nth(1) else {
+        return false;
+    };
+    let mut parts = ver.split('.');
+    let major: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let minor: u32 = parts.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    (major, minor) >= (7, 88)
+}
+
+/// `return`s out of the calling test with a message when curl is too old.
+macro_rules! require_curl_capture {
+    () => {
+        if !curl_can_capture_writeout() {
+            eprintln!(
+                "skipping: curl < 7.88 cannot capture %{{certs}}/%header{{}} — \
+                 the client degrades to 'not captured' by design"
+            );
+            return;
+        }
+    };
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wire_signed_response_verifies() {
+    require_curl_capture!();
     let w = spawn_worker().await;
     let out = call_remote_attested(
         &w.base_url,
@@ -513,6 +555,7 @@ async fn wire_signed_response_verifies() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wire_rejects_forged_response_body() {
+    require_curl_capture!();
     // The forgery: an empty hosting list, so every site on this node vanishes
     // from the panel. It is a valid `Response` and decodes without complaint —
     // nothing but the signature can tell it from the truth.
@@ -570,6 +613,7 @@ async fn wire_rejects_forged_response_body() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wire_rejects_response_signed_by_another_nodes_key() {
+    require_curl_capture!();
     // The worker signs with a key the master has never associated with this
     // node — an attacker who owns some node's key, or simply generated one,
     // answering in another node's name.
@@ -599,6 +643,7 @@ async fn wire_rejects_response_signed_by_another_nodes_key() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wire_rejects_replayed_response() {
+    require_curl_capture!();
     let slot = Arc::new(Mutex::new(None));
     let w = spawn_worker_with(WorkerCfg {
         mitm: Mitm::ReplayFirst(Arc::clone(&slot)),
@@ -689,6 +734,7 @@ const WRONG_SPKI_PIN: &str = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wire_enforced_pin_accepts_the_workers_own_cert() {
+    require_curl_capture!();
     let w = spawn_worker().await;
     let Some(pin) = w.tls_pin.clone() else {
         // The pin is computed by shelling openssl; with no openssl there is
