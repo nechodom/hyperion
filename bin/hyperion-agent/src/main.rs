@@ -902,6 +902,30 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
+    // Care-package drift enforcement — hourly. Re-asserts the features
+    // every ACTIVE package promises, so a paid capability someone switched
+    // off comes back instead of quietly staying off until the customer
+    // notices. Cheap when idle: it reads state and only writes where
+    // something actually moved, and returns immediately on a node with no
+    // activations at all.
+    {
+        let pk = svc.clone();
+        tokio::spawn(async move {
+            // 7-minute offset — clear of the vuln (4 min) and integrity
+            // (6 min) sweeps, which are the two ticks that hammer wp-cli.
+            tokio::time::sleep(std::time::Duration::from_secs(420)).await;
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+            interval.tick().await;
+            loop {
+                match pk.package_enforce_tick().await {
+                    Ok(n) if n > 0 => tracing::info!(corrected = n, "care package enforce tick"),
+                    Ok(_) => tracing::debug!("care package enforce tick: nothing drifted"),
+                    Err(e) => tracing::warn!(error=%e, "care package enforce tick failed"),
+                }
+                interval.tick().await;
+            }
+        });
+    }
     // Scheduled backups — checks hourly which LOCAL hostings are due per their
     // backup_cadence (off by default) and runs backup_now for each. Runs on
     // every node since backups are node-local.

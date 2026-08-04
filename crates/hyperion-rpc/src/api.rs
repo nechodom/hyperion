@@ -1062,6 +1062,49 @@ pub trait AgentApi: Send + Sync + 'static {
         line: String,
     ) -> Result<(String, bool), RpcError>;
 
+    // ── Care packages ("balíček péče") — the paid entitlement layer ──
+    /// List package definitions, each with the count of hostings holding it.
+    async fn package_list(&self) -> Result<Vec<hyperion_types::ServicePackage>, RpcError>;
+    async fn package_get(&self, id: i64) -> Result<hyperion_types::ServicePackage, RpcError>;
+    async fn package_create(
+        &self,
+        input: hyperion_types::PackageInput,
+    ) -> Result<hyperion_types::ServicePackage, RpcError>;
+    async fn package_update(
+        &self,
+        id: i64,
+        input: hyperion_types::PackageInput,
+    ) -> Result<hyperion_types::ServicePackage, RpcError>;
+    /// Delete a definition. Activations survive with `package_id` NULLed —
+    /// they keep the price the customer agreed to, and stop being enforced.
+    async fn package_delete(&self, id: i64) -> Result<(), RpcError>;
+    /// Activations a hosting holds; `history` also returns cancelled ones.
+    async fn package_activations(
+        &self,
+        sel: HostingSelector,
+        history: bool,
+    ) -> Result<Vec<hyperion_types::HostingPackage>, RpcError>;
+    /// Activate a package on a hosting: snapshot the features it forces,
+    /// then apply them through their existing setters. Idempotent.
+    /// `package` is the definition resolved by the master (see
+    /// `profile_apply`); `None` falls back to a local lookup.
+    async fn package_activate(
+        &self,
+        sel: HostingSelector,
+        package_id: i64,
+        package: Option<hyperion_types::ServicePackage>,
+    ) -> Result<hyperion_types::HostingPackage, RpcError>;
+    /// Cancel an activation, restoring the features it forced except those
+    /// another still-active package also forces.
+    async fn package_cancel(
+        &self,
+        sel: HostingSelector,
+        activation_id: i64,
+    ) -> Result<hyperion_types::HostingPackage, RpcError>;
+    /// Re-assert every active package's features on this node. Returns the
+    /// number of feature corrections made.
+    async fn package_enforce_tick(&self) -> Result<i64, RpcError>;
+
     /// Reset the WordPress admin password (wp user update --user_pass).
     /// Returns the new password (the caller usually shows it to the
     /// operator exactly once).

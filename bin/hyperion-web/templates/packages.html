@@ -1,0 +1,312 @@
+{% extends "base.html" %}
+{% block title %}Care packages · Hyperion{% endblock %}
+
+{# The tri-state feature bundle. Identical markup on the New form and on
+   every Edit form, so the two can't drift — the values differ, the
+   vocabulary must not.
+
+   "Leave" is the default on purpose and is NOT "off": a package only
+   touches what it explicitly forces, which is what lets a site hold a
+   Backup package and a Monitoring package at the same time without each
+   switching the other's feature off. #}
+{% macro feature_bundle(id_prefix, wp, integrity, monitoring, hardening, backup) %}
+<div class="field-row">
+  <div class="field">
+    <label for="{{ id_prefix }}_wp">Automatic WordPress updates</label>
+    <select id="{{ id_prefix }}_wp" name="feat_wp_auto_update">
+      <option value="leave"{% if wp == "leave" %} selected{% endif %}>Leave alone — not part of this package</option>
+      <option value="on"{% if wp == "on" %} selected{% endif %}>On — included, keep it on</option>
+      <option value="off"{% if wp == "off" %} selected{% endif %}>Off — keep it switched off</option>
+    </select>
+  </div>
+  <div class="field">
+    <label for="{{ id_prefix }}_integrity">File integrity &amp; malware scanning</label>
+    <select id="{{ id_prefix }}_integrity" name="feat_integrity_scan">
+      <option value="leave"{% if integrity == "leave" %} selected{% endif %}>Leave alone — not part of this package</option>
+      <option value="on"{% if integrity == "on" %} selected{% endif %}>On — included, keep it on</option>
+      <option value="off"{% if integrity == "off" %} selected{% endif %}>Off — keep it switched off</option>
+    </select>
+  </div>
+</div>
+<div class="field-row">
+  <div class="field">
+    <label for="{{ id_prefix }}_monitoring">Uptime monitoring</label>
+    <select id="{{ id_prefix }}_monitoring" name="feat_monitoring">
+      <option value="leave"{% if monitoring == "leave" %} selected{% endif %}>Leave alone — not part of this package</option>
+      <option value="on"{% if monitoring == "on" %} selected{% endif %}>On — included, keep it on</option>
+      <option value="off"{% if monitoring == "off" %} selected{% endif %}>Off — keep it switched off</option>
+    </select>
+  </div>
+  <div class="field">
+    <label for="{{ id_prefix }}_hardening">Web-application firewall &amp; hardening</label>
+    <select id="{{ id_prefix }}_hardening" name="feat_hardening">
+      <option value="leave"{% if hardening == "leave" %} selected{% endif %}>Leave alone — not part of this package</option>
+      <option value="on"{% if hardening == "on" %} selected{% endif %}>On — included, keep it on</option>
+      <option value="off"{% if hardening == "off" %} selected{% endif %}>Off — keep it switched off</option>
+    </select>
+  </div>
+</div>
+<div class="field">
+  <label for="{{ id_prefix }}_backup">Automatic backups <span class="hint">the one feature that isn't a yes/no — pick the cadence you sell</span></label>
+  <select id="{{ id_prefix }}_backup" name="feat_backup_cadence">
+    <option value="leave"{% if backup == "leave" %} selected{% endif %}>Leave alone — not part of this package</option>
+    <option value="daily"{% if backup == "daily" %} selected{% endif %}>Daily</option>
+    <option value="weekly"{% if backup == "weekly" %} selected{% endif %}>Weekly</option>
+    <option value="monthly"{% if backup == "monthly" %} selected{% endif %}>Monthly</option>
+    <option value="off"{% if backup == "off" %} selected{% endif %}>Off — keep scheduled backups switched off</option>
+  </select>
+</div>
+{% endmacro %}
+
+{% block main %}
+<div class="page-header">
+  <div>
+    <h1>Care packages</h1>
+    <div class="subtitle">
+      What you sell on top of the hosting itself — managed updates, scanning,
+      monitoring, backups, hardening. A package records that a customer
+      <em>paid</em> for those, switches them on, and keeps them on: anything
+      switched off by hand comes back on the next enforcement pass. Activate one
+      from a hosting's detail page.
+    </div>
+  </div>
+</div>
+
+{% if let Some(m) = flash %}
+  <div class="flash success"><div class="flash-body">{{ m }}</div></div>
+{% endif %}
+{% if let Some(e) = error %}
+  <div class="flash error"><div class="flash-body">{{ e }}</div></div>
+{% endif %}
+
+{# Empty state carries the pitch, because this page is where an operator
+   who has never sold care decides whether to. Nothing else in the panel
+   changes until the first package exists — the card on a hosting doesn't
+   even render. #}
+{% if packages.is_empty() %}
+<div class="card">
+  <div class="empty">
+    <p><strong>No packages yet.</strong></p>
+    <p style="max-width:60ch;margin:0.6rem auto 0">
+      Hyperion can already update WordPress, scan for tampering, watch uptime,
+      back sites up and harden them — but each of those is a switch someone can
+      flip back. A package ties a set of them to a customer who is paying for
+      them: it turns them on, records the price and the billing date, keeps them
+      on, and puts the site back the way it was when the package is cancelled.
+    </p>
+    <p style="max-width:60ch;margin:0.6rem auto 0" class="text-soft small">
+      Create one below — for example "Balíček péče" at 490 Kč a month with
+      updates, daily backups and monitoring. Until then nothing about the panel
+      changes.
+    </p>
+  </div>
+</div>
+{% else %}
+<div class="card no-pad-table">
+  <h2 style="padding:1.4rem 1.5rem 0">Packages you sell</h2>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Includes</th>
+          <th>Price</th>
+          <th>Status</th>
+          <th>In use</th>
+          <th class="right">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for v in packages %}
+        <tr>
+          <td>
+            <strong>{{ v.pkg.name }}</strong>
+            <div class="muted" style="font-size:0.74rem"><code style="font-size:inherit">{{ v.pkg.slug }}</code></div>
+            {% if !v.pkg.description.is_empty() %}
+              <div class="muted" style="font-size:0.78rem;max-width:44ch">{{ v.pkg.description }}</div>
+            {% endif %}
+          </td>
+          <td>
+            {# Only forced features are listed. A package that says nothing
+               about monitoring must not look like it sells monitoring. #}
+            {% if v.pkg.features.forced_count() == 0 %}
+              <span class="pill warn" title="This package forces nothing — it sells no capability">sells nothing</span>
+            {% else %}
+              <div style="display:flex;flex-wrap:wrap;gap:0.25rem">
+                {% if !v.pkg.features.wp_auto_update.is_leave() %}<span class="pill">WP updates {{ v.pkg.features.wp_auto_update }}</span>{% endif %}
+                {% if !v.pkg.features.integrity_scan.is_leave() %}<span class="pill">integrity scan {{ v.pkg.features.integrity_scan }}</span>{% endif %}
+                {% if !v.pkg.features.monitoring.is_leave() %}<span class="pill">monitoring {{ v.pkg.features.monitoring }}</span>{% endif %}
+                {% if !v.pkg.features.hardening.is_leave() %}<span class="pill">WAF {{ v.pkg.features.hardening }}</span>{% endif %}
+                {% if !v.pkg.features.backup_cadence.is_leave() %}<span class="pill">backups {{ v.pkg.features.backup_cadence }}</span>{% endif %}
+              </div>
+            {% endif %}
+          </td>
+          <td>{{ v.pkg.pretty_price() }}</td>
+          <td>
+            {% if v.pkg.enabled %}<span class="pill ok">offered</span>
+            {% else %}<span class="pill" title="Hidden from the activate picker; sites already holding it keep it">retired</span>{% endif %}
+          </td>
+          <td>
+            {% if v.pkg.active_count > 0 %}
+              <span class="pill">{{ v.pkg.active_count }} site{% if v.pkg.active_count != 1 %}s{% endif %}</span>
+            {% else %}<span class="text-soft">—</span>{% endif %}
+          </td>
+          <td class="right">
+            {# Deleting keeps the activations (price + the state needed for a
+               clean cancel are not ours to erase) but stops enforcing them,
+               so the confirm text says exactly that and points at the
+               `offered` checkbox as the retire path. #}
+            <form method="post" action="/packages/delete" style="display:inline"
+                  data-confirm-title="Delete package {{ v.pkg.name }}"
+                  data-confirm-body="{% if v.pkg.active_count > 0 %}{{ v.pkg.active_count }} site{% if v.pkg.active_count != 1 %}s{% endif %} currently hold this package. They keep their record and the price they agreed to, but nothing keeps their features switched on any more — and cancelling them later can no longer put the site back the way it was. To stop offering it without breaking those sites, untick \"Offered\" in Edit instead.{% else %}No site holds this package — only the definition is removed.{% endif %}"
+                  data-confirm-confirm-label="Delete package"
+                  data-confirm-variant="danger">
+              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+              <input type="hidden" name="id" value="{{ v.pkg.id }}">
+              <button class="btn small danger" type="submit">Delete</button>
+            </form>
+          </td>
+        </tr>
+        <tr>
+          <td colspan="6" style="padding-top:0">
+            <details>
+              <summary class="text-soft small" style="cursor:pointer">Edit “{{ v.pkg.name }}”</summary>
+              <form method="post" action="/packages/{{ v.pkg.id }}/update" style="margin-top:0.8rem">
+                <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+                <div class="field-row">
+                  <div class="field">
+                    <label for="e{{ v.pkg.id }}_name">Name</label>
+                    <input id="e{{ v.pkg.id }}_name" name="name" type="text" required maxlength="64" value="{{ v.pkg.name }}">
+                  </div>
+                  <div class="field">
+                    <label for="e{{ v.pkg.id }}_slug">Handle <span class="hint">used by the API</span></label>
+                    <input id="e{{ v.pkg.id }}_slug" name="slug" type="text" maxlength="64" value="{{ v.pkg.slug }}">
+                  </div>
+                </div>
+                <div class="field">
+                  <label for="e{{ v.pkg.id }}_desc">Customer-facing description <span class="hint">shown to the customer on their hosting — write what they get, not an internal note</span></label>
+                  <textarea id="e{{ v.pkg.id }}_desc" name="description" rows="2" style="width:100%">{{ v.pkg.description }}</textarea>
+                </div>
+                <div class="field-row three">
+                  <div class="field">
+                    <label for="e{{ v.pkg.id }}_price">Price <span class="hint">major units</span></label>
+                    <input id="e{{ v.pkg.id }}_price" name="price_major" type="text" inputmode="decimal" value="{{ v.price_major }}">
+                  </div>
+                  <div class="field">
+                    <label for="e{{ v.pkg.id }}_currency">Currency</label>
+                    <input id="e{{ v.pkg.id }}_currency" name="price_currency" type="text" maxlength="8"
+                           value="{% if let Some(c) = v.pkg.price_currency %}{{ c }}{% endif %}">
+                  </div>
+                  <div class="field">
+                    <label for="e{{ v.pkg.id }}_interval">Billing interval</label>
+                    <select id="e{{ v.pkg.id }}_interval" name="price_interval">
+                      {% if let Some(iv) = v.pkg.price_interval %}
+                        <option value="">No interval — no reminder</option>
+                        <option value="monthly"{% if iv == "monthly" %} selected{% endif %}>Monthly</option>
+                        <option value="quarterly"{% if iv == "quarterly" %} selected{% endif %}>Quarterly</option>
+                        <option value="yearly"{% if iv == "yearly" %} selected{% endif %}>Yearly</option>
+                      {% else %}
+                        <option value="" selected>No interval — no reminder</option>
+                        <option value="monthly">Monthly</option>
+                        <option value="quarterly">Quarterly</option>
+                        <option value="yearly">Yearly</option>
+                      {% endif %}
+                    </select>
+                  </div>
+                </div>
+                {% call feature_bundle(v.pkg.id,
+                                       v.pkg.features.wp_auto_update.as_str(),
+                                       v.pkg.features.integrity_scan.as_str(),
+                                       v.pkg.features.monitoring.as_str(),
+                                       v.pkg.features.hardening.as_str(),
+                                       v.pkg.features.backup_cadence.as_str()) %}
+                <label class="field" style="display:flex;align-items:center;gap:0.5rem;margin-top:0.8rem">
+                  <input type="checkbox" name="enabled" value="1"{% if v.pkg.enabled %} checked{% endif %} style="margin:0">
+                  <span>Offered — show it in the activate picker. Untick to retire it without touching the {{ v.pkg.active_count }} site{% if v.pkg.active_count != 1 %}s{% endif %} already on it.</span>
+                </label>
+                <div class="row" style="margin-top:0.8rem">
+                  <button class="btn primary" type="submit">Save changes</button>
+                  <span class="text-soft small" style="margin-left:0.6rem">Sites already holding this package pick the change up on the next enforcement pass.</span>
+                </div>
+              </form>
+            </details>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+<div class="card hover">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+    New package
+  </h2>
+  <form method="post" action="/packages/create">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <div class="field-row">
+      <div class="field">
+        <label for="n_name">Name <span class="hint">what the customer sees, e.g. "Balíček péče"</span></label>
+        <input id="n_name" name="name" type="text" required maxlength="64">
+      </div>
+      <div class="field">
+        <label for="n_slug">Handle <span class="hint">optional · derived from the name when blank</span></label>
+        <input id="n_slug" name="slug" type="text" maxlength="64" placeholder="balicek-pece">
+      </div>
+    </div>
+    <div class="field">
+      <label for="n_desc">Customer-facing description <span class="hint">shown to the customer on their own hosting — this is what justifies the invoice</span></label>
+      <textarea id="n_desc" name="description" rows="2" style="width:100%"
+                placeholder="Aktualizace WordPressu, denní zálohy, hlídání dostupnosti a kontrola integrity souborů."></textarea>
+    </div>
+
+    <h2 style="font-size:0.95rem;margin:1.5rem 0 0.6rem">
+      Price <span class="muted" style="font-weight:400;font-size:0.82rem">— optional · display text plus a reminder clock. Hyperion does not invoice or charge anyone.</span>
+    </h2>
+    <div class="field-row three">
+      <div class="field">
+        <label for="n_price">Price <span class="hint">major units, e.g. 490.00</span></label>
+        <input id="n_price" name="price_major" type="text" inputmode="decimal" placeholder="490.00">
+      </div>
+      <div class="field">
+        <label for="n_currency">Currency</label>
+        <input id="n_currency" name="price_currency" type="text" maxlength="8" placeholder="Kč">
+      </div>
+      <div class="field">
+        <label for="n_interval">Billing interval <span class="hint">when the reminder fires</span></label>
+        <select id="n_interval" name="price_interval">
+          <option value="">No interval — no reminder</option>
+          <option value="monthly" selected>Monthly</option>
+          <option value="quarterly">Quarterly</option>
+          <option value="yearly">Yearly</option>
+        </select>
+      </div>
+    </div>
+
+    <h2 style="font-size:0.95rem;margin:1.5rem 0 0.6rem">
+      What's included <span class="muted" style="font-weight:400;font-size:0.82rem">— each of these already exists in Hyperion; the package pays for it and keeps it switched on</span>
+    </h2>
+    <p class="text-soft small" style="margin:0 0 0.8rem;line-height:1.55;max-width:78ch">
+      <strong>Leave alone</strong> is not the same as <strong>Off</strong>. A package only
+      touches what it explicitly includes, so two packages can sit on the same site
+      without fighting — and a customer who switched something on themselves keeps it
+      when the package is cancelled.
+    </p>
+    {% call feature_bundle("n", "leave", "leave", "leave", "leave", "leave") %}
+
+    <label class="field" style="display:flex;align-items:center;gap:0.5rem;margin-top:0.8rem">
+      <input type="checkbox" name="enabled" value="1" checked style="margin:0">
+      <span>Offered — show it in the activate picker on hosting detail pages.</span>
+    </label>
+
+    <div class="row" style="margin-top:1rem">
+      <button class="btn primary" type="submit">
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+        Create package
+      </button>
+    </div>
+  </form>
+</div>
+{% endblock %}

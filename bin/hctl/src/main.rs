@@ -1162,6 +1162,77 @@ fn print_pretty(resp: &Response) {
                 if *activated { " (activated)" } else { "" }
             );
         }
+        Response::PackageList(rows) => {
+            for p in rows {
+                println!(
+                    "{}\t{}\t{}\t{} feature(s)\t{} site(s){}",
+                    p.id,
+                    p.slug,
+                    p.pretty_price(),
+                    p.features.forced_count(),
+                    p.active_count,
+                    if p.enabled { "" } else { "\t(hidden)" }
+                );
+            }
+        }
+        Response::PackageGet(p) | Response::PackageCreate(p) | Response::PackageUpdate(p) => {
+            println!("id:       {}", p.id);
+            println!("name:     {}", p.name);
+            println!("slug:     {}", p.slug);
+            println!("price:    {}", p.pretty_price());
+            println!("offered:  {}", if p.enabled { "yes" } else { "no" });
+            println!("in use:   {} site(s)", p.active_count);
+            // "leave" is not "off" — print every feature so the operator can
+            // see which ones this package has no opinion about.
+            println!("features:");
+            println!("  wp_auto_update:  {}", p.features.wp_auto_update);
+            println!("  integrity_scan:  {}", p.features.integrity_scan);
+            println!("  monitoring:      {}", p.features.monitoring);
+            println!("  hardening:       {}", p.features.hardening);
+            println!("  backup_cadence:  {}", p.features.backup_cadence);
+        }
+        Response::PackageDelete => {
+            println!("✓ package deleted (existing activations keep their price, unenforced)")
+        }
+        Response::PackageActivations(rows) => {
+            if rows.is_empty() {
+                println!("(no packages on this hosting)");
+            }
+            for a in rows {
+                println!(
+                    "{}\t{}\t{}\t{}{}",
+                    a.id,
+                    a.state,
+                    if a.package_name.is_empty() {
+                        "(definition deleted)"
+                    } else {
+                        a.package_name.as_str()
+                    },
+                    a.pretty_price(),
+                    match a.next_billing_at {
+                        Some(ts) => format!("\tnext reminder: {ts}"),
+                        None => String::new(),
+                    }
+                );
+            }
+        }
+        Response::PackageActivate(a) => {
+            println!("✓ package active (activation {})", a.id);
+            println!("  price: {}", a.pretty_price());
+            if let Some(ts) = a.next_billing_at {
+                println!("  next reminder: {ts}");
+            }
+        }
+        Response::PackageCancel(a) => {
+            println!("✓ package cancelled (activation {} kept as history)", a.id);
+        }
+        Response::PackageEnforceTick { corrected } => {
+            if *corrected == 0 {
+                println!("✓ nothing had drifted");
+            } else {
+                println!("✓ re-asserted {corrected} paid feature(s) that had been switched off");
+            }
+        }
         Response::HostingImportPanelPlan(plan) => {
             println!(
                 "Import plan — source {} {} ({} site(s)):",

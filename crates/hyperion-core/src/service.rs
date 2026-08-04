@@ -9,13 +9,15 @@ use hyperion_rpc::wire::{
 };
 use hyperion_rpc::RpcError;
 use hyperion_state::{
-    certificates, databases, hostings, metrics, profiles, system_users, wordpress,
+    certificates, databases, hostings, metrics, packages, profiles, system_users, wordpress,
 };
 use hyperion_types::{
-    now_secs, CertInfo, CertIssueRequest, CertRenewOutcome, CertRenewResult, ClusterStats,
-    DashboardAlert, DbProvision, DbSummary, DnsCheckResult, HostingDetail, HostingId,
-    HostingProfile, HostingState, HostingStats, HostingSummary, NodeStats, PhpVersion,
-    ProfileApply, ProfileInput, SecretId, WpInstallRequest, WpInstallStatus,
+    now_secs, BackupCadence, CertInfo, CertIssueRequest, CertRenewOutcome, CertRenewResult,
+    ClusterStats, DashboardAlert, DbProvision, DbSummary, DnsCheckResult, FeatureToggle,
+    HostingDetail, HostingId, HostingPackage, HostingProfile, HostingState, HostingStats,
+    HostingSummary, LiveFeatureState, NodeStats, PackageFeatures, PackageInput, PackagePriorState,
+    PhpVersion, ProfileApply, ProfileInput, SecretId, ServicePackage, WpInstallRequest,
+    WpInstallStatus,
 };
 use hyperion_validate::{Domain, SystemUserName};
 use sqlx::SqlitePool;
@@ -6061,6 +6063,18 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         serde_json::from_str(&json).ok()
     }
 
+    /// Whether the daily integrity sweep may look at this hosting.
+    /// Per-hosting toggle in `hosting_kv` (`integrity_scan_enabled`);
+    /// **default ON** (absent ⇒ enabled). "off" opts the site out.
+    async fn integrity_scan_enabled(&self, hosting_id: &str) -> bool {
+        match hyperion_state::hosting_kv::get(&self.pool, hosting_id, INTEGRITY_ENABLED_KV_KEY)
+            .await
+        {
+            Ok(Some(v)) => v.trim() != "off",
+            _ => true,
+        }
+    }
+
     /// Persist the latest integrity scan. Best-effort: a write failure
     /// costs a dashboard row and an extra ClamAV pass tomorrow, never the
     /// scan itself.
@@ -6215,6 +6229,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let mut newly_flagged = 0i64;
         for s in &summaries {
             if s.state != HostingState::Active {
+                continue;
+            }
+            // Per-site opt-out (default on). This is the switch the
+            // `integrity_scan` package feature forces, so a customer who
+            // pays for scanning keeps getting scanned even after someone
+            // turns it off on the site.
+            if !self.integrity_scan_enabled(s.id.as_str()).await {
                 continue;
             }
             // Read the prior record BEFORE scanning — `wp_integrity_scan`
@@ -7394,6 +7415,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// `next_billing_at` falls within the next 3 days, then ADVANCES the date by
     /// one billing interval so the reminder fires once per cycle instead of
     /// re-firing every tick forever. Called hourly from the agent scheduler.
+    ///
+    /// Two sources, same treatment: the hosting's applied profile, and each
+    /// care package it holds. They are separate rows on separate clocks
+    /// (a hosting carries one profile but may hold several packages), so a
+    /// site can legitimately produce more than one reminder. Neither
+    /// charges anyone — this only ever sends a message.
     pub async fn billing_sweep(&self) -> Result<i64, RpcError> {
         let now = now_secs();
         let due = profiles::due_billings(&self.pool, now, 3 * 86400)
@@ -7466,6 +7493,80 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     hosting_id = %row.hosting_id.as_str(),
                     error = %e,
                     "billing: failed to advance next_billing_at; reminder may repeat"
+                );
+            }
+            count += 1;
+        }
+
+        // Care packages, on exactly the same terms. `packages::due_billings`
+        // mirrors the profile query (active only, non-trashed, clock inside
+        // the window), so everything below is the profile branch with a
+        // package label — including advancing the clock, without which the
+        // same package re-notifies every hour forever.
+        let due_packages = packages::due_billings(&self.pool, now, 3 * 86400)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("billing sweep (packages): {e}")))?;
+        for row in due_packages {
+            let detail = self
+                .get(HostingSelector::Id(row.hosting_id.clone()))
+                .await
+                .ok();
+            let domain = detail
+                .as_ref()
+                .map(|d| d.domain.clone())
+                .unwrap_or_default();
+            // Empty once the definition was deleted — the activation and its
+            // price survive that, so the reminder still has to make sense.
+            let name = self.package_name_for(row.package_id).await;
+            let label = if name.is_empty() {
+                "care package (definition deleted)".to_string()
+            } else {
+                name
+            };
+            // Packages carry no webhook of their own; reuse the one the
+            // hosting's profile apply snapshotted so a site's money-related
+            // messages land in one channel. `None` ⇒ the cluster default.
+            let webhook = profiles::get_apply(&self.pool, &row.hosting_id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|a| a.slack_webhook);
+            let price_str = match (row.price_minor, &row.price_currency, &row.price_interval) {
+                (Some(m), Some(c), Some(iv)) => {
+                    format!("{:.2} {c} ({iv})", m as f64 / 100.0)
+                }
+                _ => "no price set".into(),
+            };
+            let due_in_days = row
+                .next_billing_at
+                .map(|t| ((t - now).max(0)) / 86400)
+                .unwrap_or(0);
+            let msg = format!(
+                ":package: *Care package reminder*\n• site: `{domain}`\n• package: {label}\n• price: {price_str}\n• due in {due_in_days} day(s)"
+            );
+            self.notify_slack(webhook.as_deref(), &msg).await;
+            let owner = self
+                .get_expiry(HostingSelector::Id(row.hosting_id.clone()))
+                .await
+                .ok()
+                .and_then(|e| e.owner_email);
+            let to = owner.unwrap_or_default();
+            let subj = format!("[Hyperion] Care package reminder — {domain}");
+            let body = format!(
+                "Hosting:    {domain}\nPackage:    {label}\nPrice:      {price_str}\nDue in:     {due_in_days} day(s)\n\n--\nHyperion\n"
+            );
+            self.notify_email(&to, &subj, &body, Some(row.hosting_id.as_str()), "billing")
+                .await;
+            let advanced = row
+                .price_interval
+                .as_deref()
+                .and_then(|iv| advance_billing_date(row.next_billing_at.unwrap_or(now), iv, now));
+            if let Err(e) = packages::set_next_billing(&self.pool, row.id, advanced).await {
+                tracing::warn!(
+                    hosting_id = %row.hosting_id.as_str(),
+                    activation_id = row.id,
+                    error = %e,
+                    "billing: failed to advance a package's next_billing_at; reminder may repeat"
                 );
             }
             count += 1;
@@ -8052,6 +8153,706 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             next_billing_at: r.next_billing_at,
             applied_at: r.applied_at,
         }))
+    }
+
+    // ================================================================
+    //  Care packages ("balíček péče") — the paid entitlement layer
+    // ================================================================
+    //
+    // Every feature a package sells already worked; each just lived
+    // somewhere different (two `hosting_kv` keys, the monitor row, the
+    // vhost options). What was missing was a record that the customer PAID
+    // for them, and something that keeps them switched on — hence
+    // activate (snapshot + apply), cancel (restore), and a tick that
+    // re-asserts.
+    //
+    // Two rules hold throughout:
+    //   * every write goes through the SAME setter the panel uses. Those
+    //     setters rewrite vhosts and seed schedules; a raw column/kv write
+    //     would record the promise without keeping it.
+    //   * `Leave` is not `Off`. A package only ever touches a feature it
+    //     explicitly forces, which is what lets two packages coexist on
+    //     one hosting.
+    //
+    // Define no packages and none of this runs.
+
+    pub async fn package_list(&self) -> Result<Vec<ServicePackage>, RpcError> {
+        let rows = packages::list(&self.pool)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("package list: {e}")))?;
+        // One GROUP BY for every count, then attach by id (no N+1).
+        let counts: HashMap<i64, i64> = packages::counts_active(&self.pool)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let mut w = package_row_to_wire(r);
+                w.active_count = counts.get(&w.id).copied().unwrap_or(0);
+                w
+            })
+            .collect())
+    }
+
+    pub async fn package_get(&self, id: i64) -> Result<ServicePackage, RpcError> {
+        let row = packages::get(&self.pool, id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("package get: {e}")))?
+            .ok_or(RpcError::NotFound {
+                kind: "package".into(),
+                id: id.to_string(),
+            })?;
+        let mut w = package_row_to_wire(row);
+        w.active_count = packages::count_active(&self.pool, id).await.unwrap_or(0);
+        Ok(w)
+    }
+
+    pub async fn package_create(&self, input: PackageInput) -> Result<ServicePackage, RpcError> {
+        let validated = validate_package(input)?;
+        let id = packages::insert(&self.pool, &package_input_to_new(validated), now_secs())
+            .await
+            // Both `name` and `slug` are UNIQUE, so the overwhelmingly
+            // likely cause is a duplicate of one of them.
+            .map_err(|e| RpcError::AlreadyExists {
+                kind: "package".into(),
+                id: e.to_string(),
+            })?;
+        let out = self.package_get(id).await?;
+        self.append_audit(
+            "package.create",
+            None,
+            &serde_json::json!({"id": id, "name": out.name, "slug": out.slug}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(out)
+    }
+
+    /// Overwrite a definition. Edits reach every ACTIVE activation on the
+    /// next drift tick — that liveness is the whole point of a package —
+    /// but never rewrite an activation's price snapshot.
+    pub async fn package_update(
+        &self,
+        id: i64,
+        input: PackageInput,
+    ) -> Result<ServicePackage, RpcError> {
+        // 404 before writing, so editing a deleted package doesn't report ok.
+        self.package_get(id).await?;
+        let validated = validate_package(input)?;
+        packages::update(&self.pool, id, &package_input_to_new(validated), now_secs())
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("package update: {e}")))?;
+        let out = self.package_get(id).await?;
+        self.append_audit(
+            "package.update",
+            None,
+            &serde_json::json!({"id": id, "name": out.name, "slug": out.slug}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(out)
+    }
+
+    /// Delete a definition. Existing activations SURVIVE with `package_id`
+    /// NULLed (the FK is ON DELETE SET NULL): the price the customer agreed
+    /// to and the prior state a clean cancel needs are not ours to erase.
+    /// What they lose is the bundle, so the drift tick stops enforcing them
+    /// — which is why the audit entry records how many sites that hit.
+    /// Retiring a package the operator still sells is `enabled = false`.
+    pub async fn package_delete(&self, id: i64) -> Result<(), RpcError> {
+        let orphaned = packages::count_active(&self.pool, id).await.unwrap_or(0);
+        packages::delete(&self.pool, id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("package delete: {e}")))?;
+        if orphaned > 0 {
+            tracing::warn!(
+                package_id = id,
+                activations = orphaned,
+                "package definition deleted while still active on hostings — \
+                 their activations survive but are no longer enforced"
+            );
+        }
+        self.append_audit(
+            "package.delete",
+            None,
+            &serde_json::json!({"id": id, "orphaned_activations": orphaned}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
+    /// The packages a hosting holds. `history = true` includes cancelled
+    /// rows (what the customer bought and when it stopped).
+    pub async fn package_activations(
+        &self,
+        sel: HostingSelector,
+        history: bool,
+    ) -> Result<Vec<HostingPackage>, RpcError> {
+        let detail = self.get(sel).await?;
+        let rows = if history {
+            packages::history_for_hosting(&self.pool, &detail.id).await
+        } else {
+            packages::list_for_hosting(&self.pool, &detail.id).await
+        }
+        .map_err(|e| RpcError::Internal_with(format!("package activations: {e}")))?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            let name = self.package_name_for(r.package_id).await;
+            out.push(activation_row_to_wire(r, name));
+        }
+        Ok(out)
+    }
+
+    /// Display name of a definition, or "" when it is gone / not local.
+    async fn package_name_for(&self, package_id: Option<i64>) -> String {
+        let Some(pid) = package_id else {
+            return String::new();
+        };
+        packages::get(&self.pool, pid)
+            .await
+            .ok()
+            .flatten()
+            .map(|p| p.name)
+            .unwrap_or_default()
+    }
+
+    /// Activate a package on a hosting: snapshot what every forced feature
+    /// was set to, push the bundle through the real setters, and record the
+    /// price the customer agreed to plus the reminder clock.
+    ///
+    /// Idempotent. Re-activating a package the hosting already holds does
+    /// not open a second row — it re-asserts the bundle and returns the
+    /// existing activation, keeping the ORIGINAL prior state. Re-capturing
+    /// it would record the state this very activation forced, and a later
+    /// cancel would then "restore" the package's own values as if they had
+    /// been the customer's.
+    pub async fn package_activate(
+        &self,
+        sel: HostingSelector,
+        package_id: i64,
+        package: Option<ServicePackage>,
+    ) -> Result<HostingPackage, RpcError> {
+        let detail = self.get(sel).await?;
+        // The master passes the resolved definition inline (`service_packages`
+        // lives in ITS database); a node that is itself the master falls back
+        // to a local lookup. Same split as profile_apply, for the same reason.
+        let def = match package {
+            Some(p) => p,
+            None => self.package_get(package_id).await?,
+        };
+        let features = def.features;
+        let now = now_secs();
+
+        let held = packages::list_for_hosting(&self.pool, &detail.id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("package activate: read held: {e}")))?;
+        if let Some(existing) = held.iter().find(|a| a.package_id == Some(package_id)) {
+            let live = self.package_live_state(&detail).await;
+            let changed = self.package_push_features(&detail, &features, &live).await;
+            self.append_audit(
+                "package.activate",
+                Some(detail.id.as_str()),
+                &serde_json::json!({
+                    "package_id": package_id,
+                    "package_name": def.name,
+                    "activation_id": existing.id,
+                    "reasserted": true,
+                    "changed": changed,
+                })
+                .to_string(),
+                "ok",
+            )
+            .await;
+            return Ok(activation_row_to_wire(existing.clone(), def.name));
+        }
+
+        // Read the site BEFORE writing to it. This is the only moment the
+        // pre-package state still exists, and it is exactly what a cancel
+        // puts back.
+        let live = self.package_live_state(&detail).await;
+        let prior = PackagePriorState::capture(&features, &live);
+        let prior_state_json = match serde_json::to_string(&prior) {
+            Ok(j) => Some(j),
+            Err(e) => {
+                // Losing the snapshot would make a later cancel silently
+                // leave paid features switched on forever — refuse instead.
+                return Err(RpcError::Internal_with(format!(
+                    "package activate: serialise prior state: {e}"
+                )));
+            }
+        };
+        let next_billing_at = def
+            .price_interval
+            .as_deref()
+            .and_then(billing_interval_secs)
+            .map(|s| now + s);
+        let activation_id = packages::activate(
+            &self.pool,
+            &packages::NewActivation {
+                hosting_id: detail.id.clone(),
+                package_id,
+                // Snapshot the price: a later re-price or delete of the
+                // definition must not rewrite what this customer agreed to.
+                price_minor: def.price_minor,
+                price_currency: def.price_currency.clone(),
+                price_interval: def.price_interval.clone(),
+                next_billing_at,
+                prior_state_json,
+            },
+            now,
+        )
+        .await
+        .map_err(|e| RpcError::Conflict {
+            message: format!("package activate: {e}"),
+        })?;
+
+        // Record first, apply second. If a setter fails half-way the row is
+        // still there with the correct prior state and the drift tick
+        // finishes the job; the other order can leave features switched on
+        // with nothing saying who paid for them.
+        let changed = self.package_push_features(&detail, &features, &live).await;
+        self.append_audit(
+            "package.activate",
+            Some(detail.id.as_str()),
+            &serde_json::json!({
+                "package_id": package_id,
+                "package_name": def.name,
+                "activation_id": activation_id,
+                "price_minor": def.price_minor,
+                "next_billing_at": next_billing_at,
+                "changed": changed,
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+
+        let row = packages::get_activation(&self.pool, activation_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("package activate: re-read: {e}")))?
+            .ok_or(RpcError::Internal {
+                message: "activation vanished after write (concurrent delete?)".into(),
+            })?;
+        Ok(activation_row_to_wire(row, def.name))
+    }
+
+    /// End an activation and put back what it changed.
+    ///
+    /// Only the features THIS package forced are restored, and only where
+    /// no OTHER still-active package forces the same one — otherwise
+    /// cancelling the cheaper package would switch off something the
+    /// customer still pays for through another. The row is kept, marked
+    /// cancelled, as history.
+    pub async fn package_cancel(
+        &self,
+        sel: HostingSelector,
+        activation_id: i64,
+    ) -> Result<HostingPackage, RpcError> {
+        let detail = self.get(sel).await?;
+        let row = packages::get_activation(&self.pool, activation_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("package cancel: {e}")))?
+            .ok_or(RpcError::NotFound {
+                kind: "package activation".into(),
+                id: activation_id.to_string(),
+            })?;
+        // The selector and the activation must agree — an id from another
+        // site is a 404 here, never a cancellation of someone else's package.
+        if row.hosting_id != detail.id {
+            return Err(RpcError::NotFound {
+                kind: "package activation".into(),
+                id: activation_id.to_string(),
+            });
+        }
+        let name = self.package_name_for(row.package_id).await;
+        if !row.state.is_active() {
+            // Already history: the restore ran once, at the right moment.
+            // Doing it again would undo whatever changed since.
+            return Ok(activation_row_to_wire(row, name));
+        }
+
+        // Mark it cancelled FIRST: that both settles the double-cancel race
+        // (the state layer returns false for the loser) and takes this row
+        // out of the "what else is still active" fold below.
+        let won = packages::cancel(&self.pool, activation_id, now_secs())
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("package cancel: {e}")))?;
+        if !won {
+            let row = packages::get_activation(&self.pool, activation_id)
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("package cancel: re-read: {e}")))?
+                .ok_or(RpcError::NotFound {
+                    kind: "package activation".into(),
+                    id: activation_id.to_string(),
+                })?;
+            return Ok(activation_row_to_wire(row, name));
+        }
+
+        let still_forced = self.package_desired_state(&detail.id).await;
+        let prior = row
+            .prior_state_json
+            .as_deref()
+            .and_then(|j| serde_json::from_str::<PackagePriorState>(j).ok())
+            .unwrap_or_default();
+        // Turn the snapshot into a restore intent, then blank out every
+        // feature another live package still speaks about.
+        let mut restore = PackageFeatures {
+            wp_auto_update: toggle_of(prior.wp_auto_update),
+            integrity_scan: toggle_of(prior.integrity_scan),
+            monitoring: toggle_of(prior.monitoring),
+            hardening: toggle_of(prior.hardening),
+            backup_cadence: prior.backup_cadence.unwrap_or_default(),
+        };
+        if still_forced.wp_auto_update.forces().is_some() {
+            restore.wp_auto_update = FeatureToggle::Leave;
+        }
+        if still_forced.integrity_scan.forces().is_some() {
+            restore.integrity_scan = FeatureToggle::Leave;
+        }
+        if still_forced.monitoring.forces().is_some() {
+            restore.monitoring = FeatureToggle::Leave;
+        }
+        if still_forced.hardening.forces().is_some() {
+            restore.hardening = FeatureToggle::Leave;
+        }
+        if !still_forced.backup_cadence.is_leave() {
+            restore.backup_cadence = BackupCadence::Leave;
+        }
+
+        let live = self.package_live_state(&detail).await;
+        let changed = self.package_push_features(&detail, &restore, &live).await;
+        self.append_audit(
+            "package.cancel",
+            Some(detail.id.as_str()),
+            &serde_json::json!({
+                "activation_id": activation_id,
+                "package_id": row.package_id,
+                "package_name": name,
+                "restored": changed,
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+
+        let row = packages::get_activation(&self.pool, activation_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("package cancel: re-read: {e}")))?
+            .ok_or(RpcError::NotFound {
+                kind: "package activation".into(),
+                id: activation_id.to_string(),
+            })?;
+        Ok(activation_row_to_wire(row, name))
+    }
+
+    /// Re-assert every active package's forced features. THE reason this
+    /// feature exists: without it a package is a label. Someone switches
+    /// backups off on a site whose customer pays for backups, and by the
+    /// next tick they are back on and the correction is in the audit log.
+    ///
+    /// Cheap by construction — one read of the live state per hosting and a
+    /// write only where something actually moved — so it can run on the
+    /// same cadence as its sibling ticks.
+    ///
+    /// Scope: the activations on THIS node (`hosting_packages` rows are
+    /// co-located with their hosting) whose definition is also readable
+    /// here. An activation whose `package_id` is NULL (definition deleted)
+    /// has no bundle left to enforce and is skipped; so is a hosting that
+    /// isn't Active, because re-rendering a suspended site's vhost is not
+    /// this tick's job. Returns the number of feature corrections made.
+    pub async fn package_enforce_tick(&self) -> Result<i64, RpcError> {
+        let rows = packages::list_all_active(&self.pool)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("package enforce: {e}")))?;
+        if rows.is_empty() {
+            // The ignore-the-feature-entirely path: no activations, no work,
+            // no queries against any hosting.
+            return Ok(0);
+        }
+        // Fold each hosting's bundles into ONE desired state before touching
+        // it, so two packages that both speak about backups don't fight each
+        // other every tick (On beats Off; the more frequent cadence wins).
+        let mut order: Vec<HostingId> = Vec::new();
+        let mut wanted: HashMap<String, PackageFeatures> = HashMap::new();
+        // Definitions are read once and reused — a node with fifty sites on
+        // the same package must not be fifty SELECTs.
+        let mut defs: HashMap<i64, PackageFeatures> = HashMap::new();
+        for row in rows {
+            let Some(pid) = row.package_id else {
+                continue; // definition deleted: nothing left to enforce
+            };
+            let features = match defs.get(&pid) {
+                Some(f) => *f,
+                None => {
+                    let f = match packages::get(&self.pool, pid).await {
+                        Ok(Some(d)) => d.features(),
+                        // Unreadable definition ⇒ enforce nothing, rather
+                        // than guess a bundle nobody bought.
+                        _ => PackageFeatures::default(),
+                    };
+                    defs.insert(pid, f);
+                    f
+                }
+            };
+            let key = row.hosting_id.as_str().to_string();
+            match wanted.get_mut(&key) {
+                Some(acc) => *acc = acc.combine(features),
+                None => {
+                    order.push(row.hosting_id.clone());
+                    wanted.insert(key, features);
+                }
+            }
+        }
+
+        let mut corrected = 0i64;
+        for hosting_id in order {
+            let Some(want) = wanted.get(hosting_id.as_str()) else {
+                continue;
+            };
+            if want.is_noop() {
+                continue;
+            }
+            let detail = match self.get(HostingSelector::Id(hosting_id.clone())).await {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::warn!(hosting_id = %hosting_id.as_str(), error = %e, "package enforce: hosting read failed");
+                    continue;
+                }
+            };
+            if detail.state != HostingState::Active {
+                continue;
+            }
+            let live = self.package_live_state(&detail).await;
+            let changed = self.package_push_features(&detail, want, &live).await;
+            if changed.is_empty() {
+                continue; // nothing drifted — the common case
+            }
+            corrected += changed.len() as i64;
+            let summary = changed
+                .iter()
+                .map(|c| format!("{}: {} → {}", c.feature, c.from, c.to))
+                .collect::<Vec<_>>()
+                .join(", ");
+            tracing::info!(
+                domain = %detail.domain,
+                hosting_id = %detail.id.as_str(),
+                corrections = %summary,
+                "care package: re-asserted a paid feature that had been switched off"
+            );
+            self.append_audit(
+                "package.enforce",
+                Some(detail.id.as_str()),
+                &serde_json::json!({"changed": changed}).to_string(),
+                "ok",
+            )
+            .await;
+        }
+        Ok(corrected)
+    }
+
+    /// What every active package on this hosting adds up to. `Leave` on a
+    /// feature means no package held here speaks about it, so nothing may
+    /// touch it.
+    async fn package_desired_state(&self, hosting_id: &HostingId) -> PackageFeatures {
+        let rows = match packages::list_for_hosting(&self.pool, hosting_id).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(hosting_id = %hosting_id.as_str(), error = %e, "package: read held failed");
+                return PackageFeatures::default();
+            }
+        };
+        let mut out = PackageFeatures::default();
+        for row in rows {
+            let Some(pid) = row.package_id else {
+                continue;
+            };
+            if let Ok(Some(def)) = packages::get(&self.pool, pid).await {
+                out = out.combine(def.features());
+            }
+        }
+        out
+    }
+
+    /// The live value of every package-controlled feature on one hosting,
+    /// read straight off this node. Both halves of the entitlement need it:
+    /// activation snapshots it into `prior_state_json`, and every push
+    /// compares against it so it only writes where something moved.
+    async fn package_live_state(&self, detail: &HostingDetail) -> LiveFeatureState {
+        let id = detail.id.as_str();
+        LiveFeatureState {
+            wp_auto_update: self.wp_auto_update_enabled(id).await,
+            integrity_scan: self.integrity_scan_enabled(id).await,
+            monitoring: hyperion_state::monitors::get(&self.pool, &detail.id)
+                .await
+                .ok()
+                .flatten()
+                .map(|c| c.enabled)
+                .unwrap_or(false),
+            hardening: detail.vhost_options.waf_enabled,
+            // A site state, never `Leave`: "no cadence configured" is `Off`.
+            backup_cadence: match hyperion_state::hosting_kv::get(&self.pool, id, BACKUP_KV_CADENCE)
+                .await
+            {
+                Ok(Some(v)) => BackupCadence::from_stored(canonical_backup_cadence(&v)),
+                _ => BackupCadence::Off,
+            },
+        }
+    }
+
+    /// Drive the five package features to `want`, writing ONLY where the
+    /// live value differs. Returns one entry per feature actually changed.
+    ///
+    /// Every branch goes through the setter the panel uses: the kv writes
+    /// are the ones the defender and the backup driver read, `monitor_set`
+    /// re-validates the config, and `set_vhost_options` re-renders the
+    /// vhost and `nginx -t`s it. A failed setter is logged and left out of
+    /// the result — the next tick retries it rather than the audit claiming
+    /// a change that never landed.
+    async fn package_push_features(
+        &self,
+        detail: &HostingDetail,
+        want: &PackageFeatures,
+        live: &LiveFeatureState,
+    ) -> Vec<FeatureChange> {
+        let mut changed: Vec<FeatureChange> = Vec::new();
+        let id = detail.id.as_str();
+
+        if let Some(on) = want.wp_auto_update.forces() {
+            if on != live.wp_auto_update {
+                let r = self
+                    .hosting_kv_set(
+                        id.to_string(),
+                        "wp_auto_update".into(),
+                        feature_kv_value(on).into(),
+                    )
+                    .await;
+                push_change(
+                    &mut changed,
+                    detail,
+                    "wp_auto_update",
+                    feature_kv_value(live.wp_auto_update),
+                    feature_kv_value(on),
+                    r,
+                );
+            }
+        }
+        if let Some(on) = want.integrity_scan.forces() {
+            if on != live.integrity_scan {
+                let r = self
+                    .hosting_kv_set(
+                        id.to_string(),
+                        INTEGRITY_ENABLED_KV_KEY.into(),
+                        feature_kv_value(on).into(),
+                    )
+                    .await;
+                push_change(
+                    &mut changed,
+                    detail,
+                    "integrity_scan",
+                    feature_kv_value(live.integrity_scan),
+                    feature_kv_value(on),
+                    r,
+                );
+            }
+        }
+        if let Some(on) = want.monitoring.forces() {
+            if on != live.monitoring {
+                let r = self.package_set_monitoring(detail, on).await;
+                push_change(
+                    &mut changed,
+                    detail,
+                    "monitoring",
+                    feature_kv_value(live.monitoring),
+                    feature_kv_value(on),
+                    r,
+                );
+            }
+        }
+        if let Some(on) = want.hardening.forces() {
+            if on != live.hardening {
+                let r = self.package_set_hardening(detail, on).await;
+                push_change(
+                    &mut changed,
+                    detail,
+                    "hardening",
+                    feature_kv_value(live.hardening),
+                    feature_kv_value(on),
+                    r,
+                );
+            }
+        }
+        if let Some(cadence) = want.backup_cadence.kv_value() {
+            if cadence != live.backup_cadence.as_str() {
+                let r = self
+                    .hosting_kv_set(id.to_string(), BACKUP_KV_CADENCE.into(), cadence.into())
+                    .await;
+                push_change(
+                    &mut changed,
+                    detail,
+                    "backup_cadence",
+                    live.backup_cadence.as_str(),
+                    cadence,
+                    r,
+                );
+            }
+        }
+        changed
+    }
+
+    /// Flip uptime monitoring without disturbing anything else on the
+    /// monitor row. `monitor_set` overwrites the whole config, so the
+    /// current path / interval / alert targets are read back and passed
+    /// through — an entitlement must not quietly reset a site's alert
+    /// email to nobody.
+    async fn package_set_monitoring(
+        &self,
+        detail: &HostingDetail,
+        enabled: bool,
+    ) -> Result<(), RpcError> {
+        let cur = hyperion_state::monitors::get(&self.pool, &detail.id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("monitor read: {e}")))?;
+        let (url_path, interval, after_fails, email, slack, webhook) = match cur {
+            Some(c) => (
+                Some(c.url_path),
+                Some(c.interval_secs),
+                Some(c.alert_after_fails),
+                c.alert_email,
+                c.alert_slack_webhook,
+                c.alert_webhook_url,
+            ),
+            None => (None, None, None, None, None, None),
+        };
+        self.monitor_set(
+            HostingSelector::Id(detail.id.clone()),
+            enabled,
+            url_path,
+            interval,
+            after_fails,
+            email,
+            slack,
+            webhook,
+        )
+        .await
+    }
+
+    /// Flip WAF-lite through the vhost-options path, which re-renders the
+    /// vhost and runs `nginx -t` before the change counts. The wp-admin
+    /// allowlist is deliberately untouched: it is a list of the operator's
+    /// own IPs, and no package can invent one.
+    async fn package_set_hardening(
+        &self,
+        detail: &HostingDetail,
+        enabled: bool,
+    ) -> Result<(), RpcError> {
+        let mut options = detail.vhost_options.clone();
+        options.waf_enabled = enabled;
+        self.set_vhost_options(HostingSelector::Id(detail.id.clone()), options, None)
+            .await?;
+        Ok(())
     }
 
     /// Compute the operator dashboard alert list. Scans hostings + certs
@@ -17072,6 +17873,231 @@ fn profile_row_to_wire(r: hyperion_state::profiles::ProfileRow) -> HostingProfil
     }
 }
 
+// ─── care packages ──────────────────────────────────────────────────
+
+/// One feature the entitlement layer actually wrote. The audit payload
+/// and the drift log line are both built from these.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+struct FeatureChange {
+    feature: &'static str,
+    from: String,
+    to: String,
+}
+
+/// Record a feature write that landed, or log one that didn't. A failed
+/// setter must NOT appear in the result: the audit entry would claim a
+/// change that never happened, and the drift tick is already the retry.
+fn push_change(
+    out: &mut Vec<FeatureChange>,
+    detail: &HostingDetail,
+    feature: &'static str,
+    from: &str,
+    to: &str,
+    result: Result<(), RpcError>,
+) {
+    match result {
+        Ok(()) => out.push(FeatureChange {
+            feature,
+            from: from.to_string(),
+            to: to.to_string(),
+        }),
+        Err(e) => tracing::warn!(
+            domain = %detail.domain,
+            hosting_id = %detail.id.as_str(),
+            feature,
+            error = %e,
+            "care package: could not apply a paid feature — retrying on the next tick"
+        ),
+    }
+}
+
+/// The two values the kv-backed toggles store. `wp_auto_update` reads
+/// anything that is not "off" as on, so "on" is the only enabled spelling
+/// we ever write.
+fn feature_kv_value(on: bool) -> &'static str {
+    if on {
+        "on"
+    } else {
+        "off"
+    }
+}
+
+/// A captured prior value as a restore intent. `None` — the package never
+/// forced this feature — stays `Leave`, so cancelling leaves it alone.
+fn toggle_of(prior: Option<bool>) -> FeatureToggle {
+    match prior {
+        Some(true) => FeatureToggle::On,
+        Some(false) => FeatureToggle::Off,
+        None => FeatureToggle::Leave,
+    }
+}
+
+/// URL/API handle for a package: "Péče Plus" → "pece-plus".
+///
+/// Folds the Czech/Slovak diacritics an operator actually types (the panel
+/// is Czech), lower-cases, and collapses everything else into single
+/// dashes. Anything unfoldable is dropped, so a name with no ASCII left
+/// yields "" — the caller turns that into "set a slug yourself" rather
+/// than inventing a handle nobody can guess.
+fn slugify(input: &str) -> String {
+    const FOLD: &[(char, char)] = &[
+        ('á', 'a'),
+        ('ä', 'a'),
+        ('č', 'c'),
+        ('ď', 'd'),
+        ('é', 'e'),
+        ('ě', 'e'),
+        ('í', 'i'),
+        ('ĺ', 'l'),
+        ('ľ', 'l'),
+        ('ň', 'n'),
+        ('ó', 'o'),
+        ('ô', 'o'),
+        ('ö', 'o'),
+        ('ŕ', 'r'),
+        ('ř', 'r'),
+        ('š', 's'),
+        ('ť', 't'),
+        ('ú', 'u'),
+        ('ů', 'u'),
+        ('ü', 'u'),
+        ('ý', 'y'),
+        ('ž', 'z'),
+    ];
+    let mut out = String::with_capacity(input.len());
+    for ch in input.to_lowercase().chars() {
+        let c = FOLD
+            .iter()
+            .find(|(from, _)| *from == ch)
+            .map(|(_, to)| *to)
+            .unwrap_or(ch);
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+        } else if !out.is_empty() && !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+/// Package-definition validation. Same shape as `validate_profile`:
+/// normalise in place, and reject anything that would otherwise fail late
+/// or silently.
+fn validate_package(mut p: PackageInput) -> Result<PackageInput, RpcError> {
+    p.name = p.name.trim().to_string();
+    if p.name.is_empty() {
+        return Err(RpcError::Validation {
+            message: "package name must not be empty".into(),
+        });
+    }
+    if p.name.chars().count() > 64 {
+        return Err(RpcError::Validation {
+            message: "package name max 64 chars".into(),
+        });
+    }
+    p.description = p.description.trim().to_string();
+    // The web layer normally derives + de-duplicates the slug, but hctl and
+    // `/api/v1` can post an empty one — and two empty slugs collide on a
+    // UNIQUE index, which reads as nothing an operator can act on.
+    p.slug = slugify(if p.slug.trim().is_empty() {
+        &p.name
+    } else {
+        &p.slug
+    });
+    if p.slug.is_empty() {
+        return Err(RpcError::Validation {
+            message:
+                "could not derive a slug from the package name — set one explicitly (a-z, 0-9, -)"
+                    .into(),
+        });
+    }
+    if p.slug.chars().count() > 64 {
+        return Err(RpcError::Validation {
+            message: "package slug max 64 chars".into(),
+        });
+    }
+    // Pricing is display text plus the reminder cadence — but a negative
+    // amount, or an interval the sweep cannot step, is a silent
+    // never-reminds bug rather than a cosmetic one.
+    if p.price_minor.is_some_and(|m| m < 0) {
+        return Err(RpcError::Validation {
+            message: "price must not be negative".into(),
+        });
+    }
+    p.price_currency = p
+        .price_currency
+        .map(|c| c.trim().to_string())
+        .filter(|c| !c.is_empty());
+    p.price_interval = p
+        .price_interval
+        .map(|i| i.trim().to_lowercase())
+        .filter(|i| !i.is_empty());
+    if let Some(iv) = p.price_interval.as_deref() {
+        if billing_interval_secs(iv).is_none() {
+            return Err(RpcError::Validation {
+                message: "price interval must be monthly | quarterly | yearly".into(),
+            });
+        }
+    }
+    Ok(p)
+}
+
+fn package_input_to_new(input: PackageInput) -> hyperion_state::packages::NewPackage {
+    hyperion_state::packages::NewPackage {
+        name: input.name,
+        slug: input.slug,
+        description: input.description,
+        enabled: input.enabled,
+        price_minor: input.price_minor,
+        price_currency: input.price_currency,
+        price_interval: input.price_interval,
+        features: input.features,
+    }
+}
+
+fn package_row_to_wire(r: hyperion_state::packages::PackageRow) -> ServicePackage {
+    // Both read `r` — take them before the struct literal moves out of it.
+    let features = r.features();
+    let enabled = r.is_enabled();
+    ServicePackage {
+        id: r.id,
+        name: r.name,
+        slug: r.slug,
+        description: r.description,
+        enabled,
+        price_minor: r.price_minor,
+        price_currency: r.price_currency,
+        price_interval: r.price_interval,
+        features,
+        // Filled in by package_list / package_get; 0 from the bare conversion.
+        active_count: 0,
+        created_at: r.created_at,
+        updated_at: r.updated_at,
+    }
+}
+
+/// `package_name` is looked up by the caller and is empty once the
+/// definition is gone — the activation itself outlives it.
+fn activation_row_to_wire(
+    r: hyperion_state::packages::HostingPackageRow,
+    package_name: String,
+) -> HostingPackage {
+    HostingPackage {
+        id: r.id,
+        hosting_id: r.hosting_id,
+        package_id: r.package_id,
+        package_name,
+        price_minor: r.price_minor,
+        price_currency: r.price_currency,
+        price_interval: r.price_interval,
+        next_billing_at: r.next_billing_at,
+        state: r.state,
+        activated_at: r.activated_at,
+        cancelled_at: r.cancelled_at,
+        prior_state_json: r.prior_state_json,
+    }
+}
+
 fn derive_user_from_summary(s: &HostingSummary) -> Option<String> {
     // HostingSummary doesn't carry system_user yet; fall back to deriving
     // it from the domain the same way the create flow does.
@@ -17596,6 +18622,14 @@ struct StoredVulnScan {
 /// `hosting_kv` key holding the last integrity scan, sibling to
 /// `vuln_scan`.
 const INTEGRITY_KV_KEY: &str = "integrity_scan";
+
+/// `hosting_kv` key gating the daily integrity sweep for ONE hosting —
+/// the per-site switch a care package sells (and enforces).
+///
+/// **Default ON** (absent ⇒ enabled), exactly like `wp_auto_update`: an
+/// installation that never touches packages must keep scanning every site
+/// it scans today. Only an explicit "off" opts a site out.
+const INTEGRITY_ENABLED_KV_KEY: &str = "integrity_scan_enabled";
 
 /// Marker put in `WpIntegrityScanResult::error` for a hosting that has no
 /// WordPress at all. A sentinel rather than free text because the sweep
@@ -23179,5 +24213,584 @@ mod tests {
                 .count(),
             0
         );
+    }
+
+    // ============================================================
+    //  Care packages — the paid entitlement layer.
+    //
+    //  What these guard is the difference between a package and a
+    //  label: that activating one really flips the features, that
+    //  cancelling puts back exactly what it changed and nothing
+    //  else, and that a paid feature switched off by hand comes
+    //  back on the next tick.
+    // ============================================================
+
+    /// `set_vhost_options` (the hardening path) drops the htpasswd file
+    /// whenever basic auth is off — which is every hosting in these tests.
+    fn package_mocks() -> MockAdapterPort {
+        let mut a = happy_mocks();
+        a.expect_nginx_delete_htpasswd().returning(|_| Ok(()));
+        a
+    }
+
+    /// Two hostings in one test: `happy_mocks` hands out a fixed uid, which
+    /// the second `create` collides with on `system_users.uid`.
+    fn package_mocks_two_sites() -> MockAdapterPort {
+        let mut a = MockAdapterPort::new();
+        let next_uid = std::sync::atomic::AtomicU32::new(1042);
+        a.expect_ensure_user()
+            .returning(move |_, _| Ok(next_uid.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
+        a.expect_ensure_dirs().returning(|_, _, _, _| Ok(()));
+        a.expect_fpm_ensure().returning(|_, _, _| Ok(()));
+        a.expect_acme_issue().returning(|d, _| Ok(cert_for(d)));
+        a.expect_nginx_write_vhost().returning(|_| Ok(()));
+        a.expect_redis_is_available().returning(|| true);
+        a.expect_nginx_delete_htpasswd().returning(|_| Ok(()));
+        a
+    }
+
+    /// …and a fixed database name, so the two-site test provisions none.
+    fn req_no_db(d: &str) -> HostingCreateReq {
+        HostingCreateReq {
+            database: None,
+            ..req(d)
+        }
+    }
+
+    fn care_input(name: &str, features: PackageFeatures) -> PackageInput {
+        PackageInput {
+            name: name.into(),
+            price_minor: Some(49_000),
+            price_currency: Some("Kč".into()),
+            price_interval: Some("monthly".into()),
+            features,
+            ..Default::default()
+        }
+    }
+
+    async fn kv_of(pool: &SqlitePool, hosting_id: &str, key: &str) -> Option<String> {
+        hyperion_state::hosting_kv::get(pool, hosting_id, key)
+            .await
+            .expect("kv read")
+    }
+
+    async fn monitoring_on(pool: &SqlitePool, id: &HostingId) -> bool {
+        hyperion_state::monitors::get(pool, id)
+            .await
+            .expect("monitor read")
+            .expect("monitor row")
+            .enabled
+    }
+
+    /// A hosting plus the detail every package test needs.
+    ///
+    /// `create` auto-enables uptime monitoring, so a brand-new site starts
+    /// with monitoring ON and everything else at its own default — the
+    /// tests that care about monitoring set it explicitly rather than
+    /// leaning on that.
+    async fn hosting_for_packages(
+        s: &HostingService<MockAdapterPort>,
+        domain: &str,
+    ) -> HostingDetail {
+        s.create(req(domain)).await.expect("create");
+        s.get(HostingSelector::Domain(
+            Domain::parse(domain).expect("parse"),
+        ))
+        .await
+        .expect("get")
+    }
+
+    #[test]
+    fn slugify_folds_czech_and_refuses_to_invent_a_handle() {
+        assert_eq!(slugify("Péče Plus"), "pece-plus");
+        assert_eq!(slugify("  Zálohy  &  Monitoring "), "zalohy-monitoring");
+        assert_eq!(slugify("Údržba 2.0"), "udrzba-2-0");
+        // Nothing foldable left ⇒ empty, which validate_package turns into
+        // "set a slug yourself" rather than a UNIQUE-index collision.
+        assert_eq!(slugify("日本語"), "");
+    }
+
+    #[test]
+    fn validate_package_derives_slug_and_bounds_pricing() {
+        let p =
+            validate_package(care_input("Péče Plus", PackageFeatures::default())).expect("valid");
+        assert_eq!(p.slug, "pece-plus", "derived when the caller left it empty");
+        assert!(p.enabled, "a new package is offerable");
+
+        // An interval the billing sweep can't step would mean a package
+        // that silently never reminds anyone.
+        let bad = PackageInput {
+            price_interval: Some("weekly".into()),
+            ..care_input("X", PackageFeatures::default())
+        };
+        assert!(validate_package(bad).is_err());
+        let negative = PackageInput {
+            price_minor: Some(-1),
+            ..care_input("X", PackageFeatures::default())
+        };
+        assert!(validate_package(negative).is_err());
+        let nameless = PackageInput {
+            name: "   ".into(),
+            ..care_input("X", PackageFeatures::default())
+        };
+        assert!(validate_package(nameless).is_err());
+    }
+
+    #[tokio::test]
+    async fn activation_captures_prior_state_and_applies_the_bundle() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), package_mocks());
+        let detail = hosting_for_packages(&s, "example.cz").await;
+        let hid = detail.id.as_str().to_string();
+        // What the customer had before they bought anything: auto-updates
+        // switched off by hand, weekly backups, monitoring switched off.
+        s.hosting_kv_set(hid.clone(), "wp_auto_update".into(), "off".into())
+            .await
+            .expect("seed");
+        s.hosting_kv_set(hid.clone(), BACKUP_KV_CADENCE.into(), "weekly".into())
+            .await
+            .expect("seed");
+        s.package_set_monitoring(&detail, false)
+            .await
+            .expect("seed");
+
+        let def = s
+            .package_create(care_input(
+                "Péče Plus",
+                PackageFeatures {
+                    wp_auto_update: FeatureToggle::On,
+                    monitoring: FeatureToggle::On,
+                    backup_cadence: BackupCadence::Daily,
+                    ..Default::default()
+                },
+            ))
+            .await
+            .expect("define");
+        assert_eq!(def.slug, "pece-plus");
+        assert_eq!(def.active_count, 0);
+
+        let act = s
+            .package_activate(HostingSelector::Id(detail.id.clone()), def.id, None)
+            .await
+            .expect("activate");
+
+        // Applied — through the setters the panel and the ticks read.
+        assert_eq!(
+            kv_of(&pool, &hid, "wp_auto_update").await.as_deref(),
+            Some("on")
+        );
+        assert_eq!(
+            kv_of(&pool, &hid, BACKUP_KV_CADENCE).await.as_deref(),
+            Some("daily")
+        );
+        assert!(monitoring_on(&pool, &detail.id).await);
+
+        // Snapshotted price + an armed reminder clock. Neither charges
+        // anyone; the sweep just has something to fire on.
+        assert_eq!(act.price_minor, Some(49_000));
+        assert_eq!(act.price_interval.as_deref(), Some("monthly"));
+        assert!(act.next_billing_at.is_some_and(|t| t > now_secs()));
+
+        // Prior state holds the SITE's values, only for forced features.
+        let prior: PackagePriorState =
+            serde_json::from_str(&act.prior_state_json.expect("captured")).expect("de");
+        assert_eq!(prior.wp_auto_update, Some(false));
+        assert_eq!(prior.monitoring, Some(false));
+        assert_eq!(prior.backup_cadence, Some(BackupCadence::Weekly));
+        assert_eq!(
+            prior.hardening, None,
+            "a feature the package leaves alone has nothing to restore"
+        );
+        assert_eq!(s.package_get(def.id).await.expect("get").active_count, 1);
+    }
+
+    #[tokio::test]
+    async fn re_activating_a_held_package_reasserts_without_a_second_row() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), package_mocks());
+        let detail = hosting_for_packages(&s, "example.cz").await;
+        let hid = detail.id.as_str().to_string();
+        s.hosting_kv_set(hid.clone(), "wp_auto_update".into(), "off".into())
+            .await
+            .expect("seed");
+        let def = s
+            .package_create(care_input(
+                "Péče",
+                PackageFeatures {
+                    wp_auto_update: FeatureToggle::On,
+                    ..Default::default()
+                },
+            ))
+            .await
+            .expect("define");
+        let sel = HostingSelector::Id(detail.id.clone());
+        let first = s
+            .package_activate(sel.clone(), def.id, None)
+            .await
+            .expect("activate");
+
+        // Someone switches the paid feature off, then the admin re-runs
+        // "activate" on a package the site already holds.
+        s.hosting_kv_set(hid.clone(), "wp_auto_update".into(), "off".into())
+            .await
+            .expect("drift");
+        let again = s
+            .package_activate(sel.clone(), def.id, None)
+            .await
+            .expect("re-activate");
+
+        assert_eq!(again.id, first.id, "the same activation row, re-asserted");
+        assert_eq!(
+            s.package_activations(sel, true)
+                .await
+                .expect("history")
+                .len(),
+            1,
+            "no duplicate row, not even a cancelled one"
+        );
+        assert_eq!(
+            kv_of(&pool, &hid, "wp_auto_update").await.as_deref(),
+            Some("on"),
+            "re-activation re-asserts the bundle"
+        );
+        // The ORIGINAL snapshot survives. Re-capturing it here would record
+        // the state the first activation forced, and the eventual cancel
+        // would then "restore" the package's own values.
+        let prior: PackagePriorState =
+            serde_json::from_str(&again.prior_state_json.expect("kept")).expect("de");
+        assert_eq!(prior.wp_auto_update, Some(false));
+    }
+
+    #[tokio::test]
+    async fn cancel_restores_exactly_what_the_package_changed() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), package_mocks());
+        let detail = hosting_for_packages(&s, "example.cz").await;
+        let hid = detail.id.as_str().to_string();
+        s.hosting_kv_set(hid.clone(), "wp_auto_update".into(), "off".into())
+            .await
+            .expect("seed");
+        s.hosting_kv_set(hid.clone(), BACKUP_KV_CADENCE.into(), "weekly".into())
+            .await
+            .expect("seed");
+        // Monitoring is on and stays on for the customer's own reasons —
+        // the load-bearing case for `leave`, since no package here sells it.
+        assert!(monitoring_on(&pool, &detail.id).await);
+
+        let def = s
+            .package_create(care_input(
+                "Zálohy",
+                PackageFeatures {
+                    wp_auto_update: FeatureToggle::On,
+                    backup_cadence: BackupCadence::Daily,
+                    ..Default::default()
+                },
+            ))
+            .await
+            .expect("define");
+        let sel = HostingSelector::Id(detail.id.clone());
+        let act = s
+            .package_activate(sel.clone(), def.id, None)
+            .await
+            .expect("activate");
+
+        let cancelled = s.package_cancel(sel.clone(), act.id).await.expect("cancel");
+        assert!(!cancelled.state.is_active());
+        assert_eq!(cancelled.next_billing_at, None, "reminders stop");
+
+        assert_eq!(
+            kv_of(&pool, &hid, "wp_auto_update").await.as_deref(),
+            Some("off"),
+            "restored to what the customer had"
+        );
+        assert_eq!(
+            kv_of(&pool, &hid, BACKUP_KV_CADENCE).await.as_deref(),
+            Some("weekly")
+        );
+        assert!(
+            monitoring_on(&pool, &detail.id).await,
+            "the package never forced monitoring, so cancelling must not touch it"
+        );
+        // Kept as history, and a second cancel is a no-op rather than a
+        // second restore on top of whatever changed since.
+        let history = s
+            .package_activations(sel.clone(), true)
+            .await
+            .expect("hist");
+        assert_eq!(history.len(), 1);
+        s.hosting_kv_set(hid.clone(), "wp_auto_update".into(), "on".into())
+            .await
+            .expect("later change");
+        s.package_cancel(sel, act.id).await.expect("re-cancel");
+        assert_eq!(
+            kv_of(&pool, &hid, "wp_auto_update").await.as_deref(),
+            Some("on"),
+            "a double cancel must not replay the restore"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_leaves_a_feature_another_package_still_pays_for() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), package_mocks());
+        let detail = hosting_for_packages(&s, "example.cz").await;
+        let hid = detail.id.as_str().to_string();
+        s.hosting_kv_set(hid.clone(), "wp_auto_update".into(), "off".into())
+            .await
+            .expect("seed");
+        s.package_set_monitoring(&detail, false)
+            .await
+            .expect("seed");
+
+        // Two packages that overlap on monitoring; only the first also
+        // sells auto-updates.
+        let plus = s
+            .package_create(care_input(
+                "Péče Plus",
+                PackageFeatures {
+                    wp_auto_update: FeatureToggle::On,
+                    monitoring: FeatureToggle::On,
+                    ..Default::default()
+                },
+            ))
+            .await
+            .expect("define plus");
+        let watch = s
+            .package_create(care_input(
+                "Monitoring",
+                PackageFeatures {
+                    monitoring: FeatureToggle::On,
+                    ..Default::default()
+                },
+            ))
+            .await
+            .expect("define watch");
+        let sel = HostingSelector::Id(detail.id.clone());
+        let act_plus = s
+            .package_activate(sel.clone(), plus.id, None)
+            .await
+            .expect("activate plus");
+        s.package_activate(sel.clone(), watch.id, None)
+            .await
+            .expect("activate watch");
+        assert!(monitoring_on(&pool, &detail.id).await);
+
+        s.package_cancel(sel.clone(), act_plus.id)
+            .await
+            .expect("cancel plus");
+
+        assert!(
+            monitoring_on(&pool, &detail.id).await,
+            "cancelling the cheaper package must not switch off what the \
+             customer still pays for through the other one"
+        );
+        assert_eq!(
+            kv_of(&pool, &hid, "wp_auto_update").await.as_deref(),
+            Some("off"),
+            "the feature only the cancelled package forced does go back"
+        );
+        assert_eq!(
+            s.package_activations(sel, false).await.expect("held").len(),
+            1,
+            "the other package is still held"
+        );
+    }
+
+    #[tokio::test]
+    async fn enforce_tick_puts_back_features_that_were_switched_off() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), package_mocks());
+        let detail = hosting_for_packages(&s, "example.cz").await;
+        let hid = detail.id.as_str().to_string();
+        let def = s
+            .package_create(care_input(
+                "Péče Plus",
+                PackageFeatures {
+                    wp_auto_update: FeatureToggle::On,
+                    monitoring: FeatureToggle::On,
+                    hardening: FeatureToggle::On,
+                    backup_cadence: BackupCadence::Daily,
+                    ..Default::default()
+                },
+            ))
+            .await
+            .expect("define");
+        let sel = HostingSelector::Id(detail.id.clone());
+        s.package_activate(sel.clone(), def.id, None)
+            .await
+            .expect("activate");
+
+        // Nothing has moved yet, so the tick must not write a thing.
+        assert_eq!(
+            s.package_enforce_tick().await.expect("tick"),
+            0,
+            "a healthy site costs the tick nothing"
+        );
+
+        // Now someone undoes all four by hand.
+        let live = s.get(sel.clone()).await.expect("re-read");
+        s.hosting_kv_set(hid.clone(), "wp_auto_update".into(), "off".into())
+            .await
+            .expect("drift");
+        s.hosting_kv_set(hid.clone(), BACKUP_KV_CADENCE.into(), "off".into())
+            .await
+            .expect("drift");
+        s.package_set_monitoring(&live, false).await.expect("drift");
+        s.package_set_hardening(&live, false).await.expect("drift");
+
+        assert_eq!(
+            s.package_enforce_tick().await.expect("tick"),
+            4,
+            "every paid feature comes back"
+        );
+        assert_eq!(
+            kv_of(&pool, &hid, "wp_auto_update").await.as_deref(),
+            Some("on")
+        );
+        assert_eq!(
+            kv_of(&pool, &hid, BACKUP_KV_CADENCE).await.as_deref(),
+            Some("daily")
+        );
+        assert!(monitoring_on(&pool, &detail.id).await);
+        assert!(
+            s.get(sel.clone())
+                .await
+                .expect("get")
+                .vhost_options
+                .waf_enabled,
+            "hardening goes back through the vhost path, not a raw column write"
+        );
+        // …and the pass right after a correction is quiet again.
+        assert_eq!(s.package_enforce_tick().await.expect("tick"), 0);
+    }
+
+    #[tokio::test]
+    async fn enforce_tick_is_inert_without_packages_and_after_a_cancel() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), package_mocks());
+        // No definitions at all: the whole feature is ignorable.
+        assert_eq!(s.package_enforce_tick().await.expect("tick"), 0);
+
+        let detail = hosting_for_packages(&s, "example.cz").await;
+        let hid = detail.id.as_str().to_string();
+        let def = s
+            .package_create(care_input(
+                "Zálohy",
+                PackageFeatures {
+                    backup_cadence: BackupCadence::Daily,
+                    ..Default::default()
+                },
+            ))
+            .await
+            .expect("define");
+        let sel = HostingSelector::Id(detail.id.clone());
+        let act = s
+            .package_activate(sel.clone(), def.id, None)
+            .await
+            .expect("activate");
+        s.package_cancel(sel, act.id).await.expect("cancel");
+
+        // A cancelled activation is history — the tick must not re-assert it.
+        s.hosting_kv_set(hid.clone(), BACKUP_KV_CADENCE.into(), "off".into())
+            .await
+            .expect("operator switches backups off");
+        assert_eq!(s.package_enforce_tick().await.expect("tick"), 0);
+        assert_eq!(
+            kv_of(&pool, &hid, BACKUP_KV_CADENCE).await.as_deref(),
+            Some("off"),
+            "nobody is paying for backups any more"
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_a_definition_keeps_the_activation_and_stops_enforcing_it() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), package_mocks());
+        let detail = hosting_for_packages(&s, "example.cz").await;
+        let hid = detail.id.as_str().to_string();
+        let def = s
+            .package_create(care_input(
+                "Zálohy",
+                PackageFeatures {
+                    backup_cadence: BackupCadence::Daily,
+                    ..Default::default()
+                },
+            ))
+            .await
+            .expect("define");
+        let sel = HostingSelector::Id(detail.id.clone());
+        let act = s
+            .package_activate(sel.clone(), def.id, None)
+            .await
+            .expect("activate");
+
+        s.package_delete(def.id).await.expect("delete");
+
+        let held = s.package_activations(sel, false).await.expect("held");
+        assert_eq!(held.len(), 1, "the customer's record survives the delete");
+        assert_eq!(held[0].id, act.id);
+        assert_eq!(held[0].package_id, None, "but there is no bundle left");
+        assert_eq!(
+            held[0].price_minor,
+            Some(49_000),
+            "the price they agreed to is not ours to erase"
+        );
+        assert!(held[0].package_name.is_empty());
+
+        // Nothing left to enforce, so drift on that feature stands.
+        s.hosting_kv_set(hid.clone(), BACKUP_KV_CADENCE.into(), "off".into())
+            .await
+            .expect("drift");
+        assert_eq!(s.package_enforce_tick().await.expect("tick"), 0);
+        assert_eq!(
+            kv_of(&pool, &hid, BACKUP_KV_CADENCE).await.as_deref(),
+            Some("off")
+        );
+    }
+
+    #[tokio::test]
+    async fn packages_on_one_hosting_do_not_reach_another() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), package_mocks_two_sites());
+        s.create(req_no_db("a-site.cz")).await.expect("create a");
+        s.create(req_no_db("b-site.cz")).await.expect("create b");
+        let a = s
+            .get(HostingSelector::Domain(
+                Domain::parse("a-site.cz").expect("parse"),
+            ))
+            .await
+            .expect("get a");
+        let b = s
+            .get(HostingSelector::Domain(
+                Domain::parse("b-site.cz").expect("parse"),
+            ))
+            .await
+            .expect("get b");
+        let def = s
+            .package_create(care_input(
+                "Zálohy",
+                PackageFeatures {
+                    backup_cadence: BackupCadence::Daily,
+                    ..Default::default()
+                },
+            ))
+            .await
+            .expect("define");
+        let act = s
+            .package_activate(HostingSelector::Id(a.id.clone()), def.id, None)
+            .await
+            .expect("activate on a");
+
+        assert_eq!(
+            kv_of(&pool, b.id.as_str(), BACKUP_KV_CADENCE).await,
+            None,
+            "the other site is untouched"
+        );
+        // An activation id from another hosting is a 404, never a
+        // cancellation of someone else's package.
+        assert!(s
+            .package_cancel(HostingSelector::Id(b.id.clone()), act.id)
+            .await
+            .is_err());
     }
 }

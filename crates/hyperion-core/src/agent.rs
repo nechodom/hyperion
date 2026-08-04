@@ -1609,6 +1609,54 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
             .profile_wp_item_install(sel, &item_kind, &line)
             .await
     }
+
+    async fn package_list(&self) -> Result<Vec<hyperion_types::ServicePackage>, RpcError> {
+        self.svc.package_list().await
+    }
+    async fn package_get(&self, id: i64) -> Result<hyperion_types::ServicePackage, RpcError> {
+        self.svc.package_get(id).await
+    }
+    async fn package_create(
+        &self,
+        input: hyperion_types::PackageInput,
+    ) -> Result<hyperion_types::ServicePackage, RpcError> {
+        self.svc.package_create(input).await
+    }
+    async fn package_update(
+        &self,
+        id: i64,
+        input: hyperion_types::PackageInput,
+    ) -> Result<hyperion_types::ServicePackage, RpcError> {
+        self.svc.package_update(id, input).await
+    }
+    async fn package_delete(&self, id: i64) -> Result<(), RpcError> {
+        self.svc.package_delete(id).await
+    }
+    async fn package_activations(
+        &self,
+        sel: HostingSelector,
+        history: bool,
+    ) -> Result<Vec<hyperion_types::HostingPackage>, RpcError> {
+        self.svc.package_activations(sel, history).await
+    }
+    async fn package_activate(
+        &self,
+        sel: HostingSelector,
+        package_id: i64,
+        package: Option<hyperion_types::ServicePackage>,
+    ) -> Result<hyperion_types::HostingPackage, RpcError> {
+        self.svc.package_activate(sel, package_id, package).await
+    }
+    async fn package_cancel(
+        &self,
+        sel: HostingSelector,
+        activation_id: i64,
+    ) -> Result<hyperion_types::HostingPackage, RpcError> {
+        self.svc.package_cancel(sel, activation_id).await
+    }
+    async fn package_enforce_tick(&self) -> Result<i64, RpcError> {
+        self.svc.package_enforce_tick().await
+    }
 }
 
 #[cfg(test)]

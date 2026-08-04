@@ -1375,6 +1375,59 @@ pub enum Request {
         item_kind: String,
         line: String,
     },
+
+    // ── Care packages ("balíček péče") — the paid entitlement layer ──
+    // Definitions are CRUD on `service_packages`; the three
+    // hosting-scoped calls below go to the OWNING node, because that is
+    // where the activation rows and every feature they force live.
+    PackageList,
+    PackageGet {
+        id: i64,
+    },
+    PackageCreate(hyperion_types::PackageInput),
+    PackageUpdate {
+        id: i64,
+        input: hyperion_types::PackageInput,
+    },
+    /// Delete a definition. Existing activations SURVIVE with their
+    /// `package_id` NULLed — the price a customer agreed to is not the
+    /// panel's to erase — but stop being enforced. `enabled = false` is
+    /// the retire path; callers should warn on `active_count > 0` first.
+    PackageDelete {
+        id: i64,
+    },
+    /// The packages a hosting holds. `history = true` also returns
+    /// cancelled activations (what was bought, and when it stopped).
+    PackageActivations {
+        sel: HostingSelector,
+        #[serde(default)]
+        history: bool,
+    },
+    /// Activate a package: snapshot what each forced feature is set to,
+    /// then push the bundle through the real per-feature setters.
+    /// Idempotent — re-activating a package the hosting already holds
+    /// re-asserts it instead of opening a second row.
+    PackageActivate {
+        sel: HostingSelector,
+        package_id: i64,
+        /// The resolved definition, supplied by the master. Same reason as
+        /// `ProfileApply::profile`: `service_packages` lives in the
+        /// master's DB, so a worker can't look one up by id. `None` (old
+        /// callers) → the node falls back to its local DB, which is
+        /// correct only when the node IS the master.
+        #[serde(default)]
+        package: Option<hyperion_types::ServicePackage>,
+    },
+    /// Cancel one activation and restore the features it forced — except
+    /// any another still-active package also forces.
+    PackageCancel {
+        sel: HostingSelector,
+        activation_id: i64,
+    },
+    /// Re-assert every active package's features on this node. Normally
+    /// driven by the agent's own tick; exposed so an operator can force a
+    /// pass without waiting for it.
+    PackageEnforceTick,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1811,6 +1864,19 @@ pub enum Response {
     ProfileWpItemInstalled {
         label: String,
         activated: bool,
+    },
+    PackageList(Vec<hyperion_types::ServicePackage>),
+    PackageGet(hyperion_types::ServicePackage),
+    PackageCreate(hyperion_types::ServicePackage),
+    PackageUpdate(hyperion_types::ServicePackage),
+    PackageDelete,
+    PackageActivations(Vec<hyperion_types::HostingPackage>),
+    PackageActivate(hyperion_types::HostingPackage),
+    PackageCancel(hyperion_types::HostingPackage),
+    /// How many individual features the pass had to put back. 0 = nothing
+    /// had drifted, which is the healthy answer.
+    PackageEnforceTick {
+        corrected: i64,
     },
     Error(RpcError),
 }

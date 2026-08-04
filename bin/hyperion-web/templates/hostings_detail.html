@@ -734,6 +734,19 @@
   </dl>
 </div>
 
+{# Care packages — sits directly under the overview because it answers the
+   same question the Plan / Next billing rows above it do, for the paid
+   services rather than for the hosting itself. Loads lazily: it reads the
+   owning node for the activations AND for the live state of everything
+   they promise. The response is EMPTY when no package was ever defined,
+   which removes this skeleton — an operator who doesn't sell care never
+   sees the feature. That's also why there is no loading placeholder
+   inside: the common case is nothing, and a "Care packages — loading…"
+   card that then vanishes on every site would be worse than a beat of
+   silence. #}
+<div hx-get="/hostings/{{ detail.id.as_str() }}/packages-panel"
+     hx-trigger="load" hx-swap="outerHTML"></div>
+
 {% if let Some(db) = detail.database %}
 <div class="card hover">
   <h2>

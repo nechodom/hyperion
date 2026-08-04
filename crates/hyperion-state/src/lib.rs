@@ -32,6 +32,7 @@ pub mod nodejs;
 pub mod nodes;
 pub mod notifications;
 pub mod oom_events;
+pub mod packages;
 pub mod profiles;
 pub mod scheduler;
 pub mod system_users;

@@ -21,6 +21,7 @@ pub mod me;
 pub mod migration;
 pub mod monitoring;
 pub mod notifications;
+pub mod packages;
 pub mod profile;
 pub mod profiles;
 pub mod roles;

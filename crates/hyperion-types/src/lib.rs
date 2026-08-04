@@ -23,6 +23,7 @@ pub mod import;
 pub mod jobs;
 pub mod limits;
 pub mod migration;
+pub mod package;
 pub mod php;
 pub mod profile;
 pub mod spf;
@@ -51,6 +52,10 @@ pub use limits::{
     HostingUsageBucket, IpBanWire, NodeInviteMint, NodeInviteSummary, OverBwPolicy, SuspendReason,
 };
 pub use migration::{HostingImportResult, HostingMigrationBundle, HostingMigrationManifest};
+pub use package::{
+    BackupCadence, FeatureToggle, HostingPackage, LiveFeatureState, PackageFeatures, PackageInput,
+    PackagePriorState, PackageState, ServicePackage,
+};
 pub use php::PhpVersion;
 pub use profile::{HostingProfile, ProfileApply, ProfileInput, WpAssetSummary};
 pub use spf::SpfCheckResult;
