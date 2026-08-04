@@ -87,12 +87,17 @@ CREATE TABLE service_packages (
 CREATE TABLE hosting_packages (
     id               INTEGER PRIMARY KEY AUTOINCREMENT,
     hosting_id       TEXT NOT NULL REFERENCES hostings(id) ON DELETE CASCADE,
-    -- ON DELETE SET NULL, like hosting_profile_apply: deleting the
-    -- definition must not erase the customer's record or their price. The
-    -- orphaned row keeps its snapshot and its prior state (so it can still
-    -- be cancelled cleanly) but has no bundle left to enforce, so the
-    -- drift tick skips it.
-    package_id       INTEGER REFERENCES service_packages(id) ON DELETE SET NULL,
+    -- A PLAIN reference, deliberately NOT a foreign key. Definitions are
+    -- master-only, but an activation is written and enforced on the node
+    -- that OWNS the hosting — where `service_packages` is empty. An FK here
+    -- would make every activation on a worker fail outright, and resolving
+    -- the bundle through it would make the drift tick a silent no-op there.
+    -- Kept only to link back to the definition for display/history on the
+    -- master; nothing load-bearing may read through it.
+    package_id       INTEGER,
+    -- Name SNAPSHOT, so an orphaned or renamed activation still says what
+    -- the customer bought.
+    package_name     TEXT NOT NULL DEFAULT '',
 
     -- Price SNAPSHOT taken at activation. The definition is free to be
     -- re-priced or deleted afterwards; what an existing customer agreed to
@@ -100,6 +105,23 @@ CREATE TABLE hosting_packages (
     price_minor      INTEGER,
     price_currency   TEXT,
     price_interval   TEXT,
+
+    -- FEATURE SNAPSHOT — the bundle as it stood at activation, for exactly
+    -- the same reason the price is snapshotted: it is what the customer
+    -- bought. This is what the drift tick enforces and what a cancel
+    -- reasons about, so an activation is entirely SELF-CONTAINED:
+    --   * it works on a worker node, which has no `service_packages` row;
+    --   * editing a definition can no longer desynchronise what is enforced
+    --     from what a cancel restores;
+    --   * deleting a definition leaves the activation still enforceable
+    --     (and still cancellable) instead of billable-but-inert.
+    -- Re-pricing or re-scoping a package therefore only affects activations
+    -- made AFTER the edit — same contract as the price.
+    feat_wp_auto_update  TEXT NOT NULL DEFAULT 'leave',
+    feat_integrity_scan  TEXT NOT NULL DEFAULT 'leave',
+    feat_monitoring      TEXT NOT NULL DEFAULT 'leave',
+    feat_hardening       TEXT NOT NULL DEFAULT 'leave',
+    feat_backup_cadence  TEXT NOT NULL DEFAULT 'leave',
     -- Reminder clock, same contract as hosting_profile_apply: the sweep
     -- advances it after firing so a due package doesn't re-notify forever.
     next_billing_at  INTEGER,

@@ -8394,11 +8394,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             &packages::NewActivation {
                 hosting_id: detail.id.clone(),
                 package_id,
-                // Snapshot the price: a later re-price or delete of the
-                // definition must not rewrite what this customer agreed to.
+                // Snapshot the name, price AND bundle: a later re-price,
+                // re-scope or delete of the definition must not rewrite what
+                // this customer agreed to. The bundle snapshot is also what
+                // makes the activation self-contained — definitions live only
+                // on the master, but this row is enforced on the node that
+                // owns the hosting, which has no `service_packages` to read.
+                package_name: def.name.clone(),
                 price_minor: def.price_minor,
                 price_currency: def.price_currency.clone(),
                 price_interval: def.price_interval.clone(),
+                features: def.features,
                 next_billing_at,
                 prior_state_json,
             },
@@ -8577,26 +8583,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // other every tick (On beats Off; the more frequent cadence wins).
         let mut order: Vec<HostingId> = Vec::new();
         let mut wanted: HashMap<String, PackageFeatures> = HashMap::new();
-        // Definitions are read once and reused — a node with fifty sites on
-        // the same package must not be fifty SELECTs.
-        let mut defs: HashMap<i64, PackageFeatures> = HashMap::new();
         for row in rows {
-            let Some(pid) = row.package_id else {
-                continue; // definition deleted: nothing left to enforce
-            };
-            let features = match defs.get(&pid) {
-                Some(f) => *f,
-                None => {
-                    let f = match packages::get(&self.pool, pid).await {
-                        Ok(Some(d)) => d.features(),
-                        // Unreadable definition ⇒ enforce nothing, rather
-                        // than guess a bundle nobody bought.
-                        _ => PackageFeatures::default(),
-                    };
-                    defs.insert(pid, f);
-                    f
-                }
-            };
+            // The bundle comes from the ACTIVATION's own snapshot, never from
+            // the definition: definitions are master-only, so resolving one
+            // here would make this tick a silent no-op on every worker node.
+            // It also means a definition edited (or deleted) after the sale
+            // cannot change, or quietly stop, what an existing customer is
+            // getting — same contract as their frozen price.
+            let features = row.features;
             let key = row.hosting_id.as_str().to_string();
             match wanted.get_mut(&key) {
                 Some(acc) => *acc = acc.combine(features),
@@ -8666,12 +8660,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         };
         let mut out = PackageFeatures::default();
         for row in rows {
-            let Some(pid) = row.package_id else {
-                continue;
-            };
-            if let Ok(Some(def)) = packages::get(&self.pool, pid).await {
-                out = out.combine(def.features());
-            }
+            // Snapshot, not definition — see package_enforce_tick. This is
+            // also the guard that stops a cancel from switching off a feature
+            // a sibling package still pays for, so silently reading `Leave`
+            // here (which a worker-node definition lookup would always do)
+            // would clobber a live entitlement.
+            out = out.combine(row.features);
         }
         out
     }

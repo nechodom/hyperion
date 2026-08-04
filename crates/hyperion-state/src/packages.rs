@@ -98,15 +98,23 @@ impl Default for NewPackage {
 pub struct HostingPackageRow {
     pub id: i64,
     pub hosting_id: HostingId,
-    /// `None` once the definition was deleted (FK `ON DELETE SET NULL`):
-    /// the customer's record and price survive, but there is no bundle left
-    /// to enforce.
+    /// Back-link to the definition, for display and history only. NOT a
+    /// foreign key and never resolved to decide behaviour — definitions are
+    /// master-only, while an activation is enforced on the node that owns
+    /// the hosting, where `service_packages` is empty.
     pub package_id: Option<i64>,
+    /// Name snapshot, so a renamed or deleted definition still says what the
+    /// customer bought.
+    pub package_name: String,
     /// Price snapshot taken at activation — never rewritten by a later edit
     /// or delete of the definition.
     pub price_minor: Option<i64>,
     pub price_currency: Option<String>,
     pub price_interval: Option<String>,
+    /// The bundle as it stood at activation. This — not the definition — is
+    /// what the drift tick enforces and what a cancel reasons about, so the
+    /// activation is self-contained and works on a worker node.
+    pub features: PackageFeatures,
     pub next_billing_at: Option<i64>,
     pub state: PackageState,
     pub activated_at: i64,
@@ -124,9 +132,13 @@ pub struct HostingPackageRow {
 pub struct NewActivation {
     pub hosting_id: HostingId,
     pub package_id: i64,
+    /// Snapshotted alongside the price + bundle: what the customer bought,
+    /// frozen at activation.
+    pub package_name: String,
     pub price_minor: Option<i64>,
     pub price_currency: Option<String>,
     pub price_interval: Option<String>,
+    pub features: PackageFeatures,
     pub next_billing_at: Option<i64>,
     pub prior_state_json: Option<String>,
 }
@@ -170,9 +182,11 @@ pub async fn insert(pool: &SqlitePool, p: &NewPackage, now: i64) -> Result<i64, 
     Ok(row.0)
 }
 
-/// Overwrite a definition. Edits apply to every ACTIVE activation on the
-/// next drift tick — that liveness is the point of packages — but never
-/// touch an activation's price snapshot.
+/// Overwrite a definition. Edits affect only activations made AFTERWARDS:
+/// each activation snapshots the bundle it was sold with, alongside its
+/// price. Re-scoping a package therefore cannot silently change — or stop —
+/// what an existing customer already bought, and cannot desynchronise what
+/// the drift tick enforces from what a cancel restores.
 pub async fn update(
     pool: &SqlitePool,
     id: i64,
@@ -282,51 +296,58 @@ pub async fn counts_active(pool: &SqlitePool) -> Result<Vec<(i64, i64)>, StateEr
 /// [`map_activation`] destructures it. One constant so a future column
 /// cannot shift the tuple under one query and not another.
 const SELECT_ACTIVATIONS: &str =
-    "SELECT a.id, a.hosting_id, a.package_id, a.price_minor, a.price_currency,
-            a.price_interval, a.next_billing_at, a.state, a.activated_at,
-            a.cancelled_at, a.prior_state_json
+    "SELECT a.id, a.hosting_id, a.package_id, a.package_name, a.price_minor,
+            a.price_currency, a.price_interval, a.next_billing_at, a.state,
+            a.activated_at, a.cancelled_at, a.prior_state_json,
+            a.feat_wp_auto_update, a.feat_integrity_scan, a.feat_monitoring,
+            a.feat_hardening, a.feat_backup_cadence
      FROM hosting_packages a";
 
-type ActivationTuple = (
-    i64,            // id
-    String,         // hosting_id
-    Option<i64>,    // package_id
-    Option<i64>,    // price_minor
-    Option<String>, // price_currency
-    Option<String>, // price_interval
-    Option<i64>,    // next_billing_at
-    String,         // state
-    i64,            // activated_at
-    Option<i64>,    // cancelled_at
-    Option<String>, // prior_state_json
-);
+/// Raw activation row. A `FromRow` struct rather than a tuple: sqlx only
+/// implements `FromRow` for tuples up to 16 elements and this has 17, and
+/// name-mapping means adding a column can never silently shift the others.
+#[derive(sqlx::FromRow)]
+struct ActivationRowRaw {
+    id: i64,
+    hosting_id: String,
+    package_id: Option<i64>,
+    package_name: String,
+    price_minor: Option<i64>,
+    price_currency: Option<String>,
+    price_interval: Option<String>,
+    next_billing_at: Option<i64>,
+    state: String,
+    activated_at: i64,
+    cancelled_at: Option<i64>,
+    prior_state_json: Option<String>,
+    feat_wp_auto_update: String,
+    feat_integrity_scan: String,
+    feat_monitoring: String,
+    feat_hardening: String,
+    feat_backup_cadence: String,
+}
 
-fn map_activation(t: ActivationTuple) -> HostingPackageRow {
-    let (
-        id,
-        hosting_id,
-        package_id,
-        price_minor,
-        price_currency,
-        price_interval,
-        next_billing_at,
-        state,
-        activated_at,
-        cancelled_at,
-        prior_state_json,
-    ) = t;
+fn map_activation(r: ActivationRowRaw) -> HostingPackageRow {
     HostingPackageRow {
-        id,
-        hosting_id: HostingId(hosting_id),
-        package_id,
-        price_minor,
-        price_currency,
-        price_interval,
-        next_billing_at,
-        state: PackageState::from_stored(&state),
-        activated_at,
-        cancelled_at,
-        prior_state_json,
+        id: r.id,
+        hosting_id: HostingId(r.hosting_id),
+        package_id: r.package_id,
+        package_name: r.package_name,
+        price_minor: r.price_minor,
+        price_currency: r.price_currency,
+        price_interval: r.price_interval,
+        features: PackageFeatures {
+            wp_auto_update: FeatureToggle::from_stored(&r.feat_wp_auto_update),
+            integrity_scan: FeatureToggle::from_stored(&r.feat_integrity_scan),
+            monitoring: FeatureToggle::from_stored(&r.feat_monitoring),
+            hardening: FeatureToggle::from_stored(&r.feat_hardening),
+            backup_cadence: BackupCadence::from_stored(&r.feat_backup_cadence),
+        },
+        next_billing_at: r.next_billing_at,
+        state: PackageState::from_stored(&r.state),
+        activated_at: r.activated_at,
+        cancelled_at: r.cancelled_at,
+        prior_state_json: r.prior_state_json,
     }
 }
 
@@ -341,20 +362,28 @@ fn map_activation(t: ActivationTuple) -> HostingPackageRow {
 pub async fn activate(pool: &SqlitePool, a: &NewActivation, now: i64) -> Result<i64, StateError> {
     let row: (i64,) = sqlx::query_as(
         r#"INSERT INTO hosting_packages
-           (hosting_id, package_id, price_minor, price_currency, price_interval,
-            next_billing_at, state, activated_at, cancelled_at, prior_state_json)
-           VALUES (?, ?, ?, ?, ?, ?, 'active', ?, NULL, ?)
+           (hosting_id, package_id, package_name, price_minor, price_currency,
+            price_interval, next_billing_at, state, activated_at, cancelled_at,
+            prior_state_json, feat_wp_auto_update, feat_integrity_scan,
+            feat_monitoring, feat_hardening, feat_backup_cadence)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL, ?, ?, ?, ?, ?, ?)
            RETURNING id"#,
     )
-    // 8 placeholders (state / cancelled_at are literals), 8 binds.
+    // 14 placeholders (state / cancelled_at are literals), 14 binds.
     .bind(a.hosting_id.as_str())
     .bind(a.package_id)
+    .bind(&a.package_name)
     .bind(a.price_minor)
     .bind(&a.price_currency)
     .bind(&a.price_interval)
     .bind(a.next_billing_at)
     .bind(now)
     .bind(&a.prior_state_json)
+    .bind(a.features.wp_auto_update.as_str())
+    .bind(a.features.integrity_scan.as_str())
+    .bind(a.features.monitoring.as_str())
+    .bind(a.features.hardening.as_str())
+    .bind(a.features.backup_cadence.as_str())
     .fetch_one(pool)
     .await?;
     Ok(row.0)
@@ -365,7 +394,7 @@ pub async fn get_activation(
     id: i64,
 ) -> Result<Option<HostingPackageRow>, StateError> {
     let q = format!("{SELECT_ACTIVATIONS} WHERE a.id = ?");
-    let row: Option<ActivationTuple> = sqlx::query_as(&q).bind(id).fetch_optional(pool).await?;
+    let row: Option<ActivationRowRaw> = sqlx::query_as(&q).bind(id).fetch_optional(pool).await?;
     Ok(row.map(map_activation))
 }
 
@@ -379,7 +408,7 @@ pub async fn list_for_hosting(
         "{SELECT_ACTIVATIONS} WHERE a.hosting_id = ? AND a.state = 'active' \
          ORDER BY a.activated_at"
     );
-    let rows: Vec<ActivationTuple> = sqlx::query_as(&q)
+    let rows: Vec<ActivationRowRaw> = sqlx::query_as(&q)
         .bind(hosting_id.as_str())
         .fetch_all(pool)
         .await?;
@@ -395,7 +424,7 @@ pub async fn history_for_hosting(
     let q = format!(
         "{SELECT_ACTIVATIONS} WHERE a.hosting_id = ? ORDER BY a.activated_at DESC, a.id DESC"
     );
-    let rows: Vec<ActivationTuple> = sqlx::query_as(&q)
+    let rows: Vec<ActivationRowRaw> = sqlx::query_as(&q)
         .bind(hosting_id.as_str())
         .fetch_all(pool)
         .await?;
@@ -412,7 +441,7 @@ pub async fn list_all_active(pool: &SqlitePool) -> Result<Vec<HostingPackageRow>
           WHERE a.state = 'active' AND h.state != 'trashed'
           ORDER BY a.hosting_id, a.activated_at"
     );
-    let rows: Vec<ActivationTuple> = sqlx::query_as(&q).fetch_all(pool).await?;
+    let rows: Vec<ActivationRowRaw> = sqlx::query_as(&q).fetch_all(pool).await?;
     Ok(rows.into_iter().map(map_activation).collect())
 }
 
@@ -469,7 +498,7 @@ pub async fn due_billings(
             AND h.state != 'trashed'
           ORDER BY a.next_billing_at"
     );
-    let rows: Vec<ActivationTuple> = sqlx::query_as(&q)
+    let rows: Vec<ActivationRowRaw> = sqlx::query_as(&q)
         .bind(now + within_secs)
         .fetch_all(pool)
         .await?;
@@ -626,12 +655,51 @@ mod tests {
         NewActivation {
             hosting_id: HostingId(hosting.into()),
             package_id,
+            package_name: format!("pkg-{package_id}"),
             price_minor: Some(price_minor),
             price_currency: Some("Kč".into()),
             price_interval: Some("monthly".into()),
+            // A non-default bundle on purpose: the snapshot is what the drift
+            // tick enforces, so a test that activated with an all-`leave`
+            // bundle would pass even if the snapshot were dropped entirely.
+            features: PackageFeatures {
+                wp_auto_update: FeatureToggle::On,
+                ..PackageFeatures::default()
+            },
             next_billing_at: None,
             prior_state_json: None,
         }
+    }
+
+    /// The bundle must survive the round trip, because it — not the
+    /// definition — is what a worker node enforces and what a cancel
+    /// reasons about.
+    #[tokio::test]
+    async fn activation_snapshots_the_bundle_and_name() {
+        let pool = fresh().await;
+        let id = insert(&pool, &care_package(), 1).await.expect("insert");
+        activate(&pool, &activation("h1", id, 49_000), 10)
+            .await
+            .expect("activate");
+        let rows = list_for_hosting(&pool, &HostingId("h1".into()))
+            .await
+            .expect("list");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].features.wp_auto_update, FeatureToggle::On);
+        assert_eq!(rows[0].package_name, format!("pkg-{id}"));
+
+        // Re-scoping the definition must NOT reach back into what was sold.
+        let mut edited = care_package();
+        edited.features.wp_auto_update = FeatureToggle::Off;
+        update(&pool, id, &edited, 20).await.expect("update");
+        let rows = list_for_hosting(&pool, &HostingId("h1".into()))
+            .await
+            .expect("relist");
+        assert_eq!(
+            rows[0].features.wp_auto_update,
+            FeatureToggle::On,
+            "the activation keeps the bundle it was sold with"
+        );
     }
 
     /// The whole reason packages are not profiles: a hosting stacks them.
@@ -806,12 +874,24 @@ mod tests {
             "the customer keeps the price they agreed to"
         );
 
-        // …and delete it entirely: the record survives, unenforceable.
+        // …and delete it entirely. The activation survives AND stays
+        // enforceable: it carries its own bundle snapshot, so a customer
+        // who is still paying keeps getting what they bought even though
+        // the operator retired the definition.
         delete(&pool, id).await.expect("delete");
         let row = get_activation(&pool, act).await.expect("get").expect("row");
         assert_eq!(row.price_minor, Some(49_000));
-        assert_eq!(row.package_id, None, "FK sets it NULL, it does not cascade");
         assert_eq!(row.state, PackageState::Active);
+        assert_eq!(
+            row.features.wp_auto_update,
+            FeatureToggle::On,
+            "a deleted definition must not silently stop enforcement"
+        );
+        assert_eq!(
+            row.package_name,
+            format!("pkg-{id}"),
+            "the name snapshot still says what was bought"
+        );
     }
 
     #[tokio::test]
