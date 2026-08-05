@@ -1697,6 +1697,81 @@ fn print_pretty(resp: &Response) {
                 }
             }
         }
+        Response::WpIntegrityScan(r) => {
+            if let Some(err) = &r.error {
+                println!("integrity scan: {err}");
+            }
+            // "Couldn't check" is printed as loudly as a finding — a
+            // missing signal must never read as a pass.
+            println!(
+                "  core       : {}",
+                if !r.wp_cli_ok {
+                    "not checked".to_string()
+                } else if r.core_ok {
+                    "verified against wordpress.org".to_string()
+                } else {
+                    format!("{} file(s) differ", r.core_issue_count())
+                }
+            );
+            for p in &r.core_modified {
+                println!("    modified : {p}");
+            }
+            for p in &r.core_unexpected {
+                println!("    extra    : {p}");
+            }
+            for p in &r.core_missing {
+                println!("    missing  : {p}");
+            }
+            println!(
+                "  plugins    : {} of {} verified, {} failed, {} unverifiable",
+                r.plugins_checked,
+                r.plugins_total,
+                r.plugins_failed.len(),
+                r.plugins_unknown.len()
+            );
+            for p in &r.plugins_failed {
+                for i in &p.issues {
+                    println!("    {} — {} ({})", p.slug, i.path, i.message);
+                }
+            }
+            if !r.plugins_unknown.is_empty() {
+                // Premium plugins publish no checksums; say so, so nobody
+                // reads it as a finding.
+                println!(
+                    "    no published checksums: {}",
+                    r.plugins_unknown.join(", ")
+                );
+            }
+            println!(
+                "  malware    : {}",
+                if !r.clamav_available {
+                    "not scanned (clamav not installed)".to_string()
+                } else if r.malware.is_empty() {
+                    "no signatures matched".to_string()
+                } else {
+                    format!("{} hit(s)", r.malware.len())
+                }
+            );
+            for h in &r.malware {
+                println!("    {} — {}", h.path, h.signature);
+            }
+        }
+        Response::IntegrityFindingsList(list) => {
+            if list.is_empty() {
+                println!("no stored integrity scans");
+            } else {
+                for h in list {
+                    let state = if h.result.is_clean() {
+                        "clean".to_string()
+                    } else if !h.result.wp_cli_ok {
+                        "COULD NOT CHECK".to_string()
+                    } else {
+                        format!("{} finding(s)", h.result.total_findings())
+                    };
+                    println!("{} — {state} (unix:{})", h.domain, h.scanned_at);
+                }
+            }
+        }
         Response::WpStagingCreate { staging_domain } => {
             println!("✓ staging site created: {staging_domain}");
         }

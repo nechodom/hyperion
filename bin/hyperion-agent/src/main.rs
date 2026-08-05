@@ -861,6 +861,29 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
+    // WordPress integrity sweep — once per day. The other half of the
+    // defender: verifies core + plugin files against the checksums
+    // WordPress.org publishes and (where clamscan exists) sweeps each
+    // docroot, then notifies admins about NEWLY-appeared findings.
+    {
+        let integrity_svc = svc.clone();
+        tokio::spawn(async move {
+            // 6-minute offset: the vuln sweep (4 min) shells out to wp-cli
+            // for every site too, and running both at once would double
+            // the load on the same hostings at the same moment.
+            tokio::time::sleep(std::time::Duration::from_secs(360)).await;
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(24 * 3600));
+            interval.tick().await; // immediate-first-tick consumption
+            loop {
+                match integrity_svc.wp_integrity_scan_tick().await {
+                    Ok(n) if n > 0 => tracing::warn!(flagged = n, "wp integrity tick"),
+                    Ok(_) => tracing::debug!("wp integrity tick: no new findings"),
+                    Err(e) => tracing::warn!(error=%e, "wp integrity tick failed"),
+                }
+                interval.tick().await;
+            }
+        });
+    }
     // Billing sweep — once per hour. Sends Slack reminders for hostings
     // with next_billing_at <= now + 3d.
     {

@@ -633,6 +633,14 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::VulnFindingsList(v),
             Err(e) => Response::Error(e),
         },
+        Request::WpIntegrityScan { hosting } => match api.wp_integrity_scan(hosting).await {
+            Ok(r) => Response::WpIntegrityScan(r),
+            Err(e) => Response::Error(e),
+        },
+        Request::IntegrityFindingsList => match api.integrity_findings_list().await {
+            Ok(v) => Response::IntegrityFindingsList(v),
+            Err(e) => Response::Error(e),
+        },
         Request::WpStagingCreate {
             sel,
             staging_domain,
@@ -1938,6 +1946,17 @@ mod tests {
         async fn vuln_findings_list(
             &self,
         ) -> Result<Vec<hyperion_types::HostingVulnSummary>, RpcError> {
+            Ok(vec![])
+        }
+        async fn wp_integrity_scan(
+            &self,
+            _: HostingSelector,
+        ) -> Result<hyperion_types::WpIntegrityScanResult, RpcError> {
+            Ok(hyperion_types::WpIntegrityScanResult::default())
+        }
+        async fn integrity_findings_list(
+            &self,
+        ) -> Result<Vec<hyperion_types::HostingIntegritySummary>, RpcError> {
             Ok(vec![])
         }
         async fn wp_staging_create(

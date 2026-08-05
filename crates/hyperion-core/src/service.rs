@@ -1,6 +1,7 @@
 //! `HostingService` — the orchestrator. Single-node, no transport.
 
 use async_trait::async_trait;
+use hyperion_adapters::integrity;
 use hyperion_adapters::rollback::{Rollback, RollbackStack};
 use hyperion_adapters::AdapterError;
 use hyperion_rpc::wire::{
@@ -6017,6 +6018,298 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             b.count_severity("critical")
                 .cmp(&a.count_severity("critical"))
                 .then(b.findings.len().cmp(&a.findings.len()))
+        });
+        Ok(out)
+    }
+
+    // ==================================================================
+    //  File integrity + malware — the "has anything been TAMPERED WITH?"
+    //  half of the defender, sibling to the outdated-component scan
+    //  above. Same shapes, same KV storage idiom, and the same honesty
+    //  rule: a signal that could not run is reported as "couldn't check",
+    //  never as "clean".
+    // ==================================================================
+
+    /// Does this hosting actually carry a WordPress install?
+    ///
+    /// The `wp_installs` row is the cheap answer, but it only exists for
+    /// installs Hyperion performed itself — a site imported from
+    /// CloudPanel/HestiaCP or restored from a foreign backup has
+    /// WordPress on disk and no row. The on-disk fallback is what makes
+    /// the care package cover those sites too.
+    async fn hosting_has_wordpress(&self, detail: &HostingDetail) -> bool {
+        if wordpress::get_install(&self.pool, &detail.id)
+            .await
+            .ok()
+            .flatten()
+            .is_some()
+        {
+            return true;
+        }
+        detect_wp_install_on_disk(&detail.root_dir).await.is_some()
+    }
+
+    /// The last stored integrity scan for a hosting. `None` when never
+    /// scanned — or when the stored JSON no longer parses, which we treat
+    /// as "never scanned" so a future shape change can't wedge the
+    /// feature on a live node.
+    async fn stored_integrity_scan(&self, hosting_id: &str) -> Option<StoredIntegrityScan> {
+        let json = hyperion_state::hosting_kv::get(&self.pool, hosting_id, INTEGRITY_KV_KEY)
+            .await
+            .ok()
+            .flatten()?;
+        serde_json::from_str(&json).ok()
+    }
+
+    /// Persist the latest integrity scan. Best-effort: a write failure
+    /// costs a dashboard row and an extra ClamAV pass tomorrow, never the
+    /// scan itself.
+    async fn set_stored_integrity_scan(&self, hosting_id: &str, stored: &StoredIntegrityScan) {
+        let Ok(json) = serde_json::to_string(stored) else {
+            return;
+        };
+        let _ = hyperion_state::hosting_kv::set(
+            &self.pool,
+            hosting_id,
+            INTEGRITY_KV_KEY,
+            &json,
+            now_secs(),
+        )
+        .await;
+    }
+
+    /// Verify a hosting's WordPress against the checksums WordPress.org
+    /// publishes for the exact installed versions, then — when a scanner
+    /// exists on the node — sweep its docroot with ClamAV. Mirrors
+    /// `wp_vuln_scan`: best-effort, and a probe that couldn't run comes
+    /// back as "couldn't check" rather than a silent pass.
+    ///
+    /// The result is stored under the `integrity_scan` KV key so the
+    /// dashboard, the daily ClamAV cadence and the next sweep's
+    /// new-findings diff all read the same record.
+    pub async fn wp_integrity_scan(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::WpIntegrityScanResult, RpcError> {
+        let detail = self.get(sel).await?;
+        if detail.state != HostingState::Active {
+            return Err(RpcError::Conflict {
+                message: "hosting must be active to scan".into(),
+            });
+        }
+        let now = now_secs();
+        // Static sites and reverse proxies have no core to compare
+        // against. Say so, rather than running wp-cli against a docroot
+        // with no WordPress in it and rendering its failure as a finding.
+        // Not stored: a non-WP hosting has no place on the integrity
+        // dashboard.
+        if !self.hosting_has_wordpress(&detail).await {
+            return Ok(hyperion_types::WpIntegrityScanResult {
+                error: Some(INTEGRITY_ERR_NOT_WORDPRESS.to_string()),
+                scanned_at: now,
+                ..Default::default()
+            });
+        }
+
+        // Probe failures are collected, not returned: one dead signal must
+        // not hide what the other two found.
+        let mut errors: Vec<String> = Vec::new();
+        // Read once: the ClamAV cadence needs the previous pass's age, and
+        // the store decision below needs to know whether this hosting has
+        // ever produced a record at all.
+        let prior = self.stored_integrity_scan(detail.id.as_str()).await;
+
+        // 1. Core, against the hashes published for the installed version.
+        let core = match integrity::verify_core(&detail.system_user, &detail.root_dir).await {
+            Ok(c) => c,
+            Err(e) => {
+                errors.push(format!("core verification failed: {e}"));
+                integrity::CoreChecksums::default()
+            }
+        };
+
+        // 2. Plugins. wp-cli's batch summary wording is too version-fragile
+        //    to parse counts out of, so the denominator comes from the
+        //    plugin list we can already enumerate.
+        let plugins = match integrity::verify_plugins(&detail.system_user, &detail.root_dir).await {
+            Ok(p) => p,
+            Err(e) => {
+                errors.push(format!("plugin verification failed: {e}"));
+                integrity::PluginChecksums::default()
+            }
+        };
+        let (plugins_total, plugins_listed) = match self
+            .adapters
+            .wp_plugin_list(&detail.system_user, &detail.root_dir)
+            .await
+        {
+            Ok((list, _v)) => (list.len() as i64, true),
+            Err(e) => {
+                errors.push(format!("plugin list failed: {e}"));
+                (0, false)
+            }
+        };
+
+        // 3. ClamAV over the docroot — the only signal that looks inside
+        //    `wp-content/uploads`, which core verification skips by design.
+        let (clamav_available, malware, clamav_at) =
+            integrity_malware_pass(&detail, now, prior.as_ref(), &mut errors).await;
+
+        let mut result = assemble_integrity_result(
+            core,
+            plugins,
+            malware,
+            clamav_available,
+            plugins_total,
+            plugins_listed,
+        );
+        result.scanned_at = now;
+        result.error = (!errors.is_empty()).then(|| errors.join("; "));
+
+        // Store when at least one signal actually ran — or when this
+        // hosting has no record at all, so a site nobody has EVER been
+        // able to check still reaches the dashboard saying exactly that.
+        // What we refuse to do is let a failed run overwrite yesterday's
+        // real findings with an empty list.
+        if result.wp_cli_ok || clamav_available || prior.is_none() {
+            self.set_stored_integrity_scan(
+                detail.id.as_str(),
+                &StoredIntegrityScan {
+                    scanned_at: now,
+                    clamav_at,
+                    result: result.clone(),
+                },
+            )
+            .await;
+        }
+
+        self.append_audit(
+            "wp.integrity.scan",
+            Some(detail.id.as_str()),
+            &serde_json::json!({
+                "core_issues": result.core_issue_count(),
+                "plugin_issues": result.plugin_issue_count(),
+                "malware": result.malware.len(),
+                "wp_cli_ok": result.wp_cli_ok,
+                "clamav": result.clamav_available,
+            })
+            .to_string(),
+            if result.wp_cli_ok { "ok" } else { "failed" },
+        )
+        .await;
+        Ok(result)
+    }
+
+    /// Daily integrity sweep over every active WordPress hosting on this
+    /// node: verify core + plugin checksums, run ClamAV where it exists,
+    /// store each result for the dashboard, and notify admins about
+    /// **newly-appeared** findings — a standing one must not re-alert
+    /// every night or the operator learns to ignore the panel.
+    /// Returns the number of hostings that gained a new finding.
+    ///
+    /// Sequential on purpose (see `integrity_malware_pass`): one docroot
+    /// walk at a time is the difference between a security feature and an
+    /// IO outage.
+    pub async fn wp_integrity_scan_tick(&self) -> Result<i64, RpcError> {
+        let summaries = self.list().await?;
+        let mut newly_flagged = 0i64;
+        for s in &summaries {
+            if s.state != HostingState::Active {
+                continue;
+            }
+            // Read the prior record BEFORE scanning — `wp_integrity_scan`
+            // overwrites it, and the alert diff needs yesterday's keys.
+            let prior_keys = self
+                .stored_integrity_scan(s.id.as_str())
+                .await
+                .map(|p| integrity_finding_keys(&p.result))
+                .unwrap_or_default();
+            let scan = match self
+                .wp_integrity_scan(HostingSelector::Id(s.id.clone()))
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(domain = %s.domain, error = %e, "integrity scan failed");
+                    continue;
+                }
+            };
+            // Static / proxy sites: nothing to verify, nothing to alert on.
+            if scan.error.as_deref() == Some(INTEGRITY_ERR_NOT_WORDPRESS) {
+                continue;
+            }
+            let new_keys = integrity_finding_keys(&scan)
+                .difference(&prior_keys)
+                .count();
+            if new_keys == 0 {
+                continue;
+            }
+            newly_flagged += 1;
+            // A modified core file, a tampered plugin or a signature hit is
+            // a suspected compromise. A merely *missing* core file is
+            // usually a botched update — still worth saying, not worth
+            // waking someone up for.
+            let compromised = !scan.malware.is_empty()
+                || !scan.core_modified.is_empty()
+                || !scan.core_unexpected.is_empty()
+                || !scan.plugins_failed.is_empty();
+            self.notify_admins(
+                if compromised { "error" } else { "warn" },
+                "WordPress integrity check found changes",
+                &format!(
+                    "{} — {} core file(s), {} plugin file(s) and {} malware hit(s) differ from what should be there ({new_keys} new since the last check).",
+                    s.domain,
+                    scan.core_issue_count(),
+                    scan.plugin_issue_count(),
+                    scan.malware.len(),
+                ),
+                &format!("/hostings/{}#wordpress", s.domain),
+                &format!("wp.integrity:{}", s.domain),
+            )
+            .await;
+        }
+        Ok(newly_flagged)
+    }
+
+    /// Read every hosting's last stored integrity scan (this node only)
+    /// for the cluster-wide dashboard. Mirrors `vuln_findings_list`, but
+    /// deliberately returns CLEAN and COULDN'T-CHECK rows too: "we have
+    /// not been able to look at this site" is exactly what the operator
+    /// selling the care package needs to see, and a page that only ever
+    /// lists problems can't distinguish it from "all good".
+    pub async fn integrity_findings_list(
+        &self,
+    ) -> Result<Vec<hyperion_types::HostingIntegritySummary>, RpcError> {
+        let pairs = hyperion_state::hosting_kv::list_by_key(&self.pool, INTEGRITY_KV_KEY)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("integrity list: {e}")))?;
+        let summaries = self.list().await.unwrap_or_default();
+        let mut out = Vec::new();
+        for (hid, json) in pairs {
+            let Ok(st) = serde_json::from_str::<StoredIntegrityScan>(&json) else {
+                continue;
+            };
+            let domain = summaries
+                .iter()
+                .find(|s| s.id.as_str() == hid)
+                .map(|s| s.domain.clone())
+                .unwrap_or_default();
+            out.push(hyperion_types::HostingIntegritySummary {
+                hosting_id: hid,
+                domain,
+                node_id: String::new(),
+                scanned_at: st.scanned_at,
+                result: st.result,
+            });
+        }
+        // Worst first: most findings, then anything not provably clean
+        // (couldn't-check outranks clean), then alphabetical for stability.
+        out.sort_by(|a, b| {
+            b.result
+                .total_findings()
+                .cmp(&a.result.total_findings())
+                .then(a.result.is_clean().cmp(&b.result.is_clean()))
+                .then(a.domain.cmp(&b.domain))
         });
         Ok(out)
     }
@@ -17300,6 +17593,174 @@ struct StoredVulnScan {
     result: hyperion_types::WpVulnScanResult,
 }
 
+/// `hosting_kv` key holding the last integrity scan, sibling to
+/// `vuln_scan`.
+const INTEGRITY_KV_KEY: &str = "integrity_scan";
+
+/// Marker put in `WpIntegrityScanResult::error` for a hosting that has no
+/// WordPress at all. A sentinel rather than free text because the sweep
+/// branches on it — a static site is *skipped*, not *reported*.
+const INTEGRITY_ERR_NOT_WORDPRESS: &str = "hosting has no WordPress installation";
+
+/// Minimum gap between two ClamAV passes over the same docroot. Twenty
+/// hours rather than a flat day so ordinary jitter in the daily sweep
+/// can't push a site's scan past the cutoff and silently halve its
+/// cadence to every other night.
+const CLAMAV_MIN_INTERVAL_SECS: i64 = 20 * 3600;
+
+/// Node-wide gate: at most one `clamscan` at a time on this machine.
+/// It reads an entire docroot, so two concurrent passes turn a shared
+/// host's IO into a queue for every site on it. Callers `try_lock` and
+/// carry their previous verdict forward rather than waiting — see
+/// `integrity_malware_pass`.
+static CLAMAV_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// What we persist per hosting under the `integrity_scan` KV key: the
+/// last result, when it ran, and — separately — when the ClamAV half of
+/// it last actually walked the disk. Both timestamps ride inside the
+/// value because the KV layer's own `updated_at` isn't read back by
+/// `list_by_key`, and because checksum verification runs far more often
+/// than the malware pass.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StoredIntegrityScan {
+    scanned_at: i64,
+    /// Unix seconds of the last real ClamAV pass; 0 = never ran. Drives
+    /// the daily cadence, so a carried-forward hit list keeps its
+    /// original age instead of looking freshly confirmed.
+    #[serde(default)]
+    clamav_at: i64,
+    result: hyperion_types::WpIntegrityScanResult,
+}
+
+/// The ClamAV half of an integrity scan, with the two guards that keep a
+/// signature sweep from hurting the node it protects:
+///
+///   * **one `clamscan` per node at a time.** It reads an entire docroot,
+///     so two at once turn a shared host's IO into a queue for every site
+///     on it. A scan that finds the gate busy carries the previous
+///     verdict forward instead of waiting — a panel "Scan now" must not
+///     block behind a night-long sweep.
+///   * **one pass per site per day.** Checksum verification is cheap and
+///     stays fresh on every call; re-walking a 20 GB docroot because
+///     someone reloaded a page is not.
+///
+/// Returns `(available, hits, produced_at)`, where `produced_at` is when
+/// those hits were actually observed (0 = never).
+async fn integrity_malware_pass(
+    detail: &HostingDetail,
+    now: i64,
+    prior: Option<&StoredIntegrityScan>,
+    errors: &mut Vec<String>,
+) -> (bool, Vec<hyperion_types::WpMalwareHit>, i64) {
+    // No scanner installed. A normal state on a shared host — never an
+    // error, and explicitly NOT a clean bill of health (the caller renders
+    // `clamav_available = false` as "not scanned").
+    if !integrity::clamav_available() {
+        return (false, Vec::new(), 0);
+    }
+    let carry = || match prior {
+        Some(p) => (
+            p.result.clamav_available,
+            p.result.malware.clone(),
+            p.clamav_at,
+        ),
+        None => (false, Vec::new(), 0),
+    };
+    if let Some(p) = prior {
+        if p.clamav_at > 0 && now.saturating_sub(p.clamav_at) < CLAMAV_MIN_INTERVAL_SECS {
+            return carry();
+        }
+    }
+    let Ok(_gate) = CLAMAV_GATE.try_lock() else {
+        errors.push("malware scan skipped: another scan is already running on this node".into());
+        return carry();
+    };
+    match integrity::scan_malware(&detail.root_dir).await {
+        Ok(scan) => (
+            scan.available,
+            scan.hits,
+            if scan.available { now } else { 0 },
+        ),
+        // clamscan exited ≥ 2: part of the tree could not be read, so this
+        // pass proves nothing. "Couldn't check" — we never build a pass on
+        // top of a partial walk.
+        Err(e) => {
+            errors.push(format!("malware scan failed: {e}"));
+            (false, Vec::new(), 0)
+        }
+    }
+}
+
+/// Fold the three probe outcomes into the wire result.
+///
+/// Pure on purpose: this is where "we could not check" becomes what the
+/// panel renders, and getting it wrong means telling a paying customer
+/// their site is clean when nothing ever looked at it. `scanned_at` and
+/// `error` are the caller's to fill.
+fn assemble_integrity_result(
+    core: integrity::CoreChecksums,
+    plugins: integrity::PluginChecksums,
+    malware: Vec<hyperion_types::WpMalwareHit>,
+    clamav_available: bool,
+    plugins_total: i64,
+    plugins_listed: bool,
+) -> hyperion_types::WpIntegrityScanResult {
+    let core_checked = core.checked;
+    let core_ok = core.is_clean();
+    // A site with no plugins at all gives wp-cli nothing to verify, so its
+    // silence is not a failure — but only when we KNOW the list is empty.
+    // A failed enumeration also reports zero, and that must never be
+    // laundered into "verified".
+    let plugins_ok = plugins.checked || (plugins_listed && plugins_total == 0);
+    let plugins_unknown = plugins.unknown;
+    // Denominator: everything installed, minus what WordPress.org
+    // publishes no hashes for (every premium plugin).
+    let plugins_checked = (plugins_total - plugins_unknown.len() as i64).max(0);
+    hyperion_types::WpIntegrityScanResult {
+        core_ok,
+        core_modified: core.modified,
+        core_unexpected: core.unexpected,
+        core_missing: core.missing,
+        plugins_failed: plugins.failed,
+        plugins_unknown,
+        malware,
+        clamav_available,
+        wp_cli_ok: core_checked && plugins_ok,
+        plugins_checked,
+        plugins_total,
+        error: None,
+        scanned_at: 0,
+    }
+}
+
+/// Stable identity for every finding in a scan, so the sweep can alert on
+/// what is NEW instead of re-sending the same list nightly. The prefixes
+/// keep the three core buckets apart: the same path moving from "missing"
+/// to "modified" is a different event, not the same one.
+fn integrity_finding_keys(
+    r: &hyperion_types::WpIntegrityScanResult,
+) -> std::collections::HashSet<String> {
+    let mut keys = std::collections::HashSet::new();
+    for p in &r.core_modified {
+        keys.insert(format!("core:mod:{p}"));
+    }
+    for p in &r.core_unexpected {
+        keys.insert(format!("core:new:{p}"));
+    }
+    for p in &r.core_missing {
+        keys.insert(format!("core:gone:{p}"));
+    }
+    for plugin in &r.plugins_failed {
+        for i in &plugin.issues {
+            keys.insert(format!("plugin:{}:{}", plugin.slug, i.path));
+        }
+    }
+    for hit in &r.malware {
+        keys.insert(format!("malware:{}:{}", hit.path, hit.signature));
+    }
+    keys
+}
+
 /// Scan the recent sshd journal for auth-failure floods. Runs
 /// `journalctl` over the ssh unit for the last `window_secs` and counts
 /// failed-auth lines per source IPv4. Returns IPs at/over `threshold`.
@@ -22452,5 +22913,271 @@ mod tests {
         assert_eq!(human_bytes(1024 * 1024), "1.0 MiB");
         assert_eq!(human_bytes(2_500_000_000), "2.3 GiB");
         assert_eq!(human_bytes(2 * 1024i64.pow(4)), "2.0 TiB");
+    }
+
+    // ============================================================
+    //  WordPress integrity scan. The feature exists because the
+    //  operator SELLS "regular malware scanning", so the thing worth
+    //  guarding is not the happy path — it's that a scan which could
+    //  not run never renders as a clean site.
+    // ============================================================
+
+    /// A core verification that actually ran and found nothing.
+    fn core_verified() -> integrity::CoreChecksums {
+        integrity::CoreChecksums {
+            checked: true,
+            ..Default::default()
+        }
+    }
+
+    /// A plugin verification that actually ran and found nothing.
+    fn plugins_verified() -> integrity::PluginChecksums {
+        integrity::PluginChecksums {
+            checked: true,
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn integrity_scan_storage_round_trips() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), MockAdapterPort::new());
+        let mut result = assemble_integrity_result(
+            integrity::CoreChecksums {
+                checked: true,
+                modified: vec!["wp-includes/version.php".into()],
+                ..Default::default()
+            },
+            plugins_verified(),
+            vec![hyperion_types::WpMalwareHit {
+                path: "/home/x/htdocs/wp-content/uploads/a.php".into(),
+                signature: "Php.Trojan.Webshell-1".into(),
+            }],
+            true,
+            3,
+            true,
+        );
+        result.scanned_at = 1_700_000_000;
+        let stored = StoredIntegrityScan {
+            scanned_at: 1_700_000_000,
+            clamav_at: 1_699_990_000,
+            result: result.clone(),
+        };
+        s.set_stored_integrity_scan("H1", &stored).await;
+
+        let back = s.stored_integrity_scan("H1").await.expect("stored");
+        assert_eq!(back.scanned_at, 1_700_000_000);
+        // The ClamAV timestamp is the daily-cadence clock — losing it
+        // would re-walk every docroot on every scan.
+        assert_eq!(back.clamav_at, 1_699_990_000);
+        assert_eq!(back.result, result);
+        assert_eq!(back.result.core_modified, vec!["wp-includes/version.php"]);
+        assert_eq!(back.result.malware.len(), 1);
+
+        // Absent key and unparseable value both read as "never scanned"
+        // rather than exploding a live sweep.
+        assert!(s.stored_integrity_scan("H2").await.is_none());
+        let _ = hyperion_state::hosting_kv::set(&pool, "H3", INTEGRITY_KV_KEY, "{oops", 1).await;
+        assert!(s.stored_integrity_scan("H3").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn integrity_scan_on_non_wordpress_hosting_is_could_not_check() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), happy_mocks());
+        s.create(req("static-site.cz")).await.expect("create");
+        let detail = s
+            .get(HostingSelector::Domain(
+                Domain::parse("static-site.cz").expect("parse"),
+            ))
+            .await
+            .expect("get");
+
+        let r = s
+            .wp_integrity_scan(HostingSelector::Id(detail.id.clone()))
+            .await
+            .expect("scan returns a result, not an error");
+        assert_eq!(r.error.as_deref(), Some(INTEGRITY_ERR_NOT_WORDPRESS));
+        assert!(!r.wp_cli_ok, "nothing was verified");
+        assert!(!r.core_ok);
+        assert!(
+            !r.is_clean(),
+            "a site we never looked at must never read as clean"
+        );
+        assert_eq!(r.total_findings(), 0);
+        // Nothing to show on the integrity dashboard for a static site —
+        // and nothing stored means the sweep can tell it apart from a
+        // WordPress site whose scan failed.
+        assert!(
+            hyperion_state::hosting_kv::get(&pool, detail.id.as_str(), INTEGRITY_KV_KEY)
+                .await
+                .expect("kv get")
+                .is_none()
+        );
+        assert!(
+            s.integrity_findings_list().await.expect("list").is_empty(),
+            "non-WordPress hostings never reach the dashboard"
+        );
+    }
+
+    #[test]
+    fn integrity_result_without_wp_cli_is_not_clean() {
+        // wp-cli missing / WordPress unbootable: every probe came back
+        // unchecked. Zero findings here means "we found nothing out"
+        // — not "there is nothing wrong".
+        let r = assemble_integrity_result(
+            integrity::CoreChecksums::default(),
+            integrity::PluginChecksums::default(),
+            Vec::new(),
+            false,
+            0,
+            false,
+        );
+        assert!(!r.wp_cli_ok);
+        assert!(!r.core_ok);
+        assert!(!r.is_clean(), "unchecked is never clean");
+        assert_eq!(r.total_findings(), 0);
+        assert_eq!(r.plugins_checked, 0);
+
+        // Same, but ClamAV DID run and found nothing. Still not clean:
+        // one working signal doesn't vouch for the other.
+        let r = assemble_integrity_result(
+            integrity::CoreChecksums::default(),
+            integrity::PluginChecksums::default(),
+            Vec::new(),
+            true,
+            0,
+            false,
+        );
+        assert!(!r.is_clean(), "clamav alone can't clear a site");
+    }
+
+    #[test]
+    fn integrity_clean_requires_every_signal_to_have_run() {
+        // Both signals ran, both empty — the only shape that is clean.
+        let r = assemble_integrity_result(
+            core_verified(),
+            plugins_verified(),
+            Vec::new(),
+            true,
+            4,
+            true,
+        );
+        assert!(r.wp_cli_ok && r.core_ok && r.is_clean());
+        assert_eq!(r.plugins_checked, 4);
+        assert_eq!(r.plugins_total, 4);
+
+        // No scanner installed on the node → "not scanned", not "clean".
+        let r = assemble_integrity_result(
+            core_verified(),
+            plugins_verified(),
+            Vec::new(),
+            false,
+            4,
+            true,
+        );
+        assert!(r.wp_cli_ok, "checksums still verified");
+        assert!(!r.is_clean(), "a missing scanner is not a pass");
+    }
+
+    #[test]
+    fn integrity_empty_plugin_list_does_not_poison_wp_cli_ok() {
+        // A site with zero plugins gives wp-cli nothing to verify; its
+        // silence is not a failure...
+        let r = assemble_integrity_result(
+            core_verified(),
+            integrity::PluginChecksums::default(),
+            Vec::new(),
+            true,
+            0,
+            true,
+        );
+        assert!(r.wp_cli_ok, "nothing to verify is not a failed check");
+
+        // ...but a FAILED enumeration reports zero plugins too, and that
+        // must not be laundered into "verified".
+        let r = assemble_integrity_result(
+            core_verified(),
+            integrity::PluginChecksums::default(),
+            Vec::new(),
+            true,
+            0,
+            false,
+        );
+        assert!(!r.wp_cli_ok, "couldn't list plugins ⇒ couldn't check");
+        assert!(!r.is_clean());
+    }
+
+    #[test]
+    fn integrity_unverifiable_premium_plugins_are_not_findings() {
+        // Elementor Pro publishes no checksums. That is "we could not
+        // check this plugin", never "this plugin is compromised" — the
+        // difference between a useful panel and one the operator mutes.
+        let r = assemble_integrity_result(
+            core_verified(),
+            integrity::PluginChecksums {
+                checked: true,
+                failed: Vec::new(),
+                unknown: vec!["elementor-pro".into(), "wp-rocket".into()],
+            },
+            Vec::new(),
+            true,
+            6,
+            true,
+        );
+        assert_eq!(r.total_findings(), 0, "unknown is not a finding");
+        assert_eq!(r.plugins_checked, 4, "6 installed − 2 unverifiable");
+        assert_eq!(r.plugins_unknown.len(), 2);
+        assert!(r.is_clean());
+    }
+
+    #[test]
+    fn integrity_finding_keys_separate_buckets_and_drive_the_new_diff() {
+        let mut yesterday = assemble_integrity_result(
+            integrity::CoreChecksums {
+                checked: true,
+                missing: vec!["wp-admin/includes/misc.php".into()],
+                ..Default::default()
+            },
+            plugins_verified(),
+            Vec::new(),
+            true,
+            1,
+            true,
+        );
+        yesterday.scanned_at = 1;
+        let prior = integrity_finding_keys(&yesterday);
+
+        // Same file, now MODIFIED rather than missing, plus a webshell:
+        // two genuinely new events, not a repeat of yesterday's alert.
+        let today = assemble_integrity_result(
+            integrity::CoreChecksums {
+                checked: true,
+                modified: vec!["wp-admin/includes/misc.php".into()],
+                ..Default::default()
+            },
+            plugins_verified(),
+            vec![hyperion_types::WpMalwareHit {
+                path: "/home/x/htdocs/wp-content/uploads/a.php".into(),
+                signature: "Php.Trojan.Webshell-1".into(),
+            }],
+            true,
+            1,
+            true,
+        );
+        let new_keys: Vec<String> = integrity_finding_keys(&today)
+            .difference(&prior)
+            .cloned()
+            .collect();
+        assert_eq!(new_keys.len(), 2);
+
+        // A standing finding produces no new keys — that's what keeps the
+        // nightly sweep from re-alerting on the same file forever.
+        assert_eq!(
+            integrity_finding_keys(&yesterday)
+                .difference(&prior)
+                .count(),
+            0
+        );
     }
 }

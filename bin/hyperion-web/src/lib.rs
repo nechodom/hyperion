@@ -212,6 +212,10 @@ pub fn build_router(state: SharedState) -> Router {
             "/hostings/wp/auto-update",
             post(handlers::hostings::post_wp_auto_update),
         )
+        .route(
+            "/hostings/integrity/scan",
+            post(handlers::hostings::post_integrity_scan),
+        )
         .route("/hostings/ban", post(handlers::hostings::post_ban))
         .route(
             "/hostings/:selector/bans-panel",
@@ -565,6 +569,13 @@ pub fn build_router(state: SharedState) -> Router {
         .route(
             "/hostings/:selector/vuln-panel",
             get(handlers::hostings::get_vuln_panel),
+        )
+        // File-integrity + malware card. Lazy for the same reason as the
+        // vuln panel and then some: it hashes every core and plugin file
+        // against wordpress.org before it can render anything.
+        .route(
+            "/hostings/:selector/integrity-panel",
+            get(handlers::hostings::get_integrity_panel),
         )
         .route("/logout", post(handlers::login::post_logout))
         // Tiny role echo for the nav-hiding shim in base.html.

@@ -449,6 +449,16 @@ pub enum Request {
     /// Every hosting's last stored vuln scan on this node — drives the
     /// cluster-wide vulnerability dashboard.
     VulnFindingsList,
+    /// Verify a hosting's WordPress core + plugins against the checksums
+    /// WordPress.org publishes, and (where a scanner exists) sweep its
+    /// docroot with ClamAV. The "has anything been tampered with?"
+    /// sibling of `WpVulnScan`.
+    WpIntegrityScan {
+        hosting: HostingSelector,
+    },
+    /// Every hosting's last stored integrity scan on this node — drives
+    /// the cluster-wide integrity dashboard.
+    IntegrityFindingsList,
     /// Create a `staging.<domain>` copy of a hosting (files + DB + WP
     /// URL rewrite). Same-node only. `staging_domain` overrides the
     /// default `staging.<domain>` hostname when `Some` + non-empty.
@@ -1501,6 +1511,8 @@ pub enum Response {
     WpThemeAction(hyperion_types::WpThemeActionResult),
     WpVulnScan(hyperion_types::WpVulnScanResult),
     VulnFindingsList(Vec<hyperion_types::HostingVulnSummary>),
+    WpIntegrityScan(hyperion_types::WpIntegrityScanResult),
+    IntegrityFindingsList(Vec<hyperion_types::HostingIntegritySummary>),
     WpStagingCreate {
         staging_domain: String,
     },

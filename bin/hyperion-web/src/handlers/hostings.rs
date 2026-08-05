@@ -5401,6 +5401,126 @@ pub async fn post_wp_auto_update(
     .into_response())
 }
 
+/// Lazily-loaded file-integrity + malware panel — the tamper-detection
+/// sibling of the vuln panel. Dispatched to the OWNING node: wp-cli's
+/// checksum comparison and clamscan both have to read the site's files.
+#[derive(Template)]
+#[template(path = "_hosting_integrity_card.html")]
+struct IntegrityCardTpl {
+    scan: hyperion_types::WpIntegrityScanResult,
+    selector: String,
+    csrf_token: String,
+}
+
+/// A result meaning "nothing was checked", carrying why.
+///
+/// `Default` leaves `wp_cli_ok` and `clamav_available` false, which is
+/// exactly what keeps `is_clean()` false — a hosting we couldn't reach
+/// must render as "couldn't check", never as a pass. Same contract the
+/// vuln panel gets from `feed_unavailable`.
+fn integrity_not_checked(why: String) -> hyperion_types::WpIntegrityScanResult {
+    hyperion_types::WpIntegrityScanResult {
+        error: Some(why),
+        ..Default::default()
+    }
+}
+
+/// Run the scan on the owning node, folding every failure mode into a
+/// renderable "couldn't check" result rather than a 500 — a blank corner
+/// of the page reads as "fine" to an operator, which is the one thing
+/// this card must never imply.
+async fn integrity_scan_on_node(
+    state: &SharedState,
+    owner_node: Option<&str>,
+    sel: HostingSelector,
+) -> hyperion_types::WpIntegrityScanResult {
+    match crate::dispatcher::dispatch_to_node(
+        state,
+        owner_node,
+        Request::WpIntegrityScan { hosting: sel },
+    )
+    .await
+    {
+        Ok(RpcResponse::WpIntegrityScan(scan)) => scan,
+        Ok(RpcResponse::Error(e)) => integrity_not_checked(e.to_string()),
+        Ok(_) => integrity_not_checked("unexpected response from the node".into()),
+        Err(e) => integrity_not_checked(e.to_string()),
+    }
+}
+
+pub async fn get_integrity_panel(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Path(selector): Path<String>,
+) -> Result<Response, AppError> {
+    let sel = parse_selector(&selector)?;
+    let (detail, owner_node) = find_hosting_anywhere(&state, sel.clone()).await?;
+    if let Err(r) = require_hosting_access(
+        &state,
+        &ctx,
+        detail.id.as_str(),
+        false,
+        Capability::WpVulnView,
+    )
+    .await
+    {
+        return Ok(r);
+    }
+    let csrf_token = super::session_csrf_token(&state, &ctx);
+    let scan = integrity_scan_on_node(&state, owner_node.as_deref(), sel).await;
+    Ok(Html(
+        IntegrityCardTpl {
+            scan,
+            selector,
+            csrf_token,
+        }
+        .render()?,
+    )
+    .into_response())
+}
+
+#[derive(Deserialize)]
+pub struct IntegrityScanForm {
+    pub selector: String,
+}
+
+/// "Scan now". A POST rather than a repeat of the lazy GET because it
+/// isn't a refresh: it re-hashes every core and plugin file against
+/// WordPress.org and can walk the whole docroot with clamscan. Gated on
+/// `WpManage` for the same reason — reading the verdict is a view,
+/// spending the node's IO is not.
+pub async fn post_integrity_scan(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<IntegrityScanForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector, Capability::WpManage)
+        .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let csrf_token = super::session_csrf_token(&state, &ctx);
+    // Resolve the owner EXPLICITLY: `.ok()`-to-None would retarget a
+    // lookup failure at the master, which would then verify checksums for
+    // files that aren't there and report the miss as a finding.
+    let scan = match find_hosting_anywhere(&state, sel.clone()).await {
+        Ok((_detail, owner_node)) => {
+            integrity_scan_on_node(&state, owner_node.as_deref(), sel).await
+        }
+        Err(e) => integrity_not_checked(e.to_string()),
+    };
+    Ok(Html(
+        IntegrityCardTpl {
+            scan,
+            selector: form.selector,
+            csrf_token,
+        }
+        .render()?,
+    )
+    .into_response())
+}
+
 #[derive(serde::Deserialize)]
 pub struct BackupCadenceForm {
     pub selector: String,
@@ -8809,5 +8929,123 @@ async fn run_wp_staging_push_job(
                 .await
         }
         Err(e) => reporter.finish(false, Some(e.to_string())).await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Render the integrity card for a given scan result.
+    fn render_integrity(scan: hyperion_types::WpIntegrityScanResult) -> String {
+        IntegrityCardTpl {
+            scan,
+            selector: "example.com".into(),
+            csrf_token: "t".into(),
+        }
+        .render()
+        .expect("integrity card renders")
+    }
+
+    /// The failure mode this whole card exists to prevent: a scan that
+    /// could not run must not produce a word an operator could forward to
+    /// a paying customer as "your site is fine".
+    #[test]
+    fn unchecked_never_renders_as_clean() {
+        let html = render_integrity(integrity_not_checked("wp-cli exited 1".into()));
+        assert!(html.contains("couldn't check"));
+        assert!(html.contains("not a clean result"));
+        assert!(!html.contains(">Clean.<"));
+        assert!(html.contains("wp-cli exited 1"));
+    }
+
+    /// Verified files with no malware scanner is its own verdict. ClamAV
+    /// being absent is normal, but it is not a clean bill of health —
+    /// checksum verification never looks inside `wp-content/uploads`.
+    #[test]
+    fn verified_without_clamav_is_not_clean() {
+        let html = render_integrity(hyperion_types::WpIntegrityScanResult {
+            core_ok: true,
+            wp_cli_ok: true,
+            clamav_available: false,
+            plugins_checked: 3,
+            plugins_total: 3,
+            scanned_at: 1_700_000_000,
+            ..Default::default()
+        });
+        assert!(html.contains("malware not scanned"));
+        assert!(html.contains("No malware scan ran"));
+        assert!(!html.contains(">Clean.<"));
+    }
+
+    /// Both signals ran and both came back empty — the only state allowed
+    /// to say so.
+    #[test]
+    fn both_signals_clean_says_clean() {
+        let html = render_integrity(hyperion_types::WpIntegrityScanResult {
+            core_ok: true,
+            wp_cli_ok: true,
+            clamav_available: true,
+            plugins_checked: 3,
+            plugins_total: 3,
+            scanned_at: 1_700_000_000,
+            ..Default::default()
+        });
+        assert!(html.contains(">Clean.<"));
+        assert!(html.contains("ClamAV scanned the site"));
+    }
+
+    /// Premium plugins have no published checksums. They must never be
+    /// counted or styled as findings — a card that flags Elementor Pro
+    /// every night is a card nobody reads.
+    #[test]
+    fn unknown_plugins_are_coverage_not_findings() {
+        let html = render_integrity(hyperion_types::WpIntegrityScanResult {
+            core_ok: true,
+            wp_cli_ok: true,
+            clamav_available: true,
+            plugins_unknown: vec!["elementor-pro".into(), "wp-rocket".into()],
+            plugins_checked: 1,
+            plugins_total: 3,
+            scanned_at: 1_700_000_000,
+            ..Default::default()
+        });
+        assert!(html.contains("this is normal"));
+        assert!(html.contains("elementor-pro"));
+        // Still clean: unknown coverage is not a finding.
+        assert!(html.contains(">Clean.<"));
+        assert!(!html.contains("finding(s)</span>"));
+    }
+
+    /// Findings outrank a half-failed probe: something we DID see is more
+    /// actionable than something we couldn't, and the paths have to be on
+    /// screen either way.
+    #[test]
+    fn findings_are_listed_with_their_paths() {
+        let html = render_integrity(hyperion_types::WpIntegrityScanResult {
+            wp_cli_ok: true,
+            clamav_available: true,
+            core_modified: vec!["wp-includes/load.php".into()],
+            core_unexpected: vec!["wp-admin/x.php".into()],
+            plugins_failed: vec![hyperion_types::WpIntegrityPluginResult {
+                slug: "akismet".into(),
+                issues: vec![hyperion_types::WpIntegrityFileIssue {
+                    path: "akismet.php".into(),
+                    message: "Checksum does not match".into(),
+                }],
+            }],
+            malware: vec![hyperion_types::WpMalwareHit {
+                path: "/var/www/uploads/s.php".into(),
+                signature: "Php.Trojan.Webshell-1".into(),
+            }],
+            scanned_at: 1_700_000_000,
+            ..Default::default()
+        });
+        assert!(html.contains("4 finding(s)"));
+        assert!(html.contains("wp-includes/load.php"));
+        assert!(html.contains("wp-admin/x.php"));
+        assert!(html.contains("akismet.php"));
+        assert!(html.contains("Php.Trojan.Webshell-1"));
+        assert!(!html.contains(">Clean.<"));
     }
 }

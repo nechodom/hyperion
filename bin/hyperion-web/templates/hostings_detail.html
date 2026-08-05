@@ -1234,6 +1234,22 @@
   </div>
 </div>
 
+{# File integrity & malware — sits next to its sibling on purpose: one
+   card answers "is anything outdated?", the next "has anything been
+   changed?". Lazy for the same reason, only more so — it hashes every
+   core and plugin file against wordpress.org before it renders. #}
+<div hx-get="/hostings/{{ detail.id.as_str() }}/integrity-panel"
+     hx-trigger="load"
+     hx-swap="outerHTML"
+     style="margin-top:1rem">
+  <div class="card">
+    <h2 style="opacity:0.6">
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><circle cx="11.5" cy="15" r="2.5"/><path d="M13.4 16.9 16 19.5"/></svg>
+      File integrity &amp; malware <span class="text-soft small">— verifying…</span>
+    </h2>
+  </div>
+</div>
+
 {# Staging → push-to-prod. Available once WP is installed. #}
 {% if detail.state.as_str() == "active" %}
 <div class="card hover" style="margin-top:1rem">

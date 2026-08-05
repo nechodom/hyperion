@@ -67,9 +67,10 @@ pub use stats::{
     WebVerify2faResult,
 };
 pub use wp::{
-    HostingVulnSummary, WpInstallRequest, WpInstallStatus, WpPlugin, WpPluginAction,
-    WpPluginActionResult, WpPluginListResponse, WpTheme, WpThemeAction, WpThemeActionResult,
-    WpThemeListResponse, WpVulnFinding, WpVulnScanResult,
+    HostingIntegritySummary, HostingVulnSummary, WpInstallRequest, WpInstallStatus,
+    WpIntegrityFileIssue, WpIntegrityPluginResult, WpIntegrityScanResult, WpMalwareHit, WpPlugin,
+    WpPluginAction, WpPluginActionResult, WpPluginListResponse, WpTheme, WpThemeAction,
+    WpThemeActionResult, WpThemeListResponse, WpVulnFinding, WpVulnScanResult,
 };
 
 /// Current Unix epoch seconds. Centralized so tests can replace it if needed.
