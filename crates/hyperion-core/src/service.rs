@@ -4,12 +4,16 @@ use async_trait::async_trait;
 use hyperion_adapters::integrity;
 use hyperion_adapters::rollback::{Rollback, RollbackStack};
 use hyperion_adapters::AdapterError;
+use hyperion_rpc::codec::CareReportMail;
 use hyperion_rpc::wire::{
     DbCredentials, DeleteOpts, HostingCreateReq, HostingCreated, HostingSelector,
 };
 use hyperion_rpc::RpcError;
 use hyperion_state::{
     certificates, databases, hostings, metrics, packages, profiles, system_users, wordpress,
+};
+use hyperion_types::package::{
+    CareBackups, CareIntegrity, CareReport, CareUptime, CareUsage, ReportCadence,
 };
 use hyperion_types::{
     now_secs, BackupCadence, CertInfo, CertIssueRequest, CertRenewOutcome, CertRenewResult,
@@ -7515,9 +7519,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .as_ref()
                 .map(|d| d.domain.clone())
                 .unwrap_or_default();
-            // Empty once the definition was deleted — the activation and its
-            // price survive that, so the reminder still has to make sense.
-            let name = self.package_name_for(row.package_id).await;
+            // From the activation's OWN snapshot, not the definition: a
+            // retired or renamed package must still name itself correctly in
+            // the reminder the customer's invoice is matched against.
+            let name = row.package_name.clone();
             let label = if name.is_empty() {
                 "care package (definition deleted)".to_string()
             } else {
@@ -8300,23 +8305,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         .map_err(|e| RpcError::Internal_with(format!("package activations: {e}")))?;
         let mut out = Vec::with_capacity(rows.len());
         for r in rows {
-            let name = self.package_name_for(r.package_id).await;
+            let name = r.package_name.clone();
             out.push(activation_row_to_wire(r, name));
         }
         Ok(out)
-    }
-
-    /// Display name of a definition, or "" when it is gone / not local.
-    async fn package_name_for(&self, package_id: Option<i64>) -> String {
-        let Some(pid) = package_id else {
-            return String::new();
-        };
-        packages::get(&self.pool, pid)
-            .await
-            .ok()
-            .flatten()
-            .map(|p| p.name)
-            .unwrap_or_default()
     }
 
     /// Activate a package on a hosting: snapshot what every forced feature
@@ -8343,6 +8335,20 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             Some(p) => p,
             None => self.package_get(package_id).await?,
         };
+        // A retired package must not be sellable. `enabled = false` is THE
+        // documented retire path (it deliberately leaves existing activations
+        // running), so enforcing it only in the picker's filter would leave a
+        // hand-crafted POST — or a stale picker rendered before the operator
+        // withdrew it — able to sell a package that is no longer on offer,
+        // snapshotting its price and forcing its bundle.
+        if !def.enabled {
+            return Err(RpcError::Conflict {
+                message: format!(
+                    "package \"{}\" is retired and can no longer be activated",
+                    def.name
+                ),
+            });
+        }
         let features = def.features;
         let now = now_secs();
 
@@ -8473,7 +8479,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 id: activation_id.to_string(),
             });
         }
-        let name = self.package_name_for(row.package_id).await;
+        let name = row.package_name.clone();
         if !row.state.is_active() {
             // Already history: the restore ran once, at the right moment.
             // Doing it again would undo whatever changed since.
@@ -8511,6 +8517,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             monitoring: toggle_of(prior.monitoring),
             hardening: toggle_of(prior.hardening),
             backup_cadence: prior.backup_cadence.unwrap_or_default(),
+            // `Leave` is the ONLY correct value here, and not because there
+            // is nothing captured to restore: the report cadence is never
+            // written to the site at all. It is derived live from the
+            // hosting's still-active activations every time a report is due
+            // (see `care_report_entitlement`), so this row leaving the
+            // active set IS the restore — and the fold below is what keeps
+            // a sibling package's cadence intact.
+            report_cadence: ReportCadence::Leave,
         };
         if still_forced.wp_auto_update.forces().is_some() {
             restore.wp_auto_update = FeatureToggle::Leave;
@@ -8847,6 +8861,463 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         self.set_vhost_options(HostingSelector::Id(detail.id.clone()), options, None)
             .await?;
         Ok(())
+    }
+
+    // ================================================================
+    //  The care report — the only half of a package the CUSTOMER sees
+    // ================================================================
+    //
+    // Everything above is invisible when it works: a well-run site is a
+    // site nobody notices, and an invoice for something nobody noticed is
+    // the one that gets cancelled. The report is what turns a month of
+    // quiet into something the person paying can read.
+    //
+    // One rule outranks looking good: it must never imply something was
+    // measured when it was not. `hyperion_state::reports` produces that
+    // distinction FROM THE ROWS (`None` = nobody was watching, `Some(0)` =
+    // we watched and nothing happened), and everything below is only
+    // allowed to print it — never to guess it. A flattering "100 %
+    // dostupnost" for a site nobody ever monitored is a written claim to a
+    // paying customer, and worse than sending nothing at all.
+    //
+    // Node locality: every source (bans, usage buckets, monitor samples,
+    // backup runs, the audit log, the stored scan) is per-node, so all of
+    // this runs on the node that OWNS the hosting. Run on the master for a
+    // worker-hosted site, every query truthfully answers "not measured" —
+    // which is why the tick is registered on every node and why the web
+    // layer dispatches preview / send to the owner.
+
+    /// Assemble one hosting's care report for the half-open period
+    /// `[from, to)` out of THIS node's tables.
+    ///
+    /// Starts from `CareReport::empty` — every section unmeasured — and
+    /// only ever fills a section in, so a query that fails costs the
+    /// customer information instead of inventing a reassuring number.
+    pub async fn care_report_build(
+        &self,
+        sel: HostingSelector,
+        from: i64,
+        to: i64,
+    ) -> Result<CareReport, RpcError> {
+        use hyperion_state::reports;
+        let detail = self.get(sel).await?;
+        let id = detail.id.as_str();
+        let wrap = |what: &str, e: hyperion_state::db::StateError| {
+            RpcError::Internal_with(format!("care report ({what}): {e}"))
+        };
+        let mut report = CareReport::empty(detail.id.clone(), detail.domain.clone(), from, to);
+
+        // The one metric whose unmeasured state the database CANNOT see:
+        // with `[fail2ban] enabled = false` the scanner never ran, so zero
+        // bans means nobody was watching rather than nobody attacking.
+        // Only this caller knows which, so only this caller may map it —
+        // hence the count stays `None` instead of becoming a proud zero.
+        if self.fail2ban.enabled {
+            report.attacks_blocked = Some(
+                reports::attacks_blocked(&self.pool, id, from, to)
+                    .await
+                    .map_err(|e| wrap("attacks", e))?,
+            );
+        }
+        report.updates_applied = reports::updates_applied(&self.pool, id, from, to)
+            .await
+            .map_err(|e| wrap("updates", e))?;
+        report.usage = reports::usage(&self.pool, id, from, to)
+            .await
+            .map_err(|e| wrap("usage", e))?;
+        // `reports::uptime` always answers, because zero samples IS its
+        // unmeasured state. The DTO says the same thing with `None`, so
+        // collapse it here — that keeps ONE rule for the renderer ("absent
+        // ⇒ say we did not measure") instead of two ways to say it, and it
+        // is what lets `is_entirely_unmeasured` be true for a site nothing
+        // ever watched.
+        let uptime = reports::uptime(&self.pool, id, from, to)
+            .await
+            .map_err(|e| wrap("uptime", e))?;
+        report.uptime = (uptime.samples > 0).then_some(uptime);
+        report.backups = reports::backups(&self.pool, id, from, to)
+            .await
+            .map_err(|e| wrap("backups", e))?;
+        report.integrity = reports::integrity(&self.pool, id, from, to)
+            .await
+            .map_err(|e| wrap("integrity", e))?;
+        Ok(report)
+    }
+
+    /// Render the current period's report WITHOUT sending anything — what
+    /// the operator's "Preview" button shows.
+    ///
+    /// It exists so the operator can read the exact text their customer
+    /// will receive before it goes out. That means it must use the same
+    /// period, the same recipient and the same renderer the tick does; a
+    /// preview that differs from the mail is worse than no preview.
+    pub async fn care_report_preview(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<CareReportMail, RpcError> {
+        let (detail, mail) = self.care_report_mail(sel).await?;
+        // Audited even though it sends nothing: the preview renders the
+        // customer's owner e-mail, their traffic figures, the attacks-blocked
+        // count and the integrity verdict. "It only reads" is not a reason to
+        // leave a cross-tenant read off the trail — /audit should be able to
+        // answer who looked at whose report.
+        self.append_audit(
+            "package.report.preview",
+            Some(detail.id.as_str()),
+            &serde_json::json!({ "domain": detail.domain }).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(mail)
+    }
+
+    /// Send the current period's report now, on the operator's say-so.
+    ///
+    /// A real send: it records the period as reported, so the scheduled
+    /// one does not repeat it an hour later and the NEXT period starts
+    /// here. Refuses (rather than falling back to the cluster's default
+    /// address) when the site has no owner e-mail — the report belongs to
+    /// the customer, and quietly mailing it to the operator instead would
+    /// leave the customer with nothing while everything looked fine.
+    pub async fn care_report_send(&self, sel: HostingSelector) -> Result<CareReportMail, RpcError> {
+        let (detail, mail) = self.care_report_mail(sel).await?;
+        if mail.to.is_empty() {
+            return Err(RpcError::Validation {
+                message: "this site has no owner e-mail — set one on the hosting first, \
+                          otherwise the report has nowhere to go"
+                    .into(),
+            });
+        }
+        if self.email_config.is_none() {
+            return Err(RpcError::Validation {
+                message: "no SMTP relay is configured on the node that owns this site, \
+                          so nothing can be sent"
+                    .into(),
+            });
+        }
+        self.notify_email(
+            &mail.to,
+            &mail.subject,
+            &mail.body,
+            Some(detail.id.as_str()),
+            CARE_REPORT_EMAIL_KIND,
+        )
+        .await;
+        self.care_report_mark_reported(&detail.id, mail.period_end)
+            .await;
+        self.append_audit(
+            "package.report.send",
+            Some(detail.id.as_str()),
+            &serde_json::json!({
+                "to": mail.to,
+                "period_start": mail.period_start,
+                "period_end": mail.period_end,
+                "manual": true,
+            })
+            .to_string(),
+            "ok",
+        )
+        .await;
+        Ok(mail)
+    }
+
+    /// Build the current period's mail for one hosting — the shared body
+    /// of preview and send, so the two can never render different text.
+    async fn care_report_mail(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<(HostingDetail, CareReportMail), RpcError> {
+        let detail = self.get(sel).await?;
+        let now = now_secs();
+        let (cadence, started_at) = self.care_report_entitlement(&detail.id).await;
+        let (from, to) = self
+            .care_report_period(&detail.id, cadence, started_at, now)
+            .await;
+        let report = self
+            .care_report_build(HostingSelector::Id(detail.id.clone()), from, to)
+            .await?;
+        let (subject, body) = care_report_render(&report, &detail.domain);
+        let mail = CareReportMail {
+            subject,
+            body,
+            period_start: from,
+            period_end: to,
+            to: self.care_report_recipient(&detail).await,
+            cadence: cadence.as_str().to_string(),
+            entirely_unmeasured: report.is_entirely_unmeasured(),
+        };
+        Ok((detail, mail))
+    }
+
+    /// Periodic sweep — one care report per entitled hosting per cadence.
+    ///
+    /// Walks THIS node's active activations (they are co-located with
+    /// their hosting, which is also where every metric lives), folds each
+    /// hosting's packages into one cadence, and mails the customer once a
+    /// full period has elapsed since the last report.
+    ///
+    /// Three things it deliberately does NOT do:
+    ///   * it never reports on "now minus one cadence". The period start
+    ///     is the end of the last report actually sent, so a tick the node
+    ///     slept through widens the next report instead of dropping the
+    ///     days in between;
+    ///   * it never consumes a period it could not deliver. Missing
+    ///     recipient, missing relay, nothing measurable — each leaves the
+    ///     marker untouched, so the history is still there when the
+    ///     operator fixes it;
+    ///   * it never fails quietly. Every skip is a WARN naming the domain,
+    ///     because not sending a report the customer is paying for is the
+    ///     failure this feature exists to prevent, and it is invisible by
+    ///     nature.
+    ///
+    /// Returns how many reports went out.
+    pub async fn care_report_tick(&self) -> Result<i64, RpcError> {
+        let rows = packages::list_all_active(&self.pool)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("care report tick: {e}")))?;
+        if rows.is_empty() {
+            // Same ignore-the-feature-entirely path as the drift tick: no
+            // activations, no queries against any hosting.
+            return Ok(0);
+        }
+        // Fold each hosting's activations into ONE cadence up front, with
+        // the same rule the drift tick uses: the customer keeps the most
+        // they paid for, so a monthly package alongside a quarterly one
+        // sends monthly, and a package that pins reports `off` cannot
+        // silence one that sells them.
+        let mut order: Vec<HostingId> = Vec::new();
+        let mut wanted: HashMap<String, (ReportCadence, i64)> = HashMap::new();
+        for row in rows {
+            let c = row.features.report_cadence;
+            // Only an activation that actually SELLS a report may set the
+            // entitlement's start date; `i64::MAX` is the "none yet" seed
+            // and is unreachable once one does (see `care_report_period`,
+            // which only reads it for a sellable cadence).
+            let starts = report_cadence_secs(c).map(|_| row.activated_at);
+            match wanted.get_mut(row.hosting_id.as_str()) {
+                Some((cadence, since)) => {
+                    *cadence = cadence.combine(c);
+                    if let Some(t) = starts {
+                        *since = (*since).min(t);
+                    }
+                }
+                None => {
+                    order.push(row.hosting_id.clone());
+                    wanted.insert(
+                        row.hosting_id.as_str().to_string(),
+                        (c, starts.unwrap_or(i64::MAX)),
+                    );
+                }
+            }
+        }
+
+        let now = now_secs();
+        let mut sent = 0i64;
+        for hosting_id in order {
+            let Some(&(cadence, started_at)) = wanted.get(hosting_id.as_str()) else {
+                continue;
+            };
+            let Some(cadence_secs) = report_cadence_secs(cadence) else {
+                continue; // leave / off — this site buys no report
+            };
+            let detail = match self.get(HostingSelector::Id(hosting_id.clone())).await {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::warn!(hosting_id = %hosting_id.as_str(), error = %e, "care report: hosting read failed");
+                    continue;
+                }
+            };
+            if detail.state != HostingState::Active {
+                continue;
+            }
+            let (from, to) = self
+                .care_report_period(&hosting_id, cadence, Some(started_at), now)
+                .await;
+            if to - from < cadence_secs {
+                continue; // the period isn't full yet — the common case
+            }
+
+            // Both guards leave the marker alone on purpose: the period
+            // stays open, so once the operator fixes the cause the customer
+            // gets the whole history rather than starting from that moment.
+            // Yes, this warns on every tick until it is fixed. That is the
+            // point — a report nobody receives has no other symptom.
+            if self.email_config.is_none() {
+                tracing::warn!(
+                    domain = %detail.domain,
+                    hosting_id = %detail.id.as_str(),
+                    "care report: due, but this node has no SMTP relay configured — \
+                     nothing sent; the period stays open"
+                );
+                continue;
+            }
+            let to_addr = self.care_report_recipient(&detail).await;
+            if to_addr.is_empty() {
+                // NOT falling through to `notify_email`'s empty-recipient
+                // default: that would mail the customer's report to the
+                // operator and look like a success.
+                tracing::warn!(
+                    domain = %detail.domain,
+                    hosting_id = %detail.id.as_str(),
+                    "care report: due, but the site has no owner e-mail — nothing sent. \
+                     Set one on the hosting; the period stays open until then"
+                );
+                continue;
+            }
+
+            let report = match self
+                .care_report_build(HostingSelector::Id(detail.id.clone()), from, to)
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    tracing::warn!(domain = %detail.domain, error = %e, "care report: build failed; the period stays open");
+                    continue;
+                }
+            };
+            if report.is_entirely_unmeasured() {
+                // Six "nekontrolováno" lines is a true statement and a
+                // terrible invoice attachment, and it almost always means
+                // the report was assembled somewhere the data isn't.
+                tracing::warn!(
+                    domain = %detail.domain,
+                    hosting_id = %detail.id.as_str(),
+                    "care report: due, but not one metric could be measured — nothing sent. \
+                     Is this the node that owns the site, and is any package feature actually on? \
+                     The period stays open"
+                );
+                continue;
+            }
+            let (subject, body) = care_report_render(&report, &detail.domain);
+            self.notify_email(
+                &to_addr,
+                &subject,
+                &body,
+                Some(detail.id.as_str()),
+                CARE_REPORT_EMAIL_KIND,
+            )
+            .await;
+            self.care_report_mark_reported(&detail.id, to).await;
+            tracing::info!(
+                domain = %detail.domain,
+                cadence = %cadence,
+                period_days = (to - from) / 86_400,
+                "care report sent"
+            );
+            sent += 1;
+        }
+        Ok(sent)
+    }
+
+    /// What this hosting's ACTIVE packages add up to for reporting, and
+    /// when that entitlement began.
+    ///
+    /// The cadence uses the package layer's own fold, so it agrees with
+    /// the drift tick by construction. `started_at` is the earliest
+    /// activation that actually sells a report, and it is the first
+    /// period's start for a site that has never had one: the first report
+    /// runs from the day the customer started paying, not from an invented
+    /// "one cadence ago".
+    async fn care_report_entitlement(
+        &self,
+        hosting_id: &HostingId,
+    ) -> (ReportCadence, Option<i64>) {
+        let rows = match packages::list_for_hosting(&self.pool, hosting_id).await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(hosting_id = %hosting_id.as_str(), error = %e, "care report: read held failed");
+                return (ReportCadence::Leave, None);
+            }
+        };
+        let mut cadence = ReportCadence::Leave;
+        let mut started: Option<i64> = None;
+        for row in rows {
+            let c = row.features.report_cadence;
+            cadence = cadence.combine(c);
+            if report_cadence_secs(c).is_some() {
+                started = Some(started.map_or(row.activated_at, |s: i64| s.min(row.activated_at)));
+            }
+        }
+        (cadence, started)
+    }
+
+    /// The half-open period the next report covers, `[from, now)`.
+    ///
+    /// `from`, in priority order:
+    ///   1. the end of the last period actually REPORTED. Periods are
+    ///      therefore contiguous: nothing is ever counted twice, and
+    ///      nothing between two reports is lost because a tick was missed.
+    ///   2. the moment the site started paying for reports.
+    ///   3. one cadence back. Reachable ONLY from the operator's preview /
+    ///      send-now on a site holding no package at all — the tick
+    ///      iterates activations, so case 2 always applies there. This is
+    ///      the "now minus 30 days" that must never drive a scheduled
+    ///      report, and it does not.
+    async fn care_report_period(
+        &self,
+        hosting_id: &HostingId,
+        cadence: ReportCadence,
+        started_at: Option<i64>,
+        now: i64,
+    ) -> (i64, i64) {
+        let marker = hyperion_state::hosting_kv::get(
+            &self.pool,
+            hosting_id.as_str(),
+            CARE_REPORT_KV_PERIOD_END,
+        )
+        .await
+        .ok()
+        .flatten()
+        .and_then(|v| v.trim().parse::<i64>().ok());
+        let from = marker.or(started_at).unwrap_or_else(|| {
+            now - report_cadence_secs(cadence).unwrap_or(CARE_REPORT_FALLBACK_SECS)
+        });
+        // A marker ahead of `now` (clock stepped backwards, or a restored
+        // database) would otherwise produce a reversed window that reads as
+        // a period in which nothing at all happened.
+        (from.min(now), now)
+    }
+
+    /// Record that everything up to `period_end` has been reported. This
+    /// is what a restart reads, so the same period can't be mailed twice,
+    /// and it is where the next period begins.
+    ///
+    /// Written AFTER the send. `notify_email` reports its own outcome to
+    /// `email_log` / the audit trail but returns nothing, so a relay that
+    /// rejected the message costs that one report rather than re-sending
+    /// it every hour until the relay recovers — the systematic causes (no
+    /// relay, no recipient) are caught before we get here.
+    async fn care_report_mark_reported(&self, hosting_id: &HostingId, period_end: i64) {
+        if let Err(e) = hyperion_state::hosting_kv::set(
+            &self.pool,
+            hosting_id.as_str(),
+            CARE_REPORT_KV_PERIOD_END,
+            &period_end.to_string(),
+            now_secs(),
+        )
+        .await
+        {
+            // Losing this marker means the next tick re-reports the same
+            // period — duplicate mail, never a gap.
+            tracing::warn!(
+                hosting_id = %hosting_id.as_str(),
+                error = %e,
+                "care report: sent, but the period marker could not be stored — \
+                 the next tick may repeat this report"
+            );
+        }
+    }
+
+    /// The customer's address for this site: the owner e-mail set on the
+    /// hosting, or empty. Deliberately no cluster-wide fallback — see
+    /// `care_report_send`.
+    async fn care_report_recipient(&self, detail: &HostingDetail) -> String {
+        self.get_expiry(HostingSelector::Id(detail.id.clone()))
+            .await
+            .ok()
+            .and_then(|e| e.owner_email)
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
     }
 
     /// Compute the operator dashboard alert list. Scans hostings + certs
@@ -18092,6 +18563,418 @@ fn activation_row_to_wire(
     }
 }
 
+// ─── the care report ────────────────────────────────────────────────
+
+/// `hosting_kv` key holding the END of the last period a care report was
+/// actually sent for.
+///
+/// Written only after a mail goes out, which makes it two things at once:
+/// the "already sent" marker a restart reads (so nobody gets the same
+/// report twice), and the start of the NEXT period (so a tick the node
+/// slept through widens the next report instead of silently dropping the
+/// days in between).
+const CARE_REPORT_KV_PERIOD_END: &str = "care_report_period_end";
+
+/// `email_log` / audit label for care reports, so the Emails tab can show
+/// what a site's customer was actually sent.
+const CARE_REPORT_EMAIL_KIND: &str = "care_report";
+
+/// Period length used when a hosting has no entitlement and no history at
+/// all — i.e. an operator previewing the report on a site that holds no
+/// package. Never reached by the scheduled tick; see `care_report_period`.
+const CARE_REPORT_FALLBACK_SECS: i64 = 30 * 86_400;
+
+/// Seconds in one report cadence, or `None` when the cadence sends
+/// nothing (`Leave` = no package has an opinion, `Off` = pinned off).
+///
+/// Fixed-length periods rather than calendar months on purpose: the
+/// `hosting_kv` marker records where each period actually ENDED, so
+/// periods stay contiguous whatever the step is. All a 30-day "month"
+/// costs is that the mail slides a few days across a year.
+fn report_cadence_secs(c: ReportCadence) -> Option<i64> {
+    match c {
+        ReportCadence::Leave | ReportCadence::Off => None,
+        ReportCadence::Weekly => Some(7 * 86_400),
+        ReportCadence::Monthly => Some(30 * 86_400),
+        ReportCadence::Quarterly => Some(91 * 86_400),
+    }
+}
+
+/// Subject + plain-text body of one care report, in CZECH.
+///
+/// PURE — no database, no SMTP, no clock. Everything it says comes out of
+/// the `CareReport` it was handed, which is what makes the wording
+/// testable and what keeps the honesty rule enforceable: a section is
+/// `None` because `hyperion_state::reports` could not measure it, and the
+/// only thing this function is allowed to do about that is SAY SO. It
+/// must never turn an absent measurement into a zero, a percentage or a
+/// clean bill of health.
+///
+/// `domain` is passed separately rather than read off the report so the
+/// renderer can be exercised without building a hosting; at every call
+/// site it is `report.domain`.
+pub fn care_report_render(report: &CareReport, domain: &str) -> (String, String) {
+    let days = care_days_spanned(report.period_start, report.period_end);
+    // The period is half-open, so the last day INSIDE it is `end - 1`.
+    // Printing the exclusive end ("1. 6. – 1. 7.") reads to a customer as
+    // a day they were charged for twice.
+    let last_day = (report.period_end - 1).max(report.period_start);
+    let from_str = cz_date(report.period_start);
+    let to_str = cz_date(last_day);
+
+    let subject = format!("Zpráva o péči o web {domain} ({from_str} – {to_str})");
+
+    let sections = [
+        care_section_attacks(report.attacks_blocked),
+        care_section_updates(report.updates_applied),
+        care_section_usage(report.usage.as_ref()),
+        care_section_uptime(report.uptime.as_ref()),
+        care_section_backups(report.backups.as_ref()),
+        care_section_integrity(report.integrity.as_ref()),
+    ]
+    .join("\n\n");
+
+    let body = format!(
+        "ZPRÁVA O PÉČI\n\
+         Web:     {domain}\n\
+         Období:  {from_str} – {to_str} ({days} {})\n\
+         \n\
+         Tohle se za uvedené období na vašem webu dělo. Uvádíme jen čísla, která\n\
+         jsme skutečně naměřili. Tam, kde měření neběželo, to je napsáno — místo\n\
+         nuly, která by tvrdila něco jiného než „nedívali jsme se“.\n\
+         \n\
+         {sections}\n\
+         \n\
+         --\n\
+         Tuto zprávu dostáváte proto, že k webu {domain} máte službu péče.\n\
+         Čísla pocházejí přímo ze serveru, na kterém web běží; časy jsou v UTC.\n\
+         Máte-li k čemukoli dotaz, stačí odpovědět na tento e-mail.\n",
+        cz_plural(days, "den", "dny", "dní"),
+    );
+    (subject, body)
+}
+
+/// Blocked attacks. `None` is the case the database cannot produce on its
+/// own — the caller sets it when the ban scanner was switched off — and it
+/// is exactly why zero must not be printed there.
+fn care_section_attacks(blocked: Option<i64>) -> String {
+    match blocked {
+        None => "ZABLOKOVANÉ ÚTOKY: nesledováno\n  \
+             Automatická ochrana proti útokům na tomto serveru v uvedeném období\n  \
+             neběžela. Nulu sem nepíšeme — znamenala by, že se nikdo nedíval."
+            .to_string(),
+        Some(0) => "ZABLOKOVANÉ ÚTOKY: 0\n  \
+             Ochrana běžela celé období a nemusela zasáhnout ani jednou. To je\n  \
+             dobrá zpráva, ne chybějící údaj."
+            .to_string(),
+        Some(n) => format!(
+            "ZABLOKOVANÉ ÚTOKY: {}\n  \
+             Tolikrát jsme odřízli adresu, která opakovaně zkoušela uhodnout heslo\n  \
+             do administrace nebo web jinak zneužít. Zablokovaná adresa se k webu\n  \
+             několik hodin vůbec nedostane.",
+            cz_int(n)
+        ),
+    }
+}
+
+/// Applied updates. Two things the copy has to say out loud: the number
+/// covers plugins and themes ONLY (WordPress core has no durable record
+/// to count), and an audit log that does not span the period yields
+/// "nezjištěno" rather than a partial total dressed up as a whole one.
+fn care_section_updates(applied: Option<i64>) -> String {
+    match applied {
+        None => "AKTUALIZACE PLUGINŮ A ŠABLON: nezjištěno\n  \
+             Provozní záznamy nepokrývají celé toto období, takže přesný počet\n  \
+             uvést nemůžeme. Neúplné číslo vydávat za úplné nebudeme."
+            .to_string(),
+        Some(0) => "AKTUALIZACE PLUGINŮ A ŠABLON: 0\n  \
+             Nebylo co nasazovat — pluginy i šablony byly po celé období aktuální."
+            .to_string(),
+        Some(n) => format!(
+            "AKTUALIZACE PLUGINŮ A ŠABLON: {}\n  \
+             Tolik {} jsme na webu nasadili. Počítáme jen ty, které se opravdu\n  \
+             nainstalovaly. Aktualizace jádra WordPressu v tomto čísle nejsou —\n  \
+             ty zatím samostatně neevidujeme.",
+            cz_int(n),
+            cz_plural(n, "aktualizace", "aktualizace", "aktualizací"),
+        ),
+    }
+}
+
+/// Traffic and footprint. Carries its own coverage caveat: a month with a
+/// four-day sampling gap says so instead of presenting 26 days of traffic
+/// as a month.
+fn care_section_usage(usage: Option<&CareUsage>) -> String {
+    let Some(u) = usage else {
+        return "PROVOZ: neměřeno\n  \
+             Měření návštěvnosti na tomto webu v uvedeném období neběželo.\n  \
+             „0 požadavků“ by tvrdilo, že web nikdo nenavštívil, a to nevíme."
+            .to_string();
+    };
+    let mut out = format!(
+        "PROVOZ: {} {}, odesláno {}\n  \
+         Požadavek je jedno načtení stránky, obrázku nebo souboru.",
+        cz_int(u.requests),
+        cz_plural(u.requests, "požadavek", "požadavky", "požadavků"),
+        cz_bytes(u.bw_out_bytes),
+    );
+    // Inbound bytes need a log format the stock nginx config doesn't have,
+    // so a zero there is ambiguous — and `reports::usage` hands us `None`
+    // rather than letting us print "0 B přijato" for a live site.
+    match u.bw_in_bytes {
+        Some(n) => out.push_str(&format!("\n  Přijatá data: {}.", cz_bytes(n))),
+        None => out
+            .push_str("\n  Objem přijatých dat server do svých záznamů nezapisuje, neuvádíme ho."),
+    }
+    out.push_str(&format!(
+        "\n  Nejvíc místa na disku za období: {}.",
+        cz_bytes(u.disk_peak_bytes)
+    ));
+    if u.is_complete() {
+        out.push_str(&format!(
+            "\n  Údaje pokrývají celé období ({} z {} dní).",
+            cz_int(u.days_counted),
+            cz_int(u.days_in_period)
+        ));
+    } else {
+        out.push_str(&format!(
+            "\n  Pozor: údaje pokrývají jen {} z {} dní období — zbytek se neměřil,\n  \
+             skutečný provoz byl tedy vyšší.",
+            cz_int(u.days_counted),
+            cz_int(u.days_in_period)
+        ));
+    }
+    out
+}
+
+/// Uptime. THE section this whole design exists for: with no samples
+/// there is no percentage to print, and "100 %" for a site nobody
+/// monitored is the exact lie the report must never tell.
+fn care_section_uptime(uptime: Option<&CareUptime>) -> String {
+    let Some(u) = uptime else {
+        return "DOSTUPNOST: nesledováno (monitoring nebyl aktivní)\n  \
+             Web jsme v tomto období pravidelně nekontrolovali, takže nemůžeme\n  \
+             říct, jestli byl celou dobu dostupný. Údaj 100 % by byl vymyšlený."
+            .to_string();
+    };
+    // `samples > 0` is guaranteed by the assembler (zero samples arrive as
+    // `None` above), so this can only ever be `Some`.
+    let Some(ratio) = u.success_ratio_x100() else {
+        return "DOSTUPNOST: nesledováno (monitoring nebyl aktivní)\n  \
+             Web jsme v tomto období pravidelně nekontrolovali, takže nemůžeme\n  \
+             říct, jestli byl celou dobu dostupný. Údaj 100 % by byl vymyšlený."
+            .to_string();
+    };
+    let failures = u.failures();
+    if failures == 0 {
+        return format!(
+            "DOSTUPNOST: {} ({} {}, žádný výpadek)\n  \
+             Web jsme automaticky kontrolovali a pokaždé odpověděl.",
+            cz_pct_x100(ratio),
+            cz_int(u.samples),
+            cz_plural(u.samples, "kontrola", "kontroly", "kontrol"),
+        );
+    }
+    format!(
+        "DOSTUPNOST: {} ({} {}, z toho {} neúspěšných)\n  \
+         Při {} {} web neodpověděl. Jedna dvě neúspěšné kontroly bývají krátký\n  \
+         výpadek nebo restart; když se opakují, řešíme to.",
+        cz_pct_x100(ratio),
+        cz_int(u.samples),
+        cz_plural(u.samples, "kontrola", "kontroly", "kontrol"),
+        cz_int(failures),
+        cz_int(failures),
+        cz_plural(failures, "kontrole", "kontrolách", "kontrolách"),
+    )
+}
+
+/// Backups. Three genuinely different states, and the middle one is the
+/// alarming one: a site that DOES take backups and took none this period
+/// must not read the same as a site that never had any.
+fn care_section_backups(backups: Option<&CareBackups>) -> String {
+    let Some(b) = backups else {
+        return "ZÁLOHY: nesledováno\n  \
+             Na tomto webu zatím neproběhla ani jedna záloha — automatické\n  \
+             zálohování na něm nikdy neběželo. „0 záloh“ by vypadalo jako\n  \
+             selhání; tohle je stav, kdy se zálohy nikdy nezapnuly."
+            .to_string();
+    };
+    let mut out = if b.taken == 0 {
+        "ZÁLOHY: 0 za toto období\n  \
+         Tento web zálohy má, ale v uvedeném období žádná neproběhla. To je\n  \
+         potřeba prověřit — ozvěte se nám, prosím."
+            .to_string()
+    } else {
+        let mut s = format!(
+            "ZÁLOHY: {}\n  \
+             Tolik kompletních {} webu (soubory i databáze) jsme uložili.",
+            cz_int(b.taken),
+            cz_plural(b.taken, "kopie", "kopie", "kopií"),
+        );
+        // Only ever a time INSIDE the period: the report must not reach
+        // backwards for a comforting older date.
+        if let Some(ts) = b.last_success_at {
+            s.push_str(&format!(
+                "\n  Poslední úspěšná záloha: {}.",
+                cz_datetime(ts)
+            ));
+        }
+        s
+    };
+    if b.failed > 0 {
+        out.push_str(&format!(
+            "\n  Neúspěšných pokusů: {} (opakují se automaticky).",
+            cz_int(b.failed)
+        ));
+    }
+    out
+}
+
+/// File integrity + malware. "Čisto" requires BOTH halves to have run —
+/// zero malware hits from a scanner that was never installed means "not
+/// looked for", and the copy has to say which.
+fn care_section_integrity(integrity: Option<&CareIntegrity>) -> String {
+    let Some(i) = integrity else {
+        return "KONTROLA SOUBORŮ A MALWARU: nekontrolováno\n  \
+             V uvedeném období na webu žádná kontrola souborů neproběhla.\n  \
+             Nemůžeme tedy říct, že je čistý — jen že jsme se nedívali."
+            .to_string();
+    };
+    let when = cz_date(i.scanned_at);
+    let findings = i.total_findings();
+    let mut out = if i.is_clean() {
+        format!(
+            "KONTROLA SOUBORŮ A MALWARU: bez nálezu\n  \
+             Kontrola z {when}: soubory WordPressu odpovídají tomu, co vydal\n  \
+             wordpress.org, a antivirová kontrola nic nenašla."
+        )
+    } else if findings == 0 {
+        format!(
+            "KONTROLA SOUBORŮ A MALWARU: zkontrolováno jen zčásti\n  \
+             Kontrola z {when} nic nenašla, ale proběhla jen zčásti — „čisto“\n  \
+             proto napsat nemůžeme."
+        )
+    } else {
+        let mut what: Vec<String> = Vec::new();
+        if i.core_issues > 0 {
+            what.push(format!(
+                "změněné soubory jádra WordPressu ({})",
+                cz_int(i.core_issues)
+            ));
+        }
+        if i.plugin_issues > 0 {
+            what.push(format!(
+                "změněné soubory pluginů ({})",
+                cz_int(i.plugin_issues)
+            ));
+        }
+        if i.malware_hits > 0 {
+            what.push(format!("podezřelý kód ({})", cz_int(i.malware_hits)));
+        }
+        format!(
+            "KONTROLA SOUBORŮ A MALWARU: {} {}\n  \
+             Kontrola z {when} našla: {}.\n  \
+             Ne každý nález znamená útok — bývá to i ruční úprava souboru.\n  \
+             Pokud si nálezem nejste jistí, ozvěte se nám.",
+            cz_int(findings),
+            cz_plural(findings, "nález", "nálezy", "nálezů"),
+            what.join(", "),
+        )
+    };
+    // Which half did NOT run is information the customer is owed, in every
+    // one of the three branches above.
+    if !i.checksums_ran {
+        out.push_str("\n  Kontrolní součty souborů se ověřit nepodařilo, tuhle část tedy nevíme.");
+    }
+    if !i.malware_scan_ran {
+        out.push_str(
+            "\n  Antivirová kontrola na serveru neběžela, o podezřelém kódu proto\n  \
+             neříkáme nic.",
+        );
+    }
+    out
+}
+
+/// Calendar days the half-open window `[from, to)` touches.
+///
+/// Mirrors `hyperion_state::reports::days_spanned` so the header says the
+/// same "30 dní" the traffic section's coverage line does — and keeps
+/// saying it for a report whose traffic section is unmeasured.
+fn care_days_spanned(from: i64, to: i64) -> i64 {
+    if to <= from {
+        return 0;
+    }
+    (to - 1).div_euclid(86_400) - from.div_euclid(86_400) + 1
+}
+
+/// Czech plural pick: 1 / 2–4 / everything else (including 0).
+fn cz_plural(n: i64, one: &'static str, few: &'static str, many: &'static str) -> &'static str {
+    match n.abs() {
+        1 => one,
+        2..=4 => few,
+        _ => many,
+    }
+}
+
+/// Thousands-grouped integer the Czech way: "34 500".
+fn cz_int(n: i64) -> String {
+    let digits = n.unsigned_abs().to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3 + 1);
+    if n < 0 {
+        out.push('-');
+    }
+    for (i, ch) in digits.chars().enumerate() {
+        // Group from the LEFT by counting how many digits remain.
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(' ');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+/// Bytes for a CUSTOMER: SI steps (kB / MB / GB) and a decimal comma, so
+/// the number matches what their connection and their invoice talk about.
+/// `human_bytes` (GiB, dot) stays as it is for the operator dashboard —
+/// two audiences, two conventions, and neither should learn the other's.
+fn cz_bytes(n: i64) -> String {
+    const STEPS: [(&str, i64); 3] = [("GB", 1_000_000_000), ("MB", 1_000_000), ("kB", 1_000)];
+    for (label, scale) in STEPS {
+        if n.abs() >= scale {
+            let v = n as f64 / scale as f64;
+            return format!("{} {label}", format!("{v:.1}").replace('.', ","));
+        }
+    }
+    format!("{} B", cz_int(n))
+}
+
+/// "30. 6. 2026". A date a Czech reader parses at a glance; ISO would
+/// read as a machine talking.
+fn cz_date(ts: i64) -> String {
+    use chrono::Datelike;
+    match chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0) {
+        Some(dt) => format!("{}. {}. {}", dt.day(), dt.month(), dt.year()),
+        // Unrepresentable timestamps can't reach a real report; saying so
+        // beats printing a wrong date with total confidence.
+        None => "neznámé datum".to_string(),
+    }
+}
+
+/// "30. 6. 2026 03:14 UTC" — the zone is spelled out because the customer
+/// is in CET/CEST and an unlabelled clock time would be a small lie.
+fn cz_datetime(ts: i64) -> String {
+    use chrono::Timelike;
+    match chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0) {
+        Some(dt) => format!("{} {:02}:{:02} UTC", cz_date(ts), dt.hour(), dt.minute()),
+        None => "neznámý čas".to_string(),
+    }
+}
+
+/// Hundredths of a percent → "99,93 %".
+fn cz_pct_x100(x: i64) -> String {
+    format!("{},{:02} %", x / 100, (x % 100).abs())
+}
+
 fn derive_user_from_summary(s: &HostingSummary) -> Option<String> {
     // HostingSummary doesn't carry system_user yet; fall back to deriving
     // it from the domain the same way the create flow does.
@@ -24697,7 +25580,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deleting_a_definition_keeps_the_activation_and_stops_enforcing_it() {
+    async fn deleting_a_definition_keeps_the_activation_enforceable() {
         let pool = open_memory().await.expect("open");
         let s = svc(pool.clone(), package_mocks());
         let detail = hosting_for_packages(&s, "example.cz").await;
@@ -24723,22 +25606,30 @@ mod tests {
         let held = s.package_activations(sel, false).await.expect("held");
         assert_eq!(held.len(), 1, "the customer's record survives the delete");
         assert_eq!(held[0].id, act.id);
-        assert_eq!(held[0].package_id, None, "but there is no bundle left");
         assert_eq!(
             held[0].price_minor,
             Some(49_000),
             "the price they agreed to is not ours to erase"
         );
-        assert!(held[0].package_name.is_empty());
+        assert_eq!(
+            held[0].package_name, "Zálohy",
+            "the name snapshot still says what was bought"
+        );
 
-        // Nothing left to enforce, so drift on that feature stands.
+        // …and neither is the SERVICE. The activation carries its own bundle
+        // snapshot, so retiring a definition must not quietly stop delivering
+        // what someone is still paying for: drift is still corrected.
         s.hosting_kv_set(hid.clone(), BACKUP_KV_CADENCE.into(), "off".into())
             .await
             .expect("drift");
-        assert_eq!(s.package_enforce_tick().await.expect("tick"), 0);
+        assert_eq!(
+            s.package_enforce_tick().await.expect("tick"),
+            1,
+            "a deleted definition must not silently disable enforcement"
+        );
         assert_eq!(
             kv_of(&pool, &hid, BACKUP_KV_CADENCE).await.as_deref(),
-            Some("off")
+            Some("daily")
         );
     }
 

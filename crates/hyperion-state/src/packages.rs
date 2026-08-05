@@ -12,7 +12,9 @@
 //! promise the node never kept.
 
 use crate::db::StateError;
-use hyperion_types::package::{BackupCadence, FeatureToggle, PackageFeatures, PackageState};
+use hyperion_types::package::{
+    BackupCadence, FeatureToggle, PackageFeatures, PackageState, ReportCadence,
+};
 use hyperion_types::HostingId;
 use sqlx::SqlitePool;
 
@@ -37,6 +39,7 @@ pub struct PackageRow {
     pub feat_monitoring: String,
     pub feat_hardening: String,
     pub feat_backup_cadence: String,
+    pub feat_report_cadence: String,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -58,6 +61,7 @@ impl PackageRow {
             monitoring: FeatureToggle::from_stored(&self.feat_monitoring),
             hardening: FeatureToggle::from_stored(&self.feat_hardening),
             backup_cadence: BackupCadence::from_stored(&self.feat_backup_cadence),
+            report_cadence: ReportCadence::from_stored(&self.feat_report_cadence),
         }
     }
 }
@@ -148,7 +152,7 @@ pub struct NewActivation {
 const SELECT_PACKAGES: &str =
     "SELECT id, name, slug, description, enabled, price_minor, price_currency,
             price_interval, feat_wp_auto_update, feat_integrity_scan, feat_monitoring,
-            feat_hardening, feat_backup_cadence, created_at, updated_at
+            feat_hardening, feat_backup_cadence, feat_report_cadence, created_at, updated_at
      FROM service_packages";
 
 /// Create a definition. A duplicate `name` or `slug` surfaces as a
@@ -158,11 +162,11 @@ pub async fn insert(pool: &SqlitePool, p: &NewPackage, now: i64) -> Result<i64, 
         r#"INSERT INTO service_packages
            (name, slug, description, enabled, price_minor, price_currency, price_interval,
             feat_wp_auto_update, feat_integrity_scan, feat_monitoring, feat_hardening,
-            feat_backup_cadence, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            feat_backup_cadence, feat_report_cadence, created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
            RETURNING id"#,
     )
-    // 14 columns, 14 placeholders, 14 binds — in column order.
+    // 15 columns, 15 placeholders, 15 binds — in column order.
     .bind(&p.name)
     .bind(&p.slug)
     .bind(&p.description)
@@ -175,6 +179,7 @@ pub async fn insert(pool: &SqlitePool, p: &NewPackage, now: i64) -> Result<i64, 
     .bind(p.features.monitoring.as_str())
     .bind(p.features.hardening.as_str())
     .bind(p.features.backup_cadence.as_str())
+    .bind(p.features.report_cadence.as_str())
     .bind(now)
     .bind(now)
     .fetch_one(pool)
@@ -198,11 +203,11 @@ pub async fn update(
             name = ?, slug = ?, description = ?, enabled = ?,
             price_minor = ?, price_currency = ?, price_interval = ?,
             feat_wp_auto_update = ?, feat_integrity_scan = ?, feat_monitoring = ?,
-            feat_hardening = ?, feat_backup_cadence = ?,
+            feat_hardening = ?, feat_backup_cadence = ?, feat_report_cadence = ?,
             updated_at = ?
            WHERE id = ?"#,
     )
-    // 13 SET placeholders + the WHERE id — the trailing `.bind(id)` is what
+    // 14 SET placeholders + the WHERE id — the trailing `.bind(id)` is what
     // keeps this from becoming `WHERE id = NULL` (a silent zero-row update).
     .bind(&p.name)
     .bind(&p.slug)
@@ -216,6 +221,7 @@ pub async fn update(
     .bind(p.features.monitoring.as_str())
     .bind(p.features.hardening.as_str())
     .bind(p.features.backup_cadence.as_str())
+    .bind(p.features.report_cadence.as_str())
     .bind(now)
     .bind(id)
     .execute(pool)
@@ -300,11 +306,11 @@ const SELECT_ACTIVATIONS: &str =
             a.price_currency, a.price_interval, a.next_billing_at, a.state,
             a.activated_at, a.cancelled_at, a.prior_state_json,
             a.feat_wp_auto_update, a.feat_integrity_scan, a.feat_monitoring,
-            a.feat_hardening, a.feat_backup_cadence
+            a.feat_hardening, a.feat_backup_cadence, a.feat_report_cadence
      FROM hosting_packages a";
 
 /// Raw activation row. A `FromRow` struct rather than a tuple: sqlx only
-/// implements `FromRow` for tuples up to 16 elements and this has 17, and
+/// implements `FromRow` for tuples up to 16 elements and this has 18, and
 /// name-mapping means adding a column can never silently shift the others.
 #[derive(sqlx::FromRow)]
 struct ActivationRowRaw {
@@ -325,6 +331,7 @@ struct ActivationRowRaw {
     feat_monitoring: String,
     feat_hardening: String,
     feat_backup_cadence: String,
+    feat_report_cadence: String,
 }
 
 fn map_activation(r: ActivationRowRaw) -> HostingPackageRow {
@@ -342,6 +349,7 @@ fn map_activation(r: ActivationRowRaw) -> HostingPackageRow {
             monitoring: FeatureToggle::from_stored(&r.feat_monitoring),
             hardening: FeatureToggle::from_stored(&r.feat_hardening),
             backup_cadence: BackupCadence::from_stored(&r.feat_backup_cadence),
+            report_cadence: ReportCadence::from_stored(&r.feat_report_cadence),
         },
         next_billing_at: r.next_billing_at,
         state: PackageState::from_stored(&r.state),
@@ -365,11 +373,11 @@ pub async fn activate(pool: &SqlitePool, a: &NewActivation, now: i64) -> Result<
            (hosting_id, package_id, package_name, price_minor, price_currency,
             price_interval, next_billing_at, state, activated_at, cancelled_at,
             prior_state_json, feat_wp_auto_update, feat_integrity_scan,
-            feat_monitoring, feat_hardening, feat_backup_cadence)
-           VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL, ?, ?, ?, ?, ?, ?)
+            feat_monitoring, feat_hardening, feat_backup_cadence, feat_report_cadence)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?, NULL, ?, ?, ?, ?, ?, ?, ?)
            RETURNING id"#,
     )
-    // 14 placeholders (state / cancelled_at are literals), 14 binds.
+    // 15 placeholders (state / cancelled_at are literals), 15 binds.
     .bind(a.hosting_id.as_str())
     .bind(a.package_id)
     .bind(&a.package_name)
@@ -384,6 +392,7 @@ pub async fn activate(pool: &SqlitePool, a: &NewActivation, now: i64) -> Result<
     .bind(a.features.monitoring.as_str())
     .bind(a.features.hardening.as_str())
     .bind(a.features.backup_cadence.as_str())
+    .bind(a.features.report_cadence.as_str())
     .fetch_one(pool)
     .await?;
     Ok(row.0)
@@ -554,6 +563,7 @@ mod tests {
                 wp_auto_update: FeatureToggle::On,
                 monitoring: FeatureToggle::On,
                 backup_cadence: BackupCadence::Daily,
+                report_cadence: ReportCadence::Monthly,
                 ..Default::default()
             },
             ..Default::default()
@@ -574,6 +584,7 @@ mod tests {
         assert_eq!(f.wp_auto_update, FeatureToggle::On);
         assert_eq!(f.monitoring, FeatureToggle::On);
         assert_eq!(f.backup_cadence, BackupCadence::Daily);
+        assert_eq!(f.report_cadence, ReportCadence::Monthly);
         // Untouched features must come back as "leave", never as "off".
         assert_eq!(f.hardening, FeatureToggle::Leave);
         assert_eq!(f.integrity_scan, FeatureToggle::Leave);
@@ -615,6 +626,7 @@ mod tests {
                     wp_auto_update: FeatureToggle::Off,
                     hardening: FeatureToggle::On,
                     backup_cadence: BackupCadence::Weekly,
+                    report_cadence: ReportCadence::Quarterly,
                     ..Default::default()
                 },
             },
@@ -634,6 +646,10 @@ mod tests {
         assert_eq!(f.wp_auto_update, FeatureToggle::Off);
         assert_eq!(f.hardening, FeatureToggle::On);
         assert_eq!(f.backup_cadence, BackupCadence::Weekly);
+        // The last SET column before `updated_at` — if its bind were
+        // missing, `updated_at` would absorb the id and the whole UPDATE
+        // would silently address no row at all.
+        assert_eq!(f.report_cadence, ReportCadence::Quarterly);
         // Cleared in the edit: on → leave, not on → off.
         assert_eq!(f.monitoring, FeatureToggle::Leave);
         assert_eq!(row.updated_at, 200, "updated_at must advance, not go NULL");
@@ -664,6 +680,10 @@ mod tests {
             // bundle would pass even if the snapshot were dropped entirely.
             features: PackageFeatures {
                 wp_auto_update: FeatureToggle::On,
+                // The LAST bind of the activation INSERT — a dropped bind
+                // here shifts every feature column one to the left, which
+                // this fixture makes visible in every activation test.
+                report_cadence: ReportCadence::Monthly,
                 ..PackageFeatures::default()
             },
             next_billing_at: None,
@@ -686,6 +706,8 @@ mod tests {
             .expect("list");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].features.wp_auto_update, FeatureToggle::On);
+        assert_eq!(rows[0].features.report_cadence, ReportCadence::Monthly);
+        assert_eq!(rows[0].features.backup_cadence, BackupCadence::Leave);
         assert_eq!(rows[0].package_name, format!("pkg-{id}"));
 
         // Re-scoping the definition must NOT reach back into what was sold.

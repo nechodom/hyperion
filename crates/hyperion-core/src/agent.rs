@@ -1657,6 +1657,18 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     async fn package_enforce_tick(&self) -> Result<i64, RpcError> {
         self.svc.package_enforce_tick().await
     }
+    async fn care_report_preview(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_rpc::codec::CareReportMail, RpcError> {
+        self.svc.care_report_preview(sel).await
+    }
+    async fn care_report_send(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_rpc::codec::CareReportMail, RpcError> {
+        self.svc.care_report_send(sel).await
+    }
 }
 
 #[cfg(test)]

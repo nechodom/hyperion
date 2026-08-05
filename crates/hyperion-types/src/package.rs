@@ -188,6 +188,104 @@ impl FromStr for BackupCadence {
     }
 }
 
+/// How often the customer receives the CARE REPORT — the periodic e-mail
+/// that tells them, in plain language, what the package actually did for
+/// their site: attacks blocked, updates applied, backups taken, uptime.
+///
+/// Modelled on [`BackupCadence`] rather than on [`FeatureToggle`] because
+/// it is the same kind of feature: not a boolean, and part of the same
+/// tri-state bundle. `Leave` means the package has no opinion, `Off` is a
+/// real instruction ("this package pins reports off"), and the three
+/// cadences are the values written to `hosting_kv` (`report_cadence`).
+///
+/// `Monthly` is the cadence to sell: it lines up with the usual billing
+/// interval, so the report lands next to the invoice it justifies.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum ReportCadence {
+    #[default]
+    Leave,
+    Off,
+    Weekly,
+    Monthly,
+    Quarterly,
+}
+
+impl ReportCadence {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Leave => "leave",
+            Self::Off => "off",
+            Self::Weekly => "weekly",
+            Self::Monthly => "monthly",
+            Self::Quarterly => "quarterly",
+        }
+    }
+
+    /// The value to write into `hosting_kv` `report_cadence`, or `None`
+    /// when the package leaves the cadence alone. Same split as
+    /// [`BackupCadence::kv_value`]: `Off` is a value, `Leave` is not.
+    pub fn kv_value(self) -> Option<&'static str> {
+        match self {
+            Self::Leave => None,
+            other => Some(other.as_str()),
+        }
+    }
+
+    pub fn is_leave(self) -> bool {
+        matches!(self, Self::Leave)
+    }
+
+    /// See [`FeatureToggle::from_stored`] — same fail-safe to `Leave`.
+    pub fn from_stored(s: &str) -> Self {
+        Self::from_str(s.trim()).unwrap_or(Self::Leave)
+    }
+
+    /// How much reporting this cadence buys. Only used to resolve two
+    /// packages that both pin a cadence.
+    fn frequency_rank(self) -> u8 {
+        match self {
+            Self::Leave => 0,
+            Self::Off => 1,
+            Self::Quarterly => 2,
+            Self::Monthly => 3,
+            Self::Weekly => 4,
+        }
+    }
+
+    /// Resolve two packages on the same hosting: the more frequent
+    /// cadence wins, for the same reason it does for backups — a customer
+    /// who bought a weekly report keeps it while also holding a package
+    /// that only promises quarterly.
+    pub fn combine(self, other: Self) -> Self {
+        if other.frequency_rank() > self.frequency_rank() {
+            other
+        } else {
+            self
+        }
+    }
+}
+
+impl fmt::Display for ReportCadence {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ReportCadence {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "leave" => Ok(Self::Leave),
+            "off" => Ok(Self::Off),
+            "weekly" => Ok(Self::Weekly),
+            "monthly" => Ok(Self::Monthly),
+            "quarterly" => Ok(Self::Quarterly),
+            other => Err(format!("unknown report cadence: {other}")),
+        }
+    }
+}
+
 /// The bundle of capabilities a package sells.
 ///
 /// Each field names a feature hyperion already has, and each lives
@@ -220,6 +318,12 @@ pub struct PackageFeatures {
     /// node.
     #[serde(default)]
     pub backup_cadence: BackupCadence,
+    /// Periodic care report to the customer — `hosting_kv`
+    /// `report_cadence` on the owning node. The only feature here the
+    /// customer SEES; the other five are invisible when they work, which
+    /// is precisely what the report exists to fix.
+    #[serde(default)]
+    pub report_cadence: ReportCadence,
 }
 
 impl PackageFeatures {
@@ -239,6 +343,7 @@ impl PackageFeatures {
             self.monitoring.is_leave(),
             self.hardening.is_leave(),
             self.backup_cadence.is_leave(),
+            self.report_cadence.is_leave(),
         ]
         .iter()
         .filter(|left_alone| !**left_alone)
@@ -256,6 +361,7 @@ impl PackageFeatures {
             monitoring: self.monitoring.combine(other.monitoring),
             hardening: self.hardening.combine(other.hardening),
             backup_cadence: self.backup_cadence.combine(other.backup_cadence),
+            report_cadence: self.report_cadence.combine(other.report_cadence),
         }
     }
 }
@@ -545,6 +651,202 @@ fn pretty_price(minor: Option<i64>, currency: Option<&str>, interval: Option<&st
     }
 }
 
+// =====================================================================
+//  The care report — what the customer gets for the money.
+//
+//  A well-run site is invisible: nothing breaks, so nothing is noticed.
+//  These are the numbers that make the work visible, and every one of
+//  them is OPTIONAL BY MEASUREMENT. `None` means "we did not measure
+//  this"; `Some(0)` means "we measured, and nothing happened". Collapsing
+//  the two would turn the report into a written overstatement to a paying
+//  customer — 100 % uptime for a site nobody ever monitored, "clean" for
+//  a scan that never ran. The distinction is produced by
+//  `hyperion_state::reports` from the rows themselves; a renderer must
+//  never infer it.
+// =====================================================================
+
+/// Traffic and footprint over the period, as observed by the hourly
+/// stats sampler.
+///
+/// Absent entirely (the field is `Option<CareUsage>`) when the sampler
+/// produced no row for this site in the period — a site that was never
+/// sampled has no traffic figure, which is not the same as no traffic.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct CareUsage {
+    /// Inbound bytes. `None` when the node's nginx log format carries no
+    /// request size (the default one does not), which is indistinguishable
+    /// in the data from a real zero — and "0 B received" on a site serving
+    /// traffic is a claim we cannot make.
+    #[serde(default)]
+    pub bw_in_bytes: Option<i64>,
+    pub bw_out_bytes: i64,
+    pub requests: i64,
+    /// Peak disk footprint seen in the period. A level, not a flow: it is
+    /// the MAX of the samples, never their sum.
+    pub disk_peak_bytes: i64,
+    /// Days of the period that actually carry a sample, and how many days
+    /// the period has. The traffic figures cover `days_counted` days —
+    /// print both, so a month with a four-day gap in sampling says so
+    /// instead of quietly reporting 26 days of traffic as a month.
+    pub days_counted: i64,
+    pub days_in_period: i64,
+}
+
+impl CareUsage {
+    /// True when every day of the period carries a sample — the only case
+    /// where the traffic numbers may be presented as the period's total
+    /// without a coverage caveat.
+    pub fn is_complete(&self) -> bool {
+        self.days_counted >= self.days_in_period
+    }
+}
+
+/// Uptime checks over the period.
+///
+/// Both counts travel together and the ratio is derived, never stored:
+/// the whole point is that a period with zero samples can produce no
+/// percentage at all rather than a 0/0 that renders as a flattering
+/// 100 %.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct CareUptime {
+    pub samples: i64,
+    pub successes: i64,
+}
+
+impl CareUptime {
+    /// Success ratio in hundredths of a percent (9995 = 99.95 %), or
+    /// `None` when there is nothing to divide by.
+    pub fn success_ratio_x100(&self) -> Option<i64> {
+        (self.samples > 0).then(|| self.successes * 10_000 / self.samples)
+    }
+
+    /// How many checks failed. Named the way the customer thinks about
+    /// it: outages, not "non-successes".
+    pub fn failures(&self) -> i64 {
+        (self.samples - self.successes).max(0)
+    }
+}
+
+/// Backups over the period.
+///
+/// Absent entirely when the site has no backup history AT ALL — backups
+/// were evidently never running, and "0 backups" would read as a failure
+/// rather than as a feature the customer never bought. Present with
+/// `taken == 0` is the genuinely alarming case: this site does take
+/// backups, and none happened in this period.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct CareBackups {
+    pub taken: i64,
+    pub failed: i64,
+    /// Finish time of the last successful backup IN THE PERIOD. `None`
+    /// when none succeeded — the report must not reach outside the period
+    /// for a comforting older date.
+    #[serde(default)]
+    pub last_success_at: Option<i64>,
+}
+
+/// Outcome of the file-integrity + malware scan.
+///
+/// Absent entirely when no scan ran inside the period. The two `*_ran`
+/// flags carry the same honesty inside a scan that did happen: zero
+/// malware hits with `malware_scan_ran == false` means "not looked for",
+/// never "none found".
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct CareIntegrity {
+    pub scanned_at: i64,
+    /// Whether the core/plugin checksum comparison actually ran.
+    pub checksums_ran: bool,
+    /// Whether a malware scanner actually walked the docroot. False is a
+    /// normal state (no scanner installed on the node), not an error.
+    pub malware_scan_ran: bool,
+    pub core_issues: i64,
+    pub plugin_issues: i64,
+    pub malware_hits: i64,
+}
+
+impl CareIntegrity {
+    pub fn total_findings(&self) -> i64 {
+        self.core_issues + self.plugin_issues + self.malware_hits
+    }
+
+    /// True only when BOTH signals ran and both came back empty — the
+    /// same rule as `WpIntegrityScanResult::is_clean`. A scan half of
+    /// which could not run is "unknown", and the report must say so.
+    pub fn is_clean(&self) -> bool {
+        self.checksums_ran && self.malware_scan_ran && self.total_findings() == 0
+    }
+}
+
+/// One hosting's care report for ONE period.
+///
+/// `[period_start, period_end)` is half-open, so two adjacent reports can
+/// never both claim the same event.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CareReport {
+    pub hosting_id: HostingId,
+    pub domain: String,
+    pub period_start: i64,
+    pub period_end: i64,
+    /// Ban events attributed to THIS site. `None` when the ban subsystem
+    /// was not running at all for the period (`[fail2ban] enabled =
+    /// false`), which the database cannot see and the caller must supply:
+    /// with the scanner off, zero bans means nobody was watching.
+    #[serde(default)]
+    pub attacks_blocked: Option<i64>,
+    /// Plugin/theme updates applied. `None` when the audit log cannot
+    /// account for the whole period (retention purged part of it, or the
+    /// node is younger than the period) — an incomplete count presented
+    /// as a total would understate the work done.
+    #[serde(default)]
+    pub updates_applied: Option<i64>,
+    #[serde(default)]
+    pub usage: Option<CareUsage>,
+    #[serde(default)]
+    pub uptime: Option<CareUptime>,
+    #[serde(default)]
+    pub backups: Option<CareBackups>,
+    #[serde(default)]
+    pub integrity: Option<CareIntegrity>,
+}
+
+impl CareReport {
+    /// An empty report for a period, with every metric unmeasured. The
+    /// honest starting point: a caller that fails to fill a section
+    /// leaves it saying "not measured", never zero.
+    pub fn empty(
+        hosting_id: HostingId,
+        domain: String,
+        period_start: i64,
+        period_end: i64,
+    ) -> Self {
+        Self {
+            hosting_id,
+            domain,
+            period_start,
+            period_end,
+            attacks_blocked: None,
+            updates_applied: None,
+            usage: None,
+            uptime: None,
+            backups: None,
+            integrity: None,
+        }
+    }
+
+    /// True when not a single section could be measured. Worth checking
+    /// before sending: a report that says "not measured" six times tells
+    /// the customer nothing and invites the question of what they pay
+    /// for.
+    pub fn is_entirely_unmeasured(&self) -> bool {
+        self.attacks_blocked.is_none()
+            && self.updates_applied.is_none()
+            && self.usage.is_none()
+            && self.uptime.is_none()
+            && self.backups.is_none()
+            && self.integrity.is_none()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -572,6 +874,57 @@ mod tests {
     }
 
     #[test]
+    fn report_cadence_str_round_trip() {
+        for c in [
+            ReportCadence::Leave,
+            ReportCadence::Off,
+            ReportCadence::Weekly,
+            ReportCadence::Monthly,
+            ReportCadence::Quarterly,
+        ] {
+            assert_eq!(ReportCadence::from_str(c.as_str()).unwrap(), c);
+            assert_eq!(ReportCadence::from_stored(c.as_str()), c);
+        }
+        // Same fail-safe as every other stored feature value: unreadable ⇒
+        // the package has no opinion, so nobody starts getting mail they
+        // did not buy.
+        assert_eq!(ReportCadence::from_stored("daily"), ReportCadence::Leave);
+        assert_eq!(ReportCadence::from_stored(""), ReportCadence::Leave);
+        assert_eq!(
+            ReportCadence::from_stored(" monthly "),
+            ReportCadence::Monthly
+        );
+        assert_eq!(ReportCadence::Off.kv_value(), Some("off"));
+        assert_eq!(ReportCadence::Leave.kv_value(), None);
+    }
+
+    #[test]
+    fn report_cadence_combine_keeps_the_more_frequent() {
+        assert_eq!(
+            ReportCadence::Quarterly.combine(ReportCadence::Monthly),
+            ReportCadence::Monthly
+        );
+        assert_eq!(
+            ReportCadence::Monthly.combine(ReportCadence::Quarterly),
+            ReportCadence::Monthly
+        );
+        assert_eq!(
+            ReportCadence::Weekly.combine(ReportCadence::Monthly),
+            ReportCadence::Weekly
+        );
+        // A package that pins reports off cannot silence one that sells
+        // them, and `Leave` never overrides anything.
+        assert_eq!(
+            ReportCadence::Off.combine(ReportCadence::Quarterly),
+            ReportCadence::Quarterly
+        );
+        assert_eq!(
+            ReportCadence::Leave.combine(ReportCadence::Off),
+            ReportCadence::Off
+        );
+    }
+
+    #[test]
     fn features_serde_round_trip() {
         let f = PackageFeatures {
             wp_auto_update: FeatureToggle::On,
@@ -579,6 +932,7 @@ mod tests {
             monitoring: FeatureToggle::Leave,
             hardening: FeatureToggle::On,
             backup_cadence: BackupCadence::Weekly,
+            report_cadence: ReportCadence::Monthly,
         };
         let s = serde_json::to_string(&f).expect("ser");
         let back: PackageFeatures = serde_json::from_str(&s).expect("de");
@@ -587,6 +941,7 @@ mod tests {
         // a value can move between column and JSON without translation.
         assert!(s.contains("\"wp_auto_update\":\"on\""), "{s}");
         assert!(s.contains("\"backup_cadence\":\"weekly\""), "{s}");
+        assert!(s.contains("\"report_cadence\":\"monthly\""), "{s}");
     }
 
     #[test]
@@ -598,6 +953,7 @@ mod tests {
         assert!(f.is_noop());
         assert_eq!(f.wp_auto_update.forces(), None);
         assert_eq!(f.backup_cadence.kv_value(), None);
+        assert_eq!(f.report_cadence.kv_value(), None);
     }
 
     #[test]
@@ -652,10 +1008,18 @@ mod tests {
             wp_auto_update: FeatureToggle::On,
             hardening: FeatureToggle::Off,
             backup_cadence: BackupCadence::Daily,
+            report_cadence: ReportCadence::Monthly,
             ..Default::default()
         };
-        assert_eq!(f.forced_count(), 3);
+        assert_eq!(f.forced_count(), 4);
         assert!(!f.is_noop());
+        // A package that sells only the report is still a real package.
+        let report_only = PackageFeatures {
+            report_cadence: ReportCadence::Monthly,
+            ..Default::default()
+        };
+        assert_eq!(report_only.forced_count(), 1);
+        assert!(!report_only.is_noop());
     }
 
     #[test]
@@ -772,5 +1136,94 @@ mod tests {
         let back: HostingPackage = serde_json::from_str(&s).expect("de");
         assert_eq!(a, back);
         assert_eq!(back.pretty_price(), "490.00 Kč/měsíc");
+    }
+
+    // ---------------------------------------------------------- report
+
+    #[test]
+    fn an_empty_report_measures_nothing() {
+        // The load-bearing default: a section the assembler never filled
+        // says "not measured", so a bug upstream can only ever cost the
+        // customer information — never invent a reassuring number.
+        let r = CareReport::empty(HostingId("h1".into()), "a.cz".into(), 100, 200);
+        assert!(r.is_entirely_unmeasured());
+        assert_eq!(r.attacks_blocked, None);
+        assert_eq!(r.uptime, None);
+        assert_eq!(r.integrity, None);
+    }
+
+    #[test]
+    fn zero_is_not_the_same_as_unmeasured() {
+        let mut r = CareReport::empty(HostingId("h1".into()), "a.cz".into(), 100, 200);
+        r.attacks_blocked = Some(0);
+        assert!(
+            !r.is_entirely_unmeasured(),
+            "'we watched, nothing happened' is a measurement"
+        );
+        // …and it survives the wire as such: `null` and `0` must not
+        // collapse into each other on the way to the node that renders.
+        let s = serde_json::to_string(&r).expect("ser");
+        assert!(s.contains("\"attacks_blocked\":0"), "{s}");
+        assert!(s.contains("\"uptime\":null"), "{s}");
+        let back: CareReport = serde_json::from_str(&s).expect("de");
+        assert_eq!(back, r);
+    }
+
+    #[test]
+    fn uptime_without_samples_yields_no_percentage() {
+        // The exact failure this type exists to prevent: 0/0 rendered as
+        // a flattering 100 %.
+        let none = CareUptime::default();
+        assert_eq!(none.success_ratio_x100(), None);
+        let good = CareUptime {
+            samples: 2000,
+            successes: 1999,
+        };
+        assert_eq!(good.success_ratio_x100(), Some(9995));
+        assert_eq!(good.failures(), 1);
+    }
+
+    #[test]
+    fn integrity_is_clean_only_when_both_signals_ran() {
+        // No findings, but the malware scanner never ran ⇒ "unknown".
+        let half = CareIntegrity {
+            scanned_at: 10,
+            checksums_ran: true,
+            malware_scan_ran: false,
+            ..Default::default()
+        };
+        assert!(!half.is_clean(), "an absent scanner never means clean");
+        assert_eq!(half.total_findings(), 0);
+
+        let full = CareIntegrity {
+            malware_scan_ran: true,
+            ..half
+        };
+        assert!(full.is_clean());
+
+        let dirty = CareIntegrity {
+            malware_hits: 1,
+            ..full
+        };
+        assert!(!dirty.is_clean());
+        assert_eq!(dirty.total_findings(), 1);
+    }
+
+    #[test]
+    fn usage_coverage_is_explicit() {
+        let full = CareUsage {
+            days_counted: 31,
+            days_in_period: 31,
+            ..Default::default()
+        };
+        assert!(full.is_complete());
+        let gappy = CareUsage {
+            days_counted: 26,
+            ..full
+        };
+        assert!(
+            !gappy.is_complete(),
+            "26 sampled days must not be presented as a month"
+        );
     }
 }

@@ -29,9 +29,10 @@ use askama::Template;
 use axum::extract::{Path, Query, State};
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::Form;
-use hyperion_rpc::codec::{Request, Response as RpcResponse};
+use hyperion_rpc::codec::{CareReportMail, Request, Response as RpcResponse};
 use hyperion_rpc::wire::HostingSelector;
 use hyperion_state::capabilities::Capability;
+use hyperion_types::package::ReportCadence;
 use hyperion_types::{
     BackupCadence, FeatureToggle, HostingPackage, LiveFeatureState, PackageFeatures, PackageInput,
     ServicePackage,
@@ -151,13 +152,29 @@ pub struct PackageForm {
     pub feat_hardening: String,
     #[serde(default)]
     pub feat_backup_cadence: String,
+    /// The care-report cadence. `Option`, not `String`, and the
+    /// distinction is load-bearing: `None` means the FORM did not carry
+    /// the field at all. `packages.html` posts it today, but an older
+    /// cached form — or any other client — must leave the stored cadence
+    /// alone: parsing an absent field as "leave" would silently switch off
+    /// a report the customer pays for the next time somebody fixes a typo
+    /// in the package name.
+    #[serde(default)]
+    pub feat_report_cadence: Option<String>,
 }
 
 impl PackageForm {
-    fn into_input(self) -> Result<PackageInput, AppError> {
+    /// `current` is the cadence already stored on the definition, for an
+    /// edit; `None` on create (where "not in the form" really does mean
+    /// "no opinion").
+    fn into_input(self, current: Option<ReportCadence>) -> Result<PackageInput, AppError> {
         let price_minor = parse_price_major(&self.price_major)?;
         let currency = self.price_currency.trim().to_string();
         let interval = self.price_interval.trim().to_string();
+        let report_cadence = match self.feat_report_cadence.as_deref() {
+            Some(v) => ReportCadence::from_stored(v),
+            None => current.unwrap_or_default(),
+        };
         Ok(PackageInput {
             name: self.name.trim().to_string(),
             slug: self.slug.trim().to_string(),
@@ -172,6 +189,7 @@ impl PackageForm {
                 monitoring: FeatureToggle::from_stored(&self.feat_monitoring),
                 hardening: FeatureToggle::from_stored(&self.feat_hardening),
                 backup_cadence: BackupCadence::from_stored(&self.feat_backup_cadence),
+                report_cadence,
             },
         })
     }
@@ -185,7 +203,7 @@ pub async fn post_create(
     if !ctx.can(Capability::ProfilesManage) {
         return Err(AppError::Forbidden);
     }
-    let input = form.into_input()?;
+    let input = form.into_input(None)?;
     match hyperion_rpc_client::call(&state.agent_socket, Request::PackageCreate(input)).await? {
         RpcResponse::PackageCreate(p) => Ok(redirect_flash(&format!(
             "Package \"{}\" created. Activate it on a hosting from that site's detail page.",
@@ -205,7 +223,17 @@ pub async fn post_update(
     if !ctx.can(Capability::ProfilesManage) {
         return Err(AppError::Forbidden);
     }
-    let input = form.into_input()?;
+    // Read the definition first, purely to carry over any feature an
+    // incoming form might not post back — see
+    // `PackageForm::feat_report_cadence` for why absent must not mean
+    // "leave".
+    let current =
+        match hyperion_rpc_client::call(&state.agent_socket, Request::PackageGet { id }).await? {
+            RpcResponse::PackageGet(p) => Some(p.features.report_cadence),
+            RpcResponse::Error(e) => return Ok(redirect_error(&e.to_string())),
+            _ => return Err(AppError::Internal("unexpected response".into())),
+        };
+    let input = form.into_input(current)?;
     match hyperion_rpc_client::call(&state.agent_socket, Request::PackageUpdate { id, input })
         .await?
     {
@@ -274,9 +302,71 @@ struct PackagesCardTpl {
     /// would refuse. The template also carries `data-require-caps`, but
     /// that is only for the customer's benefit, not the boundary.
     can_manage: bool,
+    /// True when at least one held package sells a periodic care report —
+    /// the only thing that makes the preview / send-now controls
+    /// meaningful, so they are absent otherwise.
+    sells_report: bool,
+    /// The rendered mail, shown in place after the operator asks for a
+    /// preview. `None` on every other render; a preview is never sticky,
+    /// because a stale one would show a period that has since moved.
+    preview: Option<ReportPreview>,
     /// Set after an action so the swapped-in card carries its own result.
     flash: Option<String>,
     error: Option<String>,
+}
+
+/// The care report as the preview block renders it — the operator reading
+/// exactly what their customer will receive, before it goes.
+struct ReportPreview {
+    subject: String,
+    /// Plain text, rendered inside a `<pre>`. Not summarised, not
+    /// reformatted: a preview that differs from the mail is worse than no
+    /// preview at all.
+    body: String,
+    /// Empty when the site has no owner e-mail — the template says so
+    /// loudly, because that is the state in which the scheduled send has
+    /// nowhere to go.
+    to: String,
+    /// "weekly" | "monthly" | "quarterly" — or "leave" / "off" when
+    /// nothing schedules this report and it would only ever go out by
+    /// hand.
+    cadence: String,
+    /// "1. 6. 2026 – 30. 6. 2026", the period the body covers.
+    period: String,
+    /// Not one section could be measured. The scheduled send skips such a
+    /// report; the operator should see why rather than wonder where their
+    /// customer's mail went.
+    entirely_unmeasured: bool,
+}
+
+impl ReportPreview {
+    /// Straight from the wire, with one thing added: the period as a date
+    /// range. Subject and body are passed through untouched — see the
+    /// struct's doc.
+    fn from_mail(m: CareReportMail) -> Self {
+        // The period is half-open, so the last day INSIDE it is `end - 1`.
+        // Same arithmetic as the renderer, so the range above the preview
+        // agrees with the one in the subject line the operator is reading.
+        let last_day = (m.period_end - 1).max(m.period_start);
+        Self {
+            period: format!("{} – {}", cz_date(m.period_start), cz_date(last_day)),
+            subject: m.subject,
+            body: m.body,
+            to: m.to,
+            cadence: m.cadence,
+            entirely_unmeasured: m.entirely_unmeasured,
+        }
+    }
+}
+
+/// "1. 6. 2026" — the shape `care_report_render` puts in the mail, so the
+/// period shown above the preview reads like the one inside it.
+fn cz_date(ts: i64) -> String {
+    use chrono::Datelike;
+    match chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0) {
+        Some(dt) => format!("{}. {}. {}", dt.day(), dt.month(), dt.year()),
+        None => "neznámé datum".to_string(),
+    }
 }
 
 /// One activation as the card renders it: the money (snapshotted at
@@ -318,6 +408,33 @@ struct Offerable {
     price: String,
 }
 
+/// Whether this site's customer actually receives a care report, how often,
+/// and when the last one went out.
+///
+/// Site-level on purpose: the cadence is the FOLD of every package the site
+/// holds (the send tick folds it the same way, so a weekly package next to
+/// a quarterly one delivers weekly), while each held package's line only
+/// says what THAT package sells. Passed into `build_held` for the same
+/// reason `LiveFeatureState` is — the definition states the promise, this
+/// states what the site is really doing about it.
+enum ReportDelivery {
+    /// The owning node couldn't be read. Renders as "couldn't check" and
+    /// never as a report that did (or didn't) arrive — the same rule the
+    /// other five features follow.
+    Unknown,
+    /// Nothing this site holds schedules a report, so there is no marker to
+    /// read: a package that pins reports `off` is keeping that promise by
+    /// construction.
+    NotScheduled,
+    /// The customer is entitled to a report on `cadence`, and `last_sent`
+    /// is the end of the last period actually mailed (`None` = they have
+    /// had none yet).
+    Scheduled {
+        cadence: ReportCadence,
+        last_sent: Option<i64>,
+    },
+}
+
 /// GET /hostings/:selector/packages-panel — lazily swapped into the
 /// detail page.
 ///
@@ -329,7 +446,7 @@ pub async fn get_packages_panel(
     ctx: AuthCtx,
     Path(selector): Path<String>,
 ) -> Result<Response, AppError> {
-    render_card(&state, &ctx, selector, None, None).await
+    render_card(&state, &ctx, selector, None, None, None).await
 }
 
 #[derive(Deserialize)]
@@ -369,7 +486,7 @@ pub async fn post_activate(
     {
         RpcResponse::PackageGet(p) => Some(p),
         RpcResponse::Error(e) => {
-            return render_card(&state, &ctx, form.selector, None, Some(e.to_string())).await;
+            return render_card(&state, &ctx, form.selector, None, Some(e.to_string()), None).await;
         }
         _ => return Err(AppError::Internal("unexpected response".into())),
     };
@@ -397,7 +514,7 @@ pub async fn post_activate(
         Ok(_) => (None, Some("unexpected response".into())),
         Err(e) => (None, Some(e.to_string())),
     };
-    render_card(&state, &ctx, form.selector, flash, error).await
+    render_card(&state, &ctx, form.selector, flash, error, None).await
 }
 
 #[derive(Deserialize)]
@@ -449,7 +566,108 @@ pub async fn post_cancel(
         Ok(_) => (None, Some("unexpected response".into())),
         Err(e) => (None, Some(e.to_string())),
     };
-    render_card(&state, &ctx, form.selector, flash, error).await
+    render_card(&state, &ctx, form.selector, flash, error, None).await
+}
+
+#[derive(Deserialize)]
+pub struct ReportForm {
+    pub selector: String,
+}
+
+/// POST /hostings/packages/report-preview — render the report and send
+/// NOTHING.
+///
+/// The important half of the pair: the operator reads the exact text their
+/// customer will receive before any of it goes out. The node builds it with
+/// the same period, recipient and renderer the scheduled send uses, so this
+/// is a rehearsal rather than an approximation.
+///
+/// Gated exactly like activate / cancel. Not a formality: the report quotes
+/// the site's traffic, the attacks against it and its integrity-scan
+/// verdict, so "it only reads" is not a reason to widen who may ask for it.
+pub async fn post_report_preview(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<ReportForm>,
+) -> Result<Response, AppError> {
+    let sel = match super::hostings::require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::ProfilesManage,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    // Hosting-scoped, so it must reach the OWNING node: every metric behind
+    // the report is per-node, and the master would truthfully answer "not
+    // measured" for all six sections of a worker's site.
+    let owner = owner_node(&state, &form.selector).await;
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        owner.as_deref(),
+        Request::CareReportPreview { sel },
+    )
+    .await;
+    let (preview, error) = match resp {
+        Ok(RpcResponse::CareReportPreview(m)) => (Some(ReportPreview::from_mail(m)), None),
+        Ok(RpcResponse::Error(e)) => (None, Some(e.to_string())),
+        Ok(_) => (None, Some("unexpected response".into())),
+        Err(e) => (None, Some(e.to_string())),
+    };
+    // No flash on success: the preview block below IS the result, and a
+    // "preview rendered" banner over it would only compete with it.
+    render_card(&state, &ctx, form.selector, None, error, preview).await
+}
+
+/// POST /hostings/packages/report-send — send it now, for real.
+///
+/// A real send, with the marker to match: the period it covers is recorded
+/// as reported, so the scheduled report neither repeats it an hour later
+/// nor loses the days before it. The node refuses outright when the site
+/// has no owner e-mail or the node has no relay — both come back as an
+/// error on the card rather than as a silent success.
+pub async fn post_report_send(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<ReportForm>,
+) -> Result<Response, AppError> {
+    let sel = match super::hostings::require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::ProfilesManage,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let owner = owner_node(&state, &form.selector).await;
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        owner.as_deref(),
+        Request::CareReportSend { sel },
+    )
+    .await;
+    let (flash, error) = match resp {
+        Ok(RpcResponse::CareReportSend(m)) => (
+            Some(format!(
+                "Care report sent to {}. The period it covers is now recorded as reported, \
+                 so the scheduled one won't repeat it.",
+                m.to
+            )),
+            None,
+        ),
+        Ok(RpcResponse::Error(e)) => (None, Some(e.to_string())),
+        Ok(_) => (None, Some("unexpected response".into())),
+        Err(e) => (None, Some(e.to_string())),
+    };
+    // Deliberately no preview of what was just sent: the marker has moved,
+    // so re-rendering the mail would show a period that no longer exists.
+    render_card(&state, &ctx, form.selector, flash, error, None).await
 }
 
 /// Build and render the card, or collapse to nothing.
@@ -466,6 +684,7 @@ async fn render_card(
     selector: String,
     flash: Option<String>,
     error: Option<String>,
+    preview: Option<ReportPreview>,
 ) -> Result<Response, AppError> {
     let sel = super::hostings::parse_selector_public(&selector)?;
     let (detail, owner) = super::hostings::find_hosting_anywhere(state, sel.clone()).await?;
@@ -518,13 +737,41 @@ async fn render_card(
     }
 
     let live = live_feature_state(state, owner.as_deref(), &detail).await;
+    // The reporting cadence this site adds up to, folded with the package
+    // layer's own rule — the customer keeps the most they paid for, so a
+    // weekly package next to a quarterly one delivers weekly and a package
+    // pinning reports off cannot silence one that sells them.
+    //
+    // Folded off the CURRENT definitions rather than the activation's
+    // snapshot: the snapshot lives on the owning node and never crosses the
+    // wire. The two differ only between an edit and the next enforcement
+    // pass, and everywhere else on this card an edited package already
+    // shows what it is about to do.
+    let cadence = activations
+        .iter()
+        .filter_map(|a| {
+            a.package_id
+                .and_then(|pid| definitions.iter().find(|d| d.id == pid))
+        })
+        .fold(ReportCadence::Leave, |acc, d| {
+            acc.combine(d.features.report_cadence)
+        });
+    // Does anything this site holds actually sell a report? Only then is
+    // the delivery marker worth an extra round trip — and only then do the
+    // preview / send controls belong on the card at all.
+    let sells_report = schedules_report(cadence);
+    let delivery = if sells_report {
+        report_delivery(state, owner.as_deref(), &detail, cadence).await
+    } else {
+        ReportDelivery::NotScheduled
+    };
     let held: Vec<HeldPackage> = activations
         .iter()
         .map(|a| {
             let def = a
                 .package_id
                 .and_then(|pid| definitions.iter().find(|d| d.id == pid));
-            build_held(a, def, live.as_ref())
+            build_held(a, def, live.as_ref(), &delivery)
         })
         .collect();
     // Don't offer what the site already holds: the partial unique index
@@ -547,6 +794,8 @@ async fn render_card(
         held,
         offerable,
         can_manage,
+        sells_report,
+        preview,
         flash,
         error,
     };
@@ -557,6 +806,7 @@ fn build_held(
     a: &HostingPackage,
     def: Option<&ServicePackage>,
     live: Option<&LiveFeatureState>,
+    delivery: &ReportDelivery,
 ) -> HeldPackage {
     HeldPackage {
         activation_id: a.id,
@@ -575,7 +825,15 @@ fn build_held(
         price: a.pretty_price(),
         next_billing_at: a.next_billing_at,
         included: def
-            .map(|d| included_features(&d.features, live))
+            .map(|d| {
+                let mut lines = included_features(&d.features, live);
+                // The report is the sixth feature the bundle sells, and the
+                // only one whose "is it actually happening?" is a send
+                // marker rather than a live setting — hence its own builder
+                // and its own site-level input.
+                lines.extend(report_feature(d.features.report_cadence, delivery));
+                lines
+            })
             .unwrap_or_default(),
         orphaned: def.is_none(),
     }
@@ -667,6 +925,95 @@ fn bool_feature(
     })
 }
 
+/// The care report's line: the cadence this package sells, and whether the
+/// customer is really getting it.
+///
+/// Same three states as `bool_feature`, and the same rule behind them — a
+/// node we couldn't read renders "couldn't check", never a report that went
+/// out. `Leave` produces no line at all: a package with no opinion about
+/// reports must not appear to sell one.
+fn report_feature(cadence: ReportCadence, delivery: &ReportDelivery) -> Option<IncludedFeature> {
+    let label = report_cadence_label(cadence)?;
+    let (status, live_label) = match delivery {
+        ReportDelivery::Unknown => ("unknown", String::new()),
+        // Reachable only for `Off`, whose promise is the ABSENCE of a mail
+        // and is therefore kept by there being nothing scheduled. Anything
+        // else here would mean we were asked about a cadence nobody sells,
+        // and "couldn't check" is the honest answer to that.
+        ReportDelivery::NotScheduled => {
+            if cadence == ReportCadence::Off {
+                ("active", String::new())
+            } else {
+                ("unknown", String::new())
+            }
+        }
+        ReportDelivery::Scheduled {
+            cadence: got,
+            last_sent,
+        } => {
+            // The fold takes the most frequent cadence the site holds, so
+            // another package can only ever make the report arrive MORE
+            // often than this one promises — never less. That is a promise
+            // kept, not drift, so it stays "on" and simply names what the
+            // customer actually receives.
+            let mut note = if *got == cadence {
+                String::new()
+            } else {
+                format!(
+                    "arrives {} — another package on this site pays for that; ",
+                    report_cadence_label(*got).unwrap_or("—")
+                )
+            };
+            note.push_str(&match last_sent {
+                Some(ts) => format!("last sent {}", crate::handlers::stats::fmt_ago(ts)),
+                // Not an error: a fresh activation's first period simply
+                // hasn't elapsed yet.
+                None => "none sent yet".to_string(),
+            });
+            ("active", note)
+        }
+    };
+    Some(IncludedFeature {
+        label: format!("Care report — {label}"),
+        detail: "A plain-language e-mail to the site's owner covering the \
+                 period: attacks blocked, updates applied, traffic, uptime, \
+                 backups taken and what the integrity scan found. It is what \
+                 makes work nobody notices visible.",
+        status,
+        live_label,
+    })
+}
+
+/// Czech label for a report cadence, or `None` when the package has no
+/// opinion at all (`Leave`) — callers that must print something render
+/// that as "—".
+///
+/// Czech because the report itself is: the customer's mail, its subject and
+/// its period all speak Czech, so naming the cadence in English here would
+/// describe a thing that doesn't exist under that name.
+fn report_cadence_label(c: ReportCadence) -> Option<&'static str> {
+    match c {
+        ReportCadence::Leave => None,
+        ReportCadence::Off => Some("vypnuto"),
+        ReportCadence::Weekly => Some("týdně"),
+        ReportCadence::Monthly => Some("měsíčně"),
+        ReportCadence::Quarterly => Some("čtvrtletně"),
+    }
+}
+
+/// Does this cadence actually put a report in the customer's inbox?
+///
+/// `Off` and `Leave` do not — the first pins reports off, the second has no
+/// opinion — which is exactly the split the send tick makes with its own
+/// (service-private) `report_cadence_secs`. Anything that hides the
+/// preview / send controls has to agree with what the tick would do.
+fn schedules_report(c: ReportCadence) -> bool {
+    matches!(
+        c,
+        ReportCadence::Weekly | ReportCadence::Monthly | ReportCadence::Quarterly
+    )
+}
+
 /// What the five package features are set to on this site RIGHT NOW.
 ///
 /// Mirrors `Service::package_live_state` through the same four sources:
@@ -730,6 +1077,47 @@ async fn live_feature_state(
         hardening: detail.vhost_options.waf_enabled,
         backup_cadence,
     })
+}
+
+/// `hosting_kv` key the service writes after a care report actually goes
+/// out — the end of the last period the customer was told about.
+///
+/// Spelled out here rather than imported because it is private to
+/// `hyperion-core`: the service owns every write, this only reads it, and a
+/// read that finds nothing means "no report has been sent yet", never
+/// "reports are off".
+const CARE_REPORT_KV_PERIOD_END: &str = "care_report_period_end";
+
+/// The delivery half of the report — the one thing the panel cannot work
+/// out for itself: when a report was last really sent.
+///
+/// `cadence` is folded by the caller from the packages the site holds; this
+/// only adds the marker, which is why an unreadable node collapses the
+/// whole thing to `Unknown` instead of answering "never sent" and painting
+/// a paid feature as silently broken.
+async fn report_delivery(
+    state: &SharedState,
+    owner: Option<&str>,
+    detail: &hyperion_types::HostingDetail,
+    cadence: ReportCadence,
+) -> ReportDelivery {
+    let kv: Vec<(String, String)> = match crate::dispatcher::dispatch_to_node(
+        state,
+        owner,
+        Request::HostingKvList {
+            hosting_id: detail.id.as_str().to_string(),
+        },
+    )
+    .await
+    {
+        Ok(RpcResponse::HostingKvList(v)) => v,
+        _ => return ReportDelivery::Unknown,
+    };
+    let last_sent = kv
+        .iter()
+        .find(|(k, _)| k == CARE_REPORT_KV_PERIOD_END)
+        .and_then(|(_, v)| v.trim().parse::<i64>().ok());
+    ReportDelivery::Scheduled { cadence, last_sent }
 }
 
 /// The node id the hosting lives on (`None` = master), for dispatch.
@@ -880,7 +1268,7 @@ mod tests {
             cancelled_at: None,
             prior_state_json: None,
         };
-        let held = build_held(&a, None, None);
+        let held = build_held(&a, None, None, &ReportDelivery::Unknown);
         assert!(held.orphaned);
         assert_eq!(held.price, "490.00 Kč/měsíc");
         assert!(held.included.is_empty());

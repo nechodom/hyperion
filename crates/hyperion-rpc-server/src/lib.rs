@@ -1462,6 +1462,14 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(corrected) => Response::PackageEnforceTick { corrected },
             Err(e) => Response::Error(e),
         },
+        Request::CareReportPreview { sel } => match api.care_report_preview(sel).await {
+            Ok(v) => Response::CareReportPreview(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::CareReportSend { sel } => match api.care_report_send(sel).await {
+            Ok(v) => Response::CareReportSend(v),
+            Err(e) => Response::Error(e),
+        },
     }
 }
 
@@ -2757,6 +2765,22 @@ mod tests {
         }
         async fn package_enforce_tick(&self) -> Result<i64, RpcError> {
             Ok(0)
+        }
+        async fn care_report_preview(
+            &self,
+            _: HostingSelector,
+        ) -> Result<hyperion_rpc::codec::CareReportMail, RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
+        }
+        async fn care_report_send(
+            &self,
+            _: HostingSelector,
+        ) -> Result<hyperion_rpc::codec::CareReportMail, RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
         }
     }
 

@@ -473,6 +473,18 @@ pub fn build_router(state: SharedState) -> Router {
             "/hostings/packages/cancel",
             post(handlers::packages::post_cancel),
         )
+        // The care report. Preview sends nothing and exists so the operator
+        // reads exactly what their customer will get; send-now really mails
+        // it. Both are gated in the handler on the same capability as
+        // activate / cancel.
+        .route(
+            "/hostings/packages/report-preview",
+            post(handlers::packages::post_report_preview),
+        )
+        .route(
+            "/hostings/packages/report-send",
+            post(handlers::packages::post_report_send),
+        )
         .route("/certs", get(handlers::certs::get_certs))
         .route("/vulns", get(handlers::vulns::get_vulns))
         .route("/bans", get(handlers::bans::get_bans))

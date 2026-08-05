@@ -1428,6 +1428,23 @@ pub enum Request {
     /// driven by the agent's own tick; exposed so an operator can force a
     /// pass without waiting for it.
     PackageEnforceTick,
+    /// Render the CURRENT period's care report for one hosting and send
+    /// NOTHING. The operator's read-before-it-goes-out: same period, same
+    /// recipient and same renderer the scheduled send uses, so what they
+    /// read is what the customer receives.
+    ///
+    /// Hosting-scoped, so it goes to the OWNING node — every metric behind
+    /// the report is per-node, and asking the master about a worker's site
+    /// would truthfully answer "not measured" for all six sections.
+    CareReportPreview {
+        sel: HostingSelector,
+    },
+    /// Send that same report now. A real send: it records the period as
+    /// reported, so the scheduled one neither repeats it nor loses the
+    /// days before it.
+    CareReportSend {
+        sel: HostingSelector,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1878,7 +1895,45 @@ pub enum Response {
     PackageEnforceTick {
         corrected: i64,
     },
+    /// The rendered report, sent nowhere.
+    CareReportPreview(CareReportMail),
+    /// The rendered report, as sent — `to` is who actually received it.
+    CareReportSend(CareReportMail),
     Error(RpcError),
+}
+
+/// One care report, rendered and ready to send (or just sent).
+///
+/// Carries the TEXT rather than the numbers because both consumers want
+/// exactly that: the panel shows the operator the mail before it goes out,
+/// and the operator must be reading the same bytes the customer will. The
+/// structured `CareReport` stays on the node that assembled it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CareReportMail {
+    /// Subject line, exactly as sent.
+    pub subject: String,
+    /// Plain-text body, exactly as sent. Czech — the recipient is the
+    /// customer, not the operator.
+    pub body: String,
+    /// The half-open period the report covers.
+    pub period_start: i64,
+    pub period_end: i64,
+    /// Recipient. EMPTY when the hosting has no owner e-mail: the preview
+    /// has to show that before anyone presses send, and the send itself
+    /// refuses rather than falling back to the cluster's default address
+    /// (which would mail the customer's report to the operator).
+    pub to: String,
+    /// What the hosting's active packages entitle it to — "weekly" |
+    /// "monthly" | "quarterly", or "leave" / "off" when nothing schedules
+    /// a report. Lets the preview say whether this would ever be sent on
+    /// its own.
+    pub cadence: String,
+    /// True when not one of the six sections could be measured. The
+    /// scheduled send skips such a report (it tells the customer nothing
+    /// and usually means it was assembled on the wrong node); the preview
+    /// shows it so the operator can see why.
+    #[serde(default)]
+    pub entirely_unmeasured: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

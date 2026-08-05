@@ -76,6 +76,17 @@ CREATE TABLE service_packages (
     -- pins backups off"), distinct from 'leave'.
     feat_backup_cadence TEXT NOT NULL DEFAULT 'leave'
         CHECK (feat_backup_cadence IN ('leave','off','daily','weekly','monthly')),
+    -- How often the customer gets the CARE REPORT — the periodic e-mail
+    -- listing what the package actually did (attacks blocked, updates
+    -- applied, backups taken, uptime). Same shape as the backup cadence
+    -- and for the same reason: not a boolean, and 'off' ("this package
+    -- pins reports off") is a real instruction distinct from 'leave'.
+    -- The only feature in this bundle the CUSTOMER ever sees; the rest
+    -- are invisible when they work, which is what the report exists to
+    -- fix. No 'daily': a daily mail about a quiet site trains people to
+    -- filter it, and a report nobody opens justifies no invoice.
+    feat_report_cadence TEXT NOT NULL DEFAULT 'leave'
+        CHECK (feat_report_cadence IN ('leave','off','weekly','monthly','quarterly')),
 
     created_at          INTEGER NOT NULL,
     updated_at          INTEGER NOT NULL
@@ -122,6 +133,12 @@ CREATE TABLE hosting_packages (
     feat_monitoring      TEXT NOT NULL DEFAULT 'leave',
     feat_hardening       TEXT NOT NULL DEFAULT 'leave',
     feat_backup_cadence  TEXT NOT NULL DEFAULT 'leave',
+    -- Deliberately un-CHECKed, like the four above: a worker node may hold
+    -- an activation written by a master that already knows a cadence this
+    -- node's build does not. A value we cannot parse degrades to 'leave'
+    -- in Rust (the package stops having an opinion), which is a far better
+    -- failure than an INSERT the node rejects outright.
+    feat_report_cadence  TEXT NOT NULL DEFAULT 'leave',
     -- Reminder clock, same contract as hosting_profile_apply: the sweep
     -- advances it after firing so a due package doesn't re-notify forever.
     next_billing_at  INTEGER,

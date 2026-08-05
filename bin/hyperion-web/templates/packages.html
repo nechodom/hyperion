@@ -9,7 +9,7 @@
    touches what it explicitly forces, which is what lets a site hold a
    Backup package and a Monitoring package at the same time without each
    switching the other's feature off. #}
-{% macro feature_bundle(id_prefix, wp, integrity, monitoring, hardening, backup) %}
+{% macro feature_bundle(id_prefix, wp, integrity, monitoring, hardening, backup, report) %}
 <div class="field-row">
   <div class="field">
     <label for="{{ id_prefix }}_wp">Automatic WordPress updates</label>
@@ -54,6 +54,16 @@
     <option value="weekly"{% if backup == "weekly" %} selected{% endif %}>Weekly</option>
     <option value="monthly"{% if backup == "monthly" %} selected{% endif %}>Monthly</option>
     <option value="off"{% if backup == "off" %} selected{% endif %}>Off — keep scheduled backups switched off</option>
+  </select>
+</div>
+<div class="field">
+  <label for="{{ id_prefix }}_report">Care report e-mail <span class="hint">the only part of the package the customer ever sees — everything else is invisible when it works</span></label>
+  <select id="{{ id_prefix }}_report" name="feat_report_cadence">
+    <option value="leave"{% if report == "leave" %} selected{% endif %}>Leave alone — not part of this package</option>
+    <option value="monthly"{% if report == "monthly" %} selected{% endif %}>Monthly</option>
+    <option value="weekly"{% if report == "weekly" %} selected{% endif %}>Weekly</option>
+    <option value="quarterly"{% if report == "quarterly" %} selected{% endif %}>Quarterly</option>
+    <option value="off"{% if report == "off" %} selected{% endif %}>Off — send no report</option>
   </select>
 </div>
 {% endmacro %}
@@ -219,7 +229,8 @@
                                        v.pkg.features.integrity_scan.as_str(),
                                        v.pkg.features.monitoring.as_str(),
                                        v.pkg.features.hardening.as_str(),
-                                       v.pkg.features.backup_cadence.as_str()) %}
+                                       v.pkg.features.backup_cadence.as_str(),
+                                       v.pkg.features.report_cadence.as_str()) %}
                 <label class="field" style="display:flex;align-items:center;gap:0.5rem;margin-top:0.8rem">
                   <input type="checkbox" name="enabled" value="1"{% if v.pkg.enabled %} checked{% endif %} style="margin:0">
                   <span>Offered — show it in the activate picker. Untick to retire it without touching the {{ v.pkg.active_count }} site{% if v.pkg.active_count != 1 %}s{% endif %} already on it.</span>
@@ -294,7 +305,7 @@
       without fighting — and a customer who switched something on themselves keeps it
       when the package is cancelled.
     </p>
-    {% call feature_bundle("n", "leave", "leave", "leave", "leave", "leave") %}
+    {% call feature_bundle("n", "leave", "leave", "leave", "leave", "leave", "leave") %}
 
     <label class="field" style="display:flex;align-items:center;gap:0.5rem;margin-top:0.8rem">
       <input type="checkbox" name="enabled" value="1" checked style="margin:0">

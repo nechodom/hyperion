@@ -1104,6 +1104,18 @@ pub trait AgentApi: Send + Sync + 'static {
     /// Re-assert every active package's features on this node. Returns the
     /// number of feature corrections made.
     async fn package_enforce_tick(&self) -> Result<i64, RpcError>;
+    /// Render the current period's care report for one hosting WITHOUT
+    /// sending it — what the operator reads before it reaches a customer.
+    async fn care_report_preview(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<crate::codec::CareReportMail, RpcError>;
+    /// Send that report now, and record the period as reported so the
+    /// scheduled send neither repeats it nor loses the days before it.
+    async fn care_report_send(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<crate::codec::CareReportMail, RpcError>;
 
     /// Reset the WordPress admin password (wp user update --user_pass).
     /// Returns the new password (the caller usually shows it to the

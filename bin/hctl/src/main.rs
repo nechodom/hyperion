@@ -1233,6 +1233,30 @@ fn print_pretty(resp: &Response) {
                 println!("✓ re-asserted {corrected} paid feature(s) that had been switched off");
             }
         }
+        Response::CareReportPreview(m) | Response::CareReportSend(m) => {
+            // The body is the point — print it verbatim, because the whole
+            // reason preview exists is to read exactly what the customer
+            // gets. Everything else goes above it as a short header.
+            println!("period:   {} → {}", m.period_start, m.period_end);
+            println!("cadence:  {}", m.cadence);
+            println!(
+                "to:       {}",
+                if m.to.is_empty() {
+                    "(none — this site has no owner e-mail, so nothing can be sent)"
+                } else {
+                    m.to.as_str()
+                }
+            );
+            if m.entirely_unmeasured {
+                println!(
+                    "warning:  not one metric could be measured — the scheduled send skips \
+                     a report like this (is this the node that owns the site?)"
+                );
+            }
+            println!("subject:  {}", m.subject);
+            println!();
+            print!("{}", m.body);
+        }
         Response::HostingImportPanelPlan(plan) => {
             println!(
                 "Import plan — source {} {} ({} site(s)):",

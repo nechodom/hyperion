@@ -94,6 +94,11 @@
                   <span class="text-soft small">— {{ f.live_label }}; it will be switched back on automatically</span>
                 {% else if f.status == "unknown" %}
                   <span class="text-soft small">— couldn't check the server just now</span>
+                {% else if !f.live_label.is_empty() %}
+                  {# A feature that IS on, with something worth saying anyway —
+                     the care report's "last sent" is the only one so far. The
+                     five live settings leave this empty when they're on. #}
+                  <span class="text-soft small">— {{ f.live_label }}</span>
                 {% endif %}
                 <div class="muted" style="font-size:0.8rem;line-height:1.5">{{ f.detail }}</div>
               </span>
@@ -123,6 +128,88 @@
       </div>
       {% endfor %}
     </div>
+  {% endif %}
+
+  {# The care report — the one part of a package the customer actually sees
+     ARRIVE. Present only when something this site holds really sells one
+     (`sells_report`; a package that pins reports off sells nothing), and
+     only for a session that may act on it: both buttons reach the owning
+     node and Send now mails the customer. The handler re-checks the same
+     capability — hiding a button is not a permission check.
+
+     Preview is the point of this block. It renders the same period, the
+     same recipient and the same text the scheduled send would use, so the
+     operator reads exactly what lands in their customer's inbox — and
+     sends nothing by reading it. The cadence and the last send are on the
+     package's own "Care report" line above. #}
+  {% if sells_report && can_manage %}
+  <div style="margin-top:0.9rem;padding-top:0.8rem;border-top:1px solid var(--border)" data-require-caps="profiles_manage">
+    <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
+      <strong style="font-size:0.9rem">Zpráva o péči</strong>
+      <span class="grow"></span>
+      <form hx-post="/hostings/packages/report-preview" hx-target="#packages-card" hx-swap="outerHTML">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="selector" value="{{ selector }}">
+        <button class="btn small ghost" type="submit">Preview</button>
+      </form>
+      <form hx-post="/hostings/packages/report-send" hx-target="#packages-card" hx-swap="outerHTML"
+            data-confirm-title="Send the care report now"
+            data-confirm-body="This really e-mails the site's owner. The period it covers is then recorded as reported, so the next scheduled report starts here instead of repeating it. Preview it first if you haven't."
+            data-confirm-confirm-label="Send now">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="selector" value="{{ selector }}">
+        <button class="btn small" type="submit">Send now</button>
+      </form>
+    </div>
+    <p class="text-soft small" style="margin:0.45rem 0 0">
+      Goes to the site's owner e-mail on its own schedule. Preview renders it
+      without sending anything; Send now mails it and starts the next period
+      here.
+    </p>
+
+    {% if let Some(p) = preview %}
+      {# Scrolls inside itself — a care report is long and a customer's site
+         name is not, so an unbounded <pre> would widen the whole detail
+         page. #}
+      <div style="margin-top:0.7rem;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-2);padding:0.7rem 0.8rem;min-width:0">
+        <div style="display:flex;gap:0.5rem;align-items:baseline;flex-wrap:wrap">
+          <span class="pill" style="font-size:0.58rem;background:var(--surface-2);color:var(--text-soft)">preview — nothing was sent</span>
+          <span class="text-soft small numeric">{{ p.period }}</span>
+          <span class="grow"></span>
+          <span class="text-soft small">{{ p.cadence }}</span>
+        </div>
+
+        {# No recipient is the state in which the scheduled send has nowhere
+           to go and refuses — said here, loudly, rather than discovered
+           weeks later when the customer asks where their report is. #}
+        {% if p.to.is_empty() %}
+          <div class="flash warn" style="margin:0.55rem 0 0">
+            <div class="flash-body">
+              This site has no owner e-mail, so nothing can be sent — not by
+              the button above and not on schedule. Set one on the hosting
+              first.
+            </div>
+          </div>
+        {% else %}
+          <p class="text-soft small" style="margin:0.45rem 0 0">To: <span class="numeric">{{ p.to }}</span></p>
+        {% endif %}
+
+        {% if p.entirely_unmeasured %}
+          <div class="flash warn" style="margin:0.55rem 0 0">
+            <div class="flash-body">
+              Not one section of this report could be measured. The scheduled
+              send skips a report like this on purpose — six "nekontrolováno"
+              lines tell the customer nothing. Check that the package's
+              features are actually on for this site.
+            </div>
+          </div>
+        {% endif %}
+
+        <p style="margin:0.55rem 0 0;font-size:0.88rem"><strong>{{ p.subject }}</strong></p>
+        <pre style="margin:0.4rem 0 0;padding:0.6rem 0.7rem;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-sm);max-height:26rem;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-size:0.78rem;line-height:1.55">{{ p.body }}</pre>
+      </div>
+    {% endif %}
+  </div>
   {% endif %}
 
   {% if can_manage %}
