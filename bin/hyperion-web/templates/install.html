@@ -229,10 +229,19 @@
       signal for the hardening ladder in <a href="/settings#cluster">Settings → Control plane → Security</a>.
       Turn a step on only once <em>every</em> node below carries its chip: while a step is on,
       a node missing that chip is <strong>refused</strong>, and its sites drop out of every
-      list until it publishes the key.
+      list until it reports the missing value.
       Both are pinned on first sight and a <em>changed</em> key is refused, so a node whose agent
       you deliberately reinstalled stays refused until you use <strong>Clear pinned crypto</strong>
       on its card. Only reach for that after a key change you expected.
+    </p>
+    <p class="text-soft small" style="margin:0 0 1rem">
+      Neither chip says anything about the other direction — whether a node verifies
+      <em>this master's</em> certificate when it enrolls and heartbeats. That is set on the node
+      itself, in <code>/etc/hyperion/agent.toml</code> under <code>[enrollment] verify_tls</code>,
+      and the install command below measures it while it runs. A node that stops appearing under
+      <strong>Last seen</strong> shortly after you changed this master's certificate is the
+      symptom: check <code>journalctl -u hyperion-agent -g 'TLS policy'</code> there. The agent
+      never falls back to an unverified connection on its own.
     </p>
     <div class="node-grid">
     {# Server-side pre-tagged: each `nodes` entry is `(NodeSummary,
@@ -261,8 +270,15 @@
               {% else %}
               <span class="pill" style="background:var(--surface-2);color:var(--text-soft)">{{ n.agent_version }}</span>
               {% endif %}
+              {# Rendered in BOTH states, for the same reason as the
+                 response-auth chip below: an absent chip is invisible
+                 when you are scanning a grid of cards, and a node
+                 without a pin is the one that gets cut off the moment
+                 step 1 of the hardening ladder goes on. #}
               {% if let Some(pin) = n.tls_spki_pin %}
-              <span class="pill" style="background:var(--surface-2);color:var(--text-soft)" title="TLS certificate SPKI pin reported by this node — curl --pinnedpubkey sha256//{{ pin }}. Recorded for change detection only; enforcement is enabled separately.">🔒 TLS pin on file</span>
+              <span class="pill" style="background:var(--surface-2);color:var(--text-soft)" title="TLS certificate SPKI pin reported by this node — curl --pinnedpubkey sha256//{{ pin }}. Pinned on first sight and never silently replaced: a node reporting a different pin is refused and logged. Enforcing it is step 1 in Settings → Control plane → Security.">🔒 TLS pin on file</span>
+              {% else %}
+              <span class="pill" style="background:var(--warn);color:white" title="This node has not reported a TLS certificate pin, so the master has nothing to check its certificate against and an on-path attacker would be indistinguishable from the node. Restart hyperion-agent there and wait one heartbeat. While step 1 (Enforce worker TLS certificate pinning) is on, this node is REFUSED — there is no protection to give a connection with no pin.">⚠ No TLS pin</span>
               {% endif %}
               {# Response-signing readiness. Rendered in BOTH states, unlike
                  the TLS pin above: the operator has to confirm that EVERY
@@ -629,7 +645,8 @@
     <li>Create a labeled token above. <strong>The plaintext is shown once</strong> — copy it immediately; only its hash is stored on the master.</li>
     <li>Run the printed <code>curl … | sudo bash …</code> command on the new machine.</li>
     <li>The install script provisions dependencies, builds <code>hyperion-agent</code>, saves the token and master URL into <code>/etc/hyperion/agent.toml</code>, and starts the service.</li>
-    <li>The agent calls <code>POST /api/enroll</code> with the token, signs an mTLS certificate, and joins the cluster. The new node appears in Enrolled nodes above within about 30 s.</li>
+    <li>Before writing that file the installer probes this master's TLS certificate from the new machine and records what it found: <code>verify_tls = true</code> when the certificate verified, <code>verify_tls = false</code> (plus the reason) when it did not, and nothing at all when the master could not be reached — in which case the agent decides from the URL, verifying any <code>https://</code> master with a DNS hostname.</li>
+    <li>The agent calls <code>POST /api/enroll</code> with the token, signs an mTLS certificate, and joins the cluster. The new node appears in Enrolled nodes above within about 30 s. If the certificate check fails the agent stops rather than retrying unverified, and <code>journalctl -u hyperion-agent</code> on the node carries the fix.</li>
   </ol>
 </div>
 {% endblock %}

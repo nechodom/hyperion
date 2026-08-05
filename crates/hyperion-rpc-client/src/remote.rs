@@ -22,6 +22,19 @@
 //!   self-signed cert" phase. The Ed25519 signature is the actual
 //!   auth — TLS is transport encryption only.
 //!
+//! ## Why THIS direction can't just verify the certificate
+//!
+//! The two legs of the cluster channel are not symmetric. The node→
+//! master leg verifies for real (the master normally holds a CA-issued
+//! certificate for the panel's hostname; see the agent's
+//! `enroll::decide_verify_tls`). This leg cannot: a worker's inbound
+//! cert is self-signed and auto-generated on first boot, so there is no
+//! CA to check it against and no hostname to check it for. The
+//! substitute is `--pinnedpubkey` against the SPKI the worker reported
+//! over its authenticated heartbeat — which is why that pin is
+//! write-once master-side, and why `-k` staying here is a deliberate
+//! decision rather than an unfinished one.
+//!
 //! ## Response authentication
 //!
 //! Because `-k` accepts any cert, an on-path attacker can rewrite what
@@ -62,9 +75,13 @@ pub struct RemoteCallOpts {
     /// take a while (backup_now, hosting_export); operator code
     /// should pick this per-request kind.
     pub timeout_secs: u64,
-    /// Skip TLS verification (the agent's cert is self-signed).
-    /// Always true today; left here as a hook for the future when
-    /// the master pins a cert fingerprint from enrollment.
+    /// Verify the worker's certificate against the master's CA bundle.
+    /// `false` everywhere today, and by design: worker certs are
+    /// self-signed with no hostname a CA could vouch for, so this leg
+    /// authenticates the connection with `pinned_pubkey` instead (see
+    /// the module docs). Kept as a field, not hardcoded, so a
+    /// deployment that does issue real certs to its workers can turn it
+    /// on without touching this crate.
     pub verify_tls: bool,
     /// When `Some`, ENFORCE this SPKI pin (the base64 value, no
     /// `sha256//` prefix) via `curl --pinnedpubkey sha256//<value>`:

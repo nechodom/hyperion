@@ -384,6 +384,65 @@ install -d -m 0755 /var/lib/hyperion/acme-challenges
 install -d -m 0700 /var/lib/hyperion/backups/local
 
 #-------- 6. agent.toml with master enrollment info -----------------------
+# Node→master TLS: MEASURE it, don't assume. Every heartbeat carries this
+# node's plaintext secret to the master, so verifying the master's
+# certificate is what keeps an on-path attacker from reading it — and the
+# master is normally the side that HAS a real certificate. We probe it the
+# way the agent will, without -k, and write down what actually happened.
+# Nothing here can fail the install: the worst case leaves the key unset and
+# lets the agent decide from the URL at runtime.
+TLS_COMMENT=""
+TLS_SETTING=""
+TLS_STATUS=""
+if [[ "$MASTER" == https://* ]]; then
+  tls_probe=0
+  curl -sS --max-time 8 -o /dev/null "${MASTER%/}/healthz" >/dev/null 2>&1 || tls_probe=$?
+  case "$tls_probe" in
+    0)
+      TLS_SETTING='verify_tls   = true'
+      TLS_STATUS="verified (verify_tls = true)"
+      TLS_COMMENT="# Measured during this install: the master's certificate verified against
+# this node's CA bundle, so enrollment and every heartbeat verify it. If the
+# master later moves to a certificate this node cannot verify, the agent
+# STOPS heartbeating and logs the fix — it never falls back to an unverified
+# connection on its own, so a node that goes stale right after a certificate
+# change is telling you something."
+      log "Master certificate verified — writing verify_tls = true."
+      ;;
+    51|60|77)
+      TLS_SETTING='verify_tls   = false'
+      TLS_STATUS="NOT verified — master certificate is self-signed (verify_tls = false)"
+      TLS_COMMENT="# Measured during this install: the master's certificate did NOT verify
+# against this node's CA bundle (curl exit ${tls_probe}) — what a self-signed
+# master looks like. Verification is therefore OFF, and the invite token plus
+# this node's per-node secret cross a channel an on-path attacker can read.
+# Master->node commands stay Ed25519-signed either way. To close the gap:
+# give the master a CA-issued certificate (certbot on the master), or copy the
+# master's own CA to /usr/local/share/ca-certificates/hyperion-master.crt here
+# and run update-ca-certificates; then set verify_tls = true below and
+# restart hyperion-agent."
+      log "WARNING: the master's certificate did not verify (curl exit ${tls_probe}) — writing verify_tls = false."
+      ;;
+    *)
+      TLS_STATUS="not measured — master unreachable during install (verify_tls left on auto)"
+      TLS_COMMENT="# The master could not be reached during this install (curl exit ${tls_probe}),
+# so NOTHING was measured and this key is deliberately left unset. Unset means
+# the agent decides from the URL: an https:// master with a DNS hostname IS
+# verified. If this master turns out to serve a self-signed certificate, the
+# agent aborts enrollment with the fix in the message rather than quietly
+# connecting unverified — add 'verify_tls = false' here to accept that channel."
+      log "Could not reach the master for a TLS check (curl exit ${tls_probe}) — leaving verify_tls unset (auto)."
+      ;;
+  esac
+else
+  TLS_STATUS="NO TLS — master_url is http://"
+  TLS_COMMENT="# master_url is http://, so there is no TLS on this connection at all: the
+# invite token and this node's per-node secret cross the network in cleartext,
+# and verify_tls has nothing to act on. Move the master to https:// and
+# re-enroll this node."
+  log "WARNING: --master is http:// — the invite token and this node's secret will cross the network in cleartext."
+fi
+
 cat > /etc/hyperion/agent.toml <<EOF
 [agent]
 socket_path  = "/run/hyperion.sock"
@@ -421,11 +480,6 @@ default_webhook = ""
 # heartbeats every 60s — visible on the master's /install page
 # under Enrolled nodes.
 #
-# verify_tls=false because install-master.sh ships a self-signed
-# cert (no DNS at install time → no LE). The bearer token + per-
-# node secret are the authentication; TLS here is encryption-in-
-# transit. Flip to true once the master serves a real cert.
-#
 # Retry on failure: if the master isn't reachable on first boot,
 # the agent retries 5× with growing backoff (~9 min total). Past
 # that, run on this node:
@@ -436,7 +490,10 @@ default_webhook = ""
 master_url   = "$MASTER"
 invite_token = "$TOKEN"
 node_label   = "$LABEL"
-verify_tls   = false
+
+# TLS for the node->master leg (enrollment + every heartbeat).
+${TLS_COMMENT}
+${TLS_SETTING}
 
 # Master→node remote RPC.
 #
@@ -523,6 +580,14 @@ echo "  ----------------------------------------"
 echo "  Local socket:    /run/hyperion.sock"
 echo "  Master:          $MASTER"
 echo "  Token recorded:  /etc/hyperion/agent.toml"
+echo "  Master TLS:      $TLS_STATUS"
+echo ""
+echo "  Cluster channel hardening — do these IN ORDER:"
+echo "    0. this node verifies the master's certificate   (above; per node, in agent.toml)"
+echo "    1. master enforces worker TLS certificate pinning (master: Settings -> Cluster)"
+echo "    2. master enforces signed node responses          (master: Settings -> Cluster)"
+echo "  Steps 1 and 2 refuse a node that has not reported the matching value, so turn"
+echo "  each on only once EVERY node shows its chip on the master's Nodes page."
 echo ""
 echo "  CLI:  sudo usermod -aG hyperion-admin \$USER  (then re-login)"
 echo "        hctl info"

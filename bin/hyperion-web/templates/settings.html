@@ -90,6 +90,14 @@
     {% if config.backup_remote.enabled %}<span class="tab-badge" style="background:var(--success);color:white">●</span>
     {% else %}<span class="tab-badge" style="background:var(--surface-2)">local</span>{% endif %}
   </a>
+  <a class="tab" data-tab="bruteforce" href="#bruteforce" role="tab" title="How many failed logins earn an IP a firewall ban, and for how long">
+    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+    Brute force
+    {% if let Some(f) = fail2ban %}
+      {% if f.cfg.enabled %}<span class="tab-badge" style="background:var(--success);color:white">●</span>
+      {% else %}<span class="tab-badge" style="background:var(--surface-2)">off</span>{% endif %}
+    {% endif %}
+  </a>
   <a class="tab" data-tab="cluster" href="#cluster" role="tab" title="Panel domain, hosting placement, and security policy">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
     Control plane
@@ -823,6 +831,176 @@
 </div>
 
 {# ==========================================================
+   BRUTE FORCE — the native scanner's [fail2ban] section
+   ========================================================== #}
+<div class="tab-panel" id="tab-bruteforce">
+
+  <div class="flash info" style="margin-bottom:1rem">
+    <div class="flash-body">
+      Hyperion watches four sources for login floods and drops offenders at the
+      firewall: each site's own <code>access.log</code> (POSTs to
+      <code>wp-login.php</code> / <code>xmlrpc.php</code>) and the node-wide
+      <strong>ssh</strong>, <strong>ftp</strong> and <strong>mail</strong> journals.
+      Bans in force are listed on <a href="/bans">Bans</a>.
+    </div>
+  </div>
+
+  {% if let Some(f) = fail2ban %}
+  <div class="card">
+    <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.5rem">
+      <h2 style="margin:0">
+        <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        Brute-force scanner
+      </h2>
+      {% if f.cfg.enabled %}<span class="pill ok">scanning</span>
+      {% else %}<span class="pill warn">off</span>{% endif %}
+    </div>
+
+    {# Two things the form itself cannot say. Neither is decoration: one
+       means the numbers were never chosen, the other means they are not
+       the numbers in use. #}
+    {% if !f.in_toml %}
+    <div class="flash info" style="margin-bottom:0.85rem">
+      <div class="flash-body">
+        <code>agent.toml</code> has no <code>[fail2ban]</code> section, so the
+        agent is running the built-in defaults — that is what's filled in below.
+        Saving writes the section for the first time.
+      </div>
+    </div>
+    {% endif %}
+    {% if f.clamped %}
+    <div class="alert alert-warn" role="alert" style="margin:0 0 0.85rem">
+      <strong>The file and the running scanner disagree.</strong>
+      At least one value in <code>[fail2ban]</code> is below the floor the agent
+      applies at start-up, so the scanner is <em>not</em> using the number shown
+      here. Saving this form writes values that stand on their own.
+    </div>
+    {% endif %}
+
+    <form method="post" action="/settings/config" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="fail2ban">
+      <input type="hidden" name="_checkboxes" value="enabled">
+      <label class="field-checkbox" style="font-weight:600">
+        <input type="checkbox" name="enabled" value="true" {% if f.cfg.enabled %}checked{% endif %}>
+        Scan for login floods and ban offenders
+      </label>
+      <p class="text-soft small" style="margin:0.4rem 0 1rem;line-height:1.55">
+        With this off, nothing is scanned — bans you add by hand still work, and
+        expired bans are still lifted. It also makes every care report say
+        <em>not measured</em> for attacks blocked rather than report a zero
+        nobody was watching for.
+      </p>
+
+      <div class="field">
+        <label for="f2b_window">Window (seconds)
+          <span class="hint">how far back each scan counts failures</span>
+        </label>
+        <input id="f2b_window" name="window_secs" type="number" min="1" max="86400"
+               value="{{ f.cfg.window_secs }}" style="max-width:12rem">
+      </div>
+
+      <div style="display:flex;align-items:center;gap:0.5rem;margin:1.2rem 0 0.4rem">
+        <svg class="h-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+        <strong style="font-size:0.92rem">Failures inside the window before a ban</strong>
+      </div>
+      <div class="field-row">
+        <div class="field" style="flex:1">
+          <label for="f2b_http">Website login <span class="hint">per site</span></label>
+          <input id="f2b_http" name="http_threshold" type="number" min="2" max="10000"
+                 value="{{ f.cfg.http_threshold }}">
+        </div>
+        <div class="field" style="flex:1">
+          <label for="f2b_ssh">SSH <span class="hint">node-wide</span></label>
+          <input id="f2b_ssh" name="ssh_threshold" type="number" min="2" max="10000"
+                 value="{{ f.cfg.ssh_threshold }}">
+        </div>
+        <div class="field" style="flex:1">
+          <label for="f2b_ftp">FTP <span class="hint">node-wide</span></label>
+          <input id="f2b_ftp" name="ftp_threshold" type="number" min="2" max="10000"
+                 value="{{ f.cfg.ftp_threshold }}">
+        </div>
+        <div class="field" style="flex:1">
+          <label for="f2b_mail">Mail <span class="hint">node-wide</span></label>
+          <input id="f2b_mail" name="mail_threshold" type="number" min="2" max="10000"
+                 value="{{ f.cfg.mail_threshold }}">
+        </div>
+      </div>
+      <p class="text-soft small" style="margin:0.4rem 0 1rem;line-height:1.55">
+        <strong>Website login</strong> counts POSTs to <code>wp-login.php</code> and
+        <code>xmlrpc.php</code> in one site's access log, so the ban is recorded
+        against that site and shows up in its care report. This is also the only
+        source that can be switched off for a single site — the ssh, ftp and mail
+        journals cover the whole machine and can't be attributed to one customer,
+        so they stay on for everyone.
+      </p>
+
+      <div style="display:flex;align-items:center;gap:0.5rem;margin:1.2rem 0 0.4rem">
+        <svg class="h-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+        <strong style="font-size:0.92rem">How long a ban lasts</strong>
+      </div>
+      <div class="field-row">
+        <div class="field" style="flex:1">
+          <label for="f2b_ttl">First offence (seconds)</label>
+          <input id="f2b_ttl" name="ban_ttl_secs" type="number" min="60" max="31536000"
+                 value="{{ f.cfg.ban_ttl_secs }}">
+        </div>
+        <div class="field" style="flex:1">
+          <label for="f2b_repeat_ttl">Repeat offender (seconds)</label>
+          <input id="f2b_repeat_ttl" name="repeat_ttl_secs" type="number" min="60" max="31536000"
+                 value="{{ f.cfg.repeat_ttl_secs }}">
+        </div>
+        <div class="field" style="flex:1">
+          <label for="f2b_lookback">Counts as a repeat for (seconds)</label>
+          <input id="f2b_lookback" name="repeat_lookback_secs" type="number" min="0" max="31536000"
+                 value="{{ f.cfg.repeat_lookback_secs }}">
+        </div>
+      </div>
+      <p class="text-soft small" style="margin:0.4rem 0 1rem;line-height:1.55">
+        An address that was already banned within the look-back window gets the
+        longer repeat-offender ban instead of the first-offence one. Set the
+        look-back to <code>0</code> to never escalate. A ban shorter than a minute
+        is refused: the ban list reads a zero duration as <em>never expires</em>.
+      </p>
+
+      <p class="text-soft small" style="margin:0 0 1rem;line-height:1.55">
+        Only public, routable addresses are ever banned automatically. Private,
+        loopback, CGNAT and link-local addresses are skipped, because a node-wide
+        firewall drop on those is an outage — webmail talking to dovecot, the
+        master↔node link, a NAT gateway in front of the whole office. You can
+        still block any address by hand from <a href="/bans">Bans</a>.
+      </p>
+      {% if !nodes.is_empty() %}
+      <p class="text-soft small" style="margin:0 0 1rem;line-height:1.55">
+        <strong>This form edits {{ config.hostname }} only.</strong> Every enrolled
+        node scans with its own <code>[fail2ban]</code> section; changing it here
+        does not reach them.
+      </p>
+      {% endif %}
+      <p class="text-soft small" style="margin:0 0 1rem;line-height:1.55">
+        Panel logins are guarded separately: repeated failures throttle, then
+        firewall the connecting address for an hour. That path is not governed by
+        the numbers above.
+      </p>
+      <button type="submit" class="btn primary">Save brute-force settings</button>
+    </form>
+  </div>
+  {% else %}
+  <div class="card">
+    <h2 style="font-size:0.95rem;margin:0 0 0.6rem">
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      Brute-force scanner
+    </h2>
+    <p class="text-soft small" style="margin:0;line-height:1.55">
+      <code>/etc/hyperion/agent.toml</code> could not be read or did not parse, so
+      the current thresholds are unknown and this form would be guessing. The
+      <a href="#raw">Raw TOML</a> tab shows what came back.
+    </p>
+  </div>
+  {% endif %}
+</div>{# /tab-bruteforce #}
+
+{# ==========================================================
    CLUSTER — multi-node controls
    ========================================================== #}
 <div class="tab-panel" id="tab-cluster">
@@ -958,24 +1136,43 @@
         for example during a server move. Applies within about 30 s; no restart needed.
       </p>
 
-      {# ─── Master → worker hardening ladder ────────────────────────
-         The two toggles below are rungs, not independent switches, and
-         the order is load-bearing: step 1 keeps an on-path attacker out
-         of the channel, step 2 keeps the master from believing what
-         comes back if the channel is defeated anyway. Turning on step 2
-         alone still leaves every secret in a reply (reset passwords,
-         enrollment tokens) readable on the wire, so the numbering is UI,
-         not decoration. #}
+      {# ─── Cluster channel hardening ───────────────────────────────
+         Three rungs, and the order is load-bearing. Step 0 is not a
+         toggle: it lives in each node's own agent.toml because it is
+         the node that decides whether to trust the master's cert, and
+         it comes first because it is the leg that carries the node's
+         plaintext secret. Steps 1 and 2 are master→worker: step 1 keeps
+         an on-path attacker out of the channel, step 2 keeps the master
+         from believing what comes back if the channel is defeated
+         anyway. Turning on step 2 alone still leaves every secret in a
+         reply (reset passwords, enrollment tokens) readable on the
+         wire, so the numbering is UI, not decoration. #}
       <div style="display:flex;align-items:center;gap:0.5rem;margin:1.4rem 0 0.4rem">
         <svg class="h-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-        <strong style="font-size:0.92rem">Master → worker channel hardening</strong>
+        <strong style="font-size:0.92rem">Cluster channel hardening</strong>
       </div>
       <p class="text-soft small" style="margin:0 0 0.8rem;line-height:1.55">
         Every command the master sends already carries an Ed25519 <em>request</em>
-        signature, so a worker never acts on a forged instruction. These two steps
+        signature, so a worker never acts on a forged instruction. The steps below
         protect the rest of the exchange — who can read the channel, and whether the
         master can trust the answer. Work through them <strong>in order</strong>, and only
         after <a href="/install">Nodes</a> shows the matching chip on every node.
+      </p>
+
+      <p class="text-soft small" style="margin:0 0 0.8rem;line-height:1.55">
+        <strong>Step 0 · Each node verifies this master's certificate.</strong>
+        Not a switch here — it is set per node, in <code>/etc/hyperion/agent.toml</code> under
+        <code>[enrollment]</code>, because the node is the side that decides whom to trust.
+        It comes first because it is the leg that carries each node's own secret, in the
+        clear, on every heartbeat. The node installer measures it: if this master already
+        serves a CA-issued certificate it writes <code>verify_tls = true</code>; if the
+        certificate is self-signed it writes <code>verify_tls = false</code> and says so.
+        With <code>verify_tls</code> absent the agent verifies whenever this master's URL is
+        <code>https://</code> with a DNS hostname. A failed check is never retried
+        unverified — the node stops heartbeating and prints the fix, so a node that has
+        gone stale on <a href="/install">Nodes</a> right after you changed the master's
+        certificate is telling you something. Check with
+        <code>journalctl -u hyperion-agent -g 'TLS policy'</code> on the node.
       </p>
 
       <label class="field-checkbox" style="font-weight:600">
@@ -987,11 +1184,19 @@
         When on, the master refuses any RPC to a worker whose TLS certificate doesn't
         match the SPKI pin that worker reported on its heartbeat. This shuts a
         man-in-the-middle out of the channel entirely, which is why it comes first.
-        <strong>Turn this on only after</strong> the per-node pins on <a href="/install">Nodes</a>
-        show <em>🔒 TLS pin on file</em> and you have seen no <code>warn-only</code>
-        pin-mismatch warnings in the logs: a stale pin blocks management of
-        that worker until its next heartbeat. Workers that haven't reported a pin
-        yet are never blocked. Applies within about 30 s; no restart needed.
+        A pin is recorded once and never silently replaced: a worker that reports a
+        <em>different</em> pin later is refused and logged, so nothing on the wire can
+        re-aim the pin the master enforces against.
+        <strong>Turn this on only after</strong> <em>every</em> node on
+        <a href="/install">Nodes</a> shows <em>🔒 TLS pin on file</em> and you have seen no
+        <code>warn-only</code> pin-mismatch warnings in the logs. While this is on, a worker
+        with <strong>no pin on file is refused too</strong> — with nothing to check the
+        certificate against there is no protection to give it, and suppressing the pin
+        report is exactly how an attacker would arrange that. So a worker that is still
+        mid-upgrade, or whose agent has been restarted within the last heartbeat,
+        <em>will</em> be cut off until its 🔒 chip appears. A stale pin behaves the same way:
+        use <em>Clear pinned crypto</em> on that node's card after a key change you expected.
+        Applies within about 30 s; no restart needed.
       </p>
 
       <label class="field-checkbox" style="font-weight:600">
@@ -1049,8 +1254,8 @@
         {% endif %}
       {% else %}
       <p class="text-soft small" style="margin:0 0 0.8rem;line-height:1.55">
-        No worker nodes are enrolled. Both steps only affect master→worker RPC, so on a
-        single-node install they change nothing.
+        No worker nodes are enrolled. Every step above only affects master↔worker traffic,
+        so on a single-node install they change nothing.
       </p>
       {% endif %}
 
