@@ -350,7 +350,11 @@ pub struct PanelProgress {
 /// Tunables for the native brute-force scanner, sourced from agent.toml's
 /// `[fail2ban]` section. Every default reproduces the historical hardcoded
 /// behaviour, so an operator who never touches the section sees no change.
-#[derive(Debug, Clone)]
+///
+/// `PartialEq` so a caller can compare what agent.toml says against
+/// `sanitized()` — the settings UI uses that to tell the operator when the
+/// numbers in the file are not the numbers the scanner is running.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Fail2banConfig {
     /// Master switch. `false` makes `fail2ban_tick` a no-op (manual bans and
     /// boot re-apply still work).
@@ -4083,22 +4087,70 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         use hyperion_state::scheduler::ScheduledKind;
         match action.action {
             ScheduledKind::Notify30d | ScheduledKind::Notify7d | ScheduledKind::Notify1d => {
-                // Foundation: we log the notification. Real SMTP integration
-                // is config-gated and ships with the controller (sub-project 4).
                 let row = hyperion_state::scheduler::get_expiry(&self.pool, &action.hosting_id)
                     .await
                     .map_err(|e| e.to_string())?;
-                let email = row.as_ref().and_then(|r| r.owner_email.as_deref());
-                tracing::info!(
-                    hosting=%action.hosting_id, action=action.action.as_str(),
-                    owner=email.unwrap_or("<none>"),
-                    "expiry notification due",
-                );
+                let email = row
+                    .as_ref()
+                    .and_then(|r| r.owner_email.as_deref())
+                    .map(str::trim)
+                    .filter(|e| !e.is_empty());
+                // Either everything the warning needs, or the reason there
+                // will be no warning. The next action queued for this hosting
+                // is the suspend, so a silently dropped warning is the
+                // customer's only notice disappearing — it gets a loud log
+                // line and an audit row that does NOT read "ok".
+                let sendable = match (row.as_ref(), email, self.email_config.is_some()) {
+                    (_, _, false) => Err("no SMTP relay configured ([email] in agent.toml)"),
+                    (None, _, _) => Err("hosting row no longer exists"),
+                    (Some(_), None, _) => Err("hosting has no owner_email"),
+                    (Some(r), Some(to), _) => match r.expires_at {
+                        Some(exp) => Ok((r, exp, to)),
+                        None => Err("hosting has no expires_at"),
+                    },
+                };
+                let (result, reason) = match sendable {
+                    Ok((r, exp, to)) => {
+                        let (subject, body) =
+                            expiry_warning_mail(&r.domain, exp, r.grace_days, now_secs());
+                        // notify_email returns nothing: a relay failure is
+                        // already recorded by it in audit_log + email_log. So
+                        // a dead relay can't bounce this row back to 'pending'
+                        // and re-send every tick forever — same treatment the
+                        // billing sweep gives its reminders.
+                        self.notify_email(
+                            to,
+                            &subject,
+                            &body,
+                            Some(action.hosting_id.as_str()),
+                            "expiry",
+                        )
+                        .await;
+                        tracing::info!(
+                            hosting=%action.hosting_id, action=action.action.as_str(),
+                            owner=%to, "expiry warning sent",
+                        );
+                        ("ok", None)
+                    }
+                    Err(why) => {
+                        tracing::warn!(
+                            hosting=%action.hosting_id, action=action.action.as_str(),
+                            reason=why,
+                            "expiry warning NOT sent — the customer gets no notice before suspension",
+                        );
+                        ("skipped", Some(why))
+                    }
+                };
                 self.append_audit(
                     "scheduler.notify",
                     Some(action.hosting_id.as_str()),
-                    &serde_json::json!({"kind": action.action.as_str()}).to_string(),
-                    "ok",
+                    &serde_json::json!({
+                        "kind": action.action.as_str(),
+                        "to": email,
+                        "reason": reason,
+                    })
+                    .to_string(),
+                    result,
                 )
                 .await;
                 Ok(())
@@ -4296,9 +4348,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     }
                 }
 
-                // Off-site S3 push to every enabled target (encrypted with age
-                // when a recipient is set, streamed so it needs no extra local
-                // disk). Best-effort — never rolls back the local backup.
+                // Off-site S3 push (encrypted with age when a recipient is set,
+                // streamed so it needs no extra local disk). Best-effort —
+                // never rolls back the local backup. A hosting pinned to one
+                // target (a client who pays for their own vault) goes there and
+                // nowhere else; an unpinned one goes to every target the caller
+                // resolved, as it always has. Re-pinning only redirects NEW
+                // backups — whatever the site already put on its old target
+                // stays there until that target's own retention drops it.
                 let manifest_path =
                     archive_dir.join(format!("{}-{}.manifest.json", detail.domain, ts));
                 let mut files: Vec<std::path::PathBuf> = vec![archive_path.clone()];
@@ -4306,7 +4363,32 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     files.push(p.clone());
                 }
                 files.push(manifest_path);
-                self.push_backup_to_s3(&detail, &files, &s3_targets).await;
+                let pin = self.offsite_pin(detail.id.as_str()).await;
+                match choose_offsite_targets(pin.as_deref(), &s3_targets) {
+                    OffsiteChoice::NodeDefault(t) => {
+                        self.push_backup_to_s3(&detail, &files, t).await
+                    }
+                    OffsiteChoice::Pinned(t) => {
+                        self.push_backup_to_s3(&detail, &files, std::slice::from_ref(t))
+                            .await
+                    }
+                    OffsiteChoice::Unresolved(name) => {
+                        tracing::warn!(
+                            domain = %detail.domain,
+                            target = %name,
+                            "off-site target pinned to this site was not among the resolved \
+                             targets (disabled, deleted, renamed, or its credentials did not \
+                             read) — the backup stayed on this node"
+                        );
+                        self.audit_s3(
+                            &detail,
+                            name,
+                            false,
+                            "pinned target not among the resolved targets — no upload attempted",
+                        )
+                        .await;
+                    }
+                }
             }
             Err(e) => {
                 // Remove any partial/truncated files a failed run (e.g. ENOSPC)
@@ -4338,6 +4420,20 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             message: "row vanished after write (concurrent delete?)".into(),
         })?;
         Ok(run_to_wire(r))
+    }
+
+    /// The off-site target this hosting is pinned to, or `None` when it
+    /// follows the node default. Lives in the OWNING node's `hosting_kv`
+    /// beside the backup cadence, because that's where the backup actually
+    /// runs. A blank value reads as unpinned, so clearing the picker is
+    /// indistinguishable from never having set it.
+    async fn offsite_pin(&self, hosting_id: &str) -> Option<String> {
+        hyperion_state::hosting_kv::get(&self.pool, hosting_id, BACKUP_KV_TARGET)
+            .await
+            .ok()
+            .flatten()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
     }
 
     /// Push the just-made backup files to every S3 target the master resolved
@@ -5264,31 +5360,41 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         .is_ok()
     }
 
-    /// One tick of the brute-force scanner: sweep expired bans, then scan
-    /// every source (per-hosting HTTP access logs + node-wide ssh/ftp/mail
-    /// journals) for auth-failure floods and auto-ban offenders. Thresholds,
-    /// windows and ban durations come from `[fail2ban]`. Returns the number
-    /// of new bans applied.
-    pub async fn fail2ban_tick(&self) -> Result<i64, RpcError> {
+    /// Whether the HTTP brute-force scan — the wp-login / xmlrpc access-log
+    /// sweep — may look at this hosting. Per-hosting toggle in `hosting_kv`
+    /// (`http_bruteforce_scan_enabled`); **default ON** (absent ⇒ enabled),
+    /// so nothing changes for a site that predates the key. "off" opts the
+    /// site out.
+    ///
+    /// A read error also answers "on": a DB hiccup must not quietly stop
+    /// protecting a site the customer is paying to have watched.
+    async fn http_bruteforce_scan_enabled(&self, hosting_id: &str) -> bool {
+        match hyperion_state::hosting_kv::get(&self.pool, hosting_id, FAIL2BAN_HTTP_KV_KEY).await {
+            Ok(Some(v)) => v.trim() != "off",
+            _ => true,
+        }
+    }
+
+    /// Everything one tick would ban, in scan order: each active hosting's
+    /// own access log first (gated by that site's switch), then the
+    /// node-wide ssh / ftp / mail journals.
+    ///
+    /// Split out of `fail2ban_tick` so the per-hosting opt-out is testable —
+    /// applying an intent goes through `ban_add`, which shells out to `nft`
+    /// before it writes a row and so cannot run under test.
+    async fn fail2ban_scan(&self, since: i64) -> Result<Vec<BanIntent>, RpcError> {
         let cfg = &self.fail2ban;
-        let now = now_secs();
-        // Always sweep expired bans, even when scanning is disabled, so a
-        // lapsed ban is dropped from nftables promptly.
-        if let Ok(expired) = hyperion_state::bans::reap_expired(&self.pool, now).await {
-            for ip in &expired {
-                nft_unban(ip).await;
-            }
-        }
-        if !cfg.enabled {
-            return Ok(0);
-        }
-        let since = now - cfg.window_secs;
-        let mut new_bans = 0i64;
+        let mut intents: Vec<BanIntent> = Vec::new();
 
         // Per-hosting HTTP brute force (wp-login / xmlrpc POST floods).
         let summaries = self.list().await?;
         for s in &summaries {
             if s.state != HostingState::Active {
+                continue;
+            }
+            // Opted out ⇒ this site's access log is not read at all, so the
+            // switch costs nothing rather than merely discarding findings.
+            if !self.http_bruteforce_scan_enabled(s.id.as_str()).await {
                 continue;
             }
             let Some(user) = derive_user_from_summary(s) else {
@@ -5300,24 +5406,21 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .join("logs")
                 .join("access.log");
             for ip in scan_access_log_for_bruteforce(&access, since, cfg.http_threshold).await {
-                if self
-                    .auto_ban(
-                        &ip,
-                        Some(s.id.as_str()),
-                        "auto: wp-login / xmlrpc brute force",
-                        now,
-                    )
-                    .await
-                {
-                    new_bans += 1;
-                    tracing::info!(ip = %ip, domain = %s.domain, "fail2ban: auto-banned (http)");
-                }
+                intents.push(BanIntent {
+                    ip,
+                    site: Some(BanSite {
+                        id: s.id.as_str().to_string(),
+                        domain: s.domain.clone(),
+                    }),
+                    reason: "auto: wp-login / xmlrpc brute force",
+                });
             }
         }
 
         // Node-wide sources: ssh, ftp, mail auth-failure floods. Not tied to
-        // one site, so banned with hosting_id = None.
-        let mut node_hits: Vec<(String, &str)> = Vec::new();
+        // one site, so banned with hosting_id = None — and, for the same
+        // reason, never gated by a site's switch.
+        let mut node_hits: Vec<(String, &'static str)> = Vec::new();
         for ip in scan_sshd_journal_for_bruteforce(cfg.window_secs, cfg.ssh_threshold).await {
             node_hits.push((ip, "auto: ssh brute force"));
         }
@@ -5327,10 +5430,49 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         for ip in scan_mail_journal_for_bruteforce(cfg.window_secs, cfg.mail_threshold).await {
             node_hits.push((ip, "auto: mail (smtp/imap) brute force"));
         }
-        for (ip, reason) in node_hits {
-            if self.auto_ban(&ip, None, reason, now).await {
-                new_bans += 1;
-                tracing::info!(ip = %ip, reason = reason, "fail2ban: auto-banned (node)");
+        intents.extend(node_hits.into_iter().map(|(ip, reason)| BanIntent {
+            ip,
+            site: None,
+            reason,
+        }));
+        Ok(intents)
+    }
+
+    /// One tick of the brute-force scanner: sweep expired bans, then scan
+    /// every source (per-hosting HTTP access logs + node-wide ssh/ftp/mail
+    /// journals) for auth-failure floods and auto-ban offenders. Thresholds,
+    /// windows and ban durations come from `[fail2ban]`. Returns the number
+    /// of new bans applied.
+    pub async fn fail2ban_tick(&self) -> Result<i64, RpcError> {
+        let now = now_secs();
+        // Always sweep expired bans, even when scanning is disabled, so a
+        // lapsed ban is dropped from nftables promptly.
+        if let Ok(expired) = hyperion_state::bans::reap_expired(&self.pool, now).await {
+            for ip in &expired {
+                nft_unban(ip).await;
+            }
+        }
+        if !self.fail2ban.enabled {
+            return Ok(0);
+        }
+        let since = now - self.fail2ban.window_secs;
+        let mut new_bans = 0i64;
+        for intent in self.fail2ban_scan(since).await? {
+            let hosting_id = intent.site.as_ref().map(|s| s.id.as_str());
+            if !self
+                .auto_ban(&intent.ip, hosting_id, intent.reason, now)
+                .await
+            {
+                continue;
+            }
+            new_bans += 1;
+            match &intent.site {
+                Some(site) => {
+                    tracing::info!(ip = %intent.ip, domain = %site.domain, "fail2ban: auto-banned (http)")
+                }
+                None => {
+                    tracing::info!(ip = %intent.ip, reason = intent.reason, "fail2ban: auto-banned (node)")
+                }
             }
         }
         Ok(new_bans)
@@ -8908,11 +9050,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let mut report = CareReport::empty(detail.id.clone(), detail.domain.clone(), from, to);
 
         // The one metric whose unmeasured state the database CANNOT see:
-        // with `[fail2ban] enabled = false` the scanner never ran, so zero
-        // bans means nobody was watching rather than nobody attacking.
-        // Only this caller knows which, so only this caller may map it —
-        // hence the count stays `None` instead of becoming a proud zero.
-        if self.fail2ban.enabled {
+        // with `[fail2ban] enabled = false` — or with this site opted out of
+        // the HTTP scan — the scanner never looked, so zero bans means nobody
+        // was watching rather than nobody attacking. Only this caller knows
+        // which, so only this caller may map it — hence the count stays
+        // `None` instead of becoming a proud zero.
+        //
+        // An opted-out site loses the handful of bans an operator may have
+        // attributed to it by hand, since those share the same column. That
+        // is the safe direction: the section claims ongoing protection, and
+        // there was none.
+        if self.fail2ban.enabled && self.http_bruteforce_scan_enabled(id).await {
             report.attacks_blocked = Some(
                 reports::attacks_blocked(&self.pool, id, from, to)
                     .await
@@ -19508,6 +19656,21 @@ const INTEGRITY_KV_KEY: &str = "integrity_scan";
 /// it scans today. Only an explicit "off" opts a site out.
 const INTEGRITY_ENABLED_KV_KEY: &str = "integrity_scan_enabled";
 
+/// `hosting_kv` key gating the HTTP brute-force scan for ONE hosting — the
+/// wp-login / xmlrpc access-log sweep, which is the part of `[fail2ban]`
+/// that is attributable to a single site's login page and therefore the
+/// part a care package can sell per customer.
+///
+/// **Default ON** (absent ⇒ enabled), like its siblings above: every site
+/// that existed before this key is scanned exactly as it was. Only an
+/// explicit "off" opts a site out.
+///
+/// Deliberately does NOT reach the node-wide sources. ssh / ftp / mail
+/// floods are read from journals that cover the whole machine and cannot
+/// be pinned to one vhost, so one customer's switch must not silence them
+/// for everybody.
+const FAIL2BAN_HTTP_KV_KEY: &str = "http_bruteforce_scan_enabled";
+
 /// Marker put in `WpIntegrityScanResult::error` for a hosting that has no
 /// WordPress at all. A sentinel rather than free text because the sweep
 /// branches on it — a static site is *skipped*, not *reported*.
@@ -19670,6 +19833,27 @@ fn integrity_finding_keys(
         keys.insert(format!("malware:{}:{}", hit.path, hit.signature));
     }
     keys
+}
+
+/// The site a ban is attributed to: its id for the `ip_bans` row (which is
+/// what the care report counts), its domain for the operator-facing log line.
+#[derive(Debug, PartialEq, Eq)]
+struct BanSite {
+    id: String,
+    domain: String,
+}
+
+/// One ban `fail2ban_scan` decided on, before `auto_ban` gets a say about
+/// whether the address may be banned at all.
+///
+/// `site: None` means node-wide (ssh / ftp / mail): those journals cover the
+/// whole machine, so the hit belongs to no single vhost — which is also why
+/// no single vhost's switch can suppress it.
+#[derive(Debug, PartialEq, Eq)]
+struct BanIntent {
+    ip: String,
+    site: Option<BanSite>,
+    reason: &'static str,
 }
 
 /// Scan the recent sshd journal for auth-failure floods. Runs
@@ -20357,6 +20541,77 @@ fn fmt_notif_time(secs: i64) -> String {
         .unwrap_or_default()
 }
 
+/// Date only, in the form a Czech reader expects ("1. 9. 2026").
+fn fmt_cz_date(secs: i64) -> String {
+    chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0)
+        .map(|dt| dt.format("%-d. %-m. %Y").to_string())
+        .unwrap_or_default()
+}
+
+/// Whole days left until `expires_at`, floored, never negative. Derived
+/// from the clock rather than from the warning's own 30/7/1 offset: a tick
+/// that runs late (agent down for a day) must state the days that are
+/// actually left, not the ones the row was queued for.
+fn expiry_days_left(expires_at: i64, now: i64) -> i64 {
+    (expires_at - now).max(0) / 86_400
+}
+
+/// Czech plural of "den": 1 den, 2–4 dny, 5+ dní.
+fn czech_days_word(n: i64) -> &'static str {
+    match n {
+        1 => "den",
+        2..=4 => "dny",
+        _ => "dní",
+    }
+}
+
+/// Subject + body of the expiry warning, in Czech — the recipient is the
+/// site owner, not the operator. Pure (every time-dependent input is an
+/// argument) so the wording is unit-testable without an SMTP relay.
+///
+/// The consequences it names are the ones the scheduler really queues, see
+/// `reconcile_scheduled_rows`: suspend at `expires_at`, delete at
+/// `expires_at + grace_days.max(1)` days — hence the same `.max(1)` here,
+/// so the date in the letter is the date the action fires.
+fn expiry_warning_mail(
+    domain: &str,
+    expires_at: i64,
+    grace_days: i64,
+    now: i64,
+) -> (String, String) {
+    let days_left = expiry_days_left(expires_at, now);
+    let grace = grace_days.max(1);
+    let subject = if days_left == 0 {
+        format!("[Hyperion] Hosting {domain} vyprší dnes")
+    } else {
+        format!(
+            "[Hyperion] Hosting {domain} vyprší za {days_left} {}",
+            czech_days_word(days_left)
+        )
+    };
+    let when = if days_left == 0 {
+        "vyprší dnes".to_string()
+    } else {
+        format!(
+            "vyprší {} — zbývá {days_left} {}",
+            fmt_cz_date(expires_at),
+            czech_days_word(days_left)
+        )
+    };
+    let body = format!(
+        "Dobrý den,\n\n\
+         hosting {domain} {when}.\n\n\
+         Pokud do té doby nedojde k prodloužení:\n\
+         - {exp_date} bude hosting pozastaven a návštěvníkům se místo webu zobrazí informační stránka,\n\
+         - po ochranné lhůtě {grace} {grace_word}, tj. {del_date}, bude hosting i s daty smazán.\n\n\
+         Pro prodloužení nás, prosím, kontaktujte.\n\n--\nHyperion\n",
+        exp_date = fmt_cz_date(expires_at),
+        grace_word = czech_days_word(grace),
+        del_date = fmt_cz_date(expires_at + grace * 86_400),
+    );
+    (subject, body)
+}
+
 /// Read the operator-editable `[notifications]` message templates from
 /// agent.toml. Missing file / section / keys fall back to the
 /// pass-through defaults, so wording is unchanged until customised.
@@ -20541,6 +20796,48 @@ fn parse_agent_section_fields(
                     return Err(bad(format!(
                         "audit_retention_days must be 0..=3650 (0 = keep forever), got {n}"
                     )));
+                }
+                crate::config_persist::FieldValue::Int(n)
+            }
+            // [fail2ban] — native brute-force scanner tunables.
+            ("fail2ban", "enabled") => crate::config_persist::FieldValue::Bool(parse_bool(v)?),
+            // Every range below is a SUBSET of what `Fail2banConfig::sanitized`
+            // leaves untouched, so the UI can never persist a number the agent
+            // silently overrides at boot — a saved `ban_ttl_secs = 0` would
+            // otherwise sit in the file reading as a PERMANENT node-wide ban
+            // while the running scanner used 60 s.
+            ("fail2ban", "window_secs") => {
+                let n = parse_int(v)?;
+                if !(1..=86_400).contains(&n) {
+                    return Err(bad(format!("window_secs must be 1..=86400, got {n}")));
+                }
+                crate::config_persist::FieldValue::Int(n)
+            }
+            ("fail2ban", "ban_ttl_secs") | ("fail2ban", "repeat_ttl_secs") => {
+                let n = parse_int(v)?;
+                if !(60..=31_536_000).contains(&n) {
+                    return Err(bad(format!("{k} must be 60..=31536000 (1 year), got {n}")));
+                }
+                crate::config_persist::FieldValue::Int(n)
+            }
+            ("fail2ban", "repeat_lookback_secs") => {
+                let n = parse_int(v)?;
+                if !(0..=31_536_000).contains(&n) {
+                    return Err(bad(format!(
+                        "repeat_lookback_secs must be 0..=31536000 (0 = never escalate), got {n}"
+                    )));
+                }
+                crate::config_persist::FieldValue::Int(n)
+            }
+            ("fail2ban", "http_threshold")
+            | ("fail2ban", "ssh_threshold")
+            | ("fail2ban", "ftp_threshold")
+            | ("fail2ban", "mail_threshold") => {
+                let n = parse_int(v)?;
+                // Floor 2: a threshold of 1 bans on the first observed
+                // failure, which is one fat-fingered password.
+                if !(2..=10_000).contains(&n) {
+                    return Err(bad(format!("{k} must be 2..=10000, got {n}")));
                 }
                 crate::config_persist::FieldValue::Int(n)
             }
@@ -21017,6 +21314,51 @@ const QUOTA_KV_STATE: &str = "quota_exceed_state";
 const BACKUP_KV_CADENCE: &str = "backup_cadence";
 /// `hosting_kv` key: unix-secs of the last successful scheduled backup.
 const BACKUP_KV_LAST_RUN: &str = "backup_last_run_at";
+/// `hosting_kv` key: the ONE off-site target this hosting's backups go to,
+/// held as `backup_targets.name` (unique in that table). Absent/blank = the
+/// node default, i.e. every target the caller resolved — what every install
+/// did before this key existed. The name rather than the row id because a
+/// worker has no `backup_targets` table of its own: the name is the only
+/// identifier that survives into the `S3BackupTarget` the master sends with
+/// the request, so it's the only one both sides can agree on.
+const BACKUP_KV_TARGET: &str = "backup_target";
+
+/// Which of the resolved off-site targets one hosting's backup may use.
+/// Borrows the caller's slice — nothing is copied until an upload happens.
+#[derive(Debug, PartialEq, Eq)]
+enum OffsiteChoice<'a> {
+    /// No pin: every target the caller resolved.
+    NodeDefault(&'a [hyperion_types::S3BackupTarget]),
+    /// Pinned to one target that is in the resolved set.
+    Pinned(&'a hyperion_types::S3BackupTarget),
+    /// Pinned to a target that ISN'T in the resolved set — disabled, deleted,
+    /// renamed, or its secret file didn't read. Nothing is pushed: someone
+    /// chose where this client's data goes, so silently falling back to the
+    /// node's other buckets would put it somewhere nobody picked.
+    Unresolved(&'a str),
+}
+
+/// Resolve one hosting's off-site destination against the targets the caller
+/// already resolved (the master's table for a manual run, this node's for a
+/// scheduled one).
+///
+/// An EMPTY `resolved` is never a broken pin: it means the run carries no
+/// off-site targets at all — the pre-clone safety backup passes none, and a
+/// worker's own `backup_targets` table is empty by design. Those paths stay
+/// exactly as they were.
+fn choose_offsite_targets<'a>(
+    pin: Option<&'a str>,
+    resolved: &'a [hyperion_types::S3BackupTarget],
+) -> OffsiteChoice<'a> {
+    match pin.map(str::trim).filter(|s| !s.is_empty()) {
+        None => OffsiteChoice::NodeDefault(resolved),
+        Some(_) if resolved.is_empty() => OffsiteChoice::NodeDefault(resolved),
+        Some(name) => match resolved.iter().find(|t| t.name == name) {
+            Some(t) => OffsiteChoice::Pinned(t),
+            None => OffsiteChoice::Unresolved(name),
+        },
+    }
+}
 
 /// Canonicalise a backup cadence string to one of the four known values; any
 /// unknown/empty input becomes "off" so a stray value never schedules backups.
@@ -22560,6 +22902,401 @@ mod tests {
         assert!(backup_due(86_400, 1_700_000_000, 1_700_000_000 + 86_400));
     }
 
+    fn s3_target(name: &str) -> hyperion_types::S3BackupTarget {
+        hyperion_types::S3BackupTarget {
+            name: name.into(),
+            endpoint: format!("https://{name}.example.net"),
+            bucket: format!("bucket-{name}"),
+            region: "eu-central-1".into(),
+            access_key_id: "AKIA-test".into(),
+            secret_access_key: "s3cret".into(),
+            age_recipient: None,
+            retention_daily: 7,
+        }
+    }
+
+    #[test]
+    fn offsite_pin_beats_the_node_default_and_unset_changes_nothing() {
+        use super::{choose_offsite_targets, OffsiteChoice};
+        let resolved = vec![s3_target("wasabi-eu"), s3_target("b2-cold")];
+
+        // Unset: byte-identical to what the code did before pinning existed —
+        // the caller's OWN slice, whole and in order, is what gets uploaded to.
+        match choose_offsite_targets(None, &resolved) {
+            OffsiteChoice::NodeDefault(t) => {
+                assert!(std::ptr::eq(t, &resolved[..]), "same slice, untouched");
+                assert_eq!(t, &resolved[..]);
+            }
+            other => panic!("unset must be the node default, got {other:?}"),
+        }
+        // A blank / whitespace value is stored by nobody, but if it ever is it
+        // must mean "unpinned", not "pinned to a target called ''".
+        assert_eq!(
+            choose_offsite_targets(Some("   "), &resolved),
+            OffsiteChoice::NodeDefault(&resolved[..])
+        );
+
+        // Pinned: exactly one target, and it's the one named.
+        assert_eq!(
+            choose_offsite_targets(Some("b2-cold"), &resolved),
+            OffsiteChoice::Pinned(&resolved[1])
+        );
+        // Whitespace around a stored name doesn't break the match.
+        assert_eq!(
+            choose_offsite_targets(Some(" b2-cold "), &resolved),
+            OffsiteChoice::Pinned(&resolved[1])
+        );
+
+        // Pinned to something the caller couldn't resolve (disabled, deleted,
+        // renamed, unreadable secret): nothing is pushed. Falling back to the
+        // node default here would put a client's data in a bucket nobody chose.
+        assert_eq!(
+            choose_offsite_targets(Some("gone"), &resolved),
+            OffsiteChoice::Unresolved("gone")
+        );
+
+        // Nothing resolved at all — no targets configured, or a caller that
+        // deliberately passes none (the pre-clone safety backup). Local only,
+        // and NOT reported as a broken pin.
+        let none: Vec<hyperion_types::S3BackupTarget> = Vec::new();
+        assert_eq!(
+            choose_offsite_targets(None, &none),
+            OffsiteChoice::NodeDefault(&none[..])
+        );
+        assert_eq!(
+            choose_offsite_targets(Some("wasabi-eu"), &none),
+            OffsiteChoice::NodeDefault(&none[..])
+        );
+    }
+
+    #[tokio::test]
+    async fn offsite_pin_round_trips_through_the_key_the_panel_writes() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), happy_mocks());
+        s.create(req("example.cz")).await.expect("create");
+        let detail = s
+            .get(HostingSelector::Domain(
+                Domain::parse("example.cz").expect("parse"),
+            ))
+            .await
+            .expect("get");
+        let hid = detail.id.as_str().to_string();
+
+        // Fresh site: unpinned. A hosting that existed before this key did
+        // reads the same way, which is what keeps upgrades behaviour-neutral.
+        assert_eq!(s.offsite_pin(&hid).await, None);
+
+        // The panel pins by dispatching the generic kv setter to the owner.
+        s.hosting_kv_set(hid.clone(), BACKUP_KV_TARGET.into(), "wasabi-eu".into())
+            .await
+            .expect("pin");
+        assert_eq!(s.offsite_pin(&hid).await.as_deref(), Some("wasabi-eu"));
+
+        // "Node default" posts an empty value — that's an unpin, not a target.
+        s.hosting_kv_set(hid.clone(), BACKUP_KV_TARGET.into(), String::new())
+            .await
+            .expect("unpin");
+        assert_eq!(s.offsite_pin(&hid).await, None);
+    }
+
+    // ============================================================
+    //  Per-hosting HTTP brute-force switch (`[fail2ban]` scoped to
+    //  one site's login page) + the `[fail2ban]` settings editor.
+    // ============================================================
+
+    /// `happy_mocks` hands out one fixed UID and one fixed database name, so
+    /// a second `create` on the same pool trips `UNIQUE(uid)` /
+    /// `UNIQUE(engine, db_name)`. Tests that need several sites on one node
+    /// use this instead.
+    fn happy_mocks_many() -> MockAdapterPort {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let uid = AtomicU32::new(1042);
+        let dbn = AtomicU32::new(1);
+        let mut a = MockAdapterPort::new();
+        a.expect_ensure_user()
+            .returning(move |_, _| Ok(uid.fetch_add(1, Ordering::Relaxed)));
+        a.expect_db_create().returning(move |_, _, _| {
+            let n = dbn.fetch_add(1, Ordering::Relaxed);
+            Ok(DbCredentials {
+                engine: DbProvision::MariaDB,
+                db_name: format!("lm_{n}"),
+                db_user: format!("lm_u{n}"),
+                password: "p".into(),
+            })
+        });
+        a.expect_ensure_dirs().returning(|_, _, _, _| Ok(()));
+        a.expect_fpm_ensure().returning(|_, _, _| Ok(()));
+        a.expect_acme_issue().returning(|d, _| Ok(cert_for(d)));
+        a.expect_nginx_write_vhost().returning(|_| Ok(()));
+        a.expect_redis_is_available().returning(|| true);
+        a
+    }
+
+    /// Write an nginx access.log where the HTTP scan looks for one — the
+    /// combined format it parses, `hits` wp-login POSTs from `ip`, stamped
+    /// now so they fall inside the scan window.
+    fn write_wp_login_flood(home_root: &std::path::Path, user: &str, domain: &str, ip: &str) {
+        use chrono::{TimeZone, Utc};
+        let dir = home_root.join(user).join(domain).join("logs");
+        std::fs::create_dir_all(&dir).expect("logs dir");
+        let ts = Utc
+            .timestamp_opt(now_secs(), 0)
+            .single()
+            .expect("now")
+            .format("%d/%b/%Y:%H:%M:%S +0000")
+            .to_string();
+        // One over the default threshold, so the flood is unambiguous.
+        let line =
+            format!("{ip} - - [{ts}] \"POST /wp-login.php HTTP/1.1\" 200 512 \"-\" \"curl\"\n");
+        let body = line.repeat(Fail2banConfig::default().http_threshold as usize + 1);
+        std::fs::write(dir.join("access.log"), body).expect("write access.log");
+    }
+
+    /// The site-attributed half of a scan, as sorted `(hosting id, ip)` —
+    /// sorted because `list()` promises no row order.
+    fn http_hits(intents: &[BanIntent]) -> Vec<(String, String)> {
+        let mut v: Vec<(String, String)> = intents
+            .iter()
+            .filter_map(|i| i.site.as_ref().map(|s| (s.id.clone(), i.ip.clone())))
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// The node-wide half of a scan (ssh / ftp / mail), as sorted
+    /// `(ip, reason)`.
+    fn node_hits(intents: &[BanIntent]) -> Vec<(String, &'static str)> {
+        let mut v: Vec<(String, &'static str)> = intents
+            .iter()
+            .filter(|i| i.site.is_none())
+            .map(|i| (i.ip.clone(), i.reason))
+            .collect();
+        v.sort();
+        v
+    }
+
+    /// Two sites, both under attack. Opting one out stops its access log
+    /// being read; the other keeps being scanned exactly as before.
+    #[tokio::test]
+    async fn opted_out_site_is_skipped_while_the_others_still_scan() {
+        let pool = open_memory().await.expect("open");
+        let home = tempfile::tempdir().expect("dir");
+        let s = svc(pool.clone(), happy_mocks_many()).with_paths(HostingPaths {
+            home_root: home.path().display().to_string(),
+            ..HostingPaths::default()
+        });
+        s.create(req("example.cz"))
+            .await
+            .expect("create example.cz");
+        s.create(req("druhy.cz")).await.expect("create druhy.cz");
+        let a = s
+            .get(HostingSelector::Domain(
+                Domain::parse("example.cz").expect("parse"),
+            ))
+            .await
+            .expect("get example.cz");
+        let b = s
+            .get(HostingSelector::Domain(
+                Domain::parse("druhy.cz").expect("parse"),
+            ))
+            .await
+            .expect("get druhy.cz");
+        write_wp_login_flood(home.path(), &a.system_user, &a.domain, "203.0.113.7");
+        write_wp_login_flood(home.path(), &b.system_user, &b.domain, "198.51.100.9");
+        let since = now_secs() - s.fail2ban.window_secs;
+
+        // No key on either site: both are scanned, which is what every
+        // install that predates this switch keeps doing.
+        assert_eq!(
+            http_hits(&s.fail2ban_scan(since).await.expect("scan")),
+            {
+                let mut want = vec![
+                    (a.id.as_str().to_string(), "203.0.113.7".to_string()),
+                    (b.id.as_str().to_string(), "198.51.100.9".to_string()),
+                ];
+                want.sort();
+                want
+            },
+            "absent key must mean ON for both sites"
+        );
+
+        // Opt example.cz out — the panel writes the same key the getter reads.
+        s.hosting_kv_set(
+            a.id.as_str().to_string(),
+            FAIL2BAN_HTTP_KV_KEY.into(),
+            "off".into(),
+        )
+        .await
+        .expect("opt out");
+        assert_eq!(
+            http_hits(&s.fail2ban_scan(since).await.expect("scan")),
+            vec![(b.id.as_str().to_string(), "198.51.100.9".to_string())],
+            "one site's switch must not silence its neighbour"
+        );
+    }
+
+    /// The switch may only silence the source that belongs to the site.
+    /// Opting EVERY site out empties the HTTP half and leaves the node-wide
+    /// half (ssh / ftp / mail) identical.
+    ///
+    /// There is no journald here, so both node-wide halves are empty: what
+    /// this pins is the attribution rule — a `site: None` intent is never
+    /// gated — not that a real ssh flood is caught, which needs a journal.
+    #[tokio::test]
+    async fn opting_every_site_out_leaves_the_node_wide_sources_alone() {
+        let pool = open_memory().await.expect("open");
+        let home = tempfile::tempdir().expect("dir");
+        let s = svc(pool.clone(), happy_mocks_many()).with_paths(HostingPaths {
+            home_root: home.path().display().to_string(),
+            ..HostingPaths::default()
+        });
+        s.create(req("example.cz")).await.expect("create");
+        let a = s
+            .get(HostingSelector::Domain(
+                Domain::parse("example.cz").expect("parse"),
+            ))
+            .await
+            .expect("get");
+        write_wp_login_flood(home.path(), &a.system_user, &a.domain, "203.0.113.7");
+        let since = now_secs() - s.fail2ban.window_secs;
+
+        let before = s.fail2ban_scan(since).await.expect("scan");
+        assert!(
+            !http_hits(&before).is_empty(),
+            "the flood must be seen first"
+        );
+
+        s.hosting_kv_set(
+            a.id.as_str().to_string(),
+            FAIL2BAN_HTTP_KV_KEY.into(),
+            "off".into(),
+        )
+        .await
+        .expect("opt out");
+        let after = s.fail2ban_scan(since).await.expect("scan");
+        assert!(http_hits(&after).is_empty(), "the site is opted out");
+        assert_eq!(
+            node_hits(&before),
+            node_hits(&after),
+            "sshd / ftp / mail journals are node-wide — no site may switch them off"
+        );
+    }
+
+    /// Absent key ⇒ on; only a literal "off" opts out. And once a site is
+    /// out, its care report stops reporting an attacks-blocked count it
+    /// cannot stand behind — nobody was watching that login page.
+    #[tokio::test]
+    async fn http_switch_defaults_on_and_an_opted_out_site_reports_no_count() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), happy_mocks());
+        s.create(req("example.cz")).await.expect("create");
+        let detail = s
+            .get(HostingSelector::Domain(
+                Domain::parse("example.cz").expect("parse"),
+            ))
+            .await
+            .expect("get");
+        let hid = detail.id.as_str().to_string();
+
+        assert!(
+            s.http_bruteforce_scan_enabled(&hid).await,
+            "absent key ⇒ scanning, so an upgrade changes nothing"
+        );
+        for (stored, want) in [("off", false), ("on", true), ("", true), (" off ", false)] {
+            s.hosting_kv_set(hid.clone(), FAIL2BAN_HTTP_KV_KEY.into(), stored.into())
+                .await
+                .expect("kv set");
+            assert_eq!(
+                s.http_bruteforce_scan_enabled(&hid).await,
+                want,
+                "stored {stored:?}"
+            );
+        }
+
+        // Scanning on: the count is a real measurement, even at zero.
+        s.hosting_kv_set(hid.clone(), FAIL2BAN_HTTP_KV_KEY.into(), "on".into())
+            .await
+            .expect("kv set");
+        let now = now_secs();
+        let on = s
+            .care_report_build(HostingSelector::Id(detail.id.clone()), now - 86_400, now)
+            .await
+            .expect("report");
+        assert_eq!(on.attacks_blocked, Some(0));
+
+        // Opted out: "we did not measure this", not a reassuring zero.
+        s.hosting_kv_set(hid.clone(), FAIL2BAN_HTTP_KV_KEY.into(), "off".into())
+            .await
+            .expect("kv set");
+        let off = s
+            .care_report_build(HostingSelector::Id(detail.id.clone()), now - 86_400, now)
+            .await
+            .expect("report");
+        assert_eq!(off.attacks_blocked, None);
+    }
+
+    /// The Settings form's round trip: a save lands in agent.toml under
+    /// `[fail2ban]`, and the allow-list refuses both unknown keys and any
+    /// value `Fail2banConfig::sanitized` would silently override at boot.
+    #[tokio::test]
+    async fn fail2ban_section_round_trips_and_refuses_values_the_agent_would_clamp() {
+        let dir = tempfile::tempdir().expect("dir");
+        let path = dir.path().join("agent.toml");
+        // No [fail2ban] table yet — the common case, and `ensure_table` has
+        // to create it rather than error.
+        std::fs::write(&path, "[agent]\nsocket_path = \"/run/hyperion.sock\"\n").expect("seed");
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool, happy_mocks()).with_agent_config_path(path.clone());
+
+        let save = |pairs: Vec<(&'static str, &'static str)>| {
+            let fields: std::collections::BTreeMap<String, String> = pairs
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            s.agent_config_update("fail2ban".to_string(), fields)
+        };
+
+        save(vec![
+            ("enabled", "true"),
+            ("window_secs", "900"),
+            ("ban_ttl_secs", "7200"),
+            ("http_threshold", "6"),
+        ])
+        .await
+        .expect("save");
+
+        let doc: toml_edit::DocumentMut = std::fs::read_to_string(&path)
+            .expect("read back")
+            .parse()
+            .expect("parse");
+        assert_eq!(doc["fail2ban"]["enabled"].as_bool(), Some(true));
+        assert_eq!(doc["fail2ban"]["window_secs"].as_integer(), Some(900));
+        assert_eq!(doc["fail2ban"]["ban_ttl_secs"].as_integer(), Some(7200));
+        assert_eq!(doc["fail2ban"]["http_threshold"].as_integer(), Some(6));
+        // Untouched sections survive the rewrite.
+        assert!(doc.get("agent").is_some());
+
+        // `ban_ttl_secs = 0` is the dangerous one: `ban_add` reads ttl ≤ 0 as
+        // no-expiry, so it would sit in the file looking like a PERMANENT
+        // node-wide ban while the running agent used 60 s.
+        assert!(save(vec![("ban_ttl_secs", "0")]).await.is_err());
+        // A threshold of 1 bans on the first mistyped password.
+        assert!(save(vec![("http_threshold", "1")]).await.is_err());
+        assert!(save(vec![("window_secs", "0")]).await.is_err());
+        assert!(save(vec![("ssh_threshold", "not a number")]).await.is_err());
+        // The allow-list still rejects anything it doesn't know.
+        assert!(save(vec![("nft_table", "hyperion")]).await.is_err());
+
+        // A rejected save writes nothing — the good values are still there.
+        let after: toml_edit::DocumentMut = std::fs::read_to_string(&path)
+            .expect("read back")
+            .parse()
+            .expect("parse");
+        assert_eq!(after["fail2ban"]["ban_ttl_secs"].as_integer(), Some(7200));
+        assert_eq!(after["fail2ban"]["http_threshold"].as_integer(), Some(6));
+        assert!(after["fail2ban"].get("nft_table").is_none());
+    }
+
     #[test]
     fn validate_profile_rejects_bad_numbers() {
         use super::validate_profile;
@@ -23186,6 +23923,61 @@ mod tests {
         // Lone/unclosed brace + literal text preserved.
         assert_eq!(render_template("a { b", &[]), "a { b");
         assert_eq!(render_template("100% {x}", &[("x", "ok")]), "100% ok");
+    }
+
+    // ============================================================
+    //  expiry_warning_mail — the letter the customer actually gets
+    //  before we suspend their site. Pure, so the 30/7/1-day
+    //  variants are assertable without an SMTP relay.
+    // ============================================================
+
+    /// 2026-09-01 00:00:00 UTC.
+    const EXP_TS: i64 = 1_788_220_800;
+
+    #[test]
+    fn expiry_warning_30d_states_domain_date_days_and_consequences() {
+        let (subject, body) = expiry_warning_mail("example.cz", EXP_TS, 14, EXP_TS - 30 * 86_400);
+        assert_eq!(subject, "[Hyperion] Hosting example.cz vyprší za 30 dní");
+        assert!(body.contains("hosting example.cz vyprší 1. 9. 2026 — zbývá 30 dní."));
+        assert!(body.contains("1. 9. 2026 bude hosting pozastaven"));
+        // Delete date = expiry + grace, the date DeleteExpired is queued for.
+        assert!(body.contains("po ochranné lhůtě 14 dní, tj. 15. 9. 2026"));
+    }
+
+    #[test]
+    fn expiry_warning_7d_variant() {
+        let (subject, body) = expiry_warning_mail("example.cz", EXP_TS, 14, EXP_TS - 7 * 86_400);
+        assert_eq!(subject, "[Hyperion] Hosting example.cz vyprší za 7 dní");
+        assert!(body.contains("zbývá 7 dní."));
+    }
+
+    #[test]
+    fn expiry_warning_1d_variant_is_singular() {
+        let (subject, body) = expiry_warning_mail("example.cz", EXP_TS, 14, EXP_TS - 86_400);
+        assert_eq!(subject, "[Hyperion] Hosting example.cz vyprší za 1 den");
+        assert!(body.contains("zbývá 1 den."));
+    }
+
+    #[test]
+    fn expiry_warning_on_the_day_says_today() {
+        let (subject, body) = expiry_warning_mail("example.cz", EXP_TS, 14, EXP_TS);
+        assert_eq!(subject, "[Hyperion] Hosting example.cz vyprší dnes");
+        assert!(body.contains("hosting example.cz vyprší dnes."));
+        // A late tick can't produce a negative countdown.
+        let (late, _) = expiry_warning_mail("example.cz", EXP_TS, 14, EXP_TS + 3 * 86_400);
+        assert_eq!(late, "[Hyperion] Hosting example.cz vyprší dnes");
+    }
+
+    #[test]
+    fn expiry_warning_grace_matches_the_scheduled_delete() {
+        // grace_days = 0 is stored, but reconcile_scheduled_rows queues the
+        // delete at grace.max(1) — the letter must name that same date.
+        let (_, body) = expiry_warning_mail("example.cz", EXP_TS, 0, EXP_TS - 86_400);
+        assert!(body.contains("po ochranné lhůtě 1 den, tj. 2. 9. 2026"));
+        // 2–4 takes the third Czech plural form.
+        let (_, body) = expiry_warning_mail("example.cz", EXP_TS, 3, EXP_TS - 2 * 86_400);
+        assert!(body.contains("zbývá 2 dny."));
+        assert!(body.contains("po ochranné lhůtě 3 dny, tj. 4. 9. 2026"));
     }
 
     // ============================================================

@@ -47,6 +47,14 @@ pub enum DispatchError {
     /// it never carries response content.
     #[error("node {node_id} response failed authentication: {reason}")]
     ResponseAuthFailed { node_id: String, reason: String },
+    /// Worker TLS certificate pinning is ENFORCED and the master holds
+    /// no pin for this node, so the connection would be made with no
+    /// certificate check at all. Same family as `ResponseAuthFailed`
+    /// and deliberately not `NodeUnreachable`: nothing is wrong with
+    /// the node's reachability, the master simply refuses to open an
+    /// unauthenticated channel while the operator has said not to.
+    #[error("node {node_id} has no TLS certificate pin on file while pinning is enforced")]
+    CertPinMissing { node_id: String },
     #[error("target node {0} is not enrolled")]
     UnknownNode(String),
     #[error("target node {0} has no public_ip on record — cannot reach")]
@@ -203,16 +211,15 @@ async fn dispatch_remote(
     // trip") — but "this node has published nothing" is exactly the state
     // an on-path attacker engineers by stripping resp_pubkey from the
     // heartbeat, and skipping the read handed that node a hard-coded
-    // enforce=false. `check_response_auth` needs the real toggle value to
-    // refuse it. Cert pinning loses nothing either way: with no reported
-    // pin there is nothing to pass to --pinnedpubkey regardless.
+    // enforce=false. BOTH checks below need the real toggle value to
+    // refuse a node in that state — an absent TLS pin is engineered the
+    // same way, by stripping tls_spki_pin from the heartbeat.
     let enforce = cluster_enforcement(state).await;
-    // Block C enforce phase: when the cluster toggle is on AND this node
-    // has a heartbeat-reported pin, pin it for real (curl --pinnedpubkey).
-    let pinned_pubkey = match &route.reported_pin {
-        Some(pin) if enforce.cert_pinning => Some(pin.clone()),
-        _ => None,
-    };
+    // Block C enforce phase. Refuses BEFORE dialling when there is no pin
+    // to enforce with — see check_cert_pinning for why "no pin" cannot be
+    // treated as "nothing to enforce".
+    let pinned_pubkey =
+        check_cert_pinning(node_id, route.reported_pin.as_deref(), enforce.cert_pinning)?;
     let opts = RemoteCallOpts {
         timeout_secs: timeout_for_request(&req),
         pinned_pubkey,
@@ -334,12 +341,16 @@ pub async fn fan_out_reporting(
                     // worker". Log it at ERROR with the security wording
                     // so it can't be lost among routine exclusions in
                     // `journalctl -u hyperion-web -g fan_out`.
-                    if matches!(e, DispatchError::ResponseAuthFailed { .. }) {
+                    if matches!(
+                        e,
+                        DispatchError::ResponseAuthFailed { .. }
+                            | DispatchError::CertPinMissing { .. }
+                    ) {
                         tracing::error!(
                             node = %nid,
                             error = %e,
-                            "SECURITY: fan_out excluded a node whose response failed \
-                             authentication — this page is rendering an INCOMPLETE \
+                            "SECURITY: fan_out excluded a node the master could not \
+                             authenticate — this page is rendering an INCOMPLETE \
                              aggregate, not an empty one"
                         );
                     } else {
@@ -446,6 +457,53 @@ async fn cluster_enforcement(state: &SharedState) -> Enforcement {
             response_auth: c.cluster.enforce_response_auth,
         },
         _ => Enforcement::default(),
+    }
+}
+
+/// Decide the `--pinnedpubkey` value for this dispatch, or refuse it.
+///
+/// The pin the master holds is trust-on-first-use and **write-once**:
+/// `nodes.tls_spki_pin` is only ever FILLED (`COALESCE(tls_spki_pin, ?)`
+/// in `touch_last_seen`), a heartbeat presenting a DIFFERENT pin is
+/// refused and warned about (`tofu_report`), and clearing it is an
+/// explicit operator action (`node_reset_crypto`, re-enrollment). So an
+/// attacker cannot silently re-aim a pin that has landed.
+///
+/// What they can still do is stop one from ever landing: the heartbeat
+/// travels over `curl -k`, so stripping `tls_spki_pin` from it leaves
+/// the column NULL forever. Treating NULL as "nothing to enforce" would
+/// hand the attacker the choice of WHICH nodes the toggle protects, and
+/// the connection would then be made with `-k` and no pin — precisely
+/// the state the toggle exists to end. So under enforcement, no pin on
+/// file is a refusal, exactly like no response-signing key on file is in
+/// [`check_response_auth`].
+///
+/// With enforcement OFF this returns `Ok(None)` for every input and
+/// nothing is ever refused: the warn-only observation in
+/// [`warn_on_pin_mismatch`] is the whole behaviour, unchanged.
+fn check_cert_pinning(
+    node_id: &str,
+    reported_pin: Option<&str>,
+    enforce: bool,
+) -> Result<Option<String>, DispatchError> {
+    if !enforce {
+        return Ok(None);
+    }
+    match reported_pin {
+        Some(pin) => Ok(Some(pin.to_string())),
+        None => {
+            tracing::error!(
+                node = node_id,
+                "SECURITY: worker TLS certificate pinning is enforced but this node has no \
+                 pin on file, so the RPC would run over an unverified connection with nothing \
+                 to check the cert against. Refused. Restart the node's agent and wait one \
+                 heartbeat for it to report its pin (the 🔒 chip on Nodes), or turn off \
+                 Enforce worker TLS certificate pinning in Settings → Cluster."
+            );
+            Err(DispatchError::CertPinMissing {
+                node_id: node_id.to_string(),
+            })
+        }
     }
 }
 
@@ -653,6 +711,17 @@ impl From<DispatchError> for crate::error::AppError {
                  connectivity problem: check `journalctl -u hyperion-agent` on the node \
                  and whether anything is intercepting master→worker traffic."
             )),
+            // Also NOT NodeUnreachable: the node is fine, the master
+            // declined to talk to it unverified. The two fixes are named
+            // in the order an operator should try them — re-reporting the
+            // pin keeps the protection, switching the toggle off drops it.
+            DispatchError::CertPinMissing { node_id } => AppError::Rpc(format!(
+                "node {node_id} has not reported a TLS certificate pin, and Enforce worker TLS \
+                 certificate pinning is on in Settings → Cluster — so the master refused to \
+                 dispatch over a connection it cannot check. Restart hyperion-agent on that node \
+                 and wait one heartbeat (about 30 s) for the 🔒 chip to appear on Nodes, or turn \
+                 the setting off."
+            )),
             DispatchError::UnknownNode(n) => AppError::BadRequest(format!(
                 "node {n} is not enrolled — pick a different target"
             )),
@@ -790,6 +859,67 @@ mod tests {
         let err = check_response_auth(NODE, Some(s.pubkey_b64()), &out, true)
             .expect_err("enforced downgrade must be refused");
         assert!(is_auth_failure(&err), "wrong variant: {err}");
+    }
+
+    const PIN: &str = "/4IrPU/vEdcxQgcB9m3gD/9oaQ9/8WmdvXZIDD+ZVxg=";
+
+    /// Nothing changes until the operator flips the toggle — including
+    /// for a node that has never reported a pin. This is the arm that
+    /// keeps a mixed cluster working, so it is asserted first.
+    #[test]
+    fn cert_pinning_is_inert_until_the_operator_enforces_it() {
+        assert_eq!(check_cert_pinning(NODE, Some(PIN), false).unwrap(), None);
+        assert_eq!(check_cert_pinning(NODE, None, false).unwrap(), None);
+    }
+
+    /// Enforcing pins the value on file, verbatim — it is what curl gets
+    /// after `sha256//`, so any rewriting here would break every call.
+    #[test]
+    fn enforced_pinning_pins_exactly_the_pin_on_file() {
+        assert_eq!(
+            check_cert_pinning(NODE, Some(PIN), true)
+                .expect("a node with a pin is dispatched to")
+                .as_deref(),
+            Some(PIN)
+        );
+    }
+
+    /// The write-once rule's consequence. Because the master only ever
+    /// FILLS `nodes.tls_spki_pin` and refuses a changed one, an attacker
+    /// cannot re-aim a pin that landed — the only lever left is keeping
+    /// one from ever landing, by stripping `tls_spki_pin` from the
+    /// node's (unverified) heartbeats. Enforcement therefore has to read
+    /// "no pin on file" as a refusal; reading it as "nothing to check"
+    /// would let the attacker choose who the toggle protects.
+    #[test]
+    fn enforced_pinning_refuses_a_node_whose_pin_never_landed() {
+        let err = check_cert_pinning(NODE, None, true)
+            .expect_err("a pinless node must not be dispatched to under enforcement");
+        assert!(
+            matches!(err, DispatchError::CertPinMissing { .. }),
+            "wrong variant: {err}"
+        );
+        assert!(err.to_string().contains("no TLS certificate pin"), "{err}");
+    }
+
+    /// ...and the refusal must not read as downtime either: an operator
+    /// who restarts a healthy agent looking for a network fault is an
+    /// operator who never finds the toggle that caused this.
+    #[test]
+    fn missing_pin_does_not_render_as_node_unreachable() {
+        let app: crate::error::AppError = DispatchError::CertPinMissing {
+            node_id: NODE.to_string(),
+        }
+        .into();
+        assert!(
+            !matches!(app, crate::error::AppError::NodeUnreachable { .. }),
+            "an enforcement refusal must not present as downtime"
+        );
+        let text = app.to_string();
+        assert!(
+            text.contains("Settings"),
+            "names where to turn it off: {text}"
+        );
     }
 
     /// A forged response must never reach the operator as "node

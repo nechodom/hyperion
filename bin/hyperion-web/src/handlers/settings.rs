@@ -58,6 +58,10 @@ struct SettingsTpl<'a> {
     /// the "Raw TOML" tab. Failing to read shows "(could not
     /// read /etc/hyperion/agent.toml: …)".
     raw_toml: String,
+    /// The master's `[fail2ban]` section, for the Brute force tab.
+    /// `None` when agent.toml couldn't be read or parsed — the card then
+    /// says so instead of pre-filling a form with numbers nothing backs.
+    fail2ban: Option<Fail2banView>,
     /// Live MTA (postfix) state — mode (smart-host / direct-mx /
     /// not-installed / default), myhostname, relayhost, mailq depth,
     /// recent mail.log. Drives the new "MTA" card under the SMTP
@@ -175,6 +179,71 @@ fn fmt_date(ts: Option<i64>) -> String {
     }
 }
 
+/// The `[fail2ban]` section as it currently reads on disk, for the Brute
+/// force tab's form.
+///
+/// Not part of `AgentConfigView`: the section is read straight out of the
+/// same `/etc/hyperion/agent.toml` the Raw TOML tab already reads, so the
+/// form shows the file rather than a value re-derived somewhere else.
+pub struct Fail2banView {
+    /// The values in the file, defaults filled in for absent keys.
+    pub cfg: hyperion_core::Fail2banConfig,
+    /// False ⇒ agent.toml has no `[fail2ban]` table at all, so these are
+    /// the built-in defaults rather than anything an operator chose. Said
+    /// out loud in the card so the form can't imply a decision nobody made.
+    pub in_toml: bool,
+    /// True ⇒ at least one value on disk is outside the floors
+    /// `Fail2banConfig::sanitized` applies at agent start, so the running
+    /// scanner is NOT using the numbers shown. Only reachable by hand-editing
+    /// the file — the form's own validation refuses to write such a value.
+    pub clamped: bool,
+}
+
+/// Parse the `[fail2ban]` table out of agent.toml for the Brute force tab.
+///
+/// An absent table is not an error: the agent runs the built-in defaults
+/// then, which is exactly what's rendered — flagged with `in_toml = false`.
+/// `None` means the file didn't parse at all, and the card says that instead
+/// of showing numbers it can't stand behind.
+fn parse_fail2ban_section(raw: &str) -> Option<Fail2banView> {
+    let doc: toml::Value = raw.parse().ok()?;
+    let table = doc.get("fail2ban");
+    let d = hyperion_core::Fail2banConfig::default();
+    let flag = |key: &str, fallback: bool| {
+        table
+            .and_then(|t| t.get(key))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(fallback)
+    };
+    let num = |key: &str, fallback: i64| {
+        table
+            .and_then(|t| t.get(key))
+            .and_then(|v| v.as_integer())
+            .unwrap_or(fallback)
+    };
+    // Thresholds are u32 in the config; a hand-edited negative or absurd
+    // value saturates rather than wrapping into a huge threshold that would
+    // silently disable a scanner.
+    let count =
+        |key: &str, fallback: u32| num(key, fallback as i64).clamp(0, u32::MAX as i64) as u32;
+    let cfg = hyperion_core::Fail2banConfig {
+        enabled: flag("enabled", d.enabled),
+        window_secs: num("window_secs", d.window_secs),
+        ban_ttl_secs: num("ban_ttl_secs", d.ban_ttl_secs),
+        repeat_ttl_secs: num("repeat_ttl_secs", d.repeat_ttl_secs),
+        repeat_lookback_secs: num("repeat_lookback_secs", d.repeat_lookback_secs),
+        http_threshold: count("http_threshold", d.http_threshold),
+        ssh_threshold: count("ssh_threshold", d.ssh_threshold),
+        ftp_threshold: count("ftp_threshold", d.ftp_threshold),
+        mail_threshold: count("mail_threshold", d.mail_threshold),
+    };
+    Some(Fail2banView {
+        in_toml: table.is_some(),
+        clamped: cfg.clone().sanitized() != cfg,
+        cfg,
+    })
+}
+
 /// One test node's wildcard-cert row in the Settings card.
 pub struct NodeWildcardRow {
     pub node_id: String,
@@ -283,12 +352,15 @@ pub async fn get_settings(
             Ok(RpcResponse::NodesList(v)) => v,
             _ => Vec::new(),
         };
-    // Read agent.toml for the Raw TOML tab. Mask anything that
-    // looks like a password / token line — token values are
-    // single-line strings so a regex on `password = "..."` /
-    // `token = "..."` / `webhook = "https://hooks..."` suffices.
-    let raw_toml = match tokio::fs::read_to_string("/etc/hyperion/agent.toml").await {
-        Ok(s) => mask_secrets_in_toml(&s),
+    // Read agent.toml once — for the Raw TOML tab (masked: anything that
+    // looks like a password / token line; token values are single-line
+    // strings so a regex on `password = "..."` / `token = "..."` /
+    // `webhook = "https://hooks..."` suffices) and for the Brute force
+    // tab's `[fail2ban]` form, which is parsed from the unmasked text.
+    let agent_toml = tokio::fs::read_to_string("/etc/hyperion/agent.toml").await;
+    let fail2ban = agent_toml.as_deref().ok().and_then(parse_fail2ban_section);
+    let raw_toml = match &agent_toml {
+        Ok(s) => mask_secrets_in_toml(s),
         Err(e) => format!("(could not read /etc/hyperion/agent.toml: {e})"),
     };
     // Master's Cloudflare DNS-01 token state (live-verified if present) for the
@@ -384,6 +456,7 @@ pub async fn get_settings(
         resp_auth_pending,
         resp_auth_total,
         raw_toml,
+        fail2ban,
         mta,
         mail_node,
         cloudflare,
@@ -933,6 +1006,7 @@ fn section_to_tab(section: &str) -> &'static str {
         "slack" => "notifications",
         "backup_remote" | "backup_retention" => "backups",
         "cluster" => "cluster",
+        "fail2ban" => "bruteforce",
         _ => "mail",
     }
 }
@@ -946,6 +1020,7 @@ fn sanitize_return_tab(v: &str) -> Option<&'static str> {
         "tls" => Some("tls"),
         "notifications" => Some("notifications"),
         "backups" => Some("backups"),
+        "bruteforce" => Some("bruteforce"),
         "cluster" => Some("cluster"),
         "testnodes" => Some("testnodes"),
         "retention" => Some("retention"),
@@ -1804,5 +1879,58 @@ from_address = "ops@example.cz"
         // looks for "<key> =" before the equals sign and "# password"
         // doesn't match "password" exactly.
         assert!(out.contains("# password = \"never-stored-but-comment\""));
+    }
+
+    // ============================================================
+    //  [fail2ban] section → Brute force tab
+    // ============================================================
+
+    /// No section at all is the common case on an install that never
+    /// touched it: the agent runs the defaults, so the form shows the
+    /// defaults — but flagged, so nothing implies an operator chose them.
+    #[test]
+    fn absent_section_shows_the_defaults_the_agent_actually_runs() {
+        let v = super::parse_fail2ban_section("[agent]\nsocket_path = \"/run/x.sock\"\n")
+            .expect("valid toml");
+        assert!(!v.in_toml);
+        assert!(!v.clamped);
+        assert_eq!(v.cfg, hyperion_core::Fail2banConfig::default());
+    }
+
+    /// A partially-filled section keeps the operator's values and fills the
+    /// rest from the same defaults the agent would.
+    #[test]
+    fn partial_section_merges_with_the_agent_defaults() {
+        let v = super::parse_fail2ban_section(
+            "[fail2ban]\nenabled = false\nhttp_threshold = 4\nban_ttl_secs = 7200\n",
+        )
+        .expect("valid toml");
+        let d = hyperion_core::Fail2banConfig::default();
+        assert!(v.in_toml);
+        assert!(!v.cfg.enabled);
+        assert_eq!(v.cfg.http_threshold, 4);
+        assert_eq!(v.cfg.ban_ttl_secs, 7200);
+        assert_eq!(v.cfg.ssh_threshold, d.ssh_threshold);
+        assert_eq!(v.cfg.window_secs, d.window_secs);
+        assert!(!v.clamped);
+    }
+
+    /// A hand-edited value the agent overrides at start-up must be reported,
+    /// not quietly rendered as if the scanner were using it.
+    #[test]
+    fn a_value_the_agent_clamps_is_flagged() {
+        let v =
+            super::parse_fail2ban_section("[fail2ban]\nban_ttl_secs = 0\n").expect("valid toml");
+        assert!(v.in_toml);
+        assert_eq!(v.cfg.ban_ttl_secs, 0, "the file is shown as it reads");
+        assert!(v.clamped, "…and the card has to say the agent uses 60 s");
+    }
+
+    /// Unparseable agent.toml yields nothing, so the card says the values
+    /// are unknown rather than showing built-in defaults as if they were
+    /// this node's settings.
+    #[test]
+    fn unparseable_toml_yields_no_view() {
+        assert!(super::parse_fail2ban_section("[fail2ban\nenabled = ").is_none());
     }
 }

@@ -125,6 +125,10 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::hostings::post_set_backup_cadence),
         )
         .route(
+            "/hostings/backup-target",
+            post(handlers::hostings::post_set_backup_target),
+        )
+        .route(
             "/hostings/expiry/set",
             post(handlers::hostings::post_set_expiry),
         )

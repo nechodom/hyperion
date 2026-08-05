@@ -132,6 +132,19 @@ struct DetailTpl<'a> {
     /// Per-hosting recurring-backup cadence ("off"|"daily"|"weekly"|"monthly"),
     /// read from the owning node's hosting_kv; drives the Backups-card select.
     backup_cadence: String,
+    csrf_backup_target: String,
+    /// The off-site target this hosting is pinned to (`backup_targets.name`),
+    /// or "" for the node default. Owning node's hosting_kv, like the cadence.
+    backup_target: String,
+    /// Every configured off-site target + why it can't take a backup, when it
+    /// can't. Empty for non-admins, who get no picker at all.
+    backup_target_options: Vec<BackupTargetOption>,
+    /// Label of the "no pin" option — it names how many targets would actually
+    /// receive a copy, so leaving it alone isn't a guess.
+    backup_target_default_label: String,
+    /// Non-empty when the pin above resolves to nothing — the site is NOT
+    /// going off-site and the card has to say so.
+    backup_target_warning: String,
     csrf_expiry_set: String,
     csrf_expiry_clear: String,
     csrf_dns_check: String,
@@ -159,6 +172,9 @@ struct DetailTpl<'a> {
     wp_flash: Option<String>,
     backup_error: Option<String>,
     backup_flash: Option<String>,
+    /// Why an off-site pin was refused (unknown target), carried back through
+    /// the redirect so the operator doesn't think the change landed.
+    backup_target_error: Option<String>,
     expiry_error: Option<String>,
     expiry_flash: Option<String>,
     cert_error: Option<String>,
@@ -1219,6 +1235,14 @@ pub async fn post_create(
                 csrf_backup_now: csrf_token_for(&state, &ctx, "/hostings/backup-now"),
                 csrf_backup_cadence: csrf_token_for(&state, &ctx, "/hostings/backup-cadence"),
                 backup_cadence: "off".into(),
+                csrf_backup_target: csrf_token_for(&state, &ctx, "/hostings/backup-target"),
+                // A just-created hosting has no pin yet, and the create
+                // response renders in place — the picker shows up on the next
+                // GET of the detail page rather than being half-populated here.
+                backup_target: String::new(),
+                backup_target_options: vec![],
+                backup_target_default_label: String::new(),
+                backup_target_warning: String::new(),
                 csrf_expiry_set: csrf_token_for(&state, &ctx, "/hostings/expiry/set"),
                 csrf_expiry_clear: csrf_token_for(&state, &ctx, "/hostings/expiry/clear"),
                 csrf_dns_check: csrf_token_for(&state, &ctx, "/hostings/dns-check"),
@@ -1248,6 +1272,7 @@ pub async fn post_create(
                 }),
                 backup_error: None,
                 backup_flash: None,
+                backup_target_error: None,
                 expiry_error: None,
                 expiry_flash: None,
                 cert_error: None,
@@ -1941,10 +1966,11 @@ pub async fn get_detail(
         .map(|(_, v)| v.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| format!("staging.{}", detail.domain));
-    // Recurring-backup cadence lives in the OWNING node's hosting_kv (seeded by
-    // profile_apply there + overridable here), so read it from the owner rather
-    // than the master kv_pairs above. Best-effort: default "off".
-    let backup_cadence = match crate::dispatcher::dispatch_to_node(
+    // Recurring-backup cadence and the off-site pin live in the OWNING node's
+    // hosting_kv (seeded by profile_apply there + overridable here), so read
+    // them from the owner rather than the master kv_pairs above. Best-effort:
+    // cadence defaults to "off", pin to the node default.
+    let owner_kv = match crate::dispatcher::dispatch_to_node(
         &state,
         target,
         Request::HostingKvList {
@@ -1953,14 +1979,53 @@ pub async fn get_detail(
     )
     .await
     {
-        Ok(RpcResponse::HostingKvList(v)) => v
-            .into_iter()
-            .find(|(k, _)| k == "backup_cadence")
-            .map(|(_, v)| v)
-            .filter(|v| matches!(v.as_str(), "daily" | "weekly" | "monthly"))
-            .unwrap_or_else(|| "off".into()),
-        _ => "off".into(),
+        Ok(RpcResponse::HostingKvList(v)) => v,
+        _ => vec![],
     };
+    let backup_cadence = owner_kv
+        .iter()
+        .find(|(k, _)| k == "backup_cadence")
+        .map(|(_, v)| v.clone())
+        .filter(|v| matches!(v.as_str(), "daily" | "weekly" | "monthly"))
+        .unwrap_or_else(|| "off".into());
+    // Off-site destination picker. Admin-only, and the target list is fetched
+    // only for admins — a non-admin render would otherwise pair a live pin
+    // with an empty list and report a working target as unconfigured. Same
+    // reason the picker disappears entirely when the list can't be read.
+    let targets = if ctx.is_admin_or_higher() {
+        configured_backup_targets(&state).await
+    } else {
+        None
+    };
+    let (backup_target, backup_target_options, backup_target_default_label, backup_target_warning) =
+        match targets {
+            Some(mut options) => {
+                let pin = owner_kv
+                    .iter()
+                    .find(|(k, _)| k == "backup_target")
+                    .map(|(_, v)| v.trim().to_string())
+                    .unwrap_or_default();
+                let warning = pinned_target_warning(&pin, &options);
+                // Say what leaving the picker alone actually does. "Every enabled
+                // target" reads like a promise when the answer is sometimes none.
+                let default_label = match options.iter().filter(|o| o.unusable.is_empty()).count() {
+                    0 => "Node default — no target can take a copy, local disk only".to_string(),
+                    1 => "Node default — the one enabled target".to_string(),
+                    n => format!("Node default — all {n} enabled targets"),
+                };
+                // A pin that matches nothing still has to appear in the select —
+                // otherwise the picker would read "Node default" for a site whose
+                // backups are in fact going nowhere.
+                if !pin.is_empty() && !options.iter().any(|o| o.name == pin) {
+                    options.push(BackupTargetOption {
+                        name: pin.clone(),
+                        unusable: "not one of the configured off-site targets".into(),
+                    });
+                }
+                (pin, options, default_label, warning)
+            }
+            None => (String::new(), Vec::new(), String::new(), String::new()),
+        };
     // Internal preview URL on the owner node's wildcard cert (shown only
     // when the node actually has one + the domain isn't already under it).
     let preview_domain = compute_preview_domain(&state, target, &detail.domain).await;
@@ -1995,6 +2060,11 @@ pub async fn get_detail(
         csrf_db_reset: csrf_token_for(&state, &ctx, "/hostings/db/reset-password"),
         csrf_backup_cadence: csrf_token_for(&state, &ctx, "/hostings/backup-cadence"),
         backup_cadence,
+        csrf_backup_target: csrf_token_for(&state, &ctx, "/hostings/backup-target"),
+        backup_target,
+        backup_target_options,
+        backup_target_default_label,
+        backup_target_warning,
         csrf_profile_apply: csrf_token_for(&state, &ctx, "/profiles/apply"),
         profile_apply,
         applied_profile_name,
@@ -2014,6 +2084,7 @@ pub async fn get_detail(
         }),
         backup_error: q.backup_error,
         backup_flash: q.backup.map(|_| "Backup started — see list below.".into()),
+        backup_target_error: q.backup_target_error,
         expiry_error: q.expiry_error,
         expiry_flash: q.expiry.map(|s| {
             if s == "cleared" {
@@ -2155,6 +2226,10 @@ pub struct DetailQuery {
     pub backup: Option<String>,
     #[serde(default)]
     pub backup_error: Option<String>,
+    /// Refusal from the off-site-target POST (unknown target), so the page
+    /// says the pin did NOT change instead of redirecting silently.
+    #[serde(default)]
+    pub backup_target_error: Option<String>,
     #[serde(default)]
     pub expiry: Option<String>,
     #[serde(default)]
@@ -2304,6 +2379,109 @@ pub(crate) async fn resolve_s3_targets(state: &SharedState) -> Vec<hyperion_type
         });
     }
     out
+}
+
+/// One entry in the Backups-card off-site picker. Names only — a target's
+/// endpoint, bucket and credentials never reach the page.
+pub struct BackupTargetOption {
+    pub name: String,
+    /// Empty when a backup could actually reach this target right now;
+    /// otherwise WHY it couldn't, in the words the card prints next to it.
+    pub unusable: String,
+}
+
+/// Every configured off-site target, each labelled with whether a backup could
+/// actually reach it. The reasons mirror the filter in [`resolve_s3_targets`]
+/// exactly: anything that function skips is listed here as unusable rather
+/// than left out, so a target can't be picked (or stay picked) while quietly
+/// doing nothing. The secret file is stat'd, never read — the page has no
+/// business holding the plaintext.
+///
+/// `None` means the target list could not be read at all. Callers must not
+/// flatten that into "no targets": an unreadable list would otherwise make a
+/// perfectly good pin look like a dangling one.
+pub(crate) async fn configured_backup_targets(
+    state: &SharedState,
+) -> Option<Vec<BackupTargetOption>> {
+    let rows = match hyperion_rpc_client::call(&state.agent_socket, Request::BackupTargetList).await
+    {
+        Ok(RpcResponse::BackupTargetList(v)) => v,
+        _ => return None,
+    };
+    let mut out = Vec::new();
+    for r in rows {
+        let unusable = if r.kind != "s3" {
+            format!("a \"{}\" target — backups are only pushed to S3", r.kind)
+        } else if !r.enabled {
+            "disabled in Settings → Backups".to_string()
+        } else {
+            match r.secret_key_id.as_deref() {
+                None => "missing its secret key".to_string(),
+                Some(p) if tokio::fs::metadata(p).await.is_err() => {
+                    "missing its secret key file on this node".to_string()
+                }
+                Some(_) => String::new(),
+            }
+        };
+        out.push(BackupTargetOption {
+            name: r.name,
+            unusable,
+        });
+    }
+    Some(out)
+}
+
+/// What the card says about the target a hosting is pinned to. Empty when
+/// there's no pin or the pin is fine; otherwise the sentence that stops a dead
+/// pin from reading like a working one — a pinned site whose target can't take
+/// the upload gets NO off-site copy at all (the runner refuses to reroute a
+/// client's data to a bucket nobody chose).
+fn pinned_target_warning(pin: &str, options: &[BackupTargetOption]) -> String {
+    if pin.is_empty() {
+        return String::new();
+    }
+    match options.iter().find(|o| o.name == pin) {
+        None => format!(
+            "\"{pin}\" is not one of the configured off-site targets — backups of this site are \
+             NOT being copied off-site."
+        ),
+        Some(o) if !o.unusable.is_empty() => format!(
+            "\"{}\" is {} — backups of this site are NOT being copied off-site until that is fixed.",
+            o.name, o.unusable
+        ),
+        Some(_) => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod backup_target_tests {
+    use super::{pinned_target_warning, BackupTargetOption};
+
+    fn opt(name: &str, unusable: &str) -> BackupTargetOption {
+        BackupTargetOption {
+            name: name.into(),
+            unusable: unusable.into(),
+        }
+    }
+
+    #[test]
+    fn only_a_pin_that_cannot_receive_a_backup_warns() {
+        let options = vec![opt("wasabi-eu", ""), opt("b2-cold", "disabled in Settings")];
+        // No pin: the site follows the node default, nothing to warn about.
+        assert!(pinned_target_warning("", &options).is_empty());
+        // Pinned to a target that can take the upload: silence.
+        assert!(pinned_target_warning("wasabi-eu", &options).is_empty());
+        // Pinned to a configured but unusable one — the reason has to reach
+        // the operator, and the sentence must not imply copies are happening.
+        let disabled = pinned_target_warning("b2-cold", &options);
+        assert!(disabled.contains("b2-cold"), "names the target: {disabled}");
+        assert!(disabled.contains("disabled in Settings"), "{disabled}");
+        assert!(disabled.contains("NOT being copied off-site"), "{disabled}");
+        // Pinned to something that isn't configured at all (deleted/renamed).
+        let gone = pinned_target_warning("gone", &options);
+        assert!(gone.contains("not one of the configured"), "{gone}");
+        assert!(gone.contains("NOT being copied off-site"), "{gone}");
+    }
 }
 
 pub async fn post_backup_now(
@@ -5569,6 +5747,102 @@ pub async fn post_set_backup_cadence(
         sel_url
     ))
     .into_response())
+}
+
+#[derive(serde::Deserialize)]
+pub struct BackupTargetForm {
+    pub selector: String,
+    /// A `backup_targets.name`, or empty for "node default".
+    #[serde(default)]
+    pub target: String,
+}
+
+/// Pin this hosting's backups to ONE off-site target, or clear the pin back to
+/// the node default. Stored in the OWNING node's hosting_kv ("backup_target"),
+/// which is where `backup_now` reads it.
+///
+/// Admin-only on the server, not just in the markup: the target list is
+/// cluster config, and an operator with BackupRun on one site must not be able
+/// to aim that site's archives at another client's bucket.
+///
+/// A name that isn't configured is refused rather than stored — a pin that
+/// resolves to nothing stops the site going off-site entirely, and that must
+/// never be the silent result of a stale form.
+pub async fn post_set_backup_target(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<BackupTargetForm>,
+) -> Result<Response, AppError> {
+    if !ctx.is_admin_or_higher() {
+        return Err(AppError::Forbidden);
+    }
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector, Capability::BackupRun)
+        .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let sel_url = urlencoding(&form.selector);
+    let (detail, target) = match find_hosting_anywhere(&state, sel).await {
+        Ok(v) => v,
+        Err(_) => {
+            return Ok(Redirect::to(&format!("/hostings/{}#backups", sel_url)).into_response());
+        }
+    };
+    let want = form.target.trim().to_string();
+    if !want.is_empty() {
+        let refusal = match configured_backup_targets(&state).await {
+            Some(options) if options.iter().any(|o| o.name == want) => None,
+            Some(_) => Some(format!(
+                "\"{want}\" is not a configured off-site target — nothing was changed."
+            )),
+            None => Some(
+                "The configured off-site targets could not be read, so the destination was \
+                 left as it was."
+                    .to_string(),
+            ),
+        };
+        if let Some(msg) = refusal {
+            return Ok(Redirect::to(&format!(
+                "/hostings/{}?backup_target_error={}#backups",
+                sel_url,
+                urlencoding(&msg)
+            ))
+            .into_response());
+        }
+    }
+    // A write that didn't land must not redirect as if it had: this key
+    // decides where a paying client's data ends up.
+    let saved = crate::dispatcher::dispatch_to_node(
+        &state,
+        target.as_deref(),
+        Request::HostingKvSet {
+            hosting_id: detail.id.as_str().to_string(),
+            key: "backup_target".into(),
+            value: want,
+        },
+    )
+    .await;
+    match saved {
+        Ok(RpcResponse::HostingKvSet) => Ok(Redirect::to(&format!(
+            "/hostings/{}?flash_saved=backup-target#backups",
+            sel_url
+        ))
+        .into_response()),
+        Ok(RpcResponse::Error(e)) => Ok(Redirect::to(&format!(
+            "/hostings/{}?backup_target_error={}#backups",
+            sel_url,
+            urlencoding(&format!("the owning node refused the change: {e}"))
+        ))
+        .into_response()),
+        Ok(_) => Err(AppError::Internal("unexpected response".into())),
+        Err(e) => Ok(Redirect::to(&format!(
+            "/hostings/{}?backup_target_error={}#backups",
+            sel_url,
+            urlencoding(&format!("the owning node could not be reached: {e}"))
+        ))
+        .into_response()),
+    }
 }
 
 /// Lazily-loaded SFTP panel (FTP tab). Dispatched to the OWNING node —

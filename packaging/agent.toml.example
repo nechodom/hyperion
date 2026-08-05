@@ -34,6 +34,43 @@ contact_email = "admin@example.com"
 # /.well-known/acme-challenge/ here.
 challenge_dir = "/var/lib/linux-manager/acme-challenges"
 
+[enrollment]
+# Only a worker node needs this section; install-node.sh writes it.
+master_url   = "https://master.example.com"
+invite_token = "one-time-token-from-the-master's-Nodes-page"
+node_label   = "node5.example.com"
+
+# TLS for the node->master leg: enrollment, and every heartbeat, which
+# carries this node's plaintext per-node secret. This is the leg that CAN
+# be verified — the master is normally the side holding a CA-issued
+# certificate, while a worker's inbound cert is self-signed by design
+# (the master pins that one instead).
+#
+# Three states, and leaving the key OUT is a real one:
+#   absent  auto — verify whenever master_url is https:// with a DNS
+#           hostname, which is the shape a CA-issued certificate covers.
+#           An IP-literal or single-label master URL is not verified,
+#           because no public CA certifies one.
+#   true    always verify. Use this with an IP-literal master URL when
+#           you have installed your own CA on this node.
+#   false   the escape hatch for a master serving a self-signed
+#           certificate (install-master.sh still ships one). The invite
+#           token and this node's secret then cross a channel an on-path
+#           attacker can read. Master->node commands stay Ed25519-signed
+#           either way; this is about who can READ the exchange.
+#
+# A failed verification is never retried unverified. The agent aborts and
+# logs the fix, so the node goes visibly stale on the master's Nodes page
+# instead of silently downgrading to an unauthenticated connection.
+# Check the live decision with:
+#   journalctl -u hyperion-agent -g 'TLS policy'
+# verify_tls = true
+
+# Where the assigned node_id + per-node secret are persisted after the
+# first successful enrollment. Its presence is what makes later boots skip
+# enrollment.
+state_file = "/etc/hyperion/node-id.json"
+
 [fail2ban]
 # Native brute-force scanner. Runs every scheduler tick, scans logs +
 # journals for auth-failure floods, and auto-bans offenders via nftables.

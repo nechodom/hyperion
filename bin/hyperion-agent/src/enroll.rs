@@ -5,14 +5,21 @@
 //! receive back `{node_id, master_url}`, persist it, and stop.
 //! Subsequent boots see the state file and skip enrollment.
 //!
-//! TLS note: the master defaults to a self-signed cert (install-
-//! master.sh does NOT provision a real LE cert because at install
-//! time the master often has no DNS yet). The node has no trust
-//! anchor — chicken-egg — so the enrollment + heartbeat curls use
-//! `-k` (skip TLS verification). The bearer token + per-node secret
-//! ARE the authentication; TLS here is just encryption-in-transit.
-//! Operators with a real LE cert on the master can flip
-//! `verify_tls = true` in agent.toml to enforce verification.
+//! TLS note: this is the leg that can actually be verified. The master
+//! is the side that normally holds a CA-issued certificate (it serves
+//! the panel on a real hostname); the worker is the side that cannot,
+//! which is why the master→worker direction still leans on cert
+//! pinning. And it is the leg worth verifying: every heartbeat carries
+//! this node's per-node secret in the clear, so an on-path attacker who
+//! can read it can then impersonate the node to the master.
+//!
+//! So `[enrollment] verify_tls` is a TRI-STATE (see
+//! [`decide_verify_tls`]): absent ⇒ verify whenever the master URL is
+//! `https://` with a DNS hostname, `true` ⇒ always verify, `false` ⇒
+//! the documented escape hatch for the self-signed master that
+//! install-master.sh still ships. A verification failure is never
+//! retried with `-k`: silently downgrading is exactly the outcome an
+//! attacker wants, so the agent aborts and logs the fix instead.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -23,11 +30,11 @@ pub struct EnrollmentConfig {
     pub token: String,
     pub label: String,
     pub state_file: PathBuf,
-    /// When `false`, curl uses `-k` (skip TLS verification) — the
-    /// default because the master usually has a self-signed cert
-    /// and there's no trust anchor on the node yet. Flip to `true`
-    /// when the master serves a real LE cert.
-    pub verify_tls: bool,
+    /// The operator's `[enrollment] verify_tls`, un-defaulted: `None`
+    /// when the key is absent. Resolved per-URL by
+    /// [`decide_verify_tls`] rather than here, because the http→https
+    /// fallback below can change which URL we are actually talking to.
+    pub verify_tls: Option<bool>,
     /// Path to the agent.toml so we can blank out `invite_token`
     /// after a successful enrollment. `None` for tests + the `hctl
     /// enroll` one-shot path that didn't load a config. The clear
@@ -153,6 +160,167 @@ pub async fn enroll_with_retry(cfg: &EnrollmentConfig) -> Result<(), String> {
     ))
 }
 
+/// What TLS verification one node→master request gets. Produced by
+/// [`decide_verify_tls`] and consumed by every curl on this leg.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MasterTls {
+    /// Verify the master's certificate against this node's CA bundle.
+    Verify,
+    /// The operator wrote `verify_tls = false` — the documented escape
+    /// hatch for a master that serves a self-signed certificate.
+    SkipByOperator,
+    /// `https://` to a host no public CA could certify (an IP literal,
+    /// a single-label name), so there is nothing to verify against.
+    SkipNoAnchor,
+    /// `http://` — this connection has no TLS at all.
+    Plaintext,
+}
+
+impl MasterTls {
+    fn verifies(self) -> bool {
+        matches!(self, MasterTls::Verify)
+    }
+
+    /// One line for the log. The operator has to be able to answer "is
+    /// this node actually verifying anything?" from `journalctl` alone
+    /// — a bare `verify_tls=false` field would not say *why*.
+    fn describe(self) -> &'static str {
+        match self {
+            MasterTls::Verify => "verifying the master certificate against this node's CA bundle",
+            MasterTls::SkipByOperator => {
+                "NOT verifying — [enrollment] verify_tls = false in agent.toml; anyone on the \
+                 path can read this node's secret"
+            }
+            MasterTls::SkipNoAnchor => {
+                "NOT verifying — the master URL is an IP literal or a single-label name, which \
+                 no public CA certifies; give the master a hostname + certificate, then set \
+                 verify_tls = true"
+            }
+            MasterTls::Plaintext => {
+                "NO TLS — master_url is http://, so the invite token and this node's secret \
+                 cross the network in cleartext; move the master to https://"
+            }
+        }
+    }
+}
+
+/// Resolve `[enrollment] verify_tls` for ONE url.
+///
+/// `http://` short-circuits: there is no certificate on that connection
+/// to verify, and reporting "verifying" for it would be a lie. Past
+/// that the operator's explicit choice wins in both directions — `true`
+/// even against an IP literal (they may have a private CA installed),
+/// `false` as the escape hatch. Only the ABSENT case is decided here,
+/// and it verifies whenever the master URL has the shape a CA-issued
+/// certificate can cover.
+fn decide_verify_tls(master_url: &str, configured: Option<bool>) -> MasterTls {
+    let url = master_url.trim();
+    if !url.starts_with("https://") {
+        return MasterTls::Plaintext;
+    }
+    match configured {
+        Some(false) => MasterTls::SkipByOperator,
+        Some(true) => MasterTls::Verify,
+        None if host_can_hold_a_ca_certificate(host_of(url)) => MasterTls::Verify,
+        None => MasterTls::SkipNoAnchor,
+    }
+}
+
+/// Host portion of `https://host[:port][/path]`, brackets stripped off
+/// an IPv6 literal. Deliberately not a general URL parser — the only
+/// input is the master URL the operator typed into install-node.sh.
+fn host_of(url: &str) -> &str {
+    let rest = url.strip_prefix("https://").unwrap_or(url);
+    let rest = rest.split('/').next().unwrap_or("");
+    if let Some(inner) = rest.strip_prefix('[') {
+        // `[2a01:...]:9443` — the colons are the address, not a port.
+        return inner.split(']').next().unwrap_or(inner);
+    }
+    match rest.rsplit_once(':') {
+        Some((h, _)) => h,
+        None => rest,
+    }
+}
+
+/// Could a certificate for `host` plausibly chain to something in a
+/// trust store? True for a dotted DNS name, false for an IP literal or
+/// a single-label name like `master` / `localhost`.
+///
+/// Deliberately permissive about the zone: `master.lan` passes, because
+/// an operator who put their own CA in `/usr/local/share/ca-certificates`
+/// gets a verified channel out of it, and if they didn't, the failure is
+/// loud and names the fix rather than quietly falling back to `-k`.
+fn host_can_hold_a_ca_certificate(host: &str) -> bool {
+    if host.is_empty() || host.parse::<std::net::IpAddr>().is_ok() {
+        return false;
+    }
+    match host.trim_end_matches('.').rsplit_once('.') {
+        Some((label, tld)) => {
+            !label.is_empty() && tld.len() >= 2 && tld.chars().all(|c| c.is_ascii_alphabetic())
+        }
+        None => false,
+    }
+}
+
+/// Does this curl failure mean specifically "the master's certificate
+/// did not verify"? A DNS failure or a refused connection must NOT be
+/// reported as a certificate problem — the recipes are unrelated and an
+/// operator sent to the wrong one loses an afternoon.
+///
+/// Exit codes first, substrings as belt-and-braces: distro curl builds
+/// disagree on which code a given OpenSSL/GnuTLS error surfaces as.
+fn is_tls_verification_failure(err: &str) -> bool {
+    let e = err.to_ascii_lowercase();
+    // Exit-code matches: 60 is CURLE_PEER_FAILED_VERIFICATION, 51 its
+    // legacy "peer certificate not OK" spelling, 77 an unreadable CA
+    // bundle (still "we could not verify", still not a network fault).
+    if e.contains("exit some(60)") || e.contains("exit some(51)") || e.contains("exit some(77)") {
+        return true;
+    }
+    // Substring matches — covers builds whose exit code differs but
+    // whose message is unambiguous.
+    e.contains("certificate verify failed")
+        || e.contains("self-signed certificate")
+        || e.contains("self signed certificate")
+        || e.contains("unable to get local issuer certificate")
+        || e.contains("ssl certificate problem")
+}
+
+/// The message an operator gets when the master's certificate is
+/// refused. It names every fix rather than one blessed path, because
+/// which is correct depends on facts this node cannot see (does the
+/// master have DNS? is the CA private?).
+///
+/// It also states what did NOT happen: we did not retry with `-k`.
+/// Silently downgrading is the whole reason this leg was unverified for
+/// so long, and an operator who assumes we retried would draw exactly
+/// the wrong conclusion from a node that then never appears.
+fn tls_verification_help(master_url: &str, err: &str) -> String {
+    format!(
+        "{err}\n→ the TLS certificate at {master_url} did NOT verify against this node's CA \
+         bundle, so the request was ABORTED — NOT retried unverified, which would hand this \
+         node's secret to whoever holds the path. Fix one of:\n\
+         (a) give the master a CA-issued certificate for that hostname (certbot on the master); \
+         or\n\
+         (b) trust the master's own CA here: copy it to \
+         /usr/local/share/ca-certificates/hyperion-master.crt && sudo update-ca-certificates; \
+         or\n\
+         (c) accept an unverified channel — set `verify_tls = false` under [enrollment] in \
+         /etc/hyperion/agent.toml and restart hyperion-agent. Master→node commands stay \
+         Ed25519-signed either way, but this node's heartbeats become readable on the path."
+    )
+}
+
+/// Attach the recipe above to a failure that IS a refused certificate,
+/// and leave every other failure untouched.
+fn annotate_tls_failure(master_url: &str, tls: MasterTls, err: String) -> String {
+    if tls.verifies() && is_tls_verification_failure(&err) {
+        tls_verification_help(master_url, &err)
+    } else {
+        err
+    }
+}
+
 /// Immediate, no-delay enrollment attempt. Used by `hctl enroll`.
 /// Auto-tries the http URL as https on transient TLS errors — covers
 /// the common case where the operator pasted http:// but the master
@@ -196,30 +364,44 @@ pub async fn enroll_now(cfg: &EnrollmentConfig) -> Result<(), String> {
     // (empty reply, "wrong version number") AND the URL is http://,
     // retry as https:// — that's the very common "master is HTTPS
     // but operator copy-pasted http:" trap.
-    tracing::info!(master = %base, "attempting node enrollment");
+    //
+    // The verification decision is therefore resolved per-URL rather
+    // than once per config: that fallback changes which connection we
+    // are describing, and an http URL has no certificate to verify
+    // while its https twin does.
+    let tls = decide_verify_tls(&base, cfg.verify_tls);
+    tracing::info!(master = %base, tls = tls.describe(), "attempting node enrollment");
     let primary_url = format!("{base}/api/enroll");
-    match post_json(&primary_url, &body, cfg.verify_tls).await {
-        Ok(stdout) => return finish_enrollment(cfg, &stdout).await,
+    match post_json(&primary_url, &body, tls.verifies()).await {
+        Ok(stdout) => finish_enrollment(cfg, &stdout).await,
         Err(e) if should_try_https_fallback(&base, &e) => {
-            let https = format!("https://{}/api/enroll", &base[7..]);
+            let https_base = format!("https://{}", &base[7..]);
+            // The upgrade to https is also an upgrade in what we can
+            // check, so re-decide against the URL we're about to use.
+            let tls = decide_verify_tls(&https_base, cfg.verify_tls);
             tracing::warn!(
                 error = %e,
+                tls = tls.describe(),
                 "enrollment over {base} failed — retrying with https://"
             );
-            let stdout = post_json(&https, &body, cfg.verify_tls).await?;
+            let stdout = post_json(&format!("{https_base}/api/enroll"), &body, tls.verifies())
+                .await
+                .map_err(|e| annotate_tls_failure(&https_base, tls, e))?;
             // Persist the discovered scheme so subsequent heartbeats
             // skip the fallback dance.
             let mut adjusted = cfg.clone();
-            adjusted.master_url = format!("https://{}", &base[7..]);
-            return finish_enrollment(&adjusted, &stdout).await;
+            adjusted.master_url = https_base;
+            finish_enrollment(&adjusted, &stdout).await
         }
-        Err(e) => Err(e),
+        Err(e) => Err(annotate_tls_failure(&base, tls, e)),
     }
 }
 
 /// Helper: POST JSON, return stdout on HTTP 2xx or a useful error
-/// string. `verify_tls=false` adds `-k` (chicken-egg: until we've
-/// enrolled we have no trust anchor for the master's cert).
+/// string. `verify_tls=false` adds `-k`. This function does NOT decide
+/// that — [`decide_verify_tls`] does, per URL, and a caller that hands
+/// it `false` has already established there is nothing to verify or
+/// that the operator opted out.
 ///
 /// Body is fed via curl's stdin (`--data-binary @-`), NOT via argv.
 /// The previous `--data <body>` approach put the invite token (on
@@ -414,9 +596,11 @@ async fn clear_invite_token_in_config(path: &std::path::Path) -> Result<(), Stri
 /// `period_secs` and POSTs {node_id, secret, agent_version} to
 /// `<master>/api/heartbeat`. Single error → log + retry next tick.
 ///
-/// `verify_tls` mirrors `EnrollmentConfig::verify_tls` — default
-/// off so self-signed master certs work. The bearer secret is the
-/// auth; TLS is just encryption-in-transit.
+/// `verify_tls` mirrors `EnrollmentConfig::verify_tls` — the operator's
+/// un-defaulted setting, resolved per tick by [`decide_verify_tls`]
+/// against the master URL we persisted at enrollment. This is the leg
+/// that matters most: the body below carries the per-node secret in
+/// the clear on every single tick.
 ///
 /// `resp_pubkey` is our response-signing pubkey, derived at startup
 /// from the loaded key and passed in rather than read here: it is
@@ -426,7 +610,7 @@ async fn clear_invite_token_in_config(path: &std::path::Path) -> Result<(), Stri
 pub async fn heartbeat_loop(
     state_file: std::path::PathBuf,
     period_secs: u64,
-    verify_tls: bool,
+    verify_tls: Option<bool>,
     inbound_cert: std::path::PathBuf,
     resp_pubkey: Option<String>,
 ) {
@@ -441,6 +625,10 @@ pub async fn heartbeat_loop(
     // `None` when remote_rpc is disabled (no cert) — the master simply
     // records no pin for this node, which is fine.
     let mut tls_spki_pin: Option<String> = None;
+    // Both one-shot: the TLS posture and the certificate-refused recipe
+    // are identical on every tick, and this loop runs 1440 times a day.
+    let mut tls_policy_logged = false;
+    let mut tls_help_logged = false;
     let period = std::time::Duration::from_secs(period_secs);
     let mut interval = tokio::time::interval(period);
     // First tick fires immediately — skip it so we wait one period after
@@ -454,6 +642,14 @@ pub async fn heartbeat_loop(
         };
         if tls_spki_pin.is_none() {
             tls_spki_pin = hyperion_core::tls_pin::spki_pin_from_cert_file(&inbound_cert).await;
+        }
+        // The master URL comes from node-id.json (operator-supplied at
+        // enrollment, never from the response), so this is a decision
+        // about a trusted string, not one the master can steer.
+        let tls = decide_verify_tls(&p.master_url, verify_tls);
+        if !tls_policy_logged {
+            tls_policy_logged = true;
+            tracing::info!(master = %p.master_url, tls = tls.describe(), "heartbeat TLS policy");
         }
         let url = format!("{}/api/heartbeat", p.master_url.trim_end_matches('/'));
         let body = match serde_json::to_string(&serde_json::json!({
@@ -475,7 +671,7 @@ pub async fn heartbeat_loop(
         use std::process::Stdio;
         use tokio::io::AsyncWriteExt;
         let mut args: Vec<&str> = vec!["-fsS", "--max-time", "8"];
-        if !verify_tls {
+        if !tls.verifies() {
             args.push("-k");
         }
         args.extend([
@@ -553,12 +749,37 @@ pub async fn heartbeat_loop(
                 }
             }
             Ok(out) => {
-                tracing::warn!(
-                    code = ?out.status.code(),
-                    stderr = %String::from_utf8_lossy(&out.stderr).trim(),
-                    master = %p.master_url,
-                    "heartbeat returned non-zero — will retry"
-                );
+                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                // Same shape should_try_https_fallback matches on, so one
+                // classifier serves both call sites.
+                let detail = format!("exit {:?}: {stderr}", out.status.code());
+                if tls.verifies() && is_tls_verification_failure(&detail) {
+                    // NOT retried with -k, here or anywhere: a node that
+                    // silently downgrades on a bad certificate is a node an
+                    // attacker only has to break once. It goes stale in the
+                    // panel instead, which is the visible failure we want.
+                    if !tls_help_logged {
+                        tls_help_logged = true;
+                        tracing::error!(
+                            master = %p.master_url,
+                            "SECURITY: heartbeat refused — {}",
+                            tls_verification_help(&p.master_url, &detail)
+                        );
+                    } else {
+                        tracing::warn!(
+                            master = %p.master_url,
+                            detail = %detail,
+                            "heartbeat still refused — the master certificate does not verify"
+                        );
+                    }
+                } else {
+                    tracing::warn!(
+                        code = ?out.status.code(),
+                        stderr = %stderr,
+                        master = %p.master_url,
+                        "heartbeat returned non-zero — will retry"
+                    );
+                }
             }
             Err(e) => tracing::warn!(error=%e, "heartbeat curl failed"),
         }
@@ -652,6 +873,148 @@ mod tests {
         assert_eq!(decide_pubkey_pin(Some("KEY_A"), "KEY_A"), PubkeyPin::Keep);
         // A DIFFERENT key (the on-path-attack case) → refuse, never adopt.
         assert_eq!(decide_pubkey_pin(Some("KEY_A"), "KEY_B"), PubkeyPin::Refuse);
+    }
+
+    /// The default. A master URL with the shape a CA-issued certificate
+    /// can cover gets verified WITHOUT the operator opting in — this is
+    /// the leg that carries the node's plaintext secret on every tick.
+    #[test]
+    fn verify_tls_defaults_on_for_an_https_hostname() {
+        for url in [
+            "https://master.example.com",
+            "https://master.example.cz:8443",
+            "https://panel.hyperion.example.co.uk/",
+            // A private zone still counts: the operator may have put
+            // their own CA in the node's trust store, and if not, the
+            // failure names the fix instead of downgrading.
+            "https://master.lan",
+            // Trailing whitespace from a hand-edited toml.
+            "  https://master.example.com  ",
+        ] {
+            assert_eq!(
+                decide_verify_tls(url, None),
+                MasterTls::Verify,
+                "{url} should verify by default"
+            );
+        }
+    }
+
+    /// ...and nowhere else. Auto must never claim to verify something
+    /// it cannot: an IP literal or a single-label name has no publicly
+    /// certifiable identity, and http:// has no certificate at all.
+    #[test]
+    fn verify_tls_auto_declines_where_there_is_no_trust_anchor() {
+        assert_eq!(
+            decide_verify_tls("https://203.0.113.9:8443", None),
+            MasterTls::SkipNoAnchor
+        );
+        assert_eq!(
+            decide_verify_tls("https://[2001:db8::1]:8443", None),
+            MasterTls::SkipNoAnchor
+        );
+        assert_eq!(
+            decide_verify_tls("https://master:8443", None),
+            MasterTls::SkipNoAnchor
+        );
+        assert_eq!(
+            decide_verify_tls("https://localhost:8443", None),
+            MasterTls::SkipNoAnchor
+        );
+        // Numeric last label — not a TLD, so not a certifiable name.
+        assert_eq!(
+            decide_verify_tls("https://10.0.0.5", None),
+            MasterTls::SkipNoAnchor
+        );
+        // http:// is Plaintext, not "skip": there is no certificate on
+        // that connection, and describing it as skipped verification
+        // would understate what actually happens to the token.
+        assert_eq!(
+            decide_verify_tls("http://master.example.com", None),
+            MasterTls::Plaintext
+        );
+        // None of these are Verify — the invariant that matters.
+        for url in [
+            "https://203.0.113.9",
+            "https://master",
+            "http://master.example.com",
+        ] {
+            assert!(!decide_verify_tls(url, None).verifies(), "{url}");
+        }
+    }
+
+    /// The escape hatch, and its opposite. An explicit setting wins in
+    /// BOTH directions — `false` is what an operator with a self-signed
+    /// master sets, `true` is what an operator with a private CA sets
+    /// for an IP-literal master that auto would have declined.
+    #[test]
+    fn an_explicit_setting_beats_the_auto_decision() {
+        assert_eq!(
+            decide_verify_tls("https://master.example.com", Some(false)),
+            MasterTls::SkipByOperator,
+            "the documented escape hatch must survive the new default"
+        );
+        assert_eq!(
+            decide_verify_tls("https://203.0.113.9:8443", Some(true)),
+            MasterTls::Verify
+        );
+        // ...except over http://, where there is nothing to verify no
+        // matter what the file says.
+        assert_eq!(
+            decide_verify_tls("http://master.example.com", Some(true)),
+            MasterTls::Plaintext
+        );
+    }
+
+    /// Only a REFUSED certificate gets the certificate recipe. Sending
+    /// an operator whose DNS is broken off to install a CA costs them
+    /// an afternoon.
+    #[test]
+    fn only_certificate_failures_get_the_certificate_recipe() {
+        assert!(is_tls_verification_failure(
+            "POST https://m.example.com/api/enroll exit Some(60): SSL certificate problem: \
+             self-signed certificate"
+        ));
+        assert!(is_tls_verification_failure(
+            "exit Some(77): error setting certificate file"
+        ));
+        assert!(is_tls_verification_failure(
+            "exit Some(35): ssl routines::certificate verify failed"
+        ));
+        // Not certificate problems.
+        assert!(!is_tls_verification_failure(
+            "exit Some(6): Could not resolve host: master.example.com"
+        ));
+        assert!(!is_tls_verification_failure(
+            "exit Some(7): Failed to connect to master.example.com port 8443"
+        ));
+        assert!(!is_tls_verification_failure("exit Some(22): 404 Not Found"));
+
+        // The annotation only fires when we were actually verifying...
+        let refused = "exit Some(60): self-signed certificate".to_string();
+        let helped = annotate_tls_failure("https://m.example.com", MasterTls::Verify, refused);
+        assert!(helped.contains("verify_tls = false"), "names the opt-out");
+        assert!(
+            helped.contains("NOT retried unverified"),
+            "must say what did not happen: {helped}"
+        );
+        // ...and never rewrites an unrelated failure.
+        let dns = "exit Some(6): Could not resolve host".to_string();
+        assert_eq!(
+            annotate_tls_failure("https://m.example.com", MasterTls::Verify, dns.clone()),
+            dns
+        );
+        // Nor one from a connection we never verified in the first
+        // place — telling that operator their certificate is bad when
+        // we passed `-k` would be a fabricated diagnosis.
+        let same = "exit Some(60): self-signed certificate".to_string();
+        assert_eq!(
+            annotate_tls_failure(
+                "https://m.example.com",
+                MasterTls::SkipByOperator,
+                same.clone()
+            ),
+            same
+        );
     }
 
     #[test]

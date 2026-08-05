@@ -413,6 +413,12 @@
     <div class="flash-body"><strong>Backup failed:</strong> {{ e }}</div>
   </div>
 {% endif %}
+{% if let Some(e) = backup_target_error %}
+  <div class="flash error">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body"><strong>Off-site destination not changed:</strong> {{ e }}</div>
+  </div>
+{% endif %}
 {% if let Some(m) = expiry_flash %}
   <div class="flash success">
     <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
@@ -2554,7 +2560,7 @@
 
 <div class="tab-panel" id="tab-backups">
 
-<p class="text-soft small" style="margin:0 0 0.6rem" data-role-min="admin">Backups land on local disk; off-site targets (S3 + age) are configured cluster-wide in <a href="/settings/backups">Settings → Backups</a>.</p>
+<p class="text-soft small" style="margin:0 0 0.6rem" data-role-min="admin">Backups land on local disk; off-site targets (S3 + age) are configured cluster-wide in <a href="/settings/backups">Settings → Backups</a>, and each site picks one of them below.</p>
 
 <div class="card hover">
   <h2>
@@ -2584,6 +2590,35 @@
     </div>
     <button class="btn" type="submit">Save schedule</button>
   </form>
+  {% if !backup_target_options.is_empty() %}
+  {# Off-site destination for THIS site. Unset = the node default (every
+     enabled target), which is what every site did before this picker
+     existed. Rendered only for admins — the list is cluster config. #}
+  <form method="post" action="/hostings/backup-target" style="display:flex;align-items:flex-end;gap:0.5rem;flex-wrap:wrap;margin-bottom:1rem" data-role-min="admin">
+    <input type="hidden" name="_csrf" value="{{ csrf_backup_target }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+    <div class="field" style="margin:0">
+      <label for="backup_target" style="font-size:0.8rem">Off-site copy <span class="hint">where this site's archives go after every backup</span></label>
+      <select id="backup_target" name="target">
+        <option value=""{% if backup_target.is_empty() %} selected{% endif %}>{{ backup_target_default_label }}</option>
+        {% for o in backup_target_options %}
+        <option value="{{ o.name }}"{% if o.name == backup_target %} selected{% else if !o.unusable.is_empty() %} disabled{% endif %}>{{ o.name }}{% if !o.unusable.is_empty() %} — {{ o.unusable }}{% endif %}</option>
+        {% endfor %}
+      </select>
+    </div>
+    <button class="btn" type="submit">Save destination</button>
+  </form>
+  {% if !backup_target_warning.is_empty() %}
+    <div class="flash warn" style="margin-bottom:0.8rem">
+      <div class="flash-body">
+        <strong>Off-site copies are not happening for this site.</strong>
+        {{ backup_target_warning }}
+        Fix the target in <a href="/settings/backups">Settings → Backups</a>, or
+        pick a different destination above.
+      </div>
+    </div>
+  {% endif %}
+  {% endif %}
   {# Live region: a running backup flips to ok, and a backup started from the
      job progress page shows up on return — no F5. Driver in base.html. #}
   <div id="backups-live" data-live-refresh="15">

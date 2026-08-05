@@ -108,15 +108,25 @@ pub struct EnrollmentSection {
     /// Path where the assigned node_id is persisted after first enrollment.
     /// Defaults to /etc/hyperion/node-id.json.
     pub state_file: Option<PathBuf>,
-    /// When `true`, the node verifies the master's TLS cert against
-    /// the system CA bundle. Defaults to `false` because install-
-    /// master.sh ships a self-signed cert (no DNS at install time
-    /// → no LE) and the node has no trust anchor to bootstrap.
-    /// The bearer token + per-node secret are the auth; TLS here
-    /// is encryption-in-transit. Set `true` once the master serves
-    /// a real LE cert.
+    /// TLS verification for the node→master leg — enrollment, and every
+    /// heartbeat, which carries this node's plaintext secret.
+    ///
+    /// Three states, and the ABSENT one is the point:
+    /// - key absent ⇒ **auto**: verify whenever `master_url` is
+    ///   `https://` with a DNS hostname, because that is the shape a
+    ///   CA-issued master certificate has. The master is normally the
+    ///   side that HAS a real certificate; the worker is the side that
+    ///   cannot, which is why this direction can be verified today and
+    ///   the master→worker one still leans on cert pinning.
+    /// - `true` ⇒ always verify, even for an IP-literal master URL.
+    /// - `false` ⇒ the documented escape hatch for a master serving a
+    ///   self-signed certificate. The invite token and the per-node
+    ///   secret then cross a channel an on-path attacker can read.
+    ///
+    /// A failed verification is never retried unverified: the agent
+    /// aborts and names the fix. See `enroll::decide_verify_tls`.
     #[serde(default)]
-    pub verify_tls: bool,
+    pub verify_tls: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -288,6 +298,24 @@ mod tests {
         let cfg = Config::default();
         assert_eq!(cfg.agent.socket_group, "hyperion-admin");
         assert_eq!(cfg.acme.contact_email, "admin@example.com");
+    }
+
+    /// The tri-state is load-bearing: an agent.toml that never mentions
+    /// `verify_tls` must be distinguishable from one that deliberately
+    /// switched verification OFF, because those two get opposite
+    /// treatment (auto-decide vs. honour the escape hatch).
+    #[test]
+    fn verify_tls_absent_is_not_the_same_as_false() {
+        let absent: Config =
+            toml::from_str("[enrollment]\nmaster_url = \"https://m.example.cz\"").expect("parse");
+        assert_eq!(absent.enrollment.verify_tls, None);
+        // Not even a whole missing section flips it to a decision.
+        assert_eq!(Config::default().enrollment.verify_tls, None);
+
+        let off: Config = toml::from_str("[enrollment]\nverify_tls = false").expect("parse");
+        assert_eq!(off.enrollment.verify_tls, Some(false));
+        let on: Config = toml::from_str("[enrollment]\nverify_tls = true").expect("parse");
+        assert_eq!(on.enrollment.verify_tls, Some(true));
     }
 
     #[test]
