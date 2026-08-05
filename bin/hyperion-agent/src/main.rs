@@ -902,6 +902,63 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
+    // Care-package drift enforcement — hourly. Re-asserts the features
+    // every ACTIVE package promises, so a paid capability someone switched
+    // off comes back instead of quietly staying off until the customer
+    // notices. Cheap when idle: it reads state and only writes where
+    // something actually moved, and returns immediately on a node with no
+    // activations at all.
+    {
+        let pk = svc.clone();
+        tokio::spawn(async move {
+            // 7-minute offset — clear of the vuln (4 min) and integrity
+            // (6 min) sweeps, which are the two ticks that hammer wp-cli.
+            tokio::time::sleep(std::time::Duration::from_secs(420)).await;
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+            interval.tick().await;
+            loop {
+                match pk.package_enforce_tick().await {
+                    Ok(n) if n > 0 => tracing::info!(corrected = n, "care package enforce tick"),
+                    Ok(_) => tracing::debug!("care package enforce tick: nothing drifted"),
+                    Err(e) => tracing::warn!(error=%e, "care package enforce tick failed"),
+                }
+                interval.tick().await;
+            }
+        });
+    }
+    // Care reports — hourly check of which LOCAL hostings are due their
+    // periodic report to the customer. The sibling of the drift tick and
+    // the other half of the same feature: that one keeps the paid work
+    // happening, this one is the only part the person paying ever sees.
+    //
+    // Runs on EVERY node, and must: every metric behind a report (bans,
+    // usage buckets, monitor samples, backup runs, the audit log, the
+    // stored integrity scan) lives on the node that owns the hosting. The
+    // same sweep on the master would truthfully report "not measured" for
+    // a worker's site — honest, and worthless.
+    //
+    // Hourly is the CHECK cadence, not the send cadence: the tick sends
+    // only once a full weekly/monthly/quarterly period has elapsed since
+    // the last report, and it returns immediately on a node with no
+    // activations at all.
+    {
+        let cr = svc.clone();
+        tokio::spawn(async move {
+            // 9-minute offset — clear of the package drift tick (7 min),
+            // which walks the same activation rows.
+            tokio::time::sleep(std::time::Duration::from_secs(540)).await;
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600));
+            interval.tick().await;
+            loop {
+                match cr.care_report_tick().await {
+                    Ok(n) if n > 0 => tracing::info!(sent = n, "care report tick"),
+                    Ok(_) => tracing::debug!("care report tick: nothing due"),
+                    Err(e) => tracing::warn!(error=%e, "care report tick failed"),
+                }
+                interval.tick().await;
+            }
+        });
+    }
     // Scheduled backups — checks hourly which LOCAL hostings are due per their
     // backup_cadence (off by default) and runs backup_now for each. Runs on
     // every node since backups are node-local.

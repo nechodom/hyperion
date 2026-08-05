@@ -1,0 +1,244 @@
+{# Care-package card — lazily swapped into the hosting detail page via
+   hx-get="/hostings/:sel/packages-panel", and re-rendered in place by the
+   activate / cancel forms (hx-target="#packages-card").
+
+   This is the CUSTOMER's view of the invoice: what they pay for, what it
+   costs, when it renews, and — the part that matters — whether the site is
+   actually doing those things right now. A promise without a live state is
+   a claim, and a claim is what an unhappy customer disputes.
+
+   The card is absent entirely when no package was ever defined (the panel
+   is unchanged for an operator who doesn't sell care) and when a customer
+   holds none (an empty "you have nothing" card is an upsell, not
+   information). Both decisions are made server-side in packages.rs.
+
+   Activate / cancel are gated in the handler on manage-level access to
+   THIS hosting plus `profiles_manage` — `can_manage` below is the very
+   same check, and `data-require-caps` merely keeps the markup honest for
+   a customer whose browser renders it. #}
+<div class="card hover" id="packages-card">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41 13.42 20.58a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>
+    Služby / Care packages
+    {% if !held.is_empty() %}
+      <span class="pill ok" style="margin-left:0.4rem;font-size:0.65rem">{{ held.len() }} active</span>
+    {% endif %}
+  </h2>
+
+  {% if let Some(m) = flash %}
+    <div class="flash success" style="margin:-0.1rem 0 0.8rem"><div class="flash-body">{{ m }}</div></div>
+  {% endif %}
+  {% if let Some(e) = error %}
+    <div class="flash error" style="margin:-0.1rem 0 0.8rem"><div class="flash-body">{{ e }}</div></div>
+  {% endif %}
+
+  {% if held.is_empty() %}
+    <p class="muted" style="margin:0 0 0.8rem;font-size:0.85rem">
+      This site isn't on a care package. Activating one switches on everything
+      the package includes and keeps it on — a feature switched off by hand
+      comes back on the next enforcement pass.
+    </p>
+  {% else %}
+    <div style="display:flex;flex-direction:column;gap:0.9rem">
+      {% for p in held %}
+      <div style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.8rem 0.9rem;background:var(--bg-2)">
+        <div style="display:flex;align-items:baseline;gap:0.5rem;flex-wrap:wrap">
+          <strong style="font-size:0.98rem">{{ p.name }}</strong>
+          <span class="pill ok" style="font-size:0.6rem">active</span>
+          <span class="grow"></span>
+          <span class="numeric" style="font-weight:600">{{ p.price }}</span>
+        </div>
+
+        {% if !p.description.is_empty() %}
+          <p class="muted" style="margin:0.35rem 0 0;font-size:0.85rem;line-height:1.55">{{ p.description }}</p>
+        {% endif %}
+
+        {% if let Some(ts) = p.next_billing_at %}
+          <p class="text-soft small" style="margin:0.4rem 0 0">
+            Next billing <span class="numeric" title="{{ ts }}">{{ crate::handlers::stats::fmt_future(ts) }}</span>
+          </p>
+        {% endif %}
+
+        {# The definition is gone, so nothing re-asserts this bundle any
+           more. Said plainly rather than rendered as a package that
+           includes nothing — the customer is still being billed. #}
+        {% if p.orphaned %}
+          <div class="flash warn" style="margin:0.6rem 0 0">
+            <div class="flash-body">
+              The definition behind this package was deleted. The record and the
+              price stay, but nothing is keeping its features switched on any
+              more. Re-create the package and activate it again, or cancel this
+              one.
+            </div>
+          </div>
+        {% else if p.included.is_empty() %}
+          <p class="text-soft small" style="margin:0.5rem 0 0">This package doesn't include any managed feature yet.</p>
+        {% else %}
+          <ul style="list-style:none;padding:0;margin:0.6rem 0 0;display:flex;flex-direction:column;gap:0.45rem">
+            {% for f in p.included %}
+            <li style="display:flex;gap:0.55rem;align-items:flex-start">
+              {# Three states, never two. "We couldn't read the node" is its
+                 own answer and must not borrow the green one — a false
+                 all-clear on a paid feature is the failure mode that costs
+                 the operator the customer. #}
+              {% if f.status == "active" %}
+                <span class="pill ok" style="font-size:0.58rem;flex:none;margin-top:0.15rem">on</span>
+              {% else if f.status == "inactive" %}
+                <span class="pill warn" style="font-size:0.58rem;flex:none;margin-top:0.15rem">not on</span>
+              {% else %}
+                <span class="pill" style="font-size:0.58rem;flex:none;margin-top:0.15rem;background:var(--surface-2);color:var(--text-soft)">?</span>
+              {% endif %}
+              <span style="min-width:0">
+                <strong style="font-size:0.88rem">{{ f.label }}</strong>
+                {% if f.status == "inactive" %}
+                  <span class="text-soft small">— {{ f.live_label }}; it will be switched back on automatically</span>
+                {% else if f.status == "unknown" %}
+                  <span class="text-soft small">— couldn't check the server just now</span>
+                {% else if !f.live_label.is_empty() %}
+                  {# A feature that IS on, with something worth saying anyway —
+                     the care report's "last sent" is the only one so far. The
+                     five live settings leave this empty when they're on. #}
+                  <span class="text-soft small">— {{ f.live_label }}</span>
+                {% endif %}
+                <div class="muted" style="font-size:0.8rem;line-height:1.5">{{ f.detail }}</div>
+              </span>
+            </li>
+            {% endfor %}
+          </ul>
+        {% endif %}
+
+        {% if can_manage %}
+        <div style="margin-top:0.7rem" data-require-caps="profiles_manage">
+          {# Cancelling restores what this package switched on — except
+             anything another package the site still holds also pays for.
+             The node owns that rule; the confirm text just has to be
+             honest about it. #}
+          <form hx-post="/hostings/packages/cancel" hx-target="#packages-card" hx-swap="outerHTML"
+                data-confirm-title="Cancel {{ p.name }}"
+                data-confirm-body="The customer stops being reminded to pay for this, and everything it switched on goes back the way it was before — unless another package they still hold covers the same thing. The record stays in this site's history."
+                data-confirm-confirm-label="Cancel package"
+                data-confirm-variant="danger">
+            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+            <input type="hidden" name="selector" value="{{ selector }}">
+            <input type="hidden" name="activation_id" value="{{ p.activation_id }}">
+            <button class="btn small ghost" type="submit">Cancel package</button>
+          </form>
+        </div>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+  {% endif %}
+
+  {# The care report — the one part of a package the customer actually sees
+     ARRIVE. Present only when something this site holds really sells one
+     (`sells_report`; a package that pins reports off sells nothing), and
+     only for a session that may act on it: both buttons reach the owning
+     node and Send now mails the customer. The handler re-checks the same
+     capability — hiding a button is not a permission check.
+
+     Preview is the point of this block. It renders the same period, the
+     same recipient and the same text the scheduled send would use, so the
+     operator reads exactly what lands in their customer's inbox — and
+     sends nothing by reading it. The cadence and the last send are on the
+     package's own "Care report" line above. #}
+  {% if sells_report && can_manage %}
+  <div style="margin-top:0.9rem;padding-top:0.8rem;border-top:1px solid var(--border)" data-require-caps="profiles_manage">
+    <div style="display:flex;gap:0.5rem;align-items:center;flex-wrap:wrap">
+      <strong style="font-size:0.9rem">Zpráva o péči</strong>
+      <span class="grow"></span>
+      <form hx-post="/hostings/packages/report-preview" hx-target="#packages-card" hx-swap="outerHTML">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="selector" value="{{ selector }}">
+        <button class="btn small ghost" type="submit">Preview</button>
+      </form>
+      <form hx-post="/hostings/packages/report-send" hx-target="#packages-card" hx-swap="outerHTML"
+            data-confirm-title="Send the care report now"
+            data-confirm-body="This really e-mails the site's owner. The period it covers is then recorded as reported, so the next scheduled report starts here instead of repeating it. Preview it first if you haven't."
+            data-confirm-confirm-label="Send now">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="selector" value="{{ selector }}">
+        <button class="btn small" type="submit">Send now</button>
+      </form>
+    </div>
+    <p class="text-soft small" style="margin:0.45rem 0 0">
+      Goes to the site's owner e-mail on its own schedule. Preview renders it
+      without sending anything; Send now mails it and starts the next period
+      here.
+    </p>
+
+    {% if let Some(p) = preview %}
+      {# Scrolls inside itself — a care report is long and a customer's site
+         name is not, so an unbounded <pre> would widen the whole detail
+         page. #}
+      <div style="margin-top:0.7rem;border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--bg-2);padding:0.7rem 0.8rem;min-width:0">
+        <div style="display:flex;gap:0.5rem;align-items:baseline;flex-wrap:wrap">
+          <span class="pill" style="font-size:0.58rem;background:var(--surface-2);color:var(--text-soft)">preview — nothing was sent</span>
+          <span class="text-soft small numeric">{{ p.period }}</span>
+          <span class="grow"></span>
+          <span class="text-soft small">{{ p.cadence }}</span>
+        </div>
+
+        {# No recipient is the state in which the scheduled send has nowhere
+           to go and refuses — said here, loudly, rather than discovered
+           weeks later when the customer asks where their report is. #}
+        {% if p.to.is_empty() %}
+          <div class="flash warn" style="margin:0.55rem 0 0">
+            <div class="flash-body">
+              This site has no owner e-mail, so nothing can be sent — not by
+              the button above and not on schedule. Set one on the hosting
+              first.
+            </div>
+          </div>
+        {% else %}
+          <p class="text-soft small" style="margin:0.45rem 0 0">To: <span class="numeric">{{ p.to }}</span></p>
+        {% endif %}
+
+        {% if p.entirely_unmeasured %}
+          <div class="flash warn" style="margin:0.55rem 0 0">
+            <div class="flash-body">
+              Not one section of this report could be measured. The scheduled
+              send skips a report like this on purpose — six "nekontrolováno"
+              lines tell the customer nothing. Check that the package's
+              features are actually on for this site.
+            </div>
+          </div>
+        {% endif %}
+
+        <p style="margin:0.55rem 0 0;font-size:0.88rem"><strong>{{ p.subject }}</strong></p>
+        <pre style="margin:0.4rem 0 0;padding:0.6rem 0.7rem;background:var(--surface-2);border:1px solid var(--border);border-radius:var(--radius-sm);max-height:26rem;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;font-size:0.78rem;line-height:1.55">{{ p.body }}</pre>
+      </div>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  {% if can_manage %}
+    {% if !offerable.is_empty() %}
+    <div style="margin-top:0.9rem;padding-top:0.8rem;border-top:1px solid var(--border)" data-require-caps="profiles_manage">
+      <form hx-post="/hostings/packages/activate" hx-target="#packages-card" hx-swap="outerHTML"
+            style="display:flex;gap:0.5rem;align-items:flex-end;flex-wrap:wrap">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="selector" value="{{ selector }}">
+        <div class="field" style="margin:0;flex:1;min-width:16rem">
+          <label for="pkg_activate">Activate a package <span class="hint">switches on everything it includes, right now</span></label>
+          <select id="pkg_activate" name="package_id">
+            {% for o in offerable %}
+            <option value="{{ o.id }}">{{ o.name }} — {{ o.price }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <button class="btn" type="submit">Activate</button>
+      </form>
+      <p class="text-soft small" style="margin:0.5rem 0 0">
+        Packages are defined in <a href="/packages">Care packages</a>. Only the
+        features a package explicitly includes are touched — everything else on
+        this site is left exactly as it is.
+      </p>
+    </div>
+    {% else if held.is_empty() %}
+    <p class="text-soft small" style="margin:0.6rem 0 0" data-require-caps="profiles_manage">
+      No package is currently offered. Define one in <a href="/packages">Care packages</a>.
+    </p>
+    {% endif %}
+  {% endif %}
+</div>

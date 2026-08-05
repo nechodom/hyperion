@@ -89,6 +89,15 @@
         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7h-9"/><path d="M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></svg>
         Profiles &amp; limits
       </a>
+      {# Care packages sit next to Profiles because they're the same kind of
+         object — an admin-authored plan applied to a hosting — and differ
+         only in being a paid entitlement that stays enforced. Same
+         capability gate for the same reason. #}
+      <a class="nav-link {% if active == "packages" %}active{% endif %}" href="/packages"
+         data-require-caps="profiles_manage">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41 13.42 20.58a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>
+        Care packages
+      </a>
     </nav>
     <nav class="nav-section" data-hide-roles="customer,viewer">
       <span class="nav-label">Security</span>

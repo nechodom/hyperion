@@ -1418,6 +1418,58 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok((label, activated)) => Response::ProfileWpItemInstalled { label, activated },
             Err(e) => Response::Error(e),
         },
+        Request::PackageList => match api.package_list().await {
+            Ok(v) => Response::PackageList(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::PackageGet { id } => match api.package_get(id).await {
+            Ok(v) => Response::PackageGet(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::PackageCreate(input) => match api.package_create(input).await {
+            Ok(v) => Response::PackageCreate(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::PackageUpdate { id, input } => match api.package_update(id, input).await {
+            Ok(v) => Response::PackageUpdate(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::PackageDelete { id } => match api.package_delete(id).await {
+            Ok(_) => Response::PackageDelete,
+            Err(e) => Response::Error(e),
+        },
+        Request::PackageActivations { sel, history } => {
+            match api.package_activations(sel, history).await {
+                Ok(v) => Response::PackageActivations(v),
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::PackageActivate {
+            sel,
+            package_id,
+            package,
+        } => match api.package_activate(sel, package_id, package).await {
+            Ok(v) => Response::PackageActivate(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::PackageCancel { sel, activation_id } => {
+            match api.package_cancel(sel, activation_id).await {
+                Ok(v) => Response::PackageCancel(v),
+                Err(e) => Response::Error(e),
+            }
+        }
+        Request::PackageEnforceTick => match api.package_enforce_tick().await {
+            Ok(corrected) => Response::PackageEnforceTick { corrected },
+            Err(e) => Response::Error(e),
+        },
+        Request::CareReportPreview { sel } => match api.care_report_preview(sel).await {
+            Ok(v) => Response::CareReportPreview(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::CareReportSend { sel } => match api.care_report_send(sel).await {
+            Ok(v) => Response::CareReportSend(v),
+            Err(e) => Response::Error(e),
+        },
     }
 }
 
@@ -2656,6 +2708,79 @@ mod tests {
             _: String,
         ) -> Result<(String, bool), RpcError> {
             Ok(("test".into(), false))
+        }
+        async fn package_list(&self) -> Result<Vec<hyperion_types::ServicePackage>, RpcError> {
+            Ok(vec![])
+        }
+        async fn package_get(&self, _: i64) -> Result<hyperion_types::ServicePackage, RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
+        }
+        async fn package_create(
+            &self,
+            _: hyperion_types::PackageInput,
+        ) -> Result<hyperion_types::ServicePackage, RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
+        }
+        async fn package_update(
+            &self,
+            _: i64,
+            _: hyperion_types::PackageInput,
+        ) -> Result<hyperion_types::ServicePackage, RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
+        }
+        async fn package_delete(&self, _: i64) -> Result<(), RpcError> {
+            Ok(())
+        }
+        async fn package_activations(
+            &self,
+            _: HostingSelector,
+            _: bool,
+        ) -> Result<Vec<hyperion_types::HostingPackage>, RpcError> {
+            Ok(vec![])
+        }
+        async fn package_activate(
+            &self,
+            _: HostingSelector,
+            _: i64,
+            _: Option<hyperion_types::ServicePackage>,
+        ) -> Result<hyperion_types::HostingPackage, RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
+        }
+        async fn package_cancel(
+            &self,
+            _: HostingSelector,
+            _: i64,
+        ) -> Result<hyperion_types::HostingPackage, RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
+        }
+        async fn package_enforce_tick(&self) -> Result<i64, RpcError> {
+            Ok(0)
+        }
+        async fn care_report_preview(
+            &self,
+            _: HostingSelector,
+        ) -> Result<hyperion_rpc::codec::CareReportMail, RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
+        }
+        async fn care_report_send(
+            &self,
+            _: HostingSelector,
+        ) -> Result<hyperion_rpc::codec::CareReportMail, RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
         }
     }
 

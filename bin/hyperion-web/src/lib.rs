@@ -454,6 +454,37 @@ pub fn build_router(state: SharedState) -> Router {
             "/profiles/reapply",
             post(handlers::profiles::post_reapply_all),
         )
+        // Care packages — the paid entitlement layer. Definitions are
+        // master-only (`service_packages`), so these four all talk to the
+        // local socket; the per-hosting actions further down dispatch to
+        // the owning node instead.
+        .route("/packages", get(handlers::packages::get_packages))
+        .route("/packages/create", post(handlers::packages::post_create))
+        .route(
+            "/packages/:id/update",
+            post(handlers::packages::post_update),
+        )
+        .route("/packages/delete", post(handlers::packages::post_delete))
+        .route(
+            "/hostings/packages/activate",
+            post(handlers::packages::post_activate),
+        )
+        .route(
+            "/hostings/packages/cancel",
+            post(handlers::packages::post_cancel),
+        )
+        // The care report. Preview sends nothing and exists so the operator
+        // reads exactly what their customer will get; send-now really mails
+        // it. Both are gated in the handler on the same capability as
+        // activate / cancel.
+        .route(
+            "/hostings/packages/report-preview",
+            post(handlers::packages::post_report_preview),
+        )
+        .route(
+            "/hostings/packages/report-send",
+            post(handlers::packages::post_report_send),
+        )
         .route("/certs", get(handlers::certs::get_certs))
         .route("/vulns", get(handlers::vulns::get_vulns))
         .route("/bans", get(handlers::bans::get_bans))
@@ -576,6 +607,14 @@ pub fn build_router(state: SharedState) -> Router {
         .route(
             "/hostings/:selector/integrity-panel",
             get(handlers::hostings::get_integrity_panel),
+        )
+        // Care-package card. Lazy for the same reason: it reads the owning
+        // node twice (the activations, then the live state of the five
+        // features they promise) and must not hold the detail page behind
+        // that. Renders nothing at all when no package was ever defined.
+        .route(
+            "/hostings/:selector/packages-panel",
+            get(handlers::packages::get_packages_panel),
         )
         .route("/logout", post(handlers::login::post_logout))
         // Tiny role echo for the nav-hiding shim in base.html.
