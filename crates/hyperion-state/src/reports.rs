@@ -200,8 +200,16 @@ pub async fn uptime(
     from_ts: i64,
     to_ts: i64,
 ) -> Result<CareUptime, StateError> {
-    let (samples, successes): (i64, Option<i64>) = sqlx::query_as(
-        "SELECT COUNT(*), SUM(success) FROM monitor_samples
+    // NOTE: three positional binds (hosting_id, from_ts, to_ts) — the
+    // DISTINCT-date expression adds none.
+    //
+    // `sampled_at` is epoch SECONDS, so the date has to be derived in SQL:
+    // `unixepoch` is the modifier that reads the integer as a timestamp.
+    let (samples, successes, days_counted): (i64, Option<i64>, i64) = sqlx::query_as(
+        "SELECT COUNT(*),
+                SUM(success),
+                COUNT(DISTINCT date(sampled_at, 'unixepoch'))
+           FROM monitor_samples
           WHERE hosting_id = ? AND sampled_at >= ? AND sampled_at < ?",
     )
     .bind(hosting_id)
@@ -214,6 +222,10 @@ pub async fn uptime(
         // `success` is CHECKed to 0/1, so SUM is the success count. NULL
         // only when there were no rows at all.
         successes: successes.unwrap_or(0),
+        days_counted,
+        // Same denominator the traffic section uses, so the two sections
+        // of one letter can never disagree about how long the period was.
+        days_in_period: days_spanned(from_ts, to_ts),
     })
 }
 

@@ -857,25 +857,18 @@
   });
 
   // ── Customer letters (care report + expiry warning) ──────────────
-  // Sample values are the REAL section strings the renderer produces,
-  // copied wording and all. Availability is deliberately the unmeasured
-  // one: the operator must be able to see what an unmonitored section
-  // looks like inside their own wording before a customer does. There is
-  // no sample for "the number behind a section" because no such
-  // placeholder exists — a section is either its measured wording or its
-  // honest "we were not looking" wording, never a bare figure.
-  var careSample = {
-    domain: 'example.com',
-    period_start: '1 Jun 2026',
-    period_end: '30 Jun 2026',
-    days: '30 days',
-    attacks: 'ATTACKS BLOCKED: 12\n  That is how many times we cut off an address that kept trying to\n  guess an admin password or otherwise abuse the site. A blocked\n  address cannot reach the site at all for several hours.',
-    updates: 'PLUGIN AND THEME UPDATES: 3\n  That is how many updates we applied to the site. We count only the ones\n  that actually installed. WordPress core updates are not in this\n  figure — we do not track those separately yet.',
-    traffic: 'TRAFFIC: 12,345 requests, 34.5 MB sent\n  A request is one load of a page, an image or a file.\n  Data received: 2.0 MB.\n  Peak disk use during the period: 1.2 GB.\n  These figures cover the whole period (30 of 30 days).',
-    uptime: 'AVAILABILITY: not monitored (uptime checks were not active)\n  We were not checking this site regularly during the period, so we\n  cannot say whether it stayed reachable. A figure of 100 % would be\n  invented.',
-    backups: 'BACKUPS: 30\n  That is how many complete copies of the site (files and database) we\n  stored.\n  Last successful backup: 30 Jun 2026 23:00 UTC.\n  Failed attempts: 1 (these retry automatically).',
-    integrity: 'FILE INTEGRITY AND MALWARE: nothing found\n  Check on 30 Jun 2026: the WordPress files match what wordpress.org\n  published, and the malware scan found nothing.'
-  };
+  // The care sample is rendered SERVER-SIDE by the very functions that
+  // build a customer's letter, so this preview cannot drift from what
+  // actually gets sent — it previously did, because the strings were
+  // hand-copied prose sitting right here.
+  //
+  // Availability arrives deliberately unmeasured: the operator must be
+  // able to see what an unmonitored section looks like inside their own
+  // wording before a customer does. There is no sample for "the number
+  // behind a section" because no such placeholder exists — a section is
+  // either its measured wording or its honest "we were not looking"
+  // wording, never a bare figure.
+  var careSample = {{ care_preview_json|safe }};
   var expirySample = {
     domain: 'example.com',
     expires_at: '1 Sep 2026',

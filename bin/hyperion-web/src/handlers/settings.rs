@@ -102,6 +102,15 @@ struct SettingsTpl<'a> {
     /// diverge) — see [`letter_node_rows`] for why the card shows this at
     /// all rather than trusting the last save to have stuck.
     letter_nodes: Vec<LetterNodeRow>,
+    /// Sample values for the care-report preview, as a JSON object the
+    /// page's script uses directly.
+    ///
+    /// Rendered SERVER-SIDE by `hyperion_core::service::care_report_preview_fields`,
+    /// which runs the same `care_section_*` code the customer's letter
+    /// does. The page used to carry its own hand-copied prose, and it had
+    /// already drifted from the mailer — an operator adjusting wording
+    /// around a sentence was editing text nobody receives.
+    care_preview_json: String,
 }
 
 /// What one node currently holds for the two CUSTOMER letters, compared
@@ -636,6 +645,21 @@ pub async fn get_settings(
         care_report_default_template: hyperion_types::CARE_REPORT_DEFAULT_BODY_TEMPLATE,
         expiry_warning_default_template: hyperion_types::EXPIRY_WARNING_DEFAULT_BODY_TEMPLATE,
         letter_nodes,
+        care_preview_json: {
+            let map: std::collections::BTreeMap<&str, String> =
+                hyperion_core::service::care_report_preview_fields()
+                    .into_iter()
+                    .collect();
+            // A failure here would only mean the preview has no sample, so
+            // fall back to an empty object: the placeholders then render as
+            // themselves, which is visibly "no sample" rather than a wrong one.
+            let json = serde_json::to_string(&map).unwrap_or_else(|_| "{}".to_string());
+            // Emitted with `|safe` into a <script> block, so the one
+            // sequence that could break out has to go. Today's sample is
+            // our own prose and contains none — this keeps that true if the
+            // sample ever grows a section that quotes markup.
+            json.replace("</", "<\\/")
+        },
     };
     let mut resp = Html(tpl.render()?).into_response();
     // One-shot: clear the reveal cookie so a refresh doesn't show the key again.

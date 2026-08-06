@@ -266,6 +266,50 @@ pub async fn upsert_usage(pool: &SqlitePool, bucket: &UsageBucket) -> Result<(),
     Ok(())
 }
 
+/// Write ONLY the three traffic columns of one bucket, leaving disk,
+/// inodes, memory and CPU as they were.
+///
+/// Used to backfill the hour the sampler has just left. Those other
+/// columns are point-in-time readings that belonged to that hour when it
+/// was live; overwriting them now with the CURRENT disk or RSS would
+/// rewrite history, and `MAX(disk_used_bytes)` over a period — the care
+/// report's "peak disk use" — would report today's figure as the peak.
+///
+/// When no row exists yet the insert supplies zeros for those columns.
+/// That is correct rather than merely convenient: a zero cannot raise a
+/// MAX, and the hour genuinely did carry traffic, so it belongs in the
+/// DISTINCT-date coverage count.
+pub async fn upsert_usage_traffic(
+    pool: &SqlitePool,
+    hosting_id: &HostingId,
+    period: &str,
+    bw_in_bytes: i64,
+    bw_out_bytes: i64,
+    php_requests: i64,
+) -> Result<(), StateError> {
+    // NOTE: six positional binds, left to right — hosting_id, period, then
+    // the three traffic values in the VALUES list. The UPDATE clause reads
+    // from `excluded`, so it adds no binds of its own.
+    sqlx::query(
+        r#"INSERT INTO hosting_usage
+           (hosting_id, period, disk_used_bytes, inodes_used, bw_in_bytes, bw_out_bytes,
+            php_requests, mem_rss_bytes, cpu_pct_x100)
+           VALUES (?, ?, 0, 0, ?, ?, ?, 0, 0)
+           ON CONFLICT(hosting_id, period) DO UPDATE SET
+             bw_in_bytes  = excluded.bw_in_bytes,
+             bw_out_bytes = excluded.bw_out_bytes,
+             php_requests = excluded.php_requests"#,
+    )
+    .bind(hosting_id.as_str())
+    .bind(period)
+    .bind(bw_in_bytes)
+    .bind(bw_out_bytes)
+    .bind(php_requests)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 #[allow(clippy::type_complexity)] // positional row tuple; mirrors the table
 pub async fn usage_for(
     pool: &SqlitePool,

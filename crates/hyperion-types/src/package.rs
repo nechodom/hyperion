@@ -711,6 +711,20 @@ impl CareUsage {
 pub struct CareUptime {
     pub samples: i64,
     pub successes: i64,
+    /// Days of the period that carry at least one check, and how many days
+    /// the period has — the same coverage pair [`CareUsage`] carries, and
+    /// for the same reason.
+    ///
+    /// Zero samples already means "not monitored", but PARTIAL monitoring
+    /// used to be invisible: a node offline for five days records no
+    /// checks for them, and the surviving 25 days were divided among
+    /// themselves into "100.00 %, no outage" — a perfect score computed
+    /// from the days the site was up, printed beside a traffic section
+    /// that admitted the same five days were missing.
+    #[serde(default)]
+    pub days_counted: i64,
+    #[serde(default)]
+    pub days_in_period: i64,
 }
 
 impl CareUptime {
@@ -718,6 +732,18 @@ impl CareUptime {
     /// `None` when there is nothing to divide by.
     pub fn success_ratio_x100(&self) -> Option<i64> {
         (self.samples > 0).then(|| self.successes * 10_000 / self.samples)
+    }
+
+    /// True when every day of the period carries at least one check — the
+    /// only case where the percentage may be presented as the period's
+    /// availability without a coverage caveat.
+    ///
+    /// `days_in_period == 0` is the pre-coverage wire shape (an older node
+    /// serialising without these fields). Treating it as complete keeps
+    /// the sentence it used to print rather than inventing a caveat about
+    /// a denominator we did not receive.
+    pub fn is_complete(&self) -> bool {
+        self.days_in_period == 0 || self.days_counted >= self.days_in_period
     }
 
     /// How many checks failed. Named the way the customer thinks about
@@ -793,6 +819,18 @@ pub struct CareReport {
     /// with the scanner off, zero bans means nobody was watching.
     #[serde(default)]
     pub attacks_blocked: Option<i64>,
+    /// When protection demonstrably started watching THIS site, if that
+    /// is later than `period_start`.
+    ///
+    /// `attacks_blocked` alone cannot tell a quiet month from a month
+    /// nobody watched for, and the enabled/disabled flags behind it are
+    /// present-tense: a site protected only since the 29th still reported
+    /// "0 — protection ran for the whole period". This is the evidence
+    /// that bounds the claim, stamped by the scanner itself rather than
+    /// inferred from a toggle, so it survives the toggle being flipped
+    /// back and forth. `None` means the whole period is covered.
+    #[serde(default)]
+    pub attacks_covered_since: Option<i64>,
     /// Plugin/theme updates applied. `None` when the audit log cannot
     /// account for the whole period (retention purged part of it, or the
     /// node is younger than the period) — an incomplete count presented
@@ -825,6 +863,9 @@ impl CareReport {
             period_start,
             period_end,
             attacks_blocked: None,
+            // No count ⇒ nothing to bound. The caller sets this only
+            // alongside a count it is about to qualify.
+            attacks_covered_since: None,
             updates_applied: None,
             usage: None,
             uptime: None,
@@ -1178,9 +1219,39 @@ mod tests {
         let good = CareUptime {
             samples: 2000,
             successes: 1999,
+            days_counted: 30,
+            days_in_period: 30,
         };
         assert_eq!(good.success_ratio_x100(), Some(9995));
         assert_eq!(good.failures(), 1);
+        assert!(good.is_complete());
+    }
+
+    /// A perfect score computed from part of the period is still only a
+    /// score for that part. The five days a node spent offline record no
+    /// checks, so they cannot fail any — and dividing the survivors among
+    /// themselves yields exactly 100 %.
+    #[test]
+    fn uptime_with_a_sampling_gap_is_not_complete() {
+        let gappy = CareUptime {
+            samples: 7200,
+            successes: 7200,
+            days_counted: 25,
+            days_in_period: 30,
+        };
+        assert_eq!(gappy.success_ratio_x100(), Some(10_000));
+        assert!(
+            !gappy.is_complete(),
+            "25 of 30 days must not present as the period's availability"
+        );
+
+        // Wire compatibility: a node that predates these fields sends no
+        // denominator. Inventing a caveat from a zero would be its own
+        // kind of lie, so the letter keeps the sentence it always printed.
+        let old_wire: CareUptime =
+            serde_json::from_str(r#"{"samples":100,"successes":100}"#).expect("de");
+        assert_eq!(old_wire.days_in_period, 0);
+        assert!(old_wire.is_complete());
     }
 
     #[test]

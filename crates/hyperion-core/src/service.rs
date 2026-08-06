@@ -5487,6 +5487,54 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
     }
 
+    /// Record that the brute-force scanner is watching this site, if we
+    /// have not already. Idempotent: only the FIRST scan of an unbroken
+    /// protected stretch writes, so the value is "watching since", not
+    /// "last seen".
+    ///
+    /// `hosting_kv` is node-local and so is the scanner, which is what
+    /// makes this readable by the care report — that runs on the owning
+    /// node too.
+    async fn note_bruteforce_coverage(&self, hosting_id: &str, at: i64) {
+        if matches!(
+            hyperion_state::hosting_kv::get(&self.pool, hosting_id, FAIL2BAN_HTTP_SINCE_KV_KEY)
+                .await,
+            Ok(Some(_))
+        ) {
+            return;
+        }
+        let _ = hyperion_state::hosting_kv::set(
+            &self.pool,
+            hosting_id,
+            FAIL2BAN_HTTP_SINCE_KV_KEY,
+            &at.to_string(),
+            now_secs(),
+        )
+        .await;
+    }
+
+    /// When protection demonstrably began watching this site, or `None`
+    /// when it is not watching now.
+    ///
+    /// A read failure answers `Some(now)` — "we cannot prove any of this
+    /// period was covered". That is the opposite of how
+    /// [`Self::http_bruteforce_scan_enabled`] fails, and deliberately so:
+    /// there, failing open keeps a paying customer PROTECTED; here,
+    /// failing open would let the letter CLAIM protection it cannot
+    /// evidence.
+    async fn bruteforce_coverage_since(&self, hosting_id: &str) -> Option<i64> {
+        if !self.fail2ban.enabled || !self.http_bruteforce_scan_enabled(hosting_id).await {
+            return None;
+        }
+        match hyperion_state::hosting_kv::get(&self.pool, hosting_id, FAIL2BAN_HTTP_SINCE_KV_KEY)
+            .await
+        {
+            Ok(Some(v)) => Some(v.trim().parse::<i64>().unwrap_or_else(|_| now_secs())),
+            Ok(None) => Some(now_secs()),
+            Err(_) => Some(now_secs()),
+        }
+    }
+
     /// Everything one tick would ban, in scan order: each active hosting's
     /// own access log first (gated by that site's switch), then the
     /// node-wide ssh / ftp / mail journals.
@@ -5507,11 +5555,27 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             // Opted out ⇒ this site's access log is not read at all, so the
             // switch costs nothing rather than merely discarding findings.
             if !self.http_bruteforce_scan_enabled(s.id.as_str()).await {
+                // Protection stops here, so the coverage stamp stops being
+                // true. Dropping it now means re-enabling later starts a
+                // fresh, honest "watched since", instead of a stale one
+                // that would let the care report claim the gap was covered.
+                let _ = hyperion_state::hosting_kv::delete(
+                    &self.pool,
+                    s.id.as_str(),
+                    FAIL2BAN_HTTP_SINCE_KV_KEY,
+                )
+                .await;
                 continue;
             }
             let Some(user) = derive_user_from_summary(s) else {
                 continue;
             };
+            // First scan since protection was (re-)enabled: stamp when we
+            // actually started watching. Written by the SCANNER, not by the
+            // toggle handler, so it records what ran rather than what was
+            // configured — a site whose log is unreadable, or whose node was
+            // down, never acquires a stamp it did not earn.
+            self.note_bruteforce_coverage(s.id.as_str(), since).await;
             let access = std::path::PathBuf::from(&self.paths.home_root)
                 .join(&user)
                 .join(&s.domain)
@@ -9231,12 +9295,18 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // attributed to it by hand, since those share the same column. That
         // is the safe direction: the section claims ongoing protection, and
         // there was none.
-        if self.fail2ban.enabled && self.http_bruteforce_scan_enabled(id).await {
+        //
+        // Protection running NOW is only half the question: it says nothing
+        // about the 29 days before an operator switched it on. The scanner's
+        // own coverage stamp answers the other half, and bounds the claim to
+        // the days it can evidence.
+        if let Some(since) = self.bruteforce_coverage_since(id).await {
             report.attacks_blocked = Some(
                 reports::attacks_blocked(&self.pool, id, from, to)
                     .await
                     .map_err(|e| wrap("attacks", e))?,
             );
+            report.attacks_covered_since = (since > from).then_some(since);
         }
         report.updates_applied = reports::updates_applied(&self.pool, id, from, to)
             .await
@@ -12636,6 +12706,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     pub async fn stats_tick(&self) -> Result<i64, RpcError> {
         let now = now_secs();
         let period = period_key(now);
+        // Start of the UTC hour this tick falls in — the lower bound of the
+        // window whose result `period` names.
+        let hour_start = now - now.rem_euclid(3600);
+        let prev_period = period_key(hour_start - 3600);
         let summaries = self.list().await?;
         let mut total_disk: i64 = 0;
         let mut total_bw_out: i64 = 0;
@@ -12668,11 +12742,56 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             let host_root = std::path::PathBuf::from(&self.paths.home_root)
                 .join(user.clone().unwrap_or_else(|| "_".to_string()))
                 .join(&s.domain);
+            // `derive_user_from_summary` GUESSES the system user from the
+            // domain, and an imported or renamed site defeats the guess. The
+            // path then points at nothing, `du` and the log parse both answer
+            // zero, and the row that gets written is indistinguishable from a
+            // real measurement: the customer's letter reads "0 requests, 0 B
+            // sent, peak disk 0 B … these figures cover the whole period" for
+            // a live site with gigabytes of files.
+            //
+            // Writing no row at all is the honest alternative — the day drops
+            // out of `days_counted`, so the letter says the period was only
+            // partly measured instead of inventing a zero.
+            if !tokio::fs::try_exists(&host_root).await.unwrap_or(false) {
+                tracing::warn!(
+                    hosting = %s.id.as_str(), domain = %s.domain, path = %host_root.display(),
+                    "stats: hosting root not found — skipping this sample rather than \
+                     recording zeros; check the site's system user",
+                );
+                continue;
+            }
             let disk = du_bytes(&host_root).await.unwrap_or(0);
             let inodes = du_inodes(&host_root).await;
             let logs_dir = host_root.join("logs");
+            let access_log = logs_dir.join("access.log");
+            // The bucket is keyed by UTC HOUR, so it must hold that hour's
+            // traffic and nothing else — see `parse_access_log_window`.
             let (bw_in, bw_out, reqs, _last) =
-                parse_access_log_window(&logs_dir.join("access.log"), now - 24 * 3600).await;
+                parse_access_log_window(&access_log, hour_start, None).await;
+            // The current hour is still running, so this row is rewritten on
+            // every tick and is only complete once the hour ends. Backfill
+            // the hour we just left so it stops being short by up to one
+            // tick interval — a 5-minute sampler otherwise loses the last
+            // few minutes of every hour, a systematic ~4 % undercount in the
+            // customer's traffic figure.
+            let (p_in, p_out, p_reqs, _) =
+                parse_access_log_window(&access_log, hour_start - 3600, Some(hour_start)).await;
+            if p_reqs > 0 {
+                // `> 0` guards logrotate: once access.log has been rotated
+                // away the parse legitimately returns zero, and writing that
+                // would erase a real hour we had already measured. A quiet
+                // hour needs no row — absent and zero sum identically.
+                let _ = hyperion_state::limits::upsert_usage_traffic(
+                    &self.pool,
+                    &s.id,
+                    &prev_period,
+                    p_in,
+                    p_out,
+                    p_reqs,
+                )
+                .await;
+            }
 
             // Per-hosting RSS + CPU% from this user's processes.
             let (mem_rss, cpu_pct) = match &user {
@@ -19070,6 +19189,97 @@ pub fn care_report_render(report: &CareReport, domain: &str) -> (String, String)
 /// An unknown `{token}` is left VERBATIM in the output by `render_template`
 /// (never a panic, never silently dropped), so an operator's typo shows up
 /// in the preview instead of quietly deleting a paragraph.
+/// The sample a Settings preview shows for each `{placeholder}`, as
+/// `(name, value)` pairs ready to hand to the page.
+///
+/// Produced by the SAME `care_section_*` functions the customer's letter
+/// goes through, because the preview's whole job is to show the operator
+/// what their wording will do to real sections. Hand-copying the strings
+/// into the page's JavaScript is what this replaces: they had already
+/// drifted, and an operator tuning a sentence was reading text no
+/// customer would ever receive.
+///
+/// Availability is deliberately left UNMEASURED. It is the case the
+/// operator most needs to see inside their own wording — a letter that
+/// reads well with a percentage in it can read absurdly with "not
+/// monitored" in the same slot, and finding that out from a customer is
+/// too late.
+pub fn care_report_preview_fields() -> Vec<(&'static str, String)> {
+    // 1–30 Jun 2026, half-open. Fixed, so the preview never depends on
+    // the clock and two operators comparing screens see the same letter.
+    let from = 1_780_272_000; // 2026-06-01 00:00 UTC
+    let to = from + 30 * 86_400;
+    let report = CareReport {
+        attacks_blocked: Some(12),
+        attacks_covered_since: None,
+        updates_applied: Some(3),
+        usage: Some(CareUsage {
+            bw_in_bytes: Some(2_000_000),
+            bw_out_bytes: 34_500_000,
+            requests: 12_345,
+            disk_peak_bytes: 1_200_000_000,
+            days_counted: 30,
+            days_in_period: 30,
+        }),
+        // See the doc comment: unmeasured on purpose.
+        uptime: None,
+        backups: Some(CareBackups {
+            taken: 30,
+            failed: 1,
+            last_success_at: Some(to - 3600),
+        }),
+        integrity: Some(CareIntegrity {
+            scanned_at: to - 3600,
+            checksums_ran: true,
+            malware_scan_ran: true,
+            ..Default::default()
+        }),
+        ..CareReport::empty(HostingId("preview".into()), "example.com".into(), from, to)
+    };
+    let (_, _, fields) = care_report_parts(&report, "example.com");
+    fields
+}
+
+/// Subject, section strings and the full placeholder set for one report.
+/// Split out so [`care_report_preview_fields`] cannot diverge from what
+/// [`care_report_render_with`] actually sends.
+fn care_report_parts(
+    report: &CareReport,
+    domain: &str,
+) -> (String, [String; 6], Vec<(&'static str, String)>) {
+    let days = care_days_spanned(report.period_start, report.period_end);
+    // The period is half-open, so the last day INSIDE it is `end - 1`.
+    let last_day = (report.period_end - 1).max(report.period_start);
+    let from_str = report_date(report.period_start);
+    let to_str = report_date(last_day);
+    let subject = format!("Care report for {domain} ({from_str} – {to_str})");
+    let parts = [
+        care_section_attacks(report.attacks_blocked, report.attacks_covered_since),
+        care_section_updates(report.updates_applied),
+        care_section_usage(report.usage.as_ref()),
+        care_section_uptime(report.uptime.as_ref()),
+        care_section_backups(report.backups.as_ref()),
+        care_section_integrity(report.integrity.as_ref()),
+    ];
+    // Day count carries its own unit word so a template can never render
+    // "1 days", and so `{days}` alone reproduces the default's "(30 days)".
+    let fields = vec![
+        ("domain", domain.to_string()),
+        ("period_start", from_str),
+        // Inclusive last day of the period, same as the default letter.
+        ("period_end", to_str),
+        ("days", format!("{days} {}", plural(days, "day", "days"))),
+        // Rendered sections, unmeasured wording included. See above.
+        ("attacks", parts[0].clone()),
+        ("updates", parts[1].clone()),
+        ("traffic", parts[2].clone()),
+        ("uptime", parts[3].clone()),
+        ("backups", parts[4].clone()),
+        ("integrity", parts[5].clone()),
+    ];
+    (subject, parts, fields)
+}
+
 pub fn care_report_render_with(
     report: &CareReport,
     domain: &str,
@@ -19083,16 +19293,7 @@ pub fn care_report_render_with(
     let from_str = report_date(report.period_start);
     let to_str = report_date(last_day);
 
-    let subject = format!("Care report for {domain} ({from_str} – {to_str})");
-
-    let parts = [
-        care_section_attacks(report.attacks_blocked),
-        care_section_updates(report.updates_applied),
-        care_section_usage(report.usage.as_ref()),
-        care_section_uptime(report.uptime.as_ref()),
-        care_section_backups(report.backups.as_ref()),
-        care_section_integrity(report.integrity.as_ref()),
-    ];
+    let (subject, parts, fields) = care_report_parts(report, domain);
 
     if body_template.trim().is_empty() {
         let sections = parts.join("\n\n");
@@ -19117,33 +19318,85 @@ pub fn care_report_render_with(
         return (subject, body);
     }
 
-    // Day count carries its own unit word so a template can never render
-    // "1 days", and so `{days}` alone reproduces the default's "(30 days)".
-    let days_str = format!("{days} {}", plural(days, "day", "days"));
-    let body = render_template(
-        body_template,
-        &[
-            ("domain", domain),
-            ("period_start", &from_str),
-            // Inclusive last day of the period, same as the default letter.
-            ("period_end", &to_str),
-            ("days", &days_str),
-            // Rendered sections, unmeasured wording included. See above.
-            ("attacks", &parts[0]),
-            ("updates", &parts[1]),
-            ("traffic", &parts[2]),
-            ("uptime", &parts[3]),
-            ("backups", &parts[4]),
-            ("integrity", &parts[5]),
-        ],
-    );
+    let pairs: Vec<(&str, &str)> = fields.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let mut body = render_template(body_template, &pairs);
+    body.push_str(&care_omitted_unmeasured_note(report, body_template));
     (subject, body)
+}
+
+/// The one thing a custom letter must not be allowed to do: quietly drop
+/// a section that would have said "we did not measure this".
+///
+/// Omitting a MEASURED section is an editorial choice and stays the
+/// operator's — a shorter letter is still a true one. Omitting an
+/// UNMEASURED one is different in kind: the disclosure disappears, and the
+/// letter's own preamble ("where something was not being measured, we say
+/// so") is still there promising otherwise, because the operator started
+/// from the built-in letter and deleted the section that read badly.
+/// Availability is the one they delete, and it is the one that matters.
+///
+/// So the disclosure is re-attached at the end. Terse, not a second copy
+/// of the section — enough that no customer is told a period was watched
+/// when it was not.
+fn care_omitted_unmeasured_note(report: &CareReport, body_template: &str) -> String {
+    let unmeasured: Vec<&str> = [
+        (
+            "attacks",
+            report.attacks_blocked.is_none(),
+            "attacks blocked",
+        ),
+        (
+            "updates",
+            report.updates_applied.is_none(),
+            "updates applied",
+        ),
+        ("traffic", report.usage.is_none(), "traffic"),
+        ("uptime", report.uptime.is_none(), "availability"),
+        ("backups", report.backups.is_none(), "backups"),
+        (
+            "integrity",
+            report.integrity.is_none(),
+            "file integrity and malware",
+        ),
+    ]
+    .into_iter()
+    .filter(|(placeholder, is_unmeasured, _)| {
+        *is_unmeasured && !body_template.contains(&format!("{{{placeholder}}}"))
+    })
+    .map(|(_, _, label)| label)
+    .collect();
+    if unmeasured.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n\nNOT MEASURED THIS PERIOD: {}.\n  \
+         We were not measuring {} during this period, so this letter makes no\n  \
+         claim about {}. This note is added automatically — a report may leave\n  \
+         a figure out, but never a gap in what was watched.",
+        unmeasured.join(", "),
+        plural(unmeasured.len() as i64, "it", "them"),
+        plural(unmeasured.len() as i64, "it", "them"),
+    )
 }
 
 /// Blocked attacks. `None` is the case the database cannot produce on its
 /// own — the caller sets it when the ban scanner was switched off — and it
 /// is exactly why zero must not be printed there.
-fn care_section_attacks(blocked: Option<i64>) -> String {
+fn care_section_attacks(blocked: Option<i64>, covered_since: Option<i64>) -> String {
+    // Protection started mid-period: the count is real but it is not a
+    // period total, and "0" is emphatically not "a quiet month". Both
+    // wordings below would otherwise assert coverage we cannot evidence.
+    if let (Some(n), Some(since)) = (blocked, covered_since) {
+        return format!(
+            "ATTACKS BLOCKED: {} (since {})\n  \
+             Automatic attack protection has been watching this site since\n  \
+             {}, not for the whole period, so this figure covers only that\n  \
+             part of it. We cannot say what reached the site beforehand.",
+            group_int(n),
+            report_date(since),
+            report_date(since),
+        );
+    }
     match blocked {
         None => "ATTACKS BLOCKED: not monitored\n  \
              Automatic attack protection was not running on this server during\n  \
@@ -19232,8 +19485,12 @@ fn care_section_usage(usage: Option<&CareUsage>) -> String {
         ));
     } else {
         out.push_str(&format!(
+            // "was higher" would state a fact about days we just said we did
+            // not measure — the site may have served nothing on them. This is
+            // the one sentence that could draw a conclusion from the gap, so
+            // it stays a possibility.
             "\n  Note: these figures cover only {} of the period's {} {} — the\n  \
-             rest was not measured, so real traffic was higher.",
+             rest was not measured, so real traffic may have been higher.",
             group_int(u.days_counted),
             group_int(u.days_in_period),
             plural(u.days_in_period, "day", "days")
@@ -19259,26 +19516,43 @@ fn care_section_uptime(uptime: Option<&CareUptime>) -> String {
         return NOT_MONITORED.to_string();
     };
     let failures = u.failures();
-    if failures == 0 {
-        return format!(
+    let mut out = if failures == 0 {
+        format!(
             "AVAILABILITY: {} ({} {}, no outage)\n  \
              We checked the site automatically and it answered every time.",
             pct_x100_str(ratio),
             group_int(u.samples),
             plural(u.samples, "check", "checks"),
-        );
+        )
+    } else {
+        format!(
+            "AVAILABILITY: {} ({} {}, {} of them failed)\n  \
+             The site did not answer on {} {}. One or two failed checks are usually\n  \
+             a brief outage or a restart; if they repeat, we look into it.",
+            pct_x100_str(ratio),
+            group_int(u.samples),
+            plural(u.samples, "check", "checks"),
+            group_int(failures),
+            group_int(failures),
+            plural(failures, "check", "checks"),
+        )
+    };
+    // A percentage computed from a subset of the period is a percentage OF
+    // that subset, and the days with no checks at all are exactly the days
+    // most likely to have been an outage — the agent being down is why no
+    // check was recorded. Saying so is the difference between a measured
+    // score and a flattering one.
+    if !u.is_complete() {
+        out.push_str(&format!(
+            "\n  Note: checks ran on only {} of the period's {} {}, so this\n  \
+             percentage describes those {} — not the whole period.",
+            group_int(u.days_counted),
+            group_int(u.days_in_period),
+            plural(u.days_in_period, "day", "days"),
+            plural(u.days_counted, "day", "days"),
+        ));
     }
-    format!(
-        "AVAILABILITY: {} ({} {}, {} of them failed)\n  \
-         The site did not answer on {} {}. One or two failed checks are usually\n  \
-         a brief outage or a restart; if they repeat, we look into it.",
-        pct_x100_str(ratio),
-        group_int(u.samples),
-        plural(u.samples, "check", "checks"),
-        group_int(failures),
-        group_int(failures),
-        plural(failures, "check", "checks"),
-    )
+    out
 }
 
 /// Backups. Three genuinely different states, and the middle one is the
@@ -19631,9 +19905,18 @@ async fn fs_used_total_bytes(path: &std::path::Path) -> Option<(u64, u64)> {
     Some((used, total))
 }
 
-/// Parse the tail of nginx access.log (default combined format) for the
-/// last `since` epoch-seconds window. Returns (bw_in_bytes, bw_out_bytes,
-/// requests, last_request_ts).
+/// Parse nginx access.log (default combined format) over the half-open
+/// range `[since, until)`. `until = None` means "up to the end of the
+/// file". Returns (bw_in_bytes, bw_out_bytes, requests, last_request_ts).
+///
+/// **The range must match the granularity of the bucket it is written
+/// into.** This used to be a `since`-only window of 24 h whose result was
+/// stored under an HOURLY `period` key, so every hourly bucket held a
+/// rolling 24 h total and every consumer that SUMs buckets — the care
+/// report's period traffic, /stats' per-site breakdown, the hosting
+/// detail's `*_24h` figures — multiplied the real number by roughly the
+/// bucket count. A customer's monthly letter quoted about 24× the traffic
+/// their site actually served.
 ///
 /// Nginx combined format: '$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent ...'.
 /// We only have body_bytes_sent (bw_out) — bw_in is approximated as
@@ -20032,6 +20315,13 @@ const INTEGRITY_ENABLED_KV_KEY: &str = "integrity_scan_enabled";
 /// for everybody.
 const FAIL2BAN_HTTP_KV_KEY: &str = "http_bruteforce_scan_enabled";
 
+/// Epoch seconds of the first scan of the current protected stretch —
+/// written by the scanner, cleared the moment a site is opted out. The
+/// care report reads it to bound "attacks blocked" to the days it can
+/// actually evidence, instead of inferring coverage from a toggle that
+/// only ever describes the present.
+const FAIL2BAN_HTTP_SINCE_KV_KEY: &str = "http_bruteforce_scan_since";
+
 /// Marker put in `WpIntegrityScanResult::error` for a hosting that has no
 /// WordPress at all. A sentinel rather than free text because the sweep
 /// branches on it — a static site is *skipped*, not *reported*.
@@ -20373,7 +20663,11 @@ async fn scan_access_log_for_bruteforce(
         .collect()
 }
 
-async fn parse_access_log_window(path: &std::path::Path, since: i64) -> (i64, i64, i64, i64) {
+async fn parse_access_log_window(
+    path: &std::path::Path,
+    since: i64,
+    until: Option<i64>,
+) -> (i64, i64, i64, i64) {
     let Ok(body) = tokio::fs::read_to_string(path).await else {
         return (0, 0, 0, 0);
     };
@@ -20396,6 +20690,12 @@ async fn parse_access_log_window(path: &std::path::Path, since: i64) -> (i64, i6
         };
         let ts = dt.timestamp();
         if ts < since {
+            continue;
+        }
+        // Half-open on purpose: `until` is the next bucket's `since`, so a
+        // request landing exactly on an hour boundary is counted once, by
+        // the later bucket, never by both.
+        if until.is_some_and(|u| ts >= u) {
             continue;
         }
         reqs += 1;
@@ -23453,6 +23753,68 @@ mod tests {
     /// The empty target list is the whole question, and only the caller can
     /// answer it: the panel resolves the master's table and sends it, so
     /// empty means the operator configured none; a scheduled run reads THIS
+    /// Each request must land in exactly ONE hourly bucket, because the
+    /// care report, /stats and the hosting detail all SUM buckets.
+    ///
+    /// The regression this pins: the sampler used to parse a 24 h window
+    /// and store it under an hourly key, so summing a month multiplied the
+    /// customer's traffic by roughly 24. Summing the per-hour windows here
+    /// must reproduce the total exactly — no request counted twice, none
+    /// dropped on a boundary.
+    #[tokio::test]
+    async fn hourly_windows_partition_the_access_log_exactly_once() {
+        use super::parse_access_log_window;
+        use chrono::{TimeZone, Utc};
+
+        let tmp = tempfile::tempdir().expect("tmp");
+        let log = tmp.path().join("access.log");
+        let base = Utc
+            .with_ymd_and_hms(2026, 6, 1, 0, 0, 0)
+            .single()
+            .expect("base ts")
+            .timestamp();
+
+        // Three hours of traffic, including two requests exactly ON hour
+        // boundaries — the case a closed range would double-count.
+        let offsets = [0i64, 59 * 60, 3600, 3600 + 30 * 60, 7200, 7200 + 59 * 60];
+        let mut body = String::new();
+        for off in offsets {
+            let stamp = Utc
+                .timestamp_opt(base + off, 0)
+                .single()
+                .expect("stamp")
+                .format("%d/%b/%Y:%H:%M:%S +0000");
+            // Combined format; body_bytes_sent is field 10 (index 9).
+            body.push_str(&format!(
+                "1.2.3.4 - - [{stamp}] \"GET / HTTP/1.1\" 200 100 \"-\" \"ua\"\n"
+            ));
+        }
+        std::fs::write(&log, &body).expect("write log");
+
+        // Whole span, as one window: the ground truth.
+        let (_, all_out, all_reqs, _) = parse_access_log_window(&log, base, None).await;
+        assert_eq!(all_reqs, 6, "fixture should parse as six requests");
+        assert_eq!(all_out, 600);
+
+        // The same span cut into the hour buckets the sampler writes.
+        let mut sum_reqs = 0;
+        let mut sum_out = 0;
+        for h in 0..3 {
+            let start = base + h * 3600;
+            let (_, out, reqs, _) = parse_access_log_window(&log, start, Some(start + 3600)).await;
+            assert_eq!(reqs, 2, "hour {h} holds its own two requests");
+            sum_reqs += reqs;
+            sum_out += out;
+        }
+        assert_eq!(sum_reqs, all_reqs, "summing buckets must not inflate");
+        assert_eq!(sum_out, all_out);
+
+        // An open-ended window still starts where it is told: the old
+        // behaviour (ignoring the upper bound) would return all six here.
+        let (_, _, tail_reqs, _) = parse_access_log_window(&log, base + 7200, None).await;
+        assert_eq!(tail_reqs, 2);
+    }
+
     /// node's table, which on a worker is empty by design.
     #[tokio::test]
     async fn only_a_worker_scheduled_run_reports_the_missing_off_site_copy() {
@@ -24882,6 +25244,103 @@ mod tests {
         }
     }
 
+    /// Deleting the section that reads badly must not delete the
+    /// disclosure. The operator starts from the built-in letter — preamble
+    /// and all — and drops `{uptime}` because "not monitored" looks bad
+    /// next to an invoice.
+    #[test]
+    fn a_custom_letter_cannot_drop_an_unmeasured_section() {
+        let r = mk_care_report(); // uptime is None
+        let (_, body) = care_report_render_with(&r, "example.cz", "{domain}\n{attacks}\n{traffic}");
+        assert!(
+            !body.contains("AVAILABILITY:"),
+            "operator did drop it: {body}"
+        );
+        assert!(
+            body.contains("NOT MEASURED THIS PERIOD: availability."),
+            "the disclosure must come back: {body}"
+        );
+
+        // Keeping the placeholder is the normal case, and must not produce
+        // a second copy of the same disclosure.
+        let (_, kept) = care_report_render_with(&r, "example.cz", "{domain}\n{uptime}");
+        assert!(kept.contains("AVAILABILITY: not monitored"));
+        assert!(!kept.contains("NOT MEASURED THIS PERIOD"), "{kept}");
+
+        // Dropping a MEASURED section stays the operator's call — a
+        // shorter letter is still a true one.
+        let (_, short) = care_report_render_with(&r, "example.cz", "{domain}\n{uptime}");
+        assert!(!short.contains("ATTACKS BLOCKED"), "{short}");
+        assert!(!short.contains("NOT MEASURED THIS PERIOD"), "{short}");
+    }
+
+    /// Protection switched on partway through bounds the claim. Without
+    /// this the letter said "0 — protection ran for the whole period"
+    /// about days nobody was watching.
+    #[test]
+    fn attacks_started_mid_period_says_so_instead_of_claiming_the_period() {
+        // 15 Jun, inside the 1–30 Jun fixture period.
+        let since = CARE_FROM + 14 * 86_400;
+
+        let quiet = care_section_attacks(Some(0), Some(since));
+        assert!(quiet.contains("since 15 Jun 2026"), "{quiet}");
+        assert!(
+            !quiet.contains("Protection ran for the whole period"),
+            "a zero from half a period must not claim the period: {quiet}"
+        );
+
+        let busy = care_section_attacks(Some(4), Some(since));
+        assert!(
+            busy.contains("ATTACKS BLOCKED: 4 (since 15 Jun 2026)"),
+            "{busy}"
+        );
+
+        // Full coverage keeps the original, unqualified wording.
+        let full = care_section_attacks(Some(0), None);
+        assert!(
+            full.contains("Protection ran for the whole period"),
+            "{full}"
+        );
+    }
+
+    /// The Settings preview is built from the same section renderers as a
+    /// real letter, so an operator tunes wording against text customers
+    /// actually receive. This pins that it is wired up — the previous
+    /// version was hand-copied prose in the page's JavaScript, and it had
+    /// already drifted.
+    #[test]
+    fn the_settings_preview_sample_comes_from_the_real_renderer() {
+        let fields = care_report_preview_fields();
+        let get = |k: &str| {
+            fields
+                .iter()
+                .find(|(n, _)| *n == k)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default()
+        };
+        // Availability is deliberately the unmeasured one.
+        assert_eq!(get("uptime"), care_section_uptime(None));
+        assert!(get("uptime").contains("AVAILABILITY: not monitored"));
+        // And the measured sections are byte-identical to the letter's.
+        assert_eq!(get("attacks"), care_section_attacks(Some(12), None));
+        assert_eq!(get("updates"), care_section_updates(Some(3)));
+        // Every placeholder the docs promise has a sample.
+        for k in [
+            "domain",
+            "period_start",
+            "period_end",
+            "days",
+            "attacks",
+            "updates",
+            "traffic",
+            "uptime",
+            "backups",
+            "integrity",
+        ] {
+            assert!(!get(k).is_empty(), "missing preview sample for {{{k}}}");
+        }
+    }
+
     #[test]
     fn care_letter_custom_template_keeps_an_unmeasured_section_honest() {
         let r = mk_care_report(); // uptime is None
@@ -24916,7 +25375,14 @@ mod tests {
         // preview rather than silently dropped from the mail.
         let (_, body) =
             care_report_render_with(&r, "example.cz", "{domain} {uptime_pct} {nope} {unclosed");
-        assert_eq!(body, "example.cz {uptime_pct} {nope} {unclosed");
+        // `starts_with`, not `==`: this letter names no section at all, so
+        // the unmeasured-section disclosure is appended after it. That is
+        // `a_custom_letter_cannot_drop_an_unmeasured_section`'s business;
+        // what matters here is that the three bad tokens survive verbatim.
+        assert!(
+            body.starts_with("example.cz {uptime_pct} {nope} {unclosed"),
+            "{body}"
+        );
     }
 
     #[test]
