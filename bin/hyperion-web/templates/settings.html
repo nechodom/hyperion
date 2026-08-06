@@ -664,7 +664,9 @@
       <p class="text-soft small" style="margin:0.9rem 0 0.8rem;line-height:1.5">
         Applies within ~30&nbsp;s, no restart needed. The rendered text is
         what gets sent and what the <a href="/emails">email log</a> records,
-        so the log always shows exactly what the recipient received.
+        so the log always shows exactly what the recipient received. Each node
+        wraps its own messages, so saving pushes this wording to every
+        enrolled node as well — the banner names any that did not take it.
       </p>
       <button type="submit" class="btn primary">Save message templates</button>
     </form>
@@ -699,6 +701,48 @@
       into a figure. The sample below leaves availability unmonitored on
       purpose: that is the case worth reading before your customer does.
     </p>
+
+    {# ─── Where these letters apply. Each letter is rendered on the node
+       that OWNS the site (that is where the report's data lives) and read
+       from THAT node's agent.toml, so this card cannot speak for the whole
+       cluster on its own. Saving pushes the text to every node; the list
+       below is read back from the nodes themselves, because a push can miss
+       one and the customers of that node would otherwise keep receiving the
+       old letter with nothing on screen to say so. ─── #}
+    <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">
+      Each letter is written by the node that <strong>owns</strong> the site —
+      that is where the report's data lives — using that node's own
+      <code>agent.toml</code>. Saving here writes this master's copy
+      <em>and pushes the same wording to every enrolled node</em>; the banner
+      after saving names any node that did not take it. No restart is needed:
+      the next letter uses the new wording. To see what one specific customer
+      will get, use <strong>Preview</strong> on that site's care-package card —
+      it renders on the owning node, so it is the letter that site's owner
+      actually receives; <a href="/audit">the audit log</a> records which
+      letter each preview and send used.
+    </p>
+    {% if !letter_nodes.is_empty() %}
+    <div style="margin:0 0 1rem">
+      <div class="text-soft small" style="margin:0 0 0.35rem">Letters on the other nodes</div>
+      <ul style="list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:0.35rem">
+        {% for n in letter_nodes %}
+        <li class="row" style="align-items:baseline;gap:0.5rem;flex-wrap:wrap">
+          {% if n.state == "same" %}<span class="pill ok">in step</span>
+          {% else if n.state == "differs" %}<span class="pill err">different</span>
+          {% else %}<span class="pill warn">unknown</span>{% endif %}
+          <strong style="font-size:0.82rem">{{ n.label }}</strong>
+          <span class="text-soft small"><code style="font-size:0.74rem">{{ n.node_id }}</code></span>
+          <span class="text-soft small">{{ n.note }}</span>
+        </li>
+        {% endfor %}
+      </ul>
+      <p class="text-soft small" style="margin:0.45rem 0 0;line-height:1.5">
+        Read from each node just now, not from a record of the last save.
+        A node listed as <em>different</em> or <em>unknown</em> is sending its
+        own wording to its customers; save again once it is reachable.
+      </p>
+    </div>
+    {% endif %}
 
     <form method="post" action="/settings/config" autocomplete="off">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">

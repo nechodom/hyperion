@@ -97,6 +97,158 @@ struct SettingsTpl<'a> {
     /// doesn't actually send.
     care_report_default_template: &'static str,
     expiry_warning_default_template: &'static str,
+    /// One row per enrolled node: which customer letters that node would
+    /// actually send right now. Empty on a single-node install (nothing can
+    /// diverge) — see [`letter_node_rows`] for why the card shows this at
+    /// all rather than trusting the last save to have stuck.
+    letter_nodes: Vec<LetterNodeRow>,
+}
+
+/// What one node currently holds for the two CUSTOMER letters, compared
+/// against the master's copy shown in the editor above it.
+///
+/// The letters are rendered on the node that OWNS each hosting, from that
+/// node's own agent.toml, because that is where the metrics behind a care
+/// report live. Settings writes the master's copy and pushes it to every
+/// node it can reach — but a node that was down, unenrolled from the signed
+/// channel, or running an older agent keeps the letter it already had, and
+/// its customers go on receiving it. That state is invisible from the
+/// master's file, so the card asks each node instead.
+pub struct LetterNodeRow {
+    pub label: String,
+    pub node_id: String,
+    /// `same` / `differs` / `unknown` — drives the badge and nothing else.
+    pub state: &'static str,
+    /// The sentence printed next to the badge. For `differs` it names WHICH
+    /// of the two letters is out of step, because the fix is per letter.
+    pub note: String,
+}
+
+/// How long the card waits for one node to answer with its letters. Short
+/// on purpose: this is a status line on a settings page, and a node that
+/// cannot answer in this window is reported as unknown rather than allowed
+/// to hold the whole page open. `dispatch_to_node`'s own ceiling is 30 s,
+/// which is right for an action and much too long for a badge.
+const LETTER_PROBE_TIMEOUT_SECS: u64 = 4;
+
+/// One node's verdict, from the two body comparisons: `(badge, sentence)`.
+///
+/// "In step" needs BOTH letters to match — a node that agrees about the care
+/// report and not about the expiry warning is still sending a letter the
+/// operator did not write, and the sentence has to name which one, because
+/// nothing else on the page will.
+fn letter_verdict(care_same: bool, expiry_same: bool) -> (&'static str, &'static str) {
+    match (care_same, expiry_same) {
+        (true, true) => ("same", "sends the same letters as this master"),
+        (false, true) => (
+            "differs",
+            "sends a DIFFERENT care report — its sites' owners get that node's wording, \
+             not the one in the box above",
+        ),
+        (true, false) => (
+            "differs",
+            "sends a DIFFERENT expiry warning — its sites' owners get that node's wording, \
+             not the one in the box above",
+        ),
+        (false, false) => (
+            "differs",
+            "sends DIFFERENT care reports AND expiry warnings — its sites' owners get \
+             neither letter in the boxes above",
+        ),
+    }
+}
+
+/// Ask every enrolled node which customer letters it currently holds.
+///
+/// Best-effort and parallel: one unreachable node must neither slow the page
+/// past [`LETTER_PROBE_TIMEOUT_SECS`] nor hide the answer for the others. A
+/// node that does not answer is reported as UNKNOWN — never as "same", which
+/// is the assumption this whole card exists to stop the operator making.
+async fn letter_node_rows(
+    state: &SharedState,
+    nodes: &[hyperion_types::NodeSummary],
+    master: &hyperion_types::NotificationTemplatesView,
+) -> Vec<LetterNodeRow> {
+    if nodes.is_empty() {
+        return Vec::new();
+    }
+    let mut set = tokio::task::JoinSet::new();
+    for n in nodes {
+        let st = state.clone();
+        let node_id = n.node_id.clone();
+        let label = if n.label.trim().is_empty() {
+            n.node_id.clone()
+        } else {
+            n.label.clone()
+        };
+        let care = master.care_report_body_template.clone();
+        let expiry = master.expiry_warning_body_template.clone();
+        set.spawn(async move {
+            let probe = tokio::time::timeout(
+                std::time::Duration::from_secs(LETTER_PROBE_TIMEOUT_SECS),
+                crate::dispatcher::dispatch_to_node(
+                    &st,
+                    Some(node_id.as_str()),
+                    Request::AgentConfigView,
+                ),
+            )
+            .await;
+            let (state_str, note) = match probe {
+                Ok(Ok(RpcResponse::AgentConfigView(v))) => {
+                    // Compare exactly what the renderers compare: the body
+                    // strings themselves. Both sides read "" as "send the
+                    // built-in letter", so two empties are genuinely the
+                    // same letter, not two unknowns.
+                    let (s, note) = letter_verdict(
+                        v.notifications.care_report_body_template == care,
+                        v.notifications.expiry_warning_body_template == expiry,
+                    );
+                    (s, note.to_string())
+                }
+                Ok(Ok(RpcResponse::Error(e))) => (
+                    "unknown",
+                    format!("could not be read, so which letter its customers get is unknown: {e}"),
+                ),
+                Ok(Ok(_)) => (
+                    "unknown",
+                    "answered with something unexpected, so which letter its customers get \
+                     is unknown"
+                        .into(),
+                ),
+                Ok(Err(e)) => (
+                    "unknown",
+                    format!(
+                        "could not be reached, so which letter its customers get is unknown: {e}"
+                    ),
+                ),
+                Err(_) => (
+                    "unknown",
+                    format!(
+                        "did not answer within {LETTER_PROBE_TIMEOUT_SECS}s, so which letter \
+                         its customers get is unknown"
+                    ),
+                ),
+            };
+            LetterNodeRow {
+                label,
+                node_id,
+                state: state_str,
+                note,
+            }
+        });
+    }
+    let mut rows: Vec<LetterNodeRow> = Vec::new();
+    while let Some(r) = set.join_next().await {
+        match r {
+            Ok(row) => rows.push(row),
+            // A panicked probe is still an unanswered question; it must not
+            // silently shrink the list into "every node agrees".
+            Err(e) => tracing::warn!(error = %e, "customer-letter probe task failed"),
+        }
+    }
+    // Stable order regardless of which node answered first.
+    rows.sort_by(|a, b| a.label.cmp(&b.label));
+    rows
 }
 
 fn short_sha(s: &str) -> String {
@@ -448,6 +600,10 @@ pub async fn get_settings(
     } else {
         Vec::new()
     };
+    // What each node would actually send to ITS customers. Done after the
+    // node list is in hand, and only for a cluster: on a single-node install
+    // the master's file is the whole truth and there is nothing to compare.
+    let letter_nodes = letter_node_rows(&state, &nodes, &config.notifications).await;
     let csrf_token = super::session_csrf_token(&state, &ctx);
     let tpl = SettingsTpl {
         username: &ctx.username,
@@ -479,6 +635,7 @@ pub async fn get_settings(
         new_api_key: new_api_key.clone(),
         care_report_default_template: hyperion_types::CARE_REPORT_DEFAULT_BODY_TEMPLATE,
         expiry_warning_default_template: hyperion_types::EXPIRY_WARNING_DEFAULT_BODY_TEMPLATE,
+        letter_nodes,
     };
     let mut resp = Html(tpl.render()?).into_response();
     // One-shot: clear the reveal cookie so a refresh doesn't show the key again.
@@ -932,6 +1089,10 @@ pub async fn post_config(
         return Ok(Redirect::to(&dest).into_response());
     }
 
+    // `[notifications]` holds the two CUSTOMER letters, and those are read on
+    // the node that OWNS each hosting — not here. Keep a copy of the fields
+    // so the same text can go to every node once the master's write lands.
+    let notification_fields = (form.section == "notifications").then(|| fields.clone());
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
         Request::AgentConfigUpdate {
@@ -984,11 +1145,47 @@ pub async fn post_config(
                     }
                 }
             });
-            format!(
-                "/settings?flash=Section+%5B{}%5D+saved+%E2%80%94+hyperion-agent+restarting+%28~5s%29#{}",
-                urlencode(&form.section),
-                tab
-            )
+            // The master's file is written. If this was `[notifications]`,
+            // the same text now has to reach every other node, because that
+            // is where each customer's letter is actually rendered. A node
+            // that refuses or cannot be reached keeps its old letter, and
+            // that is reported as an ERROR rather than folded into the
+            // success banner: the operator has just edited what their
+            // customers read, and "saved" would be a lie for that node's.
+            match notification_fields {
+                Some(f) => match propagate_notifications(&state, f).await {
+                    Ok(0) => format!(
+                        "/settings?flash=Section+%5B{}%5D+saved+%E2%80%94+hyperion-agent+restarting+%28~5s%29#{}",
+                        urlencode(&form.section),
+                        tab
+                    ),
+                    Ok(n) => format!(
+                        "/settings?flash={}#{}",
+                        urlencode(&format!(
+                            "Saved, and the same wording is now on {n} other node(s). \
+                             hyperion-agent is restarting here (~5s)."
+                        )),
+                        tab
+                    ),
+                    Err(failed) => format!(
+                        "/settings?flash_error={}#{}",
+                        urlencode(&format!(
+                            "Saved on this master, but {} did not take it: {}. \
+                             Sites owned by those nodes keep sending the PREVIOUS letter \
+                             until a save reaches them — the per-node list in the \
+                             Customer letters card shows which is which.",
+                            if failed.len() == 1 { "one node" } else { "some nodes" },
+                            failed.join("; ")
+                        )),
+                        tab
+                    ),
+                },
+                None => format!(
+                    "/settings?flash=Section+%5B{}%5D+saved+%E2%80%94+hyperion-agent+restarting+%28~5s%29#{}",
+                    urlencode(&form.section),
+                    tab
+                ),
+            }
         }
         RpcResponse::Error(e) => format!(
             "/settings?flash_error={}#{}",
@@ -998,6 +1195,99 @@ pub async fn post_config(
         _ => return Err(AppError::Internal("unexpected response".into())),
     };
     Ok(Redirect::to(&dest).into_response())
+}
+
+/// Push a just-saved `[notifications]` section to every enrolled node.
+///
+/// The precedent is the Mail tab: `[email]` is per-node, so saving it
+/// dispatches to the chosen node instead of writing only the master's file.
+/// `[notifications]` has the same shape and one extra twist — the operator
+/// does not pick a node, because the letters must be the SAME everywhere.
+/// So this fans out to all of them with the identical fields.
+///
+/// Two things it deliberately does not do:
+///   * it does not restart anything. The templates are re-read from
+///     agent.toml on every send (`read_notifications_section`), so the next
+///     letter already uses the new wording. The master's own restart below
+///     is the pre-existing behaviour for every section, not a requirement
+///     of this one.
+///   * it does not treat "pushed" as "will stay pushed". Nothing here can
+///     reach a node that is down, and nothing re-tries later; that is why
+///     the card reads each node's actual file back rather than trusting
+///     this function's result — see [`letter_node_rows`].
+///
+/// Unlike that read-back it takes no short deadline of its own, only
+/// `dispatch_to_node`'s: giving up early on a WRITE would report "did not
+/// take it" for a node that went on to apply it. A dead node costs this one
+/// POST the dispatcher's ceiling, which is the honest price.
+///
+/// `Ok(n)` = the section is now identical on n other nodes. `Err(labels)`
+/// lists, per node, what went wrong, in words the operator can act on.
+async fn propagate_notifications(
+    state: &SharedState,
+    fields: std::collections::BTreeMap<String, String>,
+) -> Result<usize, Vec<String>> {
+    let nodes: Vec<hyperion_types::NodeSummary> =
+        match hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await {
+            Ok(RpcResponse::NodesList(v)) => v,
+            // The node list itself is unreadable. Saying "pushed to 0 nodes"
+            // here would claim a single-node install; say what happened.
+            _ => {
+                return Err(vec![
+                    "the enrolled-node list could not be read, so no other node was updated"
+                        .to_string(),
+                ])
+            }
+        };
+    if nodes.is_empty() {
+        return Ok(0);
+    }
+    let mut set = tokio::task::JoinSet::new();
+    for n in nodes {
+        let st = state.clone();
+        let f = fields.clone();
+        let node_id = n.node_id.clone();
+        let label = if n.label.trim().is_empty() {
+            n.node_id.clone()
+        } else {
+            n.label.clone()
+        };
+        set.spawn(async move {
+            let resp = crate::dispatcher::dispatch_to_node(
+                &st,
+                Some(node_id.as_str()),
+                Request::AgentConfigUpdate {
+                    section: "notifications".to_string(),
+                    fields: f.into(),
+                },
+            )
+            .await;
+            match resp {
+                Ok(RpcResponse::AgentConfigUpdate) => Ok(()),
+                // An older agent that doesn't know these keys refuses the
+                // write; the operator needs to hear THAT, not "unreachable".
+                Ok(RpcResponse::Error(e)) => Err(format!("{label} refused it ({e})")),
+                Ok(_) => Err(format!("{label} answered with something unexpected")),
+                Err(e) => Err(format!("{label} could not be updated ({e})")),
+            }
+        });
+    }
+    let mut ok = 0usize;
+    let mut failed: Vec<String> = Vec::new();
+    while let Some(joined) = set.join_next().await {
+        match joined {
+            Ok(Ok(())) => ok += 1,
+            Ok(Err(why)) => failed.push(why),
+            Err(e) => failed.push(format!("a node update task failed ({e})")),
+        }
+    }
+    if failed.is_empty() {
+        Ok(ok)
+    } else {
+        // Sorted so the same failure reads the same way twice running.
+        failed.sort();
+        Err(failed)
+    }
 }
 
 /// Map the agent.toml section name to the /settings tab id. The two
@@ -1767,8 +2057,25 @@ pub async fn post_node_wildcard_finish(
 
 #[cfg(test)]
 mod tests {
-    use super::{mask_secrets_in_toml, synthesize_unchecked_checkboxes};
+    use super::{letter_verdict, mask_secrets_in_toml, synthesize_unchecked_checkboxes};
     use std::collections::BTreeMap;
+
+    /// The badge may read "in step" only when BOTH customer letters match.
+    /// Half a match is still a node sending wording the operator never wrote,
+    /// and the sentence has to name which letter — that is what tells the
+    /// operator whether their care report or their expiry warning is the one
+    /// their customers are not getting.
+    #[test]
+    fn a_node_reads_as_in_step_only_when_both_letters_match() {
+        assert_eq!(letter_verdict(true, true).0, "same");
+        for (care_same, expiry_same) in [(false, true), (true, false), (false, false)] {
+            let (state, note) = letter_verdict(care_same, expiry_same);
+            assert_eq!(state, "differs", "care={care_same} expiry={expiry_same}");
+            assert!(note.contains("DIFFERENT"), "{note}");
+        }
+        assert!(letter_verdict(false, true).1.contains("care report"));
+        assert!(letter_verdict(true, false).1.contains("expiry warning"));
+    }
 
     #[test]
     fn declared_unchecked_synthesizes_false() {

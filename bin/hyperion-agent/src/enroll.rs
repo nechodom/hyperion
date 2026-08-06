@@ -215,7 +215,11 @@ impl MasterTls {
 /// certificate can cover.
 fn decide_verify_tls(master_url: &str, configured: Option<bool>) -> MasterTls {
     let url = master_url.trim();
-    if !url.starts_with("https://") {
+    // Scheme match is case-INSENSITIVE: URL schemes are, and an operator who
+    // typed `HTTPS://master.example.com` would otherwise be classified as
+    // plaintext and run the whole heartbeat unverified — silently, since the
+    // request still succeeds.
+    if !url.to_ascii_lowercase().starts_with("https://") {
         return MasterTls::Plaintext;
     }
     match configured {
@@ -474,7 +478,9 @@ async fn post_json(url: &str, body: &str, verify_tls: bool) -> Result<Vec<u8>, S
 /// We also match stderr substrings as a belt-and-suspenders since
 /// curl exit codes sometimes shift between distro versions.
 fn should_try_https_fallback(base: &str, err: &str) -> bool {
-    if !base.starts_with("http://") {
+    // Case-insensitive for the same reason `decide_verify_tls` is: schemes
+    // are, and `HTTP://` must still get the https retry.
+    if !base.to_ascii_lowercase().starts_with("http://") {
         return false;
     }
     let e = err.to_ascii_lowercase();

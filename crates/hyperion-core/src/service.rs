@@ -3816,11 +3816,21 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
     pub async fn clear_expiry(&self, sel: HostingSelector) -> Result<(), RpcError> {
         let detail = self.get(sel).await?;
+        // Clearing an expiry DATE must not also forget who to write to. The
+        // same `owner_email` is the recipient of the paid care report, so
+        // nulling it here silently stops a deliverable the customer is still
+        // paying for — and the address itself is then gone, with nothing in
+        // the UI saying it was dropped.
+        let owner_email = hyperion_state::scheduler::get_expiry(&self.pool, &detail.id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|r| r.owner_email);
         hyperion_state::scheduler::set_expiry(
             &self.pool,
             &detail.id,
             None,
-            None,
+            owner_email.as_deref(),
             30,
             "30,7,1",
             now_secs(),
@@ -4109,33 +4119,57 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                         None => Err("hosting has no expires_at"),
                     },
                 };
-                let (result, reason) = match sendable {
+                // `letter` is carried out of the match so the audit row can
+                // name WHICH body the customer received. Like the care
+                // report, the template comes from the agent.toml of the node
+                // running this sweep, so master and worker legitimately
+                // answer differently and the row is the only lasting record
+                // of which one this was. Only a warning that actually went
+                // out has a letter; the other two arms leave it `None`
+                // rather than name a body nobody was sent.
+                let (result, reason, letter) = match sendable {
                     Ok((r, exp, to)) => {
+                        let template = self.expiry_warning_template();
+                        let letter = letter_origin(&template);
                         let (subject, body) = expiry_warning_mail_with(
                             &r.domain,
                             exp,
                             r.grace_days,
                             now_secs(),
-                            &self.expiry_warning_template(),
+                            &template,
                         );
-                        // notify_email returns nothing: a relay failure is
-                        // already recorded by it in audit_log + email_log. So
-                        // a dead relay can't bounce this row back to 'pending'
-                        // and re-send every tick forever — same treatment the
-                        // billing sweep gives its reminders.
-                        self.notify_email(
-                            to,
-                            &subject,
-                            &body,
-                            Some(action.hosting_id.as_str()),
-                            "expiry",
-                        )
-                        .await;
-                        tracing::info!(
-                            hosting=%action.hosting_id, action=action.action.as_str(),
-                            owner=%to, "expiry warning sent",
-                        );
-                        ("ok", None)
+                        // A relay failure still leaves this an `Ok(())`, so
+                        // the row is marked done rather than bounced back to
+                        // 'pending' to re-send every tick forever — same
+                        // treatment the billing sweep gives its reminders.
+                        // What it must NOT do is claim the customer was
+                        // warned: the audit row and the log line say which of
+                        // the two happened.
+                        if self
+                            .notify_email(
+                                to,
+                                &subject,
+                                &body,
+                                Some(action.hosting_id.as_str()),
+                                EXPIRY_EMAIL_KIND,
+                            )
+                            .await
+                        {
+                            tracing::info!(
+                                hosting=%action.hosting_id, action=action.action.as_str(),
+                                owner=%to, letter=letter, "expiry warning sent",
+                            );
+                            ("ok", None, Some(letter))
+                        } else {
+                            let why = "the SMTP relay refused the message \
+                                       (see the site's Emails tab)";
+                            tracing::warn!(
+                                hosting=%action.hosting_id, action=action.action.as_str(),
+                                owner=%to, reason=why,
+                                "expiry warning NOT sent — the customer gets no notice before suspension",
+                            );
+                            ("failed", Some(why), None)
+                        }
                     }
                     Err(why) => {
                         tracing::warn!(
@@ -4143,7 +4177,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                             reason=why,
                             "expiry warning NOT sent — the customer gets no notice before suspension",
                         );
-                        ("skipped", Some(why))
+                        ("skipped", Some(why), None)
                     }
                 };
                 self.append_audit(
@@ -4153,6 +4187,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                         "kind": action.action.as_str(),
                         "to": email,
                         "reason": reason,
+                        "letter": letter,
                     })
                     .to_string(),
                     result,
@@ -4178,10 +4213,31 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     }
 
     /// Produce a tar.gz + DB dump backup. Single 'local' target for v1.
+    ///
+    /// The RPC entry point, i.e. every backup a HUMAN asked for: the panel
+    /// and the API resolve the cluster's off-site targets on the master
+    /// (that is the only node whose `backup_targets` table has any) and send
+    /// them with the request, so `s3_targets` is exactly what this run may
+    /// upload to. Internal snapshots that were never meant to leave the node
+    /// call `backup_run` with `OffsiteSource::NotWanted` instead.
     pub async fn backup_now(
         &self,
         sel: HostingSelector,
         s3_targets: Vec<hyperion_types::S3BackupTarget>,
+    ) -> Result<hyperion_types::BackupRunWire, RpcError> {
+        self.backup_run(sel, s3_targets, OffsiteSource::Caller)
+            .await
+    }
+
+    /// The backup itself. `offsite` says what an EMPTY `s3_targets` means for
+    /// this particular run — see `OffsiteSource`, and the honesty rule it
+    /// exists to keep: a backup that never left the node must not be
+    /// indistinguishable from one that did.
+    async fn backup_run(
+        &self,
+        sel: HostingSelector,
+        s3_targets: Vec<hyperion_types::S3BackupTarget>,
+        offsite: OffsiteSource,
     ) -> Result<hyperion_types::BackupRunWire, RpcError> {
         let detail = self.get(sel).await?;
         let backup_root = self.paths.backup_root.clone();
@@ -4361,37 +4417,69 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 // resolved, as it always has. Re-pinning only redirects NEW
                 // backups — whatever the site already put on its old target
                 // stays there until that target's own retention drops it.
-                let manifest_path =
-                    archive_dir.join(format!("{}-{}.manifest.json", detail.domain, ts));
-                let mut files: Vec<std::path::PathBuf> = vec![archive_path.clone()];
-                if let Some(p) = db_dump_path.as_ref() {
-                    files.push(p.clone());
-                }
-                files.push(manifest_path);
-                let pin = self.offsite_pin(detail.id.as_str()).await;
-                match choose_offsite_targets(pin.as_deref(), &s3_targets) {
-                    OffsiteChoice::NodeDefault(t) => {
-                        self.push_backup_to_s3(&detail, &files, t).await
+                //
+                // Every way of NOT uploading ends in an audit row, except the
+                // two that promised nothing (see `OffsiteSource` and
+                // `offsite_gap_reason`). A local-only copy of a backup the
+                // customer pays to have off-site is the failure this block is
+                // here to make visible: it has no other symptom until the day
+                // the node is gone and someone goes looking for the archive.
+                if offsite != OffsiteSource::NotWanted {
+                    let manifest_path =
+                        archive_dir.join(format!("{}-{}.manifest.json", detail.domain, ts));
+                    let mut files: Vec<std::path::PathBuf> = vec![archive_path.clone()];
+                    if let Some(p) = db_dump_path.as_ref() {
+                        files.push(p.clone());
                     }
-                    OffsiteChoice::Pinned(t) => {
-                        self.push_backup_to_s3(&detail, &files, std::slice::from_ref(t))
-                            .await
-                    }
-                    OffsiteChoice::Unresolved(name) => {
-                        tracing::warn!(
-                            domain = %detail.domain,
-                            target = %name,
-                            "off-site target pinned to this site was not among the resolved \
-                             targets (disabled, deleted, renamed, or its credentials did not \
-                             read) — the backup stayed on this node"
-                        );
-                        self.audit_s3(
-                            &detail,
-                            name,
-                            false,
-                            "pinned target not among the resolved targets — no upload attempted",
-                        )
-                        .await;
+                    files.push(manifest_path);
+                    let pin = self.offsite_pin(detail.id.as_str()).await;
+                    match choose_offsite_targets(pin.as_deref(), &s3_targets) {
+                        OffsiteChoice::NodeDefault(t) => {
+                            self.push_backup_to_s3(&detail, &files, t).await
+                        }
+                        OffsiteChoice::Pinned(t) => {
+                            self.push_backup_to_s3(&detail, &files, std::slice::from_ref(t))
+                                .await
+                        }
+                        OffsiteChoice::Unresolved(name) => {
+                            // Same outcome — nothing uploaded — but the two
+                            // ways of getting here need opposite fixes, so the
+                            // row has to carry which one it was. A pin that
+                            // named a target this run could not use is the
+                            // operator's to repair; a run that carried no
+                            // targets at all is not a broken pin, and sending
+                            // them after the bucket's credentials would waste
+                            // their afternoon on a bug that isn't there.
+                            let why = if s3_targets.is_empty() {
+                                self.offsite_gap_reason(offsite).unwrap_or(
+                                    "this backup run carried no off-site targets at all, so the \
+                                     target this site is pinned to could not be used",
+                                )
+                            } else {
+                                "the pinned target was not among the ones this run could use \
+                                 (disabled, deleted, renamed, or its credentials did not read) — \
+                                 nothing was uploaded, because a bucket nobody chose is not a \
+                                 substitute for the one that was"
+                            };
+                            tracing::warn!(
+                                domain = %detail.domain,
+                                target = %name,
+                                reason = why,
+                                "off-site copy did NOT happen for a site pinned to a target"
+                            );
+                            self.audit_s3(&detail, name, false, why).await;
+                        }
+                        OffsiteChoice::NoTargets => {
+                            // Unpinned, and this run has nowhere to push. Only
+                            // a row when something was in fact promised — an
+                            // install with no off-site configured would
+                            // otherwise collect a red row per backup for a
+                            // copy nobody asked for, which is how a real one
+                            // stops being read.
+                            if let Some(why) = self.offsite_gap_reason(offsite) {
+                                self.audit_s3(&detail, "(none)", false, why).await;
+                            }
+                        }
                     }
                 }
             }
@@ -4439,6 +4527,25 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .flatten()
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty())
+    }
+
+    /// Why a run that pushed nothing off-site is worth recording — or `None`
+    /// when nothing was missing.
+    ///
+    /// The whole question is what an EMPTY target list means, and only the
+    /// caller plus this node's own identity can answer it. A backup the panel
+    /// asked for carries the targets the master resolved, so empty means the
+    /// operator has none that can take a copy — which the Backups card
+    /// already says in as many words. A SCHEDULED run reads this node's own
+    /// table, and on a worker that table is empty by design: there, empty
+    /// does not mean "no off-site wanted", it means the cluster's targets
+    /// never reached the run, while the panel goes on offering this site's
+    /// owner a destination.
+    fn offsite_gap_reason(&self, source: OffsiteSource) -> Option<&'static str> {
+        match source {
+            OffsiteSource::ThisNode if self.is_worker_node() => Some(OFFSITE_WORKER_HAS_NO_TARGETS),
+            OffsiteSource::ThisNode | OffsiteSource::Caller | OffsiteSource::NotWanted => None,
+        }
     }
 
     /// Push the just-made backup files to every S3 target the master resolved
@@ -6560,10 +6667,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 ),
             });
         }
-        // Reuse backup_now to produce the archive — it's already the
+        // Reuse the backup path to produce the archive — it's already the
         // most-tested code path for "snapshot this hosting to disk".
-        // Internal/transient safety backup — local only (no off-site targets).
-        let run = self.backup_now(sel.clone(), Vec::new()).await?;
+        // Internal/transient safety backup — local only, and `NotWanted`
+        // says so: nothing off-site was ever promised here, so a site pinned
+        // to a target must not collect a red "no off-site copy" row for a
+        // snapshot that exists only to be turned into a bundle.
+        let run = self
+            .backup_run(sel.clone(), Vec::new(), OffsiteSource::NotWanted)
+            .await?;
         let archive_path_str = run
             .archive_path
             .as_ref()
@@ -7013,6 +7125,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// `kind` is a free-form label with a recommended vocabulary
     /// ("test" | "alert" | "monitor" | "backup" | "cert" | "billing"
     /// | "other"). It drives the UI's "show only X" filters.
+    ///
+    /// Returns `true` ONLY when the relay accepted the message. No relay
+    /// configured, no recipient to fall back to, and an outright rejection
+    /// are all `false`. Callers that go on to record "the customer has been
+    /// told" — a period marked as reported, an audit row reading "ok", a
+    /// success message on a card — MUST branch on it: a letter the relay
+    /// refused was never received, and saying otherwise is the one failure
+    /// nobody downstream can detect.
     pub(crate) async fn notify_email(
         &self,
         to: &str,
@@ -7020,14 +7140,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         body: &str,
         hosting_id: Option<&str>,
         kind: &str,
-    ) {
+    ) -> bool {
         let Some(cfg) = self.email_config.as_ref() else {
-            return;
+            return false;
         };
         let to = if to.is_empty() {
             match self.email_default_to.as_deref() {
                 Some(t) => t,
-                None => return,
+                None => return false,
             }
         } else {
             to
@@ -7035,22 +7155,38 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // Apply the operator's editable email wording (defaults "{subject}"
         // / "{body}" are pass-through). Rendered text is what we send AND
         // log, so the email log shows exactly what the recipient received.
+        //
+        // EXCEPT for the two CUSTOMER letters. Those are complete letters
+        // with their own editable templates and their own signature; the
+        // generic wrapper is written for short operator alerts (it typically
+        // prefixes a tag and appends a panel link the customer cannot open).
+        // Wrapping one inside the other produces a mangled subject and a
+        // dead link in a letter that goes to a paying customer.
         let tmpls = read_notifications_section(self.agent_config_path.as_deref());
+        let is_customer_letter = kind == CARE_REPORT_EMAIL_KIND || kind == EXPIRY_EMAIL_KIND;
         let time = fmt_notif_time(now_secs());
         let panel = self.notify_panel_url();
-        let subject_rendered = render_template(
-            &tmpls.email_subject_template,
-            &[("subject", subject), ("time", &time)],
-        );
-        let body_rendered = render_template(
-            &tmpls.email_body_template,
-            &[
-                ("body", body),
-                ("time", &time),
-                ("panel", &panel),
-                ("kind", kind),
-            ],
-        );
+        let subject_rendered = if is_customer_letter {
+            subject.to_string()
+        } else {
+            render_template(
+                &tmpls.email_subject_template,
+                &[("subject", subject), ("time", &time)],
+            )
+        };
+        let body_rendered = if is_customer_letter {
+            body.to_string()
+        } else {
+            render_template(
+                &tmpls.email_body_template,
+                &[
+                    ("body", body),
+                    ("time", &time),
+                    ("panel", &panel),
+                    ("kind", kind),
+                ],
+            )
+        };
         let subject = subject_rendered.as_str();
         let body = body_rendered.as_str();
         match hyperion_adapters::email::send_text(cfg, to, subject, body).await {
@@ -7088,6 +7224,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                          restart hyperion-agent after update.sh to apply migration 017"
                     );
                 }
+                true
             }
             Err(e) => {
                 let err_s = e.to_string();
@@ -7126,6 +7263,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     );
                 }
                 tracing::warn!(to = %to, subject = %subject, error = %err_s, "email send failed");
+                false
             }
         }
     }
@@ -7773,6 +7911,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// failing site retries on its next cadence rather than hammering hourly;
     /// failures are logged and recorded in `backup_runs`. Returns how many
     /// backups it started. Runs on every node (backups are node-local).
+    ///
+    /// The off-site half is NOT the same as the manual button's, and the
+    /// difference is invisible from the panel: the S3 targets it uploads to
+    /// are read from this node's own table, which on a worker is empty by
+    /// design. Marking the runs `OffsiteSource::ThisNode` is what lets each
+    /// one record that it stayed here — see `offsite_gap_reason`.
     pub async fn scheduled_backups_tick(&self) -> Result<i64, RpcError> {
         let hostings = self
             .list()
@@ -7780,6 +7924,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .map_err(|e| RpcError::Internal_with(format!("scheduled backups: list: {e}")))?;
         // Resolve S3 targets once for the whole sweep.
         let s3_targets = self.resolve_local_s3_targets().await;
+        // A worker that resolved none is the case this sweep cannot fix and
+        // must not hide: every backup it is about to take stays on this node.
+        // Each one gets its own audit row; this is the same sentence in the
+        // journal, once per sweep rather than once per site, because the
+        // journal is where an operator looks for "what did the agent do at
+        // 04:00" and a missing off-site copy has no other symptom until the
+        // node is gone. Logged only when the sweep actually ran something —
+        // a node with nothing due has nothing to warn about.
+        let offsite_gap = self.offsite_gap_reason(OffsiteSource::ThisNode);
         let now = now_secs();
         let mut started = 0i64;
         for h in hostings {
@@ -7817,7 +7970,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .await;
             started += 1;
             match self
-                .backup_now(HostingSelector::Id(h.id.clone()), s3_targets.clone())
+                .backup_run(
+                    HostingSelector::Id(h.id.clone()),
+                    s3_targets.clone(),
+                    OffsiteSource::ThisNode,
+                )
                 .await
             {
                 Ok(_) => {
@@ -7831,6 +7988,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                         "scheduled backup failed; will retry next cadence (see backup_runs)"
                     );
                 }
+            }
+        }
+        if started > 0 {
+            if let Some(why) = offsite_gap {
+                tracing::warn!(
+                    backups = started,
+                    reason = why,
+                    "scheduled backups stayed on this node — no off-site copy was made"
+                );
             }
         }
         Ok(started)
@@ -9108,16 +9274,23 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         &self,
         sel: HostingSelector,
     ) -> Result<CareReportMail, RpcError> {
-        let (detail, mail) = self.care_report_mail(sel).await?;
+        let (detail, mail, letter) = self.care_report_mail(sel).await?;
         // Audited even though it sends nothing: the preview renders the
         // customer's owner e-mail, their traffic figures, the attacks-blocked
         // count and the integrity verdict. "It only reads" is not a reason to
         // leave a cross-tenant read off the trail — /audit should be able to
         // answer who looked at whose report.
+        //
+        // `letter` says WHICH body was rendered, and it is the only durable
+        // answer: the template is read from the agent.toml of the node that
+        // owns the hosting (see `care_report_template`), so two sites can be
+        // previewed on the same panel, minutes apart, and get different
+        // letters. Without this the trail records that a preview happened but
+        // not which of the two the operator was shown.
         self.append_audit(
             "package.report.preview",
             Some(detail.id.as_str()),
-            &serde_json::json!({ "domain": detail.domain }).to_string(),
+            &serde_json::json!({ "domain": detail.domain, "letter": letter }).to_string(),
             "ok",
         )
         .await;
@@ -9126,14 +9299,18 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
     /// Send the current period's report now, on the operator's say-so.
     ///
-    /// A real send: it records the period as reported, so the scheduled
-    /// one does not repeat it an hour later and the NEXT period starts
-    /// here. Refuses (rather than falling back to the cluster's default
+    /// A real send: once the relay has taken the message it records the
+    /// period as reported, so the scheduled one does not repeat it an hour
+    /// later and the NEXT period starts here. A relay that refuses is an
+    /// error to the operator and leaves the period open — the card must
+    /// never read "sent to …" for a letter nobody received.
+    ///
+    /// Refuses (rather than falling back to the cluster's default
     /// address) when the site has no owner e-mail — the report belongs to
     /// the customer, and quietly mailing it to the operator instead would
     /// leave the customer with nothing while everything looked fine.
     pub async fn care_report_send(&self, sel: HostingSelector) -> Result<CareReportMail, RpcError> {
-        let (detail, mail) = self.care_report_mail(sel).await?;
+        let (detail, mail, letter) = self.care_report_mail(sel).await?;
         if mail.to.is_empty() {
             return Err(RpcError::Validation {
                 message: "this site has no owner e-mail — set one on the hosting first, \
@@ -9148,14 +9325,27 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     .into(),
             });
         }
-        self.notify_email(
-            &mail.to,
-            &mail.subject,
-            &mail.body,
-            Some(detail.id.as_str()),
-            CARE_REPORT_EMAIL_KIND,
-        )
-        .await;
+        if !self
+            .notify_email(
+                &mail.to,
+                &mail.subject,
+                &mail.body,
+                Some(detail.id.as_str()),
+                CARE_REPORT_EMAIL_KIND,
+            )
+            .await
+        {
+            // No marker and no "ok" audit row: the period stays open, so the
+            // tick can still deliver it once the relay is fixed. The error
+            // names where the relay's OWN words are — `notify_email` already
+            // wrote them to email_log, which is the site's Emails tab.
+            return Err(RpcError::Internal_with(format!(
+                "the SMTP relay refused this report, so nothing was sent — \
+                 open the Emails tab on {} for the relay's own message. \
+                 The period stays open and can be reported once it works.",
+                detail.domain
+            )));
+        }
         self.care_report_mark_reported(&detail.id, mail.period_end)
             .await;
         self.append_audit(
@@ -9166,6 +9356,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 "period_start": mail.period_start,
                 "period_end": mail.period_end,
                 "manual": true,
+                // Which body the customer just received — see the preview's
+                // audit row for why the answer is per-node and therefore
+                // worth recording next to the send itself.
+                "letter": letter,
             })
             .to_string(),
             "ok",
@@ -9177,22 +9371,36 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// The operator's care-report body template from `[notifications]` in
     /// agent.toml. Empty string (the default, and also what an unreadable
     /// or template-less agent.toml yields) means "use the built-in letter".
+    ///
+    /// THIS NODE's agent.toml, and that is the whole subtlety: the report is
+    /// rendered wherever the hosting lives, because that is the only node
+    /// holding its metrics. Settings → Notifications writes the file it can
+    /// reach — the master's — so until the same text reaches a worker, that
+    /// worker's customers keep receiving the built-in letter. hyperion-web
+    /// pushes the section to every enrolled node on save and shows, per node,
+    /// which letter is actually on disk there; every render here records
+    /// which one it used (`letter_origin`), so the answer survives in the
+    /// trail rather than living only in a page nobody reloaded.
     fn care_report_template(&self) -> String {
         read_notifications_section(self.agent_config_path.as_deref()).care_report_body_template
     }
 
     /// The operator's expiry-warning body template. Same empty-means-default
-    /// rule as `care_report_template`.
+    /// rule — and the same per-node caveat — as `care_report_template`.
     fn expiry_warning_template(&self) -> String {
         read_notifications_section(self.agent_config_path.as_deref()).expiry_warning_body_template
     }
 
     /// Build the current period's mail for one hosting — the shared body
     /// of preview and send, so the two can never render different text.
+    ///
+    /// Returns the letter's origin alongside it (`letter_origin`), read from
+    /// the SAME string that was rendered: re-reading agent.toml at the audit
+    /// site could name a letter the mail wasn't built from.
     async fn care_report_mail(
         &self,
         sel: HostingSelector,
-    ) -> Result<(HostingDetail, CareReportMail), RpcError> {
+    ) -> Result<(HostingDetail, CareReportMail, &'static str), RpcError> {
         let detail = self.get(sel).await?;
         let now = now_secs();
         let (cadence, started_at) = self.care_report_entitlement(&detail.id).await;
@@ -9205,8 +9413,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // Preview and send share this path, so the operator's edited letter
         // is what BOTH show — a preview that differs from the mail is worse
         // than no preview.
-        let (subject, body) =
-            care_report_render_with(&report, &detail.domain, &self.care_report_template());
+        let template = self.care_report_template();
+        let (subject, body) = care_report_render_with(&report, &detail.domain, &template);
         let mail = CareReportMail {
             subject,
             body,
@@ -9216,7 +9424,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             cadence: cadence.as_str().to_string(),
             entirely_unmeasured: report.is_entirely_unmeasured(),
         };
-        Ok((detail, mail))
+        Ok((detail, mail, letter_origin(&template)))
     }
 
     /// Periodic sweep — one care report per entitled hosting per cadence.
@@ -9232,9 +9440,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     ///     slept through widens the next report instead of dropping the
     ///     days in between;
     ///   * it never consumes a period it could not deliver. Missing
-    ///     recipient, missing relay, nothing measurable — each leaves the
-    ///     marker untouched, so the history is still there when the
-    ///     operator fixes it;
+    ///     recipient, missing relay, nothing measurable, a relay that
+    ///     refused the message — each leaves the marker untouched, so the
+    ///     history is still there when the operator fixes it;
     ///   * it never fails quietly. Every skip is a WARN naming the domain,
     ///     because not sending a report the customer is paying for is the
     ///     failure this feature exists to prevent, and it is invisible by
@@ -9285,7 +9493,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // Read the operator's letter template ONCE per tick, not once per
         // hosting: it's a file read, and every report in this sweep must in
         // any case be worded the same way.
+        //
+        // "The same way" is per NODE, not per cluster — this file is this
+        // node's (see `care_report_template`). The origin therefore goes on
+        // every "care report sent" line: a worker that never received the
+        // operator's letter says so in its own journal, which is where you
+        // look when a customer forwards you wording you don't recognise.
         let body_template = self.care_report_template();
+        let letter = letter_origin(&body_template);
         let mut sent = 0i64;
         for hosting_id in order {
             let Some(&(cadence, started_at)) = wanted.get(hosting_id.as_str()) else {
@@ -9363,19 +9578,37 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 continue;
             }
             let (subject, body) = care_report_render_with(&report, &detail.domain, &body_template);
-            self.notify_email(
-                &to_addr,
-                &subject,
-                &body,
-                Some(detail.id.as_str()),
-                CARE_REPORT_EMAIL_KIND,
-            )
-            .await;
+            // Fourth guard, on exactly the terms of the three above. The
+            // marker is BOTH "already reported" and the next period's start,
+            // so consuming it on a message the relay refused does not delay
+            // the report — it deletes those days: the customer never gets
+            // this month and the next report begins after it.
+            if !self
+                .notify_email(
+                    &to_addr,
+                    &subject,
+                    &body,
+                    Some(detail.id.as_str()),
+                    CARE_REPORT_EMAIL_KIND,
+                )
+                .await
+            {
+                tracing::warn!(
+                    domain = %detail.domain,
+                    hosting_id = %detail.id.as_str(),
+                    to = %to_addr,
+                    "care report: due, but the relay refused it — nothing sent. \
+                     The relay's own message is in the site's Emails tab; \
+                     the period stays open"
+                );
+                continue;
+            }
             self.care_report_mark_reported(&detail.id, to).await;
             tracing::info!(
                 domain = %detail.domain,
                 cadence = %cadence,
                 period_days = (to - from) / 86_400,
+                letter = letter,
                 "care report sent"
             );
             sent += 1;
@@ -9456,11 +9689,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// is what a restart reads, so the same period can't be mailed twice,
     /// and it is where the next period begins.
     ///
-    /// Written AFTER the send. `notify_email` reports its own outcome to
-    /// `email_log` / the audit trail but returns nothing, so a relay that
-    /// rejected the message costs that one report rather than re-sending
-    /// it every hour until the relay recovers — the systematic causes (no
-    /// relay, no recipient) are caught before we get here.
+    /// Written only once the relay has ACCEPTED the message. It used to be
+    /// written after every attempt, arguing that a rejection should cost
+    /// that one report rather than re-send it every hour until the relay
+    /// recovers. That reasoning was wrong, and it contradicted the guards
+    /// in the tick (no relay / no recipient / nothing measurable), which
+    /// all leave the period open on purpose: this key is ALSO where the
+    /// next period starts, so consuming it on a failed send does not
+    /// re-send less — it drops the days entirely. A retry costs at worst a
+    /// duplicate letter; a consumed period is a month the customer paid
+    /// for and can now never be told about.
     async fn care_report_mark_reported(&self, hosting_id: &HostingId, period_end: i64) {
         if let Err(e) = hyperion_state::hosting_kv::set(
             &self.pool,
@@ -17971,9 +18209,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
         }
 
-        // 1. Snapshot prod (also our restore source).
+        // 1. Snapshot prod (also our restore source). Internal and local by
+        // construction — see `OffsiteSource::NotWanted`.
         let run = self
-            .backup_now(HostingSelector::Id(prod.id.clone()), Vec::new())
+            .backup_run(
+                HostingSelector::Id(prod.id.clone()),
+                Vec::new(),
+                OffsiteSource::NotWanted,
+            )
             .await?;
         let archive = run
             .archive_path
@@ -18073,12 +18316,22 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             })?;
 
         // 1. Pre-push safety backup of prod (so a bad push is recoverable).
+        // Both snapshots are internal rollback material, never an off-site
+        // copy anyone was promised — see `OffsiteSource::NotWanted`.
         let _ = self
-            .backup_now(HostingSelector::Id(prod.id.clone()), Vec::new())
+            .backup_run(
+                HostingSelector::Id(prod.id.clone()),
+                Vec::new(),
+                OffsiteSource::NotWanted,
+            )
             .await?;
         // 2. Snapshot staging — our push source.
         let run = self
-            .backup_now(HostingSelector::Id(staging.id.clone()), Vec::new())
+            .backup_run(
+                HostingSelector::Id(staging.id.clone()),
+                Vec::new(),
+                OffsiteSource::NotWanted,
+            )
             .await?;
         let archive = run
             .archive_path
@@ -18752,6 +19005,10 @@ const CARE_REPORT_KV_PERIOD_END: &str = "care_report_period_end";
 /// `email_log` / audit label for care reports, so the Emails tab can show
 /// what a site's customer was actually sent.
 const CARE_REPORT_EMAIL_KIND: &str = "care_report";
+/// Kind tag for the expiry warning. A sibling of the care report: both are
+/// complete CUSTOMER letters, which is what exempts them from the generic
+/// operator-alert wrapper in `notify_email`.
+const EXPIRY_EMAIL_KIND: &str = "expiry";
 
 /// Period length used when a hosting has no entitlement and no history at
 /// all — i.e. an operator previewing the report on a site that holds no
@@ -18924,9 +19181,10 @@ fn care_section_updates(applied: Option<i64>) -> String {
             .to_string(),
         Some(n) => format!(
             "PLUGIN AND THEME UPDATES: {}\n  \
-             That is how many {} we applied to the site. We count only the ones\n  \
-             that actually installed. WordPress core updates are not in this\n  \
-             figure — we do not track those separately yet.",
+             We applied {} {} to the site. We count only the ones that actually\n  \
+             installed. WordPress core updates are not in this figure — we do\n  \
+             not track those separately yet.",
+            group_int(n),
             group_int(n),
             plural(n, "update", "updates"),
         ),
@@ -18967,16 +19225,18 @@ fn care_section_usage(usage: Option<&CareUsage>) -> String {
     ));
     if u.is_complete() {
         out.push_str(&format!(
-            "\n  These figures cover the whole period ({} of {} days).",
+            "\n  These figures cover the whole period ({} of {} {}).",
             group_int(u.days_counted),
-            group_int(u.days_in_period)
+            group_int(u.days_in_period),
+            plural(u.days_in_period, "day", "days")
         ));
     } else {
         out.push_str(&format!(
-            "\n  Note: these figures cover only {} of the period's {} days — the\n  \
+            "\n  Note: these figures cover only {} of the period's {} {} — the\n  \
              rest was not measured, so real traffic was higher.",
             group_int(u.days_counted),
-            group_int(u.days_in_period)
+            group_int(u.days_in_period),
+            plural(u.days_in_period, "day", "days")
         ));
     }
     out
@@ -19040,8 +19300,8 @@ fn care_section_backups(backups: Option<&CareBackups>) -> String {
     } else {
         let mut s = format!(
             "BACKUPS: {}\n  \
-             That is how many complete {} of the site (files and database) we\n  \
-             stored.",
+             We stored {} complete {} of the site (files and database).",
+            group_int(b.taken),
             group_int(b.taken),
             plural(b.taken, "copy", "copies"),
         );
@@ -20747,6 +21007,27 @@ fn expiry_warning_mail_with(
     (subject, body)
 }
 
+/// Which of the two possible bodies a customer letter was rendered from,
+/// in the words the audit trail and the journal use.
+///
+/// Both renderers treat a blank template as "send the built-in letter", so
+/// blank is tested exactly the way they test it — an operator template of
+/// three spaces must not be reported as the operator's.
+///
+/// This exists because the answer is per NODE. The letters are rendered on
+/// the node that owns the hosting (that is where the data is) from that
+/// node's agent.toml, while Settings edits the master's copy and pushes it
+/// out. A node that was unreachable at save time goes on sending the old
+/// letter, and this string is what makes that legible after the fact
+/// instead of leaving "which letter did this customer get" unanswerable.
+fn letter_origin(template: &str) -> &'static str {
+    if template.trim().is_empty() {
+        "built-in"
+    } else {
+        "operator (this node's agent.toml)"
+    }
+}
+
 /// Read the operator-editable `[notifications]` message templates from
 /// agent.toml. Missing file / section / keys fall back to the
 /// pass-through defaults, so wording is unchanged until customised.
@@ -21481,36 +21762,75 @@ const BACKUP_KV_LAST_RUN: &str = "backup_last_run_at";
 /// the request, so it's the only one both sides can agree on.
 const BACKUP_KV_TARGET: &str = "backup_target";
 
+/// Where a backup run's off-site targets came from, and therefore what an
+/// EMPTY set of them means. Nothing downstream can tell from the list alone,
+/// and guessing is wrong in both directions: read every empty list as
+/// "nothing was wanted" and a worker's scheduled backups quietly stop leaving
+/// the node; read every empty list as a failure and an install that never
+/// bought off-site storage collects a red audit row per backup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OffsiteSource {
+    /// The panel or the API resolved the cluster's targets on the MASTER
+    /// (where the table lives) and sent them with the request. Empty
+    /// therefore means the operator has none that can take a copy — which
+    /// the Backups card already says — so there is nothing to report.
+    Caller,
+    /// A scheduled run, using THIS node's own `backup_targets` table. On the
+    /// master that is the same table the panel reads; on a worker it is empty
+    /// by design, so empty here means the cluster's targets never reached the
+    /// run rather than that no copy was wanted.
+    ThisNode,
+    /// An internal snapshot taken as a rollback safety net — the pre-export
+    /// and pre-push backups. Nothing off-site was ever intended, so nothing
+    /// is missing when nothing is uploaded.
+    NotWanted,
+}
+
+/// Why a scheduled backup on a worker never leaves the node. Shared by the
+/// audit row and the sweep's log line so the operator reads one explanation,
+/// not two that have drifted apart.
+const OFFSITE_WORKER_HAS_NO_TARGETS: &str =
+    "no off-site target reached this scheduled run: the cluster's off-site targets live in the \
+     master's table and a worker keeps none of its own, so this backup exists only on this node. \
+     Until that is fixed, run the backup from the panel (which sends the targets with the \
+     request) or give this node its own copy via [remote_backup] in its agent.toml";
+
 /// Which of the resolved off-site targets one hosting's backup may use.
 /// Borrows the caller's slice — nothing is copied until an upload happens.
 #[derive(Debug, PartialEq, Eq)]
 enum OffsiteChoice<'a> {
-    /// No pin: every target the caller resolved.
+    /// No pin: every target the caller resolved. Never empty — "resolved
+    /// nothing" is `NoTargets`, which is a different thing to report.
     NodeDefault(&'a [hyperion_types::S3BackupTarget]),
     /// Pinned to one target that is in the resolved set.
     Pinned(&'a hyperion_types::S3BackupTarget),
     /// Pinned to a target that ISN'T in the resolved set — disabled, deleted,
-    /// renamed, or its secret file didn't read. Nothing is pushed: someone
-    /// chose where this client's data goes, so silently falling back to the
-    /// node's other buckets would put it somewhere nobody picked.
+    /// renamed, its secret file didn't read, or this run carries no targets
+    /// at all. Nothing is pushed: someone chose where this client's data
+    /// goes, so silently falling back to the node's other buckets would put
+    /// it somewhere nobody picked.
     Unresolved(&'a str),
+    /// Unpinned, and the run resolved no targets. Whether that is a failure
+    /// depends on where the (empty) list came from — see `OffsiteSource`.
+    NoTargets,
 }
 
 /// Resolve one hosting's off-site destination against the targets the caller
 /// already resolved (the master's table for a manual run, this node's for a
 /// scheduled one).
 ///
-/// An EMPTY `resolved` is never a broken pin: it means the run carries no
-/// off-site targets at all — the pre-clone safety backup passes none, and a
-/// worker's own `backup_targets` table is empty by design. Those paths stay
-/// exactly as they were.
+/// An empty `resolved` used to swallow the pin and report the node default,
+/// on the grounds that the callers passing none wanted none. That is what let
+/// a worker's scheduled backup ignore a pin in silence: the caller's intent
+/// now travels with the run as an `OffsiteSource`, so this function can say
+/// plainly that a pinned target was not available.
 fn choose_offsite_targets<'a>(
     pin: Option<&'a str>,
     resolved: &'a [hyperion_types::S3BackupTarget],
 ) -> OffsiteChoice<'a> {
     match pin.map(str::trim).filter(|s| !s.is_empty()) {
+        None if resolved.is_empty() => OffsiteChoice::NoTargets,
         None => OffsiteChoice::NodeDefault(resolved),
-        Some(_) if resolved.is_empty() => OffsiteChoice::NodeDefault(resolved),
         Some(name) => match resolved.iter().find(|t| t.name == name) {
             Some(t) => OffsiteChoice::Pinned(t),
             None => OffsiteChoice::Unresolved(name),
@@ -23113,18 +23433,58 @@ mod tests {
             OffsiteChoice::Unresolved("gone")
         );
 
-        // Nothing resolved at all — no targets configured, or a caller that
-        // deliberately passes none (the pre-clone safety backup). Local only,
-        // and NOT reported as a broken pin.
+        // Nothing resolved at all. This used to collapse to "node default",
+        // i.e. the empty slice — which reads as "uploaded to every target
+        // there was" and is how a worker's scheduled backup ignored a pin in
+        // silence. The two ways of getting here now stay apart, because they
+        // need opposite fixes and only the caller knows which it is.
         let none: Vec<hyperion_types::S3BackupTarget> = Vec::new();
         assert_eq!(
             choose_offsite_targets(None, &none),
-            OffsiteChoice::NodeDefault(&none[..])
+            OffsiteChoice::NoTargets
         );
         assert_eq!(
             choose_offsite_targets(Some("wasabi-eu"), &none),
-            OffsiteChoice::NodeDefault(&none[..])
+            OffsiteChoice::Unresolved("wasabi-eu"),
+            "a pin nothing could satisfy is a broken pin, not a node default"
         );
+    }
+
+    /// The empty target list is the whole question, and only the caller can
+    /// answer it: the panel resolves the master's table and sends it, so
+    /// empty means the operator configured none; a scheduled run reads THIS
+    /// node's table, which on a worker is empty by design.
+    #[tokio::test]
+    async fn only_a_worker_scheduled_run_reports_the_missing_off_site_copy() {
+        use super::{OffsiteSource, OFFSITE_WORKER_HAS_NO_TARGETS};
+        let tmp = tempfile::tempdir().expect("tmp");
+        let state = tmp.path().join("node-id.json");
+
+        // Master (no node-state file): a scheduled run reading its OWN table
+        // is reading the same table the panel shows, so empty really does
+        // mean "no off-site configured" and there is nothing to report.
+        let master = svc_with_state_file(None).await;
+        assert_eq!(master.offsite_gap_reason(OffsiteSource::ThisNode), None);
+
+        // Worker: the same empty list means the cluster's targets never
+        // reached the run. The reason names the fix, and it is the SAME
+        // string the audit row carries — one explanation, not two that drift.
+        std::fs::write(&state, b"{}").expect("write node-id.json");
+        let worker = svc_with_state_file(Some(state)).await;
+        assert_eq!(
+            worker.offsite_gap_reason(OffsiteSource::ThisNode),
+            Some(OFFSITE_WORKER_HAS_NO_TARGETS)
+        );
+        assert!(
+            OFFSITE_WORKER_HAS_NO_TARGETS.contains("exists only on this node"),
+            "the reason must say the backup did not leave the node"
+        );
+
+        // A run whose targets the CALLER resolved, and an internal snapshot,
+        // promised nothing off-site — neither may collect a red row, on a
+        // worker least of all (that is every pre-export/pre-push snapshot).
+        assert_eq!(worker.offsite_gap_reason(OffsiteSource::Caller), None);
+        assert_eq!(worker.offsite_gap_reason(OffsiteSource::NotWanted), None);
     }
 
     #[tokio::test]
@@ -23391,6 +23751,268 @@ mod tests {
             .await
             .expect("report");
         assert_eq!(off.attacks_blocked, None);
+    }
+
+    // ============================================================
+    //  A refused send is not a send. The customer letters (care
+    //  report, expiry warning) may never record delivery the relay
+    //  did not perform.
+    // ============================================================
+
+    /// An SMTP config every send fails against, with no relay running and no
+    /// network touched: `send_text` parses the From address before it opens a
+    /// connection, so a malformed one takes the exact `Err` branch a relay
+    /// that rejects the message takes — which is all these tests care about.
+    /// It is also a real operator mistake (a typo'd `from_address`).
+    fn refusing_relay() -> hyperion_adapters::email::EmailConfig {
+        hyperion_adapters::email::EmailConfig {
+            smtp_host: "127.0.0.1".into(),
+            smtp_port: 25,
+            smtp_user: String::new(),
+            smtp_password: String::new(),
+            from_address: "this is not a mailbox".into(),
+            from_name: String::new(),
+            security: "plain".into(),
+        }
+    }
+
+    /// A site that buys a monthly report, whose period has been open for 40
+    /// days, on a node whose relay refuses everything.
+    async fn site_owing_a_care_report(
+        pool: &SqlitePool,
+    ) -> (HostingService<MockAdapterPort>, HostingDetail) {
+        let s = svc(pool.clone(), happy_mocks()).with_email(Some(refusing_relay()), None);
+        s.create(req("pece.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("pece.cz").expect("parse"));
+        let detail = s.get(sel.clone()).await.expect("get");
+        // The customer's address. No expires_at: this is about the report,
+        // not the expiry chain.
+        let mut e = hyperion_types::HostingExpiry::defaults();
+        e.owner_email = Some("zakaznik@pece.cz".into());
+        s.set_expiry(sel, e).await.expect("expiry");
+        // Bought 40 days ago ⇒ the first period is [activated_at, now) and
+        // is more than one month wide, so the report is due.
+        packages::activate(
+            pool,
+            &packages::NewActivation {
+                hosting_id: detail.id.clone(),
+                package_id: 1,
+                package_name: "Péče".into(),
+                price_minor: None,
+                price_currency: None,
+                price_interval: None,
+                features: PackageFeatures {
+                    report_cadence: ReportCadence::Monthly,
+                    ..Default::default()
+                },
+                next_billing_at: None,
+                prior_state_json: None,
+            },
+            now_secs() - 40 * 86_400,
+        )
+        .await
+        .expect("activate");
+        (s, detail)
+    }
+
+    /// The customer letters are read from the agent.toml of the node that
+    /// OWNS the hosting, so the same panel legitimately sends two different
+    /// letters — the operator's on the master, the built-in one on a worker
+    /// that has not received it yet. That is the divergence; what must never
+    /// happen is it being untraceable. Every render records which body it
+    /// used, and this pins both halves of that.
+    #[tokio::test]
+    async fn a_care_report_records_which_letter_it_was_rendered_from() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let toml = tmp.path().join("agent.toml");
+        std::fs::write(
+            &toml,
+            b"[notifications]\ncare_report_body_template = \"Dobry den, {domain}. {uptime}\"\n",
+        )
+        .expect("write agent.toml");
+
+        // The node that has the operator's letter (today: the master).
+        let pool = open_memory().await.expect("open");
+        let edited = svc(pool.clone(), happy_mocks()).with_agent_config_path(toml);
+        edited.create(req("pece.cz")).await.expect("create");
+        let detail = edited
+            .get(HostingSelector::Domain(
+                Domain::parse("pece.cz").expect("parse"),
+            ))
+            .await
+            .expect("get");
+        let mail = edited
+            .care_report_preview(HostingSelector::Id(detail.id.clone()))
+            .await
+            .expect("preview");
+        assert!(
+            mail.body.starts_with("Dobry den, pece.cz."),
+            "the operator's letter is what this node renders: {:?}",
+            mail.body
+        );
+        let audit = edited.audit_list(200).await.expect("audit");
+        let row = audit
+            .iter()
+            .find(|a| a.action == "package.report.preview")
+            .expect("preview is audited");
+        assert!(
+            row.payload_json.contains("\"letter\":\"operator"),
+            "the trail must name the letter that was rendered: {}",
+            row.payload_json
+        );
+
+        // A node that never received it — no agent.toml wired at all, the
+        // same state as a worker the save could not reach. Same site, same
+        // code, different letter, and the trail says so instead of leaving
+        // "which one did the customer get" to guesswork.
+        let pool2 = open_memory().await.expect("open");
+        let untouched = svc(pool2, happy_mocks());
+        untouched.create(req("pece.cz")).await.expect("create");
+        let d2 = untouched
+            .get(HostingSelector::Domain(
+                Domain::parse("pece.cz").expect("parse"),
+            ))
+            .await
+            .expect("get");
+        let plain = untouched
+            .care_report_preview(HostingSelector::Id(d2.id.clone()))
+            .await
+            .expect("preview");
+        assert_ne!(
+            plain.body, mail.body,
+            "this is the divergence the trail has to explain"
+        );
+        let audit2 = untouched.audit_list(200).await.expect("audit");
+        let row2 = audit2
+            .iter()
+            .find(|a| a.action == "package.report.preview")
+            .expect("preview is audited");
+        assert!(
+            row2.payload_json.contains("\"letter\":\"built-in\""),
+            "a node without the operator's letter must say so: {}",
+            row2.payload_json
+        );
+    }
+
+    /// `letter_origin` has to agree with the renderers about what counts as
+    /// "no template", or the trail names a letter that was not sent.
+    #[test]
+    fn a_blank_template_is_reported_as_the_built_in_letter() {
+        use super::{care_report_render_with, letter_origin};
+        let r = mk_care_report();
+        for blank in ["", "   ", "\n\t "] {
+            assert_eq!(letter_origin(blank), "built-in", "{blank:?}");
+            // Same input, same verdict from the renderer: blank ⇒ built-in.
+            assert_eq!(
+                care_report_render_with(&r, &r.domain, blank).1,
+                care_report_render_with(&r, &r.domain, "").1,
+                "{blank:?}"
+            );
+        }
+        assert!(letter_origin("Dobry den, {domain}").starts_with("operator"));
+    }
+
+    /// The scheduled report: a refused send must leave the period OPEN.
+    ///
+    /// The marker is both "already reported" and the START of the next
+    /// period, so advancing it on a failure does not merely skip one letter —
+    /// it deletes those days: the customer never hears about that month and
+    /// the next report begins after it.
+    #[tokio::test]
+    async fn care_report_tick_leaves_the_period_open_when_the_relay_refuses() {
+        let pool = open_memory().await.expect("open");
+        let (s, detail) = site_owing_a_care_report(&pool).await;
+
+        let sent = s.care_report_tick().await.expect("tick");
+        assert_eq!(sent, 0, "the relay refused it — nothing went out");
+        assert_eq!(
+            hyperion_state::hosting_kv::get(&pool, detail.id.as_str(), CARE_REPORT_KV_PERIOD_END)
+                .await
+                .expect("kv"),
+            None,
+            "the period must stay open — those 40 days are otherwise lost"
+        );
+        // And the attempt is where the operator looks for it: the site's
+        // Emails tab, reading 'failed'. This also proves the tick got as far
+        // as trying, rather than skipping on one of the earlier guards.
+        let log = s
+            .email_log_list(Some(detail.id.as_str().to_string()), 10)
+            .await
+            .expect("email log");
+        assert!(
+            log.iter()
+                .any(|e| e.kind == CARE_REPORT_EMAIL_KIND && e.state == "failed"),
+            "{log:?}"
+        );
+    }
+
+    /// The operator's "Send now": a refused send is an error naming where the
+    /// relay's own message is, never a marked period.
+    #[tokio::test]
+    async fn care_report_send_errors_on_a_refused_relay_and_marks_nothing() {
+        let pool = open_memory().await.expect("open");
+        let (s, detail) = site_owing_a_care_report(&pool).await;
+
+        let err = s
+            .care_report_send(HostingSelector::Id(detail.id.clone()))
+            .await
+            .expect_err("a refused send must not read as success");
+        // The wording will change; that it points at the Emails tab, where
+        // `notify_email` put the relay's own words, must not.
+        assert!(err.to_string().contains("Emails tab"), "got: {err}");
+        assert_eq!(
+            hyperion_state::hosting_kv::get(&pool, detail.id.as_str(), CARE_REPORT_KV_PERIOD_END)
+                .await
+                .expect("kv"),
+            None,
+            "the period stays open until a report actually goes out"
+        );
+        let audit = s.audit_list(200).await.expect("audit");
+        assert!(
+            !audit.iter().any(|a| a.action == "package.report.send"),
+            "nothing was sent, so nothing may be audited as sent: {audit:?}"
+        );
+    }
+
+    /// The expiry warning: a refused send is audited as a failure — and the
+    /// scheduled row is still completed, because bouncing it back to pending
+    /// would re-send every tick forever against a relay that keeps refusing.
+    #[tokio::test]
+    async fn refused_expiry_warning_is_audited_as_failed_but_still_completes_the_row() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), happy_mocks()).with_email(Some(refusing_relay()), None);
+        s.create(req("konci.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("konci.cz").expect("parse"));
+        // Expires in 12 h: every warning offset (30/7/1 days) is already due,
+        // the suspend is not.
+        let mut e = hyperion_types::HostingExpiry::defaults();
+        e.expires_at = Some(now_secs() + 43_200);
+        e.owner_email = Some("zakaznik@konci.cz".into());
+        s.set_expiry(sel, e).await.expect("expiry");
+
+        s.scheduler_tick().await.expect("tick");
+
+        let audit = s.audit_list(200).await.expect("audit");
+        let notify: Vec<_> = audit
+            .iter()
+            .filter(|a| a.action == "scheduler.notify")
+            .collect();
+        assert!(!notify.is_empty(), "the warnings were due: {audit:?}");
+        assert!(
+            notify.iter().all(|a| a.result == "failed"),
+            "a warning the relay refused is not an 'ok': {notify:?}"
+        );
+        // Still done, not pending: the customer's next event is the suspend,
+        // and an hourly retry storm helps nobody.
+        let still_due = hyperion_state::scheduler::pending_due(&pool, now_secs(), 100)
+            .await
+            .expect("pending");
+        assert!(
+            !still_due
+                .iter()
+                .any(|a| a.action.as_str().starts_with("notify_")),
+            "a failed send must not bounce the row back to pending: {still_due:?}"
+        );
     }
 
     /// The Settings form's round trip: a save lands in agent.toml under
@@ -24138,24 +24760,6 @@ mod tests {
         // A late tick can't produce a negative countdown.
         let (late, _) = expiry_warning_mail_with("example.cz", EXP_TS, 14, EXP_TS + 3 * 86_400, "");
         assert_eq!(late, "[Hyperion] Hosting for example.cz expires today");
-    }
-
-    #[test]
-    fn tmp_verify_scheduler_delta() {
-        // Notify1d row is due at EXP - 86_400; the 5-min tick fires it at +δ.
-        let (subject, body) =
-            expiry_warning_mail_with("example.cz", EXP_TS, 14, EXP_TS - 86_400 + 120, "");
-        assert_eq!(
-            subject,
-            "[Hyperion] Hosting for example.cz expires in 1 day"
-        );
-        assert!(body.contains("expires on 1 Sep 2026 — 1 day left."), "{body}");
-        // 7-day row, same δ.
-        let (s7, _) = expiry_warning_mail_with("example.cz", EXP_TS, 14, EXP_TS - 7 * 86_400 + 299, "");
-        assert_eq!(s7, "[Hyperion] Hosting for example.cz expires in 7 days");
-        // Late tick on the expiry day itself still says today.
-        let (s0, _) = expiry_warning_mail_with("example.cz", EXP_TS, 14, EXP_TS + 3_600, "");
-        assert_eq!(s0, "[Hyperion] Hosting for example.cz expires today");
     }
 
     #[test]
