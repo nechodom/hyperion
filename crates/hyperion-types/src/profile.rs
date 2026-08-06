@@ -87,7 +87,7 @@ impl HostingProfile {
         count_items(&self.wp_themes)
     }
 
-    /// Pretty price like "199.00 Kč/měsíc" or "—" when no price.
+    /// Pretty price like "199.00 Kč/month" or "—" when no price.
     pub fn pretty_price(&self) -> String {
         match (
             &self.price_minor,
@@ -97,9 +97,9 @@ impl HostingProfile {
             (Some(m), Some(c), Some(iv)) => {
                 let major = *m as f64 / 100.0;
                 let iv_word = match iv.as_str() {
-                    "monthly" => "/měsíc",
-                    "quarterly" => "/kvartál",
-                    "yearly" => "/rok",
+                    "monthly" => "/month",
+                    "quarterly" => "/quarter",
+                    "yearly" => "/year",
                     other => other,
                 };
                 format!("{major:.2} {c}{iv_word}")
@@ -209,9 +209,9 @@ impl ProfileApply {
             (Some(m), Some(c), Some(iv)) => {
                 let major = *m as f64 / 100.0;
                 let iv_word = match iv.as_str() {
-                    "monthly" => "/měsíc",
-                    "quarterly" => "/kvartál",
-                    "yearly" => "/rok",
+                    "monthly" => "/month",
+                    "quarterly" => "/quarter",
+                    "yearly" => "/year",
                     other => other,
                 };
                 format!("{major:.2} {c}{iv_word}")

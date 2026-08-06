@@ -547,7 +547,7 @@ pub struct ServicePackage {
 }
 
 impl ServicePackage {
-    /// Pretty price like "490.00 Kč/měsíc" or "—" when free/unpriced.
+    /// Pretty price like "490.00 Kč/month" or "—" when free/unpriced.
     pub fn pretty_price(&self) -> String {
         pretty_price(
             self.price_minor,
@@ -623,7 +623,7 @@ pub struct HostingPackage {
 }
 
 impl HostingPackage {
-    /// Pretty snapshot price like "490.00 Kč/měsíc" or "—".
+    /// Pretty snapshot price like "490.00 Kč/month" or "—".
     pub fn pretty_price(&self) -> String {
         pretty_price(
             self.price_minor,
@@ -640,9 +640,9 @@ fn pretty_price(minor: Option<i64>, currency: Option<&str>, interval: Option<&st
         (Some(m), Some(c), Some(iv)) => {
             let major = m as f64 / 100.0;
             let iv_word = match iv {
-                "monthly" => "/měsíc",
-                "quarterly" => "/kvartál",
-                "yearly" => "/rok",
+                "monthly" => "/month",
+                "quarterly" => "/quarter",
+                "yearly" => "/year",
                 other => other,
             };
             format!("{major:.2} {c}{iv_word}")
@@ -1103,7 +1103,7 @@ mod tests {
             created_at: 0,
             updated_at: 0,
         };
-        assert_eq!(p.pretty_price(), "490.00 Kč/měsíc");
+        assert_eq!(p.pretty_price(), "490.00 Kč/month");
         p.price_interval = None;
         assert_eq!(p.pretty_price(), "—");
     }
@@ -1135,7 +1135,7 @@ mod tests {
         let s = serde_json::to_string(&a).expect("ser");
         let back: HostingPackage = serde_json::from_str(&s).expect("de");
         assert_eq!(a, back);
-        assert_eq!(back.pretty_price(), "490.00 Kč/měsíc");
+        assert_eq!(back.pretty_price(), "490.00 Kč/month");
     }
 
     // ---------------------------------------------------------- report

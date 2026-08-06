@@ -189,7 +189,7 @@ async fn max_disk(
 /// `samples == 0` is a site nobody monitored, and the only place a ratio
 /// may be computed is [`CareUptime::success_ratio_x100`], which returns
 /// `None` there instead of dividing 0/0 into a flattering "100 %". A
-/// renderer that sees zero samples must print "nekontrolováno".
+/// renderer that sees zero samples must print "not monitored".
 ///
 /// Never `None`: unlike backups there is no separate "was this feature
 /// ever on" signal to recover, so zero samples IS the unmeasured state
@@ -1057,7 +1057,7 @@ mod tests {
         let (pool, a, _b) = fresh().await;
         // No ClamAV on the node — a normal state on a shared host. Zero
         // hits here means "not looked for", so the report must say
-        // "nekontrolováno", never "čisto".
+        // "not checked", never "clean".
         put_scan(
             &pool,
             a.as_str(),
@@ -1093,7 +1093,7 @@ mod tests {
     #[tokio::test]
     async fn every_metric_of_an_untouched_site_reads_as_unmeasured() {
         // The load-bearing default. A brand-new site with a package on it
-        // must produce a report full of "nekontrolováno", not a report
+        // must produce a report full of "not measured", not a report
         // full of flattering zeros.
         let (pool, a, _b) = fresh().await;
         assert_eq!(usage(&pool, a.as_str(), FROM, TO).await.expect("q"), None);

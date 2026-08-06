@@ -9324,7 +9324,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 }
             };
             if report.is_entirely_unmeasured() {
-                // Six "nekontrolováno" lines is a true statement and a
+                // Six "not measured" lines is a true statement and a
                 // terrible invoice attachment, and it almost always means
                 // the report was assembled somewhere the data isn't.
                 tracing::warn!(
@@ -18764,13 +18764,13 @@ fn report_cadence_secs(c: ReportCadence) -> Option<i64> {
 pub fn care_report_render(report: &CareReport, domain: &str) -> (String, String) {
     let days = care_days_spanned(report.period_start, report.period_end);
     // The period is half-open, so the last day INSIDE it is `end - 1`.
-    // Printing the exclusive end ("1. 6. – 1. 7.") reads to a customer as
+    // Printing the exclusive end ("1 Jun – 1 Jul") reads to a customer as
     // a day they were charged for twice.
     let last_day = (report.period_end - 1).max(report.period_start);
-    let from_str = cz_date(report.period_start);
-    let to_str = cz_date(last_day);
+    let from_str = report_date(report.period_start);
+    let to_str = report_date(last_day);
 
-    let subject = format!("Zpráva o péči o web {domain} ({from_str} – {to_str})");
+    let subject = format!("Care report for {domain} ({from_str} – {to_str})");
 
     let sections = [
         care_section_attacks(report.attacks_blocked),
@@ -18783,21 +18783,22 @@ pub fn care_report_render(report: &CareReport, domain: &str) -> (String, String)
     .join("\n\n");
 
     let body = format!(
-        "ZPRÁVA O PÉČI\n\
-         Web:     {domain}\n\
-         Období:  {from_str} – {to_str} ({days} {})\n\
+        "CARE REPORT\n\
+         Site:    {domain}\n\
+         Period:  {from_str} – {to_str} ({days} {})\n\
          \n\
-         Tohle se za uvedené období na vašem webu dělo. Uvádíme jen čísla, která\n\
-         jsme skutečně naměřili. Tam, kde měření neběželo, to je napsáno — místo\n\
-         nuly, která by tvrdila něco jiného než „nedívali jsme se“.\n\
+         Here is what happened on your site during this period. We only quote\n\
+         figures we actually measured. Where something was not being measured,\n\
+         we say so — rather than print a zero that would claim something other\n\
+         than \"we were not looking\".\n\
          \n\
          {sections}\n\
          \n\
          --\n\
-         Tuto zprávu dostáváte proto, že k webu {domain} máte službu péče.\n\
-         Čísla pocházejí přímo ze serveru, na kterém web běží; časy jsou v UTC.\n\
-         Máte-li k čemukoli dotaz, stačí odpovědět na tento e-mail.\n",
-        cz_plural(days, "den", "dny", "dní"),
+         You receive this report because {domain} is on a care plan.\n\
+         The figures come straight from the server the site runs on; times are UTC.\n\
+         If anything here needs explaining, just reply to this e-mail.\n",
+        plural(days, "day", "days"),
     );
     (subject, body)
 }
@@ -18807,20 +18808,21 @@ pub fn care_report_render(report: &CareReport, domain: &str) -> (String, String)
 /// is exactly why zero must not be printed there.
 fn care_section_attacks(blocked: Option<i64>) -> String {
     match blocked {
-        None => "ZABLOKOVANÉ ÚTOKY: nesledováno\n  \
-             Automatická ochrana proti útokům na tomto serveru v uvedeném období\n  \
-             neběžela. Nulu sem nepíšeme — znamenala by, že se nikdo nedíval."
+        None => "ATTACKS BLOCKED: not monitored\n  \
+             Automatic attack protection was not running on this server during\n  \
+             the period. We do not print a zero here — it would mean nobody was\n  \
+             watching."
             .to_string(),
-        Some(0) => "ZABLOKOVANÉ ÚTOKY: 0\n  \
-             Ochrana běžela celé období a nemusela zasáhnout ani jednou. To je\n  \
-             dobrá zpráva, ne chybějící údaj."
+        Some(0) => "ATTACKS BLOCKED: 0\n  \
+             Protection ran for the whole period and never had to step in. That\n  \
+             is good news, not a missing figure."
             .to_string(),
         Some(n) => format!(
-            "ZABLOKOVANÉ ÚTOKY: {}\n  \
-             Tolikrát jsme odřízli adresu, která opakovaně zkoušela uhodnout heslo\n  \
-             do administrace nebo web jinak zneužít. Zablokovaná adresa se k webu\n  \
-             několik hodin vůbec nedostane.",
-            cz_int(n)
+            "ATTACKS BLOCKED: {}\n  \
+             That is how many times we cut off an address that kept trying to\n  \
+             guess an admin password or otherwise abuse the site. A blocked\n  \
+             address cannot reach the site at all for several hours.",
+            group_int(n)
         ),
     }
 }
@@ -18828,23 +18830,25 @@ fn care_section_attacks(blocked: Option<i64>) -> String {
 /// Applied updates. Two things the copy has to say out loud: the number
 /// covers plugins and themes ONLY (WordPress core has no durable record
 /// to count), and an audit log that does not span the period yields
-/// "nezjištěno" rather than a partial total dressed up as a whole one.
+/// "not determined" rather than a partial total dressed up as a whole one.
 fn care_section_updates(applied: Option<i64>) -> String {
     match applied {
-        None => "AKTUALIZACE PLUGINŮ A ŠABLON: nezjištěno\n  \
-             Provozní záznamy nepokrývají celé toto období, takže přesný počet\n  \
-             uvést nemůžeme. Neúplné číslo vydávat za úplné nebudeme."
+        None => "PLUGIN AND THEME UPDATES: not determined\n  \
+             Our operational records do not cover this whole period, so we\n  \
+             cannot give you an exact count. We will not pass an incomplete\n  \
+             number off as a complete one."
             .to_string(),
-        Some(0) => "AKTUALIZACE PLUGINŮ A ŠABLON: 0\n  \
-             Nebylo co nasazovat — pluginy i šablony byly po celé období aktuální."
+        Some(0) => "PLUGIN AND THEME UPDATES: 0\n  \
+             There was nothing to apply — plugins and themes were up to date\n  \
+             throughout the period."
             .to_string(),
         Some(n) => format!(
-            "AKTUALIZACE PLUGINŮ A ŠABLON: {}\n  \
-             Tolik {} jsme na webu nasadili. Počítáme jen ty, které se opravdu\n  \
-             nainstalovaly. Aktualizace jádra WordPressu v tomto čísle nejsou —\n  \
-             ty zatím samostatně neevidujeme.",
-            cz_int(n),
-            cz_plural(n, "aktualizace", "aktualizace", "aktualizací"),
+            "PLUGIN AND THEME UPDATES: {}\n  \
+             That is how many {} we applied to the site. We count only the ones\n  \
+             that actually installed. WordPress core updates are not in this\n  \
+             figure — we do not track those separately yet.",
+            group_int(n),
+            plural(n, "update", "updates"),
         ),
     }
 }
@@ -18854,42 +18858,45 @@ fn care_section_updates(applied: Option<i64>) -> String {
 /// as a month.
 fn care_section_usage(usage: Option<&CareUsage>) -> String {
     let Some(u) = usage else {
-        return "PROVOZ: neměřeno\n  \
-             Měření návštěvnosti na tomto webu v uvedeném období neběželo.\n  \
-             „0 požadavků“ by tvrdilo, že web nikdo nenavštívil, a to nevíme."
+        return "TRAFFIC: not measured\n  \
+             Traffic measurement was not running for this site during the\n  \
+             period. \"0 requests\" would claim nobody visited the site, and we\n  \
+             do not know that."
             .to_string();
     };
     let mut out = format!(
-        "PROVOZ: {} {}, odesláno {}\n  \
-         Požadavek je jedno načtení stránky, obrázku nebo souboru.",
-        cz_int(u.requests),
-        cz_plural(u.requests, "požadavek", "požadavky", "požadavků"),
-        cz_bytes(u.bw_out_bytes),
+        "TRAFFIC: {} {}, {} sent\n  \
+         A request is one load of a page, an image or a file.",
+        group_int(u.requests),
+        plural(u.requests, "request", "requests"),
+        customer_bytes(u.bw_out_bytes),
     );
     // Inbound bytes need a log format the stock nginx config doesn't have,
     // so a zero there is ambiguous — and `reports::usage` hands us `None`
-    // rather than letting us print "0 B přijato" for a live site.
+    // rather than letting us print "0 B received" for a live site.
     match u.bw_in_bytes {
-        Some(n) => out.push_str(&format!("\n  Přijatá data: {}.", cz_bytes(n))),
-        None => out
-            .push_str("\n  Objem přijatých dat server do svých záznamů nezapisuje, neuvádíme ho."),
+        Some(n) => out.push_str(&format!("\n  Data received: {}.", customer_bytes(n))),
+        None => out.push_str(
+            "\n  The server does not record how much data was received, so we do\n  \
+             not quote it.",
+        ),
     }
     out.push_str(&format!(
-        "\n  Nejvíc místa na disku za období: {}.",
-        cz_bytes(u.disk_peak_bytes)
+        "\n  Peak disk use during the period: {}.",
+        customer_bytes(u.disk_peak_bytes)
     ));
     if u.is_complete() {
         out.push_str(&format!(
-            "\n  Údaje pokrývají celé období ({} z {} dní).",
-            cz_int(u.days_counted),
-            cz_int(u.days_in_period)
+            "\n  These figures cover the whole period ({} of {} days).",
+            group_int(u.days_counted),
+            group_int(u.days_in_period)
         ));
     } else {
         out.push_str(&format!(
-            "\n  Pozor: údaje pokrývají jen {} z {} dní období — zbytek se neměřil,\n  \
-             skutečný provoz byl tedy vyšší.",
-            cz_int(u.days_counted),
-            cz_int(u.days_in_period)
+            "\n  Note: these figures cover only {} of the period's {} days — the\n  \
+             rest was not measured, so real traffic was higher.",
+            group_int(u.days_counted),
+            group_int(u.days_in_period)
         ));
     }
     out
@@ -18899,40 +18906,38 @@ fn care_section_usage(usage: Option<&CareUsage>) -> String {
 /// there is no percentage to print, and "100 %" for a site nobody
 /// monitored is the exact lie the report must never tell.
 fn care_section_uptime(uptime: Option<&CareUptime>) -> String {
+    const NOT_MONITORED: &str = "AVAILABILITY: not monitored (uptime checks were not active)\n  \
+         We were not checking this site regularly during the period, so we\n  \
+         cannot say whether it stayed reachable. A figure of 100 % would be\n  \
+         invented.";
     let Some(u) = uptime else {
-        return "DOSTUPNOST: nesledováno (monitoring nebyl aktivní)\n  \
-             Web jsme v tomto období pravidelně nekontrolovali, takže nemůžeme\n  \
-             říct, jestli byl celou dobu dostupný. Údaj 100 % by byl vymyšlený."
-            .to_string();
+        return NOT_MONITORED.to_string();
     };
     // `samples > 0` is guaranteed by the assembler (zero samples arrive as
     // `None` above), so this can only ever be `Some`.
     let Some(ratio) = u.success_ratio_x100() else {
-        return "DOSTUPNOST: nesledováno (monitoring nebyl aktivní)\n  \
-             Web jsme v tomto období pravidelně nekontrolovali, takže nemůžeme\n  \
-             říct, jestli byl celou dobu dostupný. Údaj 100 % by byl vymyšlený."
-            .to_string();
+        return NOT_MONITORED.to_string();
     };
     let failures = u.failures();
     if failures == 0 {
         return format!(
-            "DOSTUPNOST: {} ({} {}, žádný výpadek)\n  \
-             Web jsme automaticky kontrolovali a pokaždé odpověděl.",
-            cz_pct_x100(ratio),
-            cz_int(u.samples),
-            cz_plural(u.samples, "kontrola", "kontroly", "kontrol"),
+            "AVAILABILITY: {} ({} {}, no outage)\n  \
+             We checked the site automatically and it answered every time.",
+            pct_x100_str(ratio),
+            group_int(u.samples),
+            plural(u.samples, "check", "checks"),
         );
     }
     format!(
-        "DOSTUPNOST: {} ({} {}, z toho {} neúspěšných)\n  \
-         Při {} {} web neodpověděl. Jedna dvě neúspěšné kontroly bývají krátký\n  \
-         výpadek nebo restart; když se opakují, řešíme to.",
-        cz_pct_x100(ratio),
-        cz_int(u.samples),
-        cz_plural(u.samples, "kontrola", "kontroly", "kontrol"),
-        cz_int(failures),
-        cz_int(failures),
-        cz_plural(failures, "kontrole", "kontrolách", "kontrolách"),
+        "AVAILABILITY: {} ({} {}, {} of them failed)\n  \
+         The site did not answer on {} {}. One or two failed checks are usually\n  \
+         a brief outage or a restart; if they repeat, we look into it.",
+        pct_x100_str(ratio),
+        group_int(u.samples),
+        plural(u.samples, "check", "checks"),
+        group_int(failures),
+        group_int(failures),
+        plural(failures, "check", "checks"),
     )
 }
 
@@ -18941,103 +18946,104 @@ fn care_section_uptime(uptime: Option<&CareUptime>) -> String {
 /// must not read the same as a site that never had any.
 fn care_section_backups(backups: Option<&CareBackups>) -> String {
     let Some(b) = backups else {
-        return "ZÁLOHY: nesledováno\n  \
-             Na tomto webu zatím neproběhla ani jedna záloha — automatické\n  \
-             zálohování na něm nikdy neběželo. „0 záloh“ by vypadalo jako\n  \
-             selhání; tohle je stav, kdy se zálohy nikdy nezapnuly."
+        return "BACKUPS: not monitored\n  \
+             Not a single backup has ever run for this site — automatic backups\n  \
+             were never switched on for it. \"0 backups\" would look like a\n  \
+             failure; this is the state where backups were never enabled."
             .to_string();
     };
     let mut out = if b.taken == 0 {
-        "ZÁLOHY: 0 za toto období\n  \
-         Tento web zálohy má, ale v uvedeném období žádná neproběhla. To je\n  \
-         potřeba prověřit — ozvěte se nám, prosím."
+        "BACKUPS: 0 in this period\n  \
+         This site does have backups configured, but none ran during the\n  \
+         period. That needs looking into — please get in touch."
             .to_string()
     } else {
         let mut s = format!(
-            "ZÁLOHY: {}\n  \
-             Tolik kompletních {} webu (soubory i databáze) jsme uložili.",
-            cz_int(b.taken),
-            cz_plural(b.taken, "kopie", "kopie", "kopií"),
+            "BACKUPS: {}\n  \
+             That is how many complete {} of the site (files and database) we\n  \
+             stored.",
+            group_int(b.taken),
+            plural(b.taken, "copy", "copies"),
         );
         // Only ever a time INSIDE the period: the report must not reach
         // backwards for a comforting older date.
         if let Some(ts) = b.last_success_at {
             s.push_str(&format!(
-                "\n  Poslední úspěšná záloha: {}.",
-                cz_datetime(ts)
+                "\n  Last successful backup: {}.",
+                report_datetime(ts)
             ));
         }
         s
     };
     if b.failed > 0 {
         out.push_str(&format!(
-            "\n  Neúspěšných pokusů: {} (opakují se automaticky).",
-            cz_int(b.failed)
+            "\n  Failed attempts: {} (these retry automatically).",
+            group_int(b.failed)
         ));
     }
     out
 }
 
-/// File integrity + malware. "Čisto" requires BOTH halves to have run —
+/// File integrity + malware. "Clean" requires BOTH halves to have run —
 /// zero malware hits from a scanner that was never installed means "not
 /// looked for", and the copy has to say which.
 fn care_section_integrity(integrity: Option<&CareIntegrity>) -> String {
     let Some(i) = integrity else {
-        return "KONTROLA SOUBORŮ A MALWARU: nekontrolováno\n  \
-             V uvedeném období na webu žádná kontrola souborů neproběhla.\n  \
-             Nemůžeme tedy říct, že je čistý — jen že jsme se nedívali."
+        return "FILE INTEGRITY AND MALWARE: not checked\n  \
+             No file check ran on the site during this period. So we cannot say\n  \
+             it is clean — only that we did not look."
             .to_string();
     };
-    let when = cz_date(i.scanned_at);
+    let when = report_date(i.scanned_at);
     let findings = i.total_findings();
     let mut out = if i.is_clean() {
         format!(
-            "KONTROLA SOUBORŮ A MALWARU: bez nálezu\n  \
-             Kontrola z {when}: soubory WordPressu odpovídají tomu, co vydal\n  \
-             wordpress.org, a antivirová kontrola nic nenašla."
+            "FILE INTEGRITY AND MALWARE: nothing found\n  \
+             Check on {when}: the WordPress files match what wordpress.org\n  \
+             published, and the malware scan found nothing."
         )
     } else if findings == 0 {
         format!(
-            "KONTROLA SOUBORŮ A MALWARU: zkontrolováno jen zčásti\n  \
-             Kontrola z {when} nic nenašla, ale proběhla jen zčásti — „čisto“\n  \
-             proto napsat nemůžeme."
+            "FILE INTEGRITY AND MALWARE: only partly checked\n  \
+             The check on {when} found nothing, but it only ran in part — so we\n  \
+             cannot write \"clean\"."
         )
     } else {
         let mut what: Vec<String> = Vec::new();
         if i.core_issues > 0 {
             what.push(format!(
-                "změněné soubory jádra WordPressu ({})",
-                cz_int(i.core_issues)
+                "modified WordPress core files ({})",
+                group_int(i.core_issues)
             ));
         }
         if i.plugin_issues > 0 {
             what.push(format!(
-                "změněné soubory pluginů ({})",
-                cz_int(i.plugin_issues)
+                "modified plugin files ({})",
+                group_int(i.plugin_issues)
             ));
         }
         if i.malware_hits > 0 {
-            what.push(format!("podezřelý kód ({})", cz_int(i.malware_hits)));
+            what.push(format!("suspicious code ({})", group_int(i.malware_hits)));
         }
         format!(
-            "KONTROLA SOUBORŮ A MALWARU: {} {}\n  \
-             Kontrola z {when} našla: {}.\n  \
-             Ne každý nález znamená útok — bývá to i ruční úprava souboru.\n  \
-             Pokud si nálezem nejste jistí, ozvěte se nám.",
-            cz_int(findings),
-            cz_plural(findings, "nález", "nálezy", "nálezů"),
+            "FILE INTEGRITY AND MALWARE: {} {}\n  \
+             The check on {when} found: {}.\n  \
+             Not every finding means an attack — a hand-edited file looks the\n  \
+             same. If you are unsure about a finding, get in touch.",
+            group_int(findings),
+            plural(findings, "finding", "findings"),
             what.join(", "),
         )
     };
     // Which half did NOT run is information the customer is owed, in every
     // one of the three branches above.
     if !i.checksums_ran {
-        out.push_str("\n  Kontrolní součty souborů se ověřit nepodařilo, tuhle část tedy nevíme.");
+        out.push_str("\n  We could not verify the file checksums, so that part is unknown.");
     }
     if !i.malware_scan_ran {
         out.push_str(
-            "\n  Antivirová kontrola na serveru neběžela, o podezřelém kódu proto\n  \
-             neříkáme nic.",
+            "\n  The malware scanner was not running on the server, so we say\n  \
+             nothing about suspicious code.",
         );
     }
     out
@@ -19046,7 +19052,7 @@ fn care_section_integrity(integrity: Option<&CareIntegrity>) -> String {
 /// Calendar days the half-open window `[from, to)` touches.
 ///
 /// Mirrors `hyperion_state::reports::days_spanned` so the header says the
-/// same "30 dní" the traffic section's coverage line does — and keeps
+/// same "30 days" the traffic section's coverage line does — and keeps
 /// saying it for a report whose traffic section is unmeasured.
 fn care_days_spanned(from: i64, to: i64) -> i64 {
     if to <= from {
@@ -19055,17 +19061,18 @@ fn care_days_spanned(from: i64, to: i64) -> i64 {
     (to - 1).div_euclid(86_400) - from.div_euclid(86_400) + 1
 }
 
-/// Czech plural pick: 1 / 2–4 / everything else (including 0).
-fn cz_plural(n: i64, one: &'static str, few: &'static str, many: &'static str) -> &'static str {
-    match n.abs() {
-        1 => one,
-        2..=4 => few,
-        _ => many,
+/// English plural pick: exactly 1 is singular, everything else (including
+/// 0) is plural.
+fn plural(n: i64, one: &'static str, many: &'static str) -> &'static str {
+    if n.abs() == 1 {
+        one
+    } else {
+        many
     }
 }
 
-/// Thousands-grouped integer the Czech way: "34 500".
-fn cz_int(n: i64) -> String {
+/// Thousands-grouped integer: "34,500".
+fn group_int(n: i64) -> String {
     let digits = n.unsigned_abs().to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3 + 1);
     if n < 0 {
@@ -19074,53 +19081,67 @@ fn cz_int(n: i64) -> String {
     for (i, ch) in digits.chars().enumerate() {
         // Group from the LEFT by counting how many digits remain.
         if i > 0 && (digits.len() - i) % 3 == 0 {
-            out.push(' ');
+            out.push(',');
         }
         out.push(ch);
     }
     out
 }
 
-/// Bytes for a CUSTOMER: SI steps (kB / MB / GB) and a decimal comma, so
-/// the number matches what their connection and their invoice talk about.
-/// `human_bytes` (GiB, dot) stays as it is for the operator dashboard —
-/// two audiences, two conventions, and neither should learn the other's.
-fn cz_bytes(n: i64) -> String {
+/// Bytes for a CUSTOMER: SI steps (kB / MB / GB), because that is what
+/// their connection and their invoice talk about. `human_bytes` (GiB)
+/// stays as it is for the operator dashboard — two audiences, two
+/// conventions, and neither should learn the other's.
+fn customer_bytes(n: i64) -> String {
     const STEPS: [(&str, i64); 3] = [("GB", 1_000_000_000), ("MB", 1_000_000), ("kB", 1_000)];
     for (label, scale) in STEPS {
         if n.abs() >= scale {
             let v = n as f64 / scale as f64;
-            return format!("{} {label}", format!("{v:.1}").replace('.', ","));
+            return format!("{v:.1} {label}");
         }
     }
-    format!("{} B", cz_int(n))
+    format!("{} B", group_int(n))
 }
 
-/// "30. 6. 2026". A date a Czech reader parses at a glance; ISO would
-/// read as a machine talking.
-fn cz_date(ts: i64) -> String {
+/// "30 Jun 2026". Spelled month, because a purely numeric date reads as a
+/// different day depending on the reader's country.
+fn report_date(ts: i64) -> String {
     use chrono::Datelike;
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
     match chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0) {
-        Some(dt) => format!("{}. {}. {}", dt.day(), dt.month(), dt.year()),
+        Some(dt) => {
+            let m = MONTHS
+                .get((dt.month() as usize).saturating_sub(1))
+                .copied()
+                .unwrap_or("???");
+            format!("{} {} {}", dt.day(), m, dt.year())
+        }
         // Unrepresentable timestamps can't reach a real report; saying so
         // beats printing a wrong date with total confidence.
-        None => "neznámé datum".to_string(),
+        None => "unknown date".to_string(),
     }
 }
 
-/// "30. 6. 2026 03:14 UTC" — the zone is spelled out because the customer
-/// is in CET/CEST and an unlabelled clock time would be a small lie.
-fn cz_datetime(ts: i64) -> String {
+/// "30 Jun 2026 03:14 UTC" — the zone is spelled out because the customer
+/// may not be in UTC and an unlabelled clock time would be a small lie.
+fn report_datetime(ts: i64) -> String {
     use chrono::Timelike;
     match chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0) {
-        Some(dt) => format!("{} {:02}:{:02} UTC", cz_date(ts), dt.hour(), dt.minute()),
-        None => "neznámý čas".to_string(),
+        Some(dt) => format!(
+            "{} {:02}:{:02} UTC",
+            report_date(ts),
+            dt.hour(),
+            dt.minute()
+        ),
+        None => "unknown time".to_string(),
     }
 }
 
-/// Hundredths of a percent → "99,93 %".
-fn cz_pct_x100(x: i64) -> String {
-    format!("{},{:02} %", x / 100, (x % 100).abs())
+/// Hundredths of a percent → "99.93 %".
+fn pct_x100_str(x: i64) -> String {
+    format!("{}.{:02} %", x / 100, (x % 100).abs())
 }
 
 fn derive_user_from_summary(s: &HostingSummary) -> Option<String> {
@@ -20541,10 +20562,11 @@ fn fmt_notif_time(secs: i64) -> String {
         .unwrap_or_default()
 }
 
-/// Date only, in the form a Czech reader expects ("1. 9. 2026").
-fn fmt_cz_date(secs: i64) -> String {
+/// Date only, spelled month ("1 Sep 2026"): a purely numeric date reads
+/// as a different day depending on the reader's country.
+fn fmt_mail_date(secs: i64) -> String {
     chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0)
-        .map(|dt| dt.format("%-d. %-m. %Y").to_string())
+        .map(|dt| dt.format("%-d %b %Y").to_string())
         .unwrap_or_default()
 }
 
@@ -20556,18 +20578,10 @@ fn expiry_days_left(expires_at: i64, now: i64) -> i64 {
     (expires_at - now).max(0) / 86_400
 }
 
-/// Czech plural of "den": 1 den, 2–4 dny, 5+ dní.
-fn czech_days_word(n: i64) -> &'static str {
-    match n {
-        1 => "den",
-        2..=4 => "dny",
-        _ => "dní",
-    }
-}
-
-/// Subject + body of the expiry warning, in Czech — the recipient is the
-/// site owner, not the operator. Pure (every time-dependent input is an
-/// argument) so the wording is unit-testable without an SMTP relay.
+/// Subject + body of the expiry warning. The recipient is the SITE OWNER,
+/// not the operator, so it explains consequences rather than mechanics.
+/// Pure (every time-dependent input is an argument) so the wording is
+/// unit-testable without an SMTP relay.
 ///
 /// The consequences it names are the ones the scheduler really queues, see
 /// `reconcile_scheduled_rows`: suspend at `expires_at`, delete at
@@ -20582,32 +20596,32 @@ fn expiry_warning_mail(
     let days_left = expiry_days_left(expires_at, now);
     let grace = grace_days.max(1);
     let subject = if days_left == 0 {
-        format!("[Hyperion] Hosting {domain} vyprší dnes")
+        format!("[Hyperion] Hosting for {domain} expires today")
     } else {
         format!(
-            "[Hyperion] Hosting {domain} vyprší za {days_left} {}",
-            czech_days_word(days_left)
+            "[Hyperion] Hosting for {domain} expires in {days_left} {}",
+            plural(days_left, "day", "days")
         )
     };
     let when = if days_left == 0 {
-        "vyprší dnes".to_string()
+        "expires today".to_string()
     } else {
         format!(
-            "vyprší {} — zbývá {days_left} {}",
-            fmt_cz_date(expires_at),
-            czech_days_word(days_left)
+            "expires on {} — {days_left} {} left",
+            fmt_mail_date(expires_at),
+            plural(days_left, "day", "days")
         )
     };
     let body = format!(
-        "Dobrý den,\n\n\
-         hosting {domain} {when}.\n\n\
-         Pokud do té doby nedojde k prodloužení:\n\
-         - {exp_date} bude hosting pozastaven a návštěvníkům se místo webu zobrazí informační stránka,\n\
-         - po ochranné lhůtě {grace} {grace_word}, tj. {del_date}, bude hosting i s daty smazán.\n\n\
-         Pro prodloužení nás, prosím, kontaktujte.\n\n--\nHyperion\n",
-        exp_date = fmt_cz_date(expires_at),
-        grace_word = czech_days_word(grace),
-        del_date = fmt_cz_date(expires_at + grace * 86_400),
+        "Hello,\n\n\
+         hosting for {domain} {when}.\n\n\
+         If it is not renewed before then:\n\
+         - on {exp_date} the hosting will be suspended and visitors will see an information page instead of the site,\n\
+         - after a grace period of {grace} {grace_word}, on {del_date}, the hosting and its data will be deleted.\n\n\
+         To renew, please get in touch.\n\n--\nHyperion\n",
+        exp_date = fmt_mail_date(expires_at),
+        grace_word = plural(grace, "day", "days"),
+        del_date = fmt_mail_date(expires_at + grace * 86_400),
     );
     (subject, body)
 }
@@ -23937,47 +23951,56 @@ mod tests {
     #[test]
     fn expiry_warning_30d_states_domain_date_days_and_consequences() {
         let (subject, body) = expiry_warning_mail("example.cz", EXP_TS, 14, EXP_TS - 30 * 86_400);
-        assert_eq!(subject, "[Hyperion] Hosting example.cz vyprší za 30 dní");
-        assert!(body.contains("hosting example.cz vyprší 1. 9. 2026 — zbývá 30 dní."));
-        assert!(body.contains("1. 9. 2026 bude hosting pozastaven"));
+        assert_eq!(
+            subject,
+            "[Hyperion] Hosting for example.cz expires in 30 days"
+        );
+        assert!(body.contains("hosting for example.cz expires on 1 Sep 2026 — 30 days left."));
+        assert!(body.contains("on 1 Sep 2026 the hosting will be suspended"));
         // Delete date = expiry + grace, the date DeleteExpired is queued for.
-        assert!(body.contains("po ochranné lhůtě 14 dní, tj. 15. 9. 2026"));
+        assert!(body.contains("after a grace period of 14 days, on 15 Sep 2026"));
     }
 
     #[test]
     fn expiry_warning_7d_variant() {
         let (subject, body) = expiry_warning_mail("example.cz", EXP_TS, 14, EXP_TS - 7 * 86_400);
-        assert_eq!(subject, "[Hyperion] Hosting example.cz vyprší za 7 dní");
-        assert!(body.contains("zbývá 7 dní."));
+        assert_eq!(
+            subject,
+            "[Hyperion] Hosting for example.cz expires in 7 days"
+        );
+        assert!(body.contains("7 days left."));
     }
 
     #[test]
     fn expiry_warning_1d_variant_is_singular() {
         let (subject, body) = expiry_warning_mail("example.cz", EXP_TS, 14, EXP_TS - 86_400);
-        assert_eq!(subject, "[Hyperion] Hosting example.cz vyprší za 1 den");
-        assert!(body.contains("zbývá 1 den."));
+        assert_eq!(
+            subject,
+            "[Hyperion] Hosting for example.cz expires in 1 day"
+        );
+        assert!(body.contains("1 day left."));
     }
 
     #[test]
     fn expiry_warning_on_the_day_says_today() {
         let (subject, body) = expiry_warning_mail("example.cz", EXP_TS, 14, EXP_TS);
-        assert_eq!(subject, "[Hyperion] Hosting example.cz vyprší dnes");
-        assert!(body.contains("hosting example.cz vyprší dnes."));
+        assert_eq!(subject, "[Hyperion] Hosting for example.cz expires today");
+        assert!(body.contains("hosting for example.cz expires today."));
         // A late tick can't produce a negative countdown.
         let (late, _) = expiry_warning_mail("example.cz", EXP_TS, 14, EXP_TS + 3 * 86_400);
-        assert_eq!(late, "[Hyperion] Hosting example.cz vyprší dnes");
+        assert_eq!(late, "[Hyperion] Hosting for example.cz expires today");
     }
 
     #[test]
     fn expiry_warning_grace_matches_the_scheduled_delete() {
         // grace_days = 0 is stored, but reconcile_scheduled_rows queues the
-        // delete at grace.max(1) — the letter must name that same date.
+        // delete at grace.max(1) — the letter must name that same date, and
+        // say "1 day" rather than "1 days".
         let (_, body) = expiry_warning_mail("example.cz", EXP_TS, 0, EXP_TS - 86_400);
-        assert!(body.contains("po ochranné lhůtě 1 den, tj. 2. 9. 2026"));
-        // 2–4 takes the third Czech plural form.
+        assert!(body.contains("after a grace period of 1 day, on 2 Sep 2026"));
         let (_, body) = expiry_warning_mail("example.cz", EXP_TS, 3, EXP_TS - 2 * 86_400);
-        assert!(body.contains("zbývá 2 dny."));
-        assert!(body.contains("po ochranné lhůtě 3 dny, tj. 4. 9. 2026"));
+        assert!(body.contains("2 days left."));
+        assert!(body.contains("after a grace period of 3 days, on 4 Sep 2026"));
     }
 
     // ============================================================

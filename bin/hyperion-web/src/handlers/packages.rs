@@ -349,7 +349,11 @@ impl ReportPreview {
         // agrees with the one in the subject line the operator is reading.
         let last_day = (m.period_end - 1).max(m.period_start);
         Self {
-            period: format!("{} – {}", cz_date(m.period_start), cz_date(last_day)),
+            period: format!(
+                "{} – {}",
+                preview_date(m.period_start),
+                preview_date(last_day)
+            ),
             subject: m.subject,
             body: m.body,
             to: m.to,
@@ -361,11 +365,20 @@ impl ReportPreview {
 
 /// "1. 6. 2026" — the shape `care_report_render` puts in the mail, so the
 /// period shown above the preview reads like the one inside it.
-fn cz_date(ts: i64) -> String {
+fn preview_date(ts: i64) -> String {
     use chrono::Datelike;
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
     match chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0) {
-        Some(dt) => format!("{}. {}. {}", dt.day(), dt.month(), dt.year()),
-        None => "neznámé datum".to_string(),
+        Some(dt) => {
+            let m = MONTHS
+                .get((dt.month() as usize).saturating_sub(1))
+                .copied()
+                .unwrap_or("???");
+            format!("{} {} {}", dt.day(), m, dt.year())
+        }
+        None => "unknown date".to_string(),
     }
 }
 
@@ -994,10 +1007,10 @@ fn report_feature(cadence: ReportCadence, delivery: &ReportDelivery) -> Option<I
 fn report_cadence_label(c: ReportCadence) -> Option<&'static str> {
     match c {
         ReportCadence::Leave => None,
-        ReportCadence::Off => Some("vypnuto"),
-        ReportCadence::Weekly => Some("týdně"),
-        ReportCadence::Monthly => Some("měsíčně"),
-        ReportCadence::Quarterly => Some("čtvrtletně"),
+        ReportCadence::Off => Some("off"),
+        ReportCadence::Weekly => Some("weekly"),
+        ReportCadence::Monthly => Some("monthly"),
+        ReportCadence::Quarterly => Some("quarterly"),
     }
 }
 
@@ -1270,7 +1283,7 @@ mod tests {
         };
         let held = build_held(&a, None, None, &ReportDelivery::Unknown);
         assert!(held.orphaned);
-        assert_eq!(held.price, "490.00 Kč/měsíc");
+        assert_eq!(held.price, "490.00 Kč/month");
         assert!(held.included.is_empty());
         assert_eq!(held.name, "Care package", "never renders as a blank row");
     }
