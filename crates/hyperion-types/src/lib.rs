@@ -71,6 +71,7 @@ pub use stats::{
     TrashEntry, UpdateStatus, Web2faEnrollment, WebHostingAccess, WebLoginResult, WebUserSummary,
     WebVerify2faResult,
 };
+pub use stats::{CARE_REPORT_DEFAULT_BODY_TEMPLATE, EXPIRY_WARNING_DEFAULT_BODY_TEMPLATE};
 pub use wp::{
     HostingIntegritySummary, HostingVulnSummary, WpInstallRequest, WpInstallStatus,
     WpIntegrityFileIssue, WpIntegrityPluginResult, WpIntegrityScanResult, WpMalwareHit, WpPlugin,

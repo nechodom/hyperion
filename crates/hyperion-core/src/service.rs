@@ -4111,8 +4111,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 };
                 let (result, reason) = match sendable {
                     Ok((r, exp, to)) => {
-                        let (subject, body) =
-                            expiry_warning_mail(&r.domain, exp, r.grace_days, now_secs());
+                        let (subject, body) = expiry_warning_mail_with(
+                            &r.domain,
+                            exp,
+                            r.grace_days,
+                            now_secs(),
+                            &self.expiry_warning_template(),
+                        );
                         // notify_email returns nothing: a relay failure is
                         // already recorded by it in audit_log + email_log. So
                         // a dead relay can't bounce this row back to 'pending'
@@ -9169,6 +9174,19 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(mail)
     }
 
+    /// The operator's care-report body template from `[notifications]` in
+    /// agent.toml. Empty string (the default, and also what an unreadable
+    /// or template-less agent.toml yields) means "use the built-in letter".
+    fn care_report_template(&self) -> String {
+        read_notifications_section(self.agent_config_path.as_deref()).care_report_body_template
+    }
+
+    /// The operator's expiry-warning body template. Same empty-means-default
+    /// rule as `care_report_template`.
+    fn expiry_warning_template(&self) -> String {
+        read_notifications_section(self.agent_config_path.as_deref()).expiry_warning_body_template
+    }
+
     /// Build the current period's mail for one hosting — the shared body
     /// of preview and send, so the two can never render different text.
     async fn care_report_mail(
@@ -9184,7 +9202,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let report = self
             .care_report_build(HostingSelector::Id(detail.id.clone()), from, to)
             .await?;
-        let (subject, body) = care_report_render(&report, &detail.domain);
+        // Preview and send share this path, so the operator's edited letter
+        // is what BOTH show — a preview that differs from the mail is worse
+        // than no preview.
+        let (subject, body) =
+            care_report_render_with(&report, &detail.domain, &self.care_report_template());
         let mail = CareReportMail {
             subject,
             body,
@@ -9260,6 +9282,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
 
         let now = now_secs();
+        // Read the operator's letter template ONCE per tick, not once per
+        // hosting: it's a file read, and every report in this sweep must in
+        // any case be worded the same way.
+        let body_template = self.care_report_template();
         let mut sent = 0i64;
         for hosting_id in order {
             let Some(&(cadence, started_at)) = wanted.get(hosting_id.as_str()) else {
@@ -9336,7 +9362,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 );
                 continue;
             }
-            let (subject, body) = care_report_render(&report, &detail.domain);
+            let (subject, body) = care_report_render_with(&report, &detail.domain, &body_template);
             self.notify_email(
                 &to_addr,
                 &subject,
@@ -18762,6 +18788,36 @@ fn report_cadence_secs(c: ReportCadence) -> Option<i64> {
 /// renderer can be exercised without building a hosting; at every call
 /// site it is `report.domain`.
 pub fn care_report_render(report: &CareReport, domain: &str) -> (String, String) {
+    // "" = the built-in letter, which is exactly what this function is.
+    care_report_render_with(report, domain, "")
+}
+
+/// Same letter, with the operator's editable body template applied.
+///
+/// `body_template` empty (or whitespace) ⇒ the built-in default, byte for
+/// byte — an operator who never opens Settings sees no change. A non-empty
+/// template replaces the BODY only; the subject line stays ours, because it
+/// is what makes the mail findable in the customer's inbox and in
+/// `/emails`.
+///
+/// HONESTY: the placeholders a template can use for the six sections are
+/// the SECTION STRINGS produced above — never the raw `Option<i64>` counts
+/// behind them. That is the whole point of the feature. `{uptime}` is
+/// literally "AVAILABILITY: not monitored (uptime checks were not
+/// active)…" when nothing was measured, so no arrangement of the template
+/// can promote an unmeasured section into a number or a clean bill of
+/// health; the worst a bad template can do is leave a section out. If you
+/// are ever tempted to add `{uptime_pct}` or `{attack_count}` here: don't.
+/// That is the lie this design exists to make unrepresentable.
+///
+/// An unknown `{token}` is left VERBATIM in the output by `render_template`
+/// (never a panic, never silently dropped), so an operator's typo shows up
+/// in the preview instead of quietly deleting a paragraph.
+pub fn care_report_render_with(
+    report: &CareReport,
+    domain: &str,
+    body_template: &str,
+) -> (String, String) {
     let days = care_days_spanned(report.period_start, report.period_end);
     // The period is half-open, so the last day INSIDE it is `end - 1`.
     // Printing the exclusive end ("1 Jun – 1 Jul") reads to a customer as
@@ -18772,33 +18828,57 @@ pub fn care_report_render(report: &CareReport, domain: &str) -> (String, String)
 
     let subject = format!("Care report for {domain} ({from_str} – {to_str})");
 
-    let sections = [
+    let parts = [
         care_section_attacks(report.attacks_blocked),
         care_section_updates(report.updates_applied),
         care_section_usage(report.usage.as_ref()),
         care_section_uptime(report.uptime.as_ref()),
         care_section_backups(report.backups.as_ref()),
         care_section_integrity(report.integrity.as_ref()),
-    ]
-    .join("\n\n");
+    ];
 
-    let body = format!(
-        "CARE REPORT\n\
-         Site:    {domain}\n\
-         Period:  {from_str} – {to_str} ({days} {})\n\
-         \n\
-         Here is what happened on your site during this period. We only quote\n\
-         figures we actually measured. Where something was not being measured,\n\
-         we say so — rather than print a zero that would claim something other\n\
-         than \"we were not looking\".\n\
-         \n\
-         {sections}\n\
-         \n\
-         --\n\
-         You receive this report because {domain} is on a care plan.\n\
-         The figures come straight from the server the site runs on; times are UTC.\n\
-         If anything here needs explaining, just reply to this e-mail.\n",
-        plural(days, "day", "days"),
+    if body_template.trim().is_empty() {
+        let sections = parts.join("\n\n");
+        let body = format!(
+            "CARE REPORT\n\
+             Site:    {domain}\n\
+             Period:  {from_str} – {to_str} ({days} {})\n\
+             \n\
+             Here is what happened on your site during this period. We only quote\n\
+             figures we actually measured. Where something was not being measured,\n\
+             we say so — rather than print a zero that would claim something other\n\
+             than \"we were not looking\".\n\
+             \n\
+             {sections}\n\
+             \n\
+             --\n\
+             You receive this report because {domain} is on a care plan.\n\
+             The figures come straight from the server the site runs on; times are UTC.\n\
+             If anything here needs explaining, just reply to this e-mail.\n",
+            plural(days, "day", "days"),
+        );
+        return (subject, body);
+    }
+
+    // Day count carries its own unit word so a template can never render
+    // "1 days", and so `{days}` alone reproduces the default's "(30 days)".
+    let days_str = format!("{days} {}", plural(days, "day", "days"));
+    let body = render_template(
+        body_template,
+        &[
+            ("domain", domain),
+            ("period_start", &from_str),
+            // Inclusive last day of the period, same as the default letter.
+            ("period_end", &to_str),
+            ("days", &days_str),
+            // Rendered sections, unmeasured wording included. See above.
+            ("attacks", &parts[0]),
+            ("updates", &parts[1]),
+            ("traffic", &parts[2]),
+            ("uptime", &parts[3]),
+            ("backups", &parts[4]),
+            ("integrity", &parts[5]),
+        ],
     );
     (subject, body)
 }
@@ -20570,12 +20650,24 @@ fn fmt_mail_date(secs: i64) -> String {
         .unwrap_or_default()
 }
 
-/// Whole days left until `expires_at`, floored, never negative. Derived
-/// from the clock rather than from the warning's own 30/7/1 offset: a tick
-/// that runs late (agent down for a day) must state the days that are
-/// actually left, not the ones the row was queued for.
+/// Whole days left until `expires_at`, as a CALENDAR difference in UTC —
+/// the same calendar `fmt_mail_date` prints — never negative. Derived from
+/// the clock rather than from the warning's own 30/7/1 offset: a tick that
+/// runs late (agent down for a day) must state the days that are actually
+/// left, not the ones the row was queued for.
+///
+/// It must be a calendar difference and not the duration floor
+/// `(expires_at - now) / 86_400`: the scheduler queues the 1-day row at
+/// `expires_at - 86_400` and fires it at `+δ` (δ up to one 5-minute tick),
+/// so the floor collapses to 0 on every real send and the letter claims
+/// "expires today" on the day BEFORE the date it goes on to print.
 fn expiry_days_left(expires_at: i64, now: i64) -> i64 {
-    (expires_at - now).max(0) / 86_400
+    let day =
+        |s: i64| chrono::DateTime::<chrono::Utc>::from_timestamp(s, 0).map(|dt| dt.date_naive());
+    match (day(expires_at), day(now)) {
+        (Some(exp), Some(now)) => (exp - now).num_days().max(0),
+        _ => 0,
+    }
 }
 
 /// Subject + body of the expiry warning. The recipient is the SITE OWNER,
@@ -20587,11 +20679,23 @@ fn expiry_days_left(expires_at: i64, now: i64) -> i64 {
 /// `reconcile_scheduled_rows`: suspend at `expires_at`, delete at
 /// `expires_at + grace_days.max(1)` days — hence the same `.max(1)` here,
 /// so the date in the letter is the date the action fires.
-fn expiry_warning_mail(
+///
+/// Empty (or whitespace-only) `body_template` ⇒ the built-in wording, byte
+/// for byte. A custom one replaces the BODY only; the subject keeps the
+/// "[Hyperion] … expires in N days" shape the customer's mail rules and
+/// our own `/emails` list key off.
+///
+/// Every date/day-count placeholder is pre-worded ("expires today",
+/// "30 days", "1 day"), so a custom letter cannot invent a negative
+/// countdown, mis-plural a single day, or name a delete date other than
+/// the one `reconcile_scheduled_rows` actually queued. Unknown `{tokens}`
+/// are left verbatim rather than dropped — see `render_template`.
+fn expiry_warning_mail_with(
     domain: &str,
     expires_at: i64,
     grace_days: i64,
     now: i64,
+    body_template: &str,
 ) -> (String, String) {
     let days_left = expiry_days_left(expires_at, now);
     let grace = grace_days.max(1);
@@ -20612,16 +20716,33 @@ fn expiry_warning_mail(
             plural(days_left, "day", "days")
         )
     };
-    let body = format!(
-        "Hello,\n\n\
-         hosting for {domain} {when}.\n\n\
-         If it is not renewed before then:\n\
-         - on {exp_date} the hosting will be suspended and visitors will see an information page instead of the site,\n\
-         - after a grace period of {grace} {grace_word}, on {del_date}, the hosting and its data will be deleted.\n\n\
-         To renew, please get in touch.\n\n--\nHyperion\n",
-        exp_date = fmt_mail_date(expires_at),
-        grace_word = plural(grace, "day", "days"),
-        del_date = fmt_mail_date(expires_at + grace * 86_400),
+    let exp_date = fmt_mail_date(expires_at);
+    let del_date = fmt_mail_date(expires_at + grace * 86_400);
+    let grace_str = format!("{grace} {}", plural(grace, "day", "days"));
+    if body_template.trim().is_empty() {
+        let body = format!(
+            "Hello,\n\n\
+             hosting for {domain} {when}.\n\n\
+             If it is not renewed before then:\n\
+             - on {exp_date} the hosting will be suspended and visitors will see an information page instead of the site,\n\
+             - after a grace period of {grace_str}, on {del_date}, the hosting and its data will be deleted.\n\n\
+             To renew, please get in touch.\n\n--\nHyperion\n",
+        );
+        return (subject, body);
+    }
+    let days_left_str = format!("{days_left} {}", plural(days_left, "day", "days"));
+    let body = render_template(
+        body_template,
+        &[
+            ("domain", domain),
+            ("expires_at", &exp_date),
+            ("days_left", &days_left_str),
+            // Already clamped with `.max(1)`, so the letter names the date
+            // the delete is really queued for.
+            ("grace_days", &grace_str),
+            ("delete_at", &del_date),
+            ("when", &when),
+        ],
     );
     (subject, body)
 }
@@ -20655,6 +20776,14 @@ fn read_notifications_section(
         slack_template: get("slack_template", &def.slack_template),
         email_subject_template: get("email_subject_template", &def.email_subject_template),
         email_body_template: get("email_body_template", &def.email_body_template),
+        // The customer letters default to "" — which the renderers read as
+        // "use the built-in letter", so a missing key, an empty key and an
+        // unreadable agent.toml all land on today's wording.
+        care_report_body_template: get("care_report_body_template", &def.care_report_body_template),
+        expiry_warning_body_template: get(
+            "expiry_warning_body_template",
+            &def.expiry_warning_body_template,
+        ),
     }
 }
 
@@ -20863,6 +20992,21 @@ fn parse_agent_section_fields(
                     return Err(bad("template too long (max 4000 characters)".into()));
                 }
                 crate::config_persist::FieldValue::Str(v.clone())
+            }
+            // [notifications] — the two CUSTOMER LETTERS. Whole letters
+            // rather than one-line wrappers, hence the roomier cap: the
+            // built-in care report is ~1.2 kB before the operator adds a
+            // word. Empty stays empty and means "use the built-in letter".
+            ("notifications", "care_report_body_template")
+            | ("notifications", "expiry_warning_body_template") => {
+                if v.len() > 20_000 {
+                    return Err(bad("letter too long (max 20000 characters)".into()));
+                }
+                // A <textarea> submits CRLF line endings per the HTML spec.
+                // Left alone they would end up in a plain-text mail body and
+                // would stop a saved copy of the default letter from being
+                // byte-identical to the built-in one.
+                crate::config_persist::FieldValue::Str(v.replace("\r\n", "\n"))
             }
             // Reject anything else.
             _ => {
@@ -23940,9 +24084,11 @@ mod tests {
     }
 
     // ============================================================
-    //  expiry_warning_mail — the letter the customer actually gets
-    //  before we suspend their site. Pure, so the 30/7/1-day
-    //  variants are assertable without an SMTP relay.
+    //  expiry_warning_mail_with — the letter the customer actually
+    //  gets before we suspend their site. Pure, so the 30/7/1-day
+    //  variants are assertable without an SMTP relay. An empty
+    //  template is the built-in wording (see the editable-letter
+    //  block further down).
     // ============================================================
 
     /// 2026-09-01 00:00:00 UTC.
@@ -23950,7 +24096,8 @@ mod tests {
 
     #[test]
     fn expiry_warning_30d_states_domain_date_days_and_consequences() {
-        let (subject, body) = expiry_warning_mail("example.cz", EXP_TS, 14, EXP_TS - 30 * 86_400);
+        let (subject, body) =
+            expiry_warning_mail_with("example.cz", EXP_TS, 14, EXP_TS - 30 * 86_400, "");
         assert_eq!(
             subject,
             "[Hyperion] Hosting for example.cz expires in 30 days"
@@ -23963,7 +24110,8 @@ mod tests {
 
     #[test]
     fn expiry_warning_7d_variant() {
-        let (subject, body) = expiry_warning_mail("example.cz", EXP_TS, 14, EXP_TS - 7 * 86_400);
+        let (subject, body) =
+            expiry_warning_mail_with("example.cz", EXP_TS, 14, EXP_TS - 7 * 86_400, "");
         assert_eq!(
             subject,
             "[Hyperion] Hosting for example.cz expires in 7 days"
@@ -23973,7 +24121,8 @@ mod tests {
 
     #[test]
     fn expiry_warning_1d_variant_is_singular() {
-        let (subject, body) = expiry_warning_mail("example.cz", EXP_TS, 14, EXP_TS - 86_400);
+        let (subject, body) =
+            expiry_warning_mail_with("example.cz", EXP_TS, 14, EXP_TS - 86_400, "");
         assert_eq!(
             subject,
             "[Hyperion] Hosting for example.cz expires in 1 day"
@@ -23983,12 +24132,30 @@ mod tests {
 
     #[test]
     fn expiry_warning_on_the_day_says_today() {
-        let (subject, body) = expiry_warning_mail("example.cz", EXP_TS, 14, EXP_TS);
+        let (subject, body) = expiry_warning_mail_with("example.cz", EXP_TS, 14, EXP_TS, "");
         assert_eq!(subject, "[Hyperion] Hosting for example.cz expires today");
         assert!(body.contains("hosting for example.cz expires today."));
         // A late tick can't produce a negative countdown.
-        let (late, _) = expiry_warning_mail("example.cz", EXP_TS, 14, EXP_TS + 3 * 86_400);
+        let (late, _) = expiry_warning_mail_with("example.cz", EXP_TS, 14, EXP_TS + 3 * 86_400, "");
         assert_eq!(late, "[Hyperion] Hosting for example.cz expires today");
+    }
+
+    #[test]
+    fn tmp_verify_scheduler_delta() {
+        // Notify1d row is due at EXP - 86_400; the 5-min tick fires it at +δ.
+        let (subject, body) =
+            expiry_warning_mail_with("example.cz", EXP_TS, 14, EXP_TS - 86_400 + 120, "");
+        assert_eq!(
+            subject,
+            "[Hyperion] Hosting for example.cz expires in 1 day"
+        );
+        assert!(body.contains("expires on 1 Sep 2026 — 1 day left."), "{body}");
+        // 7-day row, same δ.
+        let (s7, _) = expiry_warning_mail_with("example.cz", EXP_TS, 14, EXP_TS - 7 * 86_400 + 299, "");
+        assert_eq!(s7, "[Hyperion] Hosting for example.cz expires in 7 days");
+        // Late tick on the expiry day itself still says today.
+        let (s0, _) = expiry_warning_mail_with("example.cz", EXP_TS, 14, EXP_TS + 3_600, "");
+        assert_eq!(s0, "[Hyperion] Hosting for example.cz expires today");
     }
 
     #[test]
@@ -23996,11 +24163,253 @@ mod tests {
         // grace_days = 0 is stored, but reconcile_scheduled_rows queues the
         // delete at grace.max(1) — the letter must name that same date, and
         // say "1 day" rather than "1 days".
-        let (_, body) = expiry_warning_mail("example.cz", EXP_TS, 0, EXP_TS - 86_400);
+        let (_, body) = expiry_warning_mail_with("example.cz", EXP_TS, 0, EXP_TS - 86_400, "");
         assert!(body.contains("after a grace period of 1 day, on 2 Sep 2026"));
-        let (_, body) = expiry_warning_mail("example.cz", EXP_TS, 3, EXP_TS - 2 * 86_400);
+        let (_, body) = expiry_warning_mail_with("example.cz", EXP_TS, 3, EXP_TS - 2 * 86_400, "");
         assert!(body.contains("2 days left."));
         assert!(body.contains("after a grace period of 3 days, on 4 Sep 2026"));
+    }
+
+    // ============================================================
+    //  Editable customer letters (care report + expiry warning).
+    //
+    //  Four properties, in order of how much they matter:
+    //   1. an operator who never touches a template gets today's
+    //      letter, byte for byte;
+    //   2. the default template we SHOW the operator reproduces
+    //      that same letter — otherwise the editor lies about
+    //      where they are starting from;
+    //   3. an unmeasured section stays unmeasured through a custom
+    //      letter (the placeholders are section STRINGS, so there
+    //      is no way to spend a number we never measured);
+    //   4. an unknown placeholder survives as literal text instead
+    //      of panicking or silently deleting a paragraph.
+    // ============================================================
+
+    /// 2026-06-01 00:00:00 UTC .. 2026-07-01 (half-open, 30 days).
+    const CARE_FROM: i64 = 1_780_272_000;
+    const CARE_TO: i64 = CARE_FROM + 30 * 86_400;
+
+    /// A report with five sections measured and UPTIME deliberately not —
+    /// the mixed case, which is the one a custom letter can get wrong.
+    fn mk_care_report() -> CareReport {
+        let mut r = CareReport::empty(
+            HostingId("h1".into()),
+            "example.cz".into(),
+            CARE_FROM,
+            CARE_TO,
+        );
+        r.attacks_blocked = Some(12);
+        r.updates_applied = Some(3);
+        r.usage = Some(CareUsage {
+            bw_in_bytes: Some(2_000_000),
+            bw_out_bytes: 34_500_000,
+            requests: 12_345,
+            disk_peak_bytes: 1_200_000_000,
+            days_counted: 30,
+            days_in_period: 30,
+        });
+        r.uptime = None; // not monitored — on purpose
+        r.backups = Some(CareBackups {
+            taken: 30,
+            failed: 1,
+            last_success_at: Some(CARE_TO - 3_600),
+        });
+        r.integrity = Some(CareIntegrity {
+            scanned_at: CARE_TO - 86_400,
+            checksums_ran: true,
+            malware_scan_ran: true,
+            core_issues: 0,
+            plugin_issues: 0,
+            malware_hits: 0,
+        });
+        r
+    }
+
+    #[test]
+    fn care_letter_empty_template_is_todays_letter() {
+        let r = mk_care_report();
+        let (subject, body) = care_report_render(&r, "example.cz");
+        // Explicit "" and whitespace-only both mean "built-in letter".
+        assert_eq!(
+            care_report_render_with(&r, "example.cz", ""),
+            (subject.clone(), body.clone())
+        );
+        assert_eq!(care_report_render_with(&r, "example.cz", "  \n\t ").1, body);
+        // …and today's letter is still exactly this.
+        assert_eq!(
+            subject,
+            "Care report for example.cz (1 Jun 2026 – 30 Jun 2026)"
+        );
+        assert!(body.starts_with(
+            "CARE REPORT\nSite:    example.cz\nPeriod:  1 Jun 2026 – 30 Jun 2026 (30 days)\n\n"
+        ));
+        assert!(body.ends_with(
+            "--\nYou receive this report because example.cz is on a care plan.\n\
+             The figures come straight from the server the site runs on; times are UTC.\n\
+             If anything here needs explaining, just reply to this e-mail.\n"
+        ));
+        assert!(body.contains("ATTACKS BLOCKED: 12"));
+        assert!(body.contains("AVAILABILITY: not monitored"));
+    }
+
+    #[test]
+    fn care_letter_default_template_reproduces_the_builtin_letter() {
+        // The constant the Settings editor offers as a starting point is
+        // written by hand in hyperion-types; if either it or the built-in
+        // format! drifts, the operator's "default" would silently differ
+        // from what their customers have been receiving.
+        for r in [mk_care_report(), {
+            // Every section unmeasured — the other branch of all six.
+            CareReport::empty(
+                HostingId("h2".into()),
+                "quiet.cz".into(),
+                CARE_FROM,
+                CARE_TO,
+            )
+        }] {
+            let (_, builtin) = care_report_render(&r, &r.domain);
+            let (_, templated) = care_report_render_with(
+                &r,
+                &r.domain,
+                hyperion_types::CARE_REPORT_DEFAULT_BODY_TEMPLATE,
+            );
+            assert_eq!(builtin, templated);
+        }
+    }
+
+    #[test]
+    fn care_letter_custom_template_keeps_an_unmeasured_section_honest() {
+        let r = mk_care_report(); // uptime is None
+        let (subject, body) = care_report_render_with(
+            &r,
+            "example.cz",
+            "{domain} {period_start}–{period_end} ({days})\n{uptime}\n{attacks}",
+        );
+        // The subject is ours; only the body is operator-editable.
+        assert_eq!(
+            subject,
+            "Care report for example.cz (1 Jun 2026 – 30 Jun 2026)"
+        );
+        assert!(body.starts_with("example.cz 1 Jun 2026–30 Jun 2026 (30 days)\n"));
+        assert!(body.contains("ATTACKS BLOCKED: 12"));
+        // The rearranged letter still says nobody was watching, in full.
+        assert!(body.contains(
+            "AVAILABILITY: not monitored (uptime checks were not active)\n  \
+             We were not checking this site regularly during the period, so we\n  \
+             cannot say whether it stayed reachable. A figure of 100 % would be\n  \
+             invented."
+        ));
+    }
+
+    #[test]
+    fn care_letter_unknown_placeholder_is_left_literal() {
+        let r = mk_care_report();
+        // `{uptime_pct}` is exactly the placeholder this design refuses to
+        // provide: there is no way to ask for the number behind a section,
+        // so a template cannot turn "not monitored" into "100 %". Asking
+        // for it yields the operator's own text back, visibly wrong in the
+        // preview rather than silently dropped from the mail.
+        let (_, body) =
+            care_report_render_with(&r, "example.cz", "{domain} {uptime_pct} {nope} {unclosed");
+        assert_eq!(body, "example.cz {uptime_pct} {nope} {unclosed");
+    }
+
+    #[test]
+    fn expiry_letter_default_template_reproduces_the_builtin_letter() {
+        for (grace, now) in [
+            (14, EXP_TS - 30 * 86_400),
+            (14, EXP_TS - 86_400),
+            (0, EXP_TS - 86_400),
+            (14, EXP_TS), // "expires today"
+        ] {
+            let (_, builtin) = expiry_warning_mail_with("example.cz", EXP_TS, grace, now, "");
+            let (_, templated) = expiry_warning_mail_with(
+                "example.cz",
+                EXP_TS,
+                grace,
+                now,
+                hyperion_types::EXPIRY_WARNING_DEFAULT_BODY_TEMPLATE,
+            );
+            assert_eq!(builtin, templated, "grace={grace} now={now}");
+        }
+    }
+
+    #[test]
+    fn expiry_letter_custom_template_substitutes_and_preserves_unknowns() {
+        let (subject, body) = expiry_warning_mail_with(
+            "example.cz",
+            EXP_TS,
+            14,
+            EXP_TS - 7 * 86_400,
+            "Renew {domain} before {expires_at} ({days_left} left).\n\
+             Deleted on {delete_at}, after {grace_days}.\n{when}\n{mystery}",
+        );
+        assert_eq!(
+            subject,
+            "[Hyperion] Hosting for example.cz expires in 7 days"
+        );
+        assert_eq!(
+            body,
+            "Renew example.cz before 1 Sep 2026 (7 days left).\n\
+             Deleted on 15 Sep 2026, after 14 days.\n\
+             expires on 1 Sep 2026 — 7 days left\n{mystery}"
+        );
+    }
+
+    #[test]
+    fn customer_letter_templates_default_to_empty_meaning_builtin() {
+        let tmp = tempfile::tempdir().expect("dir");
+        // No file at all, and a file with no [notifications] section: both
+        // leave the letters empty, i.e. the built-in wording.
+        assert!(read_notifications_section(None)
+            .care_report_body_template
+            .is_empty());
+        let bare = tmp.path().join("bare.toml");
+        std::fs::write(&bare, b"[cluster]\npanel_hostname = \"p\"\n").expect("write");
+        let v = read_notifications_section(Some(bare.as_path()));
+        assert!(v.care_report_body_template.is_empty());
+        assert!(v.expiry_warning_body_template.is_empty());
+        // The three wrapper templates keep their pass-through defaults.
+        assert_eq!(v.slack_template, "{message}");
+        // A customised letter reads back verbatim; the OTHER letter is
+        // still empty (no accidental cross-fill).
+        let set = tmp.path().join("set.toml");
+        std::fs::write(
+            &set,
+            b"[notifications]\ncare_report_body_template = \"Hi {domain}\\n{uptime}\"\n",
+        )
+        .expect("write");
+        let v = read_notifications_section(Some(set.as_path()));
+        assert_eq!(v.care_report_body_template, "Hi {domain}\n{uptime}");
+        assert!(v.expiry_warning_body_template.is_empty());
+    }
+
+    #[test]
+    fn customer_letter_templates_are_settings_writable() {
+        // A <textarea> posts CRLF; storing it would put \r into a
+        // plain-text mail body, so the parser normalises it.
+        let fields = std::collections::BTreeMap::from([(
+            "care_report_body_template".to_string(),
+            "Hi {domain}\r\nbye\r\n".to_string(),
+        )]);
+        let parsed = parse_agent_section_fields("notifications", &fields).expect("allow-listed");
+        assert!(matches!(
+            parsed.as_slice(),
+            [(_, crate::config_persist::FieldValue::Str(s))] if s == "Hi {domain}\nbye\n"
+        ));
+        // Both letters are allow-listed, and both are length-capped.
+        let big = std::collections::BTreeMap::from([(
+            "expiry_warning_body_template".to_string(),
+            "x".repeat(20_001),
+        )]);
+        assert!(parse_agent_section_fields("notifications", &big).is_err());
+        // A neighbouring field in the same section is still refused.
+        let bogus = std::collections::BTreeMap::from([(
+            "care_report_subject_template".to_string(),
+            "nope".to_string(),
+        )]);
+        assert!(parse_agent_section_fields("notifications", &bogus).is_err());
     }
 
     // ============================================================

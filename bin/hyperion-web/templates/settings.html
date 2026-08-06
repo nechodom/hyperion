@@ -669,6 +669,96 @@
       <button type="submit" class="btn primary">Save message templates</button>
     </form>
   </div>
+
+  {# ───── Customer letters: the two letters that go to the SITE OWNER
+     rather than to the operator — the care report and the hosting-expiry
+     warning. Body only; the subject stays ours. Empty = the built-in
+     letter, so an operator who never opens this card keeps sending
+     exactly what Hyperion has always sent. ───── #}
+  <div class="card">
+    <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.4rem">
+      <h2 style="margin:0">
+        <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>
+        Customer letters
+      </h2>
+    </div>
+    <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">
+      These two go to the SITE OWNER, not to you: the monthly care report
+      and the warning before a hosting expires. You edit the body; the
+      subject line stays as Hyperion writes it, so the mail keeps its shape
+      in the customer's inbox and in the <a href="/emails">email log</a>.
+      Leave a box empty to send the built-in letter — the preview below then
+      shows exactly that.
+    </p>
+    <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">
+      The report's six section placeholders carry <em>whole sections</em>,
+      already worded — including &ldquo;not monitored&rdquo; / &ldquo;not
+      determined&rdquo; / &ldquo;not checked&rdquo; when that is the truth.
+      There is deliberately no placeholder for the bare number behind a
+      section, so no wording you choose can turn something we never measured
+      into a figure. The sample below leaves availability unmonitored on
+      purpose: that is the case worth reading before your customer does.
+    </p>
+
+    <form method="post" action="/settings/config" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="notifications">
+
+      <div class="field">
+        <label for="nt_care">Care report — body
+          <span class="hint">placeholders:
+            <code>{domain}</code> <code>{period_start}</code> <code>{period_end}</code> <code>{days}</code>
+            <code>{attacks}</code> <code>{updates}</code> <code>{traffic}</code> <code>{uptime}</code>
+            <code>{backups}</code> <code>{integrity}</code>
+          </span>
+        </label>
+        <textarea id="nt_care" name="care_report_body_template" rows="10"
+                  style="width:100%;font-family:var(--font-mono);font-size:0.85rem"
+                  placeholder="(empty — the built-in letter below is sent)">{{ config.notifications.care_report_body_template }}</textarea>
+        <div class="row" style="gap:0.4rem;margin:0.4rem 0 0.1rem">
+          <button type="button" class="btn small" data-fill="nt_care" data-from="nt_care_default">Start from the built-in letter</button>
+          <button type="button" class="btn small ghost" data-clear="nt_care">Clear (send the built-in)</button>
+        </div>
+        <div class="text-soft small" style="margin:0.5rem 0 0.1rem">Preview — sample site, availability NOT monitored</div>
+        <div id="nt_care_preview" style="white-space:pre-wrap;background:var(--surface-2);border-radius:var(--radius-xs);padding:0.55rem 0.7rem;font-size:0.85rem;min-height:2.2rem"></div>
+      </div>
+
+      <div class="field" style="margin-top:1.2rem">
+        <label for="nt_expiry">Expiry warning — body
+          <span class="hint">placeholders:
+            <code>{domain}</code> <code>{expires_at}</code> <code>{days_left}</code>
+            <code>{grace_days}</code> <code>{delete_at}</code> <code>{when}</code>
+          </span>
+        </label>
+        <textarea id="nt_expiry" name="expiry_warning_body_template" rows="8"
+                  style="width:100%;font-family:var(--font-mono);font-size:0.85rem"
+                  placeholder="(empty — the built-in letter below is sent)">{{ config.notifications.expiry_warning_body_template }}</textarea>
+        <div class="row" style="gap:0.4rem;margin:0.4rem 0 0.1rem">
+          <button type="button" class="btn small" data-fill="nt_expiry" data-from="nt_expiry_default">Start from the built-in letter</button>
+          <button type="button" class="btn small ghost" data-clear="nt_expiry">Clear (send the built-in)</button>
+        </div>
+        <div class="text-soft small" style="margin:0.5rem 0 0.1rem">Preview — sample site, 7 days left</div>
+        <div id="nt_expiry_preview" style="white-space:pre-wrap;background:var(--surface-2);border-radius:var(--radius-xs);padding:0.55rem 0.7rem;font-size:0.85rem;min-height:2.2rem"></div>
+      </div>
+
+      <p class="text-soft small" style="margin:0.9rem 0 0.8rem;line-height:1.5">
+        A placeholder you spell wrong is left in the text exactly as you
+        typed it — it is never dropped silently, so the preview shows the
+        mistake before a customer does. Dates and day counts arrive already
+        worded (&ldquo;1 Sep 2026&rdquo;, &ldquo;7 days&rdquo;,
+        &ldquo;1 day&rdquo;).
+      </p>
+      <button type="submit" class="btn primary">Save customer letters</button>
+    </form>
+
+    {# The built-in letters, verbatim from hyperion-types (a hyperion-core
+       test pins them to what the mailer actually sends). OUTSIDE the form
+       and with no `name`, so they are never submitted; a <textarea> is used
+       because it is the one element whose text survives HTML-escaping
+       round-trip intact. #}
+    <textarea id="nt_care_default" hidden>{{ care_report_default_template }}</textarea>
+    <textarea id="nt_expiry_default" hidden>{{ expiry_warning_default_template }}</textarea>
+  </div>
 </div>
 
 <script>
@@ -721,7 +811,69 @@
     var el = document.getElementById(id);
     if (el) el.addEventListener('input', update);
   });
+
+  // ── Customer letters (care report + expiry warning) ──────────────
+  // Sample values are the REAL section strings the renderer produces,
+  // copied wording and all. Availability is deliberately the unmeasured
+  // one: the operator must be able to see what an unmonitored section
+  // looks like inside their own wording before a customer does. There is
+  // no sample for "the number behind a section" because no such
+  // placeholder exists — a section is either its measured wording or its
+  // honest "we were not looking" wording, never a bare figure.
+  var careSample = {
+    domain: 'example.com',
+    period_start: '1 Jun 2026',
+    period_end: '30 Jun 2026',
+    days: '30 days',
+    attacks: 'ATTACKS BLOCKED: 12\n  That is how many times we cut off an address that kept trying to\n  guess an admin password or otherwise abuse the site. A blocked\n  address cannot reach the site at all for several hours.',
+    updates: 'PLUGIN AND THEME UPDATES: 3\n  That is how many updates we applied to the site. We count only the ones\n  that actually installed. WordPress core updates are not in this\n  figure — we do not track those separately yet.',
+    traffic: 'TRAFFIC: 12,345 requests, 34.5 MB sent\n  A request is one load of a page, an image or a file.\n  Data received: 2.0 MB.\n  Peak disk use during the period: 1.2 GB.\n  These figures cover the whole period (30 of 30 days).',
+    uptime: 'AVAILABILITY: not monitored (uptime checks were not active)\n  We were not checking this site regularly during the period, so we\n  cannot say whether it stayed reachable. A figure of 100 % would be\n  invented.',
+    backups: 'BACKUPS: 30\n  That is how many complete copies of the site (files and database) we\n  stored.\n  Last successful backup: 30 Jun 2026 23:00 UTC.\n  Failed attempts: 1 (these retry automatically).',
+    integrity: 'FILE INTEGRITY AND MALWARE: nothing found\n  Check on 30 Jun 2026: the WordPress files match what wordpress.org\n  published, and the malware scan found nothing.'
+  };
+  var expirySample = {
+    domain: 'example.com',
+    expires_at: '1 Sep 2026',
+    days_left: '7 days',
+    grace_days: '14 days',
+    delete_at: '15 Sep 2026',
+    when: 'expires on 1 Sep 2026 — 7 days left'
+  };
+  function letterPreview(inputId, defaultId, previewId, fields) {
+    var el = document.getElementById(inputId);
+    var def = document.getElementById(defaultId);
+    var out = document.getElementById(previewId);
+    if (!el || !def || !out) return;
+    // Empty means "send the built-in letter", so preview exactly that —
+    // the same rule the renderer applies server-side.
+    var tmpl = el.value.trim().length ? el.value : def.value;
+    out.textContent = hypRender(tmpl, fields);
+  }
+  function updateLetters() {
+    letterPreview('nt_care', 'nt_care_default', 'nt_care_preview', careSample);
+    letterPreview('nt_expiry', 'nt_expiry_default', 'nt_expiry_preview', expirySample);
+  }
+  ['nt_care', 'nt_expiry'].forEach(function (id) {
+    var el = document.getElementById(id);
+    if (el) el.addEventListener('input', updateLetters);
+  });
+  document.querySelectorAll('[data-fill]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var target = document.getElementById(btn.getAttribute('data-fill'));
+      var src = document.getElementById(btn.getAttribute('data-from'));
+      if (target && src) { target.value = src.value; updateLetters(); }
+    });
+  });
+  document.querySelectorAll('[data-clear]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var target = document.getElementById(btn.getAttribute('data-clear'));
+      if (target) { target.value = ''; updateLetters(); }
+    });
+  });
+
   update();
+  updateLetters();
 })();
 </script>
 

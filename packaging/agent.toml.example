@@ -98,3 +98,46 @@ mail_threshold = 8    # postfix/dovecot SASL auth failures
 # NB: the panel (web UI) login has its own protection — a per-real-peer rate
 # limit + firewall ban and a per-account hard-lock — so it is deliberately NOT
 # driven from here (the panel's client IP can be a spoofable proxy header).
+
+# [notifications]
+# Editable outbound wording. Every key here is optional, and an empty or
+# missing one means "unchanged" — edit them in the panel under
+# Settings -> Notifications, which has a live preview.
+#
+# The first three WRAP what Hyperion already wrote (operator alerts,
+# reminders, test sends); their defaults are pass-through:
+#   slack_template         = "{message}"   # {message} {time} {panel}
+#   email_subject_template = "{subject}"   # {subject} {time}
+#   email_body_template    = "{body}"      # {body} {time} {panel} {kind}
+#
+# The last two are whole letters to the CUSTOMER, and default to EMPTY,
+# which means "send the built-in letter". Only the body is editable; the
+# subject stays as Hyperion writes it.
+#
+#   care_report_body_template
+#     {domain} {period_start} {period_end} {days}
+#     {attacks} {updates} {traffic} {uptime} {backups} {integrity}
+#
+#     The six section placeholders carry the WHOLE rendered section,
+#     already worded — including "not monitored" / "not determined" /
+#     "not checked" when that section could not be measured. There is
+#     deliberately no placeholder for the bare number behind a section, so
+#     no wording can promote something we never measured into a figure.
+#
+#   expiry_warning_body_template
+#     {domain} {expires_at} {days_left} {grace_days} {delete_at} {when}
+#
+#     Dates and day counts arrive already worded ("1 Sep 2026", "7 days",
+#     "1 day", "expires today"), so a custom letter cannot mis-plural a
+#     day or name a delete date other than the scheduled one.
+#
+# A placeholder that does not exist is left in the text exactly as typed —
+# never dropped, never an error — so a typo shows up in the preview.
+#
+# care_report_body_template = """
+# CARE REPORT for {domain} ({period_start} – {period_end})
+#
+# {attacks}
+#
+# {uptime}
+# """

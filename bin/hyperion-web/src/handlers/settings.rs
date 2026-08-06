@@ -88,6 +88,15 @@ struct SettingsTpl<'a> {
     can_manage_api_keys: bool,
     /// A freshly-minted raw key to reveal exactly once (via ?api_key_new=).
     new_api_key: Option<String>,
+    /// The built-in customer letters, as templates. Rendered into hidden
+    /// <textarea>s so the "Customer letters" card can (a) preview the
+    /// default when the operator has written nothing and (b) hand them the
+    /// real default as a starting point. They come from hyperion-types —
+    /// the same constants a hyperion-core test pins to the built-in
+    /// wording — so the editor can never show a "default" the mailer
+    /// doesn't actually send.
+    care_report_default_template: &'static str,
+    expiry_warning_default_template: &'static str,
 }
 
 fn short_sha(s: &str) -> String {
@@ -468,6 +477,8 @@ pub async fn get_settings(
         api_keys,
         can_manage_api_keys,
         new_api_key: new_api_key.clone(),
+        care_report_default_template: hyperion_types::CARE_REPORT_DEFAULT_BODY_TEMPLATE,
+        expiry_warning_default_template: hyperion_types::EXPIRY_WARNING_DEFAULT_BODY_TEMPLATE,
     };
     let mut resp = Html(tpl.render()?).into_response();
     // One-shot: clear the reveal cookie so a refresh doesn't show the key again.
@@ -1004,6 +1015,10 @@ fn section_to_tab(section: &str) -> &'static str {
         "email" => "mail",
         "acme" => "tls",
         "slack" => "notifications",
+        // Both template cards (message wrappers + customer letters) live on
+        // the Notifications tab and write `[notifications]`. Without this
+        // the save bounced the operator to Mail mid-edit.
+        "notifications" => "notifications",
         "backup_remote" | "backup_retention" => "backups",
         "cluster" => "cluster",
         "fail2ban" => "bruteforce",
