@@ -246,9 +246,14 @@ pub async fn upsert_usage(pool: &SqlitePool, bucket: &UsageBucket) -> Result<(),
            ON CONFLICT(hosting_id, period) DO UPDATE SET
              disk_used_bytes = excluded.disk_used_bytes,
              inodes_used     = excluded.inodes_used,
-             bw_in_bytes     = excluded.bw_in_bytes,
-             bw_out_bytes    = excluded.bw_out_bytes,
-             php_requests    = excluded.php_requests,
+             -- Traffic within one hour only ever grows, so a LOWER reading
+             -- is not a correction — it is the log having been rotated or
+             -- truncated underneath us mid-hour. Taking the max keeps what
+             -- was already measured instead of erasing it. Disk, inodes,
+             -- memory and CPU are LEVELS and must still track downwards.
+             bw_in_bytes     = MAX(bw_in_bytes,  excluded.bw_in_bytes),
+             bw_out_bytes    = MAX(bw_out_bytes, excluded.bw_out_bytes),
+             php_requests    = MAX(php_requests, excluded.php_requests),
              mem_rss_bytes   = excluded.mem_rss_bytes,
              cpu_pct_x100    = excluded.cpu_pct_x100"#,
     )
@@ -279,6 +284,10 @@ pub async fn upsert_usage(pool: &SqlitePool, bucket: &UsageBucket) -> Result<(),
 /// That is correct rather than merely convenient: a zero cannot raise a
 /// MAX, and the hour genuinely did carry traffic, so it belongs in the
 /// DISTINCT-date coverage count.
+///
+/// Like [`upsert_usage`], an existing value is never LOWERED — see the
+/// comment there. Both writers can land on the same closed hour, and the
+/// one holding a rotated-away log must not win.
 pub async fn upsert_usage_traffic(
     pool: &SqlitePool,
     hosting_id: &HostingId,
@@ -296,9 +305,9 @@ pub async fn upsert_usage_traffic(
             php_requests, mem_rss_bytes, cpu_pct_x100)
            VALUES (?, ?, 0, 0, ?, ?, ?, 0, 0)
            ON CONFLICT(hosting_id, period) DO UPDATE SET
-             bw_in_bytes  = excluded.bw_in_bytes,
-             bw_out_bytes = excluded.bw_out_bytes,
-             php_requests = excluded.php_requests"#,
+             bw_in_bytes  = MAX(bw_in_bytes,  excluded.bw_in_bytes),
+             bw_out_bytes = MAX(bw_out_bytes, excluded.bw_out_bytes),
+             php_requests = MAX(php_requests, excluded.php_requests)"#,
     )
     .bind(hosting_id.as_str())
     .bind(period)

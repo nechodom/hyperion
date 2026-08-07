@@ -5487,27 +5487,36 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
     }
 
-    /// Record that the brute-force scanner is watching this site, if we
-    /// have not already. Idempotent: only the FIRST scan of an unbroken
-    /// protected stretch writes, so the value is "watching since", not
-    /// "last seen".
+    /// Record that the brute-force scanner is watching this site.
+    ///
+    /// Stores BOTH ends of the evidence, `"<since>,<last_scan>"`, because a
+    /// start alone cannot describe a gap. Protection that stops and later
+    /// resumes — the node down for a week, `[fail2ban] enabled = false`
+    /// flipped off and back on, the agent simply not running — would
+    /// otherwise keep its original `since` and let the letter back-claim
+    /// the dark days. A scan arriving more than
+    /// [`FAIL2BAN_COVERAGE_GAP_SECS`] after the last one therefore starts a
+    /// new stretch.
     ///
     /// `hosting_kv` is node-local and so is the scanner, which is what
     /// makes this readable by the care report — that runs on the owning
     /// node too.
     async fn note_bruteforce_coverage(&self, hosting_id: &str, at: i64) {
-        if matches!(
+        let prev =
             hyperion_state::hosting_kv::get(&self.pool, hosting_id, FAIL2BAN_HTTP_SINCE_KV_KEY)
-                .await,
-            Ok(Some(_))
-        ) {
-            return;
-        }
+                .await
+                .ok()
+                .flatten();
+        let since = match prev.as_deref().and_then(parse_coverage_stamp) {
+            Some((since, last)) if at.saturating_sub(last) <= FAIL2BAN_COVERAGE_GAP_SECS => since,
+            // Never stamped, unparseable, or resuming after a gap.
+            _ => at,
+        };
         let _ = hyperion_state::hosting_kv::set(
             &self.pool,
             hosting_id,
             FAIL2BAN_HTTP_SINCE_KV_KEY,
-            &at.to_string(),
+            &format!("{since},{at}"),
             now_secs(),
         )
         .await;
@@ -5516,22 +5525,30 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// When protection demonstrably began watching this site, or `None`
     /// when it is not watching now.
     ///
-    /// A read failure answers `Some(now)` — "we cannot prove any of this
-    /// period was covered". That is the opposite of how
-    /// [`Self::http_bruteforce_scan_enabled`] fails, and deliberately so:
-    /// there, failing open keeps a paying customer PROTECTED; here,
-    /// failing open would let the letter CLAIM protection it cannot
-    /// evidence.
+    /// A read failure, an absent stamp, or a stamp whose last scan is stale
+    /// all answer `Some(now)` — "we cannot evidence any of this period".
+    /// That is the opposite of how [`Self::http_bruteforce_scan_enabled`]
+    /// fails, and deliberately so: there, failing open keeps a paying
+    /// customer PROTECTED; here, failing open would let the letter CLAIM
+    /// protection it cannot evidence. The caller turns a `since` at or past
+    /// the period end into "not monitored".
     async fn bruteforce_coverage_since(&self, hosting_id: &str) -> Option<i64> {
         if !self.fail2ban.enabled || !self.http_bruteforce_scan_enabled(hosting_id).await {
             return None;
         }
-        match hyperion_state::hosting_kv::get(&self.pool, hosting_id, FAIL2BAN_HTTP_SINCE_KV_KEY)
-            .await
-        {
-            Ok(Some(v)) => Some(v.trim().parse::<i64>().unwrap_or_else(|_| now_secs())),
-            Ok(None) => Some(now_secs()),
-            Err(_) => Some(now_secs()),
+        let now = now_secs();
+        let stamp =
+            hyperion_state::hosting_kv::get(&self.pool, hosting_id, FAIL2BAN_HTTP_SINCE_KV_KEY)
+                .await
+                .ok()
+                .flatten();
+        match stamp.as_deref().and_then(parse_coverage_stamp) {
+            // Configured on, but nothing has actually scanned recently —
+            // the switch says yes and the evidence says nothing.
+            Some((since, last)) if now.saturating_sub(last) <= FAIL2BAN_COVERAGE_GAP_SECS => {
+                Some(since)
+            }
+            _ => Some(now),
         }
     }
 
@@ -5570,17 +5587,25 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             let Some(user) = derive_user_from_summary(s) else {
                 continue;
             };
-            // First scan since protection was (re-)enabled: stamp when we
-            // actually started watching. Written by the SCANNER, not by the
-            // toggle handler, so it records what ran rather than what was
-            // configured — a site whose log is unreadable, or whose node was
-            // down, never acquires a stamp it did not earn.
-            self.note_bruteforce_coverage(s.id.as_str(), since).await;
             let access = std::path::PathBuf::from(&self.paths.home_root)
                 .join(&user)
                 .join(&s.domain)
                 .join("logs")
                 .join("access.log");
+            // Stamp only AFTER the log has actually been opened. `user` is a
+            // GUESS derived from the domain and it succeeds for almost any
+            // domain, so an imported or renamed site sails past the check
+            // above and points at a path that does not exist. Stamping
+            // before the read would mark such a site "watched since" forever
+            // while its log was never read once — and its letter would say
+            // "0 attacks, protection ran for the whole period" beside a
+            // traffic section that correctly says "not measured", because
+            // `stats_tick` skips the very same site for the very same wrong
+            // path. One letter, two sections, opposite claims.
+            if !tokio::fs::try_exists(&access).await.unwrap_or(false) {
+                continue;
+            }
+            self.note_bruteforce_coverage(s.id.as_str(), since).await;
             for ip in scan_access_log_for_bruteforce(&access, since, cfg.http_threshold).await {
                 intents.push(BanIntent {
                     ip,
@@ -9301,12 +9326,21 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // own coverage stamp answers the other half, and bounds the claim to
         // the days it can evidence.
         if let Some(since) = self.bruteforce_coverage_since(id).await {
-            report.attacks_blocked = Some(
-                reports::attacks_blocked(&self.pool, id, from, to)
-                    .await
-                    .map_err(|e| wrap("attacks", e))?,
-            );
-            report.attacks_covered_since = (since > from).then_some(since);
+            // The COUNT and the sentence describing it must come from one
+            // window. Counting the whole period while saying "watching
+            // since the 25th, so this figure covers only that part" put a
+            // 21-day total inside a 5-day claim — and in the flattering
+            // direction. Bans survive an opt-out (rows are never deleted)
+            // and can be attributed by hand at any time, so the two windows
+            // really do diverge.
+            if let Some(effective) = attacks_window(since, from, to) {
+                report.attacks_blocked = Some(
+                    reports::attacks_blocked(&self.pool, id, effective, to)
+                        .await
+                        .map_err(|e| wrap("attacks", e))?,
+                );
+                report.attacks_covered_since = (since > from).then_some(since);
+            }
         }
         report.updates_applied = reports::updates_applied(&self.pool, id, from, to)
             .await
@@ -12767,8 +12801,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             let access_log = logs_dir.join("access.log");
             // The bucket is keyed by UTC HOUR, so it must hold that hour's
             // traffic and nothing else — see `parse_access_log_window`.
+            //
+            // BOUNDED at the top even though this hour is still running:
+            // `hour_start` is computed once at the start of the tick, but
+            // the per-site loop does `du` and a 200 ms /proc pass first, so
+            // a busy node can reach this line in the NEXT hour. Unbounded,
+            // that traffic would be filed into the hour named by `period`
+            // and counted again by its own bucket later.
             let (bw_in, bw_out, reqs, _last) =
-                parse_access_log_window(&access_log, hour_start, None).await;
+                parse_access_log_window(&access_log, hour_start, Some(hour_start + 3600)).await;
             // The current hour is still running, so this row is rewritten on
             // every tick and is only complete once the hour ends. Backfill
             // the hour we just left so it stops being short by up to one
@@ -20322,6 +20363,51 @@ const FAIL2BAN_HTTP_KV_KEY: &str = "http_bruteforce_scan_enabled";
 /// only ever describes the present.
 const FAIL2BAN_HTTP_SINCE_KV_KEY: &str = "http_bruteforce_scan_since";
 
+/// How long a silence breaks a stretch of proven coverage. The scanner
+/// runs every scheduler tick (minutes), so an hour without one means it
+/// was not running — the node was down, the agent was restarting, or
+/// `[fail2ban] enabled` was off. Generous on purpose: the cost of being
+/// too strict is a letter that under-claims, which is the safe direction.
+const FAIL2BAN_COVERAGE_GAP_SECS: i64 = 3600;
+
+/// The window an "attacks blocked" figure may be counted over, given when
+/// protection demonstrably started (`since`) and the report period
+/// `[from, to)`. `None` means nothing in this period was watched.
+///
+/// Exists so the COUNT and the sentence describing it cannot come from
+/// different windows. They did: the count ran over the whole period while
+/// the letter said "watching since the 25th, so this figure covers only
+/// that part of it", putting a 21-day total inside a 5-day claim. Ban rows
+/// outlive an opt-out and can be attributed by hand at any time, so the
+/// two windows genuinely diverge rather than merely being able to.
+fn attacks_window(since: i64, from: i64, to: i64) -> Option<i64> {
+    let effective = since.max(from);
+    // `>= to` ⇒ protection began only after the period ended: a zero here
+    // would sit beside a start date in the future. That is the shape of
+    // the first report after an upgrade, when no site has a stamp yet.
+    (effective < to).then_some(effective)
+}
+
+/// Parse a `"<since>,<last_scan>"` coverage stamp.
+///
+/// Also accepts the bare `"<since>"` written by the first version of this
+/// key, treating it as its own last scan — an upgrade then sees one stale
+/// stretch and restarts coverage, rather than parsing to nothing and
+/// silently claiming "watching since now" on every tick.
+fn parse_coverage_stamp(raw: &str) -> Option<(i64, i64)> {
+    let raw = raw.trim();
+    match raw.split_once(',') {
+        Some((since, last)) => Some((
+            since.trim().parse::<i64>().ok()?,
+            last.trim().parse::<i64>().ok()?,
+        )),
+        None => {
+            let since = raw.parse::<i64>().ok()?;
+            Some((since, since))
+        }
+    }
+}
+
 /// Marker put in `WpIntegrityScanResult::error` for a hosting that has no
 /// WordPress at all. A sentinel rather than free text because the sweep
 /// branches on it — a static site is *skipped*, not *reported*.
@@ -20668,9 +20754,27 @@ async fn parse_access_log_window(
     since: i64,
     until: Option<i64>,
 ) -> (i64, i64, i64, i64) {
-    let Ok(body) = tokio::fs::read_to_string(path).await else {
+    // The freshly rotated sibling is read too, and the time window does the
+    // rest of the work: logrotate can fire in the MIDDLE of an hour, and
+    // the part of that hour written before the rotation is then only in
+    // `access.log.1`. Without this the hour is re-measured from an almost
+    // empty file and the earlier traffic is lost. Entries outside `[since,
+    // until)` are skipped anyway, so reading the older file costs nothing
+    // but the read. A compressed or date-suffixed rotation is not covered —
+    // `upsert_usage`'s caller never lowers an existing bucket, which is the
+    // backstop for those.
+    let mut body = tokio::fs::read_to_string(path).await.unwrap_or_default();
+    let rotated = path.with_extension(match path.extension().and_then(|e| e.to_str()) {
+        Some(ext) => format!("{ext}.1"),
+        None => "1".to_string(),
+    });
+    if let Ok(older) = tokio::fs::read_to_string(&rotated).await {
+        body.push('\n');
+        body.push_str(&older);
+    }
+    if body.trim().is_empty() {
         return (0, 0, 0, 0);
-    };
+    }
     use chrono::{DateTime, FixedOffset};
     let mut bw_in: i64 = 0;
     let mut bw_out: i64 = 0;
@@ -23813,6 +23917,31 @@ mod tests {
         // behaviour (ignoring the upper bound) would return all six here.
         let (_, _, tail_reqs, _) = parse_access_log_window(&log, base + 7200, None).await;
         assert_eq!(tail_reqs, 2);
+
+        // logrotate can fire in the MIDDLE of an hour. The part written
+        // before the rotation is then only in access.log.1, and re-reading
+        // the hour from an almost-empty access.log would lose it. Both
+        // files are read, and the time window keeps the older file's
+        // out-of-range entries out.
+        std::fs::rename(&log, tmp.path().join("access.log.1")).expect("rotate");
+        let post = Utc
+            .timestamp_opt(base + 3600 + 45 * 60, 0)
+            .single()
+            .expect("stamp")
+            .format("%d/%b/%Y:%H:%M:%S +0000");
+        std::fs::write(
+            &log,
+            format!("9.9.9.9 - - [{post}] \"GET / HTTP/1.1\" 200 100 \"-\" \"ua\"\n"),
+        )
+        .expect("write fresh log");
+        let (_, _, hour1, _) = parse_access_log_window(&log, base + 3600, Some(base + 7200)).await;
+        assert_eq!(
+            hour1, 3,
+            "the rotated-away part of the hour must still be counted"
+        );
+        // And the rotated file does not leak traffic into other hours.
+        let (_, _, hour0, _) = parse_access_log_window(&log, base, Some(base + 3600)).await;
+        assert_eq!(hour0, 2);
     }
 
     /// node's table, which on a worker is empty by design.
@@ -24093,16 +24222,39 @@ mod tests {
             );
         }
 
-        // Scanning on: the count is a real measurement, even at zero.
         s.hosting_kv_set(hid.clone(), FAIL2BAN_HTTP_KV_KEY.into(), "on".into())
             .await
             .expect("kv set");
         let now = now_secs();
+
+        // The TOGGLE alone is not evidence. With no record of the scanner
+        // ever having run on this site, the switch says "watch it" and
+        // nothing says it was watched — so the section is unmeasured, not
+        // a reassuring zero.
+        let never_scanned = s
+            .care_report_build(HostingSelector::Id(detail.id.clone()), now - 86_400, now)
+            .await
+            .expect("report");
+        assert_eq!(never_scanned.attacks_blocked, None);
+
+        // Once the scanner has actually run across the period, the count
+        // is a real measurement — even at zero.
+        s.hosting_kv_set(
+            hid.clone(),
+            FAIL2BAN_HTTP_SINCE_KV_KEY.into(),
+            format!("{},{}", now - 90_000, now),
+        )
+        .await
+        .expect("kv set");
         let on = s
             .care_report_build(HostingSelector::Id(detail.id.clone()), now - 86_400, now)
             .await
             .expect("report");
         assert_eq!(on.attacks_blocked, Some(0));
+        assert_eq!(
+            on.attacks_covered_since, None,
+            "coverage predates the period ⇒ no qualifier"
+        );
 
         // Opted out: "we did not measure this", not a reassuring zero.
         s.hosting_kv_set(hid.clone(), FAIL2BAN_HTTP_KV_KEY.into(), "off".into())
@@ -24174,6 +24326,20 @@ mod tests {
         )
         .await
         .expect("activate");
+        // Proof that the brute-force scanner has been watching the whole
+        // time. Without it the report is entirely unmeasured and the tick
+        // correctly declines to send anything — which would make this
+        // fixture exercise that guard instead of the relay refusal it is
+        // about.
+        hyperion_state::hosting_kv::set(
+            pool,
+            detail.id.as_str(),
+            FAIL2BAN_HTTP_SINCE_KV_KEY,
+            &format!("{},{}", now_secs() - 41 * 86_400, now_secs()),
+            now_secs(),
+        )
+        .await
+        .expect("coverage stamp");
         (s, detail)
     }
 
@@ -25272,6 +25438,61 @@ mod tests {
         let (_, short) = care_report_render_with(&r, "example.cz", "{domain}\n{uptime}");
         assert!(!short.contains("ATTACKS BLOCKED"), "{short}");
         assert!(!short.contains("NOT MEASURED THIS PERIOD"), "{short}");
+    }
+
+    /// A coverage stamp has to describe a STRETCH, not just a start.
+    /// Protection that stopped and resumed — node down, `[fail2ban]
+    /// enabled` flipped off and back, agent not running — would otherwise
+    /// keep its original `since` and back-claim the dark days.
+    #[test]
+    fn a_coverage_stamp_restarts_after_a_gap() {
+        use super::{parse_coverage_stamp, FAIL2BAN_COVERAGE_GAP_SECS as GAP};
+        assert_eq!(parse_coverage_stamp("100,200"), Some((100, 200)));
+        assert_eq!(parse_coverage_stamp("  100 , 200 "), Some((100, 200)));
+        // The first version of this key stored a bare start. Reading it as
+        // its own last scan makes an upgrade see one stale stretch and
+        // restart coverage, instead of parsing to nothing and silently
+        // claiming "watching since now" on every tick.
+        assert_eq!(parse_coverage_stamp("100"), Some((100, 100)));
+        assert_eq!(parse_coverage_stamp("nonsense"), None);
+        assert_eq!(parse_coverage_stamp("100,"), None);
+
+        // Continuous scanning keeps the original start...
+        let (since, last) = parse_coverage_stamp("1000,2000").expect("parse");
+        let next = 2000 + GAP - 1;
+        assert!(next - last <= GAP, "still one unbroken stretch");
+        assert_eq!(since, 1000);
+        // ...but a silence longer than the threshold does not.
+        let after_gap = 2000 + GAP + 1;
+        assert!(
+            after_gap - last > GAP,
+            "an hour of silence means nothing was watching"
+        );
+    }
+
+    /// The count and the sentence describing it must come from ONE window.
+    #[test]
+    fn the_attacks_count_is_narrowed_to_the_window_the_letter_claims() {
+        use super::attacks_window;
+
+        // Protection predates the period ⇒ count the whole period, and the
+        // letter's unqualified wording is earned.
+        assert_eq!(
+            attacks_window(CARE_FROM - 86_400, CARE_FROM, CARE_TO),
+            Some(CARE_FROM)
+        );
+
+        // Protection starts on the 25th ⇒ the count starts there too. This
+        // is the regression: it used to count from CARE_FROM while the
+        // sentence said "since 25 Jun … covers only that part of it".
+        let since = CARE_FROM + 24 * 86_400;
+        assert_eq!(attacks_window(since, CARE_FROM, CARE_TO), Some(since));
+
+        // Protection begins only after the period ended ⇒ unmeasured, not
+        // a zero beside a start date in the future. The shape of the first
+        // report after an upgrade, when no site has a stamp yet.
+        assert_eq!(attacks_window(CARE_TO, CARE_FROM, CARE_TO), None);
+        assert_eq!(attacks_window(CARE_TO + 86_400, CARE_FROM, CARE_TO), None);
     }
 
     /// Protection switched on partway through bounds the claim. Without
