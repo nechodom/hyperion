@@ -296,9 +296,12 @@ pub async fn upsert_usage_traffic(
     bw_out_bytes: i64,
     php_requests: i64,
 ) -> Result<(), StateError> {
-    // NOTE: six positional binds, left to right — hosting_id, period, then
-    // the three traffic values in the VALUES list. The UPDATE clause reads
-    // from `excluded`, so it adds no binds of its own.
+    // NOTE: FIVE positional binds, left to right — hosting_id, period, then
+    // the three traffic values in the VALUES list. The other four VALUES
+    // entries are literal zeros, and the UPDATE clause reads from
+    // `excluded`, so neither adds a bind. Miscounting here does not fail
+    // loudly: sqlx binds by position, so an extra or missing `.bind()`
+    // silently writes the wrong column or no row at all.
     sqlx::query(
         r#"INSERT INTO hosting_usage
            (hosting_id, period, disk_used_bytes, inodes_used, bw_in_bytes, bw_out_bytes,
