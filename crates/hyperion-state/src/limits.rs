@@ -246,9 +246,14 @@ pub async fn upsert_usage(pool: &SqlitePool, bucket: &UsageBucket) -> Result<(),
            ON CONFLICT(hosting_id, period) DO UPDATE SET
              disk_used_bytes = excluded.disk_used_bytes,
              inodes_used     = excluded.inodes_used,
-             bw_in_bytes     = excluded.bw_in_bytes,
-             bw_out_bytes    = excluded.bw_out_bytes,
-             php_requests    = excluded.php_requests,
+             -- Traffic within one hour only ever grows, so a LOWER reading
+             -- is not a correction — it is the log having been rotated or
+             -- truncated underneath us mid-hour. Taking the max keeps what
+             -- was already measured instead of erasing it. Disk, inodes,
+             -- memory and CPU are LEVELS and must still track downwards.
+             bw_in_bytes     = MAX(bw_in_bytes,  excluded.bw_in_bytes),
+             bw_out_bytes    = MAX(bw_out_bytes, excluded.bw_out_bytes),
+             php_requests    = MAX(php_requests, excluded.php_requests),
              mem_rss_bytes   = excluded.mem_rss_bytes,
              cpu_pct_x100    = excluded.cpu_pct_x100"#,
     )
@@ -261,6 +266,57 @@ pub async fn upsert_usage(pool: &SqlitePool, bucket: &UsageBucket) -> Result<(),
     .bind(bucket.php_requests)
     .bind(bucket.mem_rss_bytes)
     .bind(bucket.cpu_pct_x100)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Write ONLY the three traffic columns of one bucket, leaving disk,
+/// inodes, memory and CPU as they were.
+///
+/// Used to backfill the hour the sampler has just left. Those other
+/// columns are point-in-time readings that belonged to that hour when it
+/// was live; overwriting them now with the CURRENT disk or RSS would
+/// rewrite history, and `MAX(disk_used_bytes)` over a period — the care
+/// report's "peak disk use" — would report today's figure as the peak.
+///
+/// When no row exists yet the insert supplies zeros for those columns.
+/// That is correct rather than merely convenient: a zero cannot raise a
+/// MAX, and the hour genuinely did carry traffic, so it belongs in the
+/// DISTINCT-date coverage count.
+///
+/// Like [`upsert_usage`], an existing value is never LOWERED — see the
+/// comment there. Both writers can land on the same closed hour, and the
+/// one holding a rotated-away log must not win.
+pub async fn upsert_usage_traffic(
+    pool: &SqlitePool,
+    hosting_id: &HostingId,
+    period: &str,
+    bw_in_bytes: i64,
+    bw_out_bytes: i64,
+    php_requests: i64,
+) -> Result<(), StateError> {
+    // NOTE: FIVE positional binds, left to right — hosting_id, period, then
+    // the three traffic values in the VALUES list. The other four VALUES
+    // entries are literal zeros, and the UPDATE clause reads from
+    // `excluded`, so neither adds a bind. Miscounting here does not fail
+    // loudly: sqlx binds by position, so an extra or missing `.bind()`
+    // silently writes the wrong column or no row at all.
+    sqlx::query(
+        r#"INSERT INTO hosting_usage
+           (hosting_id, period, disk_used_bytes, inodes_used, bw_in_bytes, bw_out_bytes,
+            php_requests, mem_rss_bytes, cpu_pct_x100)
+           VALUES (?, ?, 0, 0, ?, ?, ?, 0, 0)
+           ON CONFLICT(hosting_id, period) DO UPDATE SET
+             bw_in_bytes  = MAX(bw_in_bytes,  excluded.bw_in_bytes),
+             bw_out_bytes = MAX(bw_out_bytes, excluded.bw_out_bytes),
+             php_requests = MAX(php_requests, excluded.php_requests)"#,
+    )
+    .bind(hosting_id.as_str())
+    .bind(period)
+    .bind(bw_in_bytes)
+    .bind(bw_out_bytes)
+    .bind(php_requests)
     .execute(pool)
     .await?;
     Ok(())

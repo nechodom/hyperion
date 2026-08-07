@@ -327,11 +327,31 @@ pub struct AgentConfigView {
 /// - Slack: `{message}`, `{time}`, `{panel}`
 /// - Email subject: `{subject}`, `{time}`
 /// - Email body: `{body}`, `{time}`, `{panel}`, `{kind}`
+/// - Care report body: `{domain}`, `{period_start}`, `{period_end}`,
+///   `{days}`, `{attacks}`, `{updates}`, `{traffic}`, `{uptime}`,
+///   `{backups}`, `{integrity}`
+/// - Expiry warning body: `{domain}`, `{expires_at}`, `{days_left}`,
+///   `{grace_days}`, `{delete_at}`, `{when}`
+///
+/// The two CUSTOMER LETTERS differ from the three wrappers above in one
+/// way only: their default is the EMPTY STRING, which means "use the
+/// built-in letter" rather than "wrap nothing". Same observable rule for
+/// the operator — leave it alone and the wording is what it always was.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct NotificationTemplatesView {
     pub slack_template: String,
     pub email_subject_template: String,
     pub email_body_template: String,
+    /// Body of the care report letter. EMPTY ⇒ the built-in default
+    /// (`CARE_REPORT_DEFAULT_BODY_TEMPLATE` renders byte-identically).
+    /// `#[serde(default)]` so an older agent's `AgentConfigView` still
+    /// deserializes on a newer master.
+    #[serde(default)]
+    pub care_report_body_template: String,
+    /// Body of the hosting-expiry warning letter. EMPTY ⇒ the built-in
+    /// default (`EXPIRY_WARNING_DEFAULT_BODY_TEMPLATE`).
+    #[serde(default)]
+    pub expiry_warning_body_template: String,
 }
 
 impl Default for NotificationTemplatesView {
@@ -340,9 +360,71 @@ impl Default for NotificationTemplatesView {
             slack_template: "{message}".into(),
             email_subject_template: "{subject}".into(),
             email_body_template: "{body}".into(),
+            // Empty = "use the built-in letter". See the type docs.
+            care_report_body_template: String::new(),
+            expiry_warning_body_template: String::new(),
         }
     }
 }
+
+/// The built-in care-report body, written out as a template.
+///
+/// This is the SAME text `hyperion_core::care_report_render` produces on
+/// its own — a unit test in that crate asserts the two are byte-identical,
+/// so this constant can be handed to an operator as the starting point for
+/// their own version without the UI inventing wording the mailer doesn't
+/// have.
+///
+/// Note what the section placeholders are: whole rendered SECTIONS, not
+/// counts. `{uptime}` is "AVAILABILITY: not monitored …" when nothing was
+/// measured, and no arrangement of this template can turn that into a
+/// percentage. That is deliberate — see the substitution site in
+/// `hyperion_core::service::care_report_render_with`.
+pub const CARE_REPORT_DEFAULT_BODY_TEMPLATE: &str = "CARE REPORT\n\
+     Site:    {domain}\n\
+     Period:  {period_start} – {period_end} ({days})\n\
+     \n\
+     Here is what happened on your site during this period. We only quote\n\
+     figures we actually measured. Where something was not being measured,\n\
+     we say so — rather than print a zero that would claim something other\n\
+     than \"we were not looking\".\n\
+     \n\
+     {attacks}\n\
+     \n\
+     {updates}\n\
+     \n\
+     {traffic}\n\
+     \n\
+     {uptime}\n\
+     \n\
+     {backups}\n\
+     \n\
+     {integrity}\n\
+     \n\
+     --\n\
+     You receive this report because {domain} is on a care plan.\n\
+     The figures come straight from the server the site runs on; times are UTC.\n\
+     If anything here needs explaining, just reply to this e-mail.\n";
+
+/// The built-in expiry-warning body, written out as a template. Same
+/// contract as `CARE_REPORT_DEFAULT_BODY_TEMPLATE`: a unit test in
+/// `hyperion-core` pins it to the hardcoded letter.
+///
+/// `{when}`, `{days_left}` and `{grace_days}` arrive already worded
+/// ("expires today" / "30 days" / "1 day") so a custom letter cannot
+/// produce "1 days" or a negative countdown.
+pub const EXPIRY_WARNING_DEFAULT_BODY_TEMPLATE: &str = "Hello,\n\
+     \n\
+     hosting for {domain} {when}.\n\
+     \n\
+     If it is not renewed before then:\n\
+     - on {expires_at} the hosting will be suspended and visitors will see an information page instead of the site,\n\
+     - after a grace period of {grace_days}, on {delete_at}, the hosting and its data will be deleted.\n\
+     \n\
+     To renew, please get in touch.\n\
+     \n\
+     --\n\
+     Hyperion\n";
 
 /// Cluster-placement preferences for the master web UI.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

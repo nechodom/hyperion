@@ -664,10 +664,144 @@
       <p class="text-soft small" style="margin:0.9rem 0 0.8rem;line-height:1.5">
         Applies within ~30&nbsp;s, no restart needed. The rendered text is
         what gets sent and what the <a href="/emails">email log</a> records,
-        so the log always shows exactly what the recipient received.
+        so the log always shows exactly what the recipient received. Each node
+        wraps its own messages, so saving pushes this wording to every
+        enrolled node as well — the banner names any that did not take it.
       </p>
       <button type="submit" class="btn primary">Save message templates</button>
     </form>
+  </div>
+
+  {# ───── Customer letters: the two letters that go to the SITE OWNER
+     rather than to the operator — the care report and the hosting-expiry
+     warning. Body only; the subject stays ours. Empty = the built-in
+     letter, so an operator who never opens this card keeps sending
+     exactly what Hyperion has always sent. ───── #}
+  <div class="card">
+    <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.4rem">
+      <h2 style="margin:0">
+        <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m22 7-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 7"/></svg>
+        Customer letters
+      </h2>
+    </div>
+    <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">
+      These two go to the SITE OWNER, not to you: the monthly care report
+      and the warning before a hosting expires. You edit the body; the
+      subject line stays as Hyperion writes it, so the mail keeps its shape
+      in the customer's inbox and in the <a href="/emails">email log</a>.
+      Leave a box empty to send the built-in letter — the preview below then
+      shows exactly that.
+    </p>
+    <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">
+      The report's six section placeholders carry <em>whole sections</em>,
+      already worded — including &ldquo;not monitored&rdquo; / &ldquo;not
+      determined&rdquo; / &ldquo;not checked&rdquo; when that is the truth.
+      There is deliberately no placeholder for the bare number behind a
+      section, so no wording you choose can turn something we never measured
+      into a figure. The sample below leaves availability unmonitored on
+      purpose: that is the case worth reading before your customer does.
+    </p>
+
+    {# ─── Where these letters apply. Each letter is rendered on the node
+       that OWNS the site (that is where the report's data lives) and read
+       from THAT node's agent.toml, so this card cannot speak for the whole
+       cluster on its own. Saving pushes the text to every node; the list
+       below is read back from the nodes themselves, because a push can miss
+       one and the customers of that node would otherwise keep receiving the
+       old letter with nothing on screen to say so. ─── #}
+    <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">
+      Each letter is written by the node that <strong>owns</strong> the site —
+      that is where the report's data lives — using that node's own
+      <code>agent.toml</code>. Saving here writes this master's copy
+      <em>and pushes the same wording to every enrolled node</em>; the banner
+      after saving names any node that did not take it. No restart is needed:
+      the next letter uses the new wording. To see what one specific customer
+      will get, use <strong>Preview</strong> on that site's care-package card —
+      it renders on the owning node, so it is the letter that site's owner
+      actually receives; <a href="/audit">the audit log</a> records which
+      letter each preview and send used.
+    </p>
+    {% if !letter_nodes.is_empty() %}
+    <div style="margin:0 0 1rem">
+      <div class="text-soft small" style="margin:0 0 0.35rem">Letters on the other nodes</div>
+      <ul style="list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:0.35rem">
+        {% for n in letter_nodes %}
+        <li class="row" style="align-items:baseline;gap:0.5rem;flex-wrap:wrap">
+          {% if n.state == "same" %}<span class="pill ok">in step</span>
+          {% else if n.state == "differs" %}<span class="pill err">different</span>
+          {% else %}<span class="pill warn">unknown</span>{% endif %}
+          <strong style="font-size:0.82rem">{{ n.label }}</strong>
+          <span class="text-soft small"><code style="font-size:0.74rem">{{ n.node_id }}</code></span>
+          <span class="text-soft small">{{ n.note }}</span>
+        </li>
+        {% endfor %}
+      </ul>
+      <p class="text-soft small" style="margin:0.45rem 0 0;line-height:1.5">
+        Read from each node just now, not from a record of the last save.
+        A node listed as <em>different</em> or <em>unknown</em> is sending its
+        own wording to its customers; save again once it is reachable.
+      </p>
+    </div>
+    {% endif %}
+
+    <form method="post" action="/settings/config" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="notifications">
+
+      <div class="field">
+        <label for="nt_care">Care report — body
+          <span class="hint">placeholders:
+            <code>{domain}</code> <code>{period_start}</code> <code>{period_end}</code> <code>{days}</code>
+            <code>{attacks}</code> <code>{updates}</code> <code>{traffic}</code> <code>{uptime}</code>
+            <code>{backups}</code> <code>{integrity}</code>
+          </span>
+        </label>
+        <textarea id="nt_care" name="care_report_body_template" rows="10"
+                  style="width:100%;font-family:var(--font-mono);font-size:0.85rem"
+                  placeholder="(empty — the built-in letter below is sent)">{{ config.notifications.care_report_body_template }}</textarea>
+        <div class="row" style="gap:0.4rem;margin:0.4rem 0 0.1rem">
+          <button type="button" class="btn small" data-fill="nt_care" data-from="nt_care_default">Start from the built-in letter</button>
+          <button type="button" class="btn small ghost" data-clear="nt_care">Clear (send the built-in)</button>
+        </div>
+        <div class="text-soft small" style="margin:0.5rem 0 0.1rem">Preview — sample site, availability NOT monitored</div>
+        <div id="nt_care_preview" style="white-space:pre-wrap;background:var(--surface-2);border-radius:var(--radius-xs);padding:0.55rem 0.7rem;font-size:0.85rem;min-height:2.2rem"></div>
+      </div>
+
+      <div class="field" style="margin-top:1.2rem">
+        <label for="nt_expiry">Expiry warning — body
+          <span class="hint">placeholders:
+            <code>{domain}</code> <code>{expires_at}</code> <code>{days_left}</code>
+            <code>{grace_days}</code> <code>{delete_at}</code> <code>{when}</code>
+          </span>
+        </label>
+        <textarea id="nt_expiry" name="expiry_warning_body_template" rows="8"
+                  style="width:100%;font-family:var(--font-mono);font-size:0.85rem"
+                  placeholder="(empty — the built-in letter below is sent)">{{ config.notifications.expiry_warning_body_template }}</textarea>
+        <div class="row" style="gap:0.4rem;margin:0.4rem 0 0.1rem">
+          <button type="button" class="btn small" data-fill="nt_expiry" data-from="nt_expiry_default">Start from the built-in letter</button>
+          <button type="button" class="btn small ghost" data-clear="nt_expiry">Clear (send the built-in)</button>
+        </div>
+        <div class="text-soft small" style="margin:0.5rem 0 0.1rem">Preview — sample site, 7 days left</div>
+        <div id="nt_expiry_preview" style="white-space:pre-wrap;background:var(--surface-2);border-radius:var(--radius-xs);padding:0.55rem 0.7rem;font-size:0.85rem;min-height:2.2rem"></div>
+      </div>
+
+      <p class="text-soft small" style="margin:0.9rem 0 0.8rem;line-height:1.5">
+        A placeholder you spell wrong is left in the text exactly as you
+        typed it — it is never dropped silently, so the preview shows the
+        mistake before a customer does. Dates and day counts arrive already
+        worded (&ldquo;1 Sep 2026&rdquo;, &ldquo;7 days&rdquo;,
+        &ldquo;1 day&rdquo;).
+      </p>
+      <button type="submit" class="btn primary">Save customer letters</button>
+    </form>
+
+    {# The built-in letters, verbatim from hyperion-types (a hyperion-core
+       test pins them to what the mailer actually sends). OUTSIDE the form
+       and with no `name`, so they are never submitted; a <textarea> is used
+       because it is the one element whose text survives HTML-escaping
+       round-trip intact. #}
+    <textarea id="nt_care_default" hidden>{{ care_report_default_template }}</textarea>
+    <textarea id="nt_expiry_default" hidden>{{ expiry_warning_default_template }}</textarea>
   </div>
 </div>
 
@@ -721,7 +855,62 @@
     var el = document.getElementById(id);
     if (el) el.addEventListener('input', update);
   });
+
+  // ── Customer letters (care report + expiry warning) ──────────────
+  // The care sample is rendered SERVER-SIDE by the very functions that
+  // build a customer's letter, so this preview cannot drift from what
+  // actually gets sent — it previously did, because the strings were
+  // hand-copied prose sitting right here.
+  //
+  // Availability arrives deliberately unmeasured: the operator must be
+  // able to see what an unmonitored section looks like inside their own
+  // wording before a customer does. There is no sample for "the number
+  // behind a section" because no such placeholder exists — a section is
+  // either its measured wording or its honest "we were not looking"
+  // wording, never a bare figure.
+  var careSample = {{ care_preview_json|safe }};
+  var expirySample = {
+    domain: 'example.com',
+    expires_at: '1 Sep 2026',
+    days_left: '7 days',
+    grace_days: '14 days',
+    delete_at: '15 Sep 2026',
+    when: 'expires on 1 Sep 2026 — 7 days left'
+  };
+  function letterPreview(inputId, defaultId, previewId, fields) {
+    var el = document.getElementById(inputId);
+    var def = document.getElementById(defaultId);
+    var out = document.getElementById(previewId);
+    if (!el || !def || !out) return;
+    // Empty means "send the built-in letter", so preview exactly that —
+    // the same rule the renderer applies server-side.
+    var tmpl = el.value.trim().length ? el.value : def.value;
+    out.textContent = hypRender(tmpl, fields);
+  }
+  function updateLetters() {
+    letterPreview('nt_care', 'nt_care_default', 'nt_care_preview', careSample);
+    letterPreview('nt_expiry', 'nt_expiry_default', 'nt_expiry_preview', expirySample);
+  }
+  ['nt_care', 'nt_expiry'].forEach(function (id) {
+    var el = document.getElementById(id);
+    if (el) el.addEventListener('input', updateLetters);
+  });
+  document.querySelectorAll('[data-fill]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var target = document.getElementById(btn.getAttribute('data-fill'));
+      var src = document.getElementById(btn.getAttribute('data-from'));
+      if (target && src) { target.value = src.value; updateLetters(); }
+    });
+  });
+  document.querySelectorAll('[data-clear]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      var target = document.getElementById(btn.getAttribute('data-clear'));
+      if (target) { target.value = ''; updateLetters(); }
+    });
+  });
+
   update();
+  updateLetters();
 })();
 </script>
 

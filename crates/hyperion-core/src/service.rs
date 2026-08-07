@@ -3816,11 +3816,21 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
     pub async fn clear_expiry(&self, sel: HostingSelector) -> Result<(), RpcError> {
         let detail = self.get(sel).await?;
+        // Clearing an expiry DATE must not also forget who to write to. The
+        // same `owner_email` is the recipient of the paid care report, so
+        // nulling it here silently stops a deliverable the customer is still
+        // paying for — and the address itself is then gone, with nothing in
+        // the UI saying it was dropped.
+        let owner_email = hyperion_state::scheduler::get_expiry(&self.pool, &detail.id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|r| r.owner_email);
         hyperion_state::scheduler::set_expiry(
             &self.pool,
             &detail.id,
             None,
-            None,
+            owner_email.as_deref(),
             30,
             "30,7,1",
             now_secs(),
@@ -4109,28 +4119,57 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                         None => Err("hosting has no expires_at"),
                     },
                 };
-                let (result, reason) = match sendable {
+                // `letter` is carried out of the match so the audit row can
+                // name WHICH body the customer received. Like the care
+                // report, the template comes from the agent.toml of the node
+                // running this sweep, so master and worker legitimately
+                // answer differently and the row is the only lasting record
+                // of which one this was. Only a warning that actually went
+                // out has a letter; the other two arms leave it `None`
+                // rather than name a body nobody was sent.
+                let (result, reason, letter) = match sendable {
                     Ok((r, exp, to)) => {
-                        let (subject, body) =
-                            expiry_warning_mail(&r.domain, exp, r.grace_days, now_secs());
-                        // notify_email returns nothing: a relay failure is
-                        // already recorded by it in audit_log + email_log. So
-                        // a dead relay can't bounce this row back to 'pending'
-                        // and re-send every tick forever — same treatment the
-                        // billing sweep gives its reminders.
-                        self.notify_email(
-                            to,
-                            &subject,
-                            &body,
-                            Some(action.hosting_id.as_str()),
-                            "expiry",
-                        )
-                        .await;
-                        tracing::info!(
-                            hosting=%action.hosting_id, action=action.action.as_str(),
-                            owner=%to, "expiry warning sent",
+                        let template = self.expiry_warning_template();
+                        let letter = letter_origin(&template);
+                        let (subject, body) = expiry_warning_mail_with(
+                            &r.domain,
+                            exp,
+                            r.grace_days,
+                            now_secs(),
+                            &template,
                         );
-                        ("ok", None)
+                        // A relay failure still leaves this an `Ok(())`, so
+                        // the row is marked done rather than bounced back to
+                        // 'pending' to re-send every tick forever — same
+                        // treatment the billing sweep gives its reminders.
+                        // What it must NOT do is claim the customer was
+                        // warned: the audit row and the log line say which of
+                        // the two happened.
+                        if self
+                            .notify_email(
+                                to,
+                                &subject,
+                                &body,
+                                Some(action.hosting_id.as_str()),
+                                EXPIRY_EMAIL_KIND,
+                            )
+                            .await
+                        {
+                            tracing::info!(
+                                hosting=%action.hosting_id, action=action.action.as_str(),
+                                owner=%to, letter=letter, "expiry warning sent",
+                            );
+                            ("ok", None, Some(letter))
+                        } else {
+                            let why = "the SMTP relay refused the message \
+                                       (see the site's Emails tab)";
+                            tracing::warn!(
+                                hosting=%action.hosting_id, action=action.action.as_str(),
+                                owner=%to, reason=why,
+                                "expiry warning NOT sent — the customer gets no notice before suspension",
+                            );
+                            ("failed", Some(why), None)
+                        }
                     }
                     Err(why) => {
                         tracing::warn!(
@@ -4138,7 +4177,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                             reason=why,
                             "expiry warning NOT sent — the customer gets no notice before suspension",
                         );
-                        ("skipped", Some(why))
+                        ("skipped", Some(why), None)
                     }
                 };
                 self.append_audit(
@@ -4148,6 +4187,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                         "kind": action.action.as_str(),
                         "to": email,
                         "reason": reason,
+                        "letter": letter,
                     })
                     .to_string(),
                     result,
@@ -4173,10 +4213,31 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     }
 
     /// Produce a tar.gz + DB dump backup. Single 'local' target for v1.
+    ///
+    /// The RPC entry point, i.e. every backup a HUMAN asked for: the panel
+    /// and the API resolve the cluster's off-site targets on the master
+    /// (that is the only node whose `backup_targets` table has any) and send
+    /// them with the request, so `s3_targets` is exactly what this run may
+    /// upload to. Internal snapshots that were never meant to leave the node
+    /// call `backup_run` with `OffsiteSource::NotWanted` instead.
     pub async fn backup_now(
         &self,
         sel: HostingSelector,
         s3_targets: Vec<hyperion_types::S3BackupTarget>,
+    ) -> Result<hyperion_types::BackupRunWire, RpcError> {
+        self.backup_run(sel, s3_targets, OffsiteSource::Caller)
+            .await
+    }
+
+    /// The backup itself. `offsite` says what an EMPTY `s3_targets` means for
+    /// this particular run — see `OffsiteSource`, and the honesty rule it
+    /// exists to keep: a backup that never left the node must not be
+    /// indistinguishable from one that did.
+    async fn backup_run(
+        &self,
+        sel: HostingSelector,
+        s3_targets: Vec<hyperion_types::S3BackupTarget>,
+        offsite: OffsiteSource,
     ) -> Result<hyperion_types::BackupRunWire, RpcError> {
         let detail = self.get(sel).await?;
         let backup_root = self.paths.backup_root.clone();
@@ -4356,37 +4417,69 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 // resolved, as it always has. Re-pinning only redirects NEW
                 // backups — whatever the site already put on its old target
                 // stays there until that target's own retention drops it.
-                let manifest_path =
-                    archive_dir.join(format!("{}-{}.manifest.json", detail.domain, ts));
-                let mut files: Vec<std::path::PathBuf> = vec![archive_path.clone()];
-                if let Some(p) = db_dump_path.as_ref() {
-                    files.push(p.clone());
-                }
-                files.push(manifest_path);
-                let pin = self.offsite_pin(detail.id.as_str()).await;
-                match choose_offsite_targets(pin.as_deref(), &s3_targets) {
-                    OffsiteChoice::NodeDefault(t) => {
-                        self.push_backup_to_s3(&detail, &files, t).await
+                //
+                // Every way of NOT uploading ends in an audit row, except the
+                // two that promised nothing (see `OffsiteSource` and
+                // `offsite_gap_reason`). A local-only copy of a backup the
+                // customer pays to have off-site is the failure this block is
+                // here to make visible: it has no other symptom until the day
+                // the node is gone and someone goes looking for the archive.
+                if offsite != OffsiteSource::NotWanted {
+                    let manifest_path =
+                        archive_dir.join(format!("{}-{}.manifest.json", detail.domain, ts));
+                    let mut files: Vec<std::path::PathBuf> = vec![archive_path.clone()];
+                    if let Some(p) = db_dump_path.as_ref() {
+                        files.push(p.clone());
                     }
-                    OffsiteChoice::Pinned(t) => {
-                        self.push_backup_to_s3(&detail, &files, std::slice::from_ref(t))
-                            .await
-                    }
-                    OffsiteChoice::Unresolved(name) => {
-                        tracing::warn!(
-                            domain = %detail.domain,
-                            target = %name,
-                            "off-site target pinned to this site was not among the resolved \
-                             targets (disabled, deleted, renamed, or its credentials did not \
-                             read) — the backup stayed on this node"
-                        );
-                        self.audit_s3(
-                            &detail,
-                            name,
-                            false,
-                            "pinned target not among the resolved targets — no upload attempted",
-                        )
-                        .await;
+                    files.push(manifest_path);
+                    let pin = self.offsite_pin(detail.id.as_str()).await;
+                    match choose_offsite_targets(pin.as_deref(), &s3_targets) {
+                        OffsiteChoice::NodeDefault(t) => {
+                            self.push_backup_to_s3(&detail, &files, t).await
+                        }
+                        OffsiteChoice::Pinned(t) => {
+                            self.push_backup_to_s3(&detail, &files, std::slice::from_ref(t))
+                                .await
+                        }
+                        OffsiteChoice::Unresolved(name) => {
+                            // Same outcome — nothing uploaded — but the two
+                            // ways of getting here need opposite fixes, so the
+                            // row has to carry which one it was. A pin that
+                            // named a target this run could not use is the
+                            // operator's to repair; a run that carried no
+                            // targets at all is not a broken pin, and sending
+                            // them after the bucket's credentials would waste
+                            // their afternoon on a bug that isn't there.
+                            let why = if s3_targets.is_empty() {
+                                self.offsite_gap_reason(offsite).unwrap_or(
+                                    "this backup run carried no off-site targets at all, so the \
+                                     target this site is pinned to could not be used",
+                                )
+                            } else {
+                                "the pinned target was not among the ones this run could use \
+                                 (disabled, deleted, renamed, or its credentials did not read) — \
+                                 nothing was uploaded, because a bucket nobody chose is not a \
+                                 substitute for the one that was"
+                            };
+                            tracing::warn!(
+                                domain = %detail.domain,
+                                target = %name,
+                                reason = why,
+                                "off-site copy did NOT happen for a site pinned to a target"
+                            );
+                            self.audit_s3(&detail, name, false, why).await;
+                        }
+                        OffsiteChoice::NoTargets => {
+                            // Unpinned, and this run has nowhere to push. Only
+                            // a row when something was in fact promised — an
+                            // install with no off-site configured would
+                            // otherwise collect a red row per backup for a
+                            // copy nobody asked for, which is how a real one
+                            // stops being read.
+                            if let Some(why) = self.offsite_gap_reason(offsite) {
+                                self.audit_s3(&detail, "(none)", false, why).await;
+                            }
+                        }
                     }
                 }
             }
@@ -4434,6 +4527,25 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .flatten()
             .map(|v| v.trim().to_string())
             .filter(|v| !v.is_empty())
+    }
+
+    /// Why a run that pushed nothing off-site is worth recording — or `None`
+    /// when nothing was missing.
+    ///
+    /// The whole question is what an EMPTY target list means, and only the
+    /// caller plus this node's own identity can answer it. A backup the panel
+    /// asked for carries the targets the master resolved, so empty means the
+    /// operator has none that can take a copy — which the Backups card
+    /// already says in as many words. A SCHEDULED run reads this node's own
+    /// table, and on a worker that table is empty by design: there, empty
+    /// does not mean "no off-site wanted", it means the cluster's targets
+    /// never reached the run, while the panel goes on offering this site's
+    /// owner a destination.
+    fn offsite_gap_reason(&self, source: OffsiteSource) -> Option<&'static str> {
+        match source {
+            OffsiteSource::ThisNode if self.is_worker_node() => Some(OFFSITE_WORKER_HAS_NO_TARGETS),
+            OffsiteSource::ThisNode | OffsiteSource::Caller | OffsiteSource::NotWanted => None,
+        }
     }
 
     /// Push the just-made backup files to every S3 target the master resolved
@@ -5375,6 +5487,71 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
     }
 
+    /// Record that the brute-force scanner is watching this site.
+    ///
+    /// Stores BOTH ends of the evidence, `"<since>,<last_scan>"`, because a
+    /// start alone cannot describe a gap. Protection that stops and later
+    /// resumes — the node down for a week, `[fail2ban] enabled = false`
+    /// flipped off and back on, the agent simply not running — would
+    /// otherwise keep its original `since` and let the letter back-claim
+    /// the dark days. A scan arriving more than
+    /// [`FAIL2BAN_COVERAGE_GAP_SECS`] after the last one therefore starts a
+    /// new stretch.
+    ///
+    /// `hosting_kv` is node-local and so is the scanner, which is what
+    /// makes this readable by the care report — that runs on the owning
+    /// node too.
+    async fn note_bruteforce_coverage(&self, hosting_id: &str, at: i64) {
+        let prev =
+            hyperion_state::hosting_kv::get(&self.pool, hosting_id, FAIL2BAN_HTTP_SINCE_KV_KEY)
+                .await
+                .ok()
+                .flatten();
+        let since = match prev.as_deref().and_then(parse_coverage_stamp) {
+            Some((since, last)) if at.saturating_sub(last) <= FAIL2BAN_COVERAGE_GAP_SECS => since,
+            // Never stamped, unparseable, or resuming after a gap.
+            _ => at,
+        };
+        let _ = hyperion_state::hosting_kv::set(
+            &self.pool,
+            hosting_id,
+            FAIL2BAN_HTTP_SINCE_KV_KEY,
+            &format!("{since},{at}"),
+            now_secs(),
+        )
+        .await;
+    }
+
+    /// When protection demonstrably began watching this site, or `None`
+    /// when it is not watching now.
+    ///
+    /// A read failure, an absent stamp, or a stamp whose last scan is stale
+    /// all answer `Some(now)` — "we cannot evidence any of this period".
+    /// That is the opposite of how [`Self::http_bruteforce_scan_enabled`]
+    /// fails, and deliberately so: there, failing open keeps a paying
+    /// customer PROTECTED; here, failing open would let the letter CLAIM
+    /// protection it cannot evidence. The caller turns a `since` at or past
+    /// the period end into "not monitored".
+    async fn bruteforce_coverage_since(&self, hosting_id: &str) -> Option<i64> {
+        if !self.fail2ban.enabled || !self.http_bruteforce_scan_enabled(hosting_id).await {
+            return None;
+        }
+        let now = now_secs();
+        let stamp =
+            hyperion_state::hosting_kv::get(&self.pool, hosting_id, FAIL2BAN_HTTP_SINCE_KV_KEY)
+                .await
+                .ok()
+                .flatten();
+        match stamp.as_deref().and_then(parse_coverage_stamp) {
+            // Configured on, but nothing has actually scanned recently —
+            // the switch says yes and the evidence says nothing.
+            Some((since, last)) if now.saturating_sub(last) <= FAIL2BAN_COVERAGE_GAP_SECS => {
+                Some(since)
+            }
+            _ => Some(now),
+        }
+    }
+
     /// Everything one tick would ban, in scan order: each active hosting's
     /// own access log first (gated by that site's switch), then the
     /// node-wide ssh / ftp / mail journals.
@@ -5395,6 +5572,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             // Opted out ⇒ this site's access log is not read at all, so the
             // switch costs nothing rather than merely discarding findings.
             if !self.http_bruteforce_scan_enabled(s.id.as_str()).await {
+                // Protection stops here, so the coverage stamp stops being
+                // true. Dropping it now means re-enabling later starts a
+                // fresh, honest "watched since", instead of a stale one
+                // that would let the care report claim the gap was covered.
+                let _ = hyperion_state::hosting_kv::delete(
+                    &self.pool,
+                    s.id.as_str(),
+                    FAIL2BAN_HTTP_SINCE_KV_KEY,
+                )
+                .await;
                 continue;
             }
             let Some(user) = derive_user_from_summary(s) else {
@@ -5405,6 +5592,20 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .join(&s.domain)
                 .join("logs")
                 .join("access.log");
+            // Stamp only AFTER the log has actually been opened. `user` is a
+            // GUESS derived from the domain and it succeeds for almost any
+            // domain, so an imported or renamed site sails past the check
+            // above and points at a path that does not exist. Stamping
+            // before the read would mark such a site "watched since" forever
+            // while its log was never read once — and its letter would say
+            // "0 attacks, protection ran for the whole period" beside a
+            // traffic section that correctly says "not measured", because
+            // `stats_tick` skips the very same site for the very same wrong
+            // path. One letter, two sections, opposite claims.
+            if !tokio::fs::try_exists(&access).await.unwrap_or(false) {
+                continue;
+            }
+            self.note_bruteforce_coverage(s.id.as_str(), since).await;
             for ip in scan_access_log_for_bruteforce(&access, since, cfg.http_threshold).await {
                 intents.push(BanIntent {
                     ip,
@@ -6555,10 +6756,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 ),
             });
         }
-        // Reuse backup_now to produce the archive — it's already the
+        // Reuse the backup path to produce the archive — it's already the
         // most-tested code path for "snapshot this hosting to disk".
-        // Internal/transient safety backup — local only (no off-site targets).
-        let run = self.backup_now(sel.clone(), Vec::new()).await?;
+        // Internal/transient safety backup — local only, and `NotWanted`
+        // says so: nothing off-site was ever promised here, so a site pinned
+        // to a target must not collect a red "no off-site copy" row for a
+        // snapshot that exists only to be turned into a bundle.
+        let run = self
+            .backup_run(sel.clone(), Vec::new(), OffsiteSource::NotWanted)
+            .await?;
         let archive_path_str = run
             .archive_path
             .as_ref()
@@ -7008,6 +7214,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// `kind` is a free-form label with a recommended vocabulary
     /// ("test" | "alert" | "monitor" | "backup" | "cert" | "billing"
     /// | "other"). It drives the UI's "show only X" filters.
+    ///
+    /// Returns `true` ONLY when the relay accepted the message. No relay
+    /// configured, no recipient to fall back to, and an outright rejection
+    /// are all `false`. Callers that go on to record "the customer has been
+    /// told" — a period marked as reported, an audit row reading "ok", a
+    /// success message on a card — MUST branch on it: a letter the relay
+    /// refused was never received, and saying otherwise is the one failure
+    /// nobody downstream can detect.
     pub(crate) async fn notify_email(
         &self,
         to: &str,
@@ -7015,14 +7229,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         body: &str,
         hosting_id: Option<&str>,
         kind: &str,
-    ) {
+    ) -> bool {
         let Some(cfg) = self.email_config.as_ref() else {
-            return;
+            return false;
         };
         let to = if to.is_empty() {
             match self.email_default_to.as_deref() {
                 Some(t) => t,
-                None => return,
+                None => return false,
             }
         } else {
             to
@@ -7030,22 +7244,38 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // Apply the operator's editable email wording (defaults "{subject}"
         // / "{body}" are pass-through). Rendered text is what we send AND
         // log, so the email log shows exactly what the recipient received.
+        //
+        // EXCEPT for the two CUSTOMER letters. Those are complete letters
+        // with their own editable templates and their own signature; the
+        // generic wrapper is written for short operator alerts (it typically
+        // prefixes a tag and appends a panel link the customer cannot open).
+        // Wrapping one inside the other produces a mangled subject and a
+        // dead link in a letter that goes to a paying customer.
         let tmpls = read_notifications_section(self.agent_config_path.as_deref());
+        let is_customer_letter = kind == CARE_REPORT_EMAIL_KIND || kind == EXPIRY_EMAIL_KIND;
         let time = fmt_notif_time(now_secs());
         let panel = self.notify_panel_url();
-        let subject_rendered = render_template(
-            &tmpls.email_subject_template,
-            &[("subject", subject), ("time", &time)],
-        );
-        let body_rendered = render_template(
-            &tmpls.email_body_template,
-            &[
-                ("body", body),
-                ("time", &time),
-                ("panel", &panel),
-                ("kind", kind),
-            ],
-        );
+        let subject_rendered = if is_customer_letter {
+            subject.to_string()
+        } else {
+            render_template(
+                &tmpls.email_subject_template,
+                &[("subject", subject), ("time", &time)],
+            )
+        };
+        let body_rendered = if is_customer_letter {
+            body.to_string()
+        } else {
+            render_template(
+                &tmpls.email_body_template,
+                &[
+                    ("body", body),
+                    ("time", &time),
+                    ("panel", &panel),
+                    ("kind", kind),
+                ],
+            )
+        };
         let subject = subject_rendered.as_str();
         let body = body_rendered.as_str();
         match hyperion_adapters::email::send_text(cfg, to, subject, body).await {
@@ -7083,6 +7313,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                          restart hyperion-agent after update.sh to apply migration 017"
                     );
                 }
+                true
             }
             Err(e) => {
                 let err_s = e.to_string();
@@ -7121,6 +7352,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     );
                 }
                 tracing::warn!(to = %to, subject = %subject, error = %err_s, "email send failed");
+                false
             }
         }
     }
@@ -7768,6 +8000,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// failing site retries on its next cadence rather than hammering hourly;
     /// failures are logged and recorded in `backup_runs`. Returns how many
     /// backups it started. Runs on every node (backups are node-local).
+    ///
+    /// The off-site half is NOT the same as the manual button's, and the
+    /// difference is invisible from the panel: the S3 targets it uploads to
+    /// are read from this node's own table, which on a worker is empty by
+    /// design. Marking the runs `OffsiteSource::ThisNode` is what lets each
+    /// one record that it stayed here — see `offsite_gap_reason`.
     pub async fn scheduled_backups_tick(&self) -> Result<i64, RpcError> {
         let hostings = self
             .list()
@@ -7775,6 +8013,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .map_err(|e| RpcError::Internal_with(format!("scheduled backups: list: {e}")))?;
         // Resolve S3 targets once for the whole sweep.
         let s3_targets = self.resolve_local_s3_targets().await;
+        // A worker that resolved none is the case this sweep cannot fix and
+        // must not hide: every backup it is about to take stays on this node.
+        // Each one gets its own audit row; this is the same sentence in the
+        // journal, once per sweep rather than once per site, because the
+        // journal is where an operator looks for "what did the agent do at
+        // 04:00" and a missing off-site copy has no other symptom until the
+        // node is gone. Logged only when the sweep actually ran something —
+        // a node with nothing due has nothing to warn about.
+        let offsite_gap = self.offsite_gap_reason(OffsiteSource::ThisNode);
         let now = now_secs();
         let mut started = 0i64;
         for h in hostings {
@@ -7812,7 +8059,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .await;
             started += 1;
             match self
-                .backup_now(HostingSelector::Id(h.id.clone()), s3_targets.clone())
+                .backup_run(
+                    HostingSelector::Id(h.id.clone()),
+                    s3_targets.clone(),
+                    OffsiteSource::ThisNode,
+                )
                 .await
             {
                 Ok(_) => {
@@ -7826,6 +8077,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                         "scheduled backup failed; will retry next cadence (see backup_runs)"
                     );
                 }
+            }
+        }
+        if started > 0 {
+            if let Some(why) = offsite_gap {
+                tracing::warn!(
+                    backups = started,
+                    reason = why,
+                    "scheduled backups stayed on this node — no off-site copy was made"
+                );
             }
         }
         Ok(started)
@@ -9060,12 +9320,27 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // attributed to it by hand, since those share the same column. That
         // is the safe direction: the section claims ongoing protection, and
         // there was none.
-        if self.fail2ban.enabled && self.http_bruteforce_scan_enabled(id).await {
-            report.attacks_blocked = Some(
-                reports::attacks_blocked(&self.pool, id, from, to)
-                    .await
-                    .map_err(|e| wrap("attacks", e))?,
-            );
+        //
+        // Protection running NOW is only half the question: it says nothing
+        // about the 29 days before an operator switched it on. The scanner's
+        // own coverage stamp answers the other half, and bounds the claim to
+        // the days it can evidence.
+        if let Some(since) = self.bruteforce_coverage_since(id).await {
+            // The COUNT and the sentence describing it must come from one
+            // window. Counting the whole period while saying "watching
+            // since the 25th, so this figure covers only that part" put a
+            // 21-day total inside a 5-day claim — and in the flattering
+            // direction. Bans survive an opt-out (rows are never deleted)
+            // and can be attributed by hand at any time, so the two windows
+            // really do diverge.
+            if let Some(effective) = attacks_window(since, from, to) {
+                report.attacks_blocked = Some(
+                    reports::attacks_blocked(&self.pool, id, effective, to)
+                        .await
+                        .map_err(|e| wrap("attacks", e))?,
+                );
+                report.attacks_covered_since = (since > from).then_some(since);
+            }
         }
         report.updates_applied = reports::updates_applied(&self.pool, id, from, to)
             .await
@@ -9103,16 +9378,23 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         &self,
         sel: HostingSelector,
     ) -> Result<CareReportMail, RpcError> {
-        let (detail, mail) = self.care_report_mail(sel).await?;
+        let (detail, mail, letter) = self.care_report_mail(sel).await?;
         // Audited even though it sends nothing: the preview renders the
         // customer's owner e-mail, their traffic figures, the attacks-blocked
         // count and the integrity verdict. "It only reads" is not a reason to
         // leave a cross-tenant read off the trail — /audit should be able to
         // answer who looked at whose report.
+        //
+        // `letter` says WHICH body was rendered, and it is the only durable
+        // answer: the template is read from the agent.toml of the node that
+        // owns the hosting (see `care_report_template`), so two sites can be
+        // previewed on the same panel, minutes apart, and get different
+        // letters. Without this the trail records that a preview happened but
+        // not which of the two the operator was shown.
         self.append_audit(
             "package.report.preview",
             Some(detail.id.as_str()),
-            &serde_json::json!({ "domain": detail.domain }).to_string(),
+            &serde_json::json!({ "domain": detail.domain, "letter": letter }).to_string(),
             "ok",
         )
         .await;
@@ -9121,14 +9403,18 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
     /// Send the current period's report now, on the operator's say-so.
     ///
-    /// A real send: it records the period as reported, so the scheduled
-    /// one does not repeat it an hour later and the NEXT period starts
-    /// here. Refuses (rather than falling back to the cluster's default
+    /// A real send: once the relay has taken the message it records the
+    /// period as reported, so the scheduled one does not repeat it an hour
+    /// later and the NEXT period starts here. A relay that refuses is an
+    /// error to the operator and leaves the period open — the card must
+    /// never read "sent to …" for a letter nobody received.
+    ///
+    /// Refuses (rather than falling back to the cluster's default
     /// address) when the site has no owner e-mail — the report belongs to
     /// the customer, and quietly mailing it to the operator instead would
     /// leave the customer with nothing while everything looked fine.
     pub async fn care_report_send(&self, sel: HostingSelector) -> Result<CareReportMail, RpcError> {
-        let (detail, mail) = self.care_report_mail(sel).await?;
+        let (detail, mail, letter) = self.care_report_mail(sel).await?;
         if mail.to.is_empty() {
             return Err(RpcError::Validation {
                 message: "this site has no owner e-mail — set one on the hosting first, \
@@ -9143,14 +9429,27 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     .into(),
             });
         }
-        self.notify_email(
-            &mail.to,
-            &mail.subject,
-            &mail.body,
-            Some(detail.id.as_str()),
-            CARE_REPORT_EMAIL_KIND,
-        )
-        .await;
+        if !self
+            .notify_email(
+                &mail.to,
+                &mail.subject,
+                &mail.body,
+                Some(detail.id.as_str()),
+                CARE_REPORT_EMAIL_KIND,
+            )
+            .await
+        {
+            // No marker and no "ok" audit row: the period stays open, so the
+            // tick can still deliver it once the relay is fixed. The error
+            // names where the relay's OWN words are — `notify_email` already
+            // wrote them to email_log, which is the site's Emails tab.
+            return Err(RpcError::Internal_with(format!(
+                "the SMTP relay refused this report, so nothing was sent — \
+                 open the Emails tab on {} for the relay's own message. \
+                 The period stays open and can be reported once it works.",
+                detail.domain
+            )));
+        }
         self.care_report_mark_reported(&detail.id, mail.period_end)
             .await;
         self.append_audit(
@@ -9161,6 +9460,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 "period_start": mail.period_start,
                 "period_end": mail.period_end,
                 "manual": true,
+                // Which body the customer just received — see the preview's
+                // audit row for why the answer is per-node and therefore
+                // worth recording next to the send itself.
+                "letter": letter,
             })
             .to_string(),
             "ok",
@@ -9169,12 +9472,39 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(mail)
     }
 
+    /// The operator's care-report body template from `[notifications]` in
+    /// agent.toml. Empty string (the default, and also what an unreadable
+    /// or template-less agent.toml yields) means "use the built-in letter".
+    ///
+    /// THIS NODE's agent.toml, and that is the whole subtlety: the report is
+    /// rendered wherever the hosting lives, because that is the only node
+    /// holding its metrics. Settings → Notifications writes the file it can
+    /// reach — the master's — so until the same text reaches a worker, that
+    /// worker's customers keep receiving the built-in letter. hyperion-web
+    /// pushes the section to every enrolled node on save and shows, per node,
+    /// which letter is actually on disk there; every render here records
+    /// which one it used (`letter_origin`), so the answer survives in the
+    /// trail rather than living only in a page nobody reloaded.
+    fn care_report_template(&self) -> String {
+        read_notifications_section(self.agent_config_path.as_deref()).care_report_body_template
+    }
+
+    /// The operator's expiry-warning body template. Same empty-means-default
+    /// rule — and the same per-node caveat — as `care_report_template`.
+    fn expiry_warning_template(&self) -> String {
+        read_notifications_section(self.agent_config_path.as_deref()).expiry_warning_body_template
+    }
+
     /// Build the current period's mail for one hosting — the shared body
     /// of preview and send, so the two can never render different text.
+    ///
+    /// Returns the letter's origin alongside it (`letter_origin`), read from
+    /// the SAME string that was rendered: re-reading agent.toml at the audit
+    /// site could name a letter the mail wasn't built from.
     async fn care_report_mail(
         &self,
         sel: HostingSelector,
-    ) -> Result<(HostingDetail, CareReportMail), RpcError> {
+    ) -> Result<(HostingDetail, CareReportMail, &'static str), RpcError> {
         let detail = self.get(sel).await?;
         let now = now_secs();
         let (cadence, started_at) = self.care_report_entitlement(&detail.id).await;
@@ -9184,7 +9514,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let report = self
             .care_report_build(HostingSelector::Id(detail.id.clone()), from, to)
             .await?;
-        let (subject, body) = care_report_render(&report, &detail.domain);
+        // Preview and send share this path, so the operator's edited letter
+        // is what BOTH show — a preview that differs from the mail is worse
+        // than no preview.
+        let template = self.care_report_template();
+        let (subject, body) = care_report_render_with(&report, &detail.domain, &template);
         let mail = CareReportMail {
             subject,
             body,
@@ -9194,7 +9528,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             cadence: cadence.as_str().to_string(),
             entirely_unmeasured: report.is_entirely_unmeasured(),
         };
-        Ok((detail, mail))
+        Ok((detail, mail, letter_origin(&template)))
     }
 
     /// Periodic sweep — one care report per entitled hosting per cadence.
@@ -9210,9 +9544,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     ///     slept through widens the next report instead of dropping the
     ///     days in between;
     ///   * it never consumes a period it could not deliver. Missing
-    ///     recipient, missing relay, nothing measurable — each leaves the
-    ///     marker untouched, so the history is still there when the
-    ///     operator fixes it;
+    ///     recipient, missing relay, nothing measurable, a relay that
+    ///     refused the message — each leaves the marker untouched, so the
+    ///     history is still there when the operator fixes it;
     ///   * it never fails quietly. Every skip is a WARN naming the domain,
     ///     because not sending a report the customer is paying for is the
     ///     failure this feature exists to prevent, and it is invisible by
@@ -9260,6 +9594,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
 
         let now = now_secs();
+        // Read the operator's letter template ONCE per tick, not once per
+        // hosting: it's a file read, and every report in this sweep must in
+        // any case be worded the same way.
+        //
+        // "The same way" is per NODE, not per cluster — this file is this
+        // node's (see `care_report_template`). The origin therefore goes on
+        // every "care report sent" line: a worker that never received the
+        // operator's letter says so in its own journal, which is where you
+        // look when a customer forwards you wording you don't recognise.
+        let body_template = self.care_report_template();
+        let letter = letter_origin(&body_template);
         let mut sent = 0i64;
         for hosting_id in order {
             let Some(&(cadence, started_at)) = wanted.get(hosting_id.as_str()) else {
@@ -9324,7 +9669,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 }
             };
             if report.is_entirely_unmeasured() {
-                // Six "nekontrolováno" lines is a true statement and a
+                // Six "not measured" lines is a true statement and a
                 // terrible invoice attachment, and it almost always means
                 // the report was assembled somewhere the data isn't.
                 tracing::warn!(
@@ -9336,20 +9681,38 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 );
                 continue;
             }
-            let (subject, body) = care_report_render(&report, &detail.domain);
-            self.notify_email(
-                &to_addr,
-                &subject,
-                &body,
-                Some(detail.id.as_str()),
-                CARE_REPORT_EMAIL_KIND,
-            )
-            .await;
+            let (subject, body) = care_report_render_with(&report, &detail.domain, &body_template);
+            // Fourth guard, on exactly the terms of the three above. The
+            // marker is BOTH "already reported" and the next period's start,
+            // so consuming it on a message the relay refused does not delay
+            // the report — it deletes those days: the customer never gets
+            // this month and the next report begins after it.
+            if !self
+                .notify_email(
+                    &to_addr,
+                    &subject,
+                    &body,
+                    Some(detail.id.as_str()),
+                    CARE_REPORT_EMAIL_KIND,
+                )
+                .await
+            {
+                tracing::warn!(
+                    domain = %detail.domain,
+                    hosting_id = %detail.id.as_str(),
+                    to = %to_addr,
+                    "care report: due, but the relay refused it — nothing sent. \
+                     The relay's own message is in the site's Emails tab; \
+                     the period stays open"
+                );
+                continue;
+            }
             self.care_report_mark_reported(&detail.id, to).await;
             tracing::info!(
                 domain = %detail.domain,
                 cadence = %cadence,
                 period_days = (to - from) / 86_400,
+                letter = letter,
                 "care report sent"
             );
             sent += 1;
@@ -9430,11 +9793,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// is what a restart reads, so the same period can't be mailed twice,
     /// and it is where the next period begins.
     ///
-    /// Written AFTER the send. `notify_email` reports its own outcome to
-    /// `email_log` / the audit trail but returns nothing, so a relay that
-    /// rejected the message costs that one report rather than re-sending
-    /// it every hour until the relay recovers — the systematic causes (no
-    /// relay, no recipient) are caught before we get here.
+    /// Written only once the relay has ACCEPTED the message. It used to be
+    /// written after every attempt, arguing that a rejection should cost
+    /// that one report rather than re-send it every hour until the relay
+    /// recovers. That reasoning was wrong, and it contradicted the guards
+    /// in the tick (no relay / no recipient / nothing measurable), which
+    /// all leave the period open on purpose: this key is ALSO where the
+    /// next period starts, so consuming it on a failed send does not
+    /// re-send less — it drops the days entirely. A retry costs at worst a
+    /// duplicate letter; a consumed period is a month the customer paid
+    /// for and can now never be told about.
     async fn care_report_mark_reported(&self, hosting_id: &HostingId, period_end: i64) {
         if let Err(e) = hyperion_state::hosting_kv::set(
             &self.pool,
@@ -12372,6 +12740,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     pub async fn stats_tick(&self) -> Result<i64, RpcError> {
         let now = now_secs();
         let period = period_key(now);
+        // Start of the UTC hour this tick falls in — the lower bound of the
+        // window whose result `period` names.
+        let hour_start = now - now.rem_euclid(3600);
+        let prev_period = period_key(hour_start - 3600);
         let summaries = self.list().await?;
         let mut total_disk: i64 = 0;
         let mut total_bw_out: i64 = 0;
@@ -12404,11 +12776,63 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             let host_root = std::path::PathBuf::from(&self.paths.home_root)
                 .join(user.clone().unwrap_or_else(|| "_".to_string()))
                 .join(&s.domain);
+            // `derive_user_from_summary` GUESSES the system user from the
+            // domain, and an imported or renamed site defeats the guess. The
+            // path then points at nothing, `du` and the log parse both answer
+            // zero, and the row that gets written is indistinguishable from a
+            // real measurement: the customer's letter reads "0 requests, 0 B
+            // sent, peak disk 0 B … these figures cover the whole period" for
+            // a live site with gigabytes of files.
+            //
+            // Writing no row at all is the honest alternative — the day drops
+            // out of `days_counted`, so the letter says the period was only
+            // partly measured instead of inventing a zero.
+            if !tokio::fs::try_exists(&host_root).await.unwrap_or(false) {
+                tracing::warn!(
+                    hosting = %s.id.as_str(), domain = %s.domain, path = %host_root.display(),
+                    "stats: hosting root not found — skipping this sample rather than \
+                     recording zeros; check the site's system user",
+                );
+                continue;
+            }
             let disk = du_bytes(&host_root).await.unwrap_or(0);
             let inodes = du_inodes(&host_root).await;
             let logs_dir = host_root.join("logs");
+            let access_log = logs_dir.join("access.log");
+            // The bucket is keyed by UTC HOUR, so it must hold that hour's
+            // traffic and nothing else — see `parse_access_log_window`.
+            //
+            // BOUNDED at the top even though this hour is still running:
+            // `hour_start` is computed once at the start of the tick, but
+            // the per-site loop does `du` and a 200 ms /proc pass first, so
+            // a busy node can reach this line in the NEXT hour. Unbounded,
+            // that traffic would be filed into the hour named by `period`
+            // and counted again by its own bucket later.
             let (bw_in, bw_out, reqs, _last) =
-                parse_access_log_window(&logs_dir.join("access.log"), now - 24 * 3600).await;
+                parse_access_log_window(&access_log, hour_start, Some(hour_start + 3600)).await;
+            // The current hour is still running, so this row is rewritten on
+            // every tick and is only complete once the hour ends. Backfill
+            // the hour we just left so it stops being short by up to one
+            // tick interval — a 5-minute sampler otherwise loses the last
+            // few minutes of every hour, a systematic ~4 % undercount in the
+            // customer's traffic figure.
+            let (p_in, p_out, p_reqs, _) =
+                parse_access_log_window(&access_log, hour_start - 3600, Some(hour_start)).await;
+            if p_reqs > 0 {
+                // `> 0` guards logrotate: once access.log has been rotated
+                // away the parse legitimately returns zero, and writing that
+                // would erase a real hour we had already measured. A quiet
+                // hour needs no row — absent and zero sum identically.
+                let _ = hyperion_state::limits::upsert_usage_traffic(
+                    &self.pool,
+                    &s.id,
+                    &prev_period,
+                    p_in,
+                    p_out,
+                    p_reqs,
+                )
+                .await;
+            }
 
             // Per-hosting RSS + CPU% from this user's processes.
             let (mem_rss, cpu_pct) = match &user {
@@ -17945,9 +18369,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
         }
 
-        // 1. Snapshot prod (also our restore source).
+        // 1. Snapshot prod (also our restore source). Internal and local by
+        // construction — see `OffsiteSource::NotWanted`.
         let run = self
-            .backup_now(HostingSelector::Id(prod.id.clone()), Vec::new())
+            .backup_run(
+                HostingSelector::Id(prod.id.clone()),
+                Vec::new(),
+                OffsiteSource::NotWanted,
+            )
             .await?;
         let archive = run
             .archive_path
@@ -18047,12 +18476,22 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             })?;
 
         // 1. Pre-push safety backup of prod (so a bad push is recoverable).
+        // Both snapshots are internal rollback material, never an off-site
+        // copy anyone was promised — see `OffsiteSource::NotWanted`.
         let _ = self
-            .backup_now(HostingSelector::Id(prod.id.clone()), Vec::new())
+            .backup_run(
+                HostingSelector::Id(prod.id.clone()),
+                Vec::new(),
+                OffsiteSource::NotWanted,
+            )
             .await?;
         // 2. Snapshot staging — our push source.
         let run = self
-            .backup_now(HostingSelector::Id(staging.id.clone()), Vec::new())
+            .backup_run(
+                HostingSelector::Id(staging.id.clone()),
+                Vec::new(),
+                OffsiteSource::NotWanted,
+            )
             .await?;
         let archive = run
             .archive_path
@@ -18726,6 +19165,10 @@ const CARE_REPORT_KV_PERIOD_END: &str = "care_report_period_end";
 /// `email_log` / audit label for care reports, so the Emails tab can show
 /// what a site's customer was actually sent.
 const CARE_REPORT_EMAIL_KIND: &str = "care_report";
+/// Kind tag for the expiry warning. A sibling of the care report: both are
+/// complete CUSTOMER letters, which is what exempts them from the generic
+/// operator-alert wrapper in `notify_email`.
+const EXPIRY_EMAIL_KIND: &str = "expiry";
 
 /// Period length used when a hosting has no entitlement and no history at
 /// all — i.e. an operator previewing the report on a site that holds no
@@ -18762,65 +19205,255 @@ fn report_cadence_secs(c: ReportCadence) -> Option<i64> {
 /// renderer can be exercised without building a hosting; at every call
 /// site it is `report.domain`.
 pub fn care_report_render(report: &CareReport, domain: &str) -> (String, String) {
+    // "" = the built-in letter, which is exactly what this function is.
+    care_report_render_with(report, domain, "")
+}
+
+/// Same letter, with the operator's editable body template applied.
+///
+/// `body_template` empty (or whitespace) ⇒ the built-in default, byte for
+/// byte — an operator who never opens Settings sees no change. A non-empty
+/// template replaces the BODY only; the subject line stays ours, because it
+/// is what makes the mail findable in the customer's inbox and in
+/// `/emails`.
+///
+/// HONESTY: the placeholders a template can use for the six sections are
+/// the SECTION STRINGS produced above — never the raw `Option<i64>` counts
+/// behind them. That is the whole point of the feature. `{uptime}` is
+/// literally "AVAILABILITY: not monitored (uptime checks were not
+/// active)…" when nothing was measured, so no arrangement of the template
+/// can promote an unmeasured section into a number or a clean bill of
+/// health; the worst a bad template can do is leave a section out. If you
+/// are ever tempted to add `{uptime_pct}` or `{attack_count}` here: don't.
+/// That is the lie this design exists to make unrepresentable.
+///
+/// An unknown `{token}` is left VERBATIM in the output by `render_template`
+/// (never a panic, never silently dropped), so an operator's typo shows up
+/// in the preview instead of quietly deleting a paragraph.
+/// The sample a Settings preview shows for each `{placeholder}`, as
+/// `(name, value)` pairs ready to hand to the page.
+///
+/// Produced by the SAME `care_section_*` functions the customer's letter
+/// goes through, because the preview's whole job is to show the operator
+/// what their wording will do to real sections. Hand-copying the strings
+/// into the page's JavaScript is what this replaces: they had already
+/// drifted, and an operator tuning a sentence was reading text no
+/// customer would ever receive.
+///
+/// Availability is deliberately left UNMEASURED. It is the case the
+/// operator most needs to see inside their own wording — a letter that
+/// reads well with a percentage in it can read absurdly with "not
+/// monitored" in the same slot, and finding that out from a customer is
+/// too late.
+pub fn care_report_preview_fields() -> Vec<(&'static str, String)> {
+    // 1–30 Jun 2026, half-open. Fixed, so the preview never depends on
+    // the clock and two operators comparing screens see the same letter.
+    let from = 1_780_272_000; // 2026-06-01 00:00 UTC
+    let to = from + 30 * 86_400;
+    let report = CareReport {
+        attacks_blocked: Some(12),
+        attacks_covered_since: None,
+        updates_applied: Some(3),
+        usage: Some(CareUsage {
+            bw_in_bytes: Some(2_000_000),
+            bw_out_bytes: 34_500_000,
+            requests: 12_345,
+            disk_peak_bytes: 1_200_000_000,
+            days_counted: 30,
+            days_in_period: 30,
+        }),
+        // See the doc comment: unmeasured on purpose.
+        uptime: None,
+        backups: Some(CareBackups {
+            taken: 30,
+            failed: 1,
+            last_success_at: Some(to - 3600),
+        }),
+        integrity: Some(CareIntegrity {
+            scanned_at: to - 3600,
+            checksums_ran: true,
+            malware_scan_ran: true,
+            ..Default::default()
+        }),
+        ..CareReport::empty(HostingId("preview".into()), "example.com".into(), from, to)
+    };
+    let (_, _, fields) = care_report_parts(&report, "example.com");
+    fields
+}
+
+/// Subject, section strings and the full placeholder set for one report.
+/// Split out so [`care_report_preview_fields`] cannot diverge from what
+/// [`care_report_render_with`] actually sends.
+fn care_report_parts(
+    report: &CareReport,
+    domain: &str,
+) -> (String, [String; 6], Vec<(&'static str, String)>) {
     let days = care_days_spanned(report.period_start, report.period_end);
     // The period is half-open, so the last day INSIDE it is `end - 1`.
-    // Printing the exclusive end ("1. 6. – 1. 7.") reads to a customer as
-    // a day they were charged for twice.
     let last_day = (report.period_end - 1).max(report.period_start);
-    let from_str = cz_date(report.period_start);
-    let to_str = cz_date(last_day);
-
-    let subject = format!("Zpráva o péči o web {domain} ({from_str} – {to_str})");
-
-    let sections = [
-        care_section_attacks(report.attacks_blocked),
+    let from_str = report_date(report.period_start);
+    let to_str = report_date(last_day);
+    let subject = format!("Care report for {domain} ({from_str} – {to_str})");
+    let parts = [
+        care_section_attacks(report.attacks_blocked, report.attacks_covered_since),
         care_section_updates(report.updates_applied),
         care_section_usage(report.usage.as_ref()),
         care_section_uptime(report.uptime.as_ref()),
         care_section_backups(report.backups.as_ref()),
         care_section_integrity(report.integrity.as_ref()),
-    ]
-    .join("\n\n");
+    ];
+    // Day count carries its own unit word so a template can never render
+    // "1 days", and so `{days}` alone reproduces the default's "(30 days)".
+    let fields = vec![
+        ("domain", domain.to_string()),
+        ("period_start", from_str),
+        // Inclusive last day of the period, same as the default letter.
+        ("period_end", to_str),
+        ("days", format!("{days} {}", plural(days, "day", "days"))),
+        // Rendered sections, unmeasured wording included. See above.
+        ("attacks", parts[0].clone()),
+        ("updates", parts[1].clone()),
+        ("traffic", parts[2].clone()),
+        ("uptime", parts[3].clone()),
+        ("backups", parts[4].clone()),
+        ("integrity", parts[5].clone()),
+    ];
+    (subject, parts, fields)
+}
 
-    let body = format!(
-        "ZPRÁVA O PÉČI\n\
-         Web:     {domain}\n\
-         Období:  {from_str} – {to_str} ({days} {})\n\
-         \n\
-         Tohle se za uvedené období na vašem webu dělo. Uvádíme jen čísla, která\n\
-         jsme skutečně naměřili. Tam, kde měření neběželo, to je napsáno — místo\n\
-         nuly, která by tvrdila něco jiného než „nedívali jsme se“.\n\
-         \n\
-         {sections}\n\
-         \n\
-         --\n\
-         Tuto zprávu dostáváte proto, že k webu {domain} máte službu péče.\n\
-         Čísla pocházejí přímo ze serveru, na kterém web běží; časy jsou v UTC.\n\
-         Máte-li k čemukoli dotaz, stačí odpovědět na tento e-mail.\n",
-        cz_plural(days, "den", "dny", "dní"),
-    );
+pub fn care_report_render_with(
+    report: &CareReport,
+    domain: &str,
+    body_template: &str,
+) -> (String, String) {
+    let days = care_days_spanned(report.period_start, report.period_end);
+    // The period is half-open, so the last day INSIDE it is `end - 1`.
+    // Printing the exclusive end ("1 Jun – 1 Jul") reads to a customer as
+    // a day they were charged for twice.
+    let last_day = (report.period_end - 1).max(report.period_start);
+    let from_str = report_date(report.period_start);
+    let to_str = report_date(last_day);
+
+    let (subject, parts, fields) = care_report_parts(report, domain);
+
+    if body_template.trim().is_empty() {
+        let sections = parts.join("\n\n");
+        let body = format!(
+            "CARE REPORT\n\
+             Site:    {domain}\n\
+             Period:  {from_str} – {to_str} ({days} {})\n\
+             \n\
+             Here is what happened on your site during this period. We only quote\n\
+             figures we actually measured. Where something was not being measured,\n\
+             we say so — rather than print a zero that would claim something other\n\
+             than \"we were not looking\".\n\
+             \n\
+             {sections}\n\
+             \n\
+             --\n\
+             You receive this report because {domain} is on a care plan.\n\
+             The figures come straight from the server the site runs on; times are UTC.\n\
+             If anything here needs explaining, just reply to this e-mail.\n",
+            plural(days, "day", "days"),
+        );
+        return (subject, body);
+    }
+
+    let pairs: Vec<(&str, &str)> = fields.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let mut body = render_template(body_template, &pairs);
+    body.push_str(&care_omitted_unmeasured_note(report, body_template));
     (subject, body)
+}
+
+/// The one thing a custom letter must not be allowed to do: quietly drop
+/// a section that would have said "we did not measure this".
+///
+/// Omitting a MEASURED section is an editorial choice and stays the
+/// operator's — a shorter letter is still a true one. Omitting an
+/// UNMEASURED one is different in kind: the disclosure disappears, and the
+/// letter's own preamble ("where something was not being measured, we say
+/// so") is still there promising otherwise, because the operator started
+/// from the built-in letter and deleted the section that read badly.
+/// Availability is the one they delete, and it is the one that matters.
+///
+/// So the disclosure is re-attached at the end. Terse, not a second copy
+/// of the section — enough that no customer is told a period was watched
+/// when it was not.
+fn care_omitted_unmeasured_note(report: &CareReport, body_template: &str) -> String {
+    let unmeasured: Vec<&str> = [
+        (
+            "attacks",
+            report.attacks_blocked.is_none(),
+            "attacks blocked",
+        ),
+        (
+            "updates",
+            report.updates_applied.is_none(),
+            "updates applied",
+        ),
+        ("traffic", report.usage.is_none(), "traffic"),
+        ("uptime", report.uptime.is_none(), "availability"),
+        ("backups", report.backups.is_none(), "backups"),
+        (
+            "integrity",
+            report.integrity.is_none(),
+            "file integrity and malware",
+        ),
+    ]
+    .into_iter()
+    .filter(|(placeholder, is_unmeasured, _)| {
+        *is_unmeasured && !body_template.contains(&format!("{{{placeholder}}}"))
+    })
+    .map(|(_, _, label)| label)
+    .collect();
+    if unmeasured.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n\nNOT MEASURED THIS PERIOD: {}.\n  \
+         We were not measuring {} during this period, so this letter makes no\n  \
+         claim about {}. This note is added automatically — a report may leave\n  \
+         a figure out, but never a gap in what was watched.",
+        unmeasured.join(", "),
+        plural(unmeasured.len() as i64, "it", "them"),
+        plural(unmeasured.len() as i64, "it", "them"),
+    )
 }
 
 /// Blocked attacks. `None` is the case the database cannot produce on its
 /// own — the caller sets it when the ban scanner was switched off — and it
 /// is exactly why zero must not be printed there.
-fn care_section_attacks(blocked: Option<i64>) -> String {
+fn care_section_attacks(blocked: Option<i64>, covered_since: Option<i64>) -> String {
+    // Protection started mid-period: the count is real but it is not a
+    // period total, and "0" is emphatically not "a quiet month". Both
+    // wordings below would otherwise assert coverage we cannot evidence.
+    if let (Some(n), Some(since)) = (blocked, covered_since) {
+        return format!(
+            "ATTACKS BLOCKED: {} (since {})\n  \
+             Automatic attack protection has been watching this site since\n  \
+             {}, not for the whole period, so this figure covers only that\n  \
+             part of it. We cannot say what reached the site beforehand.",
+            group_int(n),
+            report_date(since),
+            report_date(since),
+        );
+    }
     match blocked {
-        None => "ZABLOKOVANÉ ÚTOKY: nesledováno\n  \
-             Automatická ochrana proti útokům na tomto serveru v uvedeném období\n  \
-             neběžela. Nulu sem nepíšeme — znamenala by, že se nikdo nedíval."
+        None => "ATTACKS BLOCKED: not monitored\n  \
+             Automatic attack protection was not running on this server during\n  \
+             the period. We do not print a zero here — it would mean nobody was\n  \
+             watching."
             .to_string(),
-        Some(0) => "ZABLOKOVANÉ ÚTOKY: 0\n  \
-             Ochrana běžela celé období a nemusela zasáhnout ani jednou. To je\n  \
-             dobrá zpráva, ne chybějící údaj."
+        Some(0) => "ATTACKS BLOCKED: 0\n  \
+             Protection ran for the whole period and never had to step in. That\n  \
+             is good news, not a missing figure."
             .to_string(),
         Some(n) => format!(
-            "ZABLOKOVANÉ ÚTOKY: {}\n  \
-             Tolikrát jsme odřízli adresu, která opakovaně zkoušela uhodnout heslo\n  \
-             do administrace nebo web jinak zneužít. Zablokovaná adresa se k webu\n  \
-             několik hodin vůbec nedostane.",
-            cz_int(n)
+            "ATTACKS BLOCKED: {}\n  \
+             That is how many times we cut off an address that kept trying to\n  \
+             guess an admin password or otherwise abuse the site. A blocked\n  \
+             address cannot reach the site at all for several hours.",
+            group_int(n)
         ),
     }
 }
@@ -18828,23 +19461,26 @@ fn care_section_attacks(blocked: Option<i64>) -> String {
 /// Applied updates. Two things the copy has to say out loud: the number
 /// covers plugins and themes ONLY (WordPress core has no durable record
 /// to count), and an audit log that does not span the period yields
-/// "nezjištěno" rather than a partial total dressed up as a whole one.
+/// "not determined" rather than a partial total dressed up as a whole one.
 fn care_section_updates(applied: Option<i64>) -> String {
     match applied {
-        None => "AKTUALIZACE PLUGINŮ A ŠABLON: nezjištěno\n  \
-             Provozní záznamy nepokrývají celé toto období, takže přesný počet\n  \
-             uvést nemůžeme. Neúplné číslo vydávat za úplné nebudeme."
+        None => "PLUGIN AND THEME UPDATES: not determined\n  \
+             Our operational records do not cover this whole period, so we\n  \
+             cannot give you an exact count. We will not pass an incomplete\n  \
+             number off as a complete one."
             .to_string(),
-        Some(0) => "AKTUALIZACE PLUGINŮ A ŠABLON: 0\n  \
-             Nebylo co nasazovat — pluginy i šablony byly po celé období aktuální."
+        Some(0) => "PLUGIN AND THEME UPDATES: 0\n  \
+             There was nothing to apply — plugins and themes were up to date\n  \
+             throughout the period."
             .to_string(),
         Some(n) => format!(
-            "AKTUALIZACE PLUGINŮ A ŠABLON: {}\n  \
-             Tolik {} jsme na webu nasadili. Počítáme jen ty, které se opravdu\n  \
-             nainstalovaly. Aktualizace jádra WordPressu v tomto čísle nejsou —\n  \
-             ty zatím samostatně neevidujeme.",
-            cz_int(n),
-            cz_plural(n, "aktualizace", "aktualizace", "aktualizací"),
+            "PLUGIN AND THEME UPDATES: {}\n  \
+             We applied {} {} to the site. We count only the ones that actually\n  \
+             installed. WordPress core updates are not in this figure — we do\n  \
+             not track those separately yet.",
+            group_int(n),
+            group_int(n),
+            plural(n, "update", "updates"),
         ),
     }
 }
@@ -18854,42 +19490,51 @@ fn care_section_updates(applied: Option<i64>) -> String {
 /// as a month.
 fn care_section_usage(usage: Option<&CareUsage>) -> String {
     let Some(u) = usage else {
-        return "PROVOZ: neměřeno\n  \
-             Měření návštěvnosti na tomto webu v uvedeném období neběželo.\n  \
-             „0 požadavků“ by tvrdilo, že web nikdo nenavštívil, a to nevíme."
+        return "TRAFFIC: not measured\n  \
+             Traffic measurement was not running for this site during the\n  \
+             period. \"0 requests\" would claim nobody visited the site, and we\n  \
+             do not know that."
             .to_string();
     };
     let mut out = format!(
-        "PROVOZ: {} {}, odesláno {}\n  \
-         Požadavek je jedno načtení stránky, obrázku nebo souboru.",
-        cz_int(u.requests),
-        cz_plural(u.requests, "požadavek", "požadavky", "požadavků"),
-        cz_bytes(u.bw_out_bytes),
+        "TRAFFIC: {} {}, {} sent\n  \
+         A request is one load of a page, an image or a file.",
+        group_int(u.requests),
+        plural(u.requests, "request", "requests"),
+        customer_bytes(u.bw_out_bytes),
     );
     // Inbound bytes need a log format the stock nginx config doesn't have,
     // so a zero there is ambiguous — and `reports::usage` hands us `None`
-    // rather than letting us print "0 B přijato" for a live site.
+    // rather than letting us print "0 B received" for a live site.
     match u.bw_in_bytes {
-        Some(n) => out.push_str(&format!("\n  Přijatá data: {}.", cz_bytes(n))),
-        None => out
-            .push_str("\n  Objem přijatých dat server do svých záznamů nezapisuje, neuvádíme ho."),
+        Some(n) => out.push_str(&format!("\n  Data received: {}.", customer_bytes(n))),
+        None => out.push_str(
+            "\n  The server does not record how much data was received, so we do\n  \
+             not quote it.",
+        ),
     }
     out.push_str(&format!(
-        "\n  Nejvíc místa na disku za období: {}.",
-        cz_bytes(u.disk_peak_bytes)
+        "\n  Peak disk use during the period: {}.",
+        customer_bytes(u.disk_peak_bytes)
     ));
     if u.is_complete() {
         out.push_str(&format!(
-            "\n  Údaje pokrývají celé období ({} z {} dní).",
-            cz_int(u.days_counted),
-            cz_int(u.days_in_period)
+            "\n  These figures cover the whole period ({} of {} {}).",
+            group_int(u.days_counted),
+            group_int(u.days_in_period),
+            plural(u.days_in_period, "day", "days")
         ));
     } else {
         out.push_str(&format!(
-            "\n  Pozor: údaje pokrývají jen {} z {} dní období — zbytek se neměřil,\n  \
-             skutečný provoz byl tedy vyšší.",
-            cz_int(u.days_counted),
-            cz_int(u.days_in_period)
+            // "was higher" would state a fact about days we just said we did
+            // not measure — the site may have served nothing on them. This is
+            // the one sentence that could draw a conclusion from the gap, so
+            // it stays a possibility.
+            "\n  Note: these figures cover only {} of the period's {} {} — the\n  \
+             rest was not measured, so real traffic may have been higher.",
+            group_int(u.days_counted),
+            group_int(u.days_in_period),
+            plural(u.days_in_period, "day", "days")
         ));
     }
     out
@@ -18899,41 +19544,56 @@ fn care_section_usage(usage: Option<&CareUsage>) -> String {
 /// there is no percentage to print, and "100 %" for a site nobody
 /// monitored is the exact lie the report must never tell.
 fn care_section_uptime(uptime: Option<&CareUptime>) -> String {
+    const NOT_MONITORED: &str = "AVAILABILITY: not monitored (uptime checks were not active)\n  \
+         We were not checking this site regularly during the period, so we\n  \
+         cannot say whether it stayed reachable. A figure of 100 % would be\n  \
+         invented.";
     let Some(u) = uptime else {
-        return "DOSTUPNOST: nesledováno (monitoring nebyl aktivní)\n  \
-             Web jsme v tomto období pravidelně nekontrolovali, takže nemůžeme\n  \
-             říct, jestli byl celou dobu dostupný. Údaj 100 % by byl vymyšlený."
-            .to_string();
+        return NOT_MONITORED.to_string();
     };
     // `samples > 0` is guaranteed by the assembler (zero samples arrive as
     // `None` above), so this can only ever be `Some`.
     let Some(ratio) = u.success_ratio_x100() else {
-        return "DOSTUPNOST: nesledováno (monitoring nebyl aktivní)\n  \
-             Web jsme v tomto období pravidelně nekontrolovali, takže nemůžeme\n  \
-             říct, jestli byl celou dobu dostupný. Údaj 100 % by byl vymyšlený."
-            .to_string();
+        return NOT_MONITORED.to_string();
     };
     let failures = u.failures();
-    if failures == 0 {
-        return format!(
-            "DOSTUPNOST: {} ({} {}, žádný výpadek)\n  \
-             Web jsme automaticky kontrolovali a pokaždé odpověděl.",
-            cz_pct_x100(ratio),
-            cz_int(u.samples),
-            cz_plural(u.samples, "kontrola", "kontroly", "kontrol"),
-        );
+    let mut out = if failures == 0 {
+        format!(
+            "AVAILABILITY: {} ({} {}, no outage)\n  \
+             We checked the site automatically and it answered every time.",
+            pct_x100_str(ratio),
+            group_int(u.samples),
+            plural(u.samples, "check", "checks"),
+        )
+    } else {
+        format!(
+            "AVAILABILITY: {} ({} {}, {} of them failed)\n  \
+             The site did not answer on {} {}. One or two failed checks are usually\n  \
+             a brief outage or a restart; if they repeat, we look into it.",
+            pct_x100_str(ratio),
+            group_int(u.samples),
+            plural(u.samples, "check", "checks"),
+            group_int(failures),
+            group_int(failures),
+            plural(failures, "check", "checks"),
+        )
+    };
+    // A percentage computed from a subset of the period is a percentage OF
+    // that subset, and the days with no checks at all are exactly the days
+    // most likely to have been an outage — the agent being down is why no
+    // check was recorded. Saying so is the difference between a measured
+    // score and a flattering one.
+    if !u.is_complete() {
+        out.push_str(&format!(
+            "\n  Note: checks ran on only {} of the period's {} {}, so this\n  \
+             percentage describes those {} — not the whole period.",
+            group_int(u.days_counted),
+            group_int(u.days_in_period),
+            plural(u.days_in_period, "day", "days"),
+            plural(u.days_counted, "day", "days"),
+        ));
     }
-    format!(
-        "DOSTUPNOST: {} ({} {}, z toho {} neúspěšných)\n  \
-         Při {} {} web neodpověděl. Jedna dvě neúspěšné kontroly bývají krátký\n  \
-         výpadek nebo restart; když se opakují, řešíme to.",
-        cz_pct_x100(ratio),
-        cz_int(u.samples),
-        cz_plural(u.samples, "kontrola", "kontroly", "kontrol"),
-        cz_int(failures),
-        cz_int(failures),
-        cz_plural(failures, "kontrole", "kontrolách", "kontrolách"),
-    )
+    out
 }
 
 /// Backups. Three genuinely different states, and the middle one is the
@@ -18941,103 +19601,104 @@ fn care_section_uptime(uptime: Option<&CareUptime>) -> String {
 /// must not read the same as a site that never had any.
 fn care_section_backups(backups: Option<&CareBackups>) -> String {
     let Some(b) = backups else {
-        return "ZÁLOHY: nesledováno\n  \
-             Na tomto webu zatím neproběhla ani jedna záloha — automatické\n  \
-             zálohování na něm nikdy neběželo. „0 záloh“ by vypadalo jako\n  \
-             selhání; tohle je stav, kdy se zálohy nikdy nezapnuly."
+        return "BACKUPS: not monitored\n  \
+             Not a single backup has ever run for this site — automatic backups\n  \
+             were never switched on for it. \"0 backups\" would look like a\n  \
+             failure; this is the state where backups were never enabled."
             .to_string();
     };
     let mut out = if b.taken == 0 {
-        "ZÁLOHY: 0 za toto období\n  \
-         Tento web zálohy má, ale v uvedeném období žádná neproběhla. To je\n  \
-         potřeba prověřit — ozvěte se nám, prosím."
+        "BACKUPS: 0 in this period\n  \
+         This site does have backups configured, but none ran during the\n  \
+         period. That needs looking into — please get in touch."
             .to_string()
     } else {
         let mut s = format!(
-            "ZÁLOHY: {}\n  \
-             Tolik kompletních {} webu (soubory i databáze) jsme uložili.",
-            cz_int(b.taken),
-            cz_plural(b.taken, "kopie", "kopie", "kopií"),
+            "BACKUPS: {}\n  \
+             We stored {} complete {} of the site (files and database).",
+            group_int(b.taken),
+            group_int(b.taken),
+            plural(b.taken, "copy", "copies"),
         );
         // Only ever a time INSIDE the period: the report must not reach
         // backwards for a comforting older date.
         if let Some(ts) = b.last_success_at {
             s.push_str(&format!(
-                "\n  Poslední úspěšná záloha: {}.",
-                cz_datetime(ts)
+                "\n  Last successful backup: {}.",
+                report_datetime(ts)
             ));
         }
         s
     };
     if b.failed > 0 {
         out.push_str(&format!(
-            "\n  Neúspěšných pokusů: {} (opakují se automaticky).",
-            cz_int(b.failed)
+            "\n  Failed attempts: {} (these retry automatically).",
+            group_int(b.failed)
         ));
     }
     out
 }
 
-/// File integrity + malware. "Čisto" requires BOTH halves to have run —
+/// File integrity + malware. "Clean" requires BOTH halves to have run —
 /// zero malware hits from a scanner that was never installed means "not
 /// looked for", and the copy has to say which.
 fn care_section_integrity(integrity: Option<&CareIntegrity>) -> String {
     let Some(i) = integrity else {
-        return "KONTROLA SOUBORŮ A MALWARU: nekontrolováno\n  \
-             V uvedeném období na webu žádná kontrola souborů neproběhla.\n  \
-             Nemůžeme tedy říct, že je čistý — jen že jsme se nedívali."
+        return "FILE INTEGRITY AND MALWARE: not checked\n  \
+             No file check ran on the site during this period. So we cannot say\n  \
+             it is clean — only that we did not look."
             .to_string();
     };
-    let when = cz_date(i.scanned_at);
+    let when = report_date(i.scanned_at);
     let findings = i.total_findings();
     let mut out = if i.is_clean() {
         format!(
-            "KONTROLA SOUBORŮ A MALWARU: bez nálezu\n  \
-             Kontrola z {when}: soubory WordPressu odpovídají tomu, co vydal\n  \
-             wordpress.org, a antivirová kontrola nic nenašla."
+            "FILE INTEGRITY AND MALWARE: nothing found\n  \
+             Check on {when}: the WordPress files match what wordpress.org\n  \
+             published, and the malware scan found nothing."
         )
     } else if findings == 0 {
         format!(
-            "KONTROLA SOUBORŮ A MALWARU: zkontrolováno jen zčásti\n  \
-             Kontrola z {when} nic nenašla, ale proběhla jen zčásti — „čisto“\n  \
-             proto napsat nemůžeme."
+            "FILE INTEGRITY AND MALWARE: only partly checked\n  \
+             The check on {when} found nothing, but it only ran in part — so we\n  \
+             cannot write \"clean\"."
         )
     } else {
         let mut what: Vec<String> = Vec::new();
         if i.core_issues > 0 {
             what.push(format!(
-                "změněné soubory jádra WordPressu ({})",
-                cz_int(i.core_issues)
+                "modified WordPress core files ({})",
+                group_int(i.core_issues)
             ));
         }
         if i.plugin_issues > 0 {
             what.push(format!(
-                "změněné soubory pluginů ({})",
-                cz_int(i.plugin_issues)
+                "modified plugin files ({})",
+                group_int(i.plugin_issues)
             ));
         }
         if i.malware_hits > 0 {
-            what.push(format!("podezřelý kód ({})", cz_int(i.malware_hits)));
+            what.push(format!("suspicious code ({})", group_int(i.malware_hits)));
         }
         format!(
-            "KONTROLA SOUBORŮ A MALWARU: {} {}\n  \
-             Kontrola z {when} našla: {}.\n  \
-             Ne každý nález znamená útok — bývá to i ruční úprava souboru.\n  \
-             Pokud si nálezem nejste jistí, ozvěte se nám.",
-            cz_int(findings),
-            cz_plural(findings, "nález", "nálezy", "nálezů"),
+            "FILE INTEGRITY AND MALWARE: {} {}\n  \
+             The check on {when} found: {}.\n  \
+             Not every finding means an attack — a hand-edited file looks the\n  \
+             same. If you are unsure about a finding, get in touch.",
+            group_int(findings),
+            plural(findings, "finding", "findings"),
             what.join(", "),
         )
     };
     // Which half did NOT run is information the customer is owed, in every
     // one of the three branches above.
     if !i.checksums_ran {
-        out.push_str("\n  Kontrolní součty souborů se ověřit nepodařilo, tuhle část tedy nevíme.");
+        out.push_str("\n  We could not verify the file checksums, so that part is unknown.");
     }
     if !i.malware_scan_ran {
         out.push_str(
-            "\n  Antivirová kontrola na serveru neběžela, o podezřelém kódu proto\n  \
-             neříkáme nic.",
+            "\n  The malware scanner was not running on the server, so we say\n  \
+             nothing about suspicious code.",
         );
     }
     out
@@ -19046,7 +19707,7 @@ fn care_section_integrity(integrity: Option<&CareIntegrity>) -> String {
 /// Calendar days the half-open window `[from, to)` touches.
 ///
 /// Mirrors `hyperion_state::reports::days_spanned` so the header says the
-/// same "30 dní" the traffic section's coverage line does — and keeps
+/// same "30 days" the traffic section's coverage line does — and keeps
 /// saying it for a report whose traffic section is unmeasured.
 fn care_days_spanned(from: i64, to: i64) -> i64 {
     if to <= from {
@@ -19055,17 +19716,18 @@ fn care_days_spanned(from: i64, to: i64) -> i64 {
     (to - 1).div_euclid(86_400) - from.div_euclid(86_400) + 1
 }
 
-/// Czech plural pick: 1 / 2–4 / everything else (including 0).
-fn cz_plural(n: i64, one: &'static str, few: &'static str, many: &'static str) -> &'static str {
-    match n.abs() {
-        1 => one,
-        2..=4 => few,
-        _ => many,
+/// English plural pick: exactly 1 is singular, everything else (including
+/// 0) is plural.
+fn plural(n: i64, one: &'static str, many: &'static str) -> &'static str {
+    if n.abs() == 1 {
+        one
+    } else {
+        many
     }
 }
 
-/// Thousands-grouped integer the Czech way: "34 500".
-fn cz_int(n: i64) -> String {
+/// Thousands-grouped integer: "34,500".
+fn group_int(n: i64) -> String {
     let digits = n.unsigned_abs().to_string();
     let mut out = String::with_capacity(digits.len() + digits.len() / 3 + 1);
     if n < 0 {
@@ -19074,53 +19736,67 @@ fn cz_int(n: i64) -> String {
     for (i, ch) in digits.chars().enumerate() {
         // Group from the LEFT by counting how many digits remain.
         if i > 0 && (digits.len() - i) % 3 == 0 {
-            out.push(' ');
+            out.push(',');
         }
         out.push(ch);
     }
     out
 }
 
-/// Bytes for a CUSTOMER: SI steps (kB / MB / GB) and a decimal comma, so
-/// the number matches what their connection and their invoice talk about.
-/// `human_bytes` (GiB, dot) stays as it is for the operator dashboard —
-/// two audiences, two conventions, and neither should learn the other's.
-fn cz_bytes(n: i64) -> String {
+/// Bytes for a CUSTOMER: SI steps (kB / MB / GB), because that is what
+/// their connection and their invoice talk about. `human_bytes` (GiB)
+/// stays as it is for the operator dashboard — two audiences, two
+/// conventions, and neither should learn the other's.
+fn customer_bytes(n: i64) -> String {
     const STEPS: [(&str, i64); 3] = [("GB", 1_000_000_000), ("MB", 1_000_000), ("kB", 1_000)];
     for (label, scale) in STEPS {
         if n.abs() >= scale {
             let v = n as f64 / scale as f64;
-            return format!("{} {label}", format!("{v:.1}").replace('.', ","));
+            return format!("{v:.1} {label}");
         }
     }
-    format!("{} B", cz_int(n))
+    format!("{} B", group_int(n))
 }
 
-/// "30. 6. 2026". A date a Czech reader parses at a glance; ISO would
-/// read as a machine talking.
-fn cz_date(ts: i64) -> String {
+/// "30 Jun 2026". Spelled month, because a purely numeric date reads as a
+/// different day depending on the reader's country.
+fn report_date(ts: i64) -> String {
     use chrono::Datelike;
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
     match chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0) {
-        Some(dt) => format!("{}. {}. {}", dt.day(), dt.month(), dt.year()),
+        Some(dt) => {
+            let m = MONTHS
+                .get((dt.month() as usize).saturating_sub(1))
+                .copied()
+                .unwrap_or("???");
+            format!("{} {} {}", dt.day(), m, dt.year())
+        }
         // Unrepresentable timestamps can't reach a real report; saying so
         // beats printing a wrong date with total confidence.
-        None => "neznámé datum".to_string(),
+        None => "unknown date".to_string(),
     }
 }
 
-/// "30. 6. 2026 03:14 UTC" — the zone is spelled out because the customer
-/// is in CET/CEST and an unlabelled clock time would be a small lie.
-fn cz_datetime(ts: i64) -> String {
+/// "30 Jun 2026 03:14 UTC" — the zone is spelled out because the customer
+/// may not be in UTC and an unlabelled clock time would be a small lie.
+fn report_datetime(ts: i64) -> String {
     use chrono::Timelike;
     match chrono::DateTime::<chrono::Utc>::from_timestamp(ts, 0) {
-        Some(dt) => format!("{} {:02}:{:02} UTC", cz_date(ts), dt.hour(), dt.minute()),
-        None => "neznámý čas".to_string(),
+        Some(dt) => format!(
+            "{} {:02}:{:02} UTC",
+            report_date(ts),
+            dt.hour(),
+            dt.minute()
+        ),
+        None => "unknown time".to_string(),
     }
 }
 
-/// Hundredths of a percent → "99,93 %".
-fn cz_pct_x100(x: i64) -> String {
-    format!("{},{:02} %", x / 100, (x % 100).abs())
+/// Hundredths of a percent → "99.93 %".
+fn pct_x100_str(x: i64) -> String {
+    format!("{}.{:02} %", x / 100, (x % 100).abs())
 }
 
 fn derive_user_from_summary(s: &HostingSummary) -> Option<String> {
@@ -19270,9 +19946,18 @@ async fn fs_used_total_bytes(path: &std::path::Path) -> Option<(u64, u64)> {
     Some((used, total))
 }
 
-/// Parse the tail of nginx access.log (default combined format) for the
-/// last `since` epoch-seconds window. Returns (bw_in_bytes, bw_out_bytes,
-/// requests, last_request_ts).
+/// Parse nginx access.log (default combined format) over the half-open
+/// range `[since, until)`. `until = None` means "up to the end of the
+/// file". Returns (bw_in_bytes, bw_out_bytes, requests, last_request_ts).
+///
+/// **The range must match the granularity of the bucket it is written
+/// into.** This used to be a `since`-only window of 24 h whose result was
+/// stored under an HOURLY `period` key, so every hourly bucket held a
+/// rolling 24 h total and every consumer that SUMs buckets — the care
+/// report's period traffic, /stats' per-site breakdown, the hosting
+/// detail's `*_24h` figures — multiplied the real number by roughly the
+/// bucket count. A customer's monthly letter quoted about 24× the traffic
+/// their site actually served.
 ///
 /// Nginx combined format: '$remote_addr - $remote_user [$time_local] "$request" $status $body_bytes_sent ...'.
 /// We only have body_bytes_sent (bw_out) — bw_in is approximated as
@@ -19671,6 +20356,58 @@ const INTEGRITY_ENABLED_KV_KEY: &str = "integrity_scan_enabled";
 /// for everybody.
 const FAIL2BAN_HTTP_KV_KEY: &str = "http_bruteforce_scan_enabled";
 
+/// Epoch seconds of the first scan of the current protected stretch —
+/// written by the scanner, cleared the moment a site is opted out. The
+/// care report reads it to bound "attacks blocked" to the days it can
+/// actually evidence, instead of inferring coverage from a toggle that
+/// only ever describes the present.
+const FAIL2BAN_HTTP_SINCE_KV_KEY: &str = "http_bruteforce_scan_since";
+
+/// How long a silence breaks a stretch of proven coverage. The scanner
+/// runs every scheduler tick (minutes), so an hour without one means it
+/// was not running — the node was down, the agent was restarting, or
+/// `[fail2ban] enabled` was off. Generous on purpose: the cost of being
+/// too strict is a letter that under-claims, which is the safe direction.
+const FAIL2BAN_COVERAGE_GAP_SECS: i64 = 3600;
+
+/// The window an "attacks blocked" figure may be counted over, given when
+/// protection demonstrably started (`since`) and the report period
+/// `[from, to)`. `None` means nothing in this period was watched.
+///
+/// Exists so the COUNT and the sentence describing it cannot come from
+/// different windows. They did: the count ran over the whole period while
+/// the letter said "watching since the 25th, so this figure covers only
+/// that part of it", putting a 21-day total inside a 5-day claim. Ban rows
+/// outlive an opt-out and can be attributed by hand at any time, so the
+/// two windows genuinely diverge rather than merely being able to.
+fn attacks_window(since: i64, from: i64, to: i64) -> Option<i64> {
+    let effective = since.max(from);
+    // `>= to` ⇒ protection began only after the period ended: a zero here
+    // would sit beside a start date in the future. That is the shape of
+    // the first report after an upgrade, when no site has a stamp yet.
+    (effective < to).then_some(effective)
+}
+
+/// Parse a `"<since>,<last_scan>"` coverage stamp.
+///
+/// Also accepts the bare `"<since>"` written by the first version of this
+/// key, treating it as its own last scan — an upgrade then sees one stale
+/// stretch and restarts coverage, rather than parsing to nothing and
+/// silently claiming "watching since now" on every tick.
+fn parse_coverage_stamp(raw: &str) -> Option<(i64, i64)> {
+    let raw = raw.trim();
+    match raw.split_once(',') {
+        Some((since, last)) => Some((
+            since.trim().parse::<i64>().ok()?,
+            last.trim().parse::<i64>().ok()?,
+        )),
+        None => {
+            let since = raw.parse::<i64>().ok()?;
+            Some((since, since))
+        }
+    }
+}
+
 /// Marker put in `WpIntegrityScanResult::error` for a hosting that has no
 /// WordPress at all. A sentinel rather than free text because the sweep
 /// branches on it — a static site is *skipped*, not *reported*.
@@ -20012,10 +20749,32 @@ async fn scan_access_log_for_bruteforce(
         .collect()
 }
 
-async fn parse_access_log_window(path: &std::path::Path, since: i64) -> (i64, i64, i64, i64) {
-    let Ok(body) = tokio::fs::read_to_string(path).await else {
+async fn parse_access_log_window(
+    path: &std::path::Path,
+    since: i64,
+    until: Option<i64>,
+) -> (i64, i64, i64, i64) {
+    // The freshly rotated sibling is read too, and the time window does the
+    // rest of the work: logrotate can fire in the MIDDLE of an hour, and
+    // the part of that hour written before the rotation is then only in
+    // `access.log.1`. Without this the hour is re-measured from an almost
+    // empty file and the earlier traffic is lost. Entries outside `[since,
+    // until)` are skipped anyway, so reading the older file costs nothing
+    // but the read. A compressed or date-suffixed rotation is not covered —
+    // `upsert_usage`'s caller never lowers an existing bucket, which is the
+    // backstop for those.
+    let mut body = tokio::fs::read_to_string(path).await.unwrap_or_default();
+    let rotated = path.with_extension(match path.extension().and_then(|e| e.to_str()) {
+        Some(ext) => format!("{ext}.1"),
+        None => "1".to_string(),
+    });
+    if let Ok(older) = tokio::fs::read_to_string(&rotated).await {
+        body.push('\n');
+        body.push_str(&older);
+    }
+    if body.trim().is_empty() {
         return (0, 0, 0, 0);
-    };
+    }
     use chrono::{DateTime, FixedOffset};
     let mut bw_in: i64 = 0;
     let mut bw_out: i64 = 0;
@@ -20035,6 +20794,12 @@ async fn parse_access_log_window(path: &std::path::Path, since: i64) -> (i64, i6
         };
         let ts = dt.timestamp();
         if ts < since {
+            continue;
+        }
+        // Half-open on purpose: `until` is the next bucket's `since`, so a
+        // request landing exactly on an hour boundary is counted once, by
+        // the later bucket, never by both.
+        if until.is_some_and(|u| ts >= u) {
             continue;
         }
         reqs += 1;
@@ -20541,75 +21306,130 @@ fn fmt_notif_time(secs: i64) -> String {
         .unwrap_or_default()
 }
 
-/// Date only, in the form a Czech reader expects ("1. 9. 2026").
-fn fmt_cz_date(secs: i64) -> String {
+/// Date only, spelled month ("1 Sep 2026"): a purely numeric date reads
+/// as a different day depending on the reader's country.
+fn fmt_mail_date(secs: i64) -> String {
     chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0)
-        .map(|dt| dt.format("%-d. %-m. %Y").to_string())
+        .map(|dt| dt.format("%-d %b %Y").to_string())
         .unwrap_or_default()
 }
 
-/// Whole days left until `expires_at`, floored, never negative. Derived
-/// from the clock rather than from the warning's own 30/7/1 offset: a tick
-/// that runs late (agent down for a day) must state the days that are
-/// actually left, not the ones the row was queued for.
+/// Whole days left until `expires_at`, as a CALENDAR difference in UTC —
+/// the same calendar `fmt_mail_date` prints — never negative. Derived from
+/// the clock rather than from the warning's own 30/7/1 offset: a tick that
+/// runs late (agent down for a day) must state the days that are actually
+/// left, not the ones the row was queued for.
+///
+/// It must be a calendar difference and not the duration floor
+/// `(expires_at - now) / 86_400`: the scheduler queues the 1-day row at
+/// `expires_at - 86_400` and fires it at `+δ` (δ up to one 5-minute tick),
+/// so the floor collapses to 0 on every real send and the letter claims
+/// "expires today" on the day BEFORE the date it goes on to print.
 fn expiry_days_left(expires_at: i64, now: i64) -> i64 {
-    (expires_at - now).max(0) / 86_400
-}
-
-/// Czech plural of "den": 1 den, 2–4 dny, 5+ dní.
-fn czech_days_word(n: i64) -> &'static str {
-    match n {
-        1 => "den",
-        2..=4 => "dny",
-        _ => "dní",
+    let day =
+        |s: i64| chrono::DateTime::<chrono::Utc>::from_timestamp(s, 0).map(|dt| dt.date_naive());
+    match (day(expires_at), day(now)) {
+        (Some(exp), Some(now)) => (exp - now).num_days().max(0),
+        _ => 0,
     }
 }
 
-/// Subject + body of the expiry warning, in Czech — the recipient is the
-/// site owner, not the operator. Pure (every time-dependent input is an
-/// argument) so the wording is unit-testable without an SMTP relay.
+/// Subject + body of the expiry warning. The recipient is the SITE OWNER,
+/// not the operator, so it explains consequences rather than mechanics.
+/// Pure (every time-dependent input is an argument) so the wording is
+/// unit-testable without an SMTP relay.
 ///
 /// The consequences it names are the ones the scheduler really queues, see
 /// `reconcile_scheduled_rows`: suspend at `expires_at`, delete at
 /// `expires_at + grace_days.max(1)` days — hence the same `.max(1)` here,
 /// so the date in the letter is the date the action fires.
-fn expiry_warning_mail(
+///
+/// Empty (or whitespace-only) `body_template` ⇒ the built-in wording, byte
+/// for byte. A custom one replaces the BODY only; the subject keeps the
+/// "[Hyperion] … expires in N days" shape the customer's mail rules and
+/// our own `/emails` list key off.
+///
+/// Every date/day-count placeholder is pre-worded ("expires today",
+/// "30 days", "1 day"), so a custom letter cannot invent a negative
+/// countdown, mis-plural a single day, or name a delete date other than
+/// the one `reconcile_scheduled_rows` actually queued. Unknown `{tokens}`
+/// are left verbatim rather than dropped — see `render_template`.
+fn expiry_warning_mail_with(
     domain: &str,
     expires_at: i64,
     grace_days: i64,
     now: i64,
+    body_template: &str,
 ) -> (String, String) {
     let days_left = expiry_days_left(expires_at, now);
     let grace = grace_days.max(1);
     let subject = if days_left == 0 {
-        format!("[Hyperion] Hosting {domain} vyprší dnes")
+        format!("[Hyperion] Hosting for {domain} expires today")
     } else {
         format!(
-            "[Hyperion] Hosting {domain} vyprší za {days_left} {}",
-            czech_days_word(days_left)
+            "[Hyperion] Hosting for {domain} expires in {days_left} {}",
+            plural(days_left, "day", "days")
         )
     };
     let when = if days_left == 0 {
-        "vyprší dnes".to_string()
+        "expires today".to_string()
     } else {
         format!(
-            "vyprší {} — zbývá {days_left} {}",
-            fmt_cz_date(expires_at),
-            czech_days_word(days_left)
+            "expires on {} — {days_left} {} left",
+            fmt_mail_date(expires_at),
+            plural(days_left, "day", "days")
         )
     };
-    let body = format!(
-        "Dobrý den,\n\n\
-         hosting {domain} {when}.\n\n\
-         Pokud do té doby nedojde k prodloužení:\n\
-         - {exp_date} bude hosting pozastaven a návštěvníkům se místo webu zobrazí informační stránka,\n\
-         - po ochranné lhůtě {grace} {grace_word}, tj. {del_date}, bude hosting i s daty smazán.\n\n\
-         Pro prodloužení nás, prosím, kontaktujte.\n\n--\nHyperion\n",
-        exp_date = fmt_cz_date(expires_at),
-        grace_word = czech_days_word(grace),
-        del_date = fmt_cz_date(expires_at + grace * 86_400),
+    let exp_date = fmt_mail_date(expires_at);
+    let del_date = fmt_mail_date(expires_at + grace * 86_400);
+    let grace_str = format!("{grace} {}", plural(grace, "day", "days"));
+    if body_template.trim().is_empty() {
+        let body = format!(
+            "Hello,\n\n\
+             hosting for {domain} {when}.\n\n\
+             If it is not renewed before then:\n\
+             - on {exp_date} the hosting will be suspended and visitors will see an information page instead of the site,\n\
+             - after a grace period of {grace_str}, on {del_date}, the hosting and its data will be deleted.\n\n\
+             To renew, please get in touch.\n\n--\nHyperion\n",
+        );
+        return (subject, body);
+    }
+    let days_left_str = format!("{days_left} {}", plural(days_left, "day", "days"));
+    let body = render_template(
+        body_template,
+        &[
+            ("domain", domain),
+            ("expires_at", &exp_date),
+            ("days_left", &days_left_str),
+            // Already clamped with `.max(1)`, so the letter names the date
+            // the delete is really queued for.
+            ("grace_days", &grace_str),
+            ("delete_at", &del_date),
+            ("when", &when),
+        ],
     );
     (subject, body)
+}
+
+/// Which of the two possible bodies a customer letter was rendered from,
+/// in the words the audit trail and the journal use.
+///
+/// Both renderers treat a blank template as "send the built-in letter", so
+/// blank is tested exactly the way they test it — an operator template of
+/// three spaces must not be reported as the operator's.
+///
+/// This exists because the answer is per NODE. The letters are rendered on
+/// the node that owns the hosting (that is where the data is) from that
+/// node's agent.toml, while Settings edits the master's copy and pushes it
+/// out. A node that was unreachable at save time goes on sending the old
+/// letter, and this string is what makes that legible after the fact
+/// instead of leaving "which letter did this customer get" unanswerable.
+fn letter_origin(template: &str) -> &'static str {
+    if template.trim().is_empty() {
+        "built-in"
+    } else {
+        "operator (this node's agent.toml)"
+    }
 }
 
 /// Read the operator-editable `[notifications]` message templates from
@@ -20641,6 +21461,14 @@ fn read_notifications_section(
         slack_template: get("slack_template", &def.slack_template),
         email_subject_template: get("email_subject_template", &def.email_subject_template),
         email_body_template: get("email_body_template", &def.email_body_template),
+        // The customer letters default to "" — which the renderers read as
+        // "use the built-in letter", so a missing key, an empty key and an
+        // unreadable agent.toml all land on today's wording.
+        care_report_body_template: get("care_report_body_template", &def.care_report_body_template),
+        expiry_warning_body_template: get(
+            "expiry_warning_body_template",
+            &def.expiry_warning_body_template,
+        ),
     }
 }
 
@@ -20849,6 +21677,21 @@ fn parse_agent_section_fields(
                     return Err(bad("template too long (max 4000 characters)".into()));
                 }
                 crate::config_persist::FieldValue::Str(v.clone())
+            }
+            // [notifications] — the two CUSTOMER LETTERS. Whole letters
+            // rather than one-line wrappers, hence the roomier cap: the
+            // built-in care report is ~1.2 kB before the operator adds a
+            // word. Empty stays empty and means "use the built-in letter".
+            ("notifications", "care_report_body_template")
+            | ("notifications", "expiry_warning_body_template") => {
+                if v.len() > 20_000 {
+                    return Err(bad("letter too long (max 20000 characters)".into()));
+                }
+                // A <textarea> submits CRLF line endings per the HTML spec.
+                // Left alone they would end up in a plain-text mail body and
+                // would stop a saved copy of the default letter from being
+                // byte-identical to the built-in one.
+                crate::config_persist::FieldValue::Str(v.replace("\r\n", "\n"))
             }
             // Reject anything else.
             _ => {
@@ -21323,36 +22166,75 @@ const BACKUP_KV_LAST_RUN: &str = "backup_last_run_at";
 /// the request, so it's the only one both sides can agree on.
 const BACKUP_KV_TARGET: &str = "backup_target";
 
+/// Where a backup run's off-site targets came from, and therefore what an
+/// EMPTY set of them means. Nothing downstream can tell from the list alone,
+/// and guessing is wrong in both directions: read every empty list as
+/// "nothing was wanted" and a worker's scheduled backups quietly stop leaving
+/// the node; read every empty list as a failure and an install that never
+/// bought off-site storage collects a red audit row per backup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OffsiteSource {
+    /// The panel or the API resolved the cluster's targets on the MASTER
+    /// (where the table lives) and sent them with the request. Empty
+    /// therefore means the operator has none that can take a copy — which
+    /// the Backups card already says — so there is nothing to report.
+    Caller,
+    /// A scheduled run, using THIS node's own `backup_targets` table. On the
+    /// master that is the same table the panel reads; on a worker it is empty
+    /// by design, so empty here means the cluster's targets never reached the
+    /// run rather than that no copy was wanted.
+    ThisNode,
+    /// An internal snapshot taken as a rollback safety net — the pre-export
+    /// and pre-push backups. Nothing off-site was ever intended, so nothing
+    /// is missing when nothing is uploaded.
+    NotWanted,
+}
+
+/// Why a scheduled backup on a worker never leaves the node. Shared by the
+/// audit row and the sweep's log line so the operator reads one explanation,
+/// not two that have drifted apart.
+const OFFSITE_WORKER_HAS_NO_TARGETS: &str =
+    "no off-site target reached this scheduled run: the cluster's off-site targets live in the \
+     master's table and a worker keeps none of its own, so this backup exists only on this node. \
+     Until that is fixed, run the backup from the panel (which sends the targets with the \
+     request) or give this node its own copy via [remote_backup] in its agent.toml";
+
 /// Which of the resolved off-site targets one hosting's backup may use.
 /// Borrows the caller's slice — nothing is copied until an upload happens.
 #[derive(Debug, PartialEq, Eq)]
 enum OffsiteChoice<'a> {
-    /// No pin: every target the caller resolved.
+    /// No pin: every target the caller resolved. Never empty — "resolved
+    /// nothing" is `NoTargets`, which is a different thing to report.
     NodeDefault(&'a [hyperion_types::S3BackupTarget]),
     /// Pinned to one target that is in the resolved set.
     Pinned(&'a hyperion_types::S3BackupTarget),
     /// Pinned to a target that ISN'T in the resolved set — disabled, deleted,
-    /// renamed, or its secret file didn't read. Nothing is pushed: someone
-    /// chose where this client's data goes, so silently falling back to the
-    /// node's other buckets would put it somewhere nobody picked.
+    /// renamed, its secret file didn't read, or this run carries no targets
+    /// at all. Nothing is pushed: someone chose where this client's data
+    /// goes, so silently falling back to the node's other buckets would put
+    /// it somewhere nobody picked.
     Unresolved(&'a str),
+    /// Unpinned, and the run resolved no targets. Whether that is a failure
+    /// depends on where the (empty) list came from — see `OffsiteSource`.
+    NoTargets,
 }
 
 /// Resolve one hosting's off-site destination against the targets the caller
 /// already resolved (the master's table for a manual run, this node's for a
 /// scheduled one).
 ///
-/// An EMPTY `resolved` is never a broken pin: it means the run carries no
-/// off-site targets at all — the pre-clone safety backup passes none, and a
-/// worker's own `backup_targets` table is empty by design. Those paths stay
-/// exactly as they were.
+/// An empty `resolved` used to swallow the pin and report the node default,
+/// on the grounds that the callers passing none wanted none. That is what let
+/// a worker's scheduled backup ignore a pin in silence: the caller's intent
+/// now travels with the run as an `OffsiteSource`, so this function can say
+/// plainly that a pinned target was not available.
 fn choose_offsite_targets<'a>(
     pin: Option<&'a str>,
     resolved: &'a [hyperion_types::S3BackupTarget],
 ) -> OffsiteChoice<'a> {
     match pin.map(str::trim).filter(|s| !s.is_empty()) {
+        None if resolved.is_empty() => OffsiteChoice::NoTargets,
         None => OffsiteChoice::NodeDefault(resolved),
-        Some(_) if resolved.is_empty() => OffsiteChoice::NodeDefault(resolved),
         Some(name) => match resolved.iter().find(|t| t.name == name) {
             Some(t) => OffsiteChoice::Pinned(t),
             None => OffsiteChoice::Unresolved(name),
@@ -22955,18 +23837,145 @@ mod tests {
             OffsiteChoice::Unresolved("gone")
         );
 
-        // Nothing resolved at all — no targets configured, or a caller that
-        // deliberately passes none (the pre-clone safety backup). Local only,
-        // and NOT reported as a broken pin.
+        // Nothing resolved at all. This used to collapse to "node default",
+        // i.e. the empty slice — which reads as "uploaded to every target
+        // there was" and is how a worker's scheduled backup ignored a pin in
+        // silence. The two ways of getting here now stay apart, because they
+        // need opposite fixes and only the caller knows which it is.
         let none: Vec<hyperion_types::S3BackupTarget> = Vec::new();
         assert_eq!(
             choose_offsite_targets(None, &none),
-            OffsiteChoice::NodeDefault(&none[..])
+            OffsiteChoice::NoTargets
         );
         assert_eq!(
             choose_offsite_targets(Some("wasabi-eu"), &none),
-            OffsiteChoice::NodeDefault(&none[..])
+            OffsiteChoice::Unresolved("wasabi-eu"),
+            "a pin nothing could satisfy is a broken pin, not a node default"
         );
+    }
+
+    /// The empty target list is the whole question, and only the caller can
+    /// answer it: the panel resolves the master's table and sends it, so
+    /// empty means the operator configured none; a scheduled run reads THIS
+    /// Each request must land in exactly ONE hourly bucket, because the
+    /// care report, /stats and the hosting detail all SUM buckets.
+    ///
+    /// The regression this pins: the sampler used to parse a 24 h window
+    /// and store it under an hourly key, so summing a month multiplied the
+    /// customer's traffic by roughly 24. Summing the per-hour windows here
+    /// must reproduce the total exactly — no request counted twice, none
+    /// dropped on a boundary.
+    #[tokio::test]
+    async fn hourly_windows_partition_the_access_log_exactly_once() {
+        use super::parse_access_log_window;
+        use chrono::{TimeZone, Utc};
+
+        let tmp = tempfile::tempdir().expect("tmp");
+        let log = tmp.path().join("access.log");
+        let base = Utc
+            .with_ymd_and_hms(2026, 6, 1, 0, 0, 0)
+            .single()
+            .expect("base ts")
+            .timestamp();
+
+        // Three hours of traffic, including two requests exactly ON hour
+        // boundaries — the case a closed range would double-count.
+        let offsets = [0i64, 59 * 60, 3600, 3600 + 30 * 60, 7200, 7200 + 59 * 60];
+        let mut body = String::new();
+        for off in offsets {
+            let stamp = Utc
+                .timestamp_opt(base + off, 0)
+                .single()
+                .expect("stamp")
+                .format("%d/%b/%Y:%H:%M:%S +0000");
+            // Combined format; body_bytes_sent is field 10 (index 9).
+            body.push_str(&format!(
+                "1.2.3.4 - - [{stamp}] \"GET / HTTP/1.1\" 200 100 \"-\" \"ua\"\n"
+            ));
+        }
+        std::fs::write(&log, &body).expect("write log");
+
+        // Whole span, as one window: the ground truth.
+        let (_, all_out, all_reqs, _) = parse_access_log_window(&log, base, None).await;
+        assert_eq!(all_reqs, 6, "fixture should parse as six requests");
+        assert_eq!(all_out, 600);
+
+        // The same span cut into the hour buckets the sampler writes.
+        let mut sum_reqs = 0;
+        let mut sum_out = 0;
+        for h in 0..3 {
+            let start = base + h * 3600;
+            let (_, out, reqs, _) = parse_access_log_window(&log, start, Some(start + 3600)).await;
+            assert_eq!(reqs, 2, "hour {h} holds its own two requests");
+            sum_reqs += reqs;
+            sum_out += out;
+        }
+        assert_eq!(sum_reqs, all_reqs, "summing buckets must not inflate");
+        assert_eq!(sum_out, all_out);
+
+        // An open-ended window still starts where it is told: the old
+        // behaviour (ignoring the upper bound) would return all six here.
+        let (_, _, tail_reqs, _) = parse_access_log_window(&log, base + 7200, None).await;
+        assert_eq!(tail_reqs, 2);
+
+        // logrotate can fire in the MIDDLE of an hour. The part written
+        // before the rotation is then only in access.log.1, and re-reading
+        // the hour from an almost-empty access.log would lose it. Both
+        // files are read, and the time window keeps the older file's
+        // out-of-range entries out.
+        std::fs::rename(&log, tmp.path().join("access.log.1")).expect("rotate");
+        let post = Utc
+            .timestamp_opt(base + 3600 + 45 * 60, 0)
+            .single()
+            .expect("stamp")
+            .format("%d/%b/%Y:%H:%M:%S +0000");
+        std::fs::write(
+            &log,
+            format!("9.9.9.9 - - [{post}] \"GET / HTTP/1.1\" 200 100 \"-\" \"ua\"\n"),
+        )
+        .expect("write fresh log");
+        let (_, _, hour1, _) = parse_access_log_window(&log, base + 3600, Some(base + 7200)).await;
+        assert_eq!(
+            hour1, 3,
+            "the rotated-away part of the hour must still be counted"
+        );
+        // And the rotated file does not leak traffic into other hours.
+        let (_, _, hour0, _) = parse_access_log_window(&log, base, Some(base + 3600)).await;
+        assert_eq!(hour0, 2);
+    }
+
+    /// node's table, which on a worker is empty by design.
+    #[tokio::test]
+    async fn only_a_worker_scheduled_run_reports_the_missing_off_site_copy() {
+        use super::{OffsiteSource, OFFSITE_WORKER_HAS_NO_TARGETS};
+        let tmp = tempfile::tempdir().expect("tmp");
+        let state = tmp.path().join("node-id.json");
+
+        // Master (no node-state file): a scheduled run reading its OWN table
+        // is reading the same table the panel shows, so empty really does
+        // mean "no off-site configured" and there is nothing to report.
+        let master = svc_with_state_file(None).await;
+        assert_eq!(master.offsite_gap_reason(OffsiteSource::ThisNode), None);
+
+        // Worker: the same empty list means the cluster's targets never
+        // reached the run. The reason names the fix, and it is the SAME
+        // string the audit row carries — one explanation, not two that drift.
+        std::fs::write(&state, b"{}").expect("write node-id.json");
+        let worker = svc_with_state_file(Some(state)).await;
+        assert_eq!(
+            worker.offsite_gap_reason(OffsiteSource::ThisNode),
+            Some(OFFSITE_WORKER_HAS_NO_TARGETS)
+        );
+        assert!(
+            OFFSITE_WORKER_HAS_NO_TARGETS.contains("exists only on this node"),
+            "the reason must say the backup did not leave the node"
+        );
+
+        // A run whose targets the CALLER resolved, and an internal snapshot,
+        // promised nothing off-site — neither may collect a red row, on a
+        // worker least of all (that is every pre-export/pre-push snapshot).
+        assert_eq!(worker.offsite_gap_reason(OffsiteSource::Caller), None);
+        assert_eq!(worker.offsite_gap_reason(OffsiteSource::NotWanted), None);
     }
 
     #[tokio::test]
@@ -23213,16 +24222,39 @@ mod tests {
             );
         }
 
-        // Scanning on: the count is a real measurement, even at zero.
         s.hosting_kv_set(hid.clone(), FAIL2BAN_HTTP_KV_KEY.into(), "on".into())
             .await
             .expect("kv set");
         let now = now_secs();
+
+        // The TOGGLE alone is not evidence. With no record of the scanner
+        // ever having run on this site, the switch says "watch it" and
+        // nothing says it was watched — so the section is unmeasured, not
+        // a reassuring zero.
+        let never_scanned = s
+            .care_report_build(HostingSelector::Id(detail.id.clone()), now - 86_400, now)
+            .await
+            .expect("report");
+        assert_eq!(never_scanned.attacks_blocked, None);
+
+        // Once the scanner has actually run across the period, the count
+        // is a real measurement — even at zero.
+        s.hosting_kv_set(
+            hid.clone(),
+            FAIL2BAN_HTTP_SINCE_KV_KEY.into(),
+            format!("{},{}", now - 90_000, now),
+        )
+        .await
+        .expect("kv set");
         let on = s
             .care_report_build(HostingSelector::Id(detail.id.clone()), now - 86_400, now)
             .await
             .expect("report");
         assert_eq!(on.attacks_blocked, Some(0));
+        assert_eq!(
+            on.attacks_covered_since, None,
+            "coverage predates the period ⇒ no qualifier"
+        );
 
         // Opted out: "we did not measure this", not a reassuring zero.
         s.hosting_kv_set(hid.clone(), FAIL2BAN_HTTP_KV_KEY.into(), "off".into())
@@ -23233,6 +24265,282 @@ mod tests {
             .await
             .expect("report");
         assert_eq!(off.attacks_blocked, None);
+    }
+
+    // ============================================================
+    //  A refused send is not a send. The customer letters (care
+    //  report, expiry warning) may never record delivery the relay
+    //  did not perform.
+    // ============================================================
+
+    /// An SMTP config every send fails against, with no relay running and no
+    /// network touched: `send_text` parses the From address before it opens a
+    /// connection, so a malformed one takes the exact `Err` branch a relay
+    /// that rejects the message takes — which is all these tests care about.
+    /// It is also a real operator mistake (a typo'd `from_address`).
+    fn refusing_relay() -> hyperion_adapters::email::EmailConfig {
+        hyperion_adapters::email::EmailConfig {
+            smtp_host: "127.0.0.1".into(),
+            smtp_port: 25,
+            smtp_user: String::new(),
+            smtp_password: String::new(),
+            from_address: "this is not a mailbox".into(),
+            from_name: String::new(),
+            security: "plain".into(),
+        }
+    }
+
+    /// A site that buys a monthly report, whose period has been open for 40
+    /// days, on a node whose relay refuses everything.
+    async fn site_owing_a_care_report(
+        pool: &SqlitePool,
+    ) -> (HostingService<MockAdapterPort>, HostingDetail) {
+        let s = svc(pool.clone(), happy_mocks()).with_email(Some(refusing_relay()), None);
+        s.create(req("pece.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("pece.cz").expect("parse"));
+        let detail = s.get(sel.clone()).await.expect("get");
+        // The customer's address. No expires_at: this is about the report,
+        // not the expiry chain.
+        let mut e = hyperion_types::HostingExpiry::defaults();
+        e.owner_email = Some("zakaznik@pece.cz".into());
+        s.set_expiry(sel, e).await.expect("expiry");
+        // Bought 40 days ago ⇒ the first period is [activated_at, now) and
+        // is more than one month wide, so the report is due.
+        packages::activate(
+            pool,
+            &packages::NewActivation {
+                hosting_id: detail.id.clone(),
+                package_id: 1,
+                package_name: "Péče".into(),
+                price_minor: None,
+                price_currency: None,
+                price_interval: None,
+                features: PackageFeatures {
+                    report_cadence: ReportCadence::Monthly,
+                    ..Default::default()
+                },
+                next_billing_at: None,
+                prior_state_json: None,
+            },
+            now_secs() - 40 * 86_400,
+        )
+        .await
+        .expect("activate");
+        // Proof that the brute-force scanner has been watching the whole
+        // time. Without it the report is entirely unmeasured and the tick
+        // correctly declines to send anything — which would make this
+        // fixture exercise that guard instead of the relay refusal it is
+        // about.
+        hyperion_state::hosting_kv::set(
+            pool,
+            detail.id.as_str(),
+            FAIL2BAN_HTTP_SINCE_KV_KEY,
+            &format!("{},{}", now_secs() - 41 * 86_400, now_secs()),
+            now_secs(),
+        )
+        .await
+        .expect("coverage stamp");
+        (s, detail)
+    }
+
+    /// The customer letters are read from the agent.toml of the node that
+    /// OWNS the hosting, so the same panel legitimately sends two different
+    /// letters — the operator's on the master, the built-in one on a worker
+    /// that has not received it yet. That is the divergence; what must never
+    /// happen is it being untraceable. Every render records which body it
+    /// used, and this pins both halves of that.
+    #[tokio::test]
+    async fn a_care_report_records_which_letter_it_was_rendered_from() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let toml = tmp.path().join("agent.toml");
+        std::fs::write(
+            &toml,
+            b"[notifications]\ncare_report_body_template = \"Dobry den, {domain}. {uptime}\"\n",
+        )
+        .expect("write agent.toml");
+
+        // The node that has the operator's letter (today: the master).
+        let pool = open_memory().await.expect("open");
+        let edited = svc(pool.clone(), happy_mocks()).with_agent_config_path(toml);
+        edited.create(req("pece.cz")).await.expect("create");
+        let detail = edited
+            .get(HostingSelector::Domain(
+                Domain::parse("pece.cz").expect("parse"),
+            ))
+            .await
+            .expect("get");
+        let mail = edited
+            .care_report_preview(HostingSelector::Id(detail.id.clone()))
+            .await
+            .expect("preview");
+        assert!(
+            mail.body.starts_with("Dobry den, pece.cz."),
+            "the operator's letter is what this node renders: {:?}",
+            mail.body
+        );
+        let audit = edited.audit_list(200).await.expect("audit");
+        let row = audit
+            .iter()
+            .find(|a| a.action == "package.report.preview")
+            .expect("preview is audited");
+        assert!(
+            row.payload_json.contains("\"letter\":\"operator"),
+            "the trail must name the letter that was rendered: {}",
+            row.payload_json
+        );
+
+        // A node that never received it — no agent.toml wired at all, the
+        // same state as a worker the save could not reach. Same site, same
+        // code, different letter, and the trail says so instead of leaving
+        // "which one did the customer get" to guesswork.
+        let pool2 = open_memory().await.expect("open");
+        let untouched = svc(pool2, happy_mocks());
+        untouched.create(req("pece.cz")).await.expect("create");
+        let d2 = untouched
+            .get(HostingSelector::Domain(
+                Domain::parse("pece.cz").expect("parse"),
+            ))
+            .await
+            .expect("get");
+        let plain = untouched
+            .care_report_preview(HostingSelector::Id(d2.id.clone()))
+            .await
+            .expect("preview");
+        assert_ne!(
+            plain.body, mail.body,
+            "this is the divergence the trail has to explain"
+        );
+        let audit2 = untouched.audit_list(200).await.expect("audit");
+        let row2 = audit2
+            .iter()
+            .find(|a| a.action == "package.report.preview")
+            .expect("preview is audited");
+        assert!(
+            row2.payload_json.contains("\"letter\":\"built-in\""),
+            "a node without the operator's letter must say so: {}",
+            row2.payload_json
+        );
+    }
+
+    /// `letter_origin` has to agree with the renderers about what counts as
+    /// "no template", or the trail names a letter that was not sent.
+    #[test]
+    fn a_blank_template_is_reported_as_the_built_in_letter() {
+        use super::{care_report_render_with, letter_origin};
+        let r = mk_care_report();
+        for blank in ["", "   ", "\n\t "] {
+            assert_eq!(letter_origin(blank), "built-in", "{blank:?}");
+            // Same input, same verdict from the renderer: blank ⇒ built-in.
+            assert_eq!(
+                care_report_render_with(&r, &r.domain, blank).1,
+                care_report_render_with(&r, &r.domain, "").1,
+                "{blank:?}"
+            );
+        }
+        assert!(letter_origin("Dobry den, {domain}").starts_with("operator"));
+    }
+
+    /// The scheduled report: a refused send must leave the period OPEN.
+    ///
+    /// The marker is both "already reported" and the START of the next
+    /// period, so advancing it on a failure does not merely skip one letter —
+    /// it deletes those days: the customer never hears about that month and
+    /// the next report begins after it.
+    #[tokio::test]
+    async fn care_report_tick_leaves_the_period_open_when_the_relay_refuses() {
+        let pool = open_memory().await.expect("open");
+        let (s, detail) = site_owing_a_care_report(&pool).await;
+
+        let sent = s.care_report_tick().await.expect("tick");
+        assert_eq!(sent, 0, "the relay refused it — nothing went out");
+        assert_eq!(
+            hyperion_state::hosting_kv::get(&pool, detail.id.as_str(), CARE_REPORT_KV_PERIOD_END)
+                .await
+                .expect("kv"),
+            None,
+            "the period must stay open — those 40 days are otherwise lost"
+        );
+        // And the attempt is where the operator looks for it: the site's
+        // Emails tab, reading 'failed'. This also proves the tick got as far
+        // as trying, rather than skipping on one of the earlier guards.
+        let log = s
+            .email_log_list(Some(detail.id.as_str().to_string()), 10)
+            .await
+            .expect("email log");
+        assert!(
+            log.iter()
+                .any(|e| e.kind == CARE_REPORT_EMAIL_KIND && e.state == "failed"),
+            "{log:?}"
+        );
+    }
+
+    /// The operator's "Send now": a refused send is an error naming where the
+    /// relay's own message is, never a marked period.
+    #[tokio::test]
+    async fn care_report_send_errors_on_a_refused_relay_and_marks_nothing() {
+        let pool = open_memory().await.expect("open");
+        let (s, detail) = site_owing_a_care_report(&pool).await;
+
+        let err = s
+            .care_report_send(HostingSelector::Id(detail.id.clone()))
+            .await
+            .expect_err("a refused send must not read as success");
+        // The wording will change; that it points at the Emails tab, where
+        // `notify_email` put the relay's own words, must not.
+        assert!(err.to_string().contains("Emails tab"), "got: {err}");
+        assert_eq!(
+            hyperion_state::hosting_kv::get(&pool, detail.id.as_str(), CARE_REPORT_KV_PERIOD_END)
+                .await
+                .expect("kv"),
+            None,
+            "the period stays open until a report actually goes out"
+        );
+        let audit = s.audit_list(200).await.expect("audit");
+        assert!(
+            !audit.iter().any(|a| a.action == "package.report.send"),
+            "nothing was sent, so nothing may be audited as sent: {audit:?}"
+        );
+    }
+
+    /// The expiry warning: a refused send is audited as a failure — and the
+    /// scheduled row is still completed, because bouncing it back to pending
+    /// would re-send every tick forever against a relay that keeps refusing.
+    #[tokio::test]
+    async fn refused_expiry_warning_is_audited_as_failed_but_still_completes_the_row() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), happy_mocks()).with_email(Some(refusing_relay()), None);
+        s.create(req("konci.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("konci.cz").expect("parse"));
+        // Expires in 12 h: every warning offset (30/7/1 days) is already due,
+        // the suspend is not.
+        let mut e = hyperion_types::HostingExpiry::defaults();
+        e.expires_at = Some(now_secs() + 43_200);
+        e.owner_email = Some("zakaznik@konci.cz".into());
+        s.set_expiry(sel, e).await.expect("expiry");
+
+        s.scheduler_tick().await.expect("tick");
+
+        let audit = s.audit_list(200).await.expect("audit");
+        let notify: Vec<_> = audit
+            .iter()
+            .filter(|a| a.action == "scheduler.notify")
+            .collect();
+        assert!(!notify.is_empty(), "the warnings were due: {audit:?}");
+        assert!(
+            notify.iter().all(|a| a.result == "failed"),
+            "a warning the relay refused is not an 'ok': {notify:?}"
+        );
+        // Still done, not pending: the customer's next event is the suspend,
+        // and an hourly retry storm helps nobody.
+        let still_due = hyperion_state::scheduler::pending_due(&pool, now_secs(), 100)
+            .await
+            .expect("pending");
+        assert!(
+            !still_due
+                .iter()
+                .any(|a| a.action.as_str().starts_with("notify_")),
+            "a failed send must not bounce the row back to pending: {still_due:?}"
+        );
     }
 
     /// The Settings form's round trip: a save lands in agent.toml under
@@ -23926,9 +25234,11 @@ mod tests {
     }
 
     // ============================================================
-    //  expiry_warning_mail — the letter the customer actually gets
-    //  before we suspend their site. Pure, so the 30/7/1-day
-    //  variants are assertable without an SMTP relay.
+    //  expiry_warning_mail_with — the letter the customer actually
+    //  gets before we suspend their site. Pure, so the 30/7/1-day
+    //  variants are assertable without an SMTP relay. An empty
+    //  template is the built-in wording (see the editable-letter
+    //  block further down).
     // ============================================================
 
     /// 2026-09-01 00:00:00 UTC.
@@ -23936,48 +25246,461 @@ mod tests {
 
     #[test]
     fn expiry_warning_30d_states_domain_date_days_and_consequences() {
-        let (subject, body) = expiry_warning_mail("example.cz", EXP_TS, 14, EXP_TS - 30 * 86_400);
-        assert_eq!(subject, "[Hyperion] Hosting example.cz vyprší za 30 dní");
-        assert!(body.contains("hosting example.cz vyprší 1. 9. 2026 — zbývá 30 dní."));
-        assert!(body.contains("1. 9. 2026 bude hosting pozastaven"));
+        let (subject, body) =
+            expiry_warning_mail_with("example.cz", EXP_TS, 14, EXP_TS - 30 * 86_400, "");
+        assert_eq!(
+            subject,
+            "[Hyperion] Hosting for example.cz expires in 30 days"
+        );
+        assert!(body.contains("hosting for example.cz expires on 1 Sep 2026 — 30 days left."));
+        assert!(body.contains("on 1 Sep 2026 the hosting will be suspended"));
         // Delete date = expiry + grace, the date DeleteExpired is queued for.
-        assert!(body.contains("po ochranné lhůtě 14 dní, tj. 15. 9. 2026"));
+        assert!(body.contains("after a grace period of 14 days, on 15 Sep 2026"));
     }
 
     #[test]
     fn expiry_warning_7d_variant() {
-        let (subject, body) = expiry_warning_mail("example.cz", EXP_TS, 14, EXP_TS - 7 * 86_400);
-        assert_eq!(subject, "[Hyperion] Hosting example.cz vyprší za 7 dní");
-        assert!(body.contains("zbývá 7 dní."));
+        let (subject, body) =
+            expiry_warning_mail_with("example.cz", EXP_TS, 14, EXP_TS - 7 * 86_400, "");
+        assert_eq!(
+            subject,
+            "[Hyperion] Hosting for example.cz expires in 7 days"
+        );
+        assert!(body.contains("7 days left."));
     }
 
     #[test]
     fn expiry_warning_1d_variant_is_singular() {
-        let (subject, body) = expiry_warning_mail("example.cz", EXP_TS, 14, EXP_TS - 86_400);
-        assert_eq!(subject, "[Hyperion] Hosting example.cz vyprší za 1 den");
-        assert!(body.contains("zbývá 1 den."));
+        let (subject, body) =
+            expiry_warning_mail_with("example.cz", EXP_TS, 14, EXP_TS - 86_400, "");
+        assert_eq!(
+            subject,
+            "[Hyperion] Hosting for example.cz expires in 1 day"
+        );
+        assert!(body.contains("1 day left."));
     }
 
     #[test]
     fn expiry_warning_on_the_day_says_today() {
-        let (subject, body) = expiry_warning_mail("example.cz", EXP_TS, 14, EXP_TS);
-        assert_eq!(subject, "[Hyperion] Hosting example.cz vyprší dnes");
-        assert!(body.contains("hosting example.cz vyprší dnes."));
+        let (subject, body) = expiry_warning_mail_with("example.cz", EXP_TS, 14, EXP_TS, "");
+        assert_eq!(subject, "[Hyperion] Hosting for example.cz expires today");
+        assert!(body.contains("hosting for example.cz expires today."));
         // A late tick can't produce a negative countdown.
-        let (late, _) = expiry_warning_mail("example.cz", EXP_TS, 14, EXP_TS + 3 * 86_400);
-        assert_eq!(late, "[Hyperion] Hosting example.cz vyprší dnes");
+        let (late, _) = expiry_warning_mail_with("example.cz", EXP_TS, 14, EXP_TS + 3 * 86_400, "");
+        assert_eq!(late, "[Hyperion] Hosting for example.cz expires today");
     }
 
     #[test]
     fn expiry_warning_grace_matches_the_scheduled_delete() {
         // grace_days = 0 is stored, but reconcile_scheduled_rows queues the
-        // delete at grace.max(1) — the letter must name that same date.
-        let (_, body) = expiry_warning_mail("example.cz", EXP_TS, 0, EXP_TS - 86_400);
-        assert!(body.contains("po ochranné lhůtě 1 den, tj. 2. 9. 2026"));
-        // 2–4 takes the third Czech plural form.
-        let (_, body) = expiry_warning_mail("example.cz", EXP_TS, 3, EXP_TS - 2 * 86_400);
-        assert!(body.contains("zbývá 2 dny."));
-        assert!(body.contains("po ochranné lhůtě 3 dny, tj. 4. 9. 2026"));
+        // delete at grace.max(1) — the letter must name that same date, and
+        // say "1 day" rather than "1 days".
+        let (_, body) = expiry_warning_mail_with("example.cz", EXP_TS, 0, EXP_TS - 86_400, "");
+        assert!(body.contains("after a grace period of 1 day, on 2 Sep 2026"));
+        let (_, body) = expiry_warning_mail_with("example.cz", EXP_TS, 3, EXP_TS - 2 * 86_400, "");
+        assert!(body.contains("2 days left."));
+        assert!(body.contains("after a grace period of 3 days, on 4 Sep 2026"));
+    }
+
+    // ============================================================
+    //  Editable customer letters (care report + expiry warning).
+    //
+    //  Four properties, in order of how much they matter:
+    //   1. an operator who never touches a template gets today's
+    //      letter, byte for byte;
+    //   2. the default template we SHOW the operator reproduces
+    //      that same letter — otherwise the editor lies about
+    //      where they are starting from;
+    //   3. an unmeasured section stays unmeasured through a custom
+    //      letter (the placeholders are section STRINGS, so there
+    //      is no way to spend a number we never measured);
+    //   4. an unknown placeholder survives as literal text instead
+    //      of panicking or silently deleting a paragraph.
+    // ============================================================
+
+    /// 2026-06-01 00:00:00 UTC .. 2026-07-01 (half-open, 30 days).
+    const CARE_FROM: i64 = 1_780_272_000;
+    const CARE_TO: i64 = CARE_FROM + 30 * 86_400;
+
+    /// A report with five sections measured and UPTIME deliberately not —
+    /// the mixed case, which is the one a custom letter can get wrong.
+    fn mk_care_report() -> CareReport {
+        let mut r = CareReport::empty(
+            HostingId("h1".into()),
+            "example.cz".into(),
+            CARE_FROM,
+            CARE_TO,
+        );
+        r.attacks_blocked = Some(12);
+        r.updates_applied = Some(3);
+        r.usage = Some(CareUsage {
+            bw_in_bytes: Some(2_000_000),
+            bw_out_bytes: 34_500_000,
+            requests: 12_345,
+            disk_peak_bytes: 1_200_000_000,
+            days_counted: 30,
+            days_in_period: 30,
+        });
+        r.uptime = None; // not monitored — on purpose
+        r.backups = Some(CareBackups {
+            taken: 30,
+            failed: 1,
+            last_success_at: Some(CARE_TO - 3_600),
+        });
+        r.integrity = Some(CareIntegrity {
+            scanned_at: CARE_TO - 86_400,
+            checksums_ran: true,
+            malware_scan_ran: true,
+            core_issues: 0,
+            plugin_issues: 0,
+            malware_hits: 0,
+        });
+        r
+    }
+
+    #[test]
+    fn care_letter_empty_template_is_todays_letter() {
+        let r = mk_care_report();
+        let (subject, body) = care_report_render(&r, "example.cz");
+        // Explicit "" and whitespace-only both mean "built-in letter".
+        assert_eq!(
+            care_report_render_with(&r, "example.cz", ""),
+            (subject.clone(), body.clone())
+        );
+        assert_eq!(care_report_render_with(&r, "example.cz", "  \n\t ").1, body);
+        // …and today's letter is still exactly this.
+        assert_eq!(
+            subject,
+            "Care report for example.cz (1 Jun 2026 – 30 Jun 2026)"
+        );
+        assert!(body.starts_with(
+            "CARE REPORT\nSite:    example.cz\nPeriod:  1 Jun 2026 – 30 Jun 2026 (30 days)\n\n"
+        ));
+        assert!(body.ends_with(
+            "--\nYou receive this report because example.cz is on a care plan.\n\
+             The figures come straight from the server the site runs on; times are UTC.\n\
+             If anything here needs explaining, just reply to this e-mail.\n"
+        ));
+        assert!(body.contains("ATTACKS BLOCKED: 12"));
+        assert!(body.contains("AVAILABILITY: not monitored"));
+    }
+
+    #[test]
+    fn care_letter_default_template_reproduces_the_builtin_letter() {
+        // The constant the Settings editor offers as a starting point is
+        // written by hand in hyperion-types; if either it or the built-in
+        // format! drifts, the operator's "default" would silently differ
+        // from what their customers have been receiving.
+        for r in [mk_care_report(), {
+            // Every section unmeasured — the other branch of all six.
+            CareReport::empty(
+                HostingId("h2".into()),
+                "quiet.cz".into(),
+                CARE_FROM,
+                CARE_TO,
+            )
+        }] {
+            let (_, builtin) = care_report_render(&r, &r.domain);
+            let (_, templated) = care_report_render_with(
+                &r,
+                &r.domain,
+                hyperion_types::CARE_REPORT_DEFAULT_BODY_TEMPLATE,
+            );
+            assert_eq!(builtin, templated);
+        }
+    }
+
+    /// Deleting the section that reads badly must not delete the
+    /// disclosure. The operator starts from the built-in letter — preamble
+    /// and all — and drops `{uptime}` because "not monitored" looks bad
+    /// next to an invoice.
+    #[test]
+    fn a_custom_letter_cannot_drop_an_unmeasured_section() {
+        let r = mk_care_report(); // uptime is None
+        let (_, body) = care_report_render_with(&r, "example.cz", "{domain}\n{attacks}\n{traffic}");
+        assert!(
+            !body.contains("AVAILABILITY:"),
+            "operator did drop it: {body}"
+        );
+        assert!(
+            body.contains("NOT MEASURED THIS PERIOD: availability."),
+            "the disclosure must come back: {body}"
+        );
+
+        // Keeping the placeholder is the normal case, and must not produce
+        // a second copy of the same disclosure.
+        let (_, kept) = care_report_render_with(&r, "example.cz", "{domain}\n{uptime}");
+        assert!(kept.contains("AVAILABILITY: not monitored"));
+        assert!(!kept.contains("NOT MEASURED THIS PERIOD"), "{kept}");
+
+        // Dropping a MEASURED section stays the operator's call — a
+        // shorter letter is still a true one.
+        let (_, short) = care_report_render_with(&r, "example.cz", "{domain}\n{uptime}");
+        assert!(!short.contains("ATTACKS BLOCKED"), "{short}");
+        assert!(!short.contains("NOT MEASURED THIS PERIOD"), "{short}");
+    }
+
+    /// A coverage stamp has to describe a STRETCH, not just a start.
+    /// Protection that stopped and resumed — node down, `[fail2ban]
+    /// enabled` flipped off and back, agent not running — would otherwise
+    /// keep its original `since` and back-claim the dark days.
+    #[test]
+    fn a_coverage_stamp_restarts_after_a_gap() {
+        use super::{parse_coverage_stamp, FAIL2BAN_COVERAGE_GAP_SECS as GAP};
+        assert_eq!(parse_coverage_stamp("100,200"), Some((100, 200)));
+        assert_eq!(parse_coverage_stamp("  100 , 200 "), Some((100, 200)));
+        // The first version of this key stored a bare start. Reading it as
+        // its own last scan makes an upgrade see one stale stretch and
+        // restart coverage, instead of parsing to nothing and silently
+        // claiming "watching since now" on every tick.
+        assert_eq!(parse_coverage_stamp("100"), Some((100, 100)));
+        assert_eq!(parse_coverage_stamp("nonsense"), None);
+        assert_eq!(parse_coverage_stamp("100,"), None);
+
+        // Continuous scanning keeps the original start...
+        let (since, last) = parse_coverage_stamp("1000,2000").expect("parse");
+        let next = 2000 + GAP - 1;
+        assert!(next - last <= GAP, "still one unbroken stretch");
+        assert_eq!(since, 1000);
+        // ...but a silence longer than the threshold does not.
+        let after_gap = 2000 + GAP + 1;
+        assert!(
+            after_gap - last > GAP,
+            "an hour of silence means nothing was watching"
+        );
+    }
+
+    /// The count and the sentence describing it must come from ONE window.
+    #[test]
+    fn the_attacks_count_is_narrowed_to_the_window_the_letter_claims() {
+        use super::attacks_window;
+
+        // Protection predates the period ⇒ count the whole period, and the
+        // letter's unqualified wording is earned.
+        assert_eq!(
+            attacks_window(CARE_FROM - 86_400, CARE_FROM, CARE_TO),
+            Some(CARE_FROM)
+        );
+
+        // Protection starts on the 25th ⇒ the count starts there too. This
+        // is the regression: it used to count from CARE_FROM while the
+        // sentence said "since 25 Jun … covers only that part of it".
+        let since = CARE_FROM + 24 * 86_400;
+        assert_eq!(attacks_window(since, CARE_FROM, CARE_TO), Some(since));
+
+        // Protection begins only after the period ended ⇒ unmeasured, not
+        // a zero beside a start date in the future. The shape of the first
+        // report after an upgrade, when no site has a stamp yet.
+        assert_eq!(attacks_window(CARE_TO, CARE_FROM, CARE_TO), None);
+        assert_eq!(attacks_window(CARE_TO + 86_400, CARE_FROM, CARE_TO), None);
+    }
+
+    /// Protection switched on partway through bounds the claim. Without
+    /// this the letter said "0 — protection ran for the whole period"
+    /// about days nobody was watching.
+    #[test]
+    fn attacks_started_mid_period_says_so_instead_of_claiming_the_period() {
+        // 15 Jun, inside the 1–30 Jun fixture period.
+        let since = CARE_FROM + 14 * 86_400;
+
+        let quiet = care_section_attacks(Some(0), Some(since));
+        assert!(quiet.contains("since 15 Jun 2026"), "{quiet}");
+        assert!(
+            !quiet.contains("Protection ran for the whole period"),
+            "a zero from half a period must not claim the period: {quiet}"
+        );
+
+        let busy = care_section_attacks(Some(4), Some(since));
+        assert!(
+            busy.contains("ATTACKS BLOCKED: 4 (since 15 Jun 2026)"),
+            "{busy}"
+        );
+
+        // Full coverage keeps the original, unqualified wording.
+        let full = care_section_attacks(Some(0), None);
+        assert!(
+            full.contains("Protection ran for the whole period"),
+            "{full}"
+        );
+    }
+
+    /// The Settings preview is built from the same section renderers as a
+    /// real letter, so an operator tunes wording against text customers
+    /// actually receive. This pins that it is wired up — the previous
+    /// version was hand-copied prose in the page's JavaScript, and it had
+    /// already drifted.
+    #[test]
+    fn the_settings_preview_sample_comes_from_the_real_renderer() {
+        let fields = care_report_preview_fields();
+        let get = |k: &str| {
+            fields
+                .iter()
+                .find(|(n, _)| *n == k)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_default()
+        };
+        // Availability is deliberately the unmeasured one.
+        assert_eq!(get("uptime"), care_section_uptime(None));
+        assert!(get("uptime").contains("AVAILABILITY: not monitored"));
+        // And the measured sections are byte-identical to the letter's.
+        assert_eq!(get("attacks"), care_section_attacks(Some(12), None));
+        assert_eq!(get("updates"), care_section_updates(Some(3)));
+        // Every placeholder the docs promise has a sample.
+        for k in [
+            "domain",
+            "period_start",
+            "period_end",
+            "days",
+            "attacks",
+            "updates",
+            "traffic",
+            "uptime",
+            "backups",
+            "integrity",
+        ] {
+            assert!(!get(k).is_empty(), "missing preview sample for {{{k}}}");
+        }
+    }
+
+    #[test]
+    fn care_letter_custom_template_keeps_an_unmeasured_section_honest() {
+        let r = mk_care_report(); // uptime is None
+        let (subject, body) = care_report_render_with(
+            &r,
+            "example.cz",
+            "{domain} {period_start}–{period_end} ({days})\n{uptime}\n{attacks}",
+        );
+        // The subject is ours; only the body is operator-editable.
+        assert_eq!(
+            subject,
+            "Care report for example.cz (1 Jun 2026 – 30 Jun 2026)"
+        );
+        assert!(body.starts_with("example.cz 1 Jun 2026–30 Jun 2026 (30 days)\n"));
+        assert!(body.contains("ATTACKS BLOCKED: 12"));
+        // The rearranged letter still says nobody was watching, in full.
+        assert!(body.contains(
+            "AVAILABILITY: not monitored (uptime checks were not active)\n  \
+             We were not checking this site regularly during the period, so we\n  \
+             cannot say whether it stayed reachable. A figure of 100 % would be\n  \
+             invented."
+        ));
+    }
+
+    #[test]
+    fn care_letter_unknown_placeholder_is_left_literal() {
+        let r = mk_care_report();
+        // `{uptime_pct}` is exactly the placeholder this design refuses to
+        // provide: there is no way to ask for the number behind a section,
+        // so a template cannot turn "not monitored" into "100 %". Asking
+        // for it yields the operator's own text back, visibly wrong in the
+        // preview rather than silently dropped from the mail.
+        let (_, body) =
+            care_report_render_with(&r, "example.cz", "{domain} {uptime_pct} {nope} {unclosed");
+        // `starts_with`, not `==`: this letter names no section at all, so
+        // the unmeasured-section disclosure is appended after it. That is
+        // `a_custom_letter_cannot_drop_an_unmeasured_section`'s business;
+        // what matters here is that the three bad tokens survive verbatim.
+        assert!(
+            body.starts_with("example.cz {uptime_pct} {nope} {unclosed"),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn expiry_letter_default_template_reproduces_the_builtin_letter() {
+        for (grace, now) in [
+            (14, EXP_TS - 30 * 86_400),
+            (14, EXP_TS - 86_400),
+            (0, EXP_TS - 86_400),
+            (14, EXP_TS), // "expires today"
+        ] {
+            let (_, builtin) = expiry_warning_mail_with("example.cz", EXP_TS, grace, now, "");
+            let (_, templated) = expiry_warning_mail_with(
+                "example.cz",
+                EXP_TS,
+                grace,
+                now,
+                hyperion_types::EXPIRY_WARNING_DEFAULT_BODY_TEMPLATE,
+            );
+            assert_eq!(builtin, templated, "grace={grace} now={now}");
+        }
+    }
+
+    #[test]
+    fn expiry_letter_custom_template_substitutes_and_preserves_unknowns() {
+        let (subject, body) = expiry_warning_mail_with(
+            "example.cz",
+            EXP_TS,
+            14,
+            EXP_TS - 7 * 86_400,
+            "Renew {domain} before {expires_at} ({days_left} left).\n\
+             Deleted on {delete_at}, after {grace_days}.\n{when}\n{mystery}",
+        );
+        assert_eq!(
+            subject,
+            "[Hyperion] Hosting for example.cz expires in 7 days"
+        );
+        assert_eq!(
+            body,
+            "Renew example.cz before 1 Sep 2026 (7 days left).\n\
+             Deleted on 15 Sep 2026, after 14 days.\n\
+             expires on 1 Sep 2026 — 7 days left\n{mystery}"
+        );
+    }
+
+    #[test]
+    fn customer_letter_templates_default_to_empty_meaning_builtin() {
+        let tmp = tempfile::tempdir().expect("dir");
+        // No file at all, and a file with no [notifications] section: both
+        // leave the letters empty, i.e. the built-in wording.
+        assert!(read_notifications_section(None)
+            .care_report_body_template
+            .is_empty());
+        let bare = tmp.path().join("bare.toml");
+        std::fs::write(&bare, b"[cluster]\npanel_hostname = \"p\"\n").expect("write");
+        let v = read_notifications_section(Some(bare.as_path()));
+        assert!(v.care_report_body_template.is_empty());
+        assert!(v.expiry_warning_body_template.is_empty());
+        // The three wrapper templates keep their pass-through defaults.
+        assert_eq!(v.slack_template, "{message}");
+        // A customised letter reads back verbatim; the OTHER letter is
+        // still empty (no accidental cross-fill).
+        let set = tmp.path().join("set.toml");
+        std::fs::write(
+            &set,
+            b"[notifications]\ncare_report_body_template = \"Hi {domain}\\n{uptime}\"\n",
+        )
+        .expect("write");
+        let v = read_notifications_section(Some(set.as_path()));
+        assert_eq!(v.care_report_body_template, "Hi {domain}\n{uptime}");
+        assert!(v.expiry_warning_body_template.is_empty());
+    }
+
+    #[test]
+    fn customer_letter_templates_are_settings_writable() {
+        // A <textarea> posts CRLF; storing it would put \r into a
+        // plain-text mail body, so the parser normalises it.
+        let fields = std::collections::BTreeMap::from([(
+            "care_report_body_template".to_string(),
+            "Hi {domain}\r\nbye\r\n".to_string(),
+        )]);
+        let parsed = parse_agent_section_fields("notifications", &fields).expect("allow-listed");
+        assert!(matches!(
+            parsed.as_slice(),
+            [(_, crate::config_persist::FieldValue::Str(s))] if s == "Hi {domain}\nbye\n"
+        ));
+        // Both letters are allow-listed, and both are length-capped.
+        let big = std::collections::BTreeMap::from([(
+            "expiry_warning_body_template".to_string(),
+            "x".repeat(20_001),
+        )]);
+        assert!(parse_agent_section_fields("notifications", &big).is_err());
+        // A neighbouring field in the same section is still refused.
+        let bogus = std::collections::BTreeMap::from([(
+            "care_report_subject_template".to_string(),
+            "nope".to_string(),
+        )]);
+        assert!(parse_agent_section_fields("notifications", &bogus).is_err());
     }
 
     // ============================================================

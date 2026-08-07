@@ -189,7 +189,7 @@ async fn max_disk(
 /// `samples == 0` is a site nobody monitored, and the only place a ratio
 /// may be computed is [`CareUptime::success_ratio_x100`], which returns
 /// `None` there instead of dividing 0/0 into a flattering "100 %". A
-/// renderer that sees zero samples must print "nekontrolováno".
+/// renderer that sees zero samples must print "not monitored".
 ///
 /// Never `None`: unlike backups there is no separate "was this feature
 /// ever on" signal to recover, so zero samples IS the unmeasured state
@@ -200,8 +200,16 @@ pub async fn uptime(
     from_ts: i64,
     to_ts: i64,
 ) -> Result<CareUptime, StateError> {
-    let (samples, successes): (i64, Option<i64>) = sqlx::query_as(
-        "SELECT COUNT(*), SUM(success) FROM monitor_samples
+    // NOTE: three positional binds (hosting_id, from_ts, to_ts) — the
+    // DISTINCT-date expression adds none.
+    //
+    // `sampled_at` is epoch SECONDS, so the date has to be derived in SQL:
+    // `unixepoch` is the modifier that reads the integer as a timestamp.
+    let (samples, successes, days_counted): (i64, Option<i64>, i64) = sqlx::query_as(
+        "SELECT COUNT(*),
+                SUM(success),
+                COUNT(DISTINCT date(sampled_at, 'unixepoch'))
+           FROM monitor_samples
           WHERE hosting_id = ? AND sampled_at >= ? AND sampled_at < ?",
     )
     .bind(hosting_id)
@@ -214,6 +222,10 @@ pub async fn uptime(
         // `success` is CHECKed to 0/1, so SUM is the success count. NULL
         // only when there were no rows at all.
         successes: successes.unwrap_or(0),
+        days_counted,
+        // Same denominator the traffic section uses, so the two sections
+        // of one letter can never disagree about how long the period was.
+        days_in_period: days_spanned(from_ts, to_ts),
     })
 }
 
@@ -1057,7 +1069,7 @@ mod tests {
         let (pool, a, _b) = fresh().await;
         // No ClamAV on the node — a normal state on a shared host. Zero
         // hits here means "not looked for", so the report must say
-        // "nekontrolováno", never "čisto".
+        // "not checked", never "clean".
         put_scan(
             &pool,
             a.as_str(),
@@ -1093,7 +1105,7 @@ mod tests {
     #[tokio::test]
     async fn every_metric_of_an_untouched_site_reads_as_unmeasured() {
         // The load-bearing default. A brand-new site with a package on it
-        // must produce a report full of "nekontrolováno", not a report
+        // must produce a report full of "not measured", not a report
         // full of flattering zeros.
         let (pool, a, _b) = fresh().await;
         assert_eq!(usage(&pool, a.as_str(), FROM, TO).await.expect("q"), None);
