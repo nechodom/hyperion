@@ -723,9 +723,13 @@
           Socket: <code style="font-size:inherit">/run/php/{{ v }}/{{ detail.system_user }}.sock</code>
         </div>
       {% else %}
-        {% if detail.kind == "static" %}
+        {# kind "php" with NO version is what the importer produces when
+           the source panel reported none — it needs the converter just as
+           much as a static site, and it is the case an operator actually
+           hits. Only proxy/redirect (no docroot) get no form. #}
+        {% if detail.kind == "static" || detail.kind == "php" %}
           <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap">
-            <span class="text-soft">static (no PHP)</span>
+            <span class="text-soft">no PHP version yet</span>
             {# Same endpoint as the version switch above: the backend
                CONVERTS a static hosting when it has no PHP yet — kind
                flips to php, a pool is created, the vhost re-renders.

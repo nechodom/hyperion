@@ -2961,11 +2961,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // at all; giving either an FPM pool would produce a site that
         // silently does not work.
         let converting = detail.php_version.is_none();
-        if converting && detail.kind != "static" {
+        // Refuse by what the kind LACKS (a document root), not by
+        // matching one blessed kind. The first version allowed only
+        // `static` — and an imported WordPress site whose source panel
+        // reported no PHP version arrives as kind="php" with NO version,
+        // which that guard rejected with the absurd sentence "hosting
+        // kind `php` cannot run PHP".
+        if converting && matches!(detail.kind.as_str(), "reverse_proxy" | "redirect") {
             return Err(RpcError::Conflict {
                 message: format!(
                     "hosting kind `{}` cannot run PHP — it has no document root to run it \
-                     from. Only a static hosting can be converted.",
+                     from. Only a static or PHP hosting can be given a PHP version.",
                     detail.kind
                 ),
             });
@@ -3007,7 +3013,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         //     step 5 reads a hosting that is already PHP. Doing it after
         //     would render the static template against a hosting that has
         //     a pool — a site that 404s every .php it is asked for.
-        if converting {
+        if converting && detail.kind != "php" {
             hyperion_state::hostings::set_kind(&self.pool, &detail.id, "php", None, now_secs())
                 .await
                 .map_err(|e| {
@@ -27461,6 +27467,30 @@ mod tests {
         // a site that 404s every .php it is asked for.
         let after = s.get(sel).await.expect("get");
         assert_eq!(after.php_version, Some(PhpVersion::V8_4));
+        assert_eq!(after.kind, "php");
+    }
+
+    /// kind="php" with NO version is what the importer produces when the
+    /// source panel reported none — the exact site an operator wants to
+    /// hand a PHP version. The first guard matched only kind="static"
+    /// and refused these with "hosting kind `php` cannot run PHP".
+    #[tokio::test]
+    async fn set_php_version_fills_in_an_imported_php_site_without_a_version() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), happy_mocks());
+        let mut r = req("imported.cz");
+        r.php_version = None;
+        r.kind = "php".into();
+        r.database = None;
+        s.create(r).await.expect("create imported");
+        let sel = HostingSelector::Domain(Domain::parse("imported.cz").unwrap());
+        let got = s
+            .set_php_version(sel.clone(), PhpVersion::V8_3)
+            .await
+            .expect("a php-kind site without a version must accept one");
+        assert_eq!(got, PhpVersion::V8_3);
+        let after = s.get(sel).await.expect("get");
+        assert_eq!(after.php_version, Some(PhpVersion::V8_3));
         assert_eq!(after.kind, "php");
     }
 
