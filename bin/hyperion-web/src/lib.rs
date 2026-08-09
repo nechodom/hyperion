@@ -188,6 +188,14 @@ pub fn build_router(state: SharedState) -> Router {
             get(handlers::hostings::get_dkim_panel),
         )
         .route(
+            "/hostings/:selector/bruteforce-panel",
+            get(handlers::hostings::get_bruteforce_panel),
+        )
+        .route(
+            "/hostings/bruteforce-scan",
+            post(handlers::hostings::post_bruteforce_scan),
+        )
+        .route(
             "/hostings/dkim/enable",
             post(handlers::hostings::post_dkim_enable),
         )

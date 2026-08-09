@@ -5463,6 +5463,181 @@ pub async fn post_dkim_verify(
     .await
 }
 
+/// Brute-force tile on the Security card: whether the per-site HTTP
+/// brute-force scan (the wp-login / xmlrpc access-log sweep) may look at
+/// this hosting.
+///
+/// The switch is the OWNING node's `hosting_kv` key
+/// `http_bruteforce_scan_enabled` (`FAIL2BAN_HTTP_KV_KEY` in
+/// hyperion-core): `fail2ban_scan` reads it on the node that owns the
+/// hosting, so both the state read and the toggle write must travel
+/// there. The master's local kv — where the generic notes/tags writes
+/// land — would be a switch wired to nothing on a multi-node cluster.
+#[derive(Template)]
+#[template(path = "_hosting_bruteforce_card.html")]
+struct BruteforceCardTpl {
+    enabled: bool,
+    selector: String,
+    csrf_token: String,
+    /// Set only when a read or write failed — surfaced above the copy.
+    error: Option<String>,
+}
+
+/// Read the switch from the owning node's kv. Absent ⇒ ON, matching the
+/// scanner's own default (`http_bruteforce_scan_enabled` in
+/// hyperion-core); only a literal "off" opts the site out.
+async fn bruteforce_scan_enabled_on_node(
+    state: &SharedState,
+    owner_node: Option<&str>,
+    hosting_id: &str,
+) -> Result<bool, String> {
+    match crate::dispatcher::dispatch_to_node(
+        state,
+        owner_node,
+        Request::HostingKvList {
+            hosting_id: hosting_id.to_string(),
+        },
+    )
+    .await
+    {
+        Ok(RpcResponse::HostingKvList(v)) => Ok(v
+            .into_iter()
+            .find(|(k, _)| k == "http_bruteforce_scan_enabled")
+            .map(|(_, val)| val.trim() != "off")
+            .unwrap_or(true)),
+        Ok(RpcResponse::Error(e)) => Err(e.to_string()),
+        Ok(_) => Err("unexpected response from the owning node".to_string()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+pub async fn get_bruteforce_panel(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Path(selector): Path<String>,
+) -> Result<Response, AppError> {
+    let sel = parse_selector(&selector)?;
+    let (detail, owner_node) = find_hosting_anywhere(&state, sel).await?;
+    if let Err(r) = require_hosting_access(
+        &state,
+        &ctx,
+        detail.id.as_str(),
+        false,
+        Capability::HostingView,
+    )
+    .await
+    {
+        return Ok(r);
+    }
+    let csrf_token = super::session_csrf_token(&state, &ctx);
+    // A failed read renders as ON plus the error — ON is what the scanner
+    // itself answers when it cannot read the key, so the tile shows the
+    // state the site is actually in rather than collapsing.
+    let (enabled, error) =
+        match bruteforce_scan_enabled_on_node(&state, owner_node.as_deref(), detail.id.as_str())
+            .await
+        {
+            Ok(on) => (on, None),
+            Err(e) => (true, Some(e)),
+        };
+    Ok(Html(
+        BruteforceCardTpl {
+            enabled,
+            selector,
+            csrf_token,
+            error,
+        }
+        .render()?,
+    )
+    .into_response())
+}
+
+#[derive(Deserialize)]
+pub struct BruteforceScanForm {
+    pub selector: String,
+    /// "on" resumes the access-log scan; anything else pauses it.
+    pub enabled: String,
+}
+
+/// Pause or resume the HTTP brute-force scan for one hosting.
+///
+/// Writes the OWNING node's kv, and resolves that node EXPLICITLY — a
+/// `.ok()`-to-None fallback (as the read panels use) would silently
+/// retarget a lookup failure at the master, whose kv the scanner never
+/// reads, leaving the operator with a toggle that lies. Surface the
+/// error in the tile instead.
+pub async fn post_bruteforce_scan(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<BruteforceScanForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::HostingEditConfig,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let csrf_token = super::session_csrf_token(&state, &ctx);
+    let render = |enabled: bool, error: Option<String>| -> Result<Response, AppError> {
+        Ok(Html(
+            BruteforceCardTpl {
+                enabled,
+                selector: form.selector.clone(),
+                csrf_token: csrf_token.clone(),
+                error,
+            }
+            .render()?,
+        )
+        .into_response())
+    };
+    let (detail, owner) = match find_hosting_anywhere(&state, sel).await {
+        Ok(v) => v,
+        // Unknown state — show the scanner's fail-open default plus why.
+        Err(e) => return render(true, Some(e.to_string())),
+    };
+    let value = if form.enabled.trim() == "on" {
+        "on"
+    } else {
+        "off"
+    };
+    let saved = crate::dispatcher::dispatch_to_node(
+        &state,
+        owner.as_deref(),
+        Request::HostingKvSet {
+            hosting_id: detail.id.as_str().to_string(),
+            key: "http_bruteforce_scan_enabled".into(),
+            value: value.into(),
+        },
+    )
+    .await;
+    let (enabled, error) = match saved {
+        Ok(RpcResponse::HostingKvSet) => (value == "on", None),
+        Ok(RpcResponse::Error(e)) => (
+            // The write was refused — re-read so the tile shows reality.
+            bruteforce_scan_enabled_on_node(&state, owner.as_deref(), detail.id.as_str())
+                .await
+                .unwrap_or(true),
+            Some(format!("the owning node refused the change: {e}")),
+        ),
+        Ok(_) => (
+            true,
+            Some("unexpected response from the owning node".into()),
+        ),
+        Err(e) => (
+            bruteforce_scan_enabled_on_node(&state, owner.as_deref(), detail.id.as_str())
+                .await
+                .unwrap_or(true),
+            Some(e.to_string()),
+        ),
+    };
+    render(enabled, error)
+}
+
 #[derive(Deserialize)]
 pub struct RepairPermsForm {
     pub selector: String,
