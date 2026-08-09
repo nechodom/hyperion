@@ -98,6 +98,131 @@ pub async fn read_manifest(dir: &Path) -> Option<ImportIR> {
     serde_json::from_str(&txt).ok()
 }
 
+/// Bytes free on the filesystem holding `path`, via `df -P -B1`.
+/// `None` on any exec/parse failure — an unknown figure must not block
+/// an export that would have worked.
+async fn avail_bytes(path: &Path) -> Option<u64> {
+    let out = tokio::process::Command::new("/bin/df")
+        .args(["-P", "-B1", "--"])
+        .arg(path)
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.lines().nth(1)?.split_whitespace().nth(3)?.parse().ok()
+}
+
+/// Apparent size of a directory tree in bytes, via `du -sb`.
+async fn dir_bytes(path: &Path) -> Option<u64> {
+    let out = tokio::process::Command::new("/usr/bin/du")
+        .args(["-sb", "--"])
+        .arg(path)
+        .output()
+        .await
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()
+}
+
+fn human(bytes: u64) -> String {
+    const U: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
+    let mut v = bytes as f64;
+    let mut i = 0;
+    while v >= 1024.0 && i < U.len() - 1 {
+        v /= 1024.0;
+        i += 1;
+    }
+    if i == 0 {
+        format!("{bytes} B")
+    } else {
+        format!("{v:.1} {}", U[i])
+    }
+}
+
+/// Refuse to start an export that cannot possibly fit.
+///
+/// Staging writes a tar of every docroot plus a dump of every database
+/// into `stage`, and then — unless we are streaming to stdout — packs
+/// that whole tree into a second archive beside it. So the peak
+/// requirement is roughly TWICE the payload, on top of whatever else
+/// shares that filesystem.
+///
+/// This exists because running out of space mid-export fails deep inside
+/// `tar` or `mysqldump` with a message about one file, long after the
+/// operator has committed to the migration, leaving a half-written stage
+/// dir behind. Checking first turns that into one sentence up front that
+/// names the path, the shortfall and the fix.
+///
+/// Deliberately conservative in the SAFE direction: an unmeasurable
+/// docroot or an unreadable `df` skips the check entirely rather than
+/// blocking a legitimate export.
+async fn preflight_space(
+    ir: &ImportIR,
+    stage: &Path,
+    needs_archive: bool,
+) -> Result<(), ImportError> {
+    // `stage` does not exist yet; ask about its parent, which does.
+    let probe = stage.parent().unwrap_or(Path::new("/"));
+    let Some(avail) = avail_bytes(probe).await else {
+        return Ok(());
+    };
+    let mut payload: u64 = 0;
+    for h in &ir.hostings {
+        match dir_bytes(Path::new(&h.docroot)).await {
+            Some(b) => payload = payload.saturating_add(b),
+            // A docroot we cannot measure makes the whole estimate a
+            // guess; a guess must not be used to refuse work.
+            None => return Ok(()),
+        }
+    }
+    if payload == 0 {
+        return Ok(());
+    }
+    // Database dumps are not measurable before they are taken. Allow a
+    // flat 20 % of the file payload for them plus 512 MB of headroom, so
+    // the check errs toward letting a borderline export proceed rather
+    // than blocking one that would have fit.
+    let dumps = payload / 5;
+    let copies = if needs_archive { 2 } else { 1 };
+    let needed = payload
+        .saturating_add(dumps)
+        .saturating_mul(copies)
+        .saturating_add(512 * 1024 * 1024);
+    if avail >= needed {
+        return Ok(());
+    }
+    Err(ImportError::Command {
+        cmd: format!("preflight: free space on {}", probe.display()),
+        msg: format!(
+            "not enough room to stage this export: {} free, about {} needed \
+             ({} of site files{}{}). Free up space, or point TMPDIR at a \
+             filesystem that has room (TMPDIR=/path/with/space) and re-run.",
+            human(avail),
+            human(needed),
+            human(payload),
+            if dumps > 0 {
+                format!(" plus ~{} for database dumps", human(dumps))
+            } else {
+                String::new()
+            },
+            if copies > 1 {
+                ", counted twice because the staged tree is then packed into an archive beside it"
+            } else {
+                ""
+            },
+        ),
+    })
+}
+
 /// Build a portable bundle from an extracted IR. Runs on the SOURCE box (as
 /// root/sudo): tars each docroot, dumps each DB, writes the manifest, then packs
 /// everything into `out`. Shells out to `tar`/`mysqldump`/`pg_dump` (present on
@@ -111,6 +236,10 @@ pub async fn build(ir: &ImportIR, out: &Path) -> Result<(), ImportError> {
     } else {
         out.with_extension("bundle-stage")
     };
+    // Before anything is written: fail with one clear sentence rather
+    // than half-way through `tar`, with a stage dir left behind.
+    // Streaming to stdout never materialises the second archive.
+    preflight_space(ir, &stage, !to_stdout).await?;
     let _ = tokio::fs::remove_dir_all(&stage).await;
     tokio::fs::create_dir_all(&stage).await?;
 
@@ -479,7 +608,64 @@ async fn run(bin: &str, args: &[&str]) -> Result<(), ImportError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{looks_like_sql, site_dir};
+    use super::{human, looks_like_sql, preflight_space, site_dir};
+
+    fn hosting_with_docroot(docroot: &str) -> crate::ir::IrHosting {
+        crate::ir::IrHosting {
+            source_key: "cloudpanel:u:example.cz".into(),
+            domain: "example.cz".into(),
+            aliases: vec![],
+            owner_user: "u".into(),
+            kind: crate::ir::IrSiteKind::Php,
+            php_version: Some("8.3".into()),
+            docroot: docroot.into(),
+            proxy_upstream: None,
+            databases: vec![],
+            crons: vec![],
+            tls: None,
+            ssh_keys: vec![],
+        }
+    }
+
+    /// The whole point of the preflight is that it must never be the
+    /// reason a legitimate export fails. Anything it cannot measure —
+    /// an unreadable docroot, an empty IR — has to pass.
+    #[tokio::test]
+    async fn preflight_passes_whenever_it_cannot_measure() {
+        use crate::ir::ImportIR;
+        let tmp = tempfile::tempdir().expect("tmp");
+        let stage = tmp.path().join("stage");
+
+        // No hostings ⇒ nothing to weigh.
+        let empty = ImportIR::default();
+        assert!(preflight_space(&empty, &stage, true).await.is_ok());
+
+        // A docroot that does not exist ⇒ `du` fails ⇒ the estimate is a
+        // guess ⇒ pass rather than block.
+        let mut ir = ImportIR::default();
+        ir.hostings
+            .push(hosting_with_docroot("/definitely/not/here"));
+        assert!(preflight_space(&ir, &stage, true).await.is_ok());
+
+        // A real, tiny docroot on a normal filesystem must also pass —
+        // the everyday case; a false refusal here blocks every export.
+        let doc = tmp.path().join("docroot");
+        std::fs::create_dir_all(&doc).expect("mkdir");
+        std::fs::write(doc.join("index.php"), b"<?php echo 1;").expect("write");
+        let mut ir = ImportIR::default();
+        ir.hostings
+            .push(hosting_with_docroot(&doc.display().to_string()));
+        assert!(preflight_space(&ir, &stage, true).await.is_ok());
+    }
+
+    #[test]
+    fn human_sizes_read_like_sizes() {
+        assert_eq!(human(0), "0 B");
+        assert_eq!(human(512), "512 B");
+        assert_eq!(human(1024), "1.0 KB");
+        assert_eq!(human(1536), "1.5 KB");
+        assert_eq!(human(3 * 1024 * 1024 * 1024), "3.0 GB");
+    }
 
     #[test]
     fn looks_like_sql_accepts_real_dumps() {
