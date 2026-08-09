@@ -33,6 +33,39 @@ const SASL_PASSWD_PATH: &str = "/etc/postfix/sasl_passwd";
 /// breadcrumb the operator can `cat` for diagnostics.
 const HYPERION_MARKER: &str = "/etc/postfix/hyperion-relay.marker";
 
+/// Envelope-sender rewrite map: `<system_user>@<node fqdn>` on the left,
+/// `bounce@<site domain>` on the right. One line per hosting that has
+/// envelope alignment switched on.
+///
+/// Why this exists: PHP `mail()` produces an envelope sender of
+/// `<php-fpm user>@<node fqdn>`, and SPF is evaluated against the
+/// ENVELOPE domain. So the per-site SPF record the panel tells the
+/// operator to publish was never consulted by anyone — receivers were
+/// checking the node's own FQDN instead. Rewriting the envelope is what
+/// makes that record real.
+const SENDER_CANONICAL_PATH: &str = "/etc/postfix/hyperion_sender_canonical";
+
+/// Settings for [`ensure_direct_delivery_config`] beyond the hostname.
+/// A struct rather than more positional arguments — every field here is
+/// an address or a protocol token, so a swapped pair would type-check.
+#[derive(Debug, Clone, Default)]
+pub struct DirectDeliveryOpts {
+    /// `inet_protocols`. `None` ⇒ `ipv4`.
+    ///
+    /// IPv4-only is the deliverability-safe default for a send-only box:
+    /// Postfix prefers AAAA when a receiving MX has one, and a node whose
+    /// PTR and SPF cover only its IPv4 address then gets a hard 5xx from
+    /// the large receivers with no IPv4 retry. An operator who has set up
+    /// a v6 PTR and `ip6:` in SPF can set this to `all`.
+    pub inet_protocols: Option<String>,
+    /// `smtp_bind_address` — the source address for outbound SMTP.
+    ///
+    /// Unset means the kernel chooses, which on a multi-homed node can
+    /// pick an address whose PTR does not match `myhostname` and which no
+    /// SPF record lists. Pin it to the address the PTR belongs to.
+    pub bind_address: Option<String>,
+}
+
 /// True when an SMTP relay host refers to THIS machine — `localhost`, a loopback
 /// IP, or our own (short or fully-qualified) hostname. Such a "relay" can't be a
 /// postfix smart-host: postfix would try to relay through itself and defer every
@@ -257,7 +290,10 @@ pub async fn ensure_relay_config(cfg: &EmailConfig) -> Result<(), AdapterError> 
 /// mode is written here too — its body just changes to reflect
 /// the active mode, so an operator can `cat` it to see which path
 /// the agent picked.
-pub async fn ensure_direct_delivery_config(myhostname: &str) -> Result<(), AdapterError> {
+pub async fn ensure_direct_delivery_config(
+    myhostname: &str,
+    opts: &DirectDeliveryOpts,
+) -> Result<(), AdapterError> {
     let myhostname = myhostname.trim();
     if myhostname.is_empty() {
         return Err(AdapterError::Other(
@@ -276,6 +312,25 @@ pub async fn ensure_direct_delivery_config(myhostname: &str) -> Result<(), Adapt
         )));
     }
 
+    // Validate before it reaches `postconf`, same reason as the hostname
+    // above: this string ends up in main.cf.
+    let protocols = match opts.inet_protocols.as_deref().map(str::trim) {
+        Some(p) if matches!(p, "ipv4" | "ipv6" | "all") => p,
+        Some(p) if !p.is_empty() => {
+            return Err(AdapterError::Other(format!(
+                "postfix direct delivery: inet_protocols `{p}` must be ipv4, ipv6 or all"
+            )))
+        }
+        _ => "ipv4",
+    };
+    if let Some(ip) = opts.bind_address.as_deref().map(str::trim) {
+        if !ip.is_empty() && ip.parse::<std::net::IpAddr>().is_err() {
+            return Err(AdapterError::Other(format!(
+                "postfix direct delivery: smtp_bind_address `{ip}` is not an IP address"
+            )));
+        }
+    }
+
     let postconf_lines: &[&str] = &[
         &format!("myhostname={myhostname}"),
         "smtp_helo_name=$myhostname",
@@ -290,11 +345,38 @@ pub async fn ensure_direct_delivery_config(myhostname: &str) -> Result<(), Adapt
         // /usr/sbin/sendmail talks to the postfix master via UNIX
         // socket (/var/spool/postfix/...), not the network listener.
         "inet_interfaces=loopback-only",
-        "inet_protocols=all",
+        &format!("inet_protocols={protocols}"),
         "smtputf8_enable=yes",
+        // Opportunistic TLS, set EXPLICITLY rather than left to whatever
+        // the box happens to hold. Two failures ride on this being
+        // stated: a node switched here from a smart host inherits
+        // `encrypt` from `ensure_relay_config`, which is MANDATORY TLS —
+        // correct for one known relay, wrong for public MX delivery,
+        // where it defers and then bounces every message to a receiver
+        // that offers no STARTTLS. And a box whose main.cf never had the
+        // key sends in cleartext. `may` is the only correct policy here:
+        // encrypt when the far side offers it, deliver either way, and
+        // do not verify certificates (public MXs routinely present names
+        // that do not match).
+        "smtp_tls_security_level=may",
     ];
     for line in postconf_lines {
         cmd::run("/usr/sbin/postconf", &["-e", line]).await?;
+    }
+    // Pin the source address when the operator has told us which one the
+    // PTR belongs to; otherwise leave the kernel's choice alone rather
+    // than guessing at an address and breaking a working node.
+    match opts.bind_address.as_deref().map(str::trim) {
+        Some(ip) if !ip.is_empty() => {
+            cmd::run(
+                "/usr/sbin/postconf",
+                &["-e", &format!("smtp_bind_address={ip}")],
+            )
+            .await?;
+        }
+        _ => {
+            let _ = cmd::run("/usr/sbin/postconf", &["-X", "smtp_bind_address"]).await;
+        }
     }
     // Explicitly clear the relayhost (in case we were in smart-host
     // mode before). postconf -X drops the parameter, postfix then
@@ -307,6 +389,10 @@ pub async fn ensure_direct_delivery_config(myhostname: &str) -> Result<(), Adapt
         "smtp_sasl_password_maps",
         "smtp_sasl_security_options",
         "smtp_sasl_tls_security_options",
+        // Obsolete boolean from the relay config. Harmless beside an
+        // explicit `smtp_tls_security_level`, but leaving two knobs that
+        // both claim to control TLS is how the next reader gets it wrong.
+        "smtp_use_tls",
     ] {
         let _ = cmd::run("/usr/sbin/postconf", &["-X", key]).await;
     }
@@ -325,10 +411,97 @@ pub async fn ensure_direct_delivery_config(myhostname: &str) -> Result<(), Adapt
         "# managed by hyperion-agent — DO NOT EDIT by hand.\n\
          mode=direct-mx\n\
          myhostname={myhostname}\n\
+         inet_protocols={protocols}\n\
+         smtp_bind_address={}\n\
          # Operator is responsible for the IP's PTR record + SPF\n\
          # on every domain hosted on this node.\n",
+        opts.bind_address.as_deref().unwrap_or("").trim(),
     );
     atomic_write(Path::new(HYPERION_MARKER), marker.as_bytes(), 0o644).await?;
+    // RESTART, not reload: `inet_protocols` is read once when the master
+    // process starts and binds its sockets, so a reload leaves a node
+    // still talking IPv6 while main.cf says otherwise — the config would
+    // look applied and the mail would keep bouncing. Restarting is
+    // acceptable here because postfix is send-only (`inet_interfaces =
+    // loopback-only`), so nothing inbound is dropped, and queued mail
+    // survives a restart.
+    cmd::run("/usr/bin/systemctl", &["restart", "postfix"]).await?;
+    Ok(())
+}
+
+/// Rewrite the envelope-sender map and point postfix at it.
+///
+/// `entries` is `(local_part_source, site_domain)` — the caller passes
+/// each hosting's system user and the domain its mail should appear to
+/// come from. An empty list REMOVES the mapping entirely rather than
+/// leaving an empty map behind, so "switched off everywhere" and "never
+/// switched on" are the same state on disk.
+///
+/// Only `envelope_sender` is rewritten. That is load-bearing: OpenDKIM
+/// signs the `From:` HEADER, so touching headers here would invalidate
+/// every signature this node produces. `sender_canonical_classes` is set
+/// explicitly because Postfix's default for it covers headers too.
+pub async fn ensure_sender_canonical(
+    my_fqdn: &str,
+    entries: &[(String, String)],
+) -> Result<(), AdapterError> {
+    let my_fqdn = my_fqdn.trim().to_ascii_lowercase();
+    if my_fqdn.is_empty() {
+        return Err(AdapterError::Other(
+            "postfix sender canonical: node FQDN is empty".into(),
+        ));
+    }
+    if entries.is_empty() {
+        let _ = cmd::run("/usr/sbin/postconf", &["-X", "sender_canonical_maps"]).await;
+        let _ = cmd::run("/usr/sbin/postconf", &["-X", "sender_canonical_classes"]).await;
+        for path in [
+            SENDER_CANONICAL_PATH,
+            &format!("{SENDER_CANONICAL_PATH}.db"),
+            &format!("{SENDER_CANONICAL_PATH}.lmdb"),
+        ] {
+            let _ = tokio::fs::remove_file(path).await;
+        }
+        cmd::run("/usr/bin/systemctl", &["reload", "postfix"]).await?;
+        return Ok(());
+    }
+
+    let mut body = String::from(
+        "# managed by hyperion-agent — DO NOT EDIT by hand.\n\
+         # Envelope sender only. SPF is checked against the envelope\n\
+         # domain, so without these lines the per-site SPF record is\n\
+         # never consulted — receivers evaluate this node's FQDN.\n",
+    );
+    for (system_user, domain) in entries {
+        let (u, d) = (system_user.trim(), domain.trim().to_ascii_lowercase());
+        // Refuse anything that could add a second field or a comment to
+        // a line postfix parses on whitespace.
+        if u.is_empty()
+            || d.is_empty()
+            || !u
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            || !d
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        {
+            return Err(AdapterError::Other(format!(
+                "postfix sender canonical: refusing entry `{u}` -> `{d}`"
+            )));
+        }
+        body.push_str(&format!("{u}@{my_fqdn}\tbounce@{d}\n"));
+        // PHP hands sendmail a bare local part when the pool has no
+        // domain of its own; postfix qualifies it with `myorigin`, but
+        // mapping it directly costs one line and removes the dependency.
+        body.push_str(&format!("{u}\tbounce@{d}\n"));
+    }
+    atomic_write(Path::new(SENDER_CANONICAL_PATH), body.as_bytes(), 0o644).await?;
+    cmd::run("/usr/sbin/postmap", &[SENDER_CANONICAL_PATH]).await?;
+    for line in [
+        &format!("sender_canonical_maps=hash:{SENDER_CANONICAL_PATH}"),
+        "sender_canonical_classes=envelope_sender",
+    ] {
+        cmd::run("/usr/sbin/postconf", &["-e", line]).await?;
+    }
     cmd::run("/usr/bin/systemctl", &["reload", "postfix"]).await?;
     Ok(())
 }
@@ -380,6 +553,73 @@ mod tests {
     use super::*;
     use crate::email::EmailConfig;
 
+    /// The direct-MX knobs reach `postconf` as strings, so they are
+    /// validated before they get there — same reason `myhostname` is.
+    #[tokio::test]
+    async fn direct_delivery_rejects_junk_before_it_reaches_postconf() {
+        // Nothing here should ever execute postconf; each call must fail
+        // on validation. (A machine WITH postfix would otherwise be
+        // reconfigured by its own test suite.)
+        let bad_proto = DirectDeliveryOpts {
+            inet_protocols: Some("ipv4; rm -rf /".into()),
+            ..Default::default()
+        };
+        let e = ensure_direct_delivery_config("mail.example.com", &bad_proto)
+            .await
+            .expect_err("must reject");
+        assert!(format!("{e}").contains("inet_protocols"), "{e}");
+
+        let bad_bind = DirectDeliveryOpts {
+            bind_address: Some("not-an-ip".into()),
+            ..Default::default()
+        };
+        let e = ensure_direct_delivery_config("mail.example.com", &bad_bind)
+            .await
+            .expect_err("must reject");
+        assert!(format!("{e}").contains("smtp_bind_address"), "{e}");
+
+        // The hostname guard predates this and must still fire first.
+        let e = ensure_direct_delivery_config("mail example com", &DirectDeliveryOpts::default())
+            .await
+            .expect_err("must reject");
+        assert!(format!("{e}").contains("invalid chars"), "{e}");
+    }
+
+    /// A map line is parsed by postfix on whitespace, so anything that
+    /// could introduce a second field — or a comment — is refused rather
+    /// than escaped. An entry that silently failed to match would leave
+    /// that site's envelope on the node hostname while the panel reported
+    /// its SPF as fine.
+    #[tokio::test]
+    async fn sender_canonical_refuses_entries_that_could_forge_a_line() {
+        for (user, domain) in [
+            ("site1 evil", "example.cz"),
+            ("site1", "example.cz nope"),
+            ("site1", "example.cz\n@other"),
+            ("site1\t", "exa mple.cz"),
+            ("", "example.cz"),
+            ("site1", ""),
+            ("site1", "example.cz#comment"),
+        ] {
+            let e = ensure_sender_canonical(
+                "node.example.com",
+                &[(user.to_string(), domain.to_string())],
+            )
+            .await
+            .expect_err("must refuse {user:?} -> {domain:?}");
+            assert!(
+                format!("{e}").contains("refusing entry"),
+                "{user:?} -> {domain:?} gave {e}"
+            );
+        }
+
+        // A node with no FQDN cannot build a left-hand side at all.
+        let e = ensure_sender_canonical("  ", &[("site1".into(), "example.cz".into())])
+            .await
+            .expect_err("must refuse");
+        assert!(format!("{e}").contains("FQDN is empty"), "{e}");
+    }
+
     fn cfg() -> EmailConfig {
         EmailConfig {
             smtp_host: "smtp.mailgun.org".into(),
@@ -414,7 +654,7 @@ mod tests {
 
     #[tokio::test]
     async fn ensure_direct_delivery_rejects_empty_hostname() {
-        let err = ensure_direct_delivery_config("")
+        let err = ensure_direct_delivery_config("", &DirectDeliveryOpts::default())
             .await
             .expect_err("must reject");
         assert!(err.to_string().contains("myhostname is empty"));
@@ -422,7 +662,7 @@ mod tests {
 
     #[tokio::test]
     async fn ensure_direct_delivery_rejects_whitespace_hostname() {
-        let err = ensure_direct_delivery_config("   ")
+        let err = ensure_direct_delivery_config("   ", &DirectDeliveryOpts::default())
             .await
             .expect_err("must reject");
         assert!(err.to_string().contains("myhostname is empty"));
@@ -434,11 +674,11 @@ mod tests {
     /// real FQDN out of this.
     #[tokio::test]
     async fn ensure_direct_delivery_rejects_shell_metachars() {
-        let err = ensure_direct_delivery_config("stav;rm -rf /")
+        let err = ensure_direct_delivery_config("stav;rm -rf /", &DirectDeliveryOpts::default())
             .await
             .expect_err("must reject");
         assert!(err.to_string().contains("invalid chars"));
-        let err = ensure_direct_delivery_config("$(whoami).cz")
+        let err = ensure_direct_delivery_config("$(whoami).cz", &DirectDeliveryOpts::default())
             .await
             .expect_err("must reject");
         assert!(err.to_string().contains("invalid chars"));

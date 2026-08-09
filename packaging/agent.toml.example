@@ -99,6 +99,36 @@ mail_threshold = 8    # postfix/dovecot SASL auth failures
 # limit + firewall ban and a per-account hard-lock — so it is deliberately NOT
 # driven from here (the panel's client IP can be a spoofable proxy header).
 
+# [email]
+# Outbound mail. With `enabled = false` (the default) postfix delivers
+# DIRECTLY to each recipient's MX — no external relay involved. The two
+# keys below shape that direct delivery; the rest configure a smart host.
+#
+# inet_protocols = "ipv4"
+#   "ipv4" (default) | "ipv6" | "all". IPv4-only is the deliverability-safe
+#   choice for a send-only node: postfix prefers a receiver's AAAA when it
+#   has one, and a node whose PTR and SPF cover only its IPv4 address then
+#   collects hard rejections from the large receivers with no IPv4 retry.
+#   Set "all" once the node has a v6 PTR and every hosted domain's SPF
+#   record carries an ip6: term.
+#
+# bind_address = ""
+#   postfix `smtp_bind_address`. Empty (default) lets the kernel choose.
+#   Worth setting on a node with more than one public address, where the
+#   kernel can otherwise send from an address whose PTR does not match the
+#   HELO name and which no SPF record lists.
+#
+# What Hyperion CANNOT do for you, and what direct delivery depends on:
+#   - The PTR (reverse DNS) for this node's IP must equal its `myhostname`.
+#     It is set wherever the IP is managed (the provider's console), not
+#     here. Settings -> Mail reports whether it matches.
+#   - Outbound TCP/25 must not be blocked. Several providers block it by
+#     default and unblock on request. Settings -> Mail probes it.
+#   - Each hosted domain needs its own DKIM record (per-hosting card) and
+#     an SPF record naming this node's IP. Envelope alignment — what makes
+#     that SPF record actually get consulted — is switched on for a site
+#     when its DKIM is enabled.
+
 # [notifications]
 # Editable outbound wording. Every key here is optional, and an empty or
 # missing one means "unchanged" — edit them in the panel under

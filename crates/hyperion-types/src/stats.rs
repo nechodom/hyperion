@@ -1100,6 +1100,30 @@ pub struct MtaDiagnostics {
     /// proxy for "is a real FQDN" but catches the most common
     /// botched case where the box just has a short hostname).
     pub myhostname_is_fqdn: bool,
+    /// This node's public IPv4 address, as seen from outside. Empty when
+    /// the probe failed — which is NOT the same as "no address", so the
+    /// UI must not render the PTR verdict below as a failure in that case.
+    #[serde(default)]
+    pub public_ipv4: String,
+    /// The PTR (reverse DNS) name that address resolves to. Empty when
+    /// there is none, or when the lookup could not be performed.
+    ///
+    /// This is the single biggest factor in whether direct-MX mail is
+    /// accepted at all, and nothing in Hyperion checked it before: the
+    /// large receivers reject on a missing PTR, and on a PTR that does
+    /// not match the HELO name, before they ever look at SPF or DKIM.
+    /// Only the operator can set it — it lives with whoever owns the IP
+    /// (the Hetzner console, for this deployment) — so all we can do is
+    /// report the truth loudly.
+    #[serde(default)]
+    pub ptr_name: String,
+    /// One of "ok" (PTR matches `myhostname`), "mismatch", "missing",
+    /// or "unknown" (we could not determine the address or run the
+    /// lookup). "unknown" is deliberately distinct from "missing": a
+    /// failed probe must never be reported as a missing record the
+    /// operator would then go and re-create.
+    #[serde(default)]
+    pub ptr_status: String,
     /// `postconf relayhost`. Empty string = direct MX. Non-empty
     /// = smart-host (and matches the [email] smtp_host/port).
     pub relayhost: String,
