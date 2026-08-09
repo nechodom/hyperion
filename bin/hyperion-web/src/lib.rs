@@ -196,6 +196,10 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::hostings::post_dkim_disable),
         )
         .route(
+            "/hostings/repair-permissions",
+            post(handlers::hostings::post_repair_permissions),
+        )
+        .route(
             "/hostings/dkim/verify",
             post(handlers::hostings::post_dkim_verify),
         )

@@ -1165,6 +1165,8 @@ pub trait AgentApi: Send + Sync + 'static {
         sel: HostingSelector,
     ) -> Result<hyperion_types::DkimStatus, RpcError>;
     /// Verify the domain's published DKIM TXT record against our key.
+    async fn hosting_repair_permissions(&self, sel: HostingSelector) -> Result<String, RpcError>;
+
     async fn dkim_verify(
         &self,
         sel: HostingSelector,

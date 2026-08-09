@@ -303,6 +303,7 @@ struct DetailTpl<'a> {
     /// Operator php.ini overrides (applied via .user.ini).
     php_ini: PhpIniSettings,
     csrf_php_ini: String,
+    csrf_repair_perms: String,
     /// Internal preview hostname on the owner node's `*.<base>` wildcard
     /// cert (e.g. `shop-example-com.s4.testovaciverze.cz`), or `None`
     /// when no preview applies. `Some` ⇒ the detail page shows a
@@ -1323,6 +1324,7 @@ pub async fn post_create(
                 staging_domain: staging_domain_default,
                 php_ini: PhpIniSettings::default(),
                 csrf_php_ini: csrf_token_for(&state, &ctx, "/hostings/php-ini"),
+                csrf_repair_perms: csrf_token_for(&state, &ctx, "/hostings/repair-permissions"),
                 preview_domain,
             };
             Ok(Html(tpl.render()?).into_response())
@@ -2152,6 +2154,7 @@ pub async fn get_detail(
         staging_domain,
         php_ini: PhpIniSettings::from_kv(&kv_pairs),
         csrf_php_ini: csrf_token_for(&state, &ctx, "/hostings/php-ini"),
+        csrf_repair_perms: csrf_token_for(&state, &ctx, "/hostings/repair-permissions"),
         preview_domain,
     };
     Ok(Html(tpl.render()?).into_response())
@@ -3120,10 +3123,17 @@ pub async fn post_set_php_ini(
             body.push_str(&format!("{k} = {v}\n"));
         }
     };
-    line("memory_limit", &form.memory_limit);
+    // memory_limit and max_execution_time are DELIBERATELY not written.
+    //
+    // The FPM pool sets both as `php_admin_value`, which by definition
+    // `.user.ini` may not override — so a value here was saved, reported
+    // as applied, and then ignored by PHP. Two cards claimed to own the
+    // same two settings and only one of them worked. They now live solely
+    // in "PHP-FPM & DB limits", which rewrites the pool. Not writing them
+    // also cleans a stale line out of a `.user.ini` from before this
+    // change, the next time the card is saved.
     line("upload_max_filesize", &form.upload_max_filesize);
     line("post_max_size", &form.post_max_size);
-    line("max_execution_time", &form.max_execution_time);
     line("max_input_vars", &form.max_input_vars);
     if !display.is_empty() {
         body.push_str(&format!("display_errors = {display}\n"));
@@ -5451,6 +5461,64 @@ pub async fn post_dkim_verify(
         },
     )
     .await
+}
+
+#[derive(Deserialize)]
+pub struct RepairPermsForm {
+    pub selector: String,
+    pub _csrf: String,
+}
+
+/// Reset ownership + modes across a hosting's tree.
+///
+/// Dispatched to the OWNING node explicitly, like the DKIM writes: the
+/// files are there, and only that node knows the uid behind the system
+/// user. Falling back to the master on a lookup failure would chown a
+/// path that either does not exist there or belongs to a different site.
+pub async fn post_repair_permissions(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<RepairPermsForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::HostingEditConfig,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let sel_url = urlencoding(&form.selector);
+    let owner: Option<String> = match find_hosting_anywhere(&state, sel.clone()).await {
+        Ok((_d, n)) => n,
+        Err(e) => {
+            return Ok(Redirect::to(&format!(
+                "/hostings/{sel_url}?flash_error={}#settings",
+                urlencoding(&e.to_string())
+            ))
+            .into_response())
+        }
+    };
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        owner.as_deref(),
+        Request::HostingRepairPermissions { sel },
+    )
+    .await;
+    let (key, msg) = match resp {
+        Ok(RpcResponse::HostingRepairPermissions(m)) => ("flash_saved", m),
+        Ok(RpcResponse::Error(e)) => ("flash_error", e.to_string()),
+        Ok(_) => ("flash_error", "unexpected response from node".to_string()),
+        Err(e) => ("flash_error", e.to_string()),
+    };
+    Ok(Redirect::to(&format!(
+        "/hostings/{sel_url}?{key}={}#settings",
+        urlencoding(&msg)
+    ))
+    .into_response())
 }
 
 /// Lazily-loaded WordPress vulnerability panel (Wordfence feed match).

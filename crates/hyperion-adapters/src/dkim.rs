@@ -248,7 +248,23 @@ pub async fn ensure_installed() -> Result<(), AdapterError> {
     if created_policy {
         let _ = tokio::fs::remove_file(policy).await;
     }
-    res.map(|_| ())
+    // apt/dpkg failures arrive as kilobytes of per-archive noise in which
+    // the decisive line repeats a dozen times and the actual cause is a
+    // property of the MACHINE, not of the packages. Lead with that cause
+    // when we can recognise it — an operator reading eleven "error
+    // processing archive" lines reasonably concludes DKIM is broken, when
+    // the real message was "Read-only file system" and no retry will ever
+    // help. The raw output still follows, so nothing is hidden.
+    res.map(|_| ()).map_err(|e| {
+        let raw = e.to_string();
+        match cmd::explain_apt_failure(&raw) {
+            Some(reason) => AdapterError::Other(format!(
+                "OpenDKIM could not be installed — {reason}\n\n\
+                 Original package-manager output:\n{raw}"
+            )),
+            None => e,
+        }
+    })
 }
 
 /// Ensure the node-wide OpenDKIM config, tables and the postfix milter wiring

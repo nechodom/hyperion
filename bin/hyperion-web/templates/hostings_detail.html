@@ -2023,7 +2023,10 @@
 </div>
 
 <div class="settings-group-label" style="text-transform:uppercase;font-size:0.72rem;letter-spacing:0.06em;color:var(--text-soft);font-weight:700;margin:1.2rem 0 0.5rem;opacity:0.85">Performance &amp; resource limits</div>
-<div class="card hover">
+{# Anchor target for the PHP settings card, which sends memory_limit and
+   max_execution_time here — the pool sets those as php_admin_value, so
+   this is the only place that can actually change them. #}
+<div class="card hover" id="limits">
   <h2>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><line x1="9" y1="9" x2="15" y2="9"/><line x1="9" y1="15" x2="15" y2="15"/></svg>
     PHP-FPM &amp; DB limits
@@ -2353,14 +2356,17 @@
     Per-hosting <code>.user.ini</code> overrides. Blank = pool default. Sizes like <code>256M</code> / <code>1G</code>.
     {% if php_ini.any() %}<span class="pill ok small" style="margin-left:0.3rem">active</span>{% endif %}
   </p>
+  <p class="muted" style="font-size:0.85rem;margin-top:-0.5rem;margin-bottom:0.9rem">
+    <code>memory_limit</code> and <code>max_execution_time</code> are set in
+    <a href="#limits">PHP-FPM &amp; DB limits</a> instead. The pool applies them as
+    <code>php_admin_value</code>, which <code>.user.ini</code> is not permitted to
+    override — a value entered here would have been saved, reported as applied, and
+    then ignored by PHP.
+  </p>
   <form method="post" action="/hostings/php-ini">
     <input type="hidden" name="_csrf" value="{{ csrf_php_ini }}">
     <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(180px, 100%), 1fr));gap:1rem">
-      <div class="field" style="margin:0">
-        <label for="pi_memory_limit"><code>memory_limit</code></label>
-        <input id="pi_memory_limit" name="memory_limit" value="{{ php_ini.memory_limit }}" placeholder="256M" autocomplete="off">
-      </div>
       <div class="field" style="margin:0">
         <label for="pi_upload"><code>upload_max_filesize</code></label>
         <input id="pi_upload" name="upload_max_filesize" value="{{ php_ini.upload_max_filesize }}" placeholder="64M" autocomplete="off">
@@ -2368,10 +2374,6 @@
       <div class="field" style="margin:0">
         <label for="pi_post"><code>post_max_size</code></label>
         <input id="pi_post" name="post_max_size" value="{{ php_ini.post_max_size }}" placeholder="64M" autocomplete="off">
-      </div>
-      <div class="field" style="margin:0">
-        <label for="pi_exec"><code>max_execution_time</code></label>
-        <input id="pi_exec" name="max_execution_time" value="{{ php_ini.max_execution_time }}" placeholder="120" autocomplete="off">
       </div>
       <div class="field" style="margin:0">
         <label for="pi_vars"><code>max_input_vars</code></label>
@@ -2392,6 +2394,26 @@
         Save PHP settings
       </button>
       <span class="muted hint">writes .user.ini in htdocs</span>
+    </div>
+  </form>
+
+  {# Ownership repair. Lives here because the symptom an operator arrives
+     with — "WordPress can't write", "FTP won't overwrite" — reads as a PHP
+     problem, so this is where they look. #}
+  <form method="post" action="/hostings/repair-permissions" style="margin-top:1.1rem;border-top:1px solid var(--border);padding-top:0.9rem">
+    <input type="hidden" name="_csrf" value="{{ csrf_repair_perms }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+    <div class="row" style="gap:0.6rem;flex-wrap:wrap;align-items:center">
+      <button class="btn" type="submit">
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        Repair file permissions
+      </button>
+      <span class="muted hint">
+        Gives every file back to <code>{{ detail.system_user }}</code> and normalises modes
+        (directories 0755, files 0644). Fixes "could not create directory", failed plugin
+        updates and uploads that vanish — and FTP, which signs in as the same account.
+        Use after a restore, a migration, or unpacking an archive over SSH as root.
+      </span>
     </div>
   </form>
 </div>

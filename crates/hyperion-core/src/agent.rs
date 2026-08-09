@@ -1513,6 +1513,10 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.dkim_verify(sel).await
     }
 
+    async fn hosting_repair_permissions(&self, sel: HostingSelector) -> Result<String, RpcError> {
+        self.svc.hosting_repair_permissions(sel).await
+    }
+
     async fn sftp_status(
         &self,
         sel: HostingSelector,

@@ -207,3 +207,125 @@ mod tests {
         assert!(out.contains('5'), "wc output: {out:?}");
     }
 }
+
+/// Translate an apt/dpkg failure into one sentence naming the HOST-level
+/// cause, or `None` when the output shows nothing recognisable.
+///
+/// Package-manager failures arrive as kilobytes of per-archive dpkg noise
+/// in which the decisive line appears dozens of times and the actual
+/// cause is a property of the machine, not of the packages. An operator
+/// reading "dpkg: error processing archive ... (--unpack)" eleven times
+/// reasonably concludes the software is broken; the real message was
+/// `Read-only file system`, which no amount of retrying will fix.
+///
+/// Ordered by how completely each cause explains the failure: a
+/// read-only or full filesystem makes every later symptom meaningless,
+/// so it is matched first.
+pub fn explain_apt_failure(output: &str) -> Option<&'static str> {
+    // Case-insensitive on purpose — dpkg and apt disagree about capitals
+    // across versions and locales.
+    let o = output.to_ascii_lowercase();
+    if o.contains("read-only file system") {
+        return Some(
+            "this server's filesystem is mounted READ-ONLY, so nothing can be installed. \
+             The kernel does this after an I/O error or filesystem corruption — it is a \
+             problem with the machine, not with the package. Check `mount | grep ' / '` and \
+             `dmesg -T | grep -i 'ext4\\|i/o error'`; you will most likely need to fsck the \
+             volume from rescue mode and reboot. Everything else on this node — postfix, \
+             new sites, backups — is failing for the same reason.",
+        );
+    }
+    if o.contains("no space left on device") {
+        return Some(
+            "this server has run out of disk space, so the package could not be unpacked. \
+             Check `df -h` and free some room, then try again. Note that a full disk can \
+             also leave apt half-configured; `dpkg --configure -a` cleans that up.",
+        );
+    }
+    if o.contains("could not get lock") || o.contains("dpkg frontend lock") {
+        return Some(
+            "another package operation is already running on this server (apt, unattended-\
+             upgrades, or a previous attempt that has not finished). Wait for it to end and \
+             try again — running two at once would corrupt the package database.",
+        );
+    }
+    if o.contains("temporary failure resolving") || o.contains("could not resolve host") {
+        return Some(
+            "this server cannot resolve the package repository's hostname, so nothing could \
+             be downloaded. Check DNS on the node (`resolvectl status`, /etc/resolv.conf) \
+             and that outbound HTTPS is allowed.",
+        );
+    }
+    if o.contains("no_pubkey") || o.contains("signatures were invalid") {
+        return Some(
+            "a package repository's signing key is missing or expired, so apt refused its \
+             packages. Re-import the repository's key, then run `apt-get update`.",
+        );
+    }
+    if o.contains("held broken packages") || o.contains("unmet dependencies") {
+        return Some(
+            "apt could not satisfy the dependencies. This usually means a third-party \
+             repository is configured for the WRONG Debian release, so it offers packages \
+             built against libraries this system does not have. Check the suites in \
+             /etc/apt/sources.list.d/ against `. /etc/os-release; echo $VERSION_CODENAME`.",
+        );
+    }
+    None
+}
+
+#[cfg(test)]
+mod apt_explain_tests {
+    use super::explain_apt_failure;
+
+    /// Built from the real dpkg output that sent an operator chasing a
+    /// DKIM bug for an hour: eleven "error processing archive" lines
+    /// around one sentence that actually mattered.
+    #[test]
+    fn a_read_only_root_is_reported_ahead_of_the_dpkg_noise() {
+        let raw = "Unpacking librbl1:amd64 (2.11.0~beta2-9.1+b1) ...\n\
+                   dpkg: error processing archive /tmp/apt-dpkg-install-f3jn1P/06-librbl1.deb (--unpack):\n\
+                   unable to create '/usr/lib/x86_64-linux-gnu/librbl.so.1.0.0.dpkg-new': Read-only file system\n\
+                   E: Sub-process /usr/bin/dpkg returned an error code (1)\n";
+        let msg = explain_apt_failure(raw).expect("must recognise a read-only root");
+        assert!(msg.contains("READ-ONLY"), "{msg}");
+        assert!(msg.contains("fsck"), "must name the remedy: {msg}");
+    }
+
+    /// A full disk and a read-only mount look similar in a log and need
+    /// different fixes, so they must not collapse into one message.
+    #[test]
+    fn each_host_level_cause_gets_its_own_answer() {
+        let cases = [
+            (
+                "dpkg: unrecoverable fatal error: No space left on device",
+                "disk space",
+            ),
+            (
+                "E: Could not get lock /var/lib/dpkg/lock-frontend",
+                "already running",
+            ),
+            ("Temporary failure resolving 'deb.debian.org'", "resolve"),
+            ("W: GPG error: ... NO_PUBKEY 1234ABCD", "signing key"),
+            (
+                "E: Unable to correct problems, you have held broken packages",
+                "dependencies",
+            ),
+        ];
+        for (raw, needle) in cases {
+            let msg = explain_apt_failure(raw).unwrap_or_else(|| panic!("unmatched: {raw}"));
+            assert!(msg.contains(needle), "{raw} -> {msg}");
+        }
+        // Matching is case-insensitive: dpkg and apt differ across versions.
+        assert!(explain_apt_failure("READ-ONLY FILE SYSTEM").is_some());
+    }
+
+    /// An unrecognised failure must return None so the caller shows the
+    /// real output rather than a confident guess about the wrong thing.
+    #[test]
+    fn an_unknown_failure_is_not_explained_away() {
+        assert!(
+            explain_apt_failure("E: Package 'nosuchpkg' has no installation candidate").is_none()
+        );
+        assert!(explain_apt_failure("").is_none());
+    }
+}
