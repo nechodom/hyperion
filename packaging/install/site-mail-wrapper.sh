@@ -11,7 +11,10 @@
 #   3. Append one JSON object per line to
 #      /var/lib/hyperion/site-mail/<user>.jsonl
 #   4. Exec the real sendmail (/usr/sbin/sendmail) so delivery is
-#      identical to the pre-wrapper behaviour.
+#      identical to the pre-wrapper behaviour. That last part is the
+#      whole contract, and it is easy to break: PHP's default
+#      sendmail_path carries `-t -i`, and pointing the INI at this
+#      wrapper drops them. See the SAW_T block below.
 #
 # Failure modes (intentionally non-fatal — never block the email):
 #   - JSONL directory missing: try to create; if still fails, skip
@@ -38,11 +41,18 @@ USER_ARG=""
 # Parse out our -u flag without consuming the rest (those go to the
 # real sendmail unchanged).
 declare -a SENDMAIL_ARGS=()
+SAW_T=0
 while [ "$#" -gt 0 ]; do
     case "$1" in
         -u)
             shift
             USER_ARG="${1:-}"
+            ;;
+        -t|-t*)
+            # Note it so we don't add a second one below. Matches the
+            # bundled forms too (`-ti`), which sendmail accepts.
+            SAW_T=1
+            SENDMAIL_ARGS+=("$1")
             ;;
         *)
             SENDMAIL_ARGS+=("$1")
@@ -50,6 +60,29 @@ while [ "$#" -gt 0 ]; do
     esac
     shift || true
 done
+
+# PHP's compiled default sendmail_path is "/usr/sbin/sendmail -t -i", and
+# setting the INI replaces that string WHOLE — the flags are not merged.
+# The pool template points sendmail_path at this wrapper, so unless the
+# flags are restored here, the real sendmail is exec'd with no -t.
+#
+# That is not a degradation, it is total failure: PHP writes the message
+# (recipients only in the To: header) to our stdin and passes NO recipient
+# on the command line, so without -t sendmail has nobody to deliver to and
+# refuses the message. Every wp_mail() on the box — password resets, order
+# confirmations, contact forms — fails, and the site sees mail() return
+# false with nothing in the mail log to explain it.
+#
+# -i matters too: without it a body line containing only "." ends the
+# message early, silently truncating it.
+#
+# Restored HERE rather than in the pool template on purpose. This file is
+# reinstalled by update.sh on every node, so the fix reaches sites that
+# already have a pool written with the old value, without rewriting and
+# reloading every FPM pool on the box.
+if [ "$SAW_T" -eq 0 ]; then
+    SENDMAIL_ARGS=(-t -i ${SENDMAIL_ARGS[@]+"${SENDMAIL_ARGS[@]}"})
+fi
 
 # Validate the user arg shape.
 if ! [[ "$USER_ARG" =~ ^[a-z][a-z0-9_]{0,31}$ ]]; then
@@ -139,7 +172,15 @@ fi
 # Forward to the real sendmail. If it's missing, fail soft (PHP
 # will see a non-zero exit and behave as before).
 if [ -x "$REAL_SENDMAIL" ]; then
-    exec "$REAL_SENDMAIL" "${SENDMAIL_ARGS[@]}" < "$TMP"
+    # Hand the message over on an already-open descriptor and unlink the
+    # file first. `exec` replaces this shell, which discards the EXIT trap
+    # above — so every message used to leave a copy in /tmp forever: a
+    # full body per send, 0600 and owned by the site user, growing without
+    # bound on a busy box. The open descriptor keeps the data alive for
+    # sendmail even though the name is already gone.
+    exec 3< "$TMP"
+    rm -f "$TMP"
+    exec "$REAL_SENDMAIL" "${SENDMAIL_ARGS[@]}" <&3
 else
     echo "site-mail-wrapper: $REAL_SENDMAIL missing or non-executable" >&2
     exit 75
