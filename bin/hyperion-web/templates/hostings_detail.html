@@ -637,10 +637,16 @@
       <div class="text-soft small" style="margin-bottom:0.45rem">Outdated plugins and themes, auto-patched</div>
       <a class="text-soft small" href="#wordpress">Open the WordPress tab →</a>
     </div>
-    <div style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.7rem">
-      <div class="text-soft small" style="margin-bottom:0.35rem">Brute-force bans</div>
-      <div class="text-soft small" style="margin-bottom:0.45rem">Automatic wp-login, xmlrpc and SSH bans</div>
-      <a class="text-soft small" href="#settings">Manage in Settings →</a>
+    {# Brute-force tile — lazily swapped in: the per-site scan switch
+       lives in the OWNING node's hosting_kv, one RPC away. Replaced by
+       _hosting_bruteforce_card.html. #}
+    <div hx-get="/hostings/{{ detail.id.as_str() }}/bruteforce-panel"
+         hx-trigger="load" hx-swap="outerHTML">
+      <div style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.7rem">
+        <div class="text-soft small" style="margin-bottom:0.35rem">Brute-force bans</div>
+        <div class="text-soft small" style="margin-bottom:0.45rem"><span class="spinner-inline"></span> Checking this site's scan…</div>
+        <a class="text-soft small" href="#settings">Manage in Settings →</a>
+      </div>
     </div>
   </div>
   {# Cluster-wide context: the cards above act on THIS site; these jump to the

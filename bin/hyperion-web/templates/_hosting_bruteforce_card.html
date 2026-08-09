@@ -1,0 +1,34 @@
+{# Brute-force tile on the Security card — lazily swapped in via
+   hx-get="/hostings/:sel/bruteforce-panel" and re-rendered in place by
+   the pause/resume form (hx-target="#bf-scan-tile"). The switch is the
+   OWNING node's hosting_kv "http_bruteforce_scan_enabled": that is the
+   node whose fail2ban_scan reads the site's access log, so both the
+   state read and the toggle write travel there — the master's local kv
+   would be a switch wired to nothing. Only the per-site wp-login /
+   xmlrpc scan is switchable; ssh, ftp and mail bans are node-wide. #}
+<div style="border:1px solid var(--border);border-radius:var(--radius-sm);padding:0.7rem" id="bf-scan-tile">
+  <div class="text-soft small" style="margin-bottom:0.35rem">Brute-force bans
+    {% if enabled %}<span class="pill ok" style="font-size:0.6rem;margin-left:0.3rem">on</span>
+    {% else %}<span class="pill warn" style="font-size:0.6rem;margin-left:0.3rem">paused</span>{% endif %}
+  </div>
+  {% if let Some(e) = error %}
+  <div style="color:var(--danger);font-size:0.75rem;margin-bottom:0.45rem">{{ e }}</div>
+  {% endif %}
+  {% if enabled %}
+  <div class="text-soft small" style="margin-bottom:0.45rem">Login floods against <code>wp-login.php</code> / <code>xmlrpc.php</code> earn an automatic firewall ban. ssh, ftp and mail bans are node-wide.</div>
+  {% else %}
+  <div class="text-soft small" style="margin-bottom:0.45rem">This site's access log isn't scanned, and its care report won't claim login protection. Node-wide ssh, ftp and mail bans still apply.</div>
+  {% endif %}
+  <form hx-post="/hostings/bruteforce-scan" hx-target="#bf-scan-tile" hx-swap="outerHTML" style="margin:0 0 0.4rem">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <input type="hidden" name="selector" value="{{ selector }}">
+    {% if enabled %}
+    <input type="hidden" name="enabled" value="off">
+    <button class="btn ghost" type="submit" style="font-size:0.75rem;padding:0.2rem 0.55rem">Pause for this site</button>
+    {% else %}
+    <input type="hidden" name="enabled" value="on">
+    <button class="btn primary" type="submit" style="font-size:0.75rem;padding:0.2rem 0.55rem">Resume scanning</button>
+    {% endif %}
+  </form>
+  <a class="text-soft small" href="#settings">Manage in Settings →</a>
+</div>
