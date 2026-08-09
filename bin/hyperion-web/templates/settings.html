@@ -373,6 +373,40 @@
             </span>
           {% endif %}
         </dd>
+        <dt>Sender identity</dt>
+        <dd>
+          {% if mta.sender_auth_status == "authorized" %}
+            <code>{{ mta.sender_domain }}</code>
+            <span class="pill ok" style="margin-left:0.5rem">SPF authorizes this server ✓</span>
+          {% else if mta.sender_auth_status == "foreign-reject" %}
+            <code>{{ mta.sender_domain }}</code>
+            <span class="pill err" style="margin-left:0.5rem">mail is silently destroyed</span>
+            <span class="text-soft small" style="display:block;margin-top:0.25rem">
+              {{ mta.sender_auth_detail }} Fix <code>from_address</code> in the form below.
+            </span>
+          {% else if mta.sender_auth_status == "no-spf" %}
+            <code>{{ mta.sender_domain }}</code>
+            <span class="pill warn" style="margin-left:0.5rem">no SPF record</span>
+            <span class="text-soft small" style="display:block;margin-top:0.25rem">
+              {{ mta.sender_auth_detail }} Publish this TXT on
+              <code>{{ mta.sender_domain }}</code>:
+              <code>{{ mta.sender_spf_suggested }}</code>
+            </span>
+          {% else if mta.sender_auth_status == "not-authorized" %}
+            <code>{{ mta.sender_domain }}</code>
+            <span class="pill warn" style="margin-left:0.5rem">SPF excludes this server</span>
+            <span class="text-soft small" style="display:block;margin-top:0.25rem">
+              {{ mta.sender_auth_detail }}
+            </span>
+          {% else if mta.sender_auth_status == "no-domain" %}
+            <span class="pill warn">from_address has no domain</span>
+            <span class="text-soft small" style="display:block;margin-top:0.25rem">
+              {{ mta.sender_auth_detail }}
+            </span>
+          {% else %}
+            <span class="text-soft">unknown — {{ mta.sender_auth_detail }}</span>
+          {% endif %}
+        </dd>
         <dt>relayhost</dt>
         <dd>
           {% if mta.relayhost.is_empty() %}

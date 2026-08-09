@@ -1173,6 +1173,36 @@ pub struct MtaDiagnostics {
     // ── This node's editable `[email]` config, read from its own
     //    agent.toml so the Settings → Mail form can pre-fill per node.
     //    The password is never sent back (only `cfg_password_set`).
+    /// Domain part of `[email] from_address` — the identity every panel
+    /// mail claims, and therefore the domain receivers evaluate SPF and
+    /// DMARC against.
+    #[serde(default)]
+    pub sender_domain: String,
+    /// Verdict on that identity, from this node's point of view:
+    /// "authorized" | "no-spf" | "not-authorized" | "foreign-reject" |
+    /// "no-domain" | "unknown".
+    ///
+    /// "foreign-reject" is the case this check exists for: the domain's
+    /// SPF does not authorize this server AND its DMARC says
+    /// reject/quarantine — so receivers ACCEPT the message at SMTP time
+    /// and then discard it. No bounce, no queue entry, no spam folder.
+    /// The one failure an operator cannot see from the server at all,
+    /// and exactly what a placeholder like `hyperion@hyperion.com`
+    /// produces (that real domain publishes `v=spf1 -all` + `p=reject`).
+    ///
+    /// "unknown" strictly means the check could not run (DNS failure,
+    /// our own IP unknown) — never "probably fine".
+    #[serde(default)]
+    pub sender_auth_status: String,
+    /// One human sentence with the specifics behind the status —
+    /// which SPF record was found, what DMARC policy applies.
+    #[serde(default)]
+    pub sender_auth_detail: String,
+    /// A ready-to-paste SPF TXT value for `sender_domain`, filled when
+    /// the status is "no-spf" (the domain is the operator's and just
+    /// needs the record).
+    #[serde(default)]
+    pub sender_spf_suggested: String,
     #[serde(default)]
     pub cfg_enabled: bool,
     #[serde(default)]
