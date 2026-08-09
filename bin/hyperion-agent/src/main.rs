@@ -381,7 +381,19 @@ async fn main() -> anyhow::Result<()> {
                              PTR record matches."
                         );
                     }
-                    match hyperion_core::postfix_ensure_direct_delivery_config(&fqdn).await {
+                    let direct_opts = hyperion_core::PostfixDirectDeliveryOpts {
+                        // Blank ⇒ the adapter's defaults (ipv4, kernel's
+                        // choice of source address), so a node whose
+                        // agent.toml predates these keys still gets the
+                        // deliverability-safe policy.
+                        inet_protocols: Some(cfg.email.inet_protocols.clone())
+                            .filter(|s| !s.trim().is_empty()),
+                        bind_address: Some(cfg.email.bind_address.clone())
+                            .filter(|s| !s.trim().is_empty()),
+                    };
+                    match hyperion_core::postfix_ensure_direct_delivery_config(&fqdn, &direct_opts)
+                        .await
+                    {
                         Ok(()) => {
                             tracing::info!(
                                 myhostname = %fqdn,

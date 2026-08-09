@@ -211,6 +211,22 @@ pub struct EmailSection {
     /// Default operator address that gets cluster-wide notifications
     /// (billing reminders for hostings with no owner_email set).
     pub default_to: String,
+    /// Postfix `inet_protocols` for DIRECT-MX delivery: `ipv4` (default),
+    /// `ipv6` or `all`.
+    ///
+    /// IPv4-only is the safe default for a send-only node. Postfix prefers
+    /// a receiver's AAAA when it has one, and a node whose PTR and SPF
+    /// cover only its IPv4 address then collects hard rejections from the
+    /// large receivers with no IPv4 retry. Set `all` once the node has a
+    /// v6 PTR and every hosted domain's SPF carries an `ip6:`.
+    pub inet_protocols: String,
+    /// Postfix `smtp_bind_address` — the source address for outbound
+    /// SMTP. Empty (default) leaves the kernel's choice alone.
+    ///
+    /// Worth setting on a node with more than one public address, where
+    /// the kernel can otherwise pick one whose PTR does not match the
+    /// HELO name and which no SPF record lists.
+    pub bind_address: String,
 }
 
 impl Default for EmailSection {
@@ -225,6 +241,8 @@ impl Default for EmailSection {
             from_name: "Hyperion".into(),
             security: "starttls".into(),
             default_to: String::new(),
+            inet_protocols: "ipv4".into(),
+            bind_address: String::new(),
         }
     }
 }

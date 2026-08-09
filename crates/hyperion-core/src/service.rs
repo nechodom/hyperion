@@ -5053,6 +5053,53 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(self.dkim_status_for(&detail).await)
     }
 
+    /// Rebuild postfix's envelope-sender map from every hosting on THIS
+    /// node that has DKIM switched on.
+    ///
+    /// SPF is evaluated against the ENVELOPE sender's domain, and PHP
+    /// `mail()` produces an envelope of `<php-fpm user>@<node fqdn>`. So
+    /// until this ran, the per-site SPF record the panel tells the
+    /// operator to publish was never consulted by any receiver — they
+    /// were checking this node's own hostname, which usually has no SPF
+    /// record at all. The suggestion was decorative and the card went
+    /// green anyway.
+    ///
+    /// **Keyed on DKIM being enabled**, deliberately. Enabling DKIM means
+    /// the operator has published a record in that domain's DNS, so they
+    /// demonstrably control its mail identity and the SPF advice on the
+    /// same page is theirs to act on. It also means the envelope is never
+    /// moved to a domain nobody has set up: a site with DKIM off keeps
+    /// the old behaviour exactly.
+    ///
+    /// Rebuilt wholesale rather than patched, so the file cannot drift
+    /// from the hostings that actually exist. The `From:` HEADER is left
+    /// alone — see `ensure_sender_canonical`; rewriting it would break
+    /// every DKIM signature this node produces.
+    async fn sync_sender_canonical(&self) -> Result<(), RpcError> {
+        let fqdn = my_fqdn().await;
+        let mut entries: Vec<(String, String)> = Vec::new();
+        for s in self.list().await? {
+            if !self.dkim_kv_get(s.id.as_str()).await.enabled {
+                continue;
+            }
+            // The STORED system user, never the domain-derived guess: an
+            // imported or renamed site defeats the guess, and a wrong
+            // left-hand side here silently fails to match, leaving that
+            // site's envelope on the node hostname while the panel says
+            // its SPF is fine.
+            let Ok(detail) = self.get(HostingSelector::Id(s.id.clone())).await else {
+                continue;
+            };
+            if detail.system_user.trim().is_empty() {
+                continue;
+            }
+            entries.push((detail.system_user.clone(), detail.domain.clone()));
+        }
+        hyperion_adapters::postfix::ensure_sender_canonical(&fqdn, &entries)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("postfix sender canonical: {e}")))
+    }
+
     pub async fn dkim_enable(
         &self,
         sel: HostingSelector,
@@ -5107,6 +5154,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             },
         )
         .await?;
+        // Move this site's envelope sender onto its own domain now that
+        // the operator manages that domain's mail DNS. Best-effort: the
+        // signing itself is already live and correct, so a postfix hiccup
+        // here must not report DKIM as failed. It is re-asserted on the
+        // next enable/disable and on every mta_reconfigure.
+        if let Err(e) = self.sync_sender_canonical().await {
+            tracing::warn!(error = %e, domain = %detail.domain,
+                "dkim: envelope-sender map not updated; this site's SPF record \
+                 stays unconsulted until the next reconfigure");
+        }
         self.append_audit(
             "hosting.dkim.enable",
             Some(detail.id.as_str()),
@@ -5148,6 +5205,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             },
         )
         .await?;
+        // Move this site's envelope sender onto its own domain now that
+        // the operator manages that domain's mail DNS. Best-effort: the
+        // signing itself is already live and correct, so a postfix hiccup
+        // here must not report DKIM as failed. It is re-asserted on the
+        // next enable/disable and on every mta_reconfigure.
+        if let Err(e) = self.sync_sender_canonical().await {
+            tracing::warn!(error = %e, domain = %detail.domain,
+                "dkim: envelope-sender map not updated; this site's SPF record \
+                 stays unconsulted until the next reconfigure");
+        }
         self.append_audit(
             "hosting.dkim.disable",
             Some(detail.id.as_str()),
@@ -7616,7 +7683,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // so the worst case is one slow probe, not the sum.
         let (txts_raw, our_ipv4) = tokio::join!(
             dig_records(&d, "TXT"),
-            fetch_public_ip("https://api.ipify.org"),
+            fetch_public_ip_v4("https://api4.ipify.org"),
         );
         let txts_raw = txts_raw.unwrap_or_default();
         // dig may return one TXT split across multiple quoted segments
@@ -11723,8 +11790,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let (resolved_a, resolved_aaaa, our_ipv4, our_ipv6) = tokio::join!(
             dig_records(&d, "A"),
             dig_records(&d, "AAAA"),
-            fetch_public_ip("https://api.ipify.org"),
-            fetch_public_ip("https://api6.ipify.org"),
+            fetch_public_ip_v4("https://api4.ipify.org"),
+            fetch_public_ip_v6("https://api6.ipify.org"),
         );
         let resolved_a = resolved_a.unwrap_or_default();
         let resolved_aaaa = resolved_aaaa.unwrap_or_default();
@@ -15193,6 +15260,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let myhostname = postconf_get("myhostname").await;
         let relayhost = postconf_get("relayhost").await;
         let myhostname_is_fqdn = myhostname.contains('.');
+        // Reverse DNS for the address this node sends from. Two network
+        // round trips, so it is STARTED here and awaited beside the port
+        // probes below rather than in front of them — this runs on every
+        // Settings page load, and serialising it would put ~7 s in front
+        // of the operator. A failure degrades to "unknown", never to a
+        // claim about the record.
+        let ptr_fut = mta_ptr_check(&myhostname);
 
         // Decide mode from observable state, not just the marker.
         let mode = if !postfix_known {
@@ -15261,7 +15335,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let probes_fut = probe_outbound_smtp_all();
         // Keep the legacy single port_25 fields populated for
         // older UI / external scripts that grep on them.
-        let outbound_smtp_probes: Vec<hyperion_types::MtaPortProbe> = probes_fut.await;
+        let (outbound_smtp_probes, (public_ipv4, ptr_name, ptr_status)): (
+            Vec<hyperion_types::MtaPortProbe>,
+            (String, String, String),
+        ) = tokio::join!(probes_fut, ptr_fut);
         let (outbound_port_25_ok, outbound_port_25_msg) = outbound_smtp_probes
             .iter()
             .find(|p| p.port == 25)
@@ -15313,6 +15390,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             marker_body,
             myhostname,
             myhostname_is_fqdn,
+            public_ipv4,
+            ptr_name,
+            ptr_status,
             relayhost,
             mailq_summary,
             mailq_total,
@@ -16256,6 +16336,19 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .agent_config_path
             .as_ref()
             .map(|p| load_email_section(p));
+        // Read before `disk` is consumed by the match below. These two
+        // apply to direct-MX delivery and are independent of whether a
+        // relay is configured at all.
+        let toml_email = DirectMxTuning {
+            inet_protocols: disk
+                .as_ref()
+                .map(|e| e.inet_protocols.clone())
+                .unwrap_or_default(),
+            bind_address: disk
+                .as_ref()
+                .map(|e| e.bind_address.clone())
+                .unwrap_or_default(),
+        };
         let relay_cfg: Option<hyperion_adapters::email::EmailConfig> = match disk {
             Some(e) if e.enabled && !e.smtp_host.trim().is_empty() => {
                 Some(hyperion_adapters::email::EmailConfig {
@@ -16315,9 +16408,27 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 Ok("smart-host".to_string())
             }
             _ => {
-                hyperion_adapters::postfix::ensure_direct_delivery_config(&fqdn)
-                    .await
-                    .map_err(|e| RpcError::Internal_with(format!("postfix direct: {e}")))?;
+                hyperion_adapters::postfix::ensure_direct_delivery_config(
+                    &fqdn,
+                    &hyperion_adapters::postfix::DirectDeliveryOpts {
+                        // Empty ⇒ the adapter's own defaults (ipv4, no
+                        // bind address), so a node whose agent.toml
+                        // predates these keys gets the safe policy
+                        // without the operator touching anything.
+                        inet_protocols: Some(toml_email.inet_protocols.clone())
+                            .filter(|s| !s.trim().is_empty()),
+                        bind_address: Some(toml_email.bind_address.clone())
+                            .filter(|s| !s.trim().is_empty()),
+                    },
+                )
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("postfix direct: {e}")))?;
+                // Re-assert the envelope map: a reconfigure rewrites main.cf,
+                // and this is the one place guaranteed to run on every node
+                // after any mail change.
+                if let Err(e) = self.sync_sender_canonical().await {
+                    tracing::warn!(error = %e, "mta: envelope-sender map not rebuilt");
+                }
                 Ok("direct-mx".to_string())
             }
         }
@@ -16360,8 +16471,29 @@ impl<A: AdapterPort + 'static> HostingService<A> {
              If you can read this, your MTA accepted it.\r\n\
              Whether it actually delivered is between postfix and the recipient's MX.\r\n",
         );
-        let mut child = tokio::process::Command::new("/usr/sbin/sendmail")
-            .args(["-t", "-f", &from])
+        // Go through the SITE-MAIL WRAPPER when it is installed, exactly as a
+        // hosted PHP site does, rather than straight to /usr/sbin/sendmail.
+        //
+        // This test called sendmail directly for six releases while every real
+        // site's mail was rejected for want of a `-t` the wrapper never got —
+        // so the one diagnostic an operator reaches for was structurally
+        // incapable of reproducing the only failure that mattered, and it
+        // reported success throughout. A test that exercises a different path
+        // than production is not a test of production.
+        //
+        // `-t -i` are still passed: PHP would supply them via `sendmail_path`,
+        // and this is standing in for PHP.
+        let (bin, args): (&str, Vec<&str>) = if tokio::fs::metadata(SITE_MAIL_WRAPPER).await.is_ok()
+        {
+            (
+                SITE_MAIL_WRAPPER,
+                vec!["-u", "hyperion", "-t", "-i", "-f", &from],
+            )
+        } else {
+            ("/usr/sbin/sendmail", vec!["-t", "-f", &from])
+        };
+        let mut child = tokio::process::Command::new(bin)
+            .args(&args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -19868,7 +20000,116 @@ async fn dig_records(domain: &str, kind: &str) -> Result<Vec<String>, std::io::E
         .collect())
 }
 
-async fn fetch_public_ip(url: &str) -> Result<String, std::io::Error> {
+/// This node's public IPv4 address, or an error.
+///
+/// The result is PARSED and the family CHECKED, which is the whole point.
+/// `api.ipify.org` answers over whichever family the request went out on,
+/// so a dual-stack node gets an IPv6 literal back — and the caller was
+/// interpolating it straight into `format!("v=spf1 ip4:{ip} a mx ~all")`.
+/// An operator who pasted that into DNS published a record every receiver
+/// evaluates as PERMERROR, which is worse than publishing nothing: the
+/// domain's mail gets junked, and the panel's own SPF card kept reporting
+/// "differs" no matter what they did, because the comparison parsed the
+/// same broken string.
+///
+/// `api4.` pins the lookup to A-records only; the parse is the backstop
+/// for the day that host starts answering differently.
+async fn fetch_public_ip_v4(url: &str) -> Result<String, std::io::Error> {
+    let raw = fetch_public_ip_raw(url).await?;
+    match raw.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => Ok(v4.to_string()),
+        Ok(std::net::IpAddr::V6(_)) => Err(std::io::Error::other(format!(
+            "{url} returned an IPv6 address ({raw}); need IPv4 for an SPF ip4: term"
+        ))),
+        Err(_) => Err(std::io::Error::other(format!(
+            "{url} returned something that is not an IP address: {raw:?}"
+        ))),
+    }
+}
+
+/// This node's public IPv6 address. Same family check as
+/// [`fetch_public_ip_v4`], in the other direction — the DNS preflight
+/// compares this against the domain's AAAA records, and an IPv4 literal
+/// leaking in here would report a mismatch that does not exist.
+async fn fetch_public_ip_v6(url: &str) -> Result<String, std::io::Error> {
+    let raw = fetch_public_ip_raw(url).await?;
+    match raw.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V6(v6)) => Ok(v6.to_string()),
+        Ok(std::net::IpAddr::V4(_)) => Err(std::io::Error::other(format!(
+            "{url} returned an IPv4 address ({raw}); expected IPv6"
+        ))),
+        Err(_) => Err(std::io::Error::other(format!(
+            "{url} returned something that is not an IP address: {raw:?}"
+        ))),
+    }
+}
+
+/// This node's fully-qualified hostname, falling back to the short name
+/// and then to `localhost`.
+///
+/// Same resolution `mta_reconfigure` does for postfix's `myhostname`, so
+/// the left-hand side of the envelope-rewrite map is guaranteed to be the
+/// string postfix actually stamps on unqualified senders.
+async fn my_fqdn() -> String {
+    let out = tokio::process::Command::new("/bin/hostname")
+        .arg("-f")
+        .output()
+        .await
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty());
+    out.unwrap_or_else(|| "localhost".to_string())
+}
+
+/// Reverse-DNS check for the address this node sends mail from.
+///
+/// Returns `(public_ipv4, ptr_name, status)` where status is `ok` /
+/// `mismatch` / `missing` / `unknown`.
+///
+/// The comparison is against postfix's `myhostname`, because that is the
+/// name it announces in HELO, and the rule receivers apply is that the
+/// two agree. Matching is case-insensitive and ignores a trailing dot,
+/// which `dig -x` includes and `postconf` does not — comparing them raw
+/// would report a mismatch on a perfectly good record.
+///
+/// `unknown` covers both "could not learn our address" and "the lookup
+/// itself failed", and is kept strictly separate from `missing`. Telling
+/// an operator a PTR is absent when we simply could not ask would send
+/// them to re-create a record that already exists.
+async fn mta_ptr_check(myhostname: &str) -> (String, String, String) {
+    let Ok(ip) = fetch_public_ip_v4("https://api4.ipify.org").await else {
+        return (String::new(), String::new(), "unknown".to_string());
+    };
+    let out = tokio::process::Command::new("/usr/bin/dig")
+        .args(["+short", "+time=3", "+tries=1", "-x", &ip])
+        .output()
+        .await;
+    let Ok(out) = out else {
+        return (ip, String::new(), "unknown".to_string());
+    };
+    if !out.status.success() {
+        return (ip, String::new(), "unknown".to_string());
+    }
+    let ptr = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("")
+        .to_string();
+    if ptr.is_empty() {
+        return (ip, String::new(), "missing".to_string());
+    }
+    let norm = |s: &str| s.trim().trim_end_matches('.').to_ascii_lowercase();
+    let status = if norm(&ptr) == norm(myhostname) {
+        "ok"
+    } else {
+        "mismatch"
+    };
+    (ip, ptr, status.to_string())
+}
+
+async fn fetch_public_ip_raw(url: &str) -> Result<String, std::io::Error> {
     let out = tokio::process::Command::new("/usr/bin/curl")
         .args(["-fsS", "--max-time", "4", url])
         .output()
@@ -20362,6 +20603,11 @@ const FAIL2BAN_HTTP_KV_KEY: &str = "http_bruteforce_scan_enabled";
 /// actually evidence, instead of inferring coverage from a toggle that
 /// only ever describes the present.
 const FAIL2BAN_HTTP_SINCE_KV_KEY: &str = "http_bruteforce_scan_since";
+
+/// The shim every PHP-FPM pool has as its `sendmail_path`. The mail test
+/// runs through it when present so the diagnostic and production share a
+/// code path.
+const SITE_MAIL_WRAPPER: &str = "/usr/local/lib/hyperion/site-mail-wrapper";
 
 /// How long a silence breaks a stretch of proven coverage. The scanner
 /// runs every scheduler tick (minutes), so an hour without one means it
@@ -21579,6 +21825,8 @@ fn parse_agent_section_fields(
             | ("email", "from_address")
             | ("email", "from_name")
             | ("email", "security")
+            | ("email", "inet_protocols")
+            | ("email", "bind_address")
             | ("email", "default_to") => crate::config_persist::FieldValue::Str(v.clone()),
             ("email", "smtp_port") => crate::config_persist::FieldValue::Int(parse_int(v)?),
             // [slack]
@@ -22712,6 +22960,15 @@ fn quota_report_shows_on(out: &str) -> bool {
 /// so there we update fstab and ask for a reboot.
 /// Minimal view of agent.toml's `[email]` section, read fresh from disk.
 #[derive(Default)]
+/// The two `[email]` keys that shape DIRECT-MX delivery rather than the
+/// relay. Split out so `mta_reconfigure` can read them off the on-disk
+/// section before that section is consumed building the relay config.
+struct DirectMxTuning {
+    inet_protocols: String,
+    bind_address: String,
+}
+
+#[derive(Default)]
 struct EmailTomlView {
     enabled: bool,
     smtp_host: String,
@@ -22722,6 +22979,8 @@ struct EmailTomlView {
     from_name: String,
     security: String,
     default_to: String,
+    inet_protocols: String,
+    bind_address: String,
 }
 
 /// Read the `[email]` section straight from agent.toml so callers see the
@@ -22756,6 +23015,8 @@ fn load_email_section(path: &std::path::Path) -> EmailTomlView {
         from_name: s("from_name"),
         security: s("security"),
         default_to: s("default_to"),
+        inet_protocols: s("inet_protocols"),
+        bind_address: s("bind_address"),
     }
 }
 

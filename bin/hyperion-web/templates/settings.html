@@ -342,6 +342,37 @@
             </span>
           {% endif %}
         </dd>
+        <dt>Reverse DNS (PTR)</dt>
+        <dd>
+          {% if mta.ptr_status == "ok" %}
+            <code>{{ mta.public_ipv4 }}</code> → <code>{{ mta.ptr_name }}</code>
+            <span class="pill ok" style="margin-left:0.5rem">matches HELO ✓</span>
+          {% else if mta.ptr_status == "mismatch" %}
+            <code>{{ mta.public_ipv4 }}</code> → <code>{{ mta.ptr_name }}</code>
+            <span class="pill warn" style="margin-left:0.5rem">does not match myhostname</span>
+            <span class="text-soft small" style="display:block;margin-top:0.25rem">
+              Receivers compare the HELO name against this record. Set the PTR
+              for <code>{{ mta.public_ipv4 }}</code> to <code>{{ mta.myhostname }}</code>
+              where the IP is managed (for Hetzner: Server → Networking → edit the
+              rDNS entry). Nothing in Hyperion can change it.
+            </span>
+          {% else if mta.ptr_status == "missing" %}
+            <code>{{ mta.public_ipv4 }}</code>
+            <span class="pill warn" style="margin-left:0.5rem">no PTR record</span>
+            <span class="text-soft small" style="display:block;margin-top:0.25rem">
+              This is the most common reason direct-MX mail is rejected outright —
+              before SPF or DKIM are even looked at. Point the PTR for
+              <code>{{ mta.public_ipv4 }}</code> at <code>{{ mta.myhostname }}</code>.
+            </span>
+          {% else %}
+            <span class="text-soft">unknown — could not determine this node's public
+            address or run the lookup</span>
+            <span class="text-soft small" style="display:block;margin-top:0.25rem">
+              Not the same as "no record": we could not ask. Check it by hand with
+              <code>dig +short -x &lt;ip&gt;</code> before changing anything.
+            </span>
+          {% endif %}
+        </dd>
         <dt>relayhost</dt>
         <dd>
           {% if mta.relayhost.is_empty() %}
