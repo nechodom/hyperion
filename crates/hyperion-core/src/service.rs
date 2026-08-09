@@ -15267,6 +15267,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // of the operator. A failure degrades to "unknown", never to a
         // claim about the record.
         let ptr_fut = mta_ptr_check(&myhostname);
+        // This node's editable [email] config, read fresh from its agent.toml
+        // so the Settings → Mail form pre-fills the right values per node.
+        let email_view = self
+            .agent_config_path
+            .as_ref()
+            .map(|p| load_email_section(p))
+            .unwrap_or_default();
+
+        // The sender-identity check shares the page-load budget, so it
+        // runs beside the probes too.
+        let sender_fut = mta_sender_auth_check(&email_view.from_address);
 
         // Decide mode from observable state, not just the marker.
         let mode = if !postfix_known {
@@ -15335,10 +15346,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let probes_fut = probe_outbound_smtp_all();
         // Keep the legacy single port_25 fields populated for
         // older UI / external scripts that grep on them.
-        let (outbound_smtp_probes, (public_ipv4, ptr_name, ptr_status)): (
-            Vec<hyperion_types::MtaPortProbe>,
-            (String, String, String),
-        ) = tokio::join!(probes_fut, ptr_fut);
+        let (
+            outbound_smtp_probes,
+            (public_ipv4, ptr_name, ptr_status),
+            (sender_domain, sender_auth_status, sender_auth_detail, sender_spf_suggested),
+        ) = tokio::join!(probes_fut, ptr_fut, sender_fut);
         let (outbound_port_25_ok, outbound_port_25_msg) = outbound_smtp_probes
             .iter()
             .find(|p| p.port == 25)
@@ -15373,14 +15385,6 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             Err(_) => Vec::new(),
         };
 
-        // This node's editable [email] config, read fresh from its agent.toml
-        // so the Settings → Mail form pre-fills the right values per node.
-        let email_view = self
-            .agent_config_path
-            .as_ref()
-            .map(|p| load_email_section(p))
-            .unwrap_or_default();
-
         Ok(hyperion_types::MtaDiagnostics {
             mode,
             sendmail_executable,
@@ -15402,6 +15406,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             outbound_smtp_probes,
             recent_log_tail,
             cfg_password_set: !email_view.smtp_password.is_empty(),
+            sender_domain,
+            sender_auth_status,
+            sender_auth_detail,
+            sender_spf_suggested,
             cfg_enabled: email_view.enabled,
             cfg_smtp_host: email_view.smtp_host,
             cfg_smtp_port: email_view.smtp_port,
@@ -20060,6 +20068,139 @@ async fn my_fqdn() -> String {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .filter(|s| !s.is_empty());
     out.unwrap_or_else(|| "localhost".to_string())
+}
+
+/// What the DNS of the `from_address` domain says about mail sent from
+/// this node. Returns `(domain, status, detail, suggested_spf)` for
+/// `MtaDiagnostics`.
+///
+/// Exists because of a failure mode the server cannot observe at all: a
+/// `from_address` on a domain whose SPF excludes this server and whose
+/// DMARC says reject means receivers ACCEPT the message (250) and then
+/// discard it. No bounce, nothing in the queue, nothing in the spam
+/// folder. The queue log looks like success, and the operator debugs
+/// postfix — the actual verdict was published in someone else's DNS the
+/// whole time. `hyperion@hyperion.com`, an innocent-looking placeholder,
+/// is exactly this: that real domain publishes `v=spf1 -all` + `p=reject`.
+async fn mta_sender_auth_check(from_address: &str) -> (String, String, String, String) {
+    let unknown = |domain: &str, why: &str| {
+        (
+            domain.to_string(),
+            "unknown".to_string(),
+            format!("Could not check: {why}. Not the same as OK — verify by hand."),
+            String::new(),
+        )
+    };
+    let domain = from_address
+        .rsplit_once('@')
+        .map(|(_, d)| d.trim().trim_end_matches('.').to_ascii_lowercase())
+        .unwrap_or_default();
+    if domain.is_empty() || !domain.contains('.') {
+        return (
+            domain,
+            "no-domain".to_string(),
+            "from_address has no usable domain — receivers cannot even evaluate it.".to_string(),
+            String::new(),
+        );
+    }
+
+    // Our address and the domain's TXT in parallel; DMARC only matters on
+    // the not-authorized path, so it is fetched there.
+    let (our_ip, txts) = tokio::join!(
+        fetch_public_ip_v4("https://api4.ipify.org"),
+        dig_records(&domain, "TXT"),
+    );
+    let Ok(txts) = txts else {
+        return unknown(&domain, "the TXT lookup failed");
+    };
+    let Ok(our_ip) = our_ip else {
+        return unknown(&domain, "this node's public IPv4 could not be determined");
+    };
+
+    // TXT answers come back quoted and possibly chunked; normalize the
+    // same way dns_spf_check does before matching the version tag.
+    let spf = txts
+        .iter()
+        .map(|t| t.trim().trim_matches('"').replace("\" \"", ""))
+        .find(|t| t.to_ascii_lowercase().starts_with("v=spf1"));
+    let Some(spf) = spf else {
+        return (
+            domain.clone(),
+            "no-spf".to_string(),
+            format!(
+                "{domain} publishes no SPF record, so receivers score mail from it \
+                 as unauthenticated — spam folder territory."
+            ),
+            format!("v=spf1 ip4:{our_ip} ~all"),
+        );
+    };
+
+    match check_spf_authorizes(&spf, &domain, Some(&our_ip)).await {
+        SpfMatch::Match { mechanism } => (
+            domain.clone(),
+            "authorized".to_string(),
+            format!("SPF of {domain} authorizes this server ({mechanism})."),
+            String::new(),
+        ),
+        SpfMatch::CatchAll { mechanism } => (
+            domain.clone(),
+            "authorized".to_string(),
+            format!("SPF of {domain} passes everything ({mechanism}) — permissive, but it passes."),
+            String::new(),
+        ),
+        SpfMatch::NoIp => unknown(&domain, "this node's public IPv4 could not be parsed"),
+        SpfMatch::None => {
+            // Not authorized. Whether that means "spam folder" or
+            // "silently destroyed" is decided by the domain's DMARC.
+            let dmarc = dig_records(&format!("_dmarc.{domain}"), "TXT")
+                .await
+                .unwrap_or_default()
+                .iter()
+                .map(|t| t.trim().trim_matches('"').replace("\" \"", ""))
+                .find(|t| t.to_ascii_lowercase().starts_with("v=dmarc1"))
+                .unwrap_or_default();
+            let policy = dmarc_policy_of(&dmarc);
+            if policy == "reject" || policy == "quarantine" {
+                (
+                    domain.clone(),
+                    "foreign-reject".to_string(),
+                    format!(
+                        "SPF of {domain} does NOT authorize this server, and its DMARC says \
+                         p={policy} — receivers accept the message and then destroy it. \
+                         No bounce, no spam folder, no trace here. Nothing sent as this \
+                         address will ever arrive; use a domain you control."
+                    ),
+                    String::new(),
+                )
+            } else {
+                (
+                    domain.clone(),
+                    "not-authorized".to_string(),
+                    format!(
+                        "SPF of {domain} exists but does not include this server — \
+                         mail fails SPF and tends to land in spam. Add ip4:{our_ip} \
+                         to that record, or send from a domain that lists this node."
+                    ),
+                    String::new(),
+                )
+            }
+        }
+    }
+}
+
+/// The `p=` policy of a DMARC record, lowercased; empty when absent.
+///
+/// Only `p=` — `sp=` governs subdomains of the record's own domain, and
+/// the caller looks the record up at the exact from-domain, so applying
+/// `sp=` here would judge mail by a policy that does not bind it.
+fn dmarc_policy_of(record: &str) -> String {
+    record
+        .split(';')
+        .filter_map(|kv| kv.trim().strip_prefix("p="))
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase()
 }
 
 /// Reverse-DNS check for the address this node sends mail from.
@@ -25705,6 +25846,32 @@ mod tests {
     /// Protection that stopped and resumed — node down, `[fail2ban]
     /// enabled` flipped off and back, agent not running — would otherwise
     /// keep its original `since` and back-claim the dark days.
+    /// The reject/quarantine decision hangs off this parse, and a DMARC
+    /// record is operator-typed free text — spacing, order and case all
+    /// vary in the wild.
+    #[test]
+    fn dmarc_policy_parse_handles_wild_records() {
+        use super::dmarc_policy_of;
+        // The actual record that motivated the whole check (hyperion.com's).
+        assert_eq!(
+            dmarc_policy_of(
+                "v=DMARC1;p=reject;rua=mailto:dmarc_rua@emaildefense.proofpoint.com;fo=1"
+            ),
+            "reject"
+        );
+        assert_eq!(dmarc_policy_of("v=DMARC1; p=none;"), "none");
+        assert_eq!(dmarc_policy_of("v=DMARC1;  p = quarantine"), ""); // spaces inside kv ⇒ not a p= tag
+        assert_eq!(dmarc_policy_of("v=DMARC1; p=QUARANTINE"), "quarantine");
+        assert_eq!(
+            dmarc_policy_of("v=DMARC1; sp=reject"),
+            "",
+            "sp= must not read as p="
+        );
+        assert_eq!(dmarc_policy_of(""), "");
+        // pct=100 etc. before p=; order is not guaranteed by anyone.
+        assert_eq!(dmarc_policy_of("v=DMARC1; pct=100; p=reject"), "reject");
+    }
+
     #[test]
     fn a_coverage_stamp_restarts_after_a_gap() {
         use super::{parse_coverage_stamp, FAIL2BAN_COVERAGE_GAP_SECS as GAP};
