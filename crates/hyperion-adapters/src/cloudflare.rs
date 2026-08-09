@@ -43,15 +43,85 @@ pub async fn verify_token(token: &str) -> Result<usize, AdapterError> {
     if t.is_empty() {
         return Err(AdapterError::Other("empty Cloudflare token".into()));
     }
+    // Ask the endpoint that exists for exactly this question FIRST.
+    // `/zones` conflates two different failures behind one 403: a token
+    // that is not a valid token at all, and a valid token that may not
+    // list zones. Those need opposite fixes, and the operator was shown
+    // neither — just "403". `/user/tokens/verify` answers for ANY API
+    // token regardless of its scope, so a failure here is unambiguous.
+    //
+    // The most common cause of a 403 from a "token with every permission"
+    // is that it is not an API Token at all but a Global API Key, which
+    // is not a bearer credential and can never work here. Second most
+    // common: the token carries an IP-address filter that does not
+    // include this node. Both are named below, because Cloudflare's own
+    // message for them is terse.
+    let verify_url = format!("{API}/user/tokens/verify");
+    match curl_json(t, &[&verify_url]).await {
+        Ok(v) if v["success"].as_bool() == Some(true) => {}
+        Ok(v) => {
+            return Err(AdapterError::Other(format!(
+                "cloudflare: this token is not accepted ({}). \
+                 Two things produce this from a token that looks fully privileged: \
+                 (1) it is a Global API Key rather than an API Token — those are \
+                 not bearer credentials and cannot be used here; create one under \
+                 My Profile -> API Tokens -> Create Token; \
+                 (2) the token has an IP-address filter that excludes this server.",
+                cf_error_summary(&v)
+            )));
+        }
+        Err(e) => return Err(e),
+    }
+
+    // Token is genuine. Now check it can actually see zones, which is a
+    // separate permission and a separate remedy.
     let url = format!("{API}/zones?per_page=50");
     let v = curl_json(t, &[&url]).await?;
     if v["success"].as_bool() != Some(true) {
         return Err(AdapterError::Other(format!(
-            "cloudflare: token rejected: {}",
-            v["errors"]
+            "cloudflare: the token is valid but cannot list zones ({}). \
+             Add the Zone:Read permission, and make sure Zone Resources \
+             includes the zone you want to use.",
+            cf_error_summary(&v)
         )));
     }
-    Ok(v["result"].as_array().map(|a| a.len()).unwrap_or(0))
+    let zones = v["result"].as_array().map(|a| a.len()).unwrap_or(0);
+    if zones == 0 {
+        return Err(AdapterError::Other(
+            "cloudflare: the token is valid but sees no zones. Its Zone Resources \
+             probably name a different account, or none. Re-issue it with \
+             Zone:Read + DNS:Edit on the zone you want to use."
+                .into(),
+        ));
+    }
+    Ok(zones)
+}
+
+/// Flatten Cloudflare's `errors` array into one readable sentence.
+///
+/// Their shape is `[{"code":1000,"message":"Invalid API Token"}]`, and
+/// rendering the raw JSON put punctuation and field names in front of the
+/// operator instead of the sentence that tells them what to do.
+fn cf_error_summary(v: &serde_json::Value) -> String {
+    let msgs: Vec<String> = v["errors"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|e| {
+                    let m = e["message"].as_str()?;
+                    Some(match e["code"].as_i64() {
+                        Some(c) => format!("{m} [code {c}]"),
+                        None => m.to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if msgs.is_empty() {
+        "no reason given".to_string()
+    } else {
+        msgs.join("; ")
+    }
 }
 
 /// Persist the API token to [`TOKEN_FILE`] with `0600` perms (so DNS-01 issuance
@@ -83,8 +153,16 @@ async fn curl_json(token: &str, args: &[&str]) -> Result<serde_json::Value, Adap
     // header to curl via a config file on stdin (`curl --config -`); curl reads
     // it from there and the token never appears in the process command line.
     // `--config -` is consumed before the URL/method args we append on argv.
+    // `--fail-with-body`, NOT `-f`. Plain `-f` discards the response body on
+    // an HTTP error, so a rejected token surfaced to the operator as bare
+    // `exit 22: curl: (22) ... error: 403` while Cloudflare's own JSON —
+    // which names the actual reason, e.g. "Invalid API Token" vs
+    // "Unauthorized to access requested resource" — was thrown away. Those
+    // two need completely different fixes, and the operator was told
+    // neither. (curl >= 7.76; Debian 12 ships 7.88.)
     let mut full: Vec<&str> = vec![
-        "-fsS",
+        "--fail-with-body",
+        "-sS",
         "--max-time",
         "30",
         "--config",
@@ -96,7 +174,24 @@ async fn curl_json(token: &str, args: &[&str]) -> Result<serde_json::Value, Adap
     // curl config syntax: one directive per line; the header value is quoted so
     // it survives intact. The token is confined to this stdin payload.
     let config = format!("header = \"Authorization: Bearer {token}\"\n");
-    let out = crate::cmd::run_with_stdin("/usr/bin/curl", &full, config.as_bytes()).await?;
+    let out = match crate::cmd::run_with_stdin("/usr/bin/curl", &full, config.as_bytes()).await {
+        Ok(body) => body,
+        Err(e) => {
+            // With `--fail-with-body` the body is on stdout even for a 4xx,
+            // but `run_with_stdin` only hands back stderr on failure. Retry
+            // once WITHOUT the fail flag so the API's explanation can be
+            // parsed and shown, rather than reporting a bare exit code.
+            let plain: Vec<&str> = full
+                .iter()
+                .copied()
+                .filter(|a| *a != "--fail-with-body")
+                .collect();
+            match crate::cmd::run_with_stdin("/usr/bin/curl", &plain, config.as_bytes()).await {
+                Ok(body) if !body.trim().is_empty() => body,
+                _ => return Err(e),
+            }
+        }
+    };
     serde_json::from_str(&out).map_err(|e| AdapterError::Other(format!("cloudflare json: {e}")))
 }
 
@@ -169,5 +264,45 @@ pub async fn cleanup_txt(token: &str, record_ids: &[String]) {
         };
         let url = format!("{API}/zones/{zone}/dns_records/{id}");
         let _ = curl_json(token, &["-X", "DELETE", &url]).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::cf_error_summary;
+
+    /// The operator reads this string and nothing else, so it has to be a
+    /// sentence rather than rendered JSON. The previous version printed
+    /// the raw `errors` value, which put braces and field names in front
+    /// of the one thing that mattered.
+    #[test]
+    fn cloudflare_errors_render_as_a_sentence() {
+        // The real shape for a Global API Key pasted as a token.
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"success":false,"errors":[{"code":1000,"message":"Invalid API Token"}]}"#,
+        )
+        .expect("json");
+        assert_eq!(cf_error_summary(&v), "Invalid API Token [code 1000]");
+
+        // Several at once, joined rather than truncated to the first.
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"errors":[{"code":9109,"message":"Unauthorized to access requested resource"},
+                          {"message":"no code here"}]}"#,
+        )
+        .expect("json");
+        assert_eq!(
+            cf_error_summary(&v),
+            "Unauthorized to access requested resource [code 9109]; no code here"
+        );
+
+        // An empty or absent array must still read as prose, never "[]".
+        for raw in [
+            r#"{"errors":[]}"#,
+            r#"{"success":false}"#,
+            r#"{"errors":"broken"}"#,
+        ] {
+            let v: serde_json::Value = serde_json::from_str(raw).expect("json");
+            assert_eq!(cf_error_summary(&v), "no reason given", "{raw}");
+        }
     }
 }

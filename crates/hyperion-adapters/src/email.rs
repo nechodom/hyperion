@@ -34,6 +34,32 @@ pub struct EmailConfig {
 /// the host field, so we strip it. IPv6 is handled: a bracketed `"[::1]:25"`
 /// is unwrapped, a bare IPv6 literal (`"::1"`, 2+ colons, no brackets) is
 /// returned unchanged.
+/// True when the SMTP host is the LOOPBACK interface of this machine.
+///
+/// Deliberately narrower than `postfix::host_is_local`, which also counts
+/// this node's own FQDN — that name can resolve to a public address and
+/// leave the box, so it must not relax TLS. Only `localhost`, the
+/// `127.0.0.0/8` range and `::1` qualify here.
+///
+/// Used to skip certificate VERIFICATION (not encryption) when talking to
+/// our own postfix. Debian's postfix presents the self-signed
+/// `ssl-cert-snakeoil` certificate, so a `starttls` config against
+/// `localhost` fails with `invalid peer certificate: UnknownIssuer` and
+/// no mail goes out at all. Verifying it would prove nothing: the bytes
+/// never leave the kernel's loopback interface, and anyone able to
+/// intercept them already has root on this machine.
+pub fn is_loopback_host(host: &str) -> bool {
+    let h = host.trim().trim_matches(['[', ']']).to_ascii_lowercase();
+    if h == "localhost" || h.ends_with(".localhost") {
+        return true;
+    }
+    match h.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) => v4.is_loopback(),
+        Ok(std::net::IpAddr::V6(v6)) => v6.is_loopback(),
+        Err(_) => false,
+    }
+}
+
 pub fn normalize_smtp_host(raw: &str) -> (String, Option<u16>) {
     let s = raw.trim();
     if let Some(rest) = s.strip_prefix('[') {
@@ -106,11 +132,28 @@ pub async fn send_text(
             cfg.smtp_password.clone(),
         ))
     };
+    // Our own postfix answers with Debian's self-signed snakeoil
+    // certificate. Verifying it is not a security property here — see
+    // `is_loopback_host` — it just stops the mail.
+    let loopback = is_loopback_host(&host);
+    let tls_params = |host: &str| -> Result<TlsParameters, AdapterError> {
+        let b = TlsParameters::builder(host.to_string());
+        let b = if loopback {
+            b.dangerous_accept_invalid_certs(true)
+                .dangerous_accept_invalid_hostnames(true)
+        } else {
+            b
+        };
+        b.build()
+            .map_err(|e| AdapterError::Other(format!("smtp: tls params: {e}")))
+    };
+
     let transport: AsyncSmtpTransport<Tokio1Executor> = match cfg.security.as_str() {
         "tls" => {
             let mut b = AsyncSmtpTransport::<Tokio1Executor>::relay(&host)
                 .map_err(|e| AdapterError::Other(format!("smtp: relay: {e}")))?
-                .port(port);
+                .port(port)
+                .tls(Tls::Wrapper(tls_params(&host)?));
             if let Some(c) = creds {
                 b = b.credentials(c);
             }
@@ -128,8 +171,7 @@ pub async fn send_text(
         }
         _ => {
             // Default: STARTTLS upgrade (most relays expect this on 587).
-            let tls = TlsParameters::new(host.clone())
-                .map_err(|e| AdapterError::Other(format!("smtp: tls params: {e}")))?;
+            let tls = tls_params(&host)?;
             let mut b = AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&host)
                 .map_err(|e| AdapterError::Other(format!("smtp: starttls: {e}")))?
                 .port(port)
@@ -151,7 +193,44 @@ pub async fn send_text(
 
 #[cfg(test)]
 mod tests {
+    use super::is_loopback_host;
     use super::normalize_smtp_host;
+
+    /// Certificate verification is skipped for these hosts, so the set has
+    /// to be exactly the addresses that never leave the machine. A false
+    /// positive here would silently disable verification against a real
+    /// relay — the failure this whole helper exists to avoid, inverted.
+    #[test]
+    fn loopback_detection_covers_local_and_nothing_else() {
+        for h in [
+            "localhost",
+            "LOCALHOST",
+            " localhost ",
+            "mail.localhost",
+            "127.0.0.1",
+            "127.1.2.3", // the whole /8 is loopback
+            "::1",
+            "[::1]",
+        ] {
+            assert!(is_loopback_host(h), "{h:?} must count as loopback");
+        }
+        for h in [
+            "smtp.gmail.com",
+            "s4.digitalka.cz",
+            // Not loopback: a public address, however local it looks.
+            "10.0.0.1",
+            "192.168.1.1",
+            "0.0.0.0",
+            "::",
+            // Names that merely CONTAIN the word must not match — this is
+            // the one an attacker would register.
+            "localhost.evil.com",
+            "notlocalhost",
+            "",
+        ] {
+            assert!(!is_loopback_host(h), "{h:?} must NOT count as loopback");
+        }
+    }
 
     #[test]
     fn strips_embedded_port_but_keeps_bare_host() {

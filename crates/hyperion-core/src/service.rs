@@ -16789,8 +16789,24 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // nechodom/hyperion too — if the operator forks, they patch the
         // installer and this together.
         let repo_url = "https://github.com/nechodom/hyperion";
-        let probe = tokio::process::Command::new("/usr/bin/git")
-            .args(["ls-remote", "--tags", repo_url, "refs/tags/rolling"])
+        // Read the VERSION marker OF THE RELEASE, not the git tag.
+        //
+        // These are not the same thing and drifted apart for two months.
+        // Publishing a release under an existing tag overwrites the
+        // assets but does NOT move the tag, so `refs/tags/rolling` still
+        // pointed at the commit where the tag was first created while the
+        // binaries tracked main. The panel read the tag and nagged
+        // "update available" forever; `update.sh` read the VERSION marker,
+        // correctly answered "already up to date", and the two called each
+        // other liars on the same box.
+        //
+        // VERSION is also the RIGHT question: it is the commit the
+        // published binaries were built from, so comparing against it
+        // means "what I would install differs from what I run" rather than
+        // "some ref somewhere moved".
+        let version_url = format!("{repo_url}/releases/download/rolling/VERSION");
+        let probe = tokio::process::Command::new("/usr/bin/curl")
+            .args(["-fsSL", "--max-time", "15", &version_url])
             .output()
             .await;
 
@@ -16806,11 +16822,20 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
         match probe {
             Ok(out) if out.status.success() => {
-                // Output: "<sha>\trefs/tags/rolling\n"
+                // The marker is a bare 40-char sha plus a newline.
                 let raw = String::from_utf8_lossy(&out.stdout);
-                let sha = raw.split_whitespace().next().unwrap_or("").to_string();
+                let sha = raw.trim().to_string();
+                // Guard the shape: a 404 page or a CDN error page would
+                // otherwise become a "latest version" that never matches,
+                // which is the same permanent-nag failure in a new coat.
+                let sha = if sha.len() == 40 && sha.chars().all(|c| c.is_ascii_hexdigit()) {
+                    sha
+                } else {
+                    String::new()
+                };
                 if sha.is_empty() {
-                    status.message = "probe failed: empty ls-remote output".into();
+                    status.message =
+                        "probe failed: the rolling release has no usable VERSION marker".into();
                 } else {
                     status.latest_sha = sha;
                     let (avail, msg) = compare_git_shas(&status.current_sha, &status.latest_sha);
