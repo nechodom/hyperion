@@ -1193,10 +1193,11 @@
       <p class="text-soft small" style="margin:0.4rem 0 1rem;line-height:1.55">
         <strong>Website login</strong> counts POSTs to <code>wp-login.php</code> and
         <code>xmlrpc.php</code> in one site's access log, so the ban is recorded
-        against that site and shows up in its care report. This is also the only
-        source that can be switched off for a single site — the ssh, ftp and mail
+        against that site and shows up in its care report. The ssh, ftp and mail
         journals cover the whole machine and can't be attributed to one customer,
-        so they stay on for everyone.
+        so they stay on for everyone. (A per-site opt-out for the website-login
+        scan exists in the agent; a panel switch for it is planned — until then
+        it is on for every site, which is the safe default.)
       </p>
 
       <div style="display:flex;align-items:center;gap:0.5rem;margin:1.2rem 0 0.4rem">

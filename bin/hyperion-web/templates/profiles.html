@@ -62,7 +62,7 @@
           </td>
           <td>{{ p.php_memory_mb }} MB</td>
           <td>
-            {% if let Some(m) = p.disk_hard_mb %}{{ m }} MB{% else %}<span class="text-soft">unlimited</span>{% endif %}
+            {% if let Some(m) = p.disk_hard_mb %}{{ m }} MiB{% else %}<span class="text-soft">unlimited</span>{% endif %}
             {% if p.quota_exceed_action == "suspend" %}<br><span class="pill warn" title="Sites on this profile auto-suspend when they exceed the disk hard cap">on overage: suspend</span>{% endif %}
           </td>
           <td>{{ p.pretty_price() }}</td>
@@ -154,15 +154,12 @@
         <input id="p_disk" name="disk_hard_mb" type="number" min="0" placeholder="2048">
       </div>
     </div>
-    <div class="field-row">
-      <div class="field">
-        <label for="p_mem">Memory cap <span class="hint">MiB · per-hosting quota · blank = none</span></label>
-        <input id="p_mem" name="mem_limit_mib" type="number" min="0" placeholder="512">
-      </div>
-      <div class="field">
-        <label for="p_bw">Monthly bandwidth <span class="hint">MB · leave blank for unlimited</span></label>
-        <input id="p_bw" name="bw_monthly_mb" type="number" min="0" placeholder="10000">
-      </div>
+    {# "Memory cap" and "Monthly bandwidth" used to sit here. Both fed
+       stores with NO reader — memory went to hosting_quotas.mem_limit_mib
+       (pools build from hosting_limits, so it never took effect) and
+       bandwidth to a column nothing enforces or alerts on. A plan field
+       that does nothing is a promise to a customer that nothing keeps.
+       PHP memory is the "PHP memory" field above, which IS enforced. #}
     </div>
     <div class="field">
       <label for="p_quota_action">When a site exceeds its disk limit <span class="hint">default for sites created from this profile · overridable per-site</span></label>

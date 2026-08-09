@@ -11124,10 +11124,18 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     }
 
     // ============================================================
-    //  hosting_quotas — disk + memory + bandwidth per hosting.
-    //  Disk caps push into the kernel via `setquota -u`. Memory
-    //  caps land in the FPM pool template on next rebuild.
-    //  Bandwidth is informational + alert-driven for now.
+    //  hosting_quotas — per-hosting disk caps, kernel-enforced via
+    //  `setquota -u`, plus the overage action the enforce tick applies.
+    //
+    //  The mem_limit_mib / bw_*_mib columns still exist but NOTHING
+    //  reads them, and the panel no longer writes them. Two earlier
+    //  comments here claimed memory "lands in the FPM pool template on
+    //  next rebuild" (false — pools are built from hosting_limits, the
+    //  enforced memory path) and that bandwidth was "alert-driven"
+    //  (false — no alert existed). Those sentences leaked into the UI
+    //  copy and produced placebo controls that operators trusted. If
+    //  bandwidth caps ever become real, they get an enforce-tick reader
+    //  and THEN a form field — in that order.
     // ============================================================
 
     pub async fn quota_get(
