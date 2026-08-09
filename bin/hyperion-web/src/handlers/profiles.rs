@@ -229,7 +229,9 @@ pub async fn post_create(
         php_max_requests: form.php_max_requests,
         db_max_connections: form.db_max_connections,
         disk_hard_mb: parse_opt_i64(&form.disk_hard_mb),
-        bw_monthly_mb: parse_opt_i64(&form.bw_monthly_mb),
+        // Dead stores — see the template note; a plan must not carry
+        // a number nothing keeps.
+        bw_monthly_mb: None,
         expiry_grace_days: form.expiry_grace_days,
         expiry_warning_offsets: form.expiry_warning_offsets,
         price_minor,
@@ -262,7 +264,7 @@ pub async fn post_create(
         },
         quota_exceed_action: form.quota_exceed_action.clone(),
         disk_soft_mb: parse_opt_i64(&form.disk_soft_mb),
-        mem_limit_mib: parse_opt_i64(&form.mem_limit_mib),
+        mem_limit_mib: None,
         backup_cadence: form.backup_cadence.clone(),
     };
     let resp =
@@ -463,7 +465,9 @@ pub async fn post_update(
         php_max_requests: form.php_max_requests,
         db_max_connections: form.db_max_connections,
         disk_hard_mb: parse_opt_i64(&form.disk_hard_mb),
-        bw_monthly_mb: parse_opt_i64(&form.bw_monthly_mb),
+        // Dead stores — see the template note; a plan must not carry
+        // a number nothing keeps.
+        bw_monthly_mb: None,
         expiry_grace_days: form.expiry_grace_days,
         expiry_warning_offsets: form.expiry_warning_offsets,
         price_minor,
@@ -496,7 +500,7 @@ pub async fn post_update(
         },
         quota_exceed_action: form.quota_exceed_action.clone(),
         disk_soft_mb: parse_opt_i64(&form.disk_soft_mb),
-        mem_limit_mib: parse_opt_i64(&form.mem_limit_mib),
+        mem_limit_mib: None,
         backup_cadence: form.backup_cadence.clone(),
     };
     let resp = hyperion_rpc_client::call(&state.agent_socket, Request::ProfileUpdate { id, input })

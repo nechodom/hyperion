@@ -723,7 +723,36 @@
           Socket: <code style="font-size:inherit">/run/php/{{ v }}/{{ detail.system_user }}.sock</code>
         </div>
       {% else %}
-        <span class="text-soft">static (no PHP)</span>
+        {% if detail.kind == "static" %}
+          <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap">
+            <span class="text-soft">static (no PHP)</span>
+            {# Same endpoint as the version switch above: the backend
+               CONVERTS a static hosting when it has no PHP yet — kind
+               flips to php, a pool is created, the vhost re-renders.
+               Imported WordPress sites land as static whenever the source
+               panel did not report a PHP version, so without this the
+               only visible path was "delete and recreate". #}
+            <form method="post" action="/hostings/set-php-version"
+                  style="display:inline-flex;gap:0.4rem;align-items:center;margin:0"
+                  data-confirm-title="Convert to a PHP site"
+                  data-confirm-body="This static hosting gets a PHP-FPM pool on the chosen version and its web config is rewritten to serve PHP. Files and any database stay untouched. The conversion is one-way from the panel."
+                  data-confirm-confirm-label="Convert"
+                  data-confirm-variant="primary">
+              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+              <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+              <input type="hidden" name="target_node" value="{{ target_node }}">
+              <select name="php_version" aria-label="PHP version"
+                      style="padding:0.25rem 0.5rem;font-size:0.85rem">
+                {%- for opt in php_options %}
+                <option value="{{ opt }}">PHP {{ opt }}</option>
+                {%- endfor %}
+              </select>
+              <button type="submit" class="btn small">Convert to PHP</button>
+            </form>
+          </div>
+        {% else %}
+          <span class="text-soft">{{ detail.kind }} (no PHP)</span>
+        {% endif %}
       {% endif %}
     </dd>
     {% if !detail.aliases.is_empty() %}
@@ -2076,17 +2105,19 @@
         <input id="db_max_connections" name="db_max_connections" type="number" min="1" max="1000"
                value="{{ limits.db_max_connections }}">
       </div>
-      <div class="field">
-        <label for="disk_hard_mb">Disk limit <span class="hint">MB · blank = unlimited</span></label>
-        <input id="disk_hard_mb" name="disk_hard_mb" type="number" min="0"
-               value="{% if let Some(b) = limits.disk_hard_bytes %}{{ b / 1048576 }}{% endif %}">
-      </div>
     </div>
-    <div class="field">
-      <label for="bw_monthly_mb">Monthly bandwidth <span class="hint">MB · blank = unlimited</span></label>
-      <input id="bw_monthly_mb" name="bw_monthly_mb" type="number" min="0"
-             value="{% if let Some(b) = limits.bw_monthly_bytes %}{{ b / 1048576 }}{% endif %}">
-    </div>
+    {# Disk and bandwidth caps are deliberately NOT here. This card once
+       carried its own "Disk limit" and "Monthly bandwidth" fields, and
+       they were placebo: stored in a column nothing enforced and nothing
+       alerted on, while the kernel-enforced caps lived in the quota card
+       below. Two fields with the same name, one of which lies, is worse
+       than one field — an operator set a limit here, saw "saved", and a
+       site ran straight past it. #}
+    <p class="muted small" style="margin:0 0 0.6rem">
+      Disk and bandwidth caps live in
+      <a href="#quota">Disk &amp; bandwidth quota</a> below — those are the
+      enforced ones.
+    </p>
     <button class="btn primary" type="submit">
       <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
       Save limits
@@ -2170,23 +2201,20 @@
                value="{{ quota.policy.disk_hard_kib / 1024 }}">
       </div>
     </div>
-    <div class="field-row">
-      <div class="field">
-        <label for="quota_mem_limit_mib">PHP memory_limit <span class="hint">MiB · 0 = inherit php.ini</span></label>
-        <input id="quota_mem_limit_mib" name="mem_limit_mib" type="number" min="0"
-               value="{{ quota.policy.mem_limit_mib }}">
-      </div>
-      <div class="field">
-        <label for="bw_soft_mib">Bandwidth soft <span class="hint">MiB / month · 0 = unlimited</span></label>
-        <input id="bw_soft_mib" name="bw_soft_mib" type="number" min="0"
-               value="{{ quota.policy.bw_soft_mib }}">
-      </div>
-      <div class="field">
-        <label for="bw_hard_mib">Bandwidth hard <span class="hint">MiB / month · 0 = unlimited</span></label>
-        <input id="bw_hard_mib" name="bw_hard_mib" type="number" min="0"
-               value="{{ quota.policy.bw_hard_mib }}">
-      </div>
-    </div>
+    {# PHP memory and bandwidth are deliberately NOT here. This card once
+       carried a "PHP memory_limit" field stored in hosting_quotas —
+       which nothing read: pools are built from hosting_limits, and no
+       cgroup path exists. It also carried bandwidth soft/hard caps that
+       nothing enforced OR alerted on. Both were placebo controls — the
+       memory one sat two tabs from a card explaining why such controls
+       get removed. PHP memory lives in "PHP-FPM & DB limits" above (the
+       pool php_admin_value, the enforced one); bandwidth caps do not
+       exist yet and the panel must not pretend otherwise. #}
+    <p class="muted small" style="margin:0 0 0.6rem">
+      PHP memory is set in <a href="#limits">PHP-FPM &amp; DB limits</a> — the pool
+      value, which is the enforced one. Bandwidth caps are not implemented yet;
+      traffic is measured and reported, but nothing enforces a monthly cap.
+    </p>
     <div class="field-row">
       <div class="field">
         <label for="exceed_action">When the disk hard cap is exceeded <span class="hint">{% if quota.quotas_enabled_on_fs %}the kernel blocks writes at the cap; this is the extra action{% else %}kernel quotas are OFF, so writes aren't blocked — this action is the only enforcement{% endif %}</span></label>
@@ -2204,7 +2232,6 @@
   <p class="text-soft small" style="margin:0.8rem 0 0">
     Disk caps push into the kernel via <code>setquota -u</code>. Where kernel quotas are enabled, the hard cap blocks writes with ENOSPC and the soft cap starts the grace period; the overage action above is enforced from per-user accounting regardless.
     On <strong>Suspend</strong>, a site that crosses the hard cap is stopped and auto-resumes once usage drops back under the cap — you're notified either way. The default for new sites comes from the create profile.
-    Bandwidth is informational and alert-driven (no kernel enforcement). The memory limit takes effect on the next FPM pool rebuild.
   </p>
 </div>
 

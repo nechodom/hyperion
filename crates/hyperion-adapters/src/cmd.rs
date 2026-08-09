@@ -227,12 +227,15 @@ pub fn explain_apt_failure(output: &str) -> Option<&'static str> {
     let o = output.to_ascii_lowercase();
     if o.contains("read-only file system") {
         return Some(
-            "this server's filesystem is mounted READ-ONLY, so nothing can be installed. \
-             The kernel does this after an I/O error or filesystem corruption — it is a \
-             problem with the machine, not with the package. Check `mount | grep ' / '` and \
-             `dmesg -T | grep -i 'ext4\\|i/o error'`; you will most likely need to fsck the \
-             volume from rescue mode and reboot. Everything else on this node — postfix, \
-             new sites, backups — is failing for the same reason.",
+            "a filesystem the package needs to write to is READ-ONLY. Check the SANDBOX \
+             first, not the disk: hyperion-agent runs with systemd's ProtectSystem=, which \
+             mounts /usr read-only for that service alone — so `mount` in your own shell \
+             shows / as rw while apt, running under the agent, cannot write a thing. \
+             Confirm with `systemctl show hyperion-agent -p ProtectSystem -p ReadWritePaths`; \
+             the unit needs ReadWritePaths=/usr (shipped since v0.15.1 — run update.sh). \
+             Only if the sandbox is not the cause is this a real disk fault, which \
+             `mount | grep ' / '` (looking for `ro,`) and `dmesg -T | grep -i 'i/o error'` \
+             will show, and which needs fsck from rescue mode.",
         );
     }
     if o.contains("no space left on device") {
@@ -288,7 +291,15 @@ mod apt_explain_tests {
                    E: Sub-process /usr/bin/dpkg returned an error code (1)\n";
         let msg = explain_apt_failure(raw).expect("must recognise a read-only root");
         assert!(msg.contains("READ-ONLY"), "{msg}");
-        assert!(msg.contains("fsck"), "must name the remedy: {msg}");
+        // The sandbox must be named BEFORE the disk. Getting this order
+        // wrong sent an operator to fsck a healthy volume: their own
+        // shell showed / as rw the whole time, because ProtectSystem
+        // applies only inside the agent's mount namespace.
+        let sandbox = msg.find("ProtectSystem").expect("must name the sandbox");
+        let disk = msg
+            .find("fsck")
+            .expect("must still mention a real disk fault");
+        assert!(sandbox < disk, "sandbox must be diagnosed first: {msg}");
     }
 
     /// A full disk and a read-only mount look similar in a log and need

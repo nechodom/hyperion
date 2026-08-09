@@ -3639,10 +3639,6 @@ pub struct SetLimitsForm {
     php_max_requests: i64,
     db_max_connections: i64,
     #[serde(default)]
-    disk_hard_mb: String,
-    #[serde(default)]
-    bw_monthly_mb: String,
-    #[serde(default)]
     target_node: String,
 }
 
@@ -3836,16 +3832,12 @@ pub async fn post_set_limits(
     l.php_max_children = form.php_max_children;
     l.php_max_requests = form.php_max_requests;
     l.db_max_connections = form.db_max_connections;
-    if let Ok(mb) = form.disk_hard_mb.trim().parse::<i64>() {
-        if mb > 0 {
-            l.disk_hard_bytes = Some(mb * 1024 * 1024);
-        }
-    }
-    if let Ok(mb) = form.bw_monthly_mb.trim().parse::<i64>() {
-        if mb > 0 {
-            l.bw_monthly_bytes = Some(mb * 1024 * 1024);
-        }
-    }
+    // disk_hard_bytes / bw_monthly_bytes are left at None on purpose.
+    // The columns still exist but NOTHING reads them — no enforcement, no
+    // alert — so the form fields that fed them were placebo and are gone.
+    // The enforced caps are the hosting_quotas row (the quota card), which
+    // profiles also write through quota_set. Saving this card now clears
+    // any stale ghost value, so old rows converge on the truth.
     let target = node_target(&form.target_node);
     let resp = crate::dispatcher::dispatch_to_node(
         &state,
@@ -7760,12 +7752,6 @@ pub struct QuotaSetForm {
     pub disk_soft_mib: i64,
     #[serde(default)]
     pub disk_hard_mib: i64,
-    #[serde(default)]
-    pub mem_limit_mib: i64,
-    #[serde(default)]
-    pub bw_soft_mib: i64,
-    #[serde(default)]
-    pub bw_hard_mib: i64,
     /// "notify" (default) or "suspend" — what to do when usage crosses the
     /// disk hard cap.
     #[serde(default)]
@@ -7808,9 +7794,14 @@ pub async fn post_quota_set(
             hosting: sel,
             disk_soft_kib,
             disk_hard_kib,
-            mem_limit_mib: form.mem_limit_mib,
-            bw_soft_mib: form.bw_soft_mib,
-            bw_hard_mib: form.bw_hard_mib,
+            // Always zero: the form fields that fed these were placebo —
+            // no reader existed for either (pools build from
+            // hosting_limits; nothing enforced or alerted on bandwidth).
+            // Writing zeros clears any stale ghost value, so a site's
+            // stored policy converges on what is actually true.
+            mem_limit_mib: 0,
+            bw_soft_mib: 0,
+            bw_hard_mib: 0,
             exceed_action: form.exceed_action.clone(),
         },
     )

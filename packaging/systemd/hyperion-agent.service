@@ -13,10 +13,25 @@ RestartSec=3s
 # ProtectSystem=true (not "full") because the agent legitimately writes
 # /etc/passwd, /etc/nginx/sites-available, /etc/php/*/fpm/pool.d,
 # /etc/systemd/system/*, etc. as part of provisioning hostings.
-# ProtectSystem=true keeps /usr and /boot read-only (which the agent
-# never needs to write to) while letting useradd & friends do their job.
+#
+# ReadWritePaths=/usr is REQUIRED, and the reason is not obvious.
+# ProtectSystem=true mounts /usr and /boot read-only *inside this unit's
+# mount namespace*. That was written when the agent only ever configured
+# software; it has since grown the ability to INSTALL it — OpenDKIM for
+# per-site mail signing, and the Services install action. apt unpacks
+# into /usr/lib, /usr/bin and /usr/share, so every install died with
+# "Read-only file system" while `mount` in the operator's own shell
+# correctly showed / as rw, because the sandbox applies only to this
+# unit's children. It reads exactly like a corrupt disk and is not one.
+#
+# /boot stays read-only, which is the half that matters: the agent has no
+# business touching a bootloader or a kernel image, and nothing it does
+# ever needs to. A writable /usr is not a meaningful additional exposure
+# here — this unit already creates users and writes unit files, so an
+# attacker who controls it has better options than editing a binary.
 NoNewPrivileges=true
 ProtectSystem=true
+ReadWritePaths=/usr
 ProtectHome=false
 ProtectKernelTunables=true
 ProtectKernelModules=true

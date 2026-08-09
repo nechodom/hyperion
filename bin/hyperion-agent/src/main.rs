@@ -219,6 +219,27 @@ async fn main() -> anyhow::Result<()> {
     // yet or systemd-tmpfiles hasn't run since.
     hyperion_core::ensure_phpfpm_socket_dirs().await;
 
+    // Say so at BOOT if this unit cannot write /usr, rather than letting
+    // the operator discover it from a wall of dpkg output the first time
+    // they enable DKIM or install a service.
+    //
+    // `ProtectSystem=` mounts /usr read-only for this unit alone, so the
+    // operator's own shell shows / as `rw` and every ordinary check says
+    // the machine is healthy. It reads exactly like a failing disk and is
+    // not one — see the ReadWritePaths comment in the unit file.
+    if let Some(mp) = usr_is_read_only().await {
+        tracing::warn!(
+            mount_point = %mp,
+            "boot: {mp} is READ-ONLY for this service, so installing packages will fail \
+             (OpenDKIM, the Services install action). This is systemd's ProtectSystem= \
+             sandbox, NOT a disk fault — your shell will correctly show / as rw. Fix by \
+             running packaging/install/update.sh, which ships a unit with \
+             ReadWritePaths=/usr, or add that line and `systemctl daemon-reload && \
+             systemctl restart hyperion-agent`.",
+            mp = mp,
+        );
+    }
+
     let pool = hyperion_state::open(&cfg.agent.state_db).await?;
     let secrets = Arc::new(hyperion_core::SecretsStore::new(
         cfg.agent.secrets_dir.clone(),
@@ -1108,4 +1129,87 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("ready");
     server.run().await?;
     Ok(())
+}
+
+/// The mount point covering `/usr` if it is read-only IN THIS PROCESS'S
+/// mount namespace, else `None`.
+///
+/// Reads `/proc/self/mountinfo` rather than calling `mount`, because the
+/// question is specifically about THIS unit's namespace — a sandboxed
+/// service and the operator's shell genuinely see different answers, and
+/// that discrepancy is the whole reason the check exists.
+async fn usr_is_read_only() -> Option<String> {
+    let body = tokio::fs::read_to_string("/proc/self/mountinfo")
+        .await
+        .ok()?;
+    ro_mount_covering_usr(&body)
+}
+
+/// Pure core of [`usr_is_read_only`]: the most specific mount covering
+/// `/usr`, if its options say `ro`.
+///
+/// The longest matching mount point wins, which is how the kernel
+/// resolves it: a read-only `/` covers `/usr` unless a separate `/usr`
+/// mount is stacked on top — and under `ProtectSystem=` that stacked
+/// read-only `/usr` is exactly what exists, over a perfectly healthy
+/// read-write root.
+///
+/// Options are compared as whole comma-separated tokens, never by
+/// substring: nearly every Debian root carries `errors=remount-ro`, which
+/// CONTAINS "ro" and describes a healthy filesystem.
+fn ro_mount_covering_usr(mountinfo: &str) -> Option<String> {
+    let mut best: Option<(usize, bool, String)> = None;
+    for line in mountinfo.lines() {
+        // mountinfo fields: id parent major:minor root MOUNTPOINT options ...
+        let mut f = line.split_whitespace();
+        let (mount_point, opts) = match (f.nth(4), f.next()) {
+            (Some(m), Some(o)) => (m, o),
+            _ => continue,
+        };
+        let covers = mount_point == "/"
+            || mount_point == "/usr"
+            || "/usr".starts_with(&format!("{mount_point}/"));
+        if !covers {
+            continue;
+        }
+        let ro = opts.split(',').any(|o| o == "ro");
+        // Longer mount point = more specific = the one that applies.
+        if best
+            .as_ref()
+            .map_or(true, |(len, _, _)| mount_point.len() >= *len)
+        {
+            best = Some((mount_point.len(), ro, mount_point.to_string()));
+        }
+    }
+    match best {
+        Some((_, true, mp)) => Some(mp),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod mountinfo_tests {
+    use super::ro_mount_covering_usr;
+
+    /// The four shapes that matter, including the one that fooled a real
+    /// diagnosis: the sandbox mounts /usr read-only over a healthy rw
+    /// root, so the operator's shell and the agent disagree.
+    #[test]
+    fn sandbox_healthy_and_dead_roots_are_told_apart() {
+        let sandbox = "22 1 8:1 / / rw,relatime - ext4 /dev/sda1 rw\n\
+                       180 22 8:1 /usr /usr ro,nosuid - ext4 /dev/sda1 rw\n";
+        assert_eq!(ro_mount_covering_usr(sandbox), Some("/usr".to_string()));
+
+        let healthy = "22 1 8:1 / / rw,relatime - ext4 /dev/sda1 rw\n";
+        assert_eq!(ro_mount_covering_usr(healthy), None);
+
+        // A genuinely remounted-ro root still reports.
+        let dead = "22 1 8:1 / / ro,relatime - ext4 /dev/sda1 ro\n";
+        assert_eq!(ro_mount_covering_usr(dead), Some("/".to_string()));
+
+        // `errors=remount-ro` is on nearly every Debian root and CONTAINS
+        // "ro" — substring matching would flag every healthy machine.
+        let tricky = "22 1 8:1 / / rw,relatime,errors=remount-ro - ext4 /dev/sda1 rw\n";
+        assert_eq!(ro_mount_covering_usr(tricky), None);
+    }
 }
