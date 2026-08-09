@@ -144,27 +144,20 @@ pub async fn dispatch_to_node(
 
 /// Short string tag for the Request variant — purely for logs/audit
 /// (so journalctl shows "HostingCreate" instead of the full
-/// pretty-printed enum which is multi-line for nested payloads).
+/// pretty-printed enum, which is multi-line for nested payloads).
+///
+/// Derived, not hand-written. This used to be a `match` listing sixteen
+/// variants with a `_ => "OtherRpc"` fallback, and the enum has grown a
+/// long way past that list — so in practice almost every dispatch logged
+/// `OtherRpc` and the logs could not tell you what the panel had asked a
+/// node to do. A hand-maintained mirror of an enum silently rots; this
+/// cannot.
+///
+/// `IntoStaticStr` yields the variant NAME only, never its payload, which
+/// is what keeps per-node secrets out of the log — the same reason the
+/// RPC server logs method names this way instead of `?req`.
 fn request_kind_label(req: &Request) -> &'static str {
-    match req {
-        Request::AgentInfo => "AgentInfo",
-        Request::HostingCreate(_) => "HostingCreate",
-        Request::HostingList => "HostingList",
-        Request::HostingGet(_) => "HostingGet",
-        Request::HostingDelete { .. } => "HostingDelete",
-        Request::HostingSuspend { .. } => "HostingSuspend",
-        Request::HostingResume(_) => "HostingResume",
-        Request::HostingSetLimits { .. } => "HostingSetLimits",
-        Request::HostingGetLimits(_) => "HostingGetLimits",
-        Request::ServicesHealth => "ServicesHealth",
-        Request::ServiceRestart { .. } => "ServiceRestart",
-        Request::ServiceInstall { .. } => "ServiceInstall",
-        Request::ClusterStats => "ClusterStats",
-        Request::NodeMetricsHistory { .. } => "NodeMetricsHistory",
-        Request::NodesList => "NodesList",
-        Request::WpInstall { .. } => "WpInstall",
-        _ => "OtherRpc",
-    }
+    <&'static str>::from(req)
 }
 
 /// Per-RPC wall-clock timeout (seconds). The default 30s covers info/list/CRUD,

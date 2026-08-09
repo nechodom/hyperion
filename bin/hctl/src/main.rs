@@ -448,6 +448,7 @@ async fn call(cli: &Cli) -> anyhow::Result<Response> {
 
 fn print_pretty(resp: &Response) {
     match resp {
+        Response::HostingRepairPermissions(msg) => println!("{msg}"),
         Response::AgentInfo(i) => {
             println!(
                 "agent:  {} version={} hostings={}",

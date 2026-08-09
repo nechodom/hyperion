@@ -1328,6 +1328,12 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(s) => Response::DkimDisable(s),
             Err(e) => Response::Error(e),
         },
+        Request::HostingRepairPermissions { sel } => {
+            match api.hosting_repair_permissions(sel).await {
+                Ok(msg) => Response::HostingRepairPermissions(msg),
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::DkimVerify { sel } => match api.dkim_verify(sel).await {
             Ok(s) => Response::DkimVerify(s),
             Err(e) => Response::Error(e),
@@ -2616,6 +2622,9 @@ mod tests {
             _: HostingSelector,
         ) -> Result<hyperion_types::DkimStatus, RpcError> {
             Ok(hyperion_types::DkimStatus::default())
+        }
+        async fn hosting_repair_permissions(&self, _: HostingSelector) -> Result<String, RpcError> {
+            Ok(String::new())
         }
         async fn sftp_status(
             &self,

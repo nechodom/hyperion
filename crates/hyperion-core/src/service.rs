@@ -2945,22 +2945,37 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     ) -> Result<PhpVersion, RpcError> {
         let detail = self.get(sel).await?;
 
-        // Validation — only PHP hostings can have their version changed.
-        // A static / proxy / redirect hosting would need a kind
-        // change first, which is a much bigger surgery (different
-        // template, different lifecycle).
-        let current = detail.php_version.ok_or_else(|| RpcError::Conflict {
-            message: format!(
-                "hosting kind `{}` has no PHP runtime — can't change version. \
-                 Delete and recreate as a PHP hosting if you need PHP.",
-                detail.kind
-            ),
-        })?;
-        if current == new_version {
+        // A hosting with no PHP runtime is CONVERTED rather than refused.
+        //
+        // This used to answer "delete and recreate as a PHP hosting",
+        // which is the worst possible advice for the case that actually
+        // produces it: an imported WordPress site whose source panel did
+        // not report a PHP version, so the importer classified it static.
+        // The files and the database are already in place, and the
+        // operator was being told to destroy them. Everything the
+        // conversion needs — pool creation, limits, vhost re-render —
+        // already happens below; only this guard stood in the way.
+        //
+        // Static ONLY. A reverse-proxy hosting serves an upstream and has
+        // no document root to run PHP from, and a redirect has no content
+        // at all; giving either an FPM pool would produce a site that
+        // silently does not work.
+        let converting = detail.php_version.is_none();
+        if converting && detail.kind != "static" {
+            return Err(RpcError::Conflict {
+                message: format!(
+                    "hosting kind `{}` cannot run PHP — it has no document root to run it \
+                     from. Only a static hosting can be converted.",
+                    detail.kind
+                ),
+            });
+        }
+        let current = detail.php_version;
+        if current == Some(new_version) {
             // No-op early-return so the operator can click the same
             // version twice without churn. Return Ok with the
             // current value so the UI flash can still confirm.
-            return Ok(current);
+            return Ok(new_version);
         }
         if matches!(detail.state, HostingState::Suspended) {
             return Err(RpcError::Conflict {
@@ -2977,13 +2992,27 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         //    or already-stopped service is fine — we're about to
         //    replace it with the new version anyway. The new pool
         //    create below is what actually has to succeed.
-        if let Err(e) = self.adapters.fpm_delete(&detail.system_user, current).await {
-            tracing::warn!(
-                domain = %detail.domain,
-                from_version = %current,
-                error = %e,
-                "set_php_version: fpm_delete of old version failed (continuing)"
-            );
+        if let Some(current) = current {
+            if let Err(e) = self.adapters.fpm_delete(&detail.system_user, current).await {
+                tracing::warn!(
+                    domain = %detail.domain,
+                    from_version = %current,
+                    error = %e,
+                    "set_php_version: fpm_delete of old version failed (continuing)"
+                );
+            }
+        }
+
+        // 1b. Converting: flip the kind FIRST, so the vhost re-render in
+        //     step 5 reads a hosting that is already PHP. Doing it after
+        //     would render the static template against a hosting that has
+        //     a pool — a site that 404s every .php it is asked for.
+        if converting {
+            hyperion_state::hostings::set_kind(&self.pool, &detail.id, "php", None, now_secs())
+                .await
+                .map_err(|e| {
+                    RpcError::Internal_with(format!("set_php_version: kind -> php: {e}"))
+                })?;
         }
 
         // 2. Persist the new version. If subsequent steps fail, the
@@ -3057,7 +3086,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             "hosting.set_php_version",
             Some(detail.id.as_str()),
             &serde_json::json!({
-                "from": current.as_str(),
+                // `null` for a conversion — there was no previous version,
+                // and "static" is the kind, not a PHP version.
+                "from": current.map(|v| v.as_str()),
                 "to": new_version.as_str(),
             })
             .to_string(),
@@ -5098,6 +5129,135 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         hyperion_adapters::postfix::ensure_sender_canonical(&fqdn, &entries)
             .await
             .map_err(|e| RpcError::Internal_with(format!("postfix sender canonical: {e}")))
+    }
+
+    /// Repair ownership and modes across a hosting's whole tree.
+    ///
+    /// The failure this fixes is mundane and constant: files arrive owned
+    /// by somebody else. A restore or a cross-hosting migration untars an
+    /// archive that carries the SOURCE box's uid; an operator unzips a
+    /// theme over SSH as root; an import lands files before the system
+    /// user exists. PHP-FPM then runs as the hosting user and cannot
+    /// write — WordPress reports "could not create directory", plugin
+    /// updates fail, media uploads vanish — and FTP shows the files but
+    /// refuses to replace them. Nothing in the panel could put it right.
+    ///
+    /// Ownership is the actual fix; the mode pass exists because an
+    /// archive that carries 0600 files or 0700 directories produces the
+    /// same symptoms even once the owner is correct. Directories become
+    /// 0755 and files 0644 — the conventional web layout, and readable by
+    /// nginx, which runs as its own user and only ever reads.
+    ///
+    /// FTP is covered by the same work rather than separately: vsftpd
+    /// authenticates AS the system user, so correct ownership is
+    /// precisely what it needs. What it additionally needs is for every
+    /// ancestor of the home to be traversable, which `useradd -m` does
+    /// not give it (0700 homes) — so that runs too.
+    ///
+    /// Deliberately NOT recursive-chmod-everything: an existing 0755 file
+    /// that is meant to be executable stays executable, because only the
+    /// permission bits are rewritten wholesale by `chmod` and a CGI
+    /// script losing its +x is its own outage. Files go to 0644 anyway,
+    /// which is correct for a PHP application — PHP is read by the
+    /// interpreter, never executed by the kernel.
+    pub async fn hosting_repair_permissions(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<String, RpcError> {
+        let detail = self.get(sel).await?;
+        if matches!(detail.state, HostingState::Deleting | HostingState::Trashed) {
+            return Err(RpcError::Conflict {
+                message: "hosting is being deleted or in trash".into(),
+            });
+        }
+        let user = detail.system_user.trim();
+        if user.is_empty() {
+            return Err(RpcError::Conflict {
+                message: "hosting has no system user — nothing to repair against".into(),
+            });
+        }
+        // The site's directory, i.e. the PARENT of htdocs: logs, tmp and
+        // the docroot all belong to the user, and repairing only htdocs
+        // leaves the session dir and log dir broken.
+        let root = std::path::Path::new(&detail.root_dir);
+        let site_dir = root.parent().unwrap_or(root).to_path_buf();
+        if !tokio::fs::try_exists(&site_dir).await.unwrap_or(false) {
+            return Err(RpcError::Conflict {
+                message: format!(
+                    "{} does not exist on this node — nothing to repair",
+                    site_dir.display()
+                ),
+            });
+        }
+        let dir_s = site_dir.display().to_string();
+
+        let run = |program: &'static str, args: Vec<String>| async move {
+            tokio::process::Command::new(program)
+                .args(&args)
+                .output()
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("{program}: {e}")))
+                .and_then(|o| {
+                    if o.status.success() {
+                        Ok(())
+                    } else {
+                        Err(RpcError::Internal_with(format!(
+                            "{program} failed: {}",
+                            String::from_utf8_lossy(&o.stderr).trim()
+                        )))
+                    }
+                })
+        };
+
+        // 1. Ownership — the fix that matters.
+        run(
+            "/usr/bin/chown",
+            vec![
+                "-R".into(),
+                format!("{user}:{user}"),
+                "--".into(),
+                dir_s.clone(),
+            ],
+        )
+        .await?;
+
+        // 2. Directories 0755, then files 0644. Two passes rather than a
+        //    single recursive chmod, which cannot express "different mode
+        //    per type" and would leave every directory unenterable at
+        //    0644 — a site that 403s on everything.
+        for (typ, mode) in [("d", "0755"), ("f", "0644")] {
+            run(
+                "/usr/bin/find",
+                vec![
+                    dir_s.clone(),
+                    "-type".into(),
+                    typ.into(),
+                    "-exec".into(),
+                    "/usr/bin/chmod".into(),
+                    mode.into(),
+                    "{}".into(),
+                    "+".into(),
+                ],
+            )
+            .await?;
+        }
+
+        // 3. Make the path reachable. `useradd -m` leaves /home/<user> at
+        //    0700, which 404s every request and blocks FTP even when
+        //    ownership below is perfect.
+        hyperion_adapters::fs::ensure_ancestors_traversable(&site_dir).await;
+
+        self.append_audit(
+            "hosting.repair_permissions",
+            Some(detail.id.as_str()),
+            &serde_json::json!({"path": dir_s, "user": user}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(format!(
+            "Ownership set to {user}:{user} and modes normalised (directories 0755, \
+             files 0644) across {dir_s}. FTP uses the same account, so it is fixed too."
+        ))
     }
 
     pub async fn dkim_enable(
@@ -27264,25 +27424,56 @@ mod tests {
         assert_eq!(second.wp_version, "6.4.2");
     }
 
-    /// Static / proxy / redirect hostings have no PHP — the change
-    /// must be rejected with a Conflict explaining why.
+    /// A STATIC hosting is converted to PHP rather than refused.
+    ///
+    /// The old contract answered "delete and recreate as a PHP hosting",
+    /// which is the worst advice for the case that produces it: an
+    /// imported WordPress site whose source panel reported no PHP
+    /// version, so the importer classified it static. Its files and
+    /// database are already in place.
     #[tokio::test]
-    async fn set_php_version_rejects_non_php_hosting() {
+    async fn set_php_version_converts_a_static_hosting() {
         let pool = open_memory().await.expect("open");
         let s = svc(pool.clone(), happy_mocks());
-        // Build a static hosting (php_version = None, kind = static).
         let mut r = req("static.cz");
         r.php_version = None;
         r.kind = "static".into();
         r.database = None;
         s.create(r).await.expect("create static");
         let sel = HostingSelector::Domain(Domain::parse("static.cz").unwrap());
+
+        let got = s
+            .set_php_version(sel.clone(), PhpVersion::V8_4)
+            .await
+            .expect("static must convert, not be refused");
+        assert_eq!(got, PhpVersion::V8_4);
+
+        // The kind must move too. Leaving it "static" would render the
+        // static vhost template over a hosting that now has an FPM pool —
+        // a site that 404s every .php it is asked for.
+        let after = s.get(sel).await.expect("get");
+        assert_eq!(after.php_version, Some(PhpVersion::V8_4));
+        assert_eq!(after.kind, "php");
+    }
+
+    /// A reverse proxy serves an upstream and has no document root to run
+    /// PHP from, so it is still refused — giving it a pool would produce
+    /// a site that silently does not work.
+    #[tokio::test]
+    async fn set_php_version_still_rejects_a_reverse_proxy() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), happy_mocks());
+        let mut r = req("proxy.cz");
+        r.php_version = None;
+        r.kind = "reverse_proxy".into();
+        r.proxy_upstream_url = Some("http://127.0.0.1:3000".into());
+        r.database = None;
+        s.create(r).await.expect("create proxy");
+        let sel = HostingSelector::Domain(Domain::parse("proxy.cz").unwrap());
         let err = s
             .set_php_version(sel, PhpVersion::V8_4)
             .await
-            .expect_err("must reject");
-        // We only need the variant, not the exact wording — the
-        // message is operator-facing and may evolve.
+            .expect_err("a reverse proxy has no docroot");
         assert!(matches!(err, RpcError::Conflict { .. }), "got: {err:?}");
     }
 

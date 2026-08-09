@@ -556,6 +556,16 @@
       {% endif %}
 
       <div class="row" style="gap:0.5rem;margin-top:1rem;flex-wrap:wrap">
+        {# Every check on this card — PTR, sender identity, outbound ports,
+           postfix state — is computed fresh on each page load, so a reload
+           IS the re-check. Nothing told the operator that, so after fixing
+           a DNS record they had no obvious way to ask again. #}
+        <a class="btn"
+           href="/settings?mail_node={{ mail_node|urlencode }}#mail"
+           title="Re-run the reverse-DNS, sender-identity and outbound-port checks now. DNS changes can take a few minutes to propagate before they show up here.">
+          <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10"/><path d="M3.51 15a9 9 0 0 0 14.85 3.36L23 14"/></svg>
+          Re-check records
+        </a>
         <form method="post" action="/settings/mta-reconfigure" style="margin:0">
           <input type="hidden" name="_csrf" value="{{ csrf_token }}">
           <input type="hidden" name="target_node" value="{{ mail_node }}">

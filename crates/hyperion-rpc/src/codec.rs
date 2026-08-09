@@ -1290,6 +1290,13 @@ pub enum Request {
     DkimVerify {
         sel: HostingSelector,
     },
+    /// Recursively reset ownership + modes on a hosting's tree.
+    ///
+    /// Runs on the node that OWNS the hosting: the files are there, and
+    /// only that node knows the uid behind the system user.
+    HostingRepairPermissions {
+        sel: HostingSelector,
+    },
     /// Current key-only SFTP status for a hosting's system user.
     SftpStatus {
         sel: HostingSelector,
@@ -1857,6 +1864,8 @@ pub enum Response {
     DkimEnable(hyperion_types::DkimStatus),
     DkimDisable(hyperion_types::DkimStatus),
     DkimVerify(hyperion_types::DkimStatus),
+    /// Human summary of what the repair changed.
+    HostingRepairPermissions(String),
     SftpStatus(hyperion_types::SftpStatus),
     SftpSet(hyperion_types::SftpStatus),
     BanList(Vec<hyperion_types::IpBanWire>),
