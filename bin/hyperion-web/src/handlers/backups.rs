@@ -132,8 +132,10 @@ pub async fn post_upsert(
             secret_key,
             age_recipient,
             retention_daily: form.retention_daily,
-            retention_weekly: form.retention_weekly,
-            retention_monthly: form.retention_monthly,
+            // Read by nothing — the pruner is keep-newest-N via
+            // retention_daily. Stored as zero so old rows converge.
+            retention_weekly: 0,
+            retention_monthly: 0,
             enabled: form.enabled.as_deref() == Some("on"),
         },
     )

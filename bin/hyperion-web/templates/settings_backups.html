@@ -52,7 +52,7 @@
           <div class="text-soft small">{{ t.endpoint }}</div>
           <div><code>{{ t.bucket }}</code> · region <code>{{ t.region }}</code></div>
         </td>
-        <td>{{ t.retention_daily }} / {{ t.retention_weekly }} / {{ t.retention_monthly }}</td>
+        <td>keep {{ t.retention_daily }}</td>
         <td>
           {% if t.age_recipient.is_some() %}
             <span class="pill ok">configured</span>
@@ -144,16 +144,15 @@
     </div>
     <div class="field-row">
       <div class="field">
-        <label>Daily retention</label>
+        {# Honest label: the pruner keeps the newest N objects per hosting,
+           full stop — it does not understand days, weeks or months. The
+           old "Daily / Weekly / Monthly retention" trio implied a
+           grandfather-father-son scheme that does not exist: weekly and
+           monthly were stored and read by nothing, and "daily" was not
+           days. An operator sizing their off-site costs deserves the real
+           rule, not a fancier one that is not implemented. #}
+        <label>Keep newest <span class="hint">archives per site · older ones are pruned after each upload</span></label>
         <input name="retention_daily" type="number" min="0" value="7">
-      </div>
-      <div class="field">
-        <label>Weekly retention</label>
-        <input name="retention_weekly" type="number" min="0" value="4">
-      </div>
-      <div class="field">
-        <label>Monthly retention</label>
-        <input name="retention_monthly" type="number" min="0" value="12">
       </div>
     </div>
     <div class="field">
