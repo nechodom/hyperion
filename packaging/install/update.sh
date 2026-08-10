@@ -498,7 +498,14 @@ if [[ -f "$SITE_MAIL_SRC" ]]; then
     log "Updating site-mail wrapper at $SITE_MAIL_DST ..."
     install -m 0755 "$SITE_MAIL_SRC" "$SITE_MAIL_DST"
   fi
-  install -d -m 0750 /var/lib/hyperion/site-mail
+  # 1777 + sticky, like /tmp: the wrapper runs AS EACH SITE USER and has
+  # to create its own <user>.jsonl here. 0750 root-owned made every such
+  # write fail silently (logging is deliberately best-effort), so the
+  # panel's "Mail sent by this site" was permanently empty while mail
+  # flowed fine. The chmod also HEALS existing installs — install -d
+  # alone does not change the mode of a directory that already exists.
+  install -d -m 1777 /var/lib/hyperion/site-mail
+  chmod 1777 /var/lib/hyperion/site-mail
 fi
 
 #-------- 3c. maintenance landing page ------------------------------------

@@ -549,21 +549,33 @@ pub async fn get_settings(
     // Per-test-node wildcard rows: a `*.<base>` cert issued once covers
     // every auto-subdomain the node spins up. Only test nodes with a
     // derivable base domain qualify.
-    let wildcard_nodes: Vec<NodeWildcardRow> = nodes
-        .iter()
-        .filter(|n| config.cluster.is_test_node(&n.node_id))
-        .filter_map(|n| {
-            config
-                .cluster
-                .node_wildcard_base(&n.node_id, &n.label)
-                .map(|base| NodeWildcardRow {
-                    node_id: n.node_id.clone(),
-                    label: n.label.clone(),
-                    wildcard: format!("*.{base}"),
-                    base,
-                })
-        })
-        .collect();
+    // EVERY node with a derivable base — the master first, addressed by
+    // the `local` sentinel. Previously filtered to test-marked workers,
+    // which made previews unreachable on a single-server install (empty
+    // node list ⇒ no rows ⇒ no way to issue the wildcard).
+    let mut wildcard_nodes: Vec<NodeWildcardRow> = Vec::new();
+    if let Some(base) = config
+        .cluster
+        .node_wildcard_base(&config.hostname, &config.hostname)
+    {
+        wildcard_nodes.push(NodeWildcardRow {
+            node_id: crate::dispatcher::LOCAL_NODE_SENTINEL.to_string(),
+            label: format!("{} (this server)", config.hostname),
+            wildcard: format!("*.{base}"),
+            base,
+        });
+    }
+    wildcard_nodes.extend(nodes.iter().filter_map(|n| {
+        config
+            .cluster
+            .node_wildcard_base(&n.node_id, &n.label)
+            .map(|base| NodeWildcardRow {
+                node_id: n.node_id.clone(),
+                label: n.label.clone(),
+                wildcard: format!("*.{base}"),
+                base,
+            })
+    }));
     // Response-auth readiness for the Security card's hardening ladder.
     // A blank key counts as absent: the heartbeat boundary already
     // trims, but an empty string here would render a node "ready" that
@@ -1911,8 +1923,18 @@ struct NodeWildcardDns01Tpl<'a> {
     csrf_finish: String,
 }
 
-/// Resolve a test node's wildcard base domain (+ display label). `None`
-/// when the node isn't a test node or no safe base can be derived.
+/// Resolve a node's preview-wildcard base domain (+ display label).
+/// `None` when no safe base can be derived from the template.
+///
+/// Deliberately NOT gated on test-node marking. Preview vhosts were never
+/// a test-node feature — the agent renders them for every site once the
+/// template and the wildcard cert exist — but this gate made the ONLY
+/// path to issuing that cert require the marking. On a single-server
+/// install (no workers enrolled) the node list was empty, so the whole
+/// preview feature was unreachable; and marking a production server as
+/// "test" to get at it would make the create wizard refuse production
+/// domains there. The master is addressed by the `local` sentinel, which
+/// the dispatcher already normalises.
 async fn resolve_node_wildcard_base(
     state: &SharedState,
     node_id: &str,
@@ -1922,17 +1944,26 @@ async fn resolve_node_wildcard_base(
             Ok(RpcResponse::AgentConfigView(c)) => c,
             _ => return None,
         };
-    if !config.cluster.is_test_node(node_id) {
+    let is_local = node_id.trim().is_empty()
+        || node_id == crate::dispatcher::LOCAL_NODE_SENTINEL
+        || node_id == config.hostname;
+    let label = if is_local {
+        config.hostname.clone()
+    } else {
+        match hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await {
+            Ok(RpcResponse::NodesList(ns)) => ns
+                .into_iter()
+                .find(|n| n.node_id == node_id)
+                .map(|n| n.label)
+                // An unknown node id must not fall back to "some string
+                // that derives a base anyway" — refuse instead.
+                .unwrap_or_default(),
+            _ => String::new(),
+        }
+    };
+    if !is_local && label.is_empty() {
         return None;
     }
-    let label = match hyperion_rpc_client::call(&state.agent_socket, Request::NodesList).await {
-        Ok(RpcResponse::NodesList(ns)) => ns
-            .into_iter()
-            .find(|n| n.node_id == node_id)
-            .map(|n| n.label)
-            .unwrap_or_else(|| node_id.to_string()),
-        _ => node_id.to_string(),
-    };
     config
         .cluster
         .node_wildcard_base(node_id, &label)
