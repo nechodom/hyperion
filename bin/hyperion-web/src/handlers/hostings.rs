@@ -310,7 +310,7 @@ struct DetailTpl<'a> {
     /// "Preview site" link that works before real DNS cutover. Computed
     /// with the SAME rule the agent uses to render the preview vhost, so
     /// the link always matches a server block that actually exists.
-    preview_domain: Option<String>,
+    preview_domain: PreviewInfo,
 }
 
 #[derive(Deserialize, Default)]
@@ -4722,11 +4722,42 @@ pub(crate) async fn fetch_cluster_config(state: &SharedState) -> hyperion_types:
 /// at that exact domain on that node IS the wildcard. This is strictly
 /// more accurate than assuming "test node ⇒ has wildcard" and needs no
 /// new RPC, schema, or wire change.
+/// Preview affordance for ONE hosting — shown on EVERY site's detail
+/// page, not just those with a live wildcard.
+///
+/// The point of the struct (vs. the old bare `Option<String>`) is that a
+/// missing preview is now explained in place instead of silently absent:
+/// an operator who wanted a preview URL "for all sites" was seeing
+/// nothing on a production site and reasonably concluded the feature was
+/// test-only. It never was — every site gets a preview once the node has
+/// a `*.<base>` wildcard. The card now says exactly which of the two
+/// setup steps is missing.
+#[derive(Default)]
+pub(crate) struct PreviewInfo {
+    /// The live preview hostname, when the wildcard exists. Empty ⇒ not
+    /// available yet; `reason`/`base` explain why.
+    pub url: String,
+    /// The base a wildcard would need (`hosting.nechodom.cz`), when a
+    /// template is configured. Empty ⇒ no template set.
+    pub base: String,
+    /// "" (available) | "no-template" (previews not set up on this node)
+    /// | "no-wildcard" (template set, cert not issued) | "under-base"
+    /// (this domain is already under the wildcard, so it needs no second
+    /// address).
+    pub reason: String,
+}
+
+impl PreviewInfo {
+    pub fn available(&self) -> bool {
+        !self.url.is_empty()
+    }
+}
+
 pub(crate) async fn compute_preview_domain(
     state: &SharedState,
     owner_node: Option<&str>,
     primary_domain: &str,
-) -> Option<String> {
+) -> PreviewInfo {
     let cluster = fetch_cluster_config(state).await;
     // Owner node id + its hostname label (so `{node}` → "s4", not the
     // long node_id). Empty node_id ⇒ master / local.
@@ -4738,7 +4769,13 @@ pub(crate) async fn compute_preview_domain(
         .find(|n| n.node_id == node_id)
         .map(|n| n.label)
         .unwrap_or_default();
-    let base = cluster.node_wildcard_base(&node_id, &node_hostname)?;
+    // No template configured on this node ⇒ previews aren't set up at all.
+    let Some(base) = cluster.node_wildcard_base(&node_id, &node_hostname) else {
+        return PreviewInfo {
+            reason: "no-template".into(),
+            ..Default::default()
+        };
+    };
     // Sibling domains on the owner node, so the dedup rule here matches
     // the vhost the agent wrote (same rule, same input → same name).
     let siblings: Vec<String> =
@@ -4752,11 +4789,19 @@ pub(crate) async fn compute_preview_domain(
         };
     // server_name derivation + the "already under base?" skip live in the
     // shared helper, so the URL here can't diverge from the agent's vhost.
-    let server_name = hyperion_types::ClusterConfigView::preview_subdomain_dedup(
+    // `None` here means the domain is ALREADY under the wildcard — it is
+    // reachable on the wildcard directly, no second address needed.
+    let Some(server_name) = hyperion_types::ClusterConfigView::preview_subdomain_dedup(
         primary_domain,
         &base,
         &siblings,
-    )?;
+    ) else {
+        return PreviewInfo {
+            base,
+            reason: "under-base".into(),
+            ..Default::default()
+        };
+    };
     // Confirm the wildcard cert actually exists on the owner node.
     let resp = crate::dispatcher::dispatch_to_node(state, owner_node, Request::CertOverview).await;
     let has_wildcard = matches!(
@@ -4765,9 +4810,19 @@ pub(crate) async fn compute_preview_domain(
             if items.iter().any(|c| c.domain.eq_ignore_ascii_case(&base))
     );
     if has_wildcard {
-        Some(server_name)
+        PreviewInfo {
+            url: server_name,
+            base,
+            reason: String::new(),
+        }
     } else {
-        None
+        // Template set, but the *.<base> wildcard has not been issued —
+        // the one remaining step, the same for every site on the node.
+        PreviewInfo {
+            base,
+            reason: "no-wildcard".into(),
+            ..Default::default()
+        }
     }
 }
 

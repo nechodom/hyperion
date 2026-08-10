@@ -1653,15 +1653,21 @@
       </div>
 
       <div class="field">
-        <label for="test_domain_template">Auto-domain template <span class="hint">applied when creating a hosting on a test node</span></label>
+        <label for="test_domain_template">Preview / auto-domain template <span class="hint">the base for every site's preview subdomain</span></label>
         <input id="test_domain_template" name="test_domain_template" type="text" autocomplete="off"
                value="{{ config.cluster.test_domain_template }}"
-               placeholder="e.g. {name}.{node}.staging.example.com">
+               placeholder="e.g. {name}.hosting.nechodom.cz">
+        <p class="text-soft small" style="margin:0.3rem 0 0;padding:0.55rem 0.75rem;background:var(--surface-1);border-radius:6px">
+          <strong>This is what turns on preview URLs — for EVERY site on the node, production
+          included, not just test nodes.</strong> The part after <code>{name}</code> is the
+          wildcard base: with <code>{name}.hosting.nechodom.cz</code>, every hosting gets an
+          internal address like <code>beeenglish.hosting.nechodom.cz</code> once you issue the
+          <code>*.hosting.nechodom.cz</code> certificate in Step 2. A <em>Preview site</em> button
+          then appears on each site's detail page.
+        </p>
         <p class="text-soft small" style="margin:0.3rem 0 0">
-          Two tokens are substituted:
-          <code>{name}</code> is the short name the operator types in the wizard, and
-          <code>{node}</code> is the target node's ID.
-          The result is lower-cased.
+          Tokens: <code>{name}</code> — the site's first label (or the name typed in the wizard on
+          a test node); <code>{node}</code> — the node ID. Result is lower-cased.
         </p>
         <p class="text-soft small" style="margin:0.5rem 0 0;padding:0.55rem 0.75rem;background:var(--surface-1);border-radius:6px">
           <strong>Example.</strong> With template
