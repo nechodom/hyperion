@@ -30,5 +30,9 @@
     <button class="btn primary" type="submit" style="font-size:0.75rem;padding:0.2rem 0.55rem">Resume scanning</button>
     {% endif %}
   </form>
-  <a class="text-soft small" href="#settings">Manage in Settings →</a>
+  {# Two links because "Settings" meant two different pages here: the
+     site's own ban list vs the node-wide thresholds on the GLOBAL page.
+     One ambiguous word cost the operator a wrong turn every time. #}
+  <a class="text-soft small" href="#settings">Ban list for this site →</a>
+  <a class="text-soft small" href="/settings#bruteforce" style="margin-left:0.6rem">Node-wide thresholds →</a>
 </div>
