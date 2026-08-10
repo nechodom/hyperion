@@ -100,7 +100,17 @@ cat > "$TMP"
 # Best-effort logging. Skip the whole block if user arg was rejected
 # or the log dir refuses to materialise.
 if [ -n "$USER_ARG" ]; then
-    if mkdir -p "$LOG_ROOT" 2>/dev/null && chmod 0750 "$LOG_ROOT" 2>/dev/null; then
+    # NOTE the absence of a chmod here. This script runs as the SITE USER
+    # (php-fpm execs it), and an earlier version gated the whole block on
+    # `mkdir -p && chmod 0750` — chmod on a root-owned directory fails for
+    # everyone but root, so the gate failed and the log was silently,
+    # permanently empty on every node where update.sh (root) had created
+    # the directory first. The mail still went out; only the evidence
+    # vanished. The directory is 1777+sticky (update.sh), each user's
+    # jsonl is 0600 via the umask below — tenants cannot read each
+    # other's mail metadata, and nobody can delete another's file.
+    umask 077
+    if mkdir -p -m 1777 "$LOG_ROOT" 2>/dev/null; then
         LOG="$LOG_ROOT/$USER_ARG.jsonl"
 
         # Rotate at MAX_JSONL_BYTES so we don't grow unbounded on

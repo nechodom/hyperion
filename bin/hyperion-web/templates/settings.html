@@ -109,7 +109,7 @@
   </a>
   <a class="tab" data-tab="testnodes" href="#testnodes" role="tab">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
-    Test nodes
+    Test nodes &amp; previews
   </a>
   <a class="tab" data-tab="retention" href="#retention" role="tab" title="How long trashed hostings and audit-log entries are kept">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
@@ -1694,7 +1694,17 @@
   {# Node-level wildcard certs — one *.<base> per test node, reused by
      every auto-subdomain it spins up. Issued here, not per site. #}
   <div class="card" style="margin-top:1rem">
-    <h2 style="font-size:0.95rem;margin:0 0 0.35rem">Step 2 · Test-node wildcard certificates</h2>
+    <h2 style="font-size:0.95rem;margin:0 0 0.35rem">Step 2 · Preview wildcard certificates</h2>
+    <p class="text-soft small" style="margin:0 0 0.5rem">
+      Works on <strong>any node, this server included</strong> — previews are not tied to the
+      test-node marking above. Once the wildcard exists, every site on the node gets an
+      internal address under it (a <em>Preview</em> link appears on the site's detail page):
+      production sites keep their real domain, and a site whose DNS is not switched yet is
+      reachable immediately. Needs a DNS record <code>*.&lt;base&gt;</code> → this node's IP
+      (grey-cloud it in Cloudflare — the universal certificate does not cover two-level
+      subdomains) and a Cloudflare API token for the DNS-01 issuance
+      (<a href="/settings#tls">TLS / ACME tab</a>).
+    </p>
     <p class="text-soft small" style="margin:0 0 0.8rem">
       Issue one <code>*.&lt;base&gt;</code> certificate per test node, and every auto-subdomain it
       creates reuses it — instant HTTPS, with no per-site Let's Encrypt rate-limit hits.
