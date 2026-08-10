@@ -267,6 +267,65 @@ pub async fn delete_pool(system_user: &str, php_version: PhpVersion) -> Result<(
 /// Reload php-fpm — and if the service isn't running, enable + start it
 /// first. On a brand-new install this is the difference between "first
 /// hosting create works" and "first hosting create fails because the
+/// Install one PHP version's FPM plus the SAME extension set the
+/// installer ships for the default version — mirrored from
+/// install-master.sh, with the version substituted.
+///
+/// The full set, not bare `phpX.Y-fpm`, deliberately: a WordPress site
+/// switched onto a version that lacks php-mysql greets its visitors with
+/// "error establishing a database connection", which reads as a worse
+/// failure than the 502 this install is fixing. Same `policy-rc.d`
+/// inhibitor as the OpenDKIM install — maintainer scripts must not start
+/// services mid-transaction — and the same recovery for a half-configured
+/// dpkg state from an earlier interrupted attempt.
+async fn install_php_version(php_version: PhpVersion) -> Result<(), AdapterError> {
+    let v = php_version.as_str();
+    let policy = std::path::Path::new("/usr/sbin/policy-rc.d");
+    let created_policy = if policy.exists() {
+        false
+    } else {
+        crate::fs::atomic_write(policy, b"#!/bin/sh\nexit 101\n", 0o755)
+            .await
+            .is_ok()
+    };
+    let apt = |args: Vec<String>| async move {
+        let mut argv: Vec<&str> = vec!["DEBIAN_FRONTEND=noninteractive", "apt-get"];
+        let owned: Vec<String> = args;
+        argv.extend(owned.iter().map(|s| s.as_str()));
+        cmd::run_capturing_all("/usr/bin/env", &argv).await
+    };
+    let _ = cmd::run_capturing_all(
+        "/usr/bin/env",
+        &[
+            "DEBIAN_FRONTEND=noninteractive",
+            "dpkg",
+            "--configure",
+            "-a",
+        ],
+    )
+    .await;
+    let _ = apt(vec!["update".into(), "-qq".into()]).await;
+    let mut install: Vec<String> = vec!["install".into(), "-y".into(), "-qq".into()];
+    for ext in [
+        "fpm", "cli", "mysql", "pgsql", "curl", "gd", "mbstring", "xml", "zip",
+    ] {
+        install.push(format!("php{v}-{ext}"));
+    }
+    let res = apt(install).await;
+    if created_policy {
+        let _ = tokio::fs::remove_file(policy).await;
+    }
+    res.map(|_| ()).map_err(|e| {
+        let raw = e.to_string();
+        match cmd::explain_apt_failure(&raw) {
+            Some(reason) => AdapterError::Other(format!(
+                "PHP {v} could not be installed — {reason}\n\nOriginal output:\n{raw}"
+            )),
+            None => AdapterError::Other(format!("PHP {v} could not be installed: {raw}")),
+        }
+    })
+}
+
 /// operator forgot `systemctl enable php8.3-fpm`".
 pub async fn reload(php_version: PhpVersion) -> Result<(), AdapterError> {
     let svc = php_version.service_name();
@@ -296,11 +355,35 @@ pub async fn reload(php_version: PhpVersion) -> Result<(), AdapterError> {
         tracing::warn!(service = %svc, "php-fpm not active — enabling + starting");
         // enable --now is idempotent: enable + start in one shot.
         if let Err(e) = cmd::run("/usr/bin/systemctl", &["enable", "--now", &svc]).await {
-            return Err(AdapterError::Other(format!(
-                "{svc} is inactive and `systemctl enable --now {svc}` failed: {e}. \
-                 Install it with: apt-get install -y {pkg}",
-                pkg = svc.trim_end_matches(".service"),
-            )));
+            // The unit does not exist ⇒ this PHP version was never
+            // installed on this node. The panel's version picker offers
+            // every supported version, so this is a NORMAL path, not an
+            // error to bounce back at the operator: the installer only
+            // ships one version, and the sury repo every node already has
+            // carries the rest. Telling the operator to go run apt by
+            // hand — which the old message did — punted OUR job to them,
+            // and left the hosting row already pointing at a version with
+            // no pool behind it: a 502 with homework attached.
+            let unit_missing = format!("{e}")
+                .to_ascii_lowercase()
+                .contains("does not exist");
+            if !unit_missing {
+                return Err(AdapterError::Other(format!(
+                    "{svc} is inactive and `systemctl enable --now {svc}` failed: {e}"
+                )));
+            }
+            tracing::warn!(
+                service = %svc,
+                "php-fpm unit missing — installing this PHP version from the configured repos"
+            );
+            install_php_version(php_version).await?;
+            cmd::run("/usr/bin/systemctl", &["enable", "--now", &svc])
+                .await
+                .map_err(|e| {
+                    AdapterError::Other(format!(
+                        "{svc} still failed to start after installing it: {e}"
+                    ))
+                })?;
         }
         // After enable --now the daemon is already running; skip reload
         // since the just-started process picked up our pool file at boot.

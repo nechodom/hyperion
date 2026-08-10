@@ -5227,6 +5227,9 @@ pub async fn get_dns_panel(
 struct SpfCardTpl {
     sp: SpfCheckResult,
     domain: String,
+    /// The URL selector this fragment was requested with — the
+    /// "Check again" button re-requests the same panel.
+    selector: String,
 }
 
 pub async fn get_spf_panel(
@@ -5256,15 +5259,37 @@ pub async fn get_spf_panel(
         Request::DnsSpfCheck { domain },
     )
     .await;
-    let html = match resp {
-        Ok(RpcResponse::DnsSpfCheck(r)) => SpfCardTpl {
-            sp: r,
-            domain: detail.domain.clone(),
-        }
-        .render()?,
-        _ => String::new(),
+    // NEVER render nothing. This arm used to collapse every failure —
+    // node unreachable, RPC error — into an empty string, so the card
+    // silently vanished from the page and the operator had no idea a
+    // check even existed, let alone that it failed. An unknown-status
+    // card with the reason is strictly more honest.
+    let sp = match resp {
+        Ok(RpcResponse::DnsSpfCheck(r)) => r,
+        Ok(RpcResponse::Error(e)) => unknown_spf(&detail.domain, &e.to_string()),
+        Ok(_) => unknown_spf(&detail.domain, "unexpected response from the owning node"),
+        Err(e) => unknown_spf(&detail.domain, &e.to_string()),
     };
+    let html = SpfCardTpl {
+        sp,
+        domain: detail.domain.clone(),
+        selector,
+    }
+    .render()?;
     Ok(Html(html).into_response())
+}
+
+/// An `unknown`-status SPF result carrying the failure reason — for when
+/// the check could not run at all (node unreachable, RPC refused).
+fn unknown_spf(domain: &str, why: &str) -> SpfCheckResult {
+    SpfCheckResult {
+        domain: domain.to_string(),
+        existing: vec![],
+        suggested: String::new(),
+        our_public_ipv4: None,
+        status: "unknown".into(),
+        reason: format!("could not check: {why}"),
+    }
 }
 
 /// DKIM card — lazily swapped into the detail page and re-rendered by the

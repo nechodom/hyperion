@@ -170,6 +170,16 @@
             an add_header here would drop the inherited security headers. #}
         {%- endif %}
     }
+    {%- else %}
+    # No PHP runtime on this hosting — so REFUSE .php outright instead of
+    # letting it fall through to the static file handler. Without this,
+    # nginx serves PHP SOURCE as a download: a visitor to an imported
+    # WordPress site whose conversion had not finished yet was offered
+    # index.php as a file — and anything else that ends in .php was one
+    # request away, credentials included. 404, not 403: a 403 confirms
+    # the file exists, which is exactly what a probing crawler wants to
+    # know.
+    location ~ \.php$ { return 404; }
     {%- endif %}
 
     location ~ /\.(?!well-known) {
