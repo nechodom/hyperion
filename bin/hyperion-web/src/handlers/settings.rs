@@ -422,6 +422,16 @@ pub struct NodeWildcardRow {
     pub base: String,
     /// The wildcard subject shown to the operator (`*.<base>`).
     pub wildcard: String,
+    /// Live status of the `*.<base>` cert ON THAT NODE:
+    /// "" (unknown/unreachable), "missing", "ok", "warning" (<30d),
+    /// "critical" (<7d), "expired". Drives the pill so an operator who
+    /// just ran manual validation SEES it landed, instead of guessing
+    /// from the presence of a Preview link on some other page.
+    pub status: String,
+    /// Days until expiry when status is a live band; 0 otherwise.
+    pub days_left: i64,
+    /// Absolute expiry date, pre-formatted, or empty.
+    pub expires: String,
 }
 
 #[derive(Deserialize, Default)]
@@ -563,6 +573,9 @@ pub async fn get_settings(
             label: format!("{} (this server)", config.hostname),
             wildcard: format!("*.{base}"),
             base,
+            status: String::new(),
+            days_left: 0,
+            expires: String::new(),
         });
     }
     wildcard_nodes.extend(nodes.iter().filter_map(|n| {
@@ -574,8 +587,40 @@ pub async fn get_settings(
                 label: n.label.clone(),
                 wildcard: format!("*.{base}"),
                 base,
+                status: String::new(),
+                days_left: 0,
+                expires: String::new(),
             })
     }));
+    // Fill each row's live cert status by asking the node it lives on.
+    // One CertOverview per DISTINCT target, not per row — a single-server
+    // install is one call. Unreachable node ⇒ status stays "" (unknown),
+    // never a false "missing": the standing rule that a probe which could
+    // not run must not masquerade as a finding.
+    for row in wildcard_nodes.iter_mut() {
+        let target =
+            (row.node_id != crate::dispatcher::LOCAL_NODE_SENTINEL).then(|| row.node_id.as_str());
+        let resp = crate::dispatcher::dispatch_to_node(&state, target, Request::CertOverview).await;
+        if let Ok(RpcResponse::CertOverview(items)) = resp {
+            // The wildcard subject is stored as its base domain (a
+            // `*.<base>` cert's row `domain` is `<base>`), matched
+            // case-insensitively.
+            if let Some(c) = items
+                .iter()
+                .find(|c| c.domain.eq_ignore_ascii_case(&row.base))
+            {
+                row.status = if c.days_left < 0 {
+                    "expired".to_string()
+                } else {
+                    c.band.clone()
+                };
+                row.days_left = c.days_left;
+                row.expires = fmt_date(Some(c.not_after));
+            } else {
+                row.status = "missing".to_string();
+            }
+        }
+    }
     // Response-auth readiness for the Security card's hardening ladder.
     // A blank key counts as absent: the heartbeat boundary already
     // trims, but an empty string here would render a node "ready" that
@@ -2052,7 +2097,7 @@ pub async fn post_node_wildcard_begin(
             Ok(Html(tpl.render()?).into_response())
         }
         RpcResponse::Error(e) => Ok(Redirect::to(&format!(
-            "/settings?flash_error={}#cluster",
+            "/settings?flash_error={}#testnodes",
             urlencode(&e.to_string())
         ))
         .into_response()),
