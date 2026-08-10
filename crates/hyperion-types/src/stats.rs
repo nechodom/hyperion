@@ -641,6 +641,69 @@ impl ClusterConfigView {
         }
         Some(format!("{label}.{base}"))
     }
+
+    /// Collision-safe preview hostname: like [`Self::preview_subdomain`],
+    /// but disambiguates when another hosting on the same node reduces to
+    /// the same first-label name.
+    ///
+    /// `siblings` is every OTHER primary domain on the node. The clean
+    /// first-label name (`beeenglish.<base>`) is kept by exactly ONE
+    /// domain in a colliding set — the lexicographically smallest — and
+    /// the rest fall back to the full-domain slug (`beeenglish-com.<base>`).
+    /// The rule is a pure function of the domain set, so the agent (which
+    /// writes the vhost) and the web page (which links to it) compute the
+    /// SAME answer from their own copies of the list and never disagree —
+    /// and the agent can never write two preview vhosts with one
+    /// server_name, which would silently serve one site's docroot at the
+    /// other's preview.
+    ///
+    /// The winner rule is "smallest domain", not "oldest hosting", on
+    /// purpose: it needs no creation timestamp, so both callers can
+    /// evaluate it from a bare list of domains.
+    pub fn preview_subdomain_dedup(
+        primary_domain: &str,
+        base: &str,
+        siblings: &[String],
+    ) -> Option<String> {
+        let full = Self::preview_subdomain(primary_domain, base)?;
+        let base_l = base.trim().trim_end_matches('.').to_ascii_lowercase();
+        let domain_l = primary_domain
+            .trim()
+            .trim_end_matches('.')
+            .to_ascii_lowercase();
+        let clean_label = preview_label(&domain_l);
+
+        // Any sibling that would claim the same clean label AND sorts
+        // before us means we are not the winner → use the full slug.
+        let loses = siblings.iter().any(|s| {
+            let s_l = s.trim().trim_end_matches('.').to_ascii_lowercase();
+            s_l != domain_l
+                && Self::preview_subdomain(&s_l, &base_l).is_some()
+                && preview_label(&s_l) == clean_label
+                && s_l < domain_l
+        });
+        if !loses {
+            return Some(full);
+        }
+        // Loser: full-domain slug (dots → hyphens over the whole name).
+        let slug = domain_l
+            .chars()
+            .map(|c| match c {
+                'a'..='z' | '0'..='9' | '-' => c,
+                _ => '-',
+            })
+            .collect::<String>();
+        let mut slug = slug;
+        while slug.contains("--") {
+            slug = slug.replace("--", "-");
+        }
+        let slug = slug.trim_matches('-').to_string();
+        if slug.is_empty() {
+            Some(full)
+        } else {
+            Some(format!("{slug}.{base_l}"))
+        }
+    }
 }
 
 /// Turn a primary domain into a single DNS-safe label for the preview
@@ -1473,6 +1536,36 @@ mod tests {
             ClusterConfigView::preview_subdomain("Shop.Example.COM.", "S4.Test.cz").as_deref(),
             Some("shop.s4.test.cz")
         );
+    }
+
+    #[test]
+    fn preview_subdomain_dedup_gives_the_clean_name_to_one_and_slugs_the_rest() {
+        let base = "hosting.nechodom.cz";
+        let cz = "beeenglish.cz".to_string();
+        let com = "beeenglish.com".to_string();
+
+        // `.com` < `.cz` lexicographically (o < z) ⇒ com wins the clean
+        // name, cz falls back to the slug. Winner is deterministic, not
+        // "whichever the operator made first".
+        assert_eq!(
+            ClusterConfigView::preview_subdomain_dedup(&com, base, &[cz.clone()]).as_deref(),
+            Some("beeenglish.hosting.nechodom.cz")
+        );
+        assert_eq!(
+            ClusterConfigView::preview_subdomain_dedup(&cz, base, &[com.clone()]).as_deref(),
+            Some("beeenglish-cz.hosting.nechodom.cz")
+        );
+
+        // No collision ⇒ clean name regardless of siblings.
+        assert_eq!(
+            ClusterConfigView::preview_subdomain_dedup(&com, base, &["other.cz".into()]).as_deref(),
+            Some("beeenglish.hosting.nechodom.cz")
+        );
+
+        // Both sides, given the SAME set, never pick the same output.
+        let a = ClusterConfigView::preview_subdomain_dedup(&cz, base, &[com.clone()]);
+        let b = ClusterConfigView::preview_subdomain_dedup(&com, base, &[cz.clone()]);
+        assert_ne!(a, b, "the two must not collide onto one server_name");
     }
 
     #[test]

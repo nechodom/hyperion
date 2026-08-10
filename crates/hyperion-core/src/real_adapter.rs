@@ -121,8 +121,22 @@ impl RealAdapter {
         let base = cluster.node_wildcard_base(&node_id, &hostname)?;
         // server_name + the "already under base?" skip live in one shared
         // helper so the agent vhost and the web link can never disagree.
-        let server_name =
-            hyperion_types::ClusterConfigView::preview_subdomain(primary_domain, &base)?;
+        // Dedup against every OTHER hosting on this node, so two sites with
+        // the same first label (beeenglish.cz + beeenglish.com) never get
+        // the same preview server_name — which would serve one site's
+        // docroot at the other's preview URL.
+        let siblings: Vec<String> = hyperion_state::hostings::list(pool)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .map(|h| h.domain)
+            .filter(|d| !d.eq_ignore_ascii_case(primary_domain))
+            .collect();
+        let server_name = hyperion_types::ClusterConfigView::preview_subdomain_dedup(
+            primary_domain,
+            &base,
+            &siblings,
+        )?;
         // Accurate cert check: the wildcard must really exist on THIS node.
         if !hyperion_state::certificates::is_wildcard(pool, &base)
             .await

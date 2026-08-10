@@ -395,6 +395,20 @@ document.addEventListener('click', function (ev) {
     setTimeout(() => el.remove(), 200);
   }
 
+  // Inline config saves (hx-post + HX-Trigger) surface here without a
+  // page reload. The handler answers 204 with
+  //   HX-Trigger: {"toast":{"level":"ok|error","text":"…"}}
+  // and HTMX dispatches a `toast` event carrying that object. Map the
+  // server's level onto the toast kind; a save that reordered the vhost
+  // (nginx -t) or hit a validation error arrives on the SAME channel, as
+  // an error toast, so the operator never loses feedback to the missing
+  // reload.
+  document.body.addEventListener('toast', (ev) => {
+    const d = ev.detail || {};
+    const kind = d.level === 'error' ? 'error' : (d.level === 'ok' ? 'success' : 'info');
+    window.toast(d.text || 'Saved.', kind, kind === 'error' ? 7000 : 3500);
+  });
+
   // Auto-surface HTMX errors as red toasts.
   document.addEventListener('htmx:responseError', (ev) => {
     const code = ev.detail?.xhr?.status ?? '???';

@@ -2976,6 +2976,7 @@ fn normalize_tags(raw: &str) -> Vec<String> {
 pub async fn post_set_notes(
     State(state): State<SharedState>,
     ctx: AuthCtx,
+    headers: axum::http::HeaderMap,
     Form(form): Form<NotesForm>,
 ) -> Result<Response, AppError> {
     let sel = match require_manage_for_selector(
@@ -3018,7 +3019,12 @@ pub async fn post_set_notes(
         },
     )
     .await;
-    Ok(Redirect::to(&format!("/hostings/{sel_url}?flash_saved=notes#overview")).into_response())
+    Ok(save_result(
+        &headers,
+        true,
+        "Notes & tags saved.",
+        format!("/hostings/{sel_url}?flash_saved=notes#overview"),
+    ))
 }
 
 #[derive(Deserialize)]
@@ -3074,6 +3080,7 @@ fn valid_php_int(s: &str, lo: i64, hi: i64) -> bool {
 pub async fn post_set_php_ini(
     State(state): State<SharedState>,
     ctx: AuthCtx,
+    headers: axum::http::HeaderMap,
     Form(form): Form<PhpIniForm>,
 ) -> Result<Response, AppError> {
     let sel = match require_manage_for_selector(
@@ -3103,10 +3110,12 @@ pub async fn post_set_php_ini(
         || !valid_php_int(form.max_input_vars.trim(), 100, 200_000)
         || (!form.display_errors.trim().is_empty() && display.is_empty())
     {
-        return Ok(Redirect::to(&format!(
-            "/hostings/{sel_url}?flash_error=Invalid+PHP+value+%E2%80%94+sizes+like+256M%2F1G%2C+numbers+in+range%2C+display_errors+On%2FOff#settings"
-        ))
-        .into_response());
+        return Ok(save_result(
+            &headers,
+            false,
+            "Invalid PHP value — sizes like 256M/1G, numbers in range, display_errors On/Off.",
+            format!("/hostings/{sel_url}?flash_error=Invalid+PHP+value#settings"),
+        ));
     }
     // Resolve owner — the .user.ini lives on the node hosting the site.
     let (detail, owner_node) = match find_hosting_anywhere(&state, sel).await {
@@ -3170,7 +3179,12 @@ pub async fn post_set_php_ini(
         )
         .await;
     }
-    Ok(Redirect::to(&format!("/hostings/{sel_url}?flash_saved=php#settings")).into_response())
+    Ok(save_result(
+        &headers,
+        true,
+        "PHP settings saved (.user.ini; applies within ~5 min).",
+        format!("/hostings/{sel_url}?flash_saved=php#settings"),
+    ))
 }
 
 /// Base64-encode (STANDARD) — small local helper to avoid threading the
@@ -3318,6 +3332,7 @@ fn checkbox_on(v: &Option<String>) -> bool {
 pub async fn post_vhost_options(
     State(state): State<SharedState>,
     ctx: AuthCtx,
+    headers: axum::http::HeaderMap,
     Form(form): Form<VhostOptionsForm>,
 ) -> Result<Response, AppError> {
     let sel = match require_manage_for_selector(
@@ -3364,22 +3379,27 @@ pub async fn post_vhost_options(
         },
     )
     .await?;
+    let sel_url = urlencoding(&form.selector);
     match resp {
-        RpcResponse::HostingSetVhostOptions(_) => Ok(Redirect::to(&format!(
-            "/hostings/{}?vhost_saved=1",
-            urlencoding(&form.selector)
-        ))
-        .into_response()),
+        RpcResponse::HostingSetVhostOptions(_) => Ok(save_result(
+            &headers,
+            true,
+            "HTTP & access settings saved.",
+            format!("/hostings/{sel_url}?vhost_saved=1"),
+        )),
         RpcResponse::Error(e) => {
-            // Bounce back to the detail page with the error in the query
-            // string so the operator sees the verbatim nginx -t output
-            // (or validation error) in a banner instead of a bare 500.
-            Ok(Redirect::to(&format!(
-                "/hostings/{}?vhost_error={}",
-                urlencoding(&form.selector),
-                urlencoding(&e.to_string())
+            // The verbatim nginx -t output (or validation error) reaches the
+            // operator either way: as a toast under HTMX, or in the banner
+            // the query string drives on a full navigation.
+            Ok(save_result(
+                &headers,
+                false,
+                &e.to_string(),
+                format!(
+                    "/hostings/{sel_url}?vhost_error={}",
+                    urlencoding(&e.to_string())
+                ),
             ))
-            .into_response())
         }
         _ => Err(AppError::Internal("unexpected response".into())),
     }
@@ -3816,6 +3836,7 @@ pub async fn post_set_php_version(
 pub async fn post_set_limits(
     State(state): State<SharedState>,
     ctx: AuthCtx,
+    headers: axum::http::HeaderMap,
     Form(form): Form<SetLimitsForm>,
 ) -> Result<Response, AppError> {
     let sel = match require_manage_for_selector(
@@ -3849,9 +3870,15 @@ pub async fn post_set_limits(
     )
     .await?;
     match resp {
-        RpcResponse::HostingSetLimits(_) => {
-            Ok(Redirect::to(&format!("/hostings/{}", urlencoding(&form.selector))).into_response())
-        }
+        RpcResponse::HostingSetLimits(_) => Ok(save_result(
+            &headers,
+            true,
+            "PHP-FPM & DB limits saved.",
+            format!(
+                "/hostings/{}?flash_saved=limits#limits",
+                urlencoding(&form.selector)
+            ),
+        )),
         RpcResponse::Error(e) => Err(AppError::Rpc(e.to_string())),
         _ => Err(AppError::Internal("unexpected response".into())),
     }
@@ -4228,6 +4255,64 @@ pub async fn require_manage_for_selector(
     };
     require_hosting_access(state, ctx, &hosting_id, true, cap).await?;
     Ok(sel)
+}
+
+/// A config-save outcome as either an HTMX toast or a classic redirect.
+///
+/// Progressive enhancement: the forms POST with `hx-post`, so on a normal
+/// browser HTMX sends `HX-Request: true` and we answer with a 204 + an
+/// `HX-Trigger` that fires a client-side toast — the page never reloads,
+/// the card keeps its place. Without JS (or a non-HTMX POST) the SAME
+/// handler falls back to the redirect it always did, so nothing breaks.
+///
+/// `ok`/`err` messages are plain text; the client JSON-decodes the
+/// trigger, so they are escaped here.
+fn save_result(
+    headers: &axum::http::HeaderMap,
+    is_ok: bool,
+    message: &str,
+    redirect_to: String,
+) -> Response {
+    let is_htmx = headers
+        .get("HX-Request")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if !is_htmx {
+        return Redirect::to(&redirect_to).into_response();
+    }
+    // HX-Trigger payload: {"toast":{"level":"ok|error","text":"…"}}.
+    let level = if is_ok { "ok" } else { "error" };
+    let json = format!(
+        "{{\"toast\":{{\"level\":\"{level}\",\"text\":{}}}}}",
+        json_string(message)
+    );
+    (
+        axum::http::StatusCode::NO_CONTENT,
+        [("HX-Trigger", json)],
+        (),
+    )
+        .into_response()
+}
+
+/// Minimal JSON string encoder for the toast text — quotes + the control
+/// characters a header value must not carry raw.
+fn json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 pub(crate) fn urlencoding(s: &str) -> String {
@@ -4654,9 +4739,24 @@ pub(crate) async fn compute_preview_domain(
         .map(|n| n.label)
         .unwrap_or_default();
     let base = cluster.node_wildcard_base(&node_id, &node_hostname)?;
+    // Sibling domains on the owner node, so the dedup rule here matches
+    // the vhost the agent wrote (same rule, same input → same name).
+    let siblings: Vec<String> =
+        match crate::dispatcher::dispatch_to_node(state, owner_node, Request::HostingList).await {
+            Ok(RpcResponse::HostingList(v)) => v
+                .into_iter()
+                .map(|h| h.domain)
+                .filter(|d| !d.eq_ignore_ascii_case(primary_domain))
+                .collect(),
+            _ => Vec::new(),
+        };
     // server_name derivation + the "already under base?" skip live in the
     // shared helper, so the URL here can't diverge from the agent's vhost.
-    let server_name = hyperion_types::ClusterConfigView::preview_subdomain(primary_domain, &base)?;
+    let server_name = hyperion_types::ClusterConfigView::preview_subdomain_dedup(
+        primary_domain,
+        &base,
+        &siblings,
+    )?;
     // Confirm the wildcard cert actually exists on the owner node.
     let resp = crate::dispatcher::dispatch_to_node(state, owner_node, Request::CertOverview).await;
     let has_wildcard = matches!(

@@ -909,7 +909,7 @@
     {% for t in tags %}<span class="tag" style="font-size:0.72rem">{{ t }}</span>{% endfor %}
   </div>
   {% endif %}
-  <form method="post" action="/hostings/notes">
+  <form method="post" action="/hostings/notes" hx-post="/hostings/notes" hx-swap="none">
     <input type="hidden" name="_csrf" value="{{ csrf_notes }}">
     <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
     <label class="text-soft small" style="display:block;margin-bottom:0.25rem">Note (private to operators)</label>
@@ -1860,7 +1860,7 @@
     failure the previous vhost stays active and the error is shown
     above.
   </p>
-  <form method="post" action="/hostings/vhost-options">
+  <form method="post" action="/hostings/vhost-options" hx-post="/hostings/vhost-options" hx-swap="none">
     <input type="hidden" name="_csrf" value="{{ csrf_vhost_options }}">
     <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
     {% if !target_node.is_empty() %}
@@ -2076,7 +2076,7 @@
     Kernel-enforced disk quota lives in the <strong>Disk &amp; bandwidth quota</strong>
     card below.
   </p>
-  <form method="post" action="/hostings/set-limits">
+  <form method="post" action="/hostings/set-limits" hx-post="/hostings/set-limits" hx-swap="none">
     <input type="hidden" name="_csrf" value="{{ csrf_limits }}">
     <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
     <div class="field-row">
@@ -2400,7 +2400,7 @@
     override — a value entered here would have been saved, reported as applied, and
     then ignored by PHP.
   </p>
-  <form method="post" action="/hostings/php-ini">
+  <form method="post" action="/hostings/php-ini" hx-post="/hostings/php-ini" hx-swap="none">
     <input type="hidden" name="_csrf" value="{{ csrf_php_ini }}">
     <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(180px, 100%), 1fr));gap:1rem">
