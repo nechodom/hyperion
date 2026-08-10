@@ -4758,17 +4758,33 @@ pub(crate) async fn compute_preview_domain(
     owner_node: Option<&str>,
     primary_domain: &str,
 ) -> PreviewInfo {
-    let cluster = fetch_cluster_config(state).await;
+    // Full config view, not just .cluster: the MASTER's hostname lives
+    // here, and it is the `{node}` token for master-hosted sites. The
+    // previous code looked the master up in the REMOTE node list — where
+    // it never appears — so `{node}` rendered empty, the base derived to
+    // nothing, and every master-hosted site reported "previews not set
+    // up" while the Settings page, using the same template plus the
+    // hostname it DID have, had issued a perfectly valid wildcard. Same
+    // template, two different answers, one missing hostname.
+    let (master_hostname, cluster) =
+        match hyperion_rpc_client::call(&state.agent_socket, Request::AgentConfigView).await {
+            Ok(RpcResponse::AgentConfigView(c)) => (c.hostname.clone(), c.cluster),
+            _ => (String::new(), hyperion_types::ClusterConfigView::default()),
+        };
     // Owner node id + its hostname label (so `{node}` → "s4", not the
     // long node_id). Empty node_id ⇒ master / local.
     let node_id = owner_node.unwrap_or("").to_string();
-    let node_hostname = fetch_remote_nodes(state)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .find(|n| n.node_id == node_id)
-        .map(|n| n.label)
-        .unwrap_or_default();
+    let node_hostname = if node_id.is_empty() {
+        master_hostname
+    } else {
+        fetch_remote_nodes(state)
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .find(|n| n.node_id == node_id)
+            .map(|n| n.label)
+            .unwrap_or_default()
+    };
     // No template configured on this node ⇒ previews aren't set up at all.
     let Some(base) = cluster.node_wildcard_base(&node_id, &node_hostname) else {
         return PreviewInfo {
