@@ -63,7 +63,7 @@
     {% else if st.verify_status == "missing" %}
       <p style="color:var(--warn);font-size:0.85rem;margin:0.4rem 0 0.75rem">No matching record found yet. DNS can take a while to propagate — add it and Verify again.</p>
     {% else if st.verify_status == "unknown" %}
-      <p style="color:var(--text-soft);font-size:0.85rem;margin:0.4rem 0 0.75rem">Couldn't reach DNS to check just now — try Verify again in a moment.</p>
+      <p style="color:var(--text-soft);font-size:0.85rem;margin:0.4rem 0 0.75rem">The lookup itself failed on this node — this says nothing about your record, which may be perfectly fine. Two usual causes: <code>dig</code> is not installed on the node (run <code>update.sh</code> there, it now heals this), or DNS is temporarily unreachable. Fix that, then Verify again.</p>
     {% endif %}
 
     <div style="display:flex;gap:0.5rem;flex-wrap:wrap">

@@ -1074,6 +1074,17 @@ mod tests {
         assert!(out.contains("server_name example.cz;"));
         assert!(!out.contains("fastcgi_pass"));
         assert!(out.contains("try_files $uri $uri/ =404"));
+        // CRITICAL: with no PHP runtime, .php requests must be REFUSED, not
+        // fall through to the static file handler — nginx would otherwise
+        // serve PHP SOURCE as a download. An imported WordPress site whose
+        // conversion had not finished offered index.php as a file to every
+        // visitor, and wp-config.php.bak (or any .php not covered by the
+        // two hardcoded deny locations) was one request away, DB
+        // credentials included.
+        assert!(
+            out.contains(r"location ~ \.php$ { return 404; }"),
+            "static vhost must refuse .php outright:\n{out}"
+        );
         assert!(out.contains("Strict-Transport-Security"));
         assert!(out.contains("ssl_certificate     /etc/lm/certs/example.cz/fullchain.pem"));
         assert!(out.contains("/var/lib/lm/acme-challenges"));

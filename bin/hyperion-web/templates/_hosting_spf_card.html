@@ -9,6 +9,7 @@
     {% if sp.status == "matches" %}<span class="pill ok" style="margin-left:0.4rem;font-size:0.65rem">authorized</span>
     {% else if sp.status == "differs" %}<span class="pill warn" style="margin-left:0.4rem;font-size:0.65rem">not authorized</span>
     {% else if sp.status == "multiple" %}<span class="pill err" style="margin-left:0.4rem;font-size:0.65rem">multiple records</span>
+    {% else if sp.status == "unknown" %}<span class="pill warn" style="margin-left:0.4rem;font-size:0.65rem">could not check</span>
     {% else %}<span class="pill err" style="margin-left:0.4rem;font-size:0.65rem">missing</span>{% endif %}
   </h2>
   {% if !sp.reason.is_empty() %}
@@ -17,7 +18,8 @@
   <dl class="kv">
     <dt>Existing TXT</dt>
     <dd>
-      {% if sp.existing.is_empty() %}<span class="text-soft">none — without an SPF record, mail from this hosting is likely to be marked as spam</span>
+      {% if sp.status == "unknown" %}<span class="text-soft">not determined — the lookup itself failed, which says nothing about your DNS. The reason above names the fix.</span>
+      {% else if sp.existing.is_empty() %}<span class="text-soft">none — without an SPF record, mail from this hosting is likely to be marked as spam</span>
       {% else %}{% for e in sp.existing %}<code style="font-size:0.78rem;display:block;margin-bottom:0.2rem;word-break:break-all">{{ e }}</code>{% endfor %}{% endif %}
     </dd>
     {% if sp.status != "matches" %}
@@ -39,4 +41,12 @@
     <dt>Our IPv4</dt><dd><code>{{ ip }}</code></dd>
     {% endif %}
   </dl>
+  {# The whole card is a lazily-loaded fragment, so a fresh dig is just
+     re-requesting it. Every status ends with "then check again" — this
+     is the button those words were missing. #}
+  <button class="btn small" style="margin-top:0.6rem"
+          hx-get="/hostings/{{ selector }}/spf-panel"
+          hx-target="closest .card" hx-swap="outerHTML">
+    Check again
+  </button>
 </div>

@@ -7851,7 +7851,31 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             dig_records(&d, "TXT"),
             fetch_public_ip_v4("https://api4.ipify.org"),
         );
-        let txts_raw = txts_raw.unwrap_or_default();
+        // A failed LOOKUP is not an absent RECORD. `unwrap_or_default()`
+        // here used to collapse "dig is not installed on this node" and
+        // "DNS is unreachable" into an empty list, which rendered as
+        // "missing — no SPF TXT record at the apex" — and an operator who
+        // HAD published the record hours ago re-checked their DNS over
+        // and over while the truth was on this box. Same rule as
+        // everywhere else in this codebase: a probe that could not run
+        // must never masquerade as a finding.
+        let txts_raw = match txts_raw {
+            Ok(v) => v,
+            Err(e) => {
+                let our_public_ipv4 = our_ipv4.ok();
+                return Ok(hyperion_types::SpfCheckResult {
+                    domain: d,
+                    status: "unknown".into(),
+                    reason: format!("could not check: {e}"),
+                    existing: vec![],
+                    suggested: match our_public_ipv4.as_deref() {
+                        Some(ip) => format!("v=spf1 ip4:{ip} a mx ~all"),
+                        None => "v=spf1 a mx ~all".into(),
+                    },
+                    our_public_ipv4,
+                });
+            }
+        };
         // dig may return one TXT split across multiple quoted segments
         // (long TXT values use the `"...""..."` continuation syntax).
         // Join those segments before filtering by prefix.
@@ -11983,10 +12007,25 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 matches = true;
             }
         }
+        // Behind Cloudflare's proxy the apex NEVER resolves to this node —
+        // that is the entire point of the proxy — so "DNS points elsewhere"
+        // was a standing false alarm on every proxied site, teaching
+        // operators to ignore the banner right up until it was reporting a
+        // genuinely mispointed domain. A proxied site is a working
+        // configuration and is reported as one; the note still tells the
+        // operator what it means for cert issuance (HTTP-01 rides the
+        // proxied traffic and works; what breaks it is Cloudflare's own
+        // TLS mode, which no DNS check here can see).
+        let proxied = !resolved_a.is_empty()
+            && resolved_a.iter().all(|ip| is_cloudflare_ipv4(ip))
+            && resolved_aaaa.iter().all(|ip| is_cloudflare_ipv6(ip));
         let note = if resolved_a.is_empty() && resolved_aaaa.is_empty() {
             format!("{} has no A or AAAA records (NXDOMAIN or DNS error)", d)
         } else if matches {
             "DNS resolves here — cert issuance will work.".into()
+        } else if proxied {
+            "Proxied through Cloudflare — the visible addresses are Cloudflare's,              which is how the proxy works, not a misconfiguration. Traffic still              reaches this server. HTTP-01 cert issuance works through the proxy;              if certs fail, check the Cloudflare SSL/TLS mode (Full, not Flexible)              rather than DNS."
+                .into()
         } else {
             format!(
                 "DNS points elsewhere. We see A={:?} AAAA={:?}; our IPs are {}/{}",
@@ -11996,6 +12035,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 our_ipv6.as_deref().unwrap_or("?"),
             )
         };
+        // A proxied site counts as matching: the domain is routed to this
+        // server, merely not visibly so. Everything that gates on
+        // `matches` (the banner's severity, create-preflight wording)
+        // should treat it as healthy.
+        let matches = matches || proxied;
 
         Ok(DnsCheckResult {
             domain: d,
@@ -12987,8 +13031,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let prev_period = period_key(hour_start - 3600);
         let summaries = self.list().await?;
         let mut total_disk: i64 = 0;
-        let mut total_bw_out: i64 = 0;
-        let mut total_requests: i64 = 0;
+        let total_bw_out: i64 = 0;
+        let total_requests: i64 = 0;
         let mut active = 0i64;
         let mut suspended = 0i64;
         let mut failed = 0i64;
@@ -13109,9 +13153,26 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .await;
 
             total_disk += disk;
-            total_bw_out += bw_out;
-            total_requests += reqs;
         }
+
+        // Node-level traffic totals come from the LAST 24 HOURLY BUCKETS,
+        // not from the per-site figures parsed above. Those figures are
+        // the CURRENT hour's window — summing them into a field named
+        // *_24h stored every five minutes made the dashboard sparkline a
+        // sawtooth: hour-to-date climbing from zero, resetting on every
+        // hour boundary. A cumulative counter plotted as a series. (Before
+        // the hour-bucket fix the same sums were a rolling 24 h, which was
+        // smooth but ~24x inflated — this is the second half of that fix.)
+        let (total_bw_out, total_requests) =
+            match hyperion_state::limits::usage_rollup_all(&self.pool, 24).await {
+                Ok(rows) => rows.iter().fold((0i64, 0i64), |(b, r), row| {
+                    (b + row.bw_out_bytes, r + row.php_requests)
+                }),
+                // Rollup failing must not sink the whole sample — fall
+                // back to the hour-to-date sums, which are at least real
+                // traffic, and let the next tick correct the shape.
+                Err(_) => (total_bw_out, total_requests),
+            };
 
         // Node disk = REAL filesystem usage + capacity of the home root's
         // volume (df Used/Size), not the sum of tenant `du` above — the latter
@@ -20179,11 +20240,81 @@ struct DkimKv {
     verified_at: i64,
 }
 
+/// True when `ip` parses as IPv4 inside Cloudflare's published proxy
+/// ranges (www.cloudflare.com/ips-v4 — a list that has been stable for
+/// years). A domain whose A records all sit in these ranges is proxied:
+/// the visible addresses belong to Cloudflare BY DESIGN, and comparing
+/// them against this node's own IP proves nothing about where traffic
+/// actually lands.
+fn is_cloudflare_ipv4(ip: &str) -> bool {
+    let Ok(addr) = ip.trim().parse::<std::net::Ipv4Addr>() else {
+        return false;
+    };
+    let a = u32::from(addr);
+    const RANGES: &[(u32, u32)] = &[
+        (0xadf53000, 20),
+        (0x6715f400, 22),
+        (0x6716c800, 22),
+        (0x671f0400, 22),
+        (0x8d654000, 18),
+        (0x6ca2c000, 18),
+        (0xbe5df000, 20),
+        (0xbc726000, 20),
+        (0xc5eaf000, 22),
+        (0xc6298000, 17),
+        (0xa29e0000, 15),
+        (0x68100000, 13),
+        (0x68180000, 14),
+        (0xac400000, 13),
+        (0x83004800, 22),
+    ];
+    RANGES.iter().any(|(net, len)| (a ^ net) >> (32 - len) == 0)
+}
+
+/// IPv6 companion of [`is_cloudflare_ipv4`] (www.cloudflare.com/ips-v6).
+fn is_cloudflare_ipv6(ip: &str) -> bool {
+    let Ok(addr) = ip.trim().parse::<std::net::Ipv6Addr>() else {
+        return false;
+    };
+    let a = u128::from(addr);
+    const RANGES: &[(&str, u32)] = &[
+        ("2400:cb00::", 32),
+        ("2606:4700::", 32),
+        ("2803:f800::", 32),
+        ("2405:b500::", 32),
+        ("2405:8100::", 32),
+        ("2a06:98c0::", 29),
+        ("2c0f:f248::", 32),
+    ];
+    RANGES.iter().any(|(net, len)| {
+        let Ok(n) = net.parse::<std::net::Ipv6Addr>() else {
+            return false;
+        };
+        (a ^ u128::from(n)) >> (128 - len) == 0
+    })
+}
+
 async fn dig_records(domain: &str, kind: &str) -> Result<Vec<String>, std::io::Error> {
-    let out = tokio::process::Command::new("/usr/bin/dig")
+    let out = match tokio::process::Command::new("/usr/bin/dig")
         .args(["+short", "+time=3", "+tries=2", kind, domain])
         .output()
-        .await?;
+        .await
+    {
+        Ok(o) => o,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // dig is simply NOT INSTALLED — minimal Debian ships without
+            // bind9-dnsutils, and until update.sh healed it, a fresh
+            // worker node answered every DNS question with a failure the
+            // cards rendered as "record missing". An operator who HAD
+            // published the record then re-checked their DNS for hours.
+            // Name the real cause; the error text reaches the cards'
+            // "unknown" copy.
+            return Err(std::io::Error::other(
+                "dig is not installed on this node (bind9-dnsutils) — DNS cannot be                  checked from here. Run update.sh on this node, or                  `apt-get install -y bind9-dnsutils`.",
+            ));
+        }
+        Err(e) => return Err(e),
+    };
     if !out.status.success() {
         // A non-zero dig exit (SERVFAIL, timeout, network down) is a
         // *transient* failure, not "no records". Callers `unwrap_or_default`
@@ -26045,6 +26176,39 @@ mod tests {
     /// Protection that stopped and resumed — node down, `[fail2ban]
     /// enabled` flipped off and back, agent not running — would otherwise
     /// keep its original `since` and back-claim the dark days.
+    /// A proxied domain's A records are Cloudflare's by design; treating
+    /// them as "points elsewhere" made the DNS banner a standing false
+    /// alarm the operator learns to ignore — until the day it is real.
+    #[test]
+    fn cloudflare_ranges_classify_real_addresses() {
+        use super::{is_cloudflare_ipv4, is_cloudflare_ipv6};
+        // Live addresses of the user's own proxied zones.
+        for ip in [
+            "104.21.0.217",
+            "172.67.128.81",
+            "188.114.96.9",
+            "188.114.97.9",
+        ] {
+            assert!(is_cloudflare_ipv4(ip), "{ip} is Cloudflare");
+        }
+        // Direct-hosted addresses must NOT classify.
+        for ip in [
+            "178.105.99.35",
+            "204.168.224.2",
+            "185.247.28.72",
+            "1.1.1.1",
+            "8.8.8.8",
+        ] {
+            assert!(
+                !is_cloudflare_ipv4(ip),
+                "{ip} is not a Cloudflare proxy range"
+            );
+        }
+        assert!(is_cloudflare_ipv6("2606:4700:3033::ac43:8051"));
+        assert!(!is_cloudflare_ipv6("2001:db8::1"));
+        assert!(!is_cloudflare_ipv4("not-an-ip"));
+    }
+
     /// The reject/quarantine decision hangs off this parse, and a DMARC
     /// record is operator-typed free text — spacing, order and case all
     /// vary in the wild.

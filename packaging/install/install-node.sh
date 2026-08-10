@@ -252,6 +252,7 @@ optional_pkgs=()
 [[ "$WITH_VSFTPD"   == "1" ]] && optional_pkgs+=(vsftpd)
 apt-get install -y -qq \
   curl ca-certificates gnupg lsb-release pkg-config build-essential git \
+  bind9-dnsutils \
   nginx "${optional_pkgs[@]}"
 
 mkdir -p /etc/apt/keyrings

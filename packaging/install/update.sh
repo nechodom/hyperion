@@ -657,6 +657,16 @@ refresh_unit() {
 # or
 #   "php8.3-fpm.service not loaded"
 # Re-install + enable each package only when the unit file is missing.
+# dig (bind9-dnsutils) — not a service, so it can't ride NEEDED_PKGS'
+# unit-file check. Every DNS card in the panel (SPF, DKIM verify, the
+# preflight banner) shells out to dig; a minimal Debian ships without it,
+# and a node missing it reports every record as unverifiable. Heal it
+# unconditionally — a few hundred kilobytes.
+if ! command -v dig >/dev/null 2>&1; then
+  log "Installing bind9-dnsutils (dig) — DNS checks need it ..."
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq bind9-dnsutils 2>/dev/null     || DEBIAN_FRONTEND=noninteractive apt-get install -y -qq dnsutils     || warn "could not install dig — SPF/DKIM verification will report unknown on this node"
+fi
+
 declare -A NEEDED_PKGS=(
   [nginx.service]="nginx"
   [vsftpd.service]="vsftpd"
