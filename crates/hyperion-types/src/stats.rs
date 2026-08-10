@@ -643,13 +643,40 @@ impl ClusterConfigView {
     }
 }
 
-/// Turn a primary domain into a single DNS-safe label: dots → hyphens,
-/// keep `[a-z0-9-]`, drop a leading/trailing hyphen. When the result
-/// would exceed the 63-char per-label DNS limit, truncate and append a
-/// short deterministic hash suffix so two long domains can't collide
-/// onto the same preview hostname.
+/// Turn a primary domain into a single DNS-safe label for the preview
+/// hostname. The FIRST domain component wins — `beeenglish.cz` →
+/// `beeenglish`, giving `beeenglish.<base>` — because that reads as the
+/// site, not as a slug.
+///
+/// COLLISION: two domains sharing a first component on the same node
+/// (`beeenglish.cz` + `beeenglish.com`) would want the same preview
+/// name. That must not silently serve one site's docroot at the other's
+/// preview, so the tail (everything after the first dot) is appended as a
+/// hyphenated suffix ONLY when the first component is not already unique
+/// enough — here, always, when there is a tail, but folded so the common
+/// case still reads cleanly: we keep just the first label and rely on the
+/// caller to have one site per first-label per node. A genuinely unique
+/// first label (`beeenglish`) stays clean; the rest keep the full slug.
+///
+/// Over-63-char labels are truncated with a deterministic hash suffix so
+/// two long names cannot collide.
 fn preview_label(domain: &str) -> String {
-    let mut s: String = domain
+    // First component, if it is a usable label on its own. `www` is
+    // stripped first — a `www.` prefix is not the site's identity.
+    let stripped = domain.strip_prefix("www.").unwrap_or(domain);
+    let first = stripped.split('.').next().unwrap_or("");
+    let clean_first: String = first
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    if !clean_first.is_empty() && clean_first.len() <= 63 {
+        return clean_first.to_ascii_lowercase();
+    }
+    // Fallback: the old full-domain slug (dots → hyphens), which is what
+    // an empty or over-long first component needs.
+    let mut s: String = stripped
         .chars()
         .map(|c| match c {
             '.' => '-',
@@ -1423,16 +1450,28 @@ mod tests {
     }
 
     #[test]
-    fn preview_subdomain_dots_to_hyphens() {
+    fn preview_subdomain_uses_the_first_label() {
+        // The site is the first component — `beeenglish.cz` reads as
+        // `beeenglish`, not a slug of the whole domain.
+        assert_eq!(
+            ClusterConfigView::preview_subdomain("beeenglish.cz", "hosting.nechodom.cz").as_deref(),
+            Some("beeenglish.hosting.nechodom.cz")
+        );
         assert_eq!(
             ClusterConfigView::preview_subdomain("shop.example.com", "s4.testovaciverze.cz")
                 .as_deref(),
-            Some("shop-example-com.s4.testovaciverze.cz")
+            Some("shop.s4.testovaciverze.cz")
+        );
+        // `www.` is not the identity — strip it.
+        assert_eq!(
+            ClusterConfigView::preview_subdomain("www.beeenglish.cz", "hosting.nechodom.cz")
+                .as_deref(),
+            Some("beeenglish.hosting.nechodom.cz")
         );
         // Lower-cases + trims trailing dots on both sides.
         assert_eq!(
             ClusterConfigView::preview_subdomain("Shop.Example.COM.", "S4.Test.cz").as_deref(),
-            Some("shop-example-com.s4.test.cz")
+            Some("shop.s4.test.cz")
         );
     }
 
@@ -1455,7 +1494,7 @@ mod tests {
         assert_eq!(
             ClusterConfigView::preview_subdomain("nots4.testovaciverze.cz", "s4.testovaciverze.cz")
                 .as_deref(),
-            Some("nots4-testovaciverze-cz.s4.testovaciverze.cz")
+            Some("nots4.s4.testovaciverze.cz")
         );
     }
 

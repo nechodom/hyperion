@@ -1708,7 +1708,9 @@
     <p class="text-soft small" style="margin:0 0 0.8rem">
       Issue one <code>*.&lt;base&gt;</code> certificate per test node, and every auto-subdomain it
       creates reuses it — instant HTTPS, with no per-site Let's Encrypt rate-limit hits.
-      It renews automatically via Cloudflare. Status and expiry live on the
+      It renews automatically via Cloudflare. The <strong>Status</strong> column below shows
+      whether each wildcard is live and when it expires — after a manual validation, reload this
+      page and the row turns green. The full cert list is on the
       <a href="/certs">Certificates page</a>.
     </p>
     {% if wildcard_nodes.is_empty() %}
@@ -1718,7 +1720,7 @@
     {% else %}
       <div class="table-wrap">
         <table>
-          <thead><tr><th>Node</th><th>Wildcard</th><th class="right">Issue / renew</th></tr></thead>
+          <thead><tr><th>Node</th><th>Wildcard</th><th>Status</th><th class="right">Issue / renew</th></tr></thead>
           <tbody>
           {% for n in wildcard_nodes %}
             <tr>
@@ -1727,6 +1729,25 @@
                 <span class="text-soft small"><code>{{ n.node_id }}</code></span>
               </td>
               <td><code style="word-break:break-all">{{ n.wildcard }}</code></td>
+              <td>
+                {% if n.status == "ok" %}
+                  <span class="pill ok">valid</span>
+                  <span class="text-soft small" style="display:block;margin-top:0.2rem">expires {{ n.expires }} · {{ n.days_left }} d</span>
+                {% else if n.status == "warning" %}
+                  <span class="pill warn">valid · renews soon</span>
+                  <span class="text-soft small" style="display:block;margin-top:0.2rem">expires {{ n.expires }} · {{ n.days_left }} d</span>
+                {% else if n.status == "critical" %}
+                  <span class="pill err">expires in {{ n.days_left }} d</span>
+                  <span class="text-soft small" style="display:block;margin-top:0.2rem">{{ n.expires }} — renew now</span>
+                {% else if n.status == "expired" %}
+                  <span class="pill err">expired</span>
+                  <span class="text-soft small" style="display:block;margin-top:0.2rem">{{ n.expires }} — re-issue</span>
+                {% else if n.status == "missing" %}
+                  <span class="pill warn">not issued yet</span>
+                {% else %}
+                  <span class="text-soft small">unknown (node unreachable)</span>
+                {% endif %}
+              </td>
               <td class="right">
                 <form method="post" action="/settings/node-wildcard/begin"
                       style="display:inline-flex;gap:0.4rem;flex-wrap:wrap;justify-content:flex-end">
