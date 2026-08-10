@@ -652,6 +652,38 @@
     </form>
   </div>
 
+  <div class="card" id="cloudflare-certs" style="margin-top:1rem">
+    <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Cloudflare certs (DNS-01)</h2>
+    <p class="text-soft small" style="margin:0 0 0.6rem">
+      For sites behind Cloudflare, issue <strong>real Let's Encrypt certs via DNS-01</strong> — it validates
+      over DNS, so it works even when traffic is proxied and HTTP-01 can't reach the origin. Save a Cloudflare
+      API token here once; then use <em>Issue via Cloudflare DNS</em> on a site's SSL tab, or the bulk button
+      on <a href="/certs">Certificates</a>.
+    </p>
+    {% match cloudflare.valid %}
+    {% when Some with (v) %}
+      <p class="text-soft" style="margin:0 0 0.6rem">{% if v %}✓{% else %}⚠{% endif %} {{ cloudflare.message }}</p>
+    {% when None %}
+      <p class="text-soft" style="margin:0 0 0.6rem">{{ cloudflare.message }}</p>
+    {% endmatch %}
+    <form method="post" action="/settings/cloudflare/token"
+          style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:flex-end">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <div class="field" style="flex:1;min-width:260px">
+        <label>Cloudflare API token <span class="text-soft">(Zone:Read + DNS:Edit)</span></label>
+        <input type="password" name="token" autocomplete="off"
+               placeholder="paste token — it's validated before saving">
+      </div>
+      <button class="btn primary" type="submit">Save &amp; test</button>
+    </form>
+    <p class="text-soft small" style="margin:0.6rem 0 0">
+      Create one at Cloudflare → My Profile → API Tokens → <em>Edit zone DNS</em> template (scope it to your
+      zone(s)). It's stored <code>0600</code> on the master and never shown again. Unsure of your SSL mode?
+      In Cloudflare see <strong>SSL/TLS → Overview</strong> — <strong>Full (strict)</strong> with a real cert
+      here is the safest.
+    </p>
+  </div>
+
   <div class="card muted" style="margin-top:1rem">
     <h2 style="font-size:0.95rem;margin:0 0 0.6rem">How HTTPS issuing works</h2>
     <ul class="text-soft small" style="margin:0;padding-left:1.2rem;line-height:1.7">
@@ -706,6 +738,9 @@
       </h2>
     </div>
     <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">
+      Per-site alert channels (e-mail / Slack / webhook) live on each hosting's
+      <strong>Monitor &amp; logs</strong> tab and override the default webhook above;
+      the wording of every send comes from the templates here.
       Customise the wording of the Slack and email messages Hyperion sends
       (alerts, reminders, test sends). Type a template and watch the preview
       update with sample data. Leave a template empty to use the default
@@ -1029,6 +1064,10 @@
         <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
         Off-site backup target (FTP/FTPS/SFTP)
       </h2>
+    <p class="text-soft small" style="margin:0.3rem 0 0.6rem">
+      Applies to <strong>this master node's</strong> agent.toml. Per-site overrides — including
+      S3 targets — are on each hosting's Backups tab.
+    </p>
       {% if config.backup_remote.enabled %}<span class="pill ok">pushing</span>
       {% else %}<span class="pill warn">local only</span>{% endif %}
     </div>
@@ -1086,6 +1125,10 @@
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
       Retention policy
     </h2>
+    <p class="text-soft small" style="margin:0.3rem 0 0.6rem">
+      This governs <strong>backup archives</strong> only. Trash and audit-log retention live on the
+      <a href="/settings#retention">Data retention tab</a>.
+    </p>
     <form method="post" action="/settings/config" autocomplete="off">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <input type="hidden" name="section" value="backup_retention">
@@ -1698,37 +1741,12 @@
     {% endif %}
   </div>
 
-  <div class="card" id="cloudflare-certs" style="margin-top:1rem">
-    <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Cloudflare certs (DNS-01)</h2>
-    <p class="text-soft small" style="margin:0 0 0.6rem">
-      For sites behind Cloudflare, issue <strong>real Let's Encrypt certs via DNS-01</strong> — it validates
-      over DNS, so it works even when traffic is proxied and HTTP-01 can't reach the origin. Save a Cloudflare
-      API token here once; then use <em>Issue via Cloudflare DNS</em> on a site's SSL tab, or the bulk button
-      on <a href="/certs">Certificates</a>.
-    </p>
-    {% match cloudflare.valid %}
-    {% when Some with (v) %}
-      <p class="text-soft" style="margin:0 0 0.6rem">{% if v %}✓{% else %}⚠{% endif %} {{ cloudflare.message }}</p>
-    {% when None %}
-      <p class="text-soft" style="margin:0 0 0.6rem">{{ cloudflare.message }}</p>
-    {% endmatch %}
-    <form method="post" action="/settings/cloudflare/token"
-          style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:flex-end">
-      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-      <div class="field" style="flex:1;min-width:260px">
-        <label>Cloudflare API token <span class="text-soft">(Zone:Read + DNS:Edit)</span></label>
-        <input type="password" name="token" autocomplete="off"
-               placeholder="paste token — it's validated before saving">
-      </div>
-      <button class="btn primary" type="submit">Save &amp; test</button>
-    </form>
-    <p class="text-soft small" style="margin:0.6rem 0 0">
-      Create one at Cloudflare → My Profile → API Tokens → <em>Edit zone DNS</em> template (scope it to your
-      zone(s)). It's stored <code>0600</code> on the master and never shown again. Unsure of your SSL mode?
-      In Cloudflare see <strong>SSL/TLS → Overview</strong> — <strong>Full (strict)</strong> with a real cert
-      here is the safest.
-    </p>
-  </div>
+  <p class="text-soft small" style="margin-top:1rem">
+    The Cloudflare API token for DNS-01 certificates lives on the
+    <a href="/settings#tls">TLS / ACME tab</a> now — it serves every site behind Cloudflare,
+    not just test nodes.
+  </p>
+
 
   <div class="card muted" style="margin-top:1rem">
     <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Multi-node tips</h2>
@@ -1755,6 +1773,8 @@
       Trash / soft-delete
     </h2>
     <p class="text-soft small" style="margin:0 0 0.8rem">
+      Backup-archive retention is separate — it lives with its backups on the
+      <a href="/settings#backups">Backups tab</a>.
       When on, deleting a hosting moves it to <a href="/trash">Trash</a>:
       nginx serves 503, FPM stops, and the database and OS users are locked,
       but the files, database, certificates, and user are preserved. After the retention
