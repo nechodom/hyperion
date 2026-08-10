@@ -230,7 +230,7 @@ pub async fn publish_txt(
     record_name: &str,
     values: &[String],
 ) -> Result<Vec<String>, AdapterError> {
-    let (zone_id, _zone_name) = zone_id_for(token, record_name).await?;
+    let (zone_id, zone_name) = zone_id_for(token, record_name).await?;
     let url = format!("{API}/zones/{zone_id}/dns_records");
     let mut ids = Vec::new();
     for value in values {
@@ -243,9 +243,21 @@ pub async fn publish_txt(
         .to_string();
         let v = curl_json(token, &["-X", "POST", &url, "--data", &body]).await?;
         if v["success"].as_bool() != Some(true) {
+            let summary = cf_error_summary(&v);
+            // Code 10000 "Authentication error" on a WRITE, after the zone
+            // lookup above SUCCEEDED with the same token, is Cloudflare's
+            // way of saying the token may read but not edit here. The raw
+            // message sends the operator off to re-check credentials that
+            // demonstrably work — the actual fix is in the token's scope.
+            let hint = if summary.contains("code 10000") {
+                format!(
+                    " The token READS zones fine (the zone lookup above used it), so this                      is a scope problem, not a credential problem: the token must carry                      Zone -> DNS -> Edit with Zone Resources that include `{zone_name}` —                      and `{zone_name}` must live in the SAME Cloudflare account the token                      was created in. A token cannot cross accounts, no matter its                      permissions."
+                )
+            } else {
+                String::new()
+            };
             return Err(AdapterError::Other(format!(
-                "cloudflare: TXT create failed: {}",
-                v["errors"]
+                "cloudflare: TXT create in zone `{zone_name}` failed: {summary}.{hint}"
             )));
         }
         if let Some(id) = v["result"]["id"].as_str() {
