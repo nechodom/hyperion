@@ -347,6 +347,21 @@
           {% if mta.ptr_status == "ok" %}
             <code>{{ mta.public_ipv4 }}</code> → <code>{{ mta.ptr_name }}</code>
             <span class="pill ok" style="margin-left:0.5rem">matches HELO ✓</span>
+          {% else if mta.ptr_status == "hostname-not-fqdn" %}
+            <code>{{ mta.public_ipv4 }}</code>{% if !mta.ptr_name.is_empty() %} → <code>{{ mta.ptr_name }}</code>{% endif %}
+            <span class="pill warn" style="margin-left:0.5rem">hostname is not a FQDN — cannot compare</span>
+            <span class="text-soft small" style="display:block;margin-top:0.25rem">
+              {% if !mta.ptr_name.is_empty() %}
+                The PTR record itself looks fine — the problem is on THIS side:
+                <code>myhostname</code> is the bare word <code>{{ mta.myhostname }}</code>.
+                Run <code>hostnamectl set-hostname {{ mta.ptr_name }}</code>, then click
+                <strong>Reconfigure postfix</strong>. Do not change the PTR.
+              {% else %}
+                Set a fully-qualified hostname first
+                (<code>hostnamectl set-hostname &lt;name&gt;.&lt;domain&gt;</code>), then
+                point the PTR for <code>{{ mta.public_ipv4 }}</code> at it.
+              {% endif %}
+            </span>
           {% else if mta.ptr_status == "mismatch" %}
             <code>{{ mta.public_ipv4 }}</code> → <code>{{ mta.ptr_name }}</code>
             <span class="pill warn" style="margin-left:0.5rem">does not match myhostname</span>

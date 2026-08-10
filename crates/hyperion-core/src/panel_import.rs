@@ -235,7 +235,21 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             stage: "import_chown".into(),
             reason,
         })?;
-        let _ = crate::ensure_ancestors_traversable(Path::new(&created.root_dir)).await;
+        // Ownership alone is NOT enough: cp -a and the sandboxed tar both
+        // PRESERVE the source panel's modes, and CloudPanel ships trees at
+        // 0770/0660 because its nginx runs inside the site user's group.
+        // Ours does not, so an imported site with correct ownership still
+        // 404s every asset. Normalise modes the same way the panel's
+        // Repair action does (dirs 0755, files 0644, ancestors traversable).
+        if let Err(reason) =
+            crate::service::repair_tree_permissions_for_import(&created.system_user, host_root)
+                .await
+        {
+            return Err(RpcError::ProvisioningFailed {
+                stage: "import_permissions".into(),
+                reason,
+            });
+        }
 
         // 4. DB: dump the source DB (locally or over ssh) and load it into the
         //    freshly-created one with the engine-appropriate restore helper.

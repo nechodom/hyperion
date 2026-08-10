@@ -1932,6 +1932,20 @@
       Force HTTP → HTTPS redirect
     </label>
     <div class="field" style="margin-top:0.7rem">
+      <label for="canonical_host">Canonical hostname <span class="hint">301 the other spelling onto one address</span></label>
+      <select id="canonical_host" name="canonical_host">
+        <option value="" {% if detail.vhost_options.canonical_host.is_empty() %}selected{% endif %}>Serve both as-is (no redirect)</option>
+        <option value="non-www" {% if detail.vhost_options.canonical_host == "non-www" %}selected{% endif %}>Redirect www.{{ detail.domain }} → {{ detail.domain }}</option>
+        <option value="www" {% if detail.vhost_options.canonical_host == "www" %}selected{% endif %}>Redirect {{ detail.domain }} → www.{{ detail.domain }}</option>
+      </select>
+      <span class="muted hint" style="display:block;margin-top:0.3rem">
+        Search engines treat www and non-www as two different sites; picking one
+        keeps rankings and cookies in a single place. The www option needs the
+        <code>www.{{ detail.domain }}</code> alias on this hosting first — the
+        alias is what puts the name into the certificate.
+      </span>
+    </div>
+    <div class="field" style="margin-top:0.7rem">
       <label for="hsts_max_age">HSTS <code>max-age</code> <span class="hint">seconds (0 = off)</span></label>
       <select id="hsts_max_age" name="hsts_max_age">
         <option value="0" {% if detail.vhost_options.hsts_max_age == 0 %}selected{% endif %}>Off (0)</option>

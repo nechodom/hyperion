@@ -3296,6 +3296,31 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 message: "fastcgi_cache_ttl must be 0..=86400 (24h)".into(),
             });
         }
+        // Canonical host: a closed set — this string reaches an nginx
+        // `return 301 https://<value>` and a `$host !=` comparison, so a
+        // free-form value would be config injection with extra steps.
+        if !matches!(options.canonical_host.as_str(), "" | "www" | "non-www") {
+            return Err(RpcError::Validation {
+                message: "canonical_host must be empty, \"www\" or \"non-www\"".into(),
+            });
+        }
+        // "www" needs www.<domain> inside the cert, or every redirect is
+        // served over a TLS error. The create/alias flow adds the www
+        // alias to the SANs; a hosting without it must add the alias
+        // first, and refusing here with the reason beats a browser
+        // certificate warning the operator has to reverse-engineer.
+        if options.canonical_host == "www" {
+            let www = format!("www.{}", detail.domain);
+            if !detail.aliases.iter().any(|a| a == &www) {
+                return Err(RpcError::Validation {
+                    message: format!(
+                        "canonical host www requires the alias {www} on this hosting \
+                         (it is what puts the name into the certificate). Add the \
+                         alias, reissue the certificate, then enable the redirect."
+                    ),
+                });
+            }
+        }
         if options.fastcgi_cache_enabled && options.fastcgi_cache_ttl == 0 {
             options.fastcgi_cache_ttl = 300; // 5 min default.
         }
@@ -5166,6 +5191,82 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// script losing its +x is its own outage. Files go to 0644 anyway,
     /// which is correct for a PHP application — PHP is read by the
     /// interpreter, never executed by the kernel.
+    /// Periodic self-heal: find hostings whose trees nginx cannot read,
+    /// and repair them without waiting for the operator to diagnose a
+    /// site-wide 404.
+    ///
+    /// Exists because the failure is invisible from every dashboard this
+    /// panel has: the files are present, PHP may keep serving cached
+    /// pages, the vhost is correct — only the MODE bits are wrong, and
+    /// the operator experiences it as "the site randomly 404s everything"
+    /// hours after an import or a root-shell unzip. The probe is a
+    /// handful of stats per site (see `tree_denies_world_read`); the
+    /// repair runs only when it fires, and lands in the audit log both
+    /// so the fix is traceable and so a repeating heal — something
+    /// re-breaking modes on a schedule — is visible as a pattern.
+    pub async fn permissions_autoheal_tick(&self) -> Result<i64, RpcError> {
+        let mut healed = 0i64;
+        for s in self.list().await? {
+            if s.state != HostingState::Active {
+                continue;
+            }
+            let Ok(detail) = self.get(HostingSelector::Id(s.id.clone())).await else {
+                continue;
+            };
+            // Proxy and redirect hostings have no document tree to serve.
+            if detail.root_dir.trim().is_empty()
+                || matches!(detail.kind.as_str(), "reverse_proxy" | "redirect")
+                || detail.system_user.trim().is_empty()
+            {
+                continue;
+            }
+            let root = std::path::PathBuf::from(&detail.root_dir);
+            let broken = tokio::task::spawn_blocking(move || tree_denies_world_read(&root))
+                .await
+                .unwrap_or(false);
+            if !broken {
+                continue;
+            }
+            let site_dir = std::path::Path::new(&detail.root_dir)
+                .parent()
+                .unwrap_or(std::path::Path::new(&detail.root_dir))
+                .to_path_buf();
+            tracing::warn!(
+                domain = %detail.domain,
+                path = %site_dir.display(),
+                "permissions autoheal: tree is unreadable by nginx — repairing"
+            );
+            match repair_tree_permissions(&detail.system_user, &site_dir).await {
+                Ok(()) => {
+                    healed += 1;
+                    self.append_audit(
+                        "hosting.permissions.autoheal",
+                        Some(detail.id.as_str()),
+                        &serde_json::json!({
+                            "path": site_dir.display().to_string(),
+                            "user": detail.system_user,
+                        })
+                        .to_string(),
+                        "ok",
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    tracing::warn!(domain = %detail.domain, error = %e,
+                        "permissions autoheal failed");
+                    self.append_audit(
+                        "hosting.permissions.autoheal",
+                        Some(detail.id.as_str()),
+                        &serde_json::json!({"error": e}).to_string(),
+                        "failed",
+                    )
+                    .await;
+                }
+            }
+        }
+        Ok(healed)
+    }
+
     pub async fn hosting_repair_permissions(
         &self,
         sel: HostingSelector,
@@ -5196,62 +5297,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             });
         }
         let dir_s = site_dir.display().to_string();
-
-        let run = |program: &'static str, args: Vec<String>| async move {
-            tokio::process::Command::new(program)
-                .args(&args)
-                .output()
-                .await
-                .map_err(|e| RpcError::Internal_with(format!("{program}: {e}")))
-                .and_then(|o| {
-                    if o.status.success() {
-                        Ok(())
-                    } else {
-                        Err(RpcError::Internal_with(format!(
-                            "{program} failed: {}",
-                            String::from_utf8_lossy(&o.stderr).trim()
-                        )))
-                    }
-                })
-        };
-
-        // 1. Ownership — the fix that matters.
-        run(
-            "/usr/bin/chown",
-            vec![
-                "-R".into(),
-                format!("{user}:{user}"),
-                "--".into(),
-                dir_s.clone(),
-            ],
-        )
-        .await?;
-
-        // 2. Directories 0755, then files 0644. Two passes rather than a
-        //    single recursive chmod, which cannot express "different mode
-        //    per type" and would leave every directory unenterable at
-        //    0644 — a site that 403s on everything.
-        for (typ, mode) in [("d", "0755"), ("f", "0644")] {
-            run(
-                "/usr/bin/find",
-                vec![
-                    dir_s.clone(),
-                    "-type".into(),
-                    typ.into(),
-                    "-exec".into(),
-                    "/usr/bin/chmod".into(),
-                    mode.into(),
-                    "{}".into(),
-                    "+".into(),
-                ],
-            )
-            .await?;
-        }
-
-        // 3. Make the path reachable. `useradd -m` leaves /home/<user> at
-        //    0700, which 404s every request and blocks FTP even when
-        //    ownership below is perfect.
-        hyperion_adapters::fs::ensure_ancestors_traversable(&site_dir).await;
+        repair_tree_permissions(user, &site_dir)
+            .await
+            .map_err(RpcError::Internal_with)?;
 
         self.append_audit(
             "hosting.repair_permissions",
@@ -20628,6 +20676,32 @@ async fn mta_ptr_check(myhostname: &str) -> (String, String, String) {
     let Ok(ip) = fetch_public_ip_v4("https://api4.ipify.org").await else {
         return (String::new(), String::new(), "unknown".to_string());
     };
+    // A bare hostname cannot match any PTR, and reporting that as a PTR
+    // mismatch sends the operator to the WRONG side of the comparison:
+    // the guidance said "set the PTR to `hosting`" — a bare word — while
+    // the PTR was a perfectly good FQDN and the hostname was the thing
+    // needing the fix. Report it as its own state so the card can point
+    // at `hostnamectl`, not at the DNS console.
+    if !myhostname.contains('.') {
+        let out = tokio::process::Command::new("/usr/bin/dig")
+            .args(["+short", "+time=3", "+tries=1", "-x", &ip])
+            .output()
+            .await;
+        let ptr = out
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .map(str::trim)
+                    .find(|l| !l.is_empty())
+                    .unwrap_or("")
+                    .trim_end_matches('.')
+                    .to_string()
+            })
+            .unwrap_or_default();
+        return (ip, ptr, "hostname-not-fqdn".to_string());
+    }
     let out = tokio::process::Command::new("/usr/bin/dig")
         .args(["+short", "+time=3", "+tries=1", "-x", &ip])
         .output()
@@ -21143,6 +21217,108 @@ const INTEGRITY_ENABLED_KV_KEY: &str = "integrity_scan_enabled";
 /// be pinned to one vhost, so one customer's switch must not silence them
 /// for everybody.
 const FAIL2BAN_HTTP_KV_KEY: &str = "http_bruteforce_scan_enabled";
+
+/// Thin pub wrapper so `panel_import` can reuse the exact repair the
+/// panel action runs, without `repair_tree_permissions` itself going pub.
+pub async fn repair_tree_permissions_for_import(
+    user: &str,
+    site_dir: &std::path::Path,
+) -> Result<(), String> {
+    repair_tree_permissions(user, site_dir).await
+}
+
+/// The permission repair itself: ownership to `user`, directories 0755,
+/// files 0644, ancestors traversable. Shared by the panel's
+/// Repair-file-permissions action, the import pipeline, and the autoheal
+/// tick — one behaviour, three doors.
+///
+/// Two find passes rather than a single recursive chmod, which cannot
+/// express "different mode per type" and would leave every directory
+/// unenterable at 0644 — a site that 403s on everything.
+async fn repair_tree_permissions(user: &str, site_dir: &std::path::Path) -> Result<(), String> {
+    let dir_s = site_dir.display().to_string();
+    let run = |program: &'static str, args: Vec<String>| async move {
+        tokio::process::Command::new(program)
+            .args(&args)
+            .output()
+            .await
+            .map_err(|e| format!("{program}: {e}"))
+            .and_then(|o| {
+                if o.status.success() {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "{program} failed: {}",
+                        String::from_utf8_lossy(&o.stderr).trim()
+                    ))
+                }
+            })
+    };
+    run(
+        "/usr/bin/chown",
+        vec![
+            "-R".into(),
+            format!("{user}:{user}"),
+            "--".into(),
+            dir_s.clone(),
+        ],
+    )
+    .await?;
+    for (typ, mode) in [("d", "0755"), ("f", "0644")] {
+        run(
+            "/usr/bin/find",
+            vec![
+                dir_s.clone(),
+                "-type".into(),
+                typ.into(),
+                "-exec".into(),
+                "/usr/bin/chmod".into(),
+                mode.into(),
+                "{}".into(),
+                "+".into(),
+            ],
+        )
+        .await?;
+    }
+    hyperion_adapters::fs::ensure_ancestors_traversable(site_dir).await;
+    Ok(())
+}
+
+/// True when the tree at `root` would 404 under nginx: the directory
+/// itself, or any of its first-level entries, denies world read/traverse.
+///
+/// First level only, ON PURPOSE. A full walk per tick would repeat `du`'s
+/// cost for a probe that fires almost never — and the real-world causes
+/// (an archive extracted with the source panel's 0770/0660 modes, a
+/// root-owned unzip) break the tree UNIFORMLY, so the top level is
+/// representative. wp-includes at drwxrwx--- is exactly what an imported
+/// CloudPanel site looks like: CloudPanel runs nginx inside the site
+/// user's group, hyperion does not, so modes that worked there 404 here.
+fn tree_denies_world_read(root: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let dir_denied = |m: u32| m & 0o001 == 0; // no o+x ⇒ untraversable
+    let file_denied = |m: u32| m & 0o004 == 0; // no o+r ⇒ unreadable
+    let Ok(md) = std::fs::metadata(root) else {
+        return false; // absent ⇒ someone else's problem, not a mode problem
+    };
+    if dir_denied(md.permissions().mode()) {
+        return true;
+    }
+    let Ok(entries) = std::fs::read_dir(root) else {
+        return false;
+    };
+    for e in entries.flatten().take(64) {
+        let Ok(md) = e.metadata() else { continue };
+        let m = md.permissions().mode();
+        if md.is_dir() && dir_denied(m) {
+            return true;
+        }
+        if md.is_file() && file_denied(m) {
+            return true;
+        }
+    }
+    false
+}
 
 /// Epoch seconds of the first scan of the current protected stretch —
 /// written by the scanner, cleared the moment a site is opted out. The
@@ -26216,6 +26392,69 @@ mod tests {
             );
             assert_eq!(builtin, templated);
         }
+    }
+
+    /// The autoheal probe must fire on exactly the tree an imported
+    /// CloudPanel site arrives with (0770 dirs / 0660 files), and stay
+    /// quiet on a healthy one — a false positive here would chmod a
+    /// customer's tree every 5 minutes forever.
+    #[test]
+    fn perm_probe_fires_on_archive_modes_and_not_on_healthy_trees() {
+        use super::tree_denies_world_read;
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("htdocs");
+        std::fs::create_dir_all(root.join("wp-includes")).expect("mkdir");
+        std::fs::write(root.join("index.php"), b"<?php").expect("write");
+
+        // Healthy: 0755/0644.
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        std::fs::set_permissions(
+            root.join("wp-includes"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .expect("chmod");
+        std::fs::set_permissions(
+            root.join("index.php"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .expect("chmod");
+        assert!(!tree_denies_world_read(&root), "healthy tree must not fire");
+
+        // The imported-CloudPanel shape: a first-level dir at 0770.
+        std::fs::set_permissions(
+            root.join("wp-includes"),
+            std::fs::Permissions::from_mode(0o770),
+        )
+        .expect("chmod");
+        assert!(tree_denies_world_read(&root), "0770 subdir must fire");
+
+        // A first-level file at 0660 fires too.
+        std::fs::set_permissions(
+            root.join("wp-includes"),
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .expect("chmod");
+        std::fs::set_permissions(
+            root.join("index.php"),
+            std::fs::Permissions::from_mode(0o660),
+        )
+        .expect("chmod");
+        assert!(tree_denies_world_read(&root), "0660 file must fire");
+
+        // The docroot itself untraversable fires.
+        std::fs::set_permissions(
+            root.join("index.php"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .expect("chmod");
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o750)).expect("chmod");
+        assert!(tree_denies_world_read(&root), "0750 docroot must fire");
+
+        // Absent path: someone else's problem, never a mode problem.
+        assert!(!tree_denies_world_read(std::path::Path::new(
+            "/definitely/not/here"
+        )));
     }
 
     /// Deleting the section that reads badly must not delete the
