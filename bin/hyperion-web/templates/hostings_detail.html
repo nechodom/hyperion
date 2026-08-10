@@ -558,8 +558,8 @@
     <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
     Open site
   </a>
-  {% if let Some(preview) = preview_domain %}
-  <a class="btn ghost" href="https://{{ preview }}" target="_blank" rel="noopener noreferrer"
+  {% if preview_domain.available() %}
+  <a class="btn ghost" href="https://{{ preview_domain.url }}" target="_blank" rel="noopener noreferrer"
      title="Internal preview on this node's wildcard cert — works before DNS cutover">
     <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
     Preview site
@@ -584,10 +584,32 @@
     </button>
   </form>
 </div>
-{% if let Some(preview) = preview_domain %}
+{# Preview affordance on EVERY site, not just those with a live wildcard:
+   a working link, or the one setup step still missing. Previews are not
+   test-only — every hosting gets one once the node has a *.<base> cert. #}
+{% if preview_domain.available() %}
 <p class="text-soft" style="font-size:0.8rem;margin:-0.4rem 0 1rem">
-  Preview opens <code>{{ preview }}</code> on this node's wildcard cert with valid
+  Preview opens <code>{{ preview_domain.url }}</code> on this node's wildcard cert with valid
   TLS — an internal URL for viewing the site before pointing real DNS at this node.
+</p>
+{% else if preview_domain.reason == "no-wildcard" %}
+<p class="text-soft" style="font-size:0.8rem;margin:-0.4rem 0 1rem">
+  <strong>Preview subdomain not active yet.</strong> This site (and every other on this node)
+  will get an internal address under <code>*.{{ preview_domain.base }}</code> once you issue that
+  wildcard certificate — <a href="/settings#testnodes">Settings → Test nodes &amp; previews → Step 2</a>.
+</p>
+{% else if preview_domain.reason == "no-template" %}
+<p class="text-soft" style="font-size:0.8rem;margin:-0.4rem 0 1rem">
+  <strong>Want a preview URL for this site?</strong> Preview subdomains give every hosting on the
+  node an internal address (e.g. <code>{{ detail.domain }}</code> → <code>preview.&lt;base&gt;</code>)
+  with valid TLS, so you can open a site before its real DNS points here. Set it up once in
+  <a href="/settings#testnodes">Settings → Test nodes &amp; previews</a> — it applies to all sites,
+  production included.
+</p>
+{% else if preview_domain.reason == "under-base" %}
+<p class="text-soft" style="font-size:0.8rem;margin:-0.4rem 0 1rem">
+  This domain is already under the node's preview wildcard, so it is reachable directly — no
+  separate preview address needed.
 </p>
 {% endif %}
 
