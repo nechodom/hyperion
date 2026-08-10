@@ -785,6 +785,16 @@ async fn main() -> anyhow::Result<()> {
                     Ok(_) => {}
                     Err(e) => tracing::warn!(error=%e, "quota enforce tick failed"),
                 }
+                // Self-heal trees nginx cannot read (archive modes from an
+                // import, a root-shell unzip). Probe is a few stats per
+                // site; the chown/chmod runs only when it fires.
+                match tick_svc.permissions_autoheal_tick().await {
+                    Ok(n) if n > 0 => {
+                        tracing::warn!(healed = n, "permissions autoheal: repaired site trees")
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error=%e, "permissions autoheal tick failed"),
+                }
             }
         });
     }

@@ -65,6 +65,11 @@ struct VhostTpl<'a> {
     /// allowlist disabled (every entry has already been checked to
     /// parse as an IpAddr or addr/prefix, so they're safe to inline).
     wp_admin_allow: Vec<String>,
+    /// The one hostname every other served name 301s onto, or empty for
+    /// no canonical redirect. Computed in `render` from
+    /// `options.canonical_host` ("www" | "non-www" | ""), so the
+    /// template never has to build a hostname.
+    canonical_server_name: String,
     /// Preview hostname + wildcard cert paths for the optional second
     /// server block. `preview_enabled` gates the whole block so an
     /// ordinary hosting renders unchanged. The string fields are empty
@@ -511,6 +516,11 @@ pub fn render(input: &VhostInput<'_>) -> Result<String, AdapterError> {
         custom_nginx_snippet: &input.options.custom_nginx_snippet,
         maintenance_mode: input.options.maintenance_mode,
         fastcgi_cache_enabled: input.options.fastcgi_cache_enabled,
+        canonical_server_name: match input.options.canonical_host.as_str() {
+            "www" => format!("www.{}", input.domain),
+            "non-www" => input.domain.to_string(),
+            _ => String::new(),
+        },
         fastcgi_cache_ttl: input.options.fastcgi_cache_ttl,
         waf_enabled: input.options.waf_enabled,
         wp_admin_allow: parse_admin_allowlist(&input.options.wp_admin_allowlist),
@@ -1084,6 +1094,11 @@ mod tests {
         );
         assert!(out.contains("set_real_ip_from 104.16.0.0/13;"));
         assert!(out.contains("set_real_ip_from 2606:4700::/32;"));
+        // No canonical redirect configured ⇒ no `if ($host` anywhere.
+        assert!(
+            !out.contains("if ($host"),
+            "unconfigured canonical leaked in:\n{out}"
+        );
         assert!(out.contains("try_files $uri $uri/ =404"));
         // CRITICAL: with no PHP runtime, .php requests must be REFUSED, not
         // fall through to the static file handler — nginx would otherwise
@@ -1115,6 +1130,51 @@ mod tests {
             !out.contains("root /var/lib/lm/acme-challenges"),
             "vhost MUST NOT use `root` for the ACME challenge location"
         );
+    }
+
+    /// The canonical-host redirect: one hop from http, `$host` guard on
+    /// https, and the exact hostname the operator chose — in BOTH
+    /// directions, because a bool could not have carried direction.
+    #[test]
+    fn canonical_host_renders_both_directions() {
+        let aliases = vec!["www.example.cz".to_string()];
+        for (mode, canon) in [("non-www", "example.cz"), ("www", "www.example.cz")] {
+            let opts = hyperion_types::VhostOptions {
+                canonical_host: mode.to_string(),
+                ..Default::default()
+            };
+            let out = render(&VhostInput {
+                domain: "example.cz",
+                aliases: &aliases,
+                root_dir: "/home/example_cz/example.cz/htdocs",
+                logs_dir: "/home/example_cz/example.cz/logs",
+                system_user: "example_cz",
+                php_version: Some("8.3"),
+                cert_path: "/etc/lm/certs/example.cz/fullchain.pem",
+                key_path: "/etc/lm/certs/example.cz/privkey.pem",
+                acme_challenge_root: "/var/lib/lm/acme-challenges",
+                hosting_id: "01H0000000000000000000",
+                options: &opts,
+                preview_server_name: None,
+                preview_cert_path: None,
+                preview_cert_key_path: None,
+            })
+            .expect("render");
+            assert!(
+                out.contains(&format!("if ($host != \"{canon}\")")),
+                "{mode}: missing host guard:\n{out}"
+            );
+            assert!(
+                out.contains(&format!("return 301 https://{canon}$request_uri;")),
+                "{mode}: missing 301 target:\n{out}"
+            );
+            // The :80 block must go STRAIGHT to the canonical name — the
+            // default `https://$host` would cost a second redirect hop.
+            assert!(
+                !out.contains("return 301 https://$host$request_uri;"),
+                "{mode}: http block still redirects to $host:\n{out}"
+            );
+        }
     }
 
     #[test]

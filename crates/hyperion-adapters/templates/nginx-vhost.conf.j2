@@ -297,7 +297,11 @@ server {
     }
 
     location / {
+{%- if !canonical_server_name.is_empty() %}
+        return 301 https://{{ canonical_server_name }}$request_uri;
+{%- else %}
         return 301 https://$host$request_uri;
+{%- endif %}
     }
 }
 
@@ -317,6 +321,18 @@ server {
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
     server_name {{ domain }}{% for a in aliases %} {{ a }}{% endfor %};
+{%- if !canonical_server_name.is_empty() %}
+    # Canonical-host redirect (operator choice: www vs non-www). The
+    # `if` is the documented-safe pattern — a bare `return` and nothing
+    # else — and beats a separate server block because the alias list
+    # stays in ONE place. Sits before any content is served, after the
+    # TLS handshake (the cert covers the aliases, so the redirect is
+    # served on a valid connection, which a hostname mismatch would not
+    # allow).
+    if ($host != "{{ canonical_server_name }}") {
+        return 301 https://{{ canonical_server_name }}$request_uri;
+    }
+{%- endif %}
     root {{ root_dir }};
     index index.php index.html index.htm;
 

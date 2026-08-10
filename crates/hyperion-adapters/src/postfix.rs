@@ -359,6 +359,16 @@ pub async fn ensure_direct_delivery_config(
         // do not verify certificates (public MXs routinely present names
         // that do not match).
         "smtp_tls_security_level=may",
+        // Retry a deferred delivery after 1 minute instead of postfix's
+        // default 5. The dominant deferral for a send-only box with a
+        // young IP is GREYLISTING — the receiver 450s the first attempt
+        // on purpose and accepts the retry — and with the default
+        // backoff every greylisted message costs five minutes of
+        // "where is my e-mail". Most greylisters require ~60 s of age,
+        // so retrying sooner than this buys nothing, and retrying at
+        // this rate is well within polite behaviour.
+        "minimal_backoff_time=60s",
+        "maximal_backoff_time=600s",
     ];
     for line in postconf_lines {
         cmd::run("/usr/sbin/postconf", &["-e", line]).await?;

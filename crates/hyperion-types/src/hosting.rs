@@ -189,6 +189,18 @@ pub struct VhostOptions {
     #[serde(default)]
     pub redirect_preserve_path: bool,
 
+    /// Canonical-host redirect: `""` (serve every name as-is, the
+    /// default), `"non-www"` (301 `www.<domain>` and every other alias
+    /// onto the apex), or `"www"` (301 the apex and aliases onto
+    /// `www.<domain>`).
+    ///
+    /// A STRING with two named values rather than a bool, because
+    /// "which spelling is canonical" is the actual decision the
+    /// operator is making — a `redirect_www: bool` cannot say in which
+    /// direction it points, and both directions are common.
+    #[serde(default)]
+    pub canonical_host: String,
+
     /// WAF-lite (migration 036). When true the vhost gets a
     /// conservative set of nginx rules: deny direct access to
     /// sensitive files, block PHP execution under wp-content/uploads
