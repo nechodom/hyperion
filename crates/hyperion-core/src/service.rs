@@ -12024,7 +12024,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         } else if matches {
             "DNS resolves here — cert issuance will work.".into()
         } else if proxied {
-            "Proxied through Cloudflare — the visible addresses are Cloudflare's,              which is how the proxy works, not a misconfiguration. Traffic still              reaches this server. HTTP-01 cert issuance works through the proxy;              if certs fail, check the Cloudflare SSL/TLS mode (Full, not Flexible)              rather than DNS."
+            "Proxied through Cloudflare — the visible addresses are Cloudflare's, \
+             which is how the proxy works, not a misconfiguration. Certificate \
+             issuance uses DNS-01 via the Cloudflare API when a token is \
+             configured (Settings -> Cloudflare certs); without a token, HTTP-01 \
+             depends on the proxy forwarding the challenge and often fails. If \
+             the site errors with a valid cert, check the Cloudflare SSL/TLS \
+             mode (Full, not Flexible) rather than DNS."
                 .into()
         } else {
             format!(
@@ -12174,19 +12180,75 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .output()
             .await;
 
-        let cert = hyperion_adapters::acme::issue_http01(hyperion_adapters::acme::IssueRequest {
-            domain: &detail.domain,
-            sans: &sans,
-            contact_email: email,
-            staging: req.staging,
-            challenge_root: std::path::Path::new(&self.paths.acme_challenge_root),
-            certs_root: "/etc/hyperion/certs",
-        })
-        .await
-        .map_err(|e| RpcError::ProvisioningFailed {
-            stage: "acme".into(),
-            reason: e.to_string(),
-        })?;
+        // Behind Cloudflare's proxy, HTTP-01 validates against the EDGE,
+        // not this server: Let's Encrypt fetches the challenge from
+        // whatever origin Cloudflare is configured to use, plus whatever
+        // page rules and redirects sit in front of it. Whether that
+        // reaches the token written HERE is a property of the operator's
+        // Cloudflare dashboard, which no amount of DNS checking can see —
+        // the observed failure is LE reporting a 404 for a token that is
+        // sitting on this disk. DNS-01 asks Cloudflare's own DNS instead,
+        // which is exactly the thing the proxy cannot get in the way of.
+        let proxied = domain_is_cloudflare_proxied(&detail.domain).await;
+        let cert = if proxied {
+            let Some(token) = hyperion_adapters::cloudflare::token() else {
+                return Err(RpcError::ProvisioningFailed {
+                    stage: "acme".into(),
+                    reason: format!(
+                        "{} is proxied through Cloudflare, so HTTP-01 validation is \
+                         answered by Cloudflare's edge, not this server — issuance \
+                         cannot be made reliable this way. Either add a Cloudflare API \
+                         token (Settings -> Cloudflare certs) so issuance can use \
+                         DNS-01 automatically, or grey-cloud the DNS record for the \
+                         duration of issuance.",
+                        detail.domain
+                    ),
+                });
+            };
+            let pending =
+                hyperion_adapters::acme::dns01_begin(&detail.domain, &sans, email, req.staging)
+                    .await
+                    .map_err(|e| RpcError::ProvisioningFailed {
+                        stage: "acme_dns01_begin".into(),
+                        reason: e.to_string(),
+                    })?;
+            let ids = hyperion_adapters::cloudflare::publish_txt(
+                &token,
+                &pending.record_name,
+                &pending.values,
+            )
+            .await
+            .map_err(|e| RpcError::ProvisioningFailed {
+                stage: "cloudflare_publish".into(),
+                reason: e.to_string(),
+            })?;
+            // Cloudflare's DNS answers fast, but LE resolves through its
+            // own infrastructure — give the records a moment first.
+            tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+            let finish =
+                hyperion_adapters::acme::dns01_finish(&detail.domain, "/etc/hyperion/certs").await;
+            // Clean up the TXT records regardless of outcome — stale
+            // challenge records accumulate forever otherwise.
+            hyperion_adapters::cloudflare::cleanup_txt(&token, &ids).await;
+            finish.map_err(|e| RpcError::ProvisioningFailed {
+                stage: "acme_dns01".into(),
+                reason: e.to_string(),
+            })?
+        } else {
+            hyperion_adapters::acme::issue_http01(hyperion_adapters::acme::IssueRequest {
+                domain: &detail.domain,
+                sans: &sans,
+                contact_email: email,
+                staging: req.staging,
+                challenge_root: std::path::Path::new(&self.paths.acme_challenge_root),
+                certs_root: "/etc/hyperion/certs",
+            })
+            .await
+            .map_err(|e| RpcError::ProvisioningFailed {
+                stage: "acme".into(),
+                reason: e.to_string(),
+            })?
+        };
 
         // Persist cert info in DB
         let cert_path = format!("/etc/hyperion/certs/{}/fullchain.pem", detail.domain);
@@ -20246,6 +20308,20 @@ struct DkimKv {
 /// the visible addresses belong to Cloudflare BY DESIGN, and comparing
 /// them against this node's own IP proves nothing about where traffic
 /// actually lands.
+/// True when every published address of `domain` sits inside Cloudflare's
+/// proxy ranges — the same test the DNS banner uses, packaged for the
+/// ACME path. Empty answers are NOT proxied: a domain with no records at
+/// all has a different problem, and HTTP-01 will produce the accurate
+/// error for it.
+async fn domain_is_cloudflare_proxied(domain: &str) -> bool {
+    let (a, aaaa) = tokio::join!(dig_records(domain, "A"), dig_records(domain, "AAAA"));
+    let a = a.unwrap_or_default();
+    let aaaa = aaaa.unwrap_or_default();
+    !a.is_empty()
+        && a.iter().all(|ip| is_cloudflare_ipv4(ip))
+        && aaaa.iter().all(|ip| is_cloudflare_ipv6(ip))
+}
+
 fn is_cloudflare_ipv4(ip: &str) -> bool {
     let Ok(addr) = ip.trim().parse::<std::net::Ipv4Addr>() else {
         return false;
@@ -20772,7 +20848,7 @@ fn firewall_template_commands(id: &str) -> Option<Vec<Vec<&'static str>>> {
                 "}",
                 "accept",
                 "comment",
-                "hyperion:web",
+                "\"hyperion:web\"",
             ],
             vec![
                 "add",
@@ -20785,7 +20861,7 @@ fn firewall_template_commands(id: &str) -> Option<Vec<Vec<&'static str>>> {
                 "443",
                 "accept",
                 "comment",
-                "hyperion:web-quic",
+                "\"hyperion:web-quic\"",
             ],
         ],
         "mail" => vec![vec![
@@ -20805,7 +20881,7 @@ fn firewall_template_commands(id: &str) -> Option<Vec<Vec<&'static str>>> {
             "}",
             "accept",
             "comment",
-            "hyperion:mail",
+            "\"hyperion:mail\"",
         ]],
         "hyperion" => vec![vec![
             "add",
@@ -20821,7 +20897,7 @@ fn firewall_template_commands(id: &str) -> Option<Vec<Vec<&'static str>>> {
             "}",
             "accept",
             "comment",
-            "hyperion:hyperion",
+            "\"hyperion:hyperion\"",
         ]],
         "ssh" => vec![vec![
             "add",
@@ -20834,7 +20910,7 @@ fn firewall_template_commands(id: &str) -> Option<Vec<Vec<&'static str>>> {
             "22",
             "accept",
             "comment",
-            "hyperion:ssh",
+            "\"hyperion:ssh\"",
         ]],
         "ftp" => vec![
             vec![
@@ -20848,7 +20924,7 @@ fn firewall_template_commands(id: &str) -> Option<Vec<Vec<&'static str>>> {
                 "21",
                 "accept",
                 "comment",
-                "hyperion:ftp-control",
+                "\"hyperion:ftp-control\"",
             ],
             vec![
                 "add",
@@ -20861,7 +20937,7 @@ fn firewall_template_commands(id: &str) -> Option<Vec<Vec<&'static str>>> {
                 "40000-50000",
                 "accept",
                 "comment",
-                "hyperion:ftp-passive",
+                "\"hyperion:ftp-passive\"",
             ],
         ],
         // "worker_rpc" needs <MASTER_IP> substitution which we
@@ -20934,7 +21010,7 @@ async fn nft_ensure_ban_infra() -> Result<(), RpcError> {
     let listing = hyperion_adapters::cmd::run(NFT, &["list", "chain", "inet", "hyperion", "input"])
         .await
         .unwrap_or_default();
-    if !listing.contains("hyperion:ban-drop") {
+    if !listing.contains("\"hyperion:ban-drop\"") {
         // `insert` prepends, so the drop precedes any accept rules.
         hyperion_adapters::cmd::run(
             NFT,
@@ -20949,7 +21025,7 @@ async fn nft_ensure_ban_infra() -> Result<(), RpcError> {
                 "@banned",
                 "drop",
                 "comment",
-                "hyperion:ban-drop",
+                "\"hyperion:ban-drop\"",
             ],
         )
         .await
@@ -20959,7 +21035,7 @@ async fn nft_ensure_ban_infra() -> Result<(), RpcError> {
         })?;
     }
     // NB: the v6 marker must NOT contain the v4 marker as a substring, or
-    // `contains("hyperion:ban-drop")` would also match the v6 rule and skip
+    // `contains("\"hyperion:ban-drop\"")` would also match the v6 rule and skip
     // (re-)creating the v4 rule. "ban6-drop" keeps the two disjoint.
     if !listing.contains("hyperion:ban6-drop") {
         hyperion_adapters::cmd::run(

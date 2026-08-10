@@ -1073,6 +1073,17 @@ mod tests {
         .expect("render");
         assert!(out.contains("server_name example.cz;"));
         assert!(!out.contains("fastcgi_pass"));
+        // Cloudflare real-IP restoration must be present in every vhost.
+        // Without it a proxied site's wp-admin allowlist is unsatisfiable
+        // (every visitor "is" a CF edge address ⇒ permanent 403) and the
+        // brute-force scanner bans edge IPs. Trust is scoped by
+        // set_real_ip_from, so non-proxied sites are unaffected.
+        assert!(
+            out.contains("real_ip_header CF-Connecting-IP;"),
+            "vhost lost Cloudflare real-IP restoration:\n{out}"
+        );
+        assert!(out.contains("set_real_ip_from 104.16.0.0/13;"));
+        assert!(out.contains("set_real_ip_from 2606:4700::/32;"));
         assert!(out.contains("try_files $uri $uri/ =404"));
         // CRITICAL: with no PHP runtime, .php requests must be REFUSED, not
         // fall through to the static file handler — nginx would otherwise
