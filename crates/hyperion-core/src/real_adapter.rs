@@ -156,6 +156,68 @@ impl RealAdapter {
     }
 }
 
+/// The WordPress must-use plugin that makes a preview vhost usable.
+///
+/// Keyed on the `HYPERION_PREVIEW_HOST` fastcgi param, which only the
+/// preview server block sets — so on the real vhost this file does
+/// nothing and normal visitors never touch this code path.
+const PREVIEW_SHIM_PHP: &str = r#"<?php
+/**
+ * Hyperion preview shim (managed — do not edit).
+ *
+ * When this request arrives through the node's internal preview vhost,
+ * serve WordPress under THAT hostname instead of redirecting to the
+ * site's real Site Address. Absent the preview vhost's fastcgi param
+ * this is a no-op.
+ */
+if (!empty($_SERVER['HYPERION_PREVIEW_HOST'])) {
+    $hyperion_preview_url = 'https://' . $_SERVER['HYPERION_PREVIEW_HOST'];
+    add_filter('option_home', function () use ($hyperion_preview_url) { return $hyperion_preview_url; });
+    add_filter('option_siteurl', function () use ($hyperion_preview_url) { return $hyperion_preview_url; });
+    add_filter('option_home', function () use ($hyperion_preview_url) { return $hyperion_preview_url; }, 999);
+    add_filter('option_siteurl', function () use ($hyperion_preview_url) { return $hyperion_preview_url; }, 999);
+    // Suppress the canonical redirect that would bounce us to the real host.
+    remove_filter('template_redirect', 'redirect_canonical');
+}
+"#;
+
+/// Write or remove `wp-content/mu-plugins/hyperion-preview.php`.
+///
+/// Only touches WordPress sites (detected by an existing `wp-content`),
+/// and only when a preview vhost is being written. Best-effort: a failure
+/// to write the shim must not fail the vhost write — the site still
+/// serves, the preview just keeps redirecting until the next converge.
+async fn ensure_preview_shim(root_dir: &str, system_user: &str, preview_active: bool) {
+    let wp_content = std::path::Path::new(root_dir).join("wp-content");
+    // Not WordPress (no wp-content) ⇒ nothing to do.
+    if !tokio::fs::try_exists(&wp_content).await.unwrap_or(false) {
+        return;
+    }
+    let mu_dir = wp_content.join("mu-plugins");
+    let shim = mu_dir.join("hyperion-preview.php");
+    if !preview_active {
+        // No preview for this site anymore — remove a shim we may have
+        // dropped before, so it can't linger.
+        let _ = tokio::fs::remove_file(&shim).await;
+        return;
+    }
+    if tokio::fs::create_dir_all(&mu_dir).await.is_err() {
+        return;
+    }
+    if tokio::fs::write(&shim, PREVIEW_SHIM_PHP).await.is_err() {
+        return;
+    }
+    // The site runs as its own user; a root-owned mu-plugin is readable by
+    // PHP-FPM anyway, but chown keeps the tree uniform (and lets the site
+    // owner delete it over FTP).
+    let _ = tokio::process::Command::new("/usr/bin/chown")
+        .arg(format!("{system_user}:{system_user}"))
+        .arg(&mu_dir)
+        .arg(&shim)
+        .output()
+        .await;
+}
+
 /// Resolved internal-preview server block for one hosting.
 struct PreviewVhost {
     server_name: String,
@@ -888,7 +950,19 @@ impl AdapterPort for RealAdapter {
             preview_cert_path: preview.as_ref().map(|p| p.cert_path.as_str()),
             preview_cert_key_path: preview.as_ref().map(|p| p.key_path.as_str()),
         };
-        hyperion_adapters::nginx::write_vhost(&self.nginx_paths, &input).await
+        hyperion_adapters::nginx::write_vhost(&self.nginx_paths, &input).await?;
+
+        // Drop (or remove) the WordPress preview shim. A preview vhost
+        // serves the same docroot, so WordPress sees a host that isn't its
+        // configured Site Address and 301s every request back to the real
+        // domain — which defeats the whole point of previewing before DNS
+        // cutover. The mu-plugin, gated on the `HYPERION_PREVIEW_HOST`
+        // fastcgi param that ONLY the preview server block sets, rewrites
+        // home/siteurl to the preview host and drops the canonical
+        // redirect. On the primary vhost the param is absent, so the same
+        // file is inert — real visitors are unaffected.
+        ensure_preview_shim(&detail.root_dir, &detail.system_user, preview.is_some()).await;
+        Ok(())
     }
 
     async fn nginx_delete_vhost(
@@ -1507,6 +1581,41 @@ async fn unix_user_exists(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The preview shim must land only in WordPress sites, only when a
+    /// preview is active, and must be removed when it is not — otherwise a
+    /// stale shim could rewrite a real site's URLs.
+    #[tokio::test]
+    async fn preview_shim_is_written_removed_and_skips_non_wp() {
+        let tmp = tempfile::tempdir().expect("tmp");
+        let root = tmp.path().join("htdocs");
+        std::fs::create_dir_all(&root).expect("mkdir");
+        let shim = root.join("wp-content/mu-plugins/hyperion-preview.php");
+
+        // Not WordPress yet (no wp-content) ⇒ nothing written even with a
+        // preview active.
+        ensure_preview_shim(&root.display().to_string(), "u", true).await;
+        assert!(
+            !shim.exists(),
+            "must not create wp-content on a non-WP site"
+        );
+
+        // Now it's WordPress. Preview active ⇒ shim appears and carries the
+        // guard + canonical-redirect removal.
+        std::fs::create_dir_all(root.join("wp-content")).expect("wp-content");
+        ensure_preview_shim(&root.display().to_string(), "u", true).await;
+        let body = std::fs::read_to_string(&shim).expect("shim written");
+        assert!(body.contains("HYPERION_PREVIEW_HOST"));
+        assert!(body.contains("remove_filter('template_redirect', 'redirect_canonical')"));
+
+        // Preview no longer applies ⇒ the shim is removed, so it can't
+        // rewrite the real site's URLs.
+        ensure_preview_shim(&root.display().to_string(), "u", false).await;
+        assert!(
+            !shim.exists(),
+            "shim must be removed when preview is inactive"
+        );
+    }
 
     #[test]
     fn real_adapter_default_paths() {
