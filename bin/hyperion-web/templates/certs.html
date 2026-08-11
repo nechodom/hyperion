@@ -102,12 +102,13 @@
     {% include "_node_auth_empty_note.html" %}
     <div style="margin-top:0.9rem;display:flex;gap:0.5rem;justify-content:center;flex-wrap:wrap">
       <a class="btn" href="/hostings/new">Create your first hosting</a>
-      <a class="btn ghost" href="/settings#tab-tls">Configure ACME</a>
+      <a class="btn ghost" href="/settings#tls">Configure ACME</a>
     </div>
   </div>
 {% else %}
   <div class="card" style="padding:0">
-    <table class="data-table data-table--cards">
+    <div class="scroll-x">
+<table class="data-table data-table--cards">
       <thead>
         <tr>
           <th>Domain</th>
@@ -158,6 +159,7 @@
         {% endfor %}
       </tbody>
     </table>
+</div>
   </div>
 {% endif %}
 {% endblock %}

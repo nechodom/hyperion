@@ -78,7 +78,8 @@
     <p class="muted">No importable sites found on this node.</p>
   {% else if stage == "plan" %}
   <div class="no-pad-table">
-    <table>
+    <div class="scroll-x">
+<table>
       <thead><tr><th>Action</th><th>Domain</th><th>PHP</th><th>DBs</th><th>Notes</th></tr></thead>
       <tbody>
       {% for r in plan_rows %}
@@ -92,6 +93,7 @@
       {% endfor %}
       </tbody>
     </table>
+</div>
   </div>
   {% endif %}
 

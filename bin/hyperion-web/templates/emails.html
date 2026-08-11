@@ -32,7 +32,7 @@
   </div>
   <span class="grow"></span>
   <div class="actions">
-    <a href="/settings#email" class="btn">
+    <a href="/settings#mail" class="btn">
       <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33"/></svg>
       SMTP settings
     </a>
@@ -91,14 +91,14 @@
     <h3>No emails sent yet</h3>
     <p>
       The agent hasn't sent any email. Open
-      <a href="/settings#email">Settings</a> and choose <strong>Send test</strong>
+      <a href="/settings#mail">Settings</a> and choose <strong>Send test</strong>
       to confirm your SMTP relay works.
     </p>
     {% else %}
     <h3>No emails match these filters</h3>
     <p>
       Try removing the filters above, or run a fresh test send from
-      <a href="/settings#email">Settings</a>.
+      <a href="/settings#mail">Settings</a>.
     </p>
     {% endif %}
     {% include "_node_auth_empty_note.html" %}

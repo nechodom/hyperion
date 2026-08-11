@@ -17,7 +17,7 @@
 
 <div class="card" style="margin-bottom:1rem;padding:0.85rem 1rem">
   <form method="get" action="/audit"
-        style="display:grid;grid-template-columns:1fr auto auto auto;gap:0.5rem 0.75rem;align-items:center">
+        class="audit-filter-grid" style="display:grid;grid-template-columns:1fr auto auto auto;gap:0.5rem 0.75rem;align-items:center">
     <input type="search" name="q" value="{{ q|e }}"
            placeholder="Search by action, target, actor, or payload…"
            autofocus

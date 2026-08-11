@@ -32,7 +32,8 @@
 
 {% if !targets.is_empty() %}
 <div class="card" style="padding:0;margin-bottom:1rem">
-  <table class="data-table">
+  <div class="scroll-x">
+<table class="data-table">
     <thead>
       <tr>
         <th>Name</th>
@@ -93,6 +94,7 @@
       {% endfor %}
     </tbody>
   </table>
+</div>
 </div>
 {% endif %}
 
