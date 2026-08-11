@@ -507,6 +507,9 @@ async fn main() -> anyhow::Result<()> {
         .clone()
         .unwrap_or_else(|| PathBuf::from("/etc/hyperion/node-id.json"));
 
+    // Keep a handle to the adapter for the boot-time preview-shim
+    // reconcile below; `HostingService::new` takes ownership of the Arc.
+    let adapter_for_shims = adapter.clone();
     let mut builder = hyperion_core::HostingService::new(pool, adapter, secrets)
         .with_paths(paths)
         .with_remote_backup(remote_backup)
@@ -542,6 +545,36 @@ async fn main() -> anyhow::Result<()> {
     // `vito`). Without this an in-place upgrade via update.sh wouldn't
     // unbreak existing 502'ing hostings.
     {
+        // Refresh the WordPress preview shim for every hosting. The
+        // agent's mu-plugin PHP can change between releases while the
+        // preview vhost on disk does not, and update.sh never rewrites
+        // vhosts — so without this a corrected shim would not land until
+        // each site was re-saved by hand. Shim-only: no nginx touch.
+        {
+            let shim_svc = svc.clone();
+            let shim_adapter = adapter_for_shims.clone();
+            tokio::spawn(async move {
+                let hostings = match shim_svc.list().await {
+                    Ok(v) => v,
+                    Err(_) => return,
+                };
+                let mut n = 0u32;
+                for h in hostings {
+                    if let Ok(d) = shim_svc
+                        .get(hyperion_rpc::wire::HostingSelector::Id(h.id.clone()))
+                        .await
+                    {
+                        shim_adapter
+                            .reconcile_preview_shim(&d.domain, &d.root_dir, &d.system_user)
+                            .await;
+                        n += 1;
+                    }
+                }
+                if n > 0 {
+                    tracing::info!(count = n, "boot: refreshed WordPress preview shims");
+                }
+            });
+        }
         let rerender_svc = svc.clone();
         tokio::spawn(async move {
             let n = rerender_svc.rerender_fpm_pools().await;
