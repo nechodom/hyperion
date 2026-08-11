@@ -354,6 +354,19 @@ server {
 # so an operator can open this site BEFORE pointing real DNS at the
 # node. Auto-rendered whenever the node has a wildcard and the primary
 # domain isn't already under it; removed with the hosting (same file).
+
+# Port 80 for the preview host → redirect to HTTPS. Without this block a
+# plain http:// request to the preview name matches NO server_name on :80
+# and falls through to nginx's default site — the "Welcome to nginx" page,
+# which is exactly what an operator sees when they open the preview link
+# without the https scheme. ACME is not served here (the wildcard is
+# DNS-01), so a bare redirect is safe.
+server {
+    listen 80;
+    listen [::]:80;
+    server_name {{ preview_server_name }};
+    location / { return 301 https://$host$request_uri; }
+}
 server {
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
