@@ -149,8 +149,9 @@
       <strong>No malware scan ran.</strong> ClamAV isn't installed on this
       hosting's node, so nothing looked inside <code>wp-content/uploads</code> —
       the one place checksum verification can't help, because those files were
-      never part of an official release. Install <code>clamav</code> on the node
-      to turn this half of the scan on.
+      never part of an official release. Install it in one click on the
+      <a href="/services">Services page</a> (find <strong>ClamAV</strong> →
+      <em>Install</em>) to turn this half of the scan on.
     </p>
   {% else if !scan.malware.is_empty() %}
     <h3 style="font-size:0.9rem;margin:0.9rem 0 0.4rem">ClamAV detections — {{ scan.malware.len() }}</h3>
