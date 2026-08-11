@@ -66,6 +66,30 @@ pub struct ValidatedCert {
 /// On success the leaf parses, the key matches it, and every required
 /// name is covered. The returned `fullchain_pem` is the leaf chain with
 /// the CA bundle appended.
+/// Read `notAfter` + issuer label out of a certificate already on disk,
+/// without needing its private key.
+///
+/// This exists for ADOPTION: a certificate issued before Hyperion recorded
+/// it. The panel's own cert is the case that matters — it was written
+/// straight to disk and never entered the `certificates` table, so the
+/// renewal sweep, which reads only that table, could not see it, and the one
+/// certificate whose expiry locks the operator out of the UI they would use
+/// to fix it was the only one nothing was watching.
+///
+/// Adoption needs exactly these two fields and has no business demanding the
+/// private key, so this deliberately does not reuse [`validate_upload`],
+/// which cross-checks a key it does not have.
+pub fn inspect_pem(cert_pem: &str) -> Result<(i64, String), CertError> {
+    let chain = parse_chain(cert_pem)?;
+    let leaf_der = chain
+        .first()
+        .ok_or_else(|| CertError::BadCertificate("empty certificate chain".into()))?
+        .as_ref();
+    let (_, leaf) = X509Certificate::from_der(leaf_der)
+        .map_err(|e| CertError::BadCertificate(e.to_string()))?;
+    Ok((leaf.validity().not_after.timestamp(), issuer_label(&leaf)))
+}
+
 pub fn validate_upload(
     cert_pem: &str,
     key_pem: &str,

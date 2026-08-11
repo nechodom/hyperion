@@ -8028,6 +8028,81 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         if tokio::fs::metadata(&cert_path).await.is_err() {
             return Ok(false);
         }
+
+        // Adopt a panel cert that predates it being recorded. Panel issuance
+        // used to write the cert to disk and nowhere else, so on every install
+        // provisioned before that was fixed the panel's certificate exists but
+        // has no `certificates` row — and the renewal sweep reads that table
+        // and nothing else. Left alone it expires at day 90, and because the
+        // panel vhost sets HSTS for two years with includeSubDomains, the
+        // result is a browser interstitial with no click-through, on the exact
+        // hostname the operator would use to fix it.
+        //
+        // This runs at agent boot, so the repair reaches existing installs on
+        // update with no operator action. Keyed on the row being absent, so it
+        // is idempotent and never overwrites a live row (in particular it
+        // cannot flip an operator-uploaded "manual" cert into the sweep).
+        if certificates::get(&self.pool, &hostname)
+            .await
+            .ok()
+            .flatten()
+            .is_none()
+        {
+            match tokio::fs::read_to_string(&cert_path).await {
+                Ok(pem) => match hyperion_adapters::cert::inspect_pem(&pem) {
+                    Ok((not_after, issuer)) => {
+                        match certificates::upsert(
+                            &self.pool,
+                            &hostname,
+                            now_secs(),
+                            not_after,
+                            &cert_path,
+                            &key_path,
+                            &issuer,
+                        )
+                        .await
+                        {
+                            Ok(_) => {
+                                tracing::info!(
+                                    domain = %hostname,
+                                    not_after,
+                                    %issuer,
+                                    "adopted the panel certificate into the renewal sweep"
+                                );
+                                self.append_audit(
+                                    "cert.panel_adopted",
+                                    None,
+                                    &serde_json::json!({
+                                        "domain": &hostname,
+                                        "not_after": not_after,
+                                        "issuer": &issuer,
+                                    })
+                                    .to_string(),
+                                    "ok",
+                                )
+                                .await;
+                            }
+                            Err(e) => tracing::warn!(
+                                error=%e,
+                                domain=%hostname,
+                                "could not record the panel cert — it will not auto-renew"
+                            ),
+                        }
+                    }
+                    Err(e) => tracing::warn!(
+                        error=%e,
+                        path=%cert_path,
+                        "panel cert on disk did not parse — not adopting"
+                    ),
+                },
+                Err(e) => tracing::warn!(
+                    error=%e,
+                    path=%cert_path,
+                    "could not read the panel cert — not adopting"
+                ),
+            }
+        }
+
         let acme_root = "/var/lib/hyperion/acme-challenges".to_string();
         let input = hyperion_adapters::nginx::PanelVhostInput {
             domain: &hostname,
@@ -12940,25 +13015,44 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             // burns Let's Encrypt's per-hostname failed-validation rate
             // limit (5/hour). The cert just expires while suspended and
             // is re-issued on resume. A None row (e.g. the panel cert or a
-            // test node's wildcard base, which aren't hostings) falls
-            // through and still renews.
+            // test node's wildcard base, which aren't hostings) is handled
+            // by its own arm below — it cannot go through issue_real_cert,
+            // which opens by resolving a hosting that does not exist.
             let hosting_row = hostings::get_by_domain(&self.pool, &domain_str)
                 .await
                 .ok()
                 .flatten();
+            // Only a hosting being torn down is genuinely un-renewable.
             if let Some(row) = &hosting_row {
-                if matches!(
-                    row.state,
-                    HostingState::Suspended | HostingState::Trashed | HostingState::Deleting
-                ) {
+                if matches!(row.state, HostingState::Deleting) {
                     tracing::debug!(
                         domain = %domain_str,
                         state = %row.state.as_str(),
-                        "cert renew: skipping non-serving hosting"
+                        "cert renew: skipping hosting being deleted"
                     );
                     continue;
                 }
             }
+            // Suspended and trashed sites DO renew. The old code skipped them
+            // on the premise that their vhost 503s the challenge path — but
+            // nginx-vhost-suspended.conf.j2 puts the ACME location above
+            // `location / { return 503; }` precisely so this keeps working,
+            // and a regression test pins that. The skip therefore protected
+            // nothing and cost real certificates: a site suspended over its
+            // last 30 days came back serving an expired one, because the
+            // promised "re-issued on resume" does not exist — resume() only
+            // rewrites the vhost.
+            //
+            // They must NOT go through issue_real_cert, though. That calls
+            // nginx_write_vhost, which renders the normal serving vhost with
+            // no state check, so renewing a suspended site would quietly
+            // un-suspend it — a non-paying customer back online as a side
+            // effect of a cron tick. Issue directly instead and re-apply the
+            // suspended vhost, which also gives nginx the reload it needs to
+            // pick the new certificate up.
+            let suspended_like = hosting_row.as_ref().is_some_and(|r| {
+                matches!(r.state, HostingState::Suspended | HostingState::Trashed)
+            });
             self.append_audit(
                 "cert.renew.attempt",
                 None,
@@ -13034,6 +13128,121 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                                      it shows you, then validate."
                                 .into(),
                         }
+                    }
+                }
+                // Renew without going through issue_real_cert. Two cases land
+                // here, for the same underlying reason — issue_real_cert
+                // resolves a hosting and then rewrites its serving vhost, and
+                // neither is wanted:
+                //
+                //   * no hosting at all (the panel's own certificate). It
+                //     opens with `self.get(sel)?`, so these returned NotFound
+                //     every tick, forever, while the cert expired anyway. The
+                //     comment above this block used to claim such rows "fall
+                //     through and still renew". They did not.
+                //   * a suspended or trashed hosting, where rewriting the
+                //     serving vhost would un-suspend the site.
+                Ok(_) if hosting_row.is_none() || suspended_like => {
+                    let email = match self.effective_acme_email(None) {
+                        Ok(e) => e.to_string(),
+                        Err(e) => {
+                            out.push(CertRenewResult {
+                                domain: domain_str.clone(),
+                                outcome: CertRenewOutcome::Failed {
+                                    error: e.to_string(),
+                                },
+                            });
+                            continue;
+                        }
+                    };
+                    match hyperion_adapters::acme::issue_http01(
+                        hyperion_adapters::acme::IssueRequest {
+                            domain: &domain_str,
+                            sans: &[],
+                            contact_email: &email,
+                            staging: false,
+                            challenge_root: std::path::Path::new(&self.paths.acme_challenge_root),
+                            certs_root: "/etc/hyperion/certs",
+                        },
+                    )
+                    .await
+                    {
+                        Ok(info) => {
+                            let _ = certificates::upsert(
+                                &self.pool,
+                                &domain_str,
+                                now,
+                                info.not_after,
+                                &cert.cert_path,
+                                &cert.key_path,
+                                &info.issuer,
+                            )
+                            .await;
+                            // nginx caches the certificate it loaded, so a
+                            // renewed FILE is invisible until a reload. The
+                            // normal path gets that from nginx_write_vhost;
+                            // neither case here goes through it, so each needs
+                            // its own reload — via the template that matches
+                            // what the site is supposed to be serving.
+                            if let (true, Some(row)) = (suspended_like, hosting_row.as_ref()) {
+                                // Re-apply with the SAME reason text the site
+                                // is already showing, so a renewal does not
+                                // silently reword the operator's suspension
+                                // notice.
+                                let reason =
+                                    hyperion_state::limits::get_suspension(&self.pool, &row.id)
+                                        .await
+                                        .ok()
+                                        .flatten()
+                                        .and_then(|s| s.reason_message);
+                                let aliases = hostings::aliases(&self.pool, &row.id)
+                                    .await
+                                    .unwrap_or_default();
+                                if let Err(e) = self
+                                    .adapters
+                                    .nginx_apply_suspended(&domain_str, aliases, reason)
+                                    .await
+                                {
+                                    tracing::warn!(
+                                        error=%e,
+                                        domain=%domain_str,
+                                        "renewed a suspended site's cert but could not re-apply \
+                                         its suspended vhost"
+                                    );
+                                }
+                            }
+                            let panel_host =
+                                read_cluster_section(self.agent_config_path.as_deref())
+                                    .panel_hostname;
+                            if !suspended_like
+                                && !panel_host.trim().is_empty()
+                                && domain_str == panel_host.trim()
+                            {
+                                let input = hyperion_adapters::nginx::PanelVhostInput {
+                                    domain: &domain_str,
+                                    cert_path: &cert.cert_path,
+                                    key_path: &cert.key_path,
+                                    acme_challenge_root: &self.paths.acme_challenge_root,
+                                };
+                                let paths = hyperion_adapters::nginx::Paths::debian_defaults();
+                                if let Err(e) =
+                                    hyperion_adapters::nginx::write_panel_vhost(&paths, &input)
+                                        .await
+                                {
+                                    tracing::warn!(
+                                        error=%e,
+                                        "panel cert renewed but the vhost reload failed — \
+                                         browsers keep seeing the old cert until nginx reloads"
+                                    );
+                                }
+                            }
+                            CertRenewOutcome::Renewed {
+                                new_not_after: info.not_after,
+                            }
+                        }
+                        Err(e) => CertRenewOutcome::Failed {
+                            error: acme_failure_message(&domain_str, false, &e.to_string()),
+                        },
                     }
                 }
                 Ok(d) => {
@@ -16048,6 +16257,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 not_after: bootstrap_not_after,
             });
         } else {
+            // The renewal sweep reads the `certificates` table and nothing
+            // else, so the panel's own cert has to land there or it is never
+            // a renewal candidate — see the upsert in the Ok arm below.
+            let pool_bg = self.pool.clone();
             tokio::spawn(async move {
                 {
                     let mut g = panel_progress.write().await;
@@ -16072,6 +16285,37 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     .await;
                 match result {
                     Ok(info) => {
+                        // Record it, or it never renews. Until this existed the
+                        // panel cert lived only in the in-memory progress cell
+                        // and on disk; cert_renew_tick reads the certificates
+                        // table, so the one certificate whose expiry locks the
+                        // operator out of the UI they would use to fix it was
+                        // the only one nothing was watching. HSTS on the panel
+                        // vhost is two years with includeSubDomains, so an
+                        // expired panel cert is a browser interstitial with no
+                        // click-through, and raw-IP access 308-redirects
+                        // straight back to the dead hostname.
+                        //
+                        // Logged rather than ignored: a silent failure here
+                        // puts the cert back outside the sweep, which is
+                        // exactly the bug this closes.
+                        if let Err(e) = certificates::upsert(
+                            &pool_bg,
+                            &hostname_bg,
+                            now_secs(),
+                            info.not_after,
+                            &cert_path_bg,
+                            &key_path_bg,
+                            &info.issuer,
+                        )
+                        .await
+                        {
+                            tracing::error!(
+                                error=%e,
+                                domain=%hostname_bg,
+                                "panel cert issued but NOT recorded — it will not auto-renew"
+                            );
+                        }
                         // Re-render panel vhost — paths unchanged,
                         // reload picks up the new cert chain.
                         let input = hyperion_adapters::nginx::PanelVhostInput {
@@ -28236,6 +28480,119 @@ mod tests {
             "expected Failed renewal in test env (no real ACME), got {:?}",
             results[0].outcome
         );
+    }
+
+    /// A certificate with no hosting behind it — the panel's own is the one
+    /// that matters — must still be ATTEMPTED, not dropped.
+    ///
+    /// It used to be routed through `issue_real_cert`, which opens by
+    /// resolving a hosting, so every tick returned `not found: hosting
+    /// selector` and the certificate expired regardless. Since the panel
+    /// vhost sets HSTS for two years, that expiry is a browser interstitial
+    /// with no click-through on the exact hostname the operator would use to
+    /// fix it. The outcome here is Failed (the mock cannot really talk to
+    /// Let's Encrypt) — what this pins is that the reason is no longer a
+    /// missing hosting.
+    #[tokio::test]
+    async fn cert_renew_tick_attempts_a_hosting_less_cert() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), happy_mocks());
+        let now = now_secs();
+        let later = now + 80 * 86_400;
+
+        // No `create()` — deliberately no hosting for this domain.
+        certificates::upsert(
+            &pool,
+            "panel.example.cz",
+            now,
+            later + 10 * 86_400,
+            "/cert",
+            "/key",
+            "letsencrypt",
+        )
+        .await
+        .expect("upsert panel cert");
+
+        let results = s
+            .cert_renew_tick(later, CERT_RENEWAL_WINDOW_DAYS)
+            .await
+            .expect("tick");
+        assert_eq!(results.len(), 1, "the panel cert must be a candidate");
+        assert_eq!(results[0].domain, "panel.example.cz");
+        match &results[0].outcome {
+            CertRenewOutcome::Failed { error } => assert!(
+                !error.contains("not found"),
+                "must not fail on a missing hosting — that was the bug: {error}"
+            ),
+            other => panic!("expected an attempt, got {other:?}"),
+        }
+    }
+
+    /// A SUSPENDED site still renews. Its vhost serves the ACME challenge
+    /// above the 503 precisely so this works, so skipping it protected
+    /// nothing and cost the certificate: a site suspended across its last 30
+    /// days came back serving an expired one, because the "re-issued on
+    /// resume" the old comment promised does not exist.
+    ///
+    /// Critically it must NOT be renewed through `issue_real_cert`, which
+    /// rewrites the serving vhost and would un-suspend the site as a side
+    /// effect of a cron tick.
+    #[tokio::test]
+    async fn cert_renew_tick_renews_a_suspended_site_without_unsuspending_it() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), suspend_mocks());
+        s.create(req("paused.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("paused.cz").unwrap());
+        s.suspend(
+            sel.clone(),
+            hyperion_types::SuspendReason::Manual {
+                message: Some("Unpaid invoice".into()),
+            },
+        )
+        .await
+        .expect("suspend");
+
+        let now = now_secs();
+        let later = now + 80 * 86_400;
+        certificates::upsert(
+            &pool,
+            "paused.cz",
+            now,
+            later + 10 * 86_400,
+            "/cert",
+            "/key",
+            "letsencrypt",
+        )
+        .await
+        .expect("upsert");
+
+        let results = s
+            .cert_renew_tick(later, CERT_RENEWAL_WINDOW_DAYS)
+            .await
+            .expect("tick");
+        assert_eq!(
+            results.len(),
+            1,
+            "a suspended site's cert must still be a renewal candidate"
+        );
+        assert!(
+            !matches!(results[0].outcome, CertRenewOutcome::Skipped { .. }),
+            "a suspended site must be attempted, not skipped: {:?}",
+            results[0].outcome
+        );
+        let after = s.get(sel).await.expect("get");
+        assert_eq!(after.state, HostingState::Suspended);
+
+        // NOTE: that renewal takes the direct-issuance branch rather than
+        // issue_real_cert — the part that stops a suspended site being
+        // silently un-suspended — is NOT asserted here, deliberately. The
+        // only observable difference is a call to nginx_write_vhost, which
+        // issue_real_cert makes only AFTER its ACME-email check passes; with
+        // a valid address the test then talks to the real Let's Encrypt, and
+        // no unit test should open orders against a domain we do not own or
+        // spend that service's per-hostname failure budget on every CI run.
+        // Every other test here relies on the placeholder address for the
+        // same reason. The guard is `suspended_like` in cert_renew_tick.
     }
 
     /// A subdomain that REUSES a parent wildcard (its cert row shares the
