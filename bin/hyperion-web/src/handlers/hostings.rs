@@ -6753,8 +6753,7 @@ struct Dns01Tpl {
     htmx_version: &'static str,
     domain: String,
     selector: String,
-    record_name: String,
-    values: Vec<String>,
+    records: Vec<(String, String)>,
     csrf_finish: String,
 }
 
@@ -6794,8 +6793,7 @@ pub async fn post_cert_dns01_begin(
         } => Ok(Redirect::to(&format!("/hostings/{}?cert=wildcard", sel_url)).into_response()),
         RpcResponse::CertDns01Begin {
             completed: false,
-            record_name,
-            values,
+            records,
         } => {
             let tpl = Dns01Tpl {
                 username: ctx.username.clone(),
@@ -6805,8 +6803,7 @@ pub async fn post_cert_dns01_begin(
                 htmx_version: super::htmx_version(),
                 domain: detail.domain.clone(),
                 selector: detail.id.as_str().to_string(),
-                record_name,
-                values,
+                records,
                 csrf_finish: csrf_token_for(&state, &ctx, "/hostings/cert/dns01/finish"),
             };
             Ok(Html(tpl.render()?).into_response())

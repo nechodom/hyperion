@@ -573,7 +573,7 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         sel: HostingSelector,
         staging: bool,
         provider: String,
-    ) -> Result<(bool, String, Vec<String>), RpcError> {
+    ) -> Result<(bool, Vec<(String, String)>), RpcError> {
         self.svc.cert_dns01_begin(sel, staging, provider).await
     }
 
@@ -587,7 +587,7 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         email: Option<String>,
         staging: bool,
         provider: String,
-    ) -> Result<(bool, String, Vec<String>), RpcError> {
+    ) -> Result<(bool, Vec<(String, String)>), RpcError> {
         self.svc
             .cert_dns01_begin_domain(domain.as_str(), email.as_deref(), staging, provider)
             .await

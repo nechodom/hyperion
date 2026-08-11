@@ -1511,14 +1511,14 @@ pub enum Response {
     /// the caller follows up with `CertDns01Finish`.
     CertDns01Begin {
         completed: bool,
-        record_name: String,
-        values: Vec<String>,
+        /// One (record_name, txt_value) per authorization to publish.
+        /// Empty when `completed` (cloudflare path already did it).
+        records: Vec<(String, String)>,
     },
     CertDns01Finish(CertInfo),
     CertDns01BeginDomain {
         completed: bool,
-        record_name: String,
-        values: Vec<String>,
+        records: Vec<(String, String)>,
     },
     CertDns01FinishDomain(CertInfo),
     CertUpload(CertInfo),

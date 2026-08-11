@@ -301,7 +301,7 @@ pub trait AgentApi: Send + Sync + 'static {
         sel: crate::wire::HostingSelector,
         staging: bool,
         provider: String,
-    ) -> Result<(bool, String, Vec<String>), RpcError>;
+    ) -> Result<(bool, Vec<(String, String)>), RpcError>;
     /// DNS-01 phase 2 — validate + install after the TXT is live.
     async fn cert_dns01_finish(
         &self,
@@ -314,7 +314,7 @@ pub trait AgentApi: Send + Sync + 'static {
         email: Option<String>,
         staging: bool,
         provider: String,
-    ) -> Result<(bool, String, Vec<String>), RpcError>;
+    ) -> Result<(bool, Vec<(String, String)>), RpcError>;
     /// DNS-01 phase 2 for a bare (hosting-less) domain.
     async fn cert_dns01_finish_domain(&self, domain: Domain) -> Result<CertInfo, RpcError>;
     /// Install an operator-supplied certificate (non-ACME). Validates the
