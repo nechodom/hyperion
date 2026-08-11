@@ -43,10 +43,24 @@
   </dl>
   {# The whole card is a lazily-loaded fragment, so a fresh dig is just
      re-requesting it. Every status ends with "then check again" — this
-     is the button those words were missing. #}
-  <button class="btn small" style="margin-top:0.6rem"
-          hx-get="/hostings/{{ selector }}/spf-panel"
-          hx-target="closest .card" hx-swap="outerHTML">
-    Check again
-  </button>
+     is the button those words were missing.
+
+     The check runs a dig + a public-IP probe on the OWNING node, which
+     takes seconds. Without an indicator the button looked dead: you
+     click, nothing moves, and if the answer is unchanged the card
+     re-renders byte-identical — indistinguishable from a no-op. Hence
+     both the spinner AND the "checked HH:MM:SS" stamp below: the stamp
+     is the only thing that visibly changes when the result is the same. #}
+  <div style="margin-top:0.6rem;display:flex;gap:0.5rem;align-items:center">
+    <button class="btn small"
+            hx-get="/hostings/{{ selector }}/spf-panel"
+            hx-target="closest .card" hx-swap="outerHTML"
+            hx-indicator="#spf-spinner" hx-disabled-elt="this">
+      Check again
+    </button>
+    <span id="spf-spinner" class="muted htmx-indicator" style="font-size:0.85rem">
+      <span class="spinner-inline"></span> checking DNS…
+    </span>
+    <span class="text-soft small" style="margin-left:auto">checked {{ checked_at }}</span>
+  </div>
 </div>

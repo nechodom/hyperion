@@ -5404,6 +5404,10 @@ struct SpfCardTpl {
     /// The URL selector this fragment was requested with — the
     /// "Check again" button re-requests the same panel.
     selector: String,
+    /// Wall-clock time this check ran, `HH:MM:SS`. An unchanged SPF
+    /// record re-renders a byte-identical card, so without this stamp a
+    /// re-check is invisible and the button reads as broken.
+    checked_at: String,
 }
 
 pub async fn get_spf_panel(
@@ -5424,15 +5428,23 @@ pub async fn get_spf_panel(
     {
         return Ok(r);
     }
-    let Ok(domain) = Domain::parse(&detail.domain) else {
-        return Ok(Html(String::new()).into_response());
+    // An unparseable domain used to render an empty string, which made
+    // the whole card vanish — the same silent-disappearance bug the
+    // dispatch arms below were already fixed for. Report it instead.
+    let resp = match Domain::parse(&detail.domain) {
+        Ok(domain) => {
+            crate::dispatcher::dispatch_to_node(
+                &state,
+                owner_node.as_deref(),
+                Request::DnsSpfCheck { domain },
+            )
+            .await
+        }
+        Err(e) => Ok(RpcResponse::DnsSpfCheck(unknown_spf(
+            &detail.domain,
+            &format!("{} is not a parseable domain: {e}", detail.domain),
+        ))),
     };
-    let resp = crate::dispatcher::dispatch_to_node(
-        &state,
-        owner_node.as_deref(),
-        Request::DnsSpfCheck { domain },
-    )
-    .await;
     // NEVER render nothing. This arm used to collapse every failure —
     // node unreachable, RPC error — into an empty string, so the card
     // silently vanished from the page and the operator had no idea a
@@ -5448,6 +5460,7 @@ pub async fn get_spf_panel(
         sp,
         domain: detail.domain.clone(),
         selector,
+        checked_at: chrono::Local::now().format("%H:%M:%S").to_string(),
     }
     .render()?;
     Ok(Html(html).into_response())
