@@ -10190,7 +10190,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                             severity: "warn".into(),
                             message: format!(
                                 "{} has a temporary self-signed cert. Issue a real one from the site's SSL tab — \
-                                 HTTP-01 (needs DNS pointing here) or DNS-01/Cloudflare (works behind a proxy/CDN).",
+                                 Let's Encrypt over HTTP-01, which needs the domain's DNS pointing here \
+                                 (a Cloudflare proxy is fine).",
                                 detail.domain
                             ),
                             hosting: Some(detail.domain.clone()),
@@ -12074,11 +12075,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         } else if proxied {
             "Proxied through Cloudflare — the visible addresses are Cloudflare's, \
              which is how the proxy works, not a misconfiguration. Certificate \
-             issuance uses DNS-01 via the Cloudflare API when a token is \
-             configured (Settings -> Cloudflare certs); without a token, HTTP-01 \
-             depends on the proxy forwarding the challenge and often fails. If \
-             the site errors with a valid cert, check the Cloudflare SSL/TLS \
-             mode (Full, not Flexible) rather than DNS."
+             issuance works normally through the proxy: Let's Encrypt fetches \
+             the challenge from Cloudflare's edge and Cloudflare forwards it \
+             here. The one thing that breaks it is Cloudflare's SSL/TLS mode \
+             set to 'Full (strict)' while this server is still on its \
+             self-signed bootstrap certificate — issue the certificate with the \
+             mode on 'Full', then switch back."
                 .into()
         } else {
             format!(
@@ -12251,76 +12253,49 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .output()
             .await;
 
-        // Behind Cloudflare's proxy, HTTP-01 validates against the EDGE,
-        // not this server: Let's Encrypt fetches the challenge from
-        // whatever origin Cloudflare is configured to use, plus whatever
-        // page rules and redirects sit in front of it. Whether that
-        // reaches the token written HERE is a property of the operator's
-        // Cloudflare dashboard, which no amount of DNS checking can see —
-        // the observed failure is LE reporting a 404 for a token that is
-        // sitting on this disk. DNS-01 asks Cloudflare's own DNS instead,
-        // which is exactly the thing the proxy cannot get in the way of.
+        // Proxy status no longer selects a validation method — it only makes
+        // the failure message better, because the Full (strict) deadlock is
+        // invisible from the CA's error text alone.
         let proxied = domain_is_cloudflare_proxied(&detail.domain).await;
-        let cert = if proxied {
-            let Some(token) = hyperion_adapters::cloudflare::token() else {
-                return Err(RpcError::ProvisioningFailed {
-                    stage: "acme".into(),
-                    reason: format!(
-                        "{} is proxied through Cloudflare, so HTTP-01 validation is \
-                         answered by Cloudflare's edge, not this server — issuance \
-                         cannot be made reliable this way. Either add a Cloudflare API \
-                         token (Settings -> Cloudflare certs) so issuance can use \
-                         DNS-01 automatically, or grey-cloud the DNS record for the \
-                         duration of issuance.",
-                        detail.domain
-                    ),
-                });
-            };
-            let pending =
-                hyperion_adapters::acme::dns01_begin(&detail.domain, &sans, email, req.staging)
-                    .await
-                    .map_err(|e| RpcError::ProvisioningFailed {
-                        stage: "acme_dns01_begin".into(),
-                        reason: e.to_string(),
-                    })?;
-            let cf_records = pending
-                .records
-                .iter()
-                .map(|r| (r.name.clone(), r.value.clone()))
-                .collect::<Vec<_>>();
-            let ids = hyperion_adapters::cloudflare::publish_txt(&token, &cf_records)
-                .await
-                .map_err(|e| RpcError::ProvisioningFailed {
-                    stage: "cloudflare_publish".into(),
-                    reason: e.to_string(),
-                })?;
-            // Cloudflare's DNS answers fast, but LE resolves through its
-            // own infrastructure — give the records a moment first.
-            tokio::time::sleep(std::time::Duration::from_secs(20)).await;
-            let finish =
-                hyperion_adapters::acme::dns01_finish(&detail.domain, "/etc/hyperion/certs").await;
-            // Clean up the TXT records regardless of outcome — stale
-            // challenge records accumulate forever otherwise.
-            hyperion_adapters::cloudflare::cleanup_txt(&token, &ids).await;
-            finish.map_err(|e| RpcError::ProvisioningFailed {
-                stage: "acme_dns01".into(),
-                reason: e.to_string(),
-            })?
-        } else {
-            hyperion_adapters::acme::issue_http01(hyperion_adapters::acme::IssueRequest {
-                domain: &detail.domain,
-                sans: &sans,
-                contact_email: email,
-                staging: req.staging,
-                challenge_root: std::path::Path::new(&self.paths.acme_challenge_root),
-                certs_root: "/etc/hyperion/certs",
-            })
-            .await
-            .map_err(|e| RpcError::ProvisioningFailed {
-                stage: "acme".into(),
-                reason: e.to_string(),
-            })?
-        };
+
+        // ONE path: HTTP-01, always. This used to refuse outright for any
+        // Cloudflare-proxied domain and force DNS-01 through a Cloudflare API
+        // token, on the theory that the edge makes HTTP-01 unreliable. That
+        // reasoning was wrong, and the refusal was the direct cause of an
+        // outage: a proxied site could not get a certificate, stayed on the
+        // self-signed bootstrap cert, and Cloudflare's Full (strict) mode then
+        // served visitors error 525/526 while nginx here was perfectly healthy.
+        //
+        // HTTP-01 has no concept of an "origin". Let's Encrypt resolves the
+        // name, connects to whatever answers on port 80 and compares the body.
+        // When Cloudflare answers and forwards here, validation succeeds by
+        // construction. "Always Use HTTPS" is not a problem either: Boulder
+        // follows redirects and does not verify the certificate on an https
+        // hop. Two properties of our own vhost template are what make this
+        // hold, and both are load-bearing rather than redundant:
+        //
+        //   * the challenge location lives inside the shared HTTPS macro as
+        //     well as the :80 block. Under Full / Full (strict) Cloudflare
+        //     fetches the origin over :443 even though LE arrived on :80, so a
+        //     challenge wired only into :80 would 404.
+        //   * in the :80 block the challenge location is ordered ABOVE the
+        //     catch-all `return 301 https://`, so Flexible mode cannot spin up
+        //     an edge<->origin redirect loop.
+        //
+        // See the regression test in the nginx adapter guarding both.
+        let cert = hyperion_adapters::acme::issue_http01(hyperion_adapters::acme::IssueRequest {
+            domain: &detail.domain,
+            sans: &sans,
+            contact_email: email,
+            staging: req.staging,
+            challenge_root: std::path::Path::new(&self.paths.acme_challenge_root),
+            certs_root: "/etc/hyperion/certs",
+        })
+        .await
+        .map_err(|e| RpcError::ProvisioningFailed {
+            stage: "acme".into(),
+            reason: acme_failure_message(&detail.domain, proxied, &e.to_string()),
+        })?;
 
         // Persist cert info in DB
         let cert_path = format!("/etc/hyperion/certs/{}/fullchain.pem", detail.domain);
@@ -13052,8 +13027,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                         }
                     } else {
                         CertRenewOutcome::Skipped {
-                            reason: "wildcard cert — no Cloudflare token configured; \
-                                     re-run DNS-01 from the SSL tab or test-node settings"
+                            reason: "wildcard cert — wildcards can only be validated over \
+                                     DNS-01, and this server holds no DNS credentials, so it \
+                                     cannot renew one unattended. Re-issue it from the site's \
+                                     SSL tab: start wildcard issuance, publish the TXT records \
+                                     it shows you, then validate."
                                 .into(),
                         }
                     }
@@ -20413,6 +20391,78 @@ struct DkimKv {
 /// ACME path. Empty answers are NOT proxied: a domain with no records at
 /// all has a different problem, and HTTP-01 will produce the accurate
 /// error for it.
+/// Turn a raw ACME failure into one that names the fix.
+///
+/// The CA only ever reports what it saw ("Invalid response", a 5xx, a
+/// timeout). On a proxied domain the *cause* is usually a Cloudflare setting
+/// the CA cannot see and no amount of DNS checking can reach — most often the
+/// Full (strict) deadlock, where the origin is still on the self-signed
+/// bootstrap certificate, Cloudflare refuses it, and the operator is told
+/// only that validation failed. That gap is what turned one setting into an
+/// outage, so the mapping lives here rather than in the UI: renewals and the
+/// API surface the same text as the SSL tab.
+///
+/// The raw CA error is always appended — a hint that guesses wrong must never
+/// hide the evidence.
+fn acme_failure_message(domain: &str, proxied: bool, raw: &str) -> String {
+    let low = raw.to_lowercase();
+
+    // Cloudflare's own origin-TLS errors. 525 is a failed handshake, 526 an
+    // untrusted origin certificate; both are observed for a self-signed
+    // origin under Full (strict), so never name just one.
+    let hint = if proxied && (low.contains("525") || low.contains("526")) {
+        Some(format!(
+            "Cloudflare is refusing this server's certificate, so Let's Encrypt never saw the \
+             challenge. {domain} is proxied through Cloudflare and this server is still on its \
+             self-signed bootstrap certificate, which Full (strict) rejects — the same reason \
+             visitors get error 525/526 while nginx here is healthy. FIX: in Cloudflare, \
+             SSL/TLS -> Overview, switch the mode from 'Full (strict)' to 'Full', press \
+             'Issue HTTPS certificate' again, then switch back once the certificate is \
+             installed. It takes about a minute and does not interrupt visitors. Alternatively \
+             upload a Cloudflare Origin CA certificate here, which Full (strict) accepts."
+        ))
+    } else if proxied && (low.contains("403") || low.contains("503") || low.contains("challenge")) {
+        Some(format!(
+            "Cloudflare answered the challenge itself instead of passing it to this server, so \
+             Let's Encrypt got a block or challenge page rather than the token. Let's Encrypt \
+             does not run JavaScript and will fail the same way every time. FIX: in Cloudflare, \
+             turn off 'I'm Under Attack' under Security -> Settings, or add a WAF skip rule for \
+             'URI Path starts with /.well-known/acme-challenge/'. On the Free plan Bot Fight \
+             Mode cannot be skipped per-path and has to be off while {domain} is issued."
+        ))
+    } else if low.contains("404") || low.contains("invalid response") {
+        Some(format!(
+            "The challenge URL reached a web server, but not this one — something in front of \
+             {domain} is answering or rewriting /.well-known/acme-challenge/. Usual causes, in \
+             order: a Cloudflare Redirect Rule or Page Rule on /* that drops the path (apex-to-www \
+             forwarding is the classic one — it must preserve ${{1}}), a Worker route on /*, an \
+             Origin Rule pointing elsewhere, or DNS pointing at a different server."
+        ))
+    } else if low.contains("timeout") || low.contains("connection") || low.contains("refused") {
+        Some(format!(
+            "Nothing answered on port 80 for {domain}. HTTP-01 always STARTS on port 80 — it \
+             will follow a redirect to HTTPS, but it cannot begin on 443. FIX: allow inbound TCP \
+             port 80 in this server's firewall, and if Cloudflare has a WAF rule blocking \
+             plaintext requests, skip it for '/.well-known/acme-challenge/'. Redirecting port 80 \
+             to HTTPS is fine; blocking it is not."
+        ))
+    } else if low.contains("rate limit") || low.contains("too many") {
+        Some(
+            "Let's Encrypt is rate-limiting this name. It allows 5 failed validations per \
+             hostname per hour, so retrying now only extends the lockout — wait an hour, then \
+             fix the underlying error below before trying again."
+                .to_string(),
+        )
+    } else {
+        None
+    };
+
+    match hint {
+        Some(h) => format!("{h}\n\nLet's Encrypt reported: {raw}"),
+        None => raw.to_string(),
+    }
+}
+
 async fn domain_is_cloudflare_proxied(domain: &str) -> bool {
     let (a, aaaa) = tokio::join!(dig_records(domain, "A"), dig_records(domain, "AAAA"));
     let a = a.unwrap_or_default();
