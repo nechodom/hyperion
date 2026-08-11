@@ -165,21 +165,66 @@ const PREVIEW_SHIM_PHP: &str = r#"<?php
 /**
  * Hyperion preview shim (managed — do not edit).
  *
- * When this request arrives through the node's internal preview vhost,
- * serve WordPress under THAT hostname instead of redirecting to the
- * site's real Site Address. Absent the preview vhost's fastcgi param
- * this is a no-op.
+ * When a request arrives through the node's internal preview vhost (which
+ * sets the HYPERION_PREVIEW_HOST fastcgi param), keep WordPress ON that
+ * hostname instead of bouncing to the site's real Site Address. On the
+ * real vhost the param is absent and this whole block is skipped.
  */
 if (!empty($_SERVER['HYPERION_PREVIEW_HOST'])) {
-    $hyperion_preview_url = 'https://' . $_SERVER['HYPERION_PREVIEW_HOST'];
-    add_filter('option_home', function () use ($hyperion_preview_url) { return $hyperion_preview_url; });
-    add_filter('option_siteurl', function () use ($hyperion_preview_url) { return $hyperion_preview_url; });
-    add_filter('option_home', function () use ($hyperion_preview_url) { return $hyperion_preview_url; }, 999);
-    add_filter('option_siteurl', function () use ($hyperion_preview_url) { return $hyperion_preview_url; }, 999);
-    // Suppress the canonical redirect that would bounce us to the real host.
-    remove_filter('template_redirect', 'redirect_canonical');
+    $hyp_host = $_SERVER['HYPERION_PREVIEW_HOST'];
+    $hyp_url  = 'https://' . $hyp_host;
+
+    // Force home/siteurl to the preview host. Priority 999 so this beats
+    // WordPress's own _config_wp_home/_config_wp_siteurl (priority 10),
+    // which is how a WP_HOME / WP_SITEURL constant in wp-config.php takes
+    // effect — common on imported sites, and the reason the first version
+    // of this shim (plain option filters) did nothing there.
+    add_filter('option_home',    function () use ($hyp_url) { return $hyp_url; }, 999);
+    add_filter('option_siteurl', function () use ($hyp_url) { return $hyp_url; }, 999);
+
+    // Rewrite the HOST of any generated URL to the preview host, so links
+    // and assets resolve here rather than at the real domain.
+    $hyp_rewrite = function ($url) use ($hyp_host) {
+        if (!is_string($url) || $url === '') { return $url; }
+        return preg_replace('#^(https?://)[^/]+#i', '${1}' . $hyp_host, $url);
+    };
+    add_filter('home_url', $hyp_rewrite, 999);
+    add_filter('site_url', $hyp_rewrite, 999);
+
+    // The catch-all: EVERY WordPress redirect goes through wp_redirect(),
+    // and this pins its target back onto the preview host. So a canonical
+    // bounce, a login redirect, an SSL/security plugin, whatever — none of
+    // them can send the visitor to the real domain. This is what makes the
+    // preview reliable regardless of the site's plugins or constants.
+    add_filter('wp_redirect', $hyp_rewrite, 999);
+
+    // And drop the canonical redirect outright (registered before
+    // mu-plugins load, so remove_action here takes effect).
+    remove_action('template_redirect', 'redirect_canonical');
 }
 "#;
+
+impl RealAdapter {
+    /// Refresh the preview shim for one hosting WITHOUT rewriting its
+    /// vhost or touching nginx — just recompute whether a preview applies
+    /// and drop/remove the mu-plugin accordingly.
+    ///
+    /// Exists so an agent update lands a corrected shim on the next boot
+    /// even though `update.sh` never rewrites vhosts: the preview server
+    /// block was already on disk, only the mu-plugin's PHP had changed,
+    /// and re-saving every site by hand is not a fix. Cheap (one stat +
+    /// at most one small file write per WordPress site), so it is safe to
+    /// run over every hosting at startup.
+    pub async fn reconcile_preview_shim(
+        &self,
+        primary_domain: &str,
+        root_dir: &str,
+        system_user: &str,
+    ) {
+        let active = self.compute_preview(primary_domain).await.is_some();
+        ensure_preview_shim(root_dir, system_user, active).await;
+    }
+}
 
 /// Write or remove `wp-content/mu-plugins/hyperion-preview.php`.
 ///
@@ -1606,7 +1651,8 @@ mod tests {
         ensure_preview_shim(&root.display().to_string(), "u", true).await;
         let body = std::fs::read_to_string(&shim).expect("shim written");
         assert!(body.contains("HYPERION_PREVIEW_HOST"));
-        assert!(body.contains("remove_filter('template_redirect', 'redirect_canonical')"));
+        assert!(body.contains("remove_action('template_redirect', 'redirect_canonical')"));
+        assert!(body.contains("add_filter('wp_redirect'"));
 
         // Preview no longer applies ⇒ the shim is removed, so it can't
         // rewrite the real site's URLs.
