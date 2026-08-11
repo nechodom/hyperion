@@ -948,39 +948,103 @@ done
 # into it (covered by ReadWritePaths=/etc/hyperion in the systemd unit).
 install -d -m 0700 /etc/hyperion/web-tls
 
-#-------- 4a-bis. master→node remote RPC opt-in for existing nodes --------
-# Pre-multinode agent.toml files don't have [remote_rpc]. Without
-# the section the agent's default is `enabled = false`, so the
-# master can't dispatch to this node from its UI. Patch it in via
-# a heredoc append — only when the section is missing. Operators
-# can later flip enabled to false by hand if they don't want this.
+#-------- 4a-bis. master→node remote RPC — WORKERS ONLY -------------------
+# The inbound RPC listener exists so a MASTER can dispatch to a WORKER.
+# Nothing ever dials a master or a single-server box on this port: the
+# panel routes a local request (target_node_id None/"local") straight to
+# the agent's Unix socket, never over the network — see
+# bin/hyperion-web/src/dispatcher.rs. So on a box with no master above
+# it, `enabled = true` buys exactly nothing and costs a root-privileged
+# HTTPS listener on 0.0.0.0:9443 plus, until this change, a world-open
+# ufw rule to go with it.
+#
+# It does currently fail CLOSED there — bin/hyperion-agent/src/inbound_rpc.rs
+# refuses every request with 503 while /etc/hyperion/node-id.json is
+# absent, because without an enrollment there is no master pubkey to
+# verify a signature against. But that is incidental, not intentional:
+# the safety rests on a file happening not to exist. Restore a backup
+# taken from a worker, copy an agent.toml between boxes, or repurpose a
+# machine that was once a worker, and the port turns into a live signed
+# control channel for hosting create/delete and password reset. A box
+# that never needed the listener should not be running it.
+#
+# Worker-ness is decided by evidence, not by a guess: an enrollment file
+# on disk, or a master_url pointing somewhere. Note the agent must NOT
+# make the same decision at startup — a fresh worker writes node-id.json
+# during enrollment, i.e. AFTER boot, so gating the spawn on that file
+# would leave a newly-enrolled node unreachable until its next restart.
+# Per-request refusal is the correct runtime gate; this is the config one.
 #
 # This is the channel the CLUSTER ROLLOUT ORDER at the top of this file
 # governs. Nothing here is cluster-aware: the agent's response-signing
 # key and TLS pin are re-published by its next HEARTBEAT, not by this
 # script, which is why step 3 says to wait for the readiness pill rather
 # than for this script to exit.
-if [[ -f /etc/hyperion/agent.toml ]] \
-   && ! grep -q '^\[remote_rpc\]' /etc/hyperion/agent.toml; then
-  log "Adding [remote_rpc] section to /etc/hyperion/agent.toml ..."
-  cat >> /etc/hyperion/agent.toml <<'EOF'
+IS_WORKER=0
+if [[ -f /etc/hyperion/node-id.json ]]; then
+  IS_WORKER=1
+elif [[ -f /etc/hyperion/agent.toml ]] \
+     && grep -Eq '^[[:space:]]*master_url[[:space:]]*=[[:space:]]*"[^"]+"' /etc/hyperion/agent.toml; then
+  IS_WORKER=1
+fi
 
-# Master→node remote RPC (added by update.sh). Default ON so the
-# master UI's "Target node" dropdown works for this node. Disable
-# by setting enabled = false; the local Unix socket always works
-# regardless.
+if [[ -f /etc/hyperion/agent.toml ]] && ! grep -q '^\[remote_rpc\]' /etc/hyperion/agent.toml; then
+  if (( IS_WORKER )); then
+    log "Adding [remote_rpc] section (worker) to /etc/hyperion/agent.toml ..."
+    RPC_ENABLED=true
+  else
+    log "Adding [remote_rpc] section (disabled — no master above this box) ..."
+    RPC_ENABLED=false
+  fi
+  cat >> /etc/hyperion/agent.toml <<EOF
+
+# Master→node remote RPC (added by update.sh). Only a WORKER needs this:
+# a master reaches its own agent over the local Unix socket, never over
+# the network, so on a master or a single-server box this stays false.
+# If this box later enrolls to a master, set enabled = true and restart
+# hyperion-agent.
 [remote_rpc]
-enabled       = true
+enabled       = $RPC_ENABLED
 bind          = "0.0.0.0:9443"
 tls_cert_file = "/etc/hyperion/agent-rpc.crt"
 tls_key_file  = "/etc/hyperion/agent-rpc.key"
 EOF
 fi
 
-# Best-effort: open port 9443 in ufw if it's installed + active.
-# Operators on iptables / nftables / cloud security groups will
-# need to open it themselves.
-if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+# Retro-fix boxes an earlier update.sh already switched on. Keyed on
+# CONTENT, not on the section merely existing, so a re-run is a no-op
+# once corrected — the same idempotency lesson the sury/Debian-suite
+# block learned the hard way. Only ever narrows: a worker is untouched.
+if (( ! IS_WORKER )) && [[ -f /etc/hyperion/agent.toml ]] \
+   && grep -Eq '^[[:space:]]*enabled[[:space:]]*=[[:space:]]*true' /etc/hyperion/agent.toml \
+   && grep -q '^\[remote_rpc\]' /etc/hyperion/agent.toml; then
+  # Confine the edit to the [remote_rpc] section — other sections have
+  # their own `enabled` keys and must not be touched.
+  if awk '
+      /^\[/ { in_rpc = ($0 ~ /^\[remote_rpc\]/) }
+      in_rpc && /^[[:space:]]*enabled[[:space:]]*=[[:space:]]*true/ { found = 1 }
+      END { exit !found }
+    ' /etc/hyperion/agent.toml; then
+    log "Disabling unused inbound RPC listener (this box has no master above it) ..."
+    awk '
+      /^\[/ { in_rpc = ($0 ~ /^\[remote_rpc\]/) }
+      in_rpc && /^[[:space:]]*enabled[[:space:]]*=[[:space:]]*true/ {
+        sub(/true/, "false"); print; next
+      }
+      { print }
+    ' /etc/hyperion/agent.toml > /etc/hyperion/agent.toml.new \
+      && chmod --reference=/etc/hyperion/agent.toml /etc/hyperion/agent.toml.new \
+      && mv /etc/hyperion/agent.toml.new /etc/hyperion/agent.toml
+    if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q '9443/tcp'; then
+      warn "ufw still allows 9443/tcp, which now leads to a closed port. Remove it with:"
+      warn "    ufw delete allow 9443/tcp"
+    fi
+  fi
+fi
+
+# Open 9443 only where something actually listens on it.
+if (( IS_WORKER )) \
+   && command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
   if ! ufw status 2>/dev/null | grep -q '9443/tcp'; then
     log "Opening ufw 9443/tcp for master→node RPC ..."
     ufw allow 9443/tcp comment 'hyperion master->node RPC' || true
