@@ -437,11 +437,7 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             staging,
             provider,
         } => match api.cert_dns01_begin(sel, staging, provider).await {
-            Ok((completed, record_name, values)) => Response::CertDns01Begin {
-                completed,
-                record_name,
-                values,
-            },
+            Ok((completed, records)) => Response::CertDns01Begin { completed, records },
             Err(e) => Response::Error(e),
         },
         Request::CertDns01Finish { sel } => match api.cert_dns01_finish(sel).await {
@@ -458,11 +454,7 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 .cert_dns01_begin_domain(domain, email, staging, provider)
                 .await
             {
-                Ok((completed, record_name, values)) => Response::CertDns01BeginDomain {
-                    completed,
-                    record_name,
-                    values,
-                },
+                Ok((completed, records)) => Response::CertDns01BeginDomain { completed, records },
                 Err(e) => Response::Error(e),
             }
         }
@@ -1842,7 +1834,7 @@ mod tests {
             _: HostingSelector,
             _: bool,
             _: String,
-        ) -> Result<(bool, String, Vec<String>), RpcError> {
+        ) -> Result<(bool, Vec<(String, String)>), RpcError> {
             Err(RpcError::Internal {
                 message: "not supported by this agent".into(),
             })
@@ -1858,7 +1850,7 @@ mod tests {
             _: Option<String>,
             _: bool,
             _: String,
-        ) -> Result<(bool, String, Vec<String>), RpcError> {
+        ) -> Result<(bool, Vec<(String, String)>), RpcError> {
             Err(RpcError::Internal {
                 message: "not supported by this agent".into(),
             })

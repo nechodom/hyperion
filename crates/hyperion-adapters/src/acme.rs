@@ -376,14 +376,29 @@ struct Dns01Session {
     names: Vec<String>,
 }
 
-/// What the operator must publish to DNS before finishing. `record_name`
-/// is the same for every value (apex + wildcard authorizations share
-/// `_acme-challenge.<domain>`), so all `values` go on that one name as
-/// multiple TXT records.
+/// What the operator must publish to DNS before finishing: one
+/// `(record_name, txt_value)` per authorization.
+///
+/// The old shape assumed a single `record_name` shared by every value —
+/// true for a wildcard (`example.com` and `*.example.com` both authorize
+/// under `_acme-challenge.example.com`), but WRONG for a plain multi-name
+/// cert: `example.com` + `www.example.com` need
+/// `_acme-challenge.example.com` AND `_acme-challenge.www.example.com`,
+/// two different names. Collapsing them onto the apex left the `www`
+/// challenge unpublished, so Let's Encrypt got NXDOMAIN and the order went
+/// Invalid. Each record now carries its own name, derived from that
+/// authorization's identifier.
 #[derive(Debug, Clone)]
 pub struct Dns01Pending {
-    pub record_name: String,
-    pub values: Vec<String>,
+    pub records: Vec<Dns01Record>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Dns01Record {
+    /// `_acme-challenge.<name>` for this authorization.
+    pub name: String,
+    /// The TXT value to publish there.
+    pub value: String,
 }
 
 fn install_crypto_provider() {
@@ -391,6 +406,17 @@ fn install_crypto_provider() {
     PROVIDER_INSTALLED.get_or_init(|| {
         let _ = rustls::crypto::ring::default_provider().install_default();
     });
+}
+
+/// The DNS-01 TXT record name for an ACME identifier. `_acme-challenge`
+/// sits under the identifier's base name; a leading wildcard `*.` shares
+/// the base name's record (`example.com` and `*.example.com` both validate
+/// under `_acme-challenge.example.com`), but a distinct SAN such as
+/// `www.example.com` gets its own `_acme-challenge.www.example.com` — which
+/// is exactly what a plain multi-name cert needs and what the old
+/// single-record code got wrong (it published every value onto the apex).
+fn challenge_record_name(identifier: &str) -> String {
+    format!("_acme-challenge.{}", identifier.trim_start_matches("*."))
 }
 
 fn session_path(domain: &str) -> PathBuf {
@@ -460,7 +486,7 @@ pub async fn dns01_begin(
         }
     };
 
-    let mut values = Vec::new();
+    let mut records: Vec<Dns01Record> = Vec::new();
     {
         let mut authorizations = order.authorizations();
         while let Some(result) = authorizations.next().await {
@@ -478,10 +504,26 @@ pub async fn dns01_begin(
             let challenge = authz
                 .challenge(ChallengeType::Dns01)
                 .ok_or_else(|| AdapterError::Acme("no DNS-01 challenge offered".into()))?;
-            values.push(challenge.key_authorization().dns_value());
+            // The record name is per-authorization. `_acme-challenge` sits
+            // under the identifier's base name; the wildcard flag doesn't
+            // change it (`example.com` and `*.example.com` share
+            // `_acme-challenge.example.com`), but a distinct SAN like
+            // `www.example.com` gets `_acme-challenge.www.example.com`.
+            let ident = match challenge.identifier().identifier {
+                Identifier::Dns(n) => n.to_string(),
+                other => {
+                    return Err(AdapterError::Acme(format!(
+                        "DNS-01 requires a DNS identifier, got {other:?}"
+                    )))
+                }
+            };
+            records.push(Dns01Record {
+                name: challenge_record_name(&ident),
+                value: challenge.key_authorization().dns_value(),
+            });
         }
     }
-    if values.is_empty() {
+    if records.is_empty() {
         return Err(AdapterError::Acme(
             "every authorization was already valid — nothing to validate".into(),
         ));
@@ -500,11 +542,7 @@ pub async fn dns01_begin(
         .map_err(|e| AdapterError::Acme(format!("serialize session: {e}")))?;
     crate::fs::atomic_write(&session_path(domain), &body, 0o600).await?;
 
-    let base = domain.trim_start_matches("*.");
-    Ok(Dns01Pending {
-        record_name: format!("_acme-challenge.{base}"),
-        values,
-    })
+    Ok(Dns01Pending { records })
 }
 
 /// Phase 2: resume the saved order, tell LE the TXT records are live,
@@ -749,6 +787,30 @@ mod tests {
         let s = serde_json::to_string(&c).expect("serialize");
         let back: CertInfo = serde_json::from_str(&s).expect("deserialize");
         assert_eq!(back, c);
+    }
+
+    #[test]
+    fn challenge_record_name_is_per_identifier() {
+        // Apex and its wildcard share one record — this is what makes
+        // wildcard issuance work with a single published TXT.
+        assert_eq!(
+            challenge_record_name("example.com"),
+            "_acme-challenge.example.com"
+        );
+        assert_eq!(
+            challenge_record_name("*.example.com"),
+            "_acme-challenge.example.com"
+        );
+        // A distinct SAN gets its OWN record — the bug that caused NXDOMAIN
+        // on _acme-challenge.www.example.com was collapsing this onto the apex.
+        assert_eq!(
+            challenge_record_name("www.example.com"),
+            "_acme-challenge.www.example.com"
+        );
+        assert_ne!(
+            challenge_record_name("example.com"),
+            challenge_record_name("www.example.com")
+        );
     }
 
     #[test]

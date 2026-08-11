@@ -12283,16 +12283,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                         stage: "acme_dns01_begin".into(),
                         reason: e.to_string(),
                     })?;
-            let ids = hyperion_adapters::cloudflare::publish_txt(
-                &token,
-                &pending.record_name,
-                &pending.values,
-            )
-            .await
-            .map_err(|e| RpcError::ProvisioningFailed {
-                stage: "cloudflare_publish".into(),
-                reason: e.to_string(),
-            })?;
+            let cf_records = pending
+                .records
+                .iter()
+                .map(|r| (r.name.clone(), r.value.clone()))
+                .collect::<Vec<_>>();
+            let ids = hyperion_adapters::cloudflare::publish_txt(&token, &cf_records)
+                .await
+                .map_err(|e| RpcError::ProvisioningFailed {
+                    stage: "cloudflare_publish".into(),
+                    reason: e.to_string(),
+                })?;
             // Cloudflare's DNS answers fast, but LE resolves through its
             // own infrastructure — give the records a moment first.
             tokio::time::sleep(std::time::Duration::from_secs(20)).await;
@@ -12544,7 +12545,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         sel: HostingSelector,
         staging: bool,
         provider: String,
-    ) -> Result<(bool, String, Vec<String>), RpcError> {
+    ) -> Result<(bool, Vec<(String, String)>), RpcError> {
         let detail = self.get(sel).await?;
         let row = hostings::get_by_id(&self.pool, &detail.id)
             .await
@@ -12574,16 +12575,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                               or use the manual flow"
                         .into(),
                 })?;
-            let ids = hyperion_adapters::cloudflare::publish_txt(
-                &token,
-                &pending.record_name,
-                &pending.values,
-            )
-            .await
-            .map_err(|e| RpcError::ProvisioningFailed {
-                stage: "cloudflare_publish".into(),
-                reason: e.to_string(),
-            })?;
+            let cf_records = pending
+                .records
+                .iter()
+                .map(|r| (r.name.clone(), r.value.clone()))
+                .collect::<Vec<_>>();
+            let ids = hyperion_adapters::cloudflare::publish_txt(&token, &cf_records)
+                .await
+                .map_err(|e| RpcError::ProvisioningFailed {
+                    stage: "cloudflare_publish".into(),
+                    reason: e.to_string(),
+                })?;
             // Give the records a moment to propagate, then finish.
             tokio::time::sleep(std::time::Duration::from_secs(20)).await;
             let finish = self
@@ -12591,7 +12593,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .await;
             hyperion_adapters::cloudflare::cleanup_txt(&token, &ids).await;
             finish?;
-            return Ok((true, pending.record_name, pending.values));
+            return Ok((true, Vec::new()));
         }
 
         self.append_audit(
@@ -12602,7 +12604,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             "ok",
         )
         .await;
-        Ok((false, pending.record_name, pending.values))
+        let records = pending
+            .records
+            .into_iter()
+            .map(|r| (r.name, r.value))
+            .collect();
+        Ok((false, records))
     }
 
     /// DNS-01 phase 2: validate the published TXT, install the wildcard
@@ -12744,7 +12751,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         email: Option<&str>,
         staging: bool,
         provider: String,
-    ) -> Result<(bool, String, Vec<String>), RpcError> {
+    ) -> Result<(bool, Vec<(String, String)>), RpcError> {
         let base = Domain::parse(domain).map_err(|e| RpcError::Validation {
             message: format!("invalid domain {domain}: {e}"),
         })?;
@@ -12766,21 +12773,22 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                               or use the manual flow"
                         .into(),
                 })?;
-            let ids = hyperion_adapters::cloudflare::publish_txt(
-                &token,
-                &pending.record_name,
-                &pending.values,
-            )
-            .await
-            .map_err(|e| RpcError::ProvisioningFailed {
-                stage: "cloudflare_publish".into(),
-                reason: e.to_string(),
-            })?;
+            let cf_records = pending
+                .records
+                .iter()
+                .map(|r| (r.name.clone(), r.value.clone()))
+                .collect::<Vec<_>>();
+            let ids = hyperion_adapters::cloudflare::publish_txt(&token, &cf_records)
+                .await
+                .map_err(|e| RpcError::ProvisioningFailed {
+                    stage: "cloudflare_publish".into(),
+                    reason: e.to_string(),
+                })?;
             tokio::time::sleep(std::time::Duration::from_secs(20)).await;
             let finish = self.cert_dns01_finish_domain(base.as_str()).await;
             hyperion_adapters::cloudflare::cleanup_txt(&token, &ids).await;
             finish?;
-            return Ok((true, pending.record_name, pending.values));
+            return Ok((true, Vec::new()));
         }
 
         self.append_audit(
@@ -12791,7 +12799,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             "ok",
         )
         .await;
-        Ok((false, pending.record_name, pending.values))
+        let records = pending
+            .records
+            .into_iter()
+            .map(|r| (r.name, r.value))
+            .collect();
+        Ok((false, records))
     }
 
     /// DNS-01 phase 2 for a bare (hosting-less) domain. Installs + persists
@@ -13021,7 +13034,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                             .await
                         };
                         match res {
-                            Ok((true, _, _)) => {
+                            Ok((true, _)) => {
                                 let na = certificates::get(&self.pool, &domain_str)
                                     .await
                                     .ok()

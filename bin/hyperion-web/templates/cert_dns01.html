@@ -12,28 +12,29 @@
 <div class="card" style="max-width:760px">
   <h2>Step 1 — publish these DNS records</h2>
   <p class="muted">
-    Add the following <code>TXT</code> record(s) at your DNS provider, then
-    wait a minute or two for them to propagate. Both values go on the
-    <strong>same name</strong>, as two separate TXT records.
+    Add each of these <code>TXT</code> records at your DNS provider, then wait
+    a minute or two for them to propagate. Every name below needs its own
+    record — a cert covering <code>example.com</code> and
+    <code>www.example.com</code> has two <strong>different</strong> names.
   </p>
   <div class="table-wrap" style="margin:0.75rem 0">
     <table>
       <thead><tr><th>Type</th><th>Name</th><th>Value</th></tr></thead>
       <tbody>
-        {% for v in values %}
+        {% for r in records %}
         <tr>
           <td><code>TXT</code></td>
-          <td><code style="word-break:break-all">{{ record_name }}</code></td>
-          <td><code style="word-break:break-all">{{ v }}</code></td>
+          <td><code style="word-break:break-all">{{ r.0 }}</code></td>
+          <td><code style="word-break:break-all">{{ r.1 }}</code></td>
         </tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
   <p class="muted small">
-    Verify with <code>dig +short TXT {{ record_name }}</code> — both values
-    should appear before you continue. The pending order is held server-side,
-    so you can return to this page within the hour.
+    Verify each with <code>dig +short TXT &lt;name&gt;</code> before you
+    continue. The pending order is held server-side, so you can return to this
+    page within the hour.
   </p>
 
   <h2 style="margin-top:1.25rem">Step 2 — validate and issue</h2>

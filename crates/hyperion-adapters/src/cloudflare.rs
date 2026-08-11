@@ -227,13 +227,17 @@ async fn zone_id_for(token: &str, record_name: &str) -> Result<(String, String),
 /// record ids so the caller can clean them up after issuance.
 pub async fn publish_txt(
     token: &str,
-    record_name: &str,
-    values: &[String],
+    records: &[(String, String)],
 ) -> Result<Vec<String>, AdapterError> {
-    let (zone_id, zone_name) = zone_id_for(token, record_name).await?;
-    let url = format!("{API}/zones/{zone_id}/dns_records");
     let mut ids = Vec::new();
-    for value in values {
+    for (record_name, value) in records {
+        // Resolve the zone PER RECORD. A cert covering example.com +
+        // www.example.com produces two challenge names that both live in
+        // zone example.com, but a cert spanning two zones would not — the
+        // longest-suffix match in `zone_id_for` puts each record in its
+        // own zone.
+        let (zone_id, zone_name) = zone_id_for(token, record_name).await?;
+        let url = format!("{API}/zones/{zone_id}/dns_records");
         let body = serde_json::json!({
             "type": "TXT",
             "name": record_name,

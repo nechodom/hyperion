@@ -20,18 +20,18 @@
     <table>
       <thead><tr><th>Type</th><th>Name</th><th>Value</th></tr></thead>
       <tbody>
-        {% for v in values %}
+        {% for r in records %}
         <tr>
           <td><code>TXT</code></td>
-          <td><code style="word-break:break-all">{{ record_name }}</code></td>
-          <td><code style="word-break:break-all">{{ v }}</code></td>
+          <td><code style="word-break:break-all">{{ r.0 }}</code></td>
+          <td><code style="word-break:break-all">{{ r.1 }}</code></td>
         </tr>
         {% endfor %}
       </tbody>
     </table>
   </div>
   <p class="muted small">
-    Verify with <code>dig +short TXT {{ record_name }}</code> — both values
+    Verify each with <code>dig +short TXT &lt;name&gt;</code> — the values
     should appear before you continue. The pending order is held on the node,
     so you can return to this page within the hour.
   </p>

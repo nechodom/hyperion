@@ -1963,8 +1963,7 @@ struct NodeWildcardDns01Tpl<'a> {
     htmx_version: &'static str,
     node_id: String,
     base: String,
-    record_name: String,
-    values: Vec<String>,
+    records: Vec<(String, String)>,
     csrf_finish: String,
 }
 
@@ -2079,8 +2078,7 @@ pub async fn post_node_wildcard_begin(
         .into_response()),
         RpcResponse::CertDns01BeginDomain {
             completed: false,
-            record_name,
-            values,
+            records,
         } => {
             let tpl = NodeWildcardDns01Tpl {
                 username: &ctx.username,
@@ -2090,8 +2088,7 @@ pub async fn post_node_wildcard_begin(
                 htmx_version: super::htmx_version(),
                 node_id: form.node_id.clone(),
                 base,
-                record_name,
-                values,
+                records,
                 csrf_finish: super::session_csrf_token(&state, &ctx),
             };
             Ok(Html(tpl.render()?).into_response())
