@@ -12095,6 +12095,27 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // should treat it as healthy.
         let matches = matches || proxied;
 
+        // Is the cert we serve for this domain still the self-signed
+        // bootstrap? A real cert's issuer names a CA (Let's Encrypt / ISRG,
+        // or an uploaded one); the bootstrap is `rcgen self signed cert`.
+        // Only worth reporting on a proxied site — that is the one place it
+        // silently becomes a 525 under Full (strict).
+        let origin_cert_self_signed = if proxied {
+            match certificates::get(&self.pool, &d).await {
+                Ok(Some(c)) => {
+                    let issuer = c.issuer.to_ascii_lowercase();
+                    !(issuer.contains("let's encrypt")
+                        || issuer.contains("lets encrypt")
+                        || issuer.contains("isrg"))
+                }
+                // No cert row at all ⇒ whatever nginx serves is the
+                // bootstrap; treat as self-signed.
+                _ => true,
+            }
+        } else {
+            false
+        };
+
         Ok(DnsCheckResult {
             domain: d,
             resolved_a,
@@ -12103,6 +12124,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             our_public_ipv6: our_ipv6,
             matches,
             note,
+            proxied,
+            origin_cert_self_signed,
         })
     }
 
@@ -16991,6 +17014,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 "php8.4-fpm php8.4-cli php8.4-mysql php8.4-pgsql \
                  php8.4-curl php8.4-gd php8.4-mbstring php8.4-xml php8.4-zip",
             ),
+            // ClamAV for the per-hosting malware scan. The scanner is the
+            // `clamscan` CLI (from the `clamav` package), not a daemon, so
+            // there is no unit to "start" — but `clamav-freshclam` IS a
+            // service, and it is what keeps the virus database current, so
+            // that is the unit the Services page tracks. Installing it
+            // pulls `clamav` (hence clamscan) as a dependency; naming both
+            // is belt-and-braces. First `freshclam` run downloads a few
+            // hundred MB of signatures, so the first scan afterwards may
+            // lag briefly.
+            "clamav-freshclam" => Some("clamav clamav-freshclam"),
             "hyperion-web" => Some("hyperion-web"),
             "hyperion-agent" if allow_self_restart => Some("hyperion-agent"),
             _ => None,
@@ -18082,6 +18115,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             ("php8.2-fpm", "PHP 8.2 FPM"),
             ("php8.3-fpm", "PHP 8.3 FPM"),
             ("php8.4-fpm", "PHP 8.4 FPM"),
+            // ClamAV malware scanner. Tracked by its freshclam service
+            // (the DB updater); installing it provides the `clamscan` the
+            // per-hosting File-integrity scan uses. Absent until installed,
+            // which is exactly when the integrity card says "Install
+            // clamav on the node" — this is where the Install button is.
+            ("clamav-freshclam", "ClamAV (malware scanner)"),
         ];
         // Fan ALL the probes out in parallel — was serial loop +
         // serial(rich + present) per unit, ~10 units × ~100 ms =

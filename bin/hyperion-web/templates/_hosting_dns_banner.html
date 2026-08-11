@@ -3,6 +3,31 @@
    on the OWNING node so the operator never has to wonder "does this
    domain actually point here?" The agent compares resolved A/AAAA
    against the node's public IP. #}
+{# The 525 trap: a proxied site still on the self-signed bootstrap cert.
+   Cloudflare Full (strict) rejects the untrusted origin → SSL handshake
+   failed (525), the site is "down" while nginx is perfectly healthy. This
+   is invisible to the plain DNS match (a proxied site "matches"), so it
+   gets its own red banner with both fixes. #}
+{% if dns.proxied && dns.origin_cert_self_signed %}
+  <div class="flash err" style="margin-bottom:0.8rem;padding:0.55rem 0.85rem;font-size:0.88rem">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+    <div class="flash-body">
+      <strong>Behind Cloudflare with a self-signed origin certificate.</strong>
+      This node still serves the temporary self-signed cert for
+      <code>{{ dns.domain }}</code> — no real certificate has been issued. If
+      Cloudflare's SSL/TLS mode is <strong>Full (strict)</strong> the site
+      returns <strong>error 525 (SSL handshake failed)</strong> to every
+      visitor, even though nginx is fine.
+      <span class="text-soft small" style="display:block;margin-top:0.25rem">
+        Fix: issue a real certificate below (<em>Issue via Cloudflare DNS</em>,
+        or <em>Manual</em> if the domain lives in a different Cloudflare
+        account than your API token) — then it works under strict. As an
+        immediate unblock, set Cloudflare SSL/TLS to <strong>Full</strong>
+        (not strict), which accepts the self-signed origin.
+      </span>
+    </div>
+  </div>
+{% endif %}
 {% if dns.matches %}
   <div class="flash success" style="margin-bottom:0.8rem;padding:0.55rem 0.85rem;font-size:0.88rem">
     <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>

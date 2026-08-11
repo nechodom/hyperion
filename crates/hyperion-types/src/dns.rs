@@ -26,6 +26,18 @@ pub struct DnsCheckResult {
     pub matches: bool,
     /// Human-friendly explanation of the outcome.
     pub note: String,
+    /// True when every resolved address is a Cloudflare edge — the domain
+    /// is served through Cloudflare's proxy.
+    #[serde(default)]
+    pub proxied: bool,
+    /// True when the certificate this node serves for the domain is still
+    /// the self-signed bootstrap cert (no real CA cert issued yet).
+    /// Combined with `proxied` this is the exact recipe for Cloudflare
+    /// error 525 under Full (strict): the origin presents an untrusted
+    /// cert, strict mode rejects it, the site is "down" while nginx is
+    /// fine.
+    #[serde(default)]
+    pub origin_cert_self_signed: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -64,6 +76,8 @@ mod tests {
             our_public_ipv6: None,
             matches: true,
             note: "DNS A record resolves here".into(),
+            proxied: false,
+            origin_cert_self_signed: false,
         };
         let s = serde_json::to_string(&r).expect("ser");
         let back: DnsCheckResult = serde_json::from_str(&s).expect("de");
