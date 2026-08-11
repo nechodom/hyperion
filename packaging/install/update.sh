@@ -604,6 +604,117 @@ HTML
   log "Installed default maintenance page at $MAINT_HTML"
 fi
 
+#-------- 3c2. Default landing page (replaces "Welcome to nginx") ---------
+# nginx's default_server answers any request whose Host matches no
+# configured site. On a fresh Debian box that is the stock "Welcome to
+# nginx" page — which is what a visitor (or the operator's own preview
+# link over a not-yet-configured name) sees. Replace it with a
+# Hyperion-branded "no site here" page, styled like the maintenance / error
+# pages, and disable the Debian default so there is exactly one
+# default_server per port.
+install -d -m 0755 /var/lib/hyperion/default
+DEFAULT_HTML="/var/lib/hyperion/default/index.html"
+if [[ ! -f "$DEFAULT_HTML" ]] || grep -q "x-hyperion-default" "$DEFAULT_HTML" 2>/dev/null; then
+  cat > "$DEFAULT_HTML" <<'HTML'
+<!-- x-hyperion-default: v1 - operator may replace this file freely -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>No site here · Hyperion</title>
+  <meta name="color-scheme" content="light dark">
+  <meta name="robots" content="noindex,nofollow">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23000000'/%3E%3Cpath d='M9 9 L9 23 M9 16 L17 16 M17 9 L17 23 M21 14 L24 14 L24 23 M21 11 L21 14' stroke='white' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round' fill='none'/%3E%3C/svg%3E">
+  <style>
+    :root {
+      --bg:#000000; --surface:#0a0a0a; --border:#1f1f1f;
+      --text:#fafafa; --text-soft:#a1a1aa;
+      color-scheme: dark light;
+    }
+    @media (prefers-color-scheme: light) {
+      :root { --bg:#fafafa; --surface:#ffffff; --border:#eaeaea; --text:#0a0a0a; --text-soft:#52525b; }
+    }
+    * { box-sizing:border-box; }
+    body {
+      margin:0; min-height:100vh; display:grid; place-items:center; padding:2rem 1rem;
+      background:var(--bg); color:var(--text);
+      font:15px/1.6 "Geist","Inter",-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;
+      -webkit-font-smoothing:antialiased;
+    }
+    .card {
+      background:var(--surface); border:1px solid var(--border); border-radius:14px;
+      max-width:30rem; width:100%; padding:2.25rem 2rem; text-align:center;
+    }
+    .logo { width:44px; height:44px; margin:0 auto 1.1rem; display:block; }
+    h1 { font-size:1.25rem; margin:0 0 0.5rem; letter-spacing:-0.01em; }
+    p { margin:0.4rem 0 0; color:var(--text-soft); font-size:0.92rem; }
+    code { font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:0.86rem;
+           background:color-mix(in srgb, var(--text) 8%, transparent); padding:0.1rem 0.35rem; border-radius:5px; }
+    .tag { margin-top:1.4rem; font-size:0.78rem; color:var(--text-soft); letter-spacing:0.03em; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <svg class="logo" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
+      <rect width="32" height="32" rx="7" fill="currentColor" opacity="0.06"/>
+      <path d="M9 9 L9 23 M9 16 L17 16 M17 9 L17 23 M21 14 L24 14 L24 23 M21 11 L21 14"
+            stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+    </svg>
+    <h1>No site here yet</h1>
+    <p>This server is managed by <strong>Hyperion</strong>, but no site is configured for this address.</p>
+    <p>If this is your domain, point its DNS at this server and add it in the Hyperion panel.</p>
+    <div class="tag">powered by Hyperion</div>
+  </div>
+</body>
+</html>
+HTML
+  chmod 0644 "$DEFAULT_HTML"
+  log "Installed Hyperion default landing page at $DEFAULT_HTML"
+fi
+
+# Disable the stock Debian default site (its default_server would clash
+# with ours) and install Hyperion's catch-all default_server.
+if [[ -e /etc/nginx/sites-enabled/default ]]; then
+  rm -f /etc/nginx/sites-enabled/default
+  log "Disabled stock nginx default site."
+fi
+DEFAULT_CONF="/etc/nginx/conf.d/zzz-hyperion-default.conf"
+# Use Debian's ssl-cert-snakeoil for the :443 default (any real site has
+# its own cert; this only answers unmatched hosts, where a cert mismatch
+# is expected). Skip the :443 block if the snakeoil cert is absent.
+SNAKE_CRT="/etc/ssl/certs/ssl-cert-snakeoil.pem"
+SNAKE_KEY="/etc/ssl/private/ssl-cert-snakeoil.key"
+{
+  echo "# Managed by hyperion — catch-all default server. DO NOT EDIT."
+  echo "server {"
+  echo "    listen 80 default_server;"
+  echo "    listen [::]:80 default_server;"
+  echo "    server_name _;"
+  echo "    root /var/lib/hyperion/default;"
+  echo "    location / { try_files /index.html =404; }"
+  echo "}"
+  if [[ -f "$SNAKE_CRT" && -f "$SNAKE_KEY" ]]; then
+    echo "server {"
+    echo "    listen 443 ssl default_server;"
+    echo "    listen [::]:443 ssl default_server;"
+    echo "    server_name _;"
+    echo "    ssl_certificate     $SNAKE_CRT;"
+    echo "    ssl_certificate_key $SNAKE_KEY;"
+    echo "    root /var/lib/hyperion/default;"
+    echo "    location / { try_files /index.html =404; }"
+    echo "}"
+  fi
+} > "$DEFAULT_CONF"
+if nginx -t >/dev/null 2>&1; then
+  systemctl reload nginx 2>/dev/null || true
+  log "Installed Hyperion catch-all default server."
+else
+  # Never let our default server wedge nginx — back it out if it fails to validate.
+  rm -f "$DEFAULT_CONF"
+  warn "Hyperion default server failed nginx -t; removed it (kept nginx healthy)."
+fi
+
 #-------- 3d. Heal vhosts written by an older Hyperion --------------------
 # Releases before commit 1609e75 emitted a standalone `http2 on;`
 # directive in every TLS server block. That syntax requires nginx
