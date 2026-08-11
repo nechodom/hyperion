@@ -1057,6 +1057,72 @@ mod tests {
         );
     }
 
+    /// Both of these are what make HTTP-01 survive a Cloudflare proxy, and
+    /// neither is obvious enough to survive a well-meaning "dedupe" — hence a
+    /// test that states WHY rather than just asserting a string is present.
+    ///
+    /// 1. The challenge location must exist in the TLS server block, not only
+    ///    in the :80 one. Under Cloudflare's Full / Full (strict) modes the
+    ///    edge fetches the origin over :443 even though Let's Encrypt arrived
+    ///    on :80. The near-universal certbot layout wires the challenge into
+    ///    :80 alone and would 404 here.
+    /// 2. In the :80 block the challenge location must be ordered ABOVE the
+    ///    catch-all `return 301 https://`. Under Flexible/Off the edge reaches
+    ///    the origin on :80, and an unconditional redirect there bounces the
+    ///    challenge back to the edge — an infinite edge<->origin loop.
+    #[test]
+    fn acme_challenge_survives_a_cloudflare_proxy_in_every_ssl_mode() {
+        let aliases: Vec<String> = vec![];
+        let opts = hyperion_types::VhostOptions::default();
+        let out = render(&VhostInput {
+            domain: "example.cz",
+            aliases: &aliases,
+            root_dir: "/srv/x/htdocs",
+            logs_dir: "/srv/x/logs",
+            system_user: "x",
+            php_version: None,
+            cert_path: "/etc/lm/certs/example.cz/fullchain.pem",
+            key_path: "/etc/lm/certs/example.cz/privkey.pem",
+            acme_challenge_root: "/var/lib/lm/acme-challenges",
+            hosting_id: "01HMOD",
+            options: &opts,
+            preview_server_name: None,
+            preview_cert_path: None,
+            preview_cert_key_path: None,
+        })
+        .expect("render");
+
+        // (1) Present in a `listen 443 ssl` block. Locate every server block,
+        // then require at least one TLS one to carry the challenge location.
+        let acme = "location /.well-known/acme-challenge/ {";
+        let tls_block_has_acme = out
+            .split("\nserver {")
+            .any(|blk| blk.contains("listen 443 ssl") && blk.contains(acme));
+        assert!(
+            tls_block_has_acme,
+            "no TLS server block serves the ACME challenge — Cloudflare Full/Full(strict) \
+             fetches the origin over :443 and would 404 the challenge:\n{out}"
+        );
+
+        // (2) In the :80 block, the challenge must come BEFORE the catch-all
+        // redirect, or Flexible mode loops.
+        let http_block = out
+            .split("\nserver {")
+            .find(|blk| blk.contains("listen 80;") && blk.contains("return 301 https://"))
+            .expect("no :80 redirect block found");
+        let acme_at = http_block
+            .find(acme)
+            .expect("the :80 block lost its ACME challenge location");
+        let redirect_at = http_block
+            .find("return 301 https://")
+            .expect("checked above");
+        assert!(
+            acme_at < redirect_at,
+            "the :80 block redirects before serving the ACME challenge — behind a Cloudflare \
+             proxy in Flexible mode that is an infinite edge<->origin redirect loop:\n{http_block}"
+        );
+    }
+
     #[test]
     fn render_static_no_php() {
         let aliases: Vec<String> = vec![];
