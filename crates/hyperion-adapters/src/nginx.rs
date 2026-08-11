@@ -1270,6 +1270,13 @@ mod tests {
         );
         // Preview server_name present.
         assert!(out.contains("server_name shop-example-com.s4.testovaciverze.cz;"));
+        // Preview host must ALSO have a :80 → HTTPS redirect, or a plain
+        // http:// request to it falls through to nginx's default site
+        // ("Welcome to nginx").
+        assert!(
+            out.contains("listen 80;") && out.contains("return 301 https://$host$request_uri;"),
+            "preview host is missing its port-80 redirect:\n{out}"
+        );
         // Primary block keeps the per-site cert.
         assert!(
             out.contains("ssl_certificate     /etc/hyperion/certs/shop.example.com/fullchain.pem;")
