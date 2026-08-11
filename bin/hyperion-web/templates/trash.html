@@ -11,7 +11,7 @@
         preserved until purged. Retention: <strong>{{ retention_days }} days</strong>.
       {% else %}
         <span class="text-soft">Trash is currently off</span> — deletes are immediate and permanent.
-        Turn it on in <a href="/settings#cluster">Settings → Cluster</a> to soft-delete instead.
+        Turn it on in <a href="/settings#cluster">Settings → Control plane</a> to soft-delete instead.
       {% endif %}
     </div>
   </div>
@@ -42,7 +42,7 @@
       {% if trash_enabled %}
         Deleted hostings stay here for {{ retention_days }} days, then the scheduler removes them permanently.
       {% else %}
-        Turn on trash in <a href="/settings#cluster">Settings → Cluster</a> to soft-delete hostings instead of removing them immediately.
+        Turn on trash in <a href="/settings#cluster">Settings → Control plane</a> to soft-delete hostings instead of removing them immediately.
       {% endif %}
     </p>
     {% include "_node_auth_empty_note.html" %}

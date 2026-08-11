@@ -80,12 +80,13 @@
   </div>
 {% else %}
   <div class="card" style="padding:0">
-    <table class="data-table data-table--cards">
+    <div class="scroll-x">
+<table class="data-table data-table--cards">
       <thead>
         <tr>
           <th>Kind</th>
           <th>Target</th>
-          <th style="width:18rem">Progress</th>
+          <th style="width:min(18rem,40vw)">Progress</th>
           <th>State</th>
           <th>Started by</th>
           <th>Started</th>
@@ -127,6 +128,7 @@
         {% endfor %}
       </tbody>
     </table>
+</div>
   </div>
 {% endif %}
 {% endblock %}

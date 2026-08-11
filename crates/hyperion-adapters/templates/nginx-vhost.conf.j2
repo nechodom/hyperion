@@ -11,7 +11,7 @@
    template (never nested inside an {% if %}), so it lives up here and
    is only *called* from the non-maintenance branch below.
    ─────────────────────────────────────────────────────────────── -#}
-{% macro https_body() %}
+{% macro https_body(preview) %}
     ssl_protocols TLSv1.2 TLSv1.3;
     ssl_ciphers ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384;
     ssl_prefer_server_ciphers on;
@@ -200,6 +200,13 @@
         include fastcgi_params;
         fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
         fastcgi_read_timeout 3600s;
+        {%- if preview %}
+        # Preview vhost: tell the app which host it is actually being
+        # served under, so the Hyperion mu-plugin can rewrite WordPress's
+        # home/siteurl to THIS name and suppress the canonical redirect
+        # that would otherwise bounce every request to the real domain.
+        fastcgi_param HYPERION_PREVIEW_HOST $host;
+        {%- endif %}
         {%- if fastcgi_cache_enabled %}
         fastcgi_cache hyperion_{{ hosting_id }};
         fastcgi_cache_valid 200 301 302 {{ fastcgi_cache_ttl }}s;
@@ -338,7 +345,7 @@ server {
 
     ssl_certificate     {{ cert_path }};
     ssl_certificate_key {{ key_path }};
-{%- call https_body() %}
+{%- call https_body(false) %}
 }
 {%- if preview_enabled %}
 
@@ -356,7 +363,7 @@ server {
 
     ssl_certificate     {{ preview_cert_path }};
     ssl_certificate_key {{ preview_cert_key_path }};
-{%- call https_body() %}
+{%- call https_body(true) %}
 }
 {%- endif %}
 {%- endif %}

@@ -485,10 +485,6 @@
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
     Overview
   </a>
-  <a class="tab" data-tab="settings" href="#settings" role="tab">
-    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-    Settings &amp; limits
-  </a>
   <a class="tab" data-tab="wordpress" href="#wordpress" role="tab">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20l9-5-9-5-9 5 9 5z"/><path d="M12 12l9-5-9-5-9 5 9 5z"/></svg>
     WordPress
@@ -498,14 +494,14 @@
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
     SSL
   </a>
+  <a class="tab" data-tab="settings" href="#settings" role="tab">
+    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.6 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+    Settings &amp; limits
+  </a>
   <a class="tab" data-tab="backups" href="#backups" role="tab">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
     Backups
     {% if !backups.is_empty() %}<span class="tab-badge">{{ backups.len() }}</span>{% endif %}
-  </a>
-  <a class="tab" data-tab="cron" href="#cron" role="tab">
-    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-    Cron
   </a>
   <a class="tab" data-tab="monitor" href="#monitor" role="tab" title="HTTP availability monitoring, alerts + access/error logs">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
@@ -518,6 +514,15 @@
       {% endif %}
     {% endif %}
   </a>
+  <a class="tab" data-tab="emails" href="#emails" role="tab">
+    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+    Emails &amp; deliverability
+    {% if !email_log.is_empty() %}<span class="tab-badge">{{ email_log.len() }}</span>{% endif %}
+  </a>
+  <a class="tab" data-tab="ftp" href="#ftp" role="tab">
+    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+    FTP
+  </a>
   {% if is_super_admin %}
   <a class="tab" data-tab="access" href="#access" role="tab">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="7" r="4"/><path d="M3 21v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2"/><path d="M16 11h6"/><path d="M19 8v6"/></svg>
@@ -525,15 +530,6 @@
     {% if access_grants.len() > 0 %}<span class="tab-badge">{{ access_grants.len() }}</span>{% endif %}
   </a>
   {% endif %}
-  <a class="tab" data-tab="ftp" href="#ftp" role="tab">
-    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
-    FTP
-  </a>
-  <a class="tab" data-tab="emails" href="#emails" role="tab">
-    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
-    Emails &amp; deliverability
-    {% if !email_log.is_empty() %}<span class="tab-badge">{{ email_log.len() }}</span>{% endif %}
-  </a>
   {# Direct link, not a tab: the panel behind it was a single button to
      this same wizard — a tab that adds one click and nothing else. #}
   <a class="tab" href="/hostings/transfer/{{ detail.id.as_str() }}">
@@ -1370,7 +1366,7 @@
     <details class="inline-action" style="position:relative">
       <summary class="btn small primary" style="list-style:none;cursor:pointer">+ Install plugin</summary>
       <form method="post" action="/hostings/wp/plugin-action" autocomplete="off"
-            style="position:absolute;z-index:10;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:0.7rem;margin-top:0.4rem;box-shadow:var(--shadow);min-width:22rem;max-width:calc(100vw - 1.5rem)">
+            style="position:absolute;z-index:10;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:0.7rem;margin-top:0.4rem;box-shadow:var(--shadow);width:min(24rem,calc(100vw - 1.5rem))">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
         <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
         <input type="hidden" name="action" value="install">
@@ -1395,7 +1391,7 @@
     <details class="inline-action" style="position:relative">
       <summary class="btn small" style="list-style:none;cursor:pointer">+ Install from library</summary>
       <form method="post" action="/hostings/wp/install-from-asset" autocomplete="off"
-            style="position:absolute;z-index:10;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:0.7rem;margin-top:0.4rem;box-shadow:var(--shadow);min-width:24rem;max-width:calc(100vw - 1.5rem)">
+            style="position:absolute;z-index:10;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:0.7rem;margin-top:0.4rem;box-shadow:var(--shadow);width:min(24rem,calc(100vw - 1.5rem))">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
         <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
         <div class="field" style="margin:0">
@@ -1718,7 +1714,7 @@
     <details class="inline-action" style="position:relative">
       <summary class="btn small primary" style="list-style:none;cursor:pointer">+ Install theme</summary>
       <form method="post" action="/hostings/wp/theme-action" autocomplete="off"
-            style="position:absolute;z-index:10;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:0.7rem;margin-top:0.4rem;box-shadow:var(--shadow);min-width:22rem;max-width:calc(100vw - 1.5rem)">
+            style="position:absolute;z-index:10;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:0.7rem;margin-top:0.4rem;box-shadow:var(--shadow);width:min(24rem,calc(100vw - 1.5rem))">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
         <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
         <input type="hidden" name="action" value="install">
@@ -1738,7 +1734,7 @@
     <details class="inline-action" style="position:relative">
       <summary class="btn small" style="list-style:none;cursor:pointer">+ Install theme from library</summary>
       <form method="post" action="/hostings/wp/install-from-asset" autocomplete="off"
-            style="position:absolute;z-index:10;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:0.7rem;margin-top:0.4rem;box-shadow:var(--shadow);min-width:24rem;max-width:calc(100vw - 1.5rem)">
+            style="position:absolute;z-index:10;background:var(--surface);border:1px solid var(--border-strong);border-radius:var(--radius-sm);padding:0.7rem;margin-top:0.4rem;box-shadow:var(--shadow);width:min(24rem,calc(100vw - 1.5rem))">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
         <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
         <div class="field" style="margin:0">
@@ -2261,6 +2257,80 @@
   </p>
 </div>
 
+{# Operator php.ini overrides, applied via a per-hosting .user.ini
+   (no FPM restart; takes effect within ~5 min). Leave a field blank to
+   fall back to the pool/global default. #}
+<div class="card hover">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17l6-6-6-6"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
+    PHP settings
+  </h2>
+  <p class="muted" style="font-size:0.85rem;margin-top:-0.4rem;margin-bottom:0.9rem">
+    Per-hosting <code>.user.ini</code> overrides. Blank = pool default. Sizes like <code>256M</code> / <code>1G</code>.
+    {% if php_ini.any() %}<span class="pill ok small" style="margin-left:0.3rem">active</span>{% endif %}
+  </p>
+  <p class="muted" style="font-size:0.85rem;margin-top:-0.5rem;margin-bottom:0.9rem">
+    <code>memory_limit</code> and <code>max_execution_time</code> are set in
+    <a href="#limits">PHP-FPM &amp; DB limits</a> instead. The pool applies them as
+    <code>php_admin_value</code>, which <code>.user.ini</code> is not permitted to
+    override — a value entered here would have been saved, reported as applied, and
+    then ignored by PHP.
+  </p>
+  <form method="post" action="/hostings/php-ini" hx-post="/hostings/php-ini" hx-swap="none">
+    <input type="hidden" name="_csrf" value="{{ csrf_php_ini }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(180px, 100%), 1fr));gap:1rem">
+      <div class="field" style="margin:0">
+        <label for="pi_upload"><code>upload_max_filesize</code></label>
+        <input id="pi_upload" name="upload_max_filesize" value="{{ php_ini.upload_max_filesize }}" placeholder="64M" autocomplete="off">
+      </div>
+      <div class="field" style="margin:0">
+        <label for="pi_post"><code>post_max_size</code></label>
+        <input id="pi_post" name="post_max_size" value="{{ php_ini.post_max_size }}" placeholder="64M" autocomplete="off">
+      </div>
+      <div class="field" style="margin:0">
+        <label for="pi_vars"><code>max_input_vars</code></label>
+        <input id="pi_vars" name="max_input_vars" value="{{ php_ini.max_input_vars }}" placeholder="3000" autocomplete="off">
+      </div>
+      <div class="field" style="margin:0">
+        <label for="pi_display"><code>display_errors</code></label>
+        <select id="pi_display" name="display_errors">
+          <option value="" {% if php_ini.display_errors.is_empty() %}selected{% endif %}>(default)</option>
+          <option value="Off" {% if php_ini.display_errors == "Off" %}selected{% endif %}>Off</option>
+          <option value="On" {% if php_ini.display_errors == "On" %}selected{% endif %}>On</option>
+        </select>
+      </div>
+    </div>
+    <div class="row" style="margin-top:0.9rem">
+      <button class="btn primary" type="submit">
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
+        Save PHP settings
+      </button>
+      <span class="muted hint">writes .user.ini in htdocs</span>
+    </div>
+  </form>
+
+  {# Ownership repair. Lives here because the symptom an operator arrives
+     with — "WordPress can't write", "FTP won't overwrite" — reads as a PHP
+     problem, so this is where they look. #}
+  <form method="post" action="/hostings/repair-permissions" style="margin-top:1.1rem;border-top:1px solid var(--border);padding-top:0.9rem">
+    <input type="hidden" name="_csrf" value="{{ csrf_repair_perms }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+    <div class="row" style="gap:0.6rem;flex-wrap:wrap;align-items:center">
+      <button class="btn" type="submit">
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+        Repair file permissions
+      </button>
+      <span class="muted hint">
+        Gives every file back to <code>{{ detail.system_user }}</code> and normalises modes
+        (directories 0755, files 0644). Fixes "could not create directory", failed plugin
+        updates and uploads that vanish — and FTP, which signs in as the same account.
+        Use after a restore, a migration, or unpacking an archive over SSH as root.
+      </span>
+    </div>
+  </form>
+</div>
+
 <div class="settings-group-label" style="text-transform:uppercase;font-size:0.72rem;letter-spacing:0.06em;color:var(--text-soft);font-weight:700;margin:1.2rem 0 0.5rem;opacity:0.85">Lifecycle &amp; billing</div>
 <div class="card hover">
   <h2>
@@ -2403,80 +2473,33 @@
   {% endif %}
 </div>
 
-{# Operator php.ini overrides, applied via a per-hosting .user.ini
-   (no FPM restart; takes effect within ~5 min). Leave a field blank to
-   fall back to the pool/global default. #}
+<div class="settings-group-label" style="text-transform:uppercase;font-size:0.72rem;letter-spacing:0.06em;color:var(--text-soft);font-weight:700;margin:1.2rem 0 0.5rem;opacity:0.85">Scheduled tasks</div>
 <div class="card hover">
   <h2>
-    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 17l6-6-6-6"/><line x1="12" y1="19" x2="20" y2="19"/></svg>
-    PHP settings
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+    Cron jobs
   </h2>
-  <p class="muted" style="font-size:0.85rem;margin-top:-0.4rem;margin-bottom:0.9rem">
-    Per-hosting <code>.user.ini</code> overrides. Blank = pool default. Sizes like <code>256M</code> / <code>1G</code>.
-    {% if php_ini.any() %}<span class="pill ok small" style="margin-left:0.3rem">active</span>{% endif %}
+  <p class="muted" style="font-size:0.85rem;margin-top:-0.4rem;margin-bottom:0.8rem">
+    Crontab for system user <code>{{ detail.system_user }}</code>, in standard cron syntax. Lines containing backticks are refused for safety.
   </p>
-  <p class="muted" style="font-size:0.85rem;margin-top:-0.5rem;margin-bottom:0.9rem">
-    <code>memory_limit</code> and <code>max_execution_time</code> are set in
-    <a href="#limits">PHP-FPM &amp; DB limits</a> instead. The pool applies them as
-    <code>php_admin_value</code>, which <code>.user.ini</code> is not permitted to
-    override — a value entered here would have been saved, reported as applied, and
-    then ignored by PHP.
-  </p>
-  <form method="post" action="/hostings/php-ini" hx-post="/hostings/php-ini" hx-swap="none">
-    <input type="hidden" name="_csrf" value="{{ csrf_php_ini }}">
+  <form method="post" action="/hostings/cron"
+        data-confirm-title="Replace crontab"
+        data-confirm-body="The crontab for {{ detail.system_user }} is overwritten with the contents below."
+        data-confirm-confirm-label="Save crontab"
+        data-confirm-variant="primary">
+    <input type="hidden" name="_csrf" value="{{ csrf_cron }}">
     <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(min(180px, 100%), 1fr));gap:1rem">
-      <div class="field" style="margin:0">
-        <label for="pi_upload"><code>upload_max_filesize</code></label>
-        <input id="pi_upload" name="upload_max_filesize" value="{{ php_ini.upload_max_filesize }}" placeholder="64M" autocomplete="off">
-      </div>
-      <div class="field" style="margin:0">
-        <label for="pi_post"><code>post_max_size</code></label>
-        <input id="pi_post" name="post_max_size" value="{{ php_ini.post_max_size }}" placeholder="64M" autocomplete="off">
-      </div>
-      <div class="field" style="margin:0">
-        <label for="pi_vars"><code>max_input_vars</code></label>
-        <input id="pi_vars" name="max_input_vars" value="{{ php_ini.max_input_vars }}" placeholder="3000" autocomplete="off">
-      </div>
-      <div class="field" style="margin:0">
-        <label for="pi_display"><code>display_errors</code></label>
-        <select id="pi_display" name="display_errors">
-          <option value="" {% if php_ini.display_errors.is_empty() %}selected{% endif %}>(default)</option>
-          <option value="Off" {% if php_ini.display_errors == "Off" %}selected{% endif %}>Off</option>
-          <option value="On" {% if php_ini.display_errors == "On" %}selected{% endif %}>On</option>
-        </select>
-      </div>
-    </div>
-    <div class="row" style="margin-top:0.9rem">
+    <textarea name="body" rows="10" spellcheck="false" style="font-family:var(--font-mono);font-size:12.5px"
+              placeholder="# m h dom mon dow command&#10;0 3 * * * /usr/bin/php /home/{{ detail.system_user }}/{{ detail.domain }}/htdocs/wp-cron.php >/dev/null 2>&amp;1">{{ cron_body }}</textarea>
+    <div class="row" style="margin-top:0.7rem">
       <button class="btn primary" type="submit">
         <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
-        Save PHP settings
+        Save crontab
       </button>
-      <span class="muted hint">writes .user.ini in htdocs</span>
-    </div>
-  </form>
-
-  {# Ownership repair. Lives here because the symptom an operator arrives
-     with — "WordPress can't write", "FTP won't overwrite" — reads as a PHP
-     problem, so this is where they look. #}
-  <form method="post" action="/hostings/repair-permissions" style="margin-top:1.1rem;border-top:1px solid var(--border);padding-top:0.9rem">
-    <input type="hidden" name="_csrf" value="{{ csrf_repair_perms }}">
-    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
-    <div class="row" style="gap:0.6rem;flex-wrap:wrap;align-items:center">
-      <button class="btn" type="submit">
-        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-        Repair file permissions
-      </button>
-      <span class="muted hint">
-        Gives every file back to <code>{{ detail.system_user }}</code> and normalises modes
-        (directories 0755, files 0644). Fixes "could not create directory", failed plugin
-        updates and uploads that vanish — and FTP, which signs in as the same account.
-        Use after a restore, a migration, or unpacking an archive over SSH as root.
-      </span>
+      <span class="muted hint">empty body removes the crontab</span>
     </div>
   </form>
 </div>
-
 
 </div><!-- /tab-settings -->
 
@@ -2856,36 +2879,7 @@
 
 </div><!-- /tab-backups -->
 
-<div class="tab-panel" id="tab-cron">
 
-<div class="card hover">
-  <h2>
-    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-    Cron jobs
-  </h2>
-  <p class="muted" style="font-size:0.85rem;margin-top:-0.4rem;margin-bottom:0.8rem">
-    Crontab for system user <code>{{ detail.system_user }}</code>, in standard cron syntax. Lines containing backticks are refused for safety.
-  </p>
-  <form method="post" action="/hostings/cron"
-        data-confirm-title="Replace crontab"
-        data-confirm-body="The crontab for {{ detail.system_user }} is overwritten with the contents below."
-        data-confirm-confirm-label="Save crontab"
-        data-confirm-variant="primary">
-    <input type="hidden" name="_csrf" value="{{ csrf_cron }}">
-    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
-    <textarea name="body" rows="10" spellcheck="false" style="font-family:var(--font-mono);font-size:12.5px"
-              placeholder="# m h dom mon dow command&#10;0 3 * * * /usr/bin/php /home/{{ detail.system_user }}/{{ detail.domain }}/htdocs/wp-cron.php >/dev/null 2>&amp;1">{{ cron_body }}</textarea>
-    <div class="row" style="margin-top:0.7rem">
-      <button class="btn primary" type="submit">
-        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><polyline points="20 6 9 17 4 12"/></svg>
-        Save crontab
-      </button>
-      <span class="muted hint">empty body removes the crontab</span>
-    </div>
-  </form>
-</div>
-
-</div><!-- /tab-cron -->
 
 <div class="tab-panel" id="tab-monitor">
 

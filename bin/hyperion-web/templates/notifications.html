@@ -59,13 +59,14 @@
       </p>
       <p class="text-soft small" style="margin-top:0.6rem">
         To also receive these by email or Slack, set up the channels in
-        <a href="/settings#tab-notifications">Settings → Notifications</a>.
+        <a href="/settings#notifications">Settings → Notifications</a>.
       </p>
     {% endif %}
   </div>
 {% else %}
   <div class="card" style="padding:0">
-    <table class="data-table data-table--cards">
+    <div class="scroll-x">
+<table class="data-table data-table--cards">
       <thead>
         <tr>
           <th style="width:5rem">Severity</th>
@@ -112,6 +113,7 @@
         {% endfor %}
       </tbody>
     </table>
+</div>
   </div>
 {% endif %}
 {% endblock %}

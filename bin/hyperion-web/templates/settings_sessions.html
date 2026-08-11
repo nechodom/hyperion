@@ -25,7 +25,8 @@
   </div>
 {% else %}
   <div class="card" style="padding:0">
-    <table class="data-table data-table--cards">
+    <div class="scroll-x">
+<table class="data-table data-table--cards">
       <thead>
         <tr>
           <th>Session</th>
@@ -85,6 +86,7 @@
         {% endfor %}
       </tbody>
     </table>
+</div>
   </div>
 {% endif %}
 {% endblock %}
