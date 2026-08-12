@@ -1066,6 +1066,124 @@ pub struct FtpAccountSummary {
 /// site-mail-wrapper). Distinct from the Hyperion-sent emails in
 /// EmailLogEntry — those flow through our SMTP config, these flow
 /// through the local sendmail.
+/// Decode RFC 2047 encoded-words (`=?UTF-8?Q?...?=` / `?B?`) into readable
+/// text.
+///
+/// Mail headers are ASCII-only on the wire, so anything with an accent in it
+/// arrives encoded — which is why a Czech subject line rendered as
+/// `=?UTF-8?Q?[Ingratia.cz]_Web_byl_aktualizov=C3=A1n?=` in the panel. This
+/// is display-only: the raw header stays in the log file.
+///
+/// Deliberately lenient. A header we cannot decode is returned UNCHANGED
+/// rather than mangled or dropped — a subject that is ugly is still useful,
+/// and one that has been "helpfully" rewritten into nonsense is not. Only
+/// UTF-8 and the ASCII/Latin-1 aliases are decoded; any other charset is
+/// left alone rather than guessed at.
+pub fn decode_mime_header(raw: &str) -> String {
+    // Fast path: the overwhelming majority of subjects are plain ASCII.
+    if !raw.contains("=?") {
+        return raw.to_string();
+    }
+    let mut out = String::with_capacity(raw.len());
+    let mut rest = raw;
+    while let Some(start) = rest.find("=?") {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 2..];
+        // charset ? encoding ? payload ?=
+        let Some(c1) = after.find('?') else {
+            out.push_str(&rest[start..]);
+            return out;
+        };
+        let charset = &after[..c1];
+        let after_cs = &after[c1 + 1..];
+        let Some(c2) = after_cs.find('?') else {
+            out.push_str(&rest[start..]);
+            return out;
+        };
+        let encoding = &after_cs[..c2];
+        let after_enc = &after_cs[c2 + 1..];
+        let Some(end) = after_enc.find("?=") else {
+            out.push_str(&rest[start..]);
+            return out;
+        };
+        let payload = &after_enc[..end];
+
+        let cs = charset.to_ascii_lowercase();
+        let decoded =
+            if cs == "utf-8" || cs == "utf8" || cs.starts_with("iso-8859-1") || cs == "us-ascii" {
+                match encoding.to_ascii_uppercase().as_str() {
+                    "Q" => decode_q(payload),
+                    "B" => decode_b(payload),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+        match decoded {
+            Some(t) => out.push_str(&t),
+            // Unknown charset or malformed payload — keep the original word
+            // so the operator can still read what was there.
+            None => out.push_str(&rest[start..start + 2 + c1 + 1 + c2 + 1 + end + 2]),
+        }
+        rest = &after_enc[end + 2..];
+        // Encoded words may be separated by whitespace that is NOT part of
+        // the text (RFC 2047 §6.2). Swallow a single run between two words.
+        if rest.starts_with(' ') && rest.trim_start().starts_with("=?") {
+            rest = rest.trim_start();
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Q-encoding: `_` is a space, `=XX` is a hex byte, everything else literal.
+fn decode_q(payload: &str) -> Option<String> {
+    let b = payload.as_bytes();
+    let mut bytes = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'_' => {
+                bytes.push(b' ');
+                i += 1;
+            }
+            b'=' if i + 2 < b.len() => {
+                let hex = std::str::from_utf8(&b[i + 1..i + 3]).ok()?;
+                bytes.push(u8::from_str_radix(hex, 16).ok()?);
+                i += 3;
+            }
+            // A bare '=' with nothing decodable after it is malformed.
+            b'=' => return None,
+            c => {
+                bytes.push(c);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// B-encoding: standard base64.
+fn decode_b(payload: &str) -> Option<String> {
+    const T: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut acc: u32 = 0;
+    let mut bits = 0u32;
+    let mut bytes = Vec::new();
+    for ch in payload.bytes() {
+        if ch == b'=' {
+            break;
+        }
+        let v = T.iter().position(|&t| t == ch)? as u32;
+        acc = (acc << 6) | v;
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            bytes.push((acc >> bits) as u8);
+        }
+    }
+    String::from_utf8(bytes).ok()
+}
+
 /// One captured outbound message.
 ///
 /// `#[serde(default)]` on the struct, and aliases on the two renamed fields,
@@ -1526,6 +1644,46 @@ impl Default for UpdateStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The real subject from the user's own box, which rendered raw in the
+    /// panel. Anything with an accent arrives RFC 2047 encoded, so a Czech
+    /// subject was unreadable for every message that had one.
+    #[test]
+    fn decodes_the_subject_that_was_showing_raw() {
+        assert_eq!(
+            decode_mime_header("=?UTF-8?Q?[Ingratia.cz]_Web_byl_aktualizov=C3=A1n_na_WordPre?="),
+            "[Ingratia.cz] Web byl aktualizován na WordPre"
+        );
+    }
+
+    #[test]
+    fn decodes_base64_words_and_leaves_plain_text_alone() {
+        assert_eq!(decode_mime_header("=?UTF-8?B?UMWZw61saXM=?="), "Přílis");
+        assert_eq!(decode_mime_header("Plain old subject"), "Plain old subject");
+    }
+
+    /// A header we cannot decode comes back UNCHANGED. An ugly subject is
+    /// still useful; one rewritten into nonsense is not.
+    #[test]
+    fn undecodable_headers_survive_intact() {
+        for raw in [
+            "=?ISO-2022-JP?Q?whatever?=", // charset we do not handle
+            "=?UTF-8?X?nope?=",           // unknown encoding
+            "=?UTF-8?Q?truncated",        // no terminator
+        ] {
+            assert_eq!(decode_mime_header(raw), raw, "must not mangle {raw}");
+        }
+    }
+
+    /// Mixed plain text and encoded words, which is what a "Re:" reply looks
+    /// like once a mail client gets hold of it.
+    #[test]
+    fn decodes_a_word_embedded_in_plain_text() {
+        assert_eq!(
+            decode_mime_header("Re: =?UTF-8?Q?p=C5=99=C3=ADloha?= (fwd)"),
+            "Re: příloha (fwd)"
+        );
+    }
 
     /// The exact line shape `site-mail-wrapper.sh` writes must parse.
     ///

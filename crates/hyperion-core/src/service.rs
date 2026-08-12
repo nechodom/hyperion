@@ -7911,9 +7911,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .take(limit)
             .filter_map(|line| serde_json::from_str(line).ok())
             .collect();
-        // Truncate the body excerpt for wire safety (the wrapper
-        // already caps at ~1 KB but defence in depth).
         for r in &mut out {
+            // Subjects arrive RFC 2047 encoded whenever they contain a
+            // non-ASCII character, which for a Czech site is most of them.
+            // Decode for display; an undecodable header comes back unchanged.
+            r.subject = hyperion_types::decode_mime_header(&r.subject);
+            // Truncate the body excerpt for wire safety (the wrapper
+            // already caps at ~1 KB but defence in depth).
             if r.body_excerpt.len() > 2048 {
                 r.body_excerpt.truncate(2048);
             }
@@ -11536,8 +11540,18 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             updated_at: row.updated_at,
             exceed_action: exceed_action.as_str().to_string(),
         };
-        let (current_disk_kib, quotas_enabled_on_fs, setup_hint) =
+        let (mut current_disk_kib, quotas_enabled_on_fs, setup_hint) =
             quota_probe_current(&detail.system_user, &detail.root_dir).await;
+        // Without kernel quotas the probe deliberately returns 0 rather than
+        // walking the tree — fall back to the usage sampler, which already
+        // measures exactly this and does it off the request path.
+        if current_disk_kib == 0 {
+            if let Ok(rows) = hyperion_state::limits::usage_for(&self.pool, &detail.id, 1).await {
+                if let Some(u) = rows.first() {
+                    current_disk_kib = u.disk_used_bytes / 1024;
+                }
+            }
+        }
         Ok(hyperion_types::HostingQuotaReport {
             policy,
             current_disk_kib,
@@ -24063,21 +24077,16 @@ async fn quota_probe_current(user: &str, home_dir: &str) -> (i64, bool, String) 
             }
         }
     }
-    if used == 0 {
-        if let Ok(o) = tokio::process::Command::new("/usr/bin/du")
-            .args(["-sk", home_dir])
-            .output()
-            .await
-        {
-            if o.status.success() {
-                used = String::from_utf8_lossy(&o.stdout)
-                    .split_whitespace()
-                    .next()
-                    .and_then(|n| n.parse::<i64>().ok())
-                    .unwrap_or(0);
-            }
-        }
-    }
+    // NO `du` FALLBACK HERE. It used to run whenever the kernel probe
+    // returned 0 — which is every box without kernel quotas, i.e. the default
+    // — walking the site's entire tree, with no timeout, on every hosting
+    // detail page load. On a 20 GB site with a cold page cache that is
+    // seconds to tens of seconds of wall clock before anything renders, for a
+    // number that is only ENFORCED when quotas are on.
+    //
+    // The caller substitutes the last sampled figure instead (see quota_get):
+    // five minutes stale and instant beats exact and unusable. `du` still
+    // runs, but on the sampler's schedule, where taking a while is fine.
 
     let hint = if enabled {
         String::new()
