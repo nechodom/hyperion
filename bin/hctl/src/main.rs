@@ -941,6 +941,11 @@ fn print_pretty(resp: &Response) {
             println!("matches:  {}", if c.matches { "yes ✓" } else { "no ✗" });
             println!("note:     {}", c.note);
         }
+        Response::EmailLogoSet => println!("✓ e-mail logo updated"),
+        Response::EmailLogoGet(v) => match v {
+            Some(_) => println!("e-mail logo: set"),
+            None => println!("e-mail logo: none"),
+        },
         Response::CertDelete => println!("✓ certificate deleted — the site is on a self-signed bootstrap cert until you issue a new one"),
         Response::CertIssueAcme(c)
         | Response::CertDns01Finish(c)

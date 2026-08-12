@@ -660,6 +660,14 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
                 Err(e) => Response::Error(e),
             }
         }
+        Request::EmailLogoSet { png_or_jpeg } => match api.email_logo_set(png_or_jpeg).await {
+            Ok(()) => Response::EmailLogoSet,
+            Err(e) => Response::Error(e),
+        },
+        Request::EmailLogoGet => match api.email_logo_get().await {
+            Ok(v) => Response::EmailLogoGet(v),
+            Err(e) => Response::Error(e),
+        },
         Request::EmailConfigSet { fields } => match api.email_config_set(fields.into_inner()).await
         {
             Ok(()) => Response::EmailConfigSet,
@@ -2023,6 +2031,16 @@ mod tests {
         ) -> Result<(), RpcError> {
             Ok(())
         }
+        async fn email_logo_set(&self, _: Vec<u8>) -> Result<(), RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
+        }
+
+        async fn email_logo_get(&self) -> Result<Option<String>, RpcError> {
+            Ok(None)
+        }
+
         async fn email_config_set(
             &self,
             _: std::collections::BTreeMap<String, String>,

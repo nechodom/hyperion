@@ -494,6 +494,11 @@ pub struct HostingService<A: AdapterPort + 'static> {
 /// `[acme] renewal_window_days` in agent.toml.
 pub const CERT_RENEWAL_WINDOW_DAYS: i64 = 30;
 
+/// Operator-supplied logo for notification e-mails. One file, one place —
+/// a per-node path rather than a DB row because the agent that SENDS the
+/// mail is the one that must read it.
+pub const EMAIL_LOGO_PATH: &str = "/etc/hyperion/email-logo";
+
 /// What a box is for. Resolved by [`HostingService::deployment_role`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeploymentRole {
@@ -1766,6 +1771,100 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// Niceness for the malware sweep — see [`read_scan_niceness`].
     pub fn malware_scan_niceness(&self) -> i32 {
         read_scan_niceness(self.agent_config_path.as_deref())
+    }
+
+    /// Name shown in the e-mail header when no logo is configured. The
+    /// panel hostname is the closest thing to a brand the operator has
+    /// already told us; "Hyperion" is a fallback, not a signature.
+    fn notify_brand_name(&self) -> String {
+        let host = read_cluster_section(self.agent_config_path.as_deref()).panel_hostname;
+        let host = host.trim();
+        if host.is_empty() {
+            "Hyperion".to_string()
+        } else {
+            host.to_string()
+        }
+    }
+
+    fn notify_email_footer(&self) -> String {
+        let panel = self.notify_panel_url();
+        if panel.is_empty() {
+            "Sent by Hyperion.".to_string()
+        } else {
+            format!("Sent by Hyperion · {panel}")
+        }
+    }
+
+    /// The operator's logo, as a data URI, or `None`.
+    ///
+    /// Embedded rather than linked: mail clients block remote images by
+    /// default, so a linked logo shows as a broken box for most recipients —
+    /// which is worse than no logo at all. Read fresh each send so replacing
+    /// the file takes effect without a restart; it is a few KB off local
+    /// disk, next to an SMTP round trip.
+    pub async fn notify_logo_data_uri_pub(&self) -> Option<String> {
+        self.notify_logo_data_uri().await
+    }
+
+    /// Store (or clear) the logo. Validated by MAGIC BYTES, not by the
+    /// filename or a content-type header — both are supplied by whoever is
+    /// uploading, and this file is embedded into mail that leaves the
+    /// building.
+    pub async fn email_logo_set(&self, bytes: Vec<u8>) -> Result<(), RpcError> {
+        let path = std::path::Path::new(EMAIL_LOGO_PATH);
+        if bytes.is_empty() {
+            let _ = tokio::fs::remove_file(path).await;
+            self.append_audit("email.logo.clear", None, "{}", "ok")
+                .await;
+            return Ok(());
+        }
+        if bytes.len() > 512 * 1024 {
+            return Err(RpcError::Validation {
+                message: "logo must be 512 KB or smaller — it is embedded into every message"
+                    .into(),
+            });
+        }
+        let ok = matches!(bytes.as_slice(), [0x89, b'P', b'N', b'G', ..])
+            || matches!(bytes.as_slice(), [0xFF, 0xD8, 0xFF, ..])
+            || bytes.starts_with(b"GIF8");
+        if !ok {
+            return Err(RpcError::Validation {
+                message: "logo must be a PNG, JPEG or GIF image".into(),
+            });
+        }
+        tokio::fs::write(path, &bytes)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("write logo: {e}")))?;
+        self.append_audit(
+            "email.logo.set",
+            None,
+            &serde_json::json!({"bytes": bytes.len()}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
+    async fn notify_logo_data_uri(&self) -> Option<String> {
+        let path = std::path::Path::new(EMAIL_LOGO_PATH);
+        let bytes = tokio::fs::read(path).await.ok()?;
+        // Cap it. A large image is slow for every recipient and some servers
+        // refuse oversized messages outright.
+        if bytes.is_empty() || bytes.len() > 512 * 1024 {
+            return None;
+        }
+        let mime = match bytes.as_slice() {
+            [0x89, b'P', b'N', b'G', ..] => "image/png",
+            [0xFF, 0xD8, 0xFF, ..] => "image/jpeg",
+            b if b.starts_with(b"GIF8") => "image/gif",
+            b if b.starts_with(b"<svg") || b.starts_with(b"<?xml") => "image/svg+xml",
+            _ => return None,
+        };
+        use base64::Engine;
+        Some(format!(
+            "data:{mime};base64,{}",
+            base64::engine::general_purpose::STANDARD.encode(&bytes)
+        ))
     }
 
     pub fn is_worker_node(&self) -> bool {
@@ -7705,7 +7804,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         };
         let subject = subject_rendered.as_str();
         let body = body_rendered.as_str();
-        match hyperion_adapters::email::send_text(cfg, to, subject, body).await {
+        // Send both shapes. The plain text is exactly what was composed, so
+        // nothing is lost for a client that refuses HTML — and a
+        // text/html-ONLY message reads as spam to several filters.
+        let html = hyperion_adapters::email::render_html_shell(
+            &self.notify_brand_name(),
+            body,
+            self.notify_logo_data_uri().await.as_deref(),
+            &self.notify_email_footer(),
+        );
+        match hyperion_adapters::email::send_html(cfg, to, subject, body, &html).await {
             Ok(code) => {
                 self.append_audit(
                     "notify.email",
