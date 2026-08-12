@@ -2358,7 +2358,7 @@
   </h2>
   {% if let Some(t) = expiry.expires_at %}
     <div class="row" style="margin-bottom:0.8rem">
-      <span class="pill warn">expires {{ t }}</span>
+      <span class="pill warn" title="unix {{ t }}">expires {{ t|date }}</span>
       <span class="muted" style="font-size:0.88rem">grace {{ expiry.grace_days }} days · warnings {{ expiry.warning_offsets_days }}</span>
     </div>
     <form method="post" action="/hostings/expiry/clear" style="display:inline">
@@ -2375,7 +2375,15 @@
     <div class="field-row">
       <div class="field">
         <label for="expires_on">Expires on <span class="hint">date · UTC</span></label>
-        <input id="expires_on" name="expires_on" type="date" required>
+        {#- Prefilled, in this order: the expiry already set, else the next
+            billing date. The field is `required`, so leaving it blank made
+            editing the grace period or owner e-mail mean re-typing a date
+            that was already on screen. Falling back to the billing date is
+            the answer that is right nearly every time — a hosting is
+            normally paid up to the day it would expire — and it is only a
+            default: the operator can still pick any date. #}
+        <input id="expires_on" name="expires_on" type="date" required
+               value="{% if let Some(t) = expiry.expires_at %}{{ t|date }}{% else if let Some(pa) = profile_apply %}{% if let Some(nb) = pa.next_billing_at %}{{ nb|date }}{% endif %}{% endif %}">
       </div>
       <div class="field">
         <label for="grace_days">Grace period <span class="hint">days before auto-delete</span></label>
@@ -2566,16 +2574,32 @@
     <dt>Lands in</dt><dd><code>/home/{{ detail.system_user }}/{{ detail.domain }}/htdocs</code> (writable web root)</dd>
   </dl>
 
+  {# Two ways to the same place. The generated one stays the primary action
+     because a random 20-char password is the right default and costs the
+     operator nothing to accept; typing your own is for when the credential
+     has to match something that already exists elsewhere. Leaving the field
+     empty and submitting generates one, which is what the backend already
+     did for the button below. #}
+  <form method="post" action="/hostings/ftp/set" style="margin-top:0.7rem">
+    <input type="hidden" name="_csrf" value="{{ csrf_ftp_set }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+    <div class="field" style="max-width:28rem">
+      <label for="ftp_password">
+        {% if let Some(true) = ftp_login_ok %}Change the password{% else %}Set a password{% endif %}
+        <span class="hint">at least 12 characters · leave empty to generate one</span>
+      </label>
+      <div style="display:flex;gap:0.5rem;align-items:center">
+        <input id="ftp_password" name="new_password" type="text" autocomplete="off"
+               minlength="12" placeholder="leave empty to generate a strong one"
+               style="flex:1">
+        <button class="btn primary" type="submit">
+          {% if let Some(true) = ftp_login_ok %}Change password{% else %}Set password{% endif %}
+        </button>
+      </div>
+    </div>
+  </form>
+
   <div class="row" style="margin-top:0.7rem;gap:0.5rem">
-    <form method="post" action="/hostings/ftp/set" style="display:inline">
-      <input type="hidden" name="_csrf" value="{{ csrf_ftp_set }}">
-      <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
-      <input type="hidden" name="new_password" value="">
-      <button class="btn primary" type="submit">
-        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
-        Generate &amp; set FTP password
-      </button>
-    </form>
     <form method="post" action="/hostings/ftp/disable" style="display:inline"
           data-confirm-title="Disable FTP"
           data-confirm-body="FTP access for {{ detail.system_user }} will be revoked and the password cleared. Files on disk are not affected."
@@ -2622,6 +2646,7 @@
           <th>Domain</th>
           <th>State</th>
           <th>Status</th>
+          <th class="right">Actions</th>
         </tr>
       </thead>
       <tbody>
@@ -2649,6 +2674,40 @@
               <span class="pill">disabled</span>
             {% endif %}
           </td>
+          {# Per-account actions. Each acts on the account's OWN hosting, not
+             on the one whose page this is — the table lists the whole node,
+             so posting this hosting's selector would revoke the wrong site's
+             access. Rows with no hosting behind them (an operator-created
+             system user) have nothing to dispatch, so they get no buttons. #}
+          <td class="right">
+            {% if a.domain.is_empty() %}
+              <span class="text-soft small" title="This system user has no hosting in Hyperion, so there is nothing here to act on">—</span>
+            {% else %}
+            <div class="row-actions">
+              <form method="post" action="/hostings/ftp/set" style="display:inline"
+                    data-confirm-title="Generate a new FTP password"
+                    data-confirm-body="A new password is generated for {{ a.user }} ({{ a.domain }}) and shown once. The old one stops working immediately."
+                    data-confirm-confirm-label="Generate"
+                    data-confirm-variant="primary">
+                <input type="hidden" name="_csrf" value="{{ csrf_ftp_set }}">
+                <input type="hidden" name="selector" value="{{ a.domain }}">
+                <input type="hidden" name="new_password" value="">
+                <button class="btn small" type="submit">New password</button>
+              </form>
+              {% if a.has_password %}
+              <form method="post" action="/hostings/ftp/disable" style="display:inline"
+                    data-confirm-title="Delete this FTP account"
+                    data-confirm-body="FTP access for {{ a.user }} ({{ a.domain }}) is revoked and the password cleared. The system user and every file on disk are left alone — the site keeps serving."
+                    data-confirm-confirm-label="Delete account"
+                    data-confirm-variant="danger">
+                <input type="hidden" name="_csrf" value="{{ csrf_ftp_disable }}">
+                <input type="hidden" name="selector" value="{{ a.domain }}">
+                <button class="btn small danger" type="submit">Delete</button>
+              </form>
+              {% endif %}
+            </div>
+            {% endif %}
+          </td>
         </tr>
       {% endfor %}
       </tbody>
@@ -2674,6 +2733,13 @@
 </div><!-- /tab-ftp -->
 
 <div class="tab-panel" id="tab-backups">
+
+{# Live progress for anything running against THIS site, polled in place.
+   The action still spawns a background job and still has a /jobs/<id> page
+   — that is what makes it survive a disconnect — but you no longer have to
+   leave this tab to find out how it is going. #}
+<div id="hosting-jobs" hx-get="/hostings/{{ detail.id.as_str() }}/jobs-panel"
+     hx-trigger="load, every 2s" hx-swap="outerHTML"></div>
 
 <p class="text-soft small" style="margin:0 0 0.6rem" data-role-min="admin">Backups land on local disk; off-site targets (S3 + age) are configured cluster-wide in <a href="/settings/backups">Settings → Backup targets</a>, and each site picks one of them below.</p>
 

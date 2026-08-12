@@ -53,6 +53,17 @@ pub struct NodeStats {
     /// 049). `#[serde(default)]` so an older agent still deserializes (0).
     #[serde(default)]
     pub hostings_disk_bytes: i64,
+    /// Bytes this node's LOCAL backup archives occupy, summed over the
+    /// successful runs still on disk. Distinct from `hostings_disk_bytes`:
+    /// backups live outside the sites' home directories, so a node can be
+    /// short of space for a reason no per-site figure explains — which is
+    /// exactly the case an operator wants to see before a backup starts
+    /// failing.
+    #[serde(default)]
+    pub backup_bytes: i64,
+    /// How many successful archives that figure covers.
+    #[serde(default)]
+    pub backup_count: i64,
     /// Capacity (df Size) of this node's home-root volume (migration 049).
     #[serde(default)]
     pub node_disk_total_bytes: i64,

@@ -115,6 +115,22 @@
       <div class="kpi-meta">{% if c.total_node_disk_total_bytes > 0 %}{{ crate::handlers::stats::disk_used_pct(c.total_disk_bytes, c.total_node_disk_total_bytes) }}% of {{ crate::handlers::stats::fmt_bytes(c.total_node_disk_total_bytes) }} · OS + data{% else %}whole volume · OS + data{% endif %}</div>
     </div>
 
+    {# Backups occupy the node volume but live OUTSIDE every site's home
+       directory, so neither disk figure above accounts for them. On a box
+       that is filling up they are very often the reason, and until now
+       nothing on this page said so. #}
+    <div class="kpi-card disk">
+      <div class="kpi-label">Backups on disk</div>
+      <div class="kpi-value">{{ crate::handlers::stats::fmt_bytes(backup_bytes_total) }}</div>
+      <div class="kpi-meta">
+        {% if backup_count_total > 0 %}
+          {{ backup_count_total }} archive{% if backup_count_total != 1 %}s{% endif %} · not counted in site disk
+        {% else %}
+          no archives kept yet
+        {% endif %}
+      </div>
+    </div>
+
     <div class="kpi-card bw">
       <div class="kpi-label">Bandwidth out · 24 h</div>
       <div class="kpi-value">{{ crate::handlers::stats::fmt_bytes(c.total_bw_out_24h) }}</div>

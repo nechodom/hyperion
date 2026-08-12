@@ -608,6 +608,10 @@ pub fn build_router(state: SharedState) -> Router {
             get(handlers::hostings::get_dns_panel),
         )
         .route(
+            "/hostings/:selector/jobs-panel",
+            get(handlers::hostings::get_hosting_jobs_panel),
+        )
+        .route(
             "/hostings/:selector/spf-panel",
             get(handlers::hostings::get_spf_panel),
         )

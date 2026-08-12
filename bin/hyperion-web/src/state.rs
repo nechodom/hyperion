@@ -44,6 +44,21 @@ pub struct AppState {
     /// allowed. Defaults to `"master"` so a cold cache shows too much
     /// rather than hiding a real cluster.
     pub deployment_mode: Arc<RwLock<String>>,
+    /// One-shot store for a freshly generated FTP password, keyed by a
+    /// random token.
+    ///
+    /// The password used to be handed back in the redirect's QUERY STRING,
+    /// which put a live credential into the browser history, the `Referer`
+    /// of anything the page loads, and — the one that matters — nginx's
+    /// access log, where it sits in plaintext for as long as logs are kept.
+    /// The token goes in the URL instead: single-use, and useless once
+    /// taken.
+    ///
+    /// In memory on purpose. It must not outlive the process, and a
+    /// password that survives a restart is a password sitting somewhere it
+    /// does not need to be.
+    pub ftp_password_handoff:
+        Arc<tokio::sync::Mutex<std::collections::HashMap<String, (String, i64)>>>,
 }
 
 impl AppState {
