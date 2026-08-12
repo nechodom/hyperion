@@ -1,5 +1,7 @@
 use crate::auth::AuthCtx;
 use crate::error::AppError;
+#[allow(unused_imports)] // askama resolves {{ x|date }} through this
+use crate::filters;
 use crate::state::SharedState;
 use askama::Template;
 use axum::extract::{Path, State};
@@ -1427,9 +1429,15 @@ pub(crate) fn compute_hosting_health(
     }
 
     // 3. Recent backup
+    // `mark_ok` writes state='ok'. This filtered on "done" — a string
+    // nothing ever writes — so the health card reported "No successful
+    // backup yet" forever, however many backups had succeeded, and docked
+    // 15 points off the score for it. The dashboard alert at
+    // service.rs:10519 had the comparison right, which is why the two
+    // disagreed.
     let last_ok = backups
         .iter()
-        .filter(|b| b.state == "done")
+        .filter(|b| b.state == "ok")
         .filter_map(|b| b.finished_at)
         .max();
     let backup_ok = last_ok.map(|t| now - t < 7 * 86400).unwrap_or(false);

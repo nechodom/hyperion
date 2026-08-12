@@ -6570,11 +6570,33 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 continue;
             }
             // Only WordPress hostings — skip static / proxy sites.
-            let has_wp = wordpress::get_install(&self.pool, &s.id)
+            //
+            // The `wordpress` row is written when HYPERION installs
+            // WordPress, so trusting it alone made this sweep blind to every
+            // site that arrived any other way: a CloudPanel/HestiaCP import,
+            // a restore, a site the customer uploaded themselves. Those have
+            // WordPress on disk and no row, so they were never scanned, never
+            // auto-updated, and never appeared on the WordPress-updates page
+            // — silently, and precisely for the sites most likely to be
+            // running something old.
+            //
+            // So ask the disk when the table has nothing. wp_status detects a
+            // real install and writes the row as it goes, which means this
+            // costs a filesystem probe once per imported site rather than on
+            // every tick.
+            let mut has_wp = wordpress::get_install(&self.pool, &s.id)
                 .await
                 .ok()
                 .flatten()
                 .is_some();
+            if !has_wp {
+                has_wp = self
+                    .wp_status(HostingSelector::Id(s.id.clone()))
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some();
+            }
             if !has_wp {
                 continue;
             }

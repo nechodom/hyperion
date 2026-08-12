@@ -2358,7 +2358,7 @@
   </h2>
   {% if let Some(t) = expiry.expires_at %}
     <div class="row" style="margin-bottom:0.8rem">
-      <span class="pill warn">expires {{ t }}</span>
+      <span class="pill warn" title="unix {{ t }}">expires {{ t|date }}</span>
       <span class="muted" style="font-size:0.88rem">grace {{ expiry.grace_days }} days · warnings {{ expiry.warning_offsets_days }}</span>
     </div>
     <form method="post" action="/hostings/expiry/clear" style="display:inline">
@@ -2375,7 +2375,15 @@
     <div class="field-row">
       <div class="field">
         <label for="expires_on">Expires on <span class="hint">date · UTC</span></label>
-        <input id="expires_on" name="expires_on" type="date" required>
+        {#- Prefilled, in this order: the expiry already set, else the next
+            billing date. The field is `required`, so leaving it blank made
+            editing the grace period or owner e-mail mean re-typing a date
+            that was already on screen. Falling back to the billing date is
+            the answer that is right nearly every time — a hosting is
+            normally paid up to the day it would expire — and it is only a
+            default: the operator can still pick any date. #}
+        <input id="expires_on" name="expires_on" type="date" required
+               value="{% if let Some(t) = expiry.expires_at %}{{ t|date }}{% else if let Some(pa) = profile_apply %}{% if let Some(nb) = pa.next_billing_at %}{{ nb|date }}{% endif %}{% endif %}">
       </div>
       <div class="field">
         <label for="grace_days">Grace period <span class="hint">days before auto-delete</span></label>
