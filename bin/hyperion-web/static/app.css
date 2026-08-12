@@ -3280,3 +3280,34 @@ html, body { overflow-x: clip; }
    right columns with no scrollbar. This gives the table its own reachable
    scroll axis. */
 .scroll-x{overflow-x:auto;-webkit-overflow-scrolling:touch;max-width:100%;}
+
+
+/* Sidebar status dots. A bare dot when all is well; a small count pill when
+   something needs attention — same element either way, so the row does not
+   reflow as the state changes. */
+.nav-status-dot {
+  margin-left: auto;
+  min-width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+.nav-status-dot.good { background: var(--ok); }
+.nav-status-dot.bad {
+  background: var(--err);
+  color: #fff;
+  height: auto;
+  min-width: 1.15rem;
+  padding: 0.05rem 0.35rem;
+  font-size: 0.66rem;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+/* A <summary> used as a button still draws the default disclosure triangle
+   in WebKit, which makes it read as a caption rather than a control. */
+summary.btn::-webkit-details-marker { display: none; }
+summary.btn::marker { content: ""; }

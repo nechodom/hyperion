@@ -1763,6 +1763,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         matches!(self.deployment_role(), DeploymentRole::Standalone)
     }
 
+    /// Niceness for the malware sweep — see [`read_scan_niceness`].
+    pub fn malware_scan_niceness(&self) -> i32 {
+        read_scan_niceness(self.agent_config_path.as_deref())
+    }
+
     pub fn is_worker_node(&self) -> bool {
         match &self.node_state_file {
             Some(p) => p.exists(),
@@ -6926,8 +6931,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
         // 3. ClamAV over the docroot — the only signal that looks inside
         //    `wp-content/uploads`, which core verification skips by design.
-        let (clamav_available, malware, clamav_at) =
-            integrity_malware_pass(&detail, now, prior.as_ref(), &mut errors).await;
+        let (clamav_available, malware, clamav_at) = integrity_malware_pass(
+            &detail,
+            now,
+            self.malware_scan_niceness(),
+            prior.as_ref(),
+            &mut errors,
+        )
+        .await;
 
         let mut result = assemble_integrity_result(
             core,
@@ -21972,6 +21983,7 @@ struct StoredIntegrityScan {
 async fn integrity_malware_pass(
     detail: &HostingDetail,
     now: i64,
+    scan_niceness: i32,
     prior: Option<&StoredIntegrityScan>,
     errors: &mut Vec<String>,
 ) -> (bool, Vec<hyperion_types::WpMalwareHit>, i64) {
@@ -21998,7 +22010,7 @@ async fn integrity_malware_pass(
         errors.push("malware scan skipped: another scan is already running on this node".into());
         return carry();
     };
-    match integrity::scan_malware(&detail.root_dir).await {
+    match integrity::scan_malware_niced(&detail.root_dir, scan_niceness).await {
         Ok(scan) => (
             scan.available,
             scan.hits,
@@ -22984,6 +22996,42 @@ fn read_notifications_section(
     }
 }
 
+/// How much the malware sweep should yield to everything else, from
+/// `[integrity] scan_niceness` (0-19, 0 = don't nice at all).
+///
+/// Defaults to a RECOMMENDATION rather than 0, because the setting exists to
+/// stop an unattended sweep making live sites slow, and a default of "no
+/// limit" means every box has that problem until someone notices and goes
+/// looking for the switch. On a single-core VPS clamscan saturating its only
+/// core is the difference between a site that responds and one that does not,
+/// so the fewer cores a box has, the harder the scan should yield.
+fn recommended_scan_niceness() -> i32 {
+    match std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+    {
+        1 => 19, // one core: the scan must always lose to a web request
+        2..=3 => 15,
+        4..=7 => 10,
+        _ => 5, // plenty of cores: stay polite, but finish in good time
+    }
+}
+
+fn read_scan_niceness(cfg_path: Option<&std::path::Path>) -> i32 {
+    let from_cfg = cfg_path
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|raw| raw.parse::<toml_edit::DocumentMut>().ok())
+        .and_then(|doc| {
+            doc.get("integrity")
+                .and_then(|s| s.get("scan_niceness"))
+                .and_then(|v| v.as_integer())
+        });
+    match from_cfg {
+        Some(n) => (n as i32).clamp(0, 19),
+        None => recommended_scan_niceness(),
+    }
+}
+
 pub(crate) fn read_cluster_section(
     cfg_path: Option<&std::path::Path>,
 ) -> hyperion_types::ClusterConfigView {
@@ -23096,9 +23144,12 @@ fn parse_agent_section_fields(
                 }
                 crate::config_persist::FieldValue::Str(v.clone())
             }
-            ("acme", "directory_url") | ("acme", "challenge_dir") => {
-                crate::config_persist::FieldValue::Str(v.clone())
-            }
+            // `directory_url` is deliberately NOT settable. It was writable
+            // but never read back and never honoured — issuance hardcodes the
+            // Let's Encrypt endpoints — so saving it persisted a value into
+            // agent.toml that reads as authoritative and changes nothing.
+            // A knob that lies is worse than no knob.
+            ("acme", "challenge_dir") => crate::config_persist::FieldValue::Str(v.clone()),
             // [email]
             ("email", "enabled") => crate::config_persist::FieldValue::Bool(parse_bool(v)?),
             ("email", "smtp_host")

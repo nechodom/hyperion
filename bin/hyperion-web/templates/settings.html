@@ -646,7 +646,12 @@
                style="width:100%">
       </div>
       <p class="text-soft small" style="margin:0 0 0.8rem">
-        Challenge dir: <code>{{ config.acme.challenge_dir }}</code> · ACME directory: <code>{{ config.acme.directory_url }}</code>
+        {#- The ACME directory used to be printed from a config field that
+            nothing populated, so it always rendered empty. Issuance picks the
+            endpoint itself — production, or staging when the operator asks
+            for it per-issuance — so state that instead of showing a box that
+            can only ever be blank. -#}
+        Challenge dir: <code>{{ config.acme.challenge_dir }}</code> · ACME directory: <code>Let's Encrypt production</code>
       </p>
       <button type="submit" class="btn primary">Save TLS settings</button>
     </form>

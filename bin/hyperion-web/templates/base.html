@@ -42,6 +42,12 @@
          data-require-caps="monitoring_view" data-require-scope-all>
         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>
         Monitoring
+        {# Painted by the nav-status poller. A plain green dot when every
+           monitor is happy — the point is to answer "is anything wrong?"
+           without opening the page — and a red count the moment one is not.
+           Starts hidden so a failed or slow poll shows nothing rather than a
+           reassuring green that nobody checked. #}
+        <span id="nav-monitoring-dot" class="nav-status-dot" hidden></span>
       </a>
     </nav>
     <nav class="nav-section" data-hide-roles="customer">
@@ -105,11 +111,13 @@
          data-require-caps="cert_manage" data-require-scope-all>
         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
         Certificates
+      <span id="nav-certs-dot" class="nav-status-dot" hidden></span>
       </a>
       <a class="nav-link {% if active == "vulns" %}active{% endif %}" href="/vulns"
          data-require-caps="wp_vuln_view" data-require-scope-all>
         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
         WordPress updates
+        <span id="nav-wp-dot" class="nav-status-dot" hidden></span>
       </a>
       <a class="nav-link {% if active == "bans" %}active{% endif %}" href="/bans"
          data-require-caps="security_manage" data-require-scope-all>
@@ -1299,6 +1307,52 @@ function isShortcutContext(ev) {
   }
   pollTrash();
   setInterval(pollTrash, 60_000);
+})();
+
+// ============================================================
+//  Sidebar status dots — monitoring / WordPress updates / certs.
+//  One request for all three, so the dots can never disagree with
+//  each other, and a hiccup in one RPC does not turn the sidebar
+//  red. Green means "checked, nothing wrong" — which is only
+//  honest if we have actually heard back, so nothing is painted
+//  until a response arrives.
+// ============================================================
+(function () {
+  'use strict';
+  const targets = [
+    ['nav-monitoring-dot', 'monitors_down', 'site', 'down'],
+    ['nav-wp-dot', 'wp_outdated', 'site', 'with updates'],
+    ['nav-certs-dot', 'certs_expiring', 'certificate', 'expiring within 14 days'],
+  ];
+  if (!targets.some(([id]) => document.getElementById(id))) return;
+  function paint(el, n, noun, suffix) {
+    if (!el) return;
+    el.hidden = false;
+    if (n > 0) {
+      el.textContent = n > 99 ? '99+' : String(n);
+      el.className = 'nav-status-dot bad';
+      el.title = n + ' ' + noun + (n === 1 ? '' : 's') + ' ' + suffix;
+    } else {
+      el.textContent = '';
+      el.className = 'nav-status-dot good';
+      el.title = 'Nothing needs attention';
+    }
+  }
+  async function poll() {
+    if (document.hidden) return;
+    try {
+      const r = await fetch('/api/nav-status', {
+        credentials: 'same-origin',
+        headers: { 'accept': 'application/json' },
+      });
+      if (!r.ok) return;
+      const j = await r.json();
+      targets.forEach(([id, key, noun, suffix]) =>
+        paint(document.getElementById(id), Number(j[key] || 0), noun, suffix));
+    } catch (_) { /* leave the dots as they were */ }
+  }
+  poll();
+  setInterval(poll, 60_000);
 })();
 
 // ============================================================

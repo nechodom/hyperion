@@ -1345,6 +1345,11 @@
       <button class="btn" type="submit">Create / refresh staging</button>
     </div>
   </form>
+  {# Only once a staging site actually exists. Before that, "Open staging"
+     linked to a hostname that had never been provisioned, and "Push →
+     production" offered to overwrite the live site from a source that was
+     not there. #}
+  {% if staging_exists %}
   <div class="row" style="gap:0.5rem;flex-wrap:wrap;margin-top:0.7rem">
     <form method="post" action="/hostings/wp/staging/push" style="display:inline"
           data-confirm-title="Push staging to production"
@@ -1356,6 +1361,7 @@
       <button class="btn danger" type="submit">Push staging → production</button>
     </form>
     <a class="btn ghost" href="https://{{ staging_domain }}" target="_blank" rel="noopener noreferrer">Open staging ↗</a>
+    {% endif %}
   </div>
 </div>
 {% endif %}
