@@ -600,6 +600,17 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
+    // Record what this box IS, once, so it is a literal in agent.toml rather
+    // than something inferred on every read. An install that predates the key
+    // gets the right answer here with no operator action.
+    {
+        let mode_svc = svc.clone();
+        tokio::spawn(async move {
+            if let Err(e) = mode_svc.backfill_deployment_mode().await {
+                tracing::warn!(error=%e, "boot: could not record the deployment mode");
+            }
+        });
+    }
     // Self-heal: scan every enabled nginx vhost for `ssl_certificate`
     // paths that no longer exist on disk. For each missing cert we
     // generate a self-signed bootstrap so `nginx -t` passes — without

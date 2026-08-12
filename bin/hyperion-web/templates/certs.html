@@ -112,7 +112,7 @@
         <tr>
           <th>Domain</th>
           <th>Issuer</th>
-          <th>Node</th>
+          <th data-cluster-only>Node</th>
           <th class="right">Expires</th>
           <th class="right">Days left</th>
           <th class="right">State</th>
@@ -128,7 +128,7 @@
                 <span class="text-soft small" title="Bootstrap certificate — open the hosting and issue a certificate once DNS resolves">bootstrap</span>
               {% endif %}
             </td>
-            <td>
+            <td data-cluster-only>
               {% if r.node_id.is_empty() %}
                 <span class="text-soft small">master</span>
               {% else %}

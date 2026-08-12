@@ -303,6 +303,10 @@ fn build_app_with_signer(
         // Fixtures log in as admins without enrolling 2FA — keep the
         // enforcement gate off so the existing flows render as before.
         enforce_admin_2fa: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        // "master" = draw everything, matching how these fixtures were
+        // written. Standalone only ever HIDES chrome, so this keeps the
+        // existing assertions honest.
+        deployment_mode: Arc::new(tokio::sync::RwLock::new("master".to_string())),
     });
     // The login/2FA + enroll handlers extract `ConnectInfo<SocketAddr>` (real
     // peer IP for the rate-limit bucket). `.oneshot()` doesn't go through

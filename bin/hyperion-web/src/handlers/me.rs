@@ -10,6 +10,8 @@
 //! `.then(r => r.text())` is enough.
 
 use crate::auth::AuthCtx;
+use crate::state::SharedState;
+use axum::extract::State;
 use axum::http::header;
 use axum::response::IntoResponse;
 use axum::response::Response;
@@ -20,23 +22,30 @@ use hyperion_state::capabilities::Capability;
 /// so the sidebar + action buttons reflect EXACTLY what the user can do —
 /// including custom roles, which a role-name hierarchy can't represent.
 ///
-/// Shape: `{"role":"operator","caps":["hosting_view",…],"scope_all":false}`.
+/// Shape: `{"role":"operator","caps":[…],"scope_all":false,"mode":"standalone"}`.
+/// `mode` is the deployment role of the box (standalone vs master); the shim
+/// uses it to drop cluster-only chrome on a one-server install.
 ///
 /// Always 200 — the require_auth middleware would have redirected already if
 /// there was no session.
 ///
 /// Cache: `no-store` because role/caps can change (promote/demote, role edit),
 /// and we'd rather pay the round-trip than render a stale nav after a change.
-pub async fn get_role(ctx: AuthCtx) -> Response {
+pub async fn get_role(State(state): State<SharedState>, ctx: AuthCtx) -> Response {
     let caps: Vec<&'static str> = Capability::ALL
         .iter()
         .filter(|c| ctx.can(**c))
         .map(|c| c.as_str())
         .collect();
+    // Read from the cache the 30 s poller maintains, so this stays a
+    // zero-RPC endpoint. Presentation only — it says what is worth drawing,
+    // never what is permitted.
+    let mode = state.deployment_mode.read().await.clone();
     let body = serde_json::json!({
         "role": ctx.role(),
         "caps": caps,
         "scope_all": ctx.scope_all(),
+        "mode": mode,
     })
     .to_string();
     (

@@ -490,6 +490,19 @@ fi
 # site-mail/<user>.jsonl, then forwards to the real sendmail. Idempotent
 # install — only updates the file when its content actually changed
 # so we don't restart FPM pools unnecessarily.
+# `hyperion` front-door command. The panel's Update button exists only on
+# WORKER node cards and a master has no card, so on a single-server install
+# there is no in-product way to update at all — the only route is the full
+# path under /opt. Install the wrapper so `hyperion update` works, which is
+# what people guess first. Content-idempotent, like the mail wrapper below.
+HYPERION_CMD_SRC="$INSTALL_DIR/packaging/install/hyperion-wrapper.sh"
+HYPERION_CMD_DST="/usr/local/bin/hyperion"
+if [[ -f "$HYPERION_CMD_SRC" ]] && ! cmp -s "$HYPERION_CMD_SRC" "$HYPERION_CMD_DST"; then
+  log "Installing the 'hyperion' command at $HYPERION_CMD_DST ..."
+  install -d -m 0755 /usr/local/bin
+  install -m 0755 "$HYPERION_CMD_SRC" "$HYPERION_CMD_DST"
+fi
+
 SITE_MAIL_SRC="$INSTALL_DIR/packaging/install/site-mail-wrapper.sh"
 SITE_MAIL_DST="/usr/local/lib/hyperion/site-mail-wrapper"
 if [[ -f "$SITE_MAIL_SRC" ]]; then

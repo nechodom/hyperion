@@ -100,6 +100,7 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
         // Seed on = mandatory for admin+. The poller below replaces this
         // with the live `cluster.enforce_admin_2fa` setting within 30 s.
         enforce_admin_2fa: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        deployment_mode: Arc::new(tokio::sync::RwLock::new("master".to_string())),
     });
     // Spawn a background refresher that polls the agent for the
     // current `cluster.panel_hostname` every 30 s. The host-enforce
@@ -122,6 +123,10 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
                         cfg.cluster.enforce_admin_2fa,
                         std::sync::atomic::Ordering::Relaxed,
                     );
+                    {
+                        let mut g = state_for_refresh.deployment_mode.write().await;
+                        *g = cfg.cluster.mode;
+                    }
                     let mut g = state_for_refresh.panel_hostname.write().await;
                     *g = cfg.cluster.panel_hostname;
                 }
