@@ -101,6 +101,16 @@
         are not stored anywhere recoverable in plain text.
       </p>
     </div>
+    {# Built in the BROWSER from what is already on this page. Nothing is
+       written server-side and nothing travels in a URL: the credentials are
+       in this DOM already, so generating the file here adds no exposure that
+       does not already exist, whereas a server-generated download would put
+       every password of a new site into a file, a request log, or both. #}
+    <button class="btn" type="button" id="creds-download"
+            data-domain="{{ detail.domain }}">
+      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+      Download as .txt
+    </button>
   </div>
 
   <div class="creds-grid">
@@ -3633,6 +3643,47 @@
     i.name = 'target_node';
     i.value = TARGET_NODE;
     f.appendChild(i);
+  });
+})();
+</script>
+<script>
+// Credentials download. Reads the rendered rows rather than a server
+// endpoint — see the comment on the button. A text file, not JSON or CSV:
+// this gets pasted into an e-mail or a password manager by a human.
+(function () {
+  'use strict';
+  const btn = document.getElementById('creds-download');
+  if (!btn) return;
+  btn.addEventListener('click', () => {
+    const lines = [];
+    document.querySelectorAll('.creds-section').forEach((sec) => {
+      const title = sec.querySelector('.creds-section-title');
+      if (title) lines.push('', title.textContent.trim(), '-'.repeat(title.textContent.trim().length));
+      sec.querySelectorAll('.creds-row').forEach((row) => {
+        const k = row.querySelector('.creds-label');
+        const v = row.querySelector('.creds-value');
+        if (k && v) lines.push(k.textContent.trim().padEnd(16) + v.textContent.trim());
+      });
+    });
+    const domain = btn.getAttribute('data-domain') || 'hosting';
+    const header = [
+      'Credentials for ' + domain,
+      'Generated ' + new Date().toISOString().slice(0, 16).replace('T', ' ') + ' UTC',
+      '',
+      'These are shown once. Store them somewhere safe and delete this file.',
+    ];
+    const blob = new Blob([header.concat(lines).join('\n') + '\n'], {
+      type: 'text/plain;charset=utf-8',
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = domain + '-credentials.txt';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    // Revoke promptly — the blob holds every password for this site.
+    setTimeout(() => URL.revokeObjectURL(url), 2000);
   });
 })();
 </script>
