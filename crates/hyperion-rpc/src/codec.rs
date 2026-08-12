@@ -266,13 +266,12 @@ pub enum Request {
         sel: HostingSelector,
         req: CertIssueRequest,
     },
-    /// Phase 1 of a DNS-01 wildcard issuance. `provider` is "manual"
-    /// (default) or "cloudflare". Manual returns the TXT records to
-    /// publish; cloudflare publishes them + finishes in one shot.
+    /// Phase 1 of a DNS-01 wildcard issuance.
+    /// Always the manual flow: returns the TXT records for the operator
+    /// to publish, since the server holds no DNS credentials.
     CertDns01Begin {
         sel: HostingSelector,
         staging: bool,
-        provider: String,
     },
     /// Phase 2 of a manual DNS-01 issuance — the TXT is live, validate
     /// + install the cert.
@@ -288,7 +287,6 @@ pub enum Request {
         #[serde(default)]
         email: Option<String>,
         staging: bool,
-        provider: String,
     },
     /// DNS-01 phase 2 for a bare (hosting-less) domain.
     CertDns01FinishDomain {
@@ -509,14 +507,6 @@ pub enum Request {
     /// so the SMTP password can't leak into the worker's request log.
     EmailConfigSet {
         fields: RedactedFields,
-    },
-    /// Report whether THIS node has a usable Cloudflare DNS-01 token (drives the
-    /// Settings card + whether one-click DNS-01-via-Cloudflare is offered).
-    CloudflareTokenStatus,
-    /// Validate + persist THIS node's Cloudflare DNS-01 token (0600). The token
-    /// is `RedactedPem` so it can't leak into a worker's request log.
-    CloudflareTokenSet {
-        token: RedactedPem,
     },
     /// Compare the running binary's git SHA against the upstream
     /// `rolling` release tag's SHA. Cached agent-side for an hour
@@ -1506,13 +1496,13 @@ pub enum Response {
     DnsCheck(DnsCheckResult),
     DnsSpfCheck(hyperion_types::SpfCheckResult),
     CertIssueAcme(CertInfo),
-    /// `completed = true` ⇒ the cert was issued (cloudflare path);
+    /// `completed = true` ⇒ the cert was issued;
     /// otherwise `record_name` + `values` must be published as TXT and
     /// the caller follows up with `CertDns01Finish`.
     CertDns01Begin {
         completed: bool,
         /// One (record_name, txt_value) per authorization to publish.
-        /// Empty when `completed` (cloudflare path already did it).
+        /// Empty when `completed`.
         records: Vec<(String, String)>,
     },
     CertDns01Finish(CertInfo),
@@ -1604,7 +1594,6 @@ pub enum Response {
     NodeUpdateStatus(hyperion_types::NodeUpdateStatus),
     AgentConfigUpdate,
     EmailConfigSet,
-    CloudflareToken(hyperion_types::CloudflareTokenInfo),
     UpdateCheck(hyperion_types::UpdateStatus),
     HostingExport(hyperion_types::HostingMigrationBundle),
     HostingMigrationFetchBundleFile {

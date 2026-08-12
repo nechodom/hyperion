@@ -72,9 +72,6 @@ struct SettingsTpl<'a> {
     /// Which node the Mail tab is currently editing ("" / "local" = master).
     /// The `mta` diagnostics + the form pre-fill are for THIS node.
     mail_node: String,
-    /// Master node's Cloudflare DNS-01 token state — drives the "Cloudflare
-    /// certs (DNS-01)" card so the operator can save/test the token without SSH.
-    cloudflare: hyperion_types::CloudflareTokenInfo,
     error: Option<String>,
     flash: Option<String>,
     flash_error: Option<String>,
@@ -543,17 +540,6 @@ pub async fn get_settings(
         Ok(s) => mask_secrets_in_toml(s),
         Err(e) => format!("(could not read /etc/hyperion/agent.toml: {e})"),
     };
-    // Master's Cloudflare DNS-01 token state (live-verified if present) for the
-    // "Cloudflare certs" card. Best-effort: a failed RPC just shows "unknown".
-    let cloudflare: hyperion_types::CloudflareTokenInfo = match hyperion_rpc_client::call(
-        &state.agent_socket,
-        Request::CloudflareTokenStatus,
-    )
-    .await
-    {
-        Ok(RpcResponse::CloudflareToken(i)) => i,
-        _ => hyperion_types::CloudflareTokenInfo::default(),
-    };
     let update_current_short = short_sha(&update_status.current_sha);
     let update_latest_short = short_sha(&update_status.latest_sha);
     // Per-test-node wildcard rows: a `*.<base>` cert issued once covers
@@ -690,7 +676,6 @@ pub async fn get_settings(
         fail2ban,
         mta,
         mail_node,
-        cloudflare,
         error,
         flash: q.flash,
         flash_error: q.flash_error,
@@ -899,47 +884,6 @@ pub struct ApiKeyRevokeForm {
     #[serde(default)]
     pub _csrf: String,
     pub id: i64,
-}
-
-#[derive(Deserialize)]
-pub struct CloudflareTokenForm {
-    #[serde(default)]
-    pub _csrf: String,
-    pub token: String,
-}
-
-/// `POST /settings/cloudflare/token` — validate the Cloudflare DNS-01 API token
-/// against the live API and, only if accepted, persist it on the master (0600).
-/// Enables one-click real-cert issuance via DNS-01 behind the CloudFlare proxy.
-pub async fn post_cloudflare_token(
-    State(state): State<SharedState>,
-    ctx: AuthCtx,
-    Form(form): Form<CloudflareTokenForm>,
-) -> Result<Response, AppError> {
-    if !ctx.can(Capability::SettingsManage) {
-        return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
-    }
-    let resp = hyperion_rpc_client::call(
-        &state.agent_socket,
-        Request::CloudflareTokenSet {
-            token: form.token.into(),
-        },
-    )
-    .await
-    .map_err(AppError::from)?;
-    let dest = match resp {
-        RpcResponse::CloudflareToken(i) => {
-            format!("/settings?flash={}#cluster", urlencode(&i.message))
-        }
-        RpcResponse::Error(e) => {
-            format!(
-                "/settings?flash_error={}#cluster",
-                urlencode(&e.to_string())
-            )
-        }
-        _ => return Err(AppError::Internal("unexpected response".into())),
-    };
-    Ok(Redirect::to(&dest).into_response())
 }
 
 #[derive(Deserialize)]
@@ -1948,10 +1892,10 @@ pub async fn post_mta_test(
 //
 // A test node auto-creates `<name>.<base>` subdomains; rather than a
 // per-site ACME cert each time, the operator issues ONE `*.<base>`
-// wildcard here and every auto-subdomain reuses it. Manual DNS-01 shows
-// the TXT records on an interstitial; Cloudflare publishes + finishes in
-// one shot. The cert lives on the chosen node (shared-nothing), so the
-// flow is dispatched there.
+// wildcard here and every auto-subdomain reuses it. DNS-01 shows the TXT
+// records on an interstitial for the operator to publish — the server
+// holds no DNS credentials. The cert lives on the chosen node
+// (shared-nothing), so the flow is dispatched there.
 
 #[derive(Template)]
 #[template(path = "node_wildcard_dns01.html")]
@@ -2017,7 +1961,6 @@ async fn resolve_node_wildcard_base(
 #[derive(Deserialize)]
 pub struct NodeWildcardBeginForm {
     pub node_id: String,
-    pub provider: String,
     #[serde(default)]
     pub staging: Option<String>,
 }
@@ -2051,11 +1994,6 @@ pub async fn post_node_wildcard_begin(
             .into_response());
         }
     };
-    let provider = if form.provider == "cloudflare" {
-        "cloudflare"
-    } else {
-        "manual"
-    };
     let staging = form.staging.as_deref() == Some("on");
     let resp = crate::dispatcher::dispatch_to_node(
         &state,
@@ -2064,7 +2002,6 @@ pub async fn post_node_wildcard_begin(
             domain,
             email: None,
             staging,
-            provider: provider.to_string(),
         },
     )
     .await?;

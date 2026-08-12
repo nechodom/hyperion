@@ -948,6 +948,27 @@ done
 # into it (covered by ReadWritePaths=/etc/hyperion in the systemd unit).
 install -d -m 0700 /etc/hyperion/web-tls
 
+#-------- 4a-0. retire the Cloudflare DNS-01 token ------------------------
+# The Cloudflare API integration is gone: certificates now issue over
+# HTTP-01, which works through the proxy, and wildcards are published by
+# hand. Nothing reads this file any more.
+#
+# It is not deleted — it is operator credential material, and a token that
+# silently vanishes is a token nobody remembers to revoke. Moving it stops
+# it being live while leaving the evidence, and the log line says what to
+# do about it. Idempotent on CONTENT: once renamed, the source path is gone
+# and a re-run is a no-op.
+if [[ -f /etc/hyperion/cloudflare.token ]]; then
+  mv /etc/hyperion/cloudflare.token /etc/hyperion/cloudflare.token.removed
+  chmod 0600 /etc/hyperion/cloudflare.token.removed 2>/dev/null || true
+  warn "The Cloudflare DNS-01 integration has been removed — certificates now"
+  warn "issue over HTTP-01, which works through the Cloudflare proxy."
+  warn "Your API token is no longer read. It has been moved to"
+  warn "    /etc/hyperion/cloudflare.token.removed"
+  warn "REVOKE it at dash.cloudflare.com -> My Profile -> API Tokens, then"
+  warn "delete that file."
+fi
+
 #-------- 4a-bis. master→node remote RPC — WORKERS ONLY -------------------
 # The inbound RPC listener exists so a MASTER can dispatch to a WORKER.
 # Nothing ever dials a master or a single-server box on this port: the

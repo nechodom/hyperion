@@ -30,10 +30,7 @@ pub mod spf;
 pub mod stats;
 pub mod wp;
 
-pub use cert::{
-    CertInfo, CertOverviewItem, CertRenewOutcome, CertRenewResult, CloudflareTokenInfo,
-    PanelCertProgress,
-};
+pub use cert::{CertInfo, CertOverviewItem, CertRenewOutcome, CertRenewResult, PanelCertProgress};
 pub use db::{DbProvision, DbSummary};
 pub use dkim::DkimStatus;
 pub use dns::{CertIssueRequest, DnsCheckResult};

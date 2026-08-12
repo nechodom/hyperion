@@ -247,7 +247,7 @@ for the same commit.
 - **Cross-node hosting migration** with version preflight, and **clone** to a new domain on the same or different node.
 - **Expiration + grace** with scheduled notifications and auto-suspend.
 - **Quota enforcement** — kernel-level disk quota via `setquota`, PHP `memory_limit` per FPM pool, monthly bandwidth alerts.
-- **Let's Encrypt certs** — HTTP-01 one-click, automatic renewal, and **DNS-01 wildcard** (`*.domain`) via guided manual TXT or a Cloudflare API token.
+- **Let's Encrypt certs** — HTTP-01 one-click with automatic renewal, working through a Cloudflare/CDN proxy as-is. **DNS-01 wildcards** (`*.domain`) are available via guided manual TXT records, but cannot renew themselves — Hyperion holds no DNS credentials by design.
 
 ### Per-hosting controls
 
@@ -491,7 +491,7 @@ demo-tested in VMs"*, not *"proven at scale"*.
 | Hosting profiles, clone, expiration + scheduler | UI · **API** · RPC |
 | Local + off-site backups (S3 + age, legacy FTP/SFTP) | UI · CLI · **API** · RPC |
 | Granular restore, chunked download, restore-as-new | UI · CLI · **API** · RPC |
-| Let's Encrypt HTTP-01 + DNS-01 wildcard (Cloudflare) | UI · CLI · **API** · RPC |
+| Let's Encrypt HTTP-01 + manual DNS-01 wildcard | UI · CLI · **API** · RPC |
 | WordPress install + plugin/theme manage + admin reset | UI · **API** · RPC |
 | Keyless WP defender (outdated scan + auto-update) | UI · CLI · RPC |
 | WP staging → push-to-prod, Redis cache, `.user.ini` | UI · **API** · RPC |

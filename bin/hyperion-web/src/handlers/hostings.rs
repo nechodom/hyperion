@@ -6749,9 +6749,6 @@ pub struct Dns01BeginForm {
     pub selector: String,
     #[serde(default)]
     pub staging: Option<String>,
-    /// "manual" (default) | "cloudflare".
-    #[serde(default)]
-    pub provider: String,
 }
 
 /// Interstitial page that shows the TXT records to publish for a manual
@@ -6785,19 +6782,10 @@ pub async fn post_cert_dns01_begin(
     let sel_url = urlencoding(&form.selector);
     let (detail, owner_node) = find_hosting_anywhere(&state, sel.clone()).await?;
     let staging = form.staging.as_deref() == Some("on");
-    let provider = if form.provider == "cloudflare" {
-        "cloudflare".to_string()
-    } else {
-        "manual".to_string()
-    };
     let resp = crate::dispatcher::dispatch_to_node(
         &state,
         owner_node.as_deref(),
-        Request::CertDns01Begin {
-            sel,
-            staging,
-            provider,
-        },
+        Request::CertDns01Begin { sel, staging },
     )
     .await?;
     match resp {

@@ -12587,14 +12587,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     }
 
     /// DNS-01 phase 1 for a wildcard cert (`<domain>` + `*.<domain>`).
-    /// Manual provider: returns the TXT records to publish. Cloudflare
-    /// provider: publishes them via the API, finishes issuance, and
+    /// Returns the TXT records for the operator to publish, then
     /// returns `completed = true`.
     pub async fn cert_dns01_begin(
         &self,
         sel: HostingSelector,
         staging: bool,
-        provider: String,
     ) -> Result<(bool, Vec<(String, String)>), RpcError> {
         let detail = self.get(sel).await?;
         let row = hostings::get_by_id(&self.pool, &detail.id)
@@ -12617,40 +12615,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 reason: e.to_string(),
             })?;
 
-        if provider == "cloudflare" {
-            let token =
-                hyperion_adapters::cloudflare::token().ok_or_else(|| RpcError::Validation {
-                    message: "no Cloudflare token configured — drop one in \
-                              /etc/hyperion/cloudflare.token (Zone:Read + DNS:Edit) \
-                              or use the manual flow"
-                        .into(),
-                })?;
-            let cf_records = pending
-                .records
-                .iter()
-                .map(|r| (r.name.clone(), r.value.clone()))
-                .collect::<Vec<_>>();
-            let ids = hyperion_adapters::cloudflare::publish_txt(&token, &cf_records)
-                .await
-                .map_err(|e| RpcError::ProvisioningFailed {
-                    stage: "cloudflare_publish".into(),
-                    reason: e.to_string(),
-                })?;
-            // Give the records a moment to propagate, then finish.
-            tokio::time::sleep(std::time::Duration::from_secs(20)).await;
-            let finish = self
-                .cert_dns01_finish(HostingSelector::Id(detail.id.clone()))
-                .await;
-            hyperion_adapters::cloudflare::cleanup_txt(&token, &ids).await;
-            finish?;
-            return Ok((true, Vec::new()));
-        }
-
         self.append_audit(
             "cert.dns01.begin",
             Some(detail.id.as_str()),
-            &serde_json::json!({"domain": detail.domain, "provider": provider, "staging": staging})
-                .to_string(),
+            &serde_json::json!({"domain": detail.domain, "staging": staging}).to_string(),
             "ok",
         )
         .await;
@@ -12717,78 +12685,6 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(cert)
     }
 
-    /// Report this node's Cloudflare DNS-01 token state, live-verifying it
-    /// against the Cloudflare API when present (so the Settings card can show
-    /// "OK — N zones" vs "rejected" without the operator SSHing in).
-    pub async fn cloudflare_token_status(
-        &self,
-    ) -> Result<hyperion_types::CloudflareTokenInfo, RpcError> {
-        if !hyperion_adapters::cloudflare::is_configured() {
-            return Ok(hyperion_types::CloudflareTokenInfo {
-                configured: false,
-                valid: None,
-                zones: None,
-                message: "No Cloudflare token set on this node.".into(),
-            });
-        }
-        let token = hyperion_adapters::cloudflare::token().unwrap_or_default();
-        match hyperion_adapters::cloudflare::verify_token(&token).await {
-            Ok(n) => Ok(hyperion_types::CloudflareTokenInfo {
-                configured: true,
-                valid: Some(true),
-                zones: Some(n as u32),
-                message: format!("Token OK — can see {n} zone(s)."),
-            }),
-            Err(e) => Ok(hyperion_types::CloudflareTokenInfo {
-                configured: true,
-                valid: Some(false),
-                zones: None,
-                message: format!("Token present but rejected by Cloudflare: {e}"),
-            }),
-        }
-    }
-
-    /// Validate a Cloudflare API token against the live API, then (only if it's
-    /// accepted) persist it to `/etc/hyperion/cloudflare.token` (0600) so DNS-01
-    /// issuance can use it. A rejected token is never written.
-    pub async fn cloudflare_token_set(
-        &self,
-        token: String,
-    ) -> Result<hyperion_types::CloudflareTokenInfo, RpcError> {
-        let t = token.trim().to_string();
-        if t.is_empty() {
-            return Err(RpcError::Validation {
-                message: "Cloudflare token is empty.".into(),
-            });
-        }
-        let zones = hyperion_adapters::cloudflare::verify_token(&t)
-            .await
-            .map_err(|e| RpcError::Validation {
-                message: format!(
-                    "Cloudflare rejected this token ({e}). Create an API token with \
-                     Zone:Read + DNS:Edit for your zone(s)."
-                ),
-            })?;
-        hyperion_adapters::cloudflare::write_token(&t)
-            .map_err(|e| RpcError::Internal_with(format!("could not save token: {e}")))?;
-        self.append_audit(
-            "cloudflare.token.set",
-            None,
-            &serde_json::json!({ "zones": zones }).to_string(),
-            "ok",
-        )
-        .await;
-        Ok(hyperion_types::CloudflareTokenInfo {
-            configured: true,
-            valid: Some(true),
-            zones: Some(zones as u32),
-            message: format!(
-                "Saved — token can see {zones} zone(s). You can now issue real certs via \
-                 Cloudflare DNS (works behind the CloudFlare proxy)."
-            ),
-        })
-    }
-
     /// DNS-01 issuance for a bare domain that is NOT tied to a hosting —
     /// e.g. a test node's `*.<base>` wildcard, issued once in Settings and
     /// reused by every auto-subdomain on the node. Mirrors
@@ -12800,7 +12696,6 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         domain: &str,
         email: Option<&str>,
         staging: bool,
-        provider: String,
     ) -> Result<(bool, Vec<(String, String)>), RpcError> {
         let base = Domain::parse(domain).map_err(|e| RpcError::Validation {
             message: format!("invalid domain {domain}: {e}"),
@@ -12815,37 +12710,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 reason: e.to_string(),
             })?;
 
-        if provider == "cloudflare" {
-            let token =
-                hyperion_adapters::cloudflare::token().ok_or_else(|| RpcError::Validation {
-                    message: "no Cloudflare token configured — drop one in \
-                              /etc/hyperion/cloudflare.token (Zone:Read + DNS:Edit) \
-                              or use the manual flow"
-                        .into(),
-                })?;
-            let cf_records = pending
-                .records
-                .iter()
-                .map(|r| (r.name.clone(), r.value.clone()))
-                .collect::<Vec<_>>();
-            let ids = hyperion_adapters::cloudflare::publish_txt(&token, &cf_records)
-                .await
-                .map_err(|e| RpcError::ProvisioningFailed {
-                    stage: "cloudflare_publish".into(),
-                    reason: e.to_string(),
-                })?;
-            tokio::time::sleep(std::time::Duration::from_secs(20)).await;
-            let finish = self.cert_dns01_finish_domain(base.as_str()).await;
-            hyperion_adapters::cloudflare::cleanup_txt(&token, &ids).await;
-            finish?;
-            return Ok((true, Vec::new()));
-        }
-
         self.append_audit(
             "cert.dns01.begin_domain",
             None,
-            &serde_json::json!({"domain": base.as_str(), "provider": provider, "staging": staging})
-                .to_string(),
+            &serde_json::json!({"domain": base.as_str(), "staging": staging}).to_string(),
             "ok",
         )
         .await;
@@ -13069,9 +12937,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
             // Wildcard certs (`*.domain`) can only be validated via
             // DNS-01 — HTTP-01 would fail every tick and burn the LE
-            // failed-validation rate limit. Renew via Cloudflare when a
-            // token is configured; otherwise skip + notify the operator
-            // to re-run the manual DNS-01 flow before expiry.
+            // failed-validation rate limit. Publishing a TXT record needs
+            // DNS credentials, which this server deliberately does not hold,
+            // so a wildcard is skipped and the operator is told to re-run the
+            // manual flow before expiry. That is the standing cost of a
+            // wildcard, and the issuance form says so up front.
             let is_wild = certificates::is_wildcard(&self.pool, &domain_str)
                 .await
                 .unwrap_or(false);
@@ -13079,57 +12949,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 Err(e) => CertRenewOutcome::Failed {
                     error: format!("invalid stored domain {domain_str}: {e}"),
                 },
-                Ok(d) if is_wild => {
-                    if hyperion_adapters::cloudflare::token().is_some() {
-                        // A hosting-backed wildcard renews via the
-                        // per-hosting flow; a bare node-base wildcard (no
-                        // hosting row — a test node's `*.<base>`) renews via
-                        // the domain-only flow, which also re-points the
-                        // covered auto-subdomains.
-                        let res = if hosting_row.is_some() {
-                            self.cert_dns01_begin(
-                                HostingSelector::Domain(d),
-                                false,
-                                "cloudflare".into(),
-                            )
-                            .await
-                        } else {
-                            self.cert_dns01_begin_domain(
-                                &domain_str,
-                                None,
-                                false,
-                                "cloudflare".into(),
-                            )
-                            .await
-                        };
-                        match res {
-                            Ok((true, _)) => {
-                                let na = certificates::get(&self.pool, &domain_str)
-                                    .await
-                                    .ok()
-                                    .flatten()
-                                    .map(|r| r.not_after)
-                                    .unwrap_or(cert.not_after);
-                                CertRenewOutcome::Renewed { new_not_after: na }
-                            }
-                            Ok(_) => CertRenewOutcome::Failed {
-                                error: "Cloudflare DNS-01 renewal did not complete".into(),
-                            },
-                            Err(e) => CertRenewOutcome::Failed {
-                                error: e.to_string(),
-                            },
-                        }
-                    } else {
-                        CertRenewOutcome::Skipped {
-                            reason: "wildcard cert — wildcards can only be validated over \
-                                     DNS-01, and this server holds no DNS credentials, so it \
-                                     cannot renew one unattended. Re-issue it from the site's \
-                                     SSL tab: start wildcard issuance, publish the TXT records \
-                                     it shows you, then validate."
-                                .into(),
-                        }
-                    }
-                }
+                Ok(_) if is_wild => CertRenewOutcome::Skipped {
+                    reason: "wildcard cert — wildcards can only be validated over DNS-01, and \
+                             this server holds no DNS credentials, so it cannot renew one \
+                             unattended. Re-issue it from the site's SSL tab: start wildcard \
+                             issuance, publish the TXT records it shows you, then validate."
+                        .into(),
+                },
                 // Renew without going through issue_real_cert. Two cases land
                 // here, for the same underlying reason — issue_real_cert
                 // resolves a hosting and then rewrites its serving vhost, and
@@ -13323,7 +13149,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     .await;
                 }
                 CertRenewOutcome::Skipped { reason } => {
-                    // Wildcard cert we couldn't auto-renew (no Cloudflare
+                    // Wildcard cert we can't auto-renew (no DNS
                     // token) — nag the operator to re-run DNS-01 before it
                     // expires. Per-domain kind → one bell row per cert.
                     self.notify_admins(
