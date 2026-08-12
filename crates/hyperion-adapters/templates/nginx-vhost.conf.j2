@@ -270,8 +270,14 @@ server {
     # rationale. Standalone `http2 on;` only works on nginx ≥ 1.25.1;
     # Debian 12 ships 1.22 and would emit
     # `unknown directive "http2"` on every reload.
+    {%- if http2_directive %}
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    {%- else %}
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
+    {%- endif %}
     server_name {{ domain }}{% for a in aliases %} {{ a }}{% endfor %};
     ssl_certificate     {{ cert_path }};
     ssl_certificate_key {{ key_path }};
@@ -325,8 +331,14 @@ server {
 server {
     # `http2` as listen parameter — Debian 12 nginx 1.22 doesn't
     # understand standalone `http2 on;`. See top of file for context.
+    {%- if http2_directive %}
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    {%- else %}
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
+    {%- endif %}
     server_name {{ domain }}{% for a in aliases %} {{ a }}{% endfor %};
 {%- if !canonical_server_name.is_empty() %}
     # Canonical-host redirect (operator choice: www vs non-www). The
@@ -368,8 +380,14 @@ server {
     location / { return 301 https://$host$request_uri; }
 }
 server {
+    {%- if http2_directive %}
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    {%- else %}
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
+    {%- endif %}
     server_name {{ preview_server_name }};
     root {{ root_dir }};
     index index.php index.html index.htm;
