@@ -266,6 +266,12 @@ pub enum Request {
         sel: HostingSelector,
         req: CertIssueRequest,
     },
+    /// Drop a hosting's certificate and fall back to the self-signed
+    /// bootstrap. Makes replacing a working certificate a deliberate
+    /// two-step, instead of something you reach by clicking Issue twice.
+    CertDelete {
+        sel: HostingSelector,
+    },
     /// Phase 1 of a DNS-01 wildcard issuance.
     /// Always the manual flow: returns the TXT records for the operator
     /// to publish, since the server holds no DNS credentials.
@@ -1496,6 +1502,7 @@ pub enum Response {
     DnsCheck(DnsCheckResult),
     DnsSpfCheck(hyperion_types::SpfCheckResult),
     CertIssueAcme(CertInfo),
+    CertDelete,
     /// `completed = true` ⇒ the cert was issued;
     /// otherwise `record_name` + `values` must be published as TXT and
     /// the caller follows up with `CertDns01Finish`.

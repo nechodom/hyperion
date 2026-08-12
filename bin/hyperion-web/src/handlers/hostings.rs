@@ -149,6 +149,7 @@ struct DetailTpl<'a> {
     csrf_expiry_clear: String,
     csrf_dns_check: String,
     csrf_cert_issue: String,
+    csrf_cert_delete: String,
     csrf_restore: String,
     csrf_restore_as_new: String,
     csrf_logs: String,
@@ -1248,6 +1249,7 @@ pub async fn post_create(
                 csrf_expiry_clear: csrf_token_for(&state, &ctx, "/hostings/expiry/clear"),
                 csrf_dns_check: csrf_token_for(&state, &ctx, "/hostings/dns-check"),
                 csrf_cert_issue: csrf_token_for(&state, &ctx, "/hostings/cert/issue"),
+                csrf_cert_delete: csrf_token_for(&state, &ctx, "/hostings/cert/delete"),
                 csrf_restore: csrf_token_for(&state, &ctx, "/hostings/restore"),
                 csrf_restore_as_new: csrf_token_for(&state, &ctx, "/hostings/restore-as-new"),
                 csrf_logs: csrf_token_for(&state, &ctx, "/hostings/logs"),
@@ -2053,6 +2055,7 @@ pub async fn get_detail(
         csrf_expiry_clear: csrf_token_for(&state, &ctx, "/hostings/expiry/clear"),
         csrf_dns_check: csrf_token_for(&state, &ctx, "/hostings/dns-check"),
         csrf_cert_issue: csrf_token_for(&state, &ctx, "/hostings/cert/issue"),
+        csrf_cert_delete: csrf_token_for(&state, &ctx, "/hostings/cert/delete"),
         csrf_restore: csrf_token_for(&state, &ctx, "/hostings/restore"),
         csrf_restore_as_new: csrf_token_for(&state, &ctx, "/hostings/restore-as-new"),
         csrf_logs: csrf_token_for(&state, &ctx, "/hostings/logs"),
@@ -6549,6 +6552,49 @@ pub struct CertIssueForm {
     pub staging: Option<String>,
     #[serde(default)]
     pub require_dns_match: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+pub struct CertDeleteForm {
+    pub selector: String,
+}
+
+/// POST /hostings/cert/delete — drop the certificate so a new one can be
+/// issued.
+///
+/// Synchronous, unlike issuance: this is a file removal plus a vhost
+/// re-render, with no third party to wait on. Runs on the OWNING node —
+/// the certificate and the vhost both live there.
+pub async fn post_cert_delete(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<CertDeleteForm>,
+) -> Result<Response, AppError> {
+    let sel =
+        match require_manage_for_selector(&state, &ctx, &form.selector, Capability::CertManage)
+            .await
+        {
+            Ok(s) => s,
+            Err(r) => return Ok(r),
+        };
+    let sel_url = urlencoding(&form.selector);
+    let node: Option<String> = find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
+    let resp =
+        crate::dispatcher::dispatch_to_node(&state, node.as_deref(), Request::CertDelete { sel })
+            .await?;
+    match resp {
+        RpcResponse::CertDelete => {
+            Ok(Redirect::to(&format!("/hostings/{sel_url}?cert=deleted")).into_response())
+        }
+        RpcResponse::Error(e) => {
+            let msg = urlencoding(&e.to_string());
+            Ok(Redirect::to(&format!("/hostings/{sel_url}?cert_error={msg}")).into_response())
+        }
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
 }
 
 pub async fn post_cert_issue(

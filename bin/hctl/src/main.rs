@@ -941,6 +941,7 @@ fn print_pretty(resp: &Response) {
             println!("matches:  {}", if c.matches { "yes ✓" } else { "no ✗" });
             println!("note:     {}", c.note);
         }
+        Response::CertDelete => println!("✓ certificate deleted — the site is on a self-signed bootstrap cert until you issue a new one"),
         Response::CertIssueAcme(c)
         | Response::CertDns01Finish(c)
         | Response::CertDns01FinishDomain(c)

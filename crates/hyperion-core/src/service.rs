@@ -2521,13 +2521,29 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             Some(c) => (Some(c.cert_path.clone()), Some(c.key_path.clone())),
             None => (None, None),
         };
-        let cert = cert_row.map(|c| CertInfo {
-            domain: c.domain,
-            sans: aliases.clone(),
-            issuer: c.issuer,
-            not_after: c.not_after,
-            fingerprint_sha256: String::new(),
-        });
+        // The fingerprint is not a column — it is a property of the file on
+        // disk, so read it from there rather than rendering an empty field.
+        // That is also the more honest answer: it reports what is actually
+        // being SERVED, not what we last remembered writing. Best-effort;
+        // a missing or unreadable file leaves it blank, exactly as before.
+        let cert = match cert_row {
+            Some(c) => {
+                let fingerprint_sha256 = tokio::fs::read_to_string(&c.cert_path)
+                    .await
+                    .ok()
+                    .and_then(|pem| hyperion_adapters::cert::inspect_pem(&pem).ok())
+                    .map(|i| i.fingerprint)
+                    .unwrap_or_default();
+                Some(CertInfo {
+                    domain: c.domain,
+                    sans: aliases.clone(),
+                    issuer: c.issuer,
+                    not_after: c.not_after,
+                    fingerprint_sha256,
+                })
+            }
+            None => None,
+        };
         let suser = system_users::get_by_name(&self.pool, "")
             .await
             .ok()
@@ -3489,6 +3505,49 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             return Err(RpcError::Validation {
                 message: format!("nginx config rejected: {e}. No changes applied."),
             });
+        }
+
+        // ─── Redirect-loop check ───────────────────────────────────
+        // `nginx -t` proves the config PARSES, not that it makes sense. A
+        // canonical-host redirect is one half of a conversation: the
+        // application has an opinion about its own address too, and when the
+        // two disagree each one bounces the visitor at the other and the site
+        // dies with ERR_TOO_MANY_REDIRECTS. That is not hypothetical — it is
+        // how ingratia.cz went down: nginx said www, WordPress's siteurl said
+        // apex.
+        //
+        // Nothing can predict this from config alone, because the other half
+        // lives in the site's own database. So test the real thing: apply,
+        // follow the chain, and roll back if it cycles. The operator gets the
+        // old behaviour back and a message naming what disagreed, rather than
+        // a working panel and a dead site.
+        if options.canonical_host != detail.vhost_options.canonical_host
+            && !options.canonical_host.is_empty()
+        {
+            if let Some(loop_hint) = self.redirect_loop_probe(&detail.domain).await {
+                let _ = hyperion_state::hostings::set_vhost_options(
+                    &self.pool,
+                    &detail.id,
+                    &detail.vhost_options,
+                    None,
+                    now_secs(),
+                )
+                .await;
+                let _ = self.adapters.nginx_write_vhost(&detail).await;
+                self.append_audit(
+                    "hosting.set_vhost_options",
+                    Some(detail.id.as_str()),
+                    &serde_json::json!({
+                        "domain": detail.domain,
+                        "canonical_host": options.canonical_host,
+                        "reverted": "redirect loop",
+                    })
+                    .to_string(),
+                    "failed",
+                )
+                .await;
+                return Err(RpcError::Validation { message: loop_hint });
+            }
         }
 
         let audit_payload = serde_json::json!({
@@ -8175,7 +8234,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         {
             match tokio::fs::read_to_string(&cert_path).await {
                 Ok(pem) => match hyperion_adapters::cert::inspect_pem(&pem) {
-                    Ok((not_after, issuer)) => {
+                    Ok(info) => {
+                        let (not_after, issuer) = (info.not_after, info.issuer);
                         match certificates::upsert(
                             &self.pool,
                             &hostname,
@@ -12338,6 +12398,139 @@ impl<A: AdapterPort + 'static> HostingService<A> {
 
     /// Issue a real Let's Encrypt cert via HTTP-01 + install it.
     /// Refuses unless DNS resolves here (override via req.require_dns_match=false).
+    /// Follow `domain`'s redirect chain against THIS server and report a
+    /// cycle, or `None` when the site settles.
+    ///
+    /// Aimed at loopback with an explicit Host/SNI, so it tests the vhost we
+    /// just wrote rather than whatever public DNS or a CDN in front of it
+    /// currently points at — and so it works before DNS has moved, and on a
+    /// proxied domain where the edge would answer instead of us.
+    ///
+    /// `-k` because the bootstrap certificate is self-signed and a TLS
+    /// complaint would mask the answer we came for; this probe asks "where
+    /// does this redirect to", not "is the certificate trusted", and it never
+    /// leaves the machine.
+    ///
+    /// A non-loop failure (curl missing, connection refused, timeout) returns
+    /// `None`: an inconclusive probe must not block a legitimate change. This
+    /// catches the certain case and stays out of the way otherwise.
+    async fn redirect_loop_probe(&self, domain: &str) -> Option<String> {
+        const MAX_HOPS: u8 = 6;
+        let url = format!("https://{domain}/");
+        let out = tokio::process::Command::new("curl")
+            .args([
+                "-sS",
+                "-o",
+                "/dev/null",
+                "-L",
+                "-k",
+                "--max-redirs",
+                &MAX_HOPS.to_string(),
+                "--max-time",
+                "10",
+                "--resolve",
+                &format!("{domain}:443:127.0.0.1"),
+                "-D",
+                "-",
+                &url,
+            ])
+            .output()
+            .await
+            .ok()?;
+
+        // curl exit 47 is "Maximum (N) redirects followed" — with a cap this
+        // small on a site's own front page, that is a cycle, not a deep chain.
+        if out.status.code() != Some(47) {
+            return None;
+        }
+        let headers = String::from_utf8_lossy(&out.stdout).to_lowercase();
+        let culprit = if headers.contains("x-redirect-by: wordpress") {
+            // Name it. Every minute spent looking at nginx here is wasted,
+            // and this is the overwhelmingly common cause.
+            format!(
+                "WordPress is redirecting in the opposite direction. Its Site Address \
+                 (Settings → General, the `siteurl`/`home` options) points at the other \
+                 spelling of the domain, so the two take turns bouncing visitors and the \
+                 site fails with ERR_TOO_MANY_REDIRECTS. FIX: either pick the canonical \
+                 host that matches WordPress, or change WordPress's Site Address to match \
+                 this setting — they have to agree."
+            )
+        } else {
+            "Something on the site redirects in the opposite direction — most often the \
+             application's own canonical-URL setting, or a redirect plugin. The two take \
+             turns bouncing visitors, so the site fails with ERR_TOO_MANY_REDIRECTS."
+                .to_string()
+        };
+        Some(format!(
+            "Refused: this setting makes {domain} redirect in a loop, so the change has \
+             been rolled back and the site is serving as it was. {culprit}"
+        ))
+    }
+
+    /// Throw away a hosting's certificate and fall back to the self-signed
+    /// bootstrap.
+    ///
+    /// This is what makes re-issuance a two-step action. Issuing over a
+    /// healthy certificate is nearly always a mistake: it spends Let's
+    /// Encrypt's per-hostname budget (5 failed validations an hour, 5
+    /// duplicate certificates a week) on a certificate that was already
+    /// working, and if the attempt fails the operator is left worse off than
+    /// before they touched it. Making the destructive step explicit means
+    /// nobody reaches it by clicking the obvious button twice.
+    ///
+    /// Deleting the FILES is what actually downgrades the site, because
+    /// `nginx_write_vhost` self-heals a missing cert by generating a
+    /// bootstrap one — so the vhost re-render below both restores a
+    /// serveable cert and reloads nginx onto it. The DB row goes too, or the
+    /// renewal sweep would keep trying to renew a certificate that is no
+    /// longer on disk.
+    pub async fn cert_delete(&self, sel: HostingSelector) -> Result<(), RpcError> {
+        let detail = self.get(sel).await?;
+        let domain = detail.domain.clone();
+
+        // Serialize against issuance for the same domain — otherwise a
+        // delete racing an in-flight issue can remove the files the issue
+        // just wrote and leave the row pointing at nothing.
+        let lock = {
+            let mut locks = self.cert_issue_locks.lock().await;
+            locks.entry(domain.clone()).or_default().clone()
+        };
+        let _guard = lock.lock().await;
+
+        let dir = format!("/etc/hyperion/certs/{domain}");
+        if let Err(e) = tokio::fs::remove_dir_all(&dir).await {
+            // Already gone is success — this is a "make it so" operation.
+            if e.kind() != std::io::ErrorKind::NotFound {
+                return Err(RpcError::Internal_with(format!(
+                    "could not remove {dir}: {e}"
+                )));
+            }
+        }
+        certificates::delete(&self.pool, &domain)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("certificates delete: {e}")))?;
+
+        // Re-render: regenerates the bootstrap cert and reloads nginx, so the
+        // site keeps answering on :443 (untrusted, but up) instead of taking
+        // nginx down over a missing ssl_certificate file.
+        let mut fresh = detail.clone();
+        fresh.cert_path = None;
+        fresh.cert_key_path = None;
+        self.adapters
+            .nginx_write_vhost(&fresh)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("vhost re-render: {e}")))?;
+
+        self.append_audit(
+            "cert.delete",
+            Some(detail.id.as_str()),
+            &serde_json::json!({ "domain": &domain }).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
     pub async fn issue_real_cert(
         &self,
         sel: HostingSelector,

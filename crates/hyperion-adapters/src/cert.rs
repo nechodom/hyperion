@@ -59,27 +59,24 @@ pub struct ValidatedCert {
     pub fingerprint: String,
 }
 
-/// Validate `cert_pem` + `key_pem` (+ optional `ca_bundle_pem`) for a
-/// hosting whose certificate must cover every name in `required_names`
-/// (primary domain followed by aliases).
+/// Read what a certificate already on disk actually says, without needing
+/// its private key.
 ///
-/// On success the leaf parses, the key matches it, and every required
-/// name is covered. The returned `fullchain_pem` is the leaf chain with
-/// the CA bundle appended.
-/// Read `notAfter` + issuer label out of a certificate already on disk,
-/// without needing its private key.
+/// Two callers, same need — describe a certificate nobody handed us:
 ///
-/// This exists for ADOPTION: a certificate issued before Hyperion recorded
-/// it. The panel's own cert is the case that matters — it was written
-/// straight to disk and never entered the `certificates` table, so the
-/// renewal sweep, which reads only that table, could not see it, and the one
-/// certificate whose expiry locks the operator out of the UI they would use
-/// to fix it was the only one nothing was watching.
+///   * ADOPTION. The panel's own cert was written straight to disk and
+///     never entered the `certificates` table, so the renewal sweep — which
+///     reads only that table — could not see it, and the one certificate
+///     whose expiry locks the operator out of the UI they would use to fix
+///     it was the only one nothing was watching.
+///   * DISPLAY. The hosting detail page showed an empty Fingerprint because
+///     the database has no such column. Reading it from the file is also
+///     more honest than a stored copy: it reports what is being SERVED, not
+///     what we last remembered writing.
 ///
-/// Adoption needs exactly these two fields and has no business demanding the
-/// private key, so this deliberately does not reuse [`validate_upload`],
-/// which cross-checks a key it does not have.
-pub fn inspect_pem(cert_pem: &str) -> Result<(i64, String), CertError> {
+/// Deliberately does not reuse [`validate_upload`], which cross-checks a
+/// private key that neither caller has.
+pub fn inspect_pem(cert_pem: &str) -> Result<InspectedCert, CertError> {
     let chain = parse_chain(cert_pem)?;
     let leaf_der = chain
         .first()
@@ -87,9 +84,28 @@ pub fn inspect_pem(cert_pem: &str) -> Result<(i64, String), CertError> {
         .as_ref();
     let (_, leaf) = X509Certificate::from_der(leaf_der)
         .map_err(|e| CertError::BadCertificate(e.to_string()))?;
-    Ok((leaf.validity().not_after.timestamp(), issuer_label(&leaf)))
+    Ok(InspectedCert {
+        not_after: leaf.validity().not_after.timestamp(),
+        issuer: issuer_label(&leaf),
+        fingerprint: crate::acme::fingerprint_sha256_der(leaf_der),
+    })
 }
 
+/// What [`inspect_pem`] can tell you about a certificate already on disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InspectedCert {
+    pub not_after: i64,
+    pub issuer: String,
+    pub fingerprint: String,
+}
+
+/// Validate `cert_pem` + `key_pem` (+ optional `ca_bundle_pem`) for a
+/// hosting whose certificate must cover every name in `required_names`
+/// (primary domain followed by aliases).
+///
+/// On success the leaf parses, the key matches it, and every required
+/// name is covered. The returned `fullchain_pem` is the leaf chain with
+/// the CA bundle appended.
 pub fn validate_upload(
     cert_pem: &str,
     key_pem: &str,

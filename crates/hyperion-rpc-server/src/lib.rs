@@ -428,6 +428,10 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::DnsSpfCheck(v),
             Err(e) => Response::Error(e),
         },
+        Request::CertDelete { sel } => match api.cert_delete(sel).await {
+            Ok(()) => Response::CertDelete,
+            Err(e) => Response::Error(e),
+        },
         Request::CertIssueAcme { sel, req } => match api.cert_issue_acme(sel, req).await {
             Ok(v) => Response::CertIssueAcme(v),
             Err(e) => Response::Error(e),
@@ -1802,6 +1806,12 @@ mod tests {
                 message: "not supported by this agent".into(),
             })
         }
+        async fn cert_delete(&self, _: HostingSelector) -> Result<(), RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
+        }
+
         async fn cert_issue_acme(
             &self,
             _: HostingSelector,
