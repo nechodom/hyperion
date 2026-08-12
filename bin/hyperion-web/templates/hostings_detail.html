@@ -1667,8 +1667,31 @@
     <code>WP_REDIS_*</code> constants into wp-config.php. You still
     need to install the
     <a href="https://wordpress.org/plugins/redis-cache/" target="_blank" rel="noopener">Redis Object Cache</a>
-    plugin yourself from WP admin → Plugins — Hyperion only wires the connection details into <code>wp-config.php</code>.
+    plugin — Hyperion wires the connection details into <code>wp-config.php</code>,
+    but WordPress will not USE Redis until that plugin is installed and active.
   </p>
+  {%- if detail.wp_extras.redis_enabled %}
+    {%- if !redis_plugin_installed %}
+  {# Enabling Redis writes the constants and does nothing observable until
+     the plugin is there. Rather than leaving that as a sentence the operator
+     has to notice, offer the one action that finishes the job. #}
+  <div class="flash warn" style="margin:0.6rem 0">
+    <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+    <div class="flash-body">
+      <strong>Redis is wired up, but nothing is using it yet.</strong>
+      The <code>Redis Object Cache</code> plugin is not installed, so WordPress
+      still caches to the database. Install and activate it to finish the job.
+      <form method="post" action="/hostings/wp/plugin-action" style="margin-top:0.6rem">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+        <input type="hidden" name="slug" value="redis-cache">
+        <input type="hidden" name="action" value="install">
+        <button class="btn primary small" type="submit">Install &amp; activate Redis Object Cache</button>
+      </form>
+    </div>
+  </div>
+    {%- endif %}
+  {%- endif %}
   {% if detail.wp_extras.redis_enabled %}
   <p class="muted small">
     <strong>DB slot:</strong> {{ detail.wp_extras.redis_db_number.unwrap_or(-1) }}<br>
@@ -2565,11 +2588,38 @@
       <div class="flash-body">
         <strong>New FTP password (shown once)</strong>
         <div style="display:flex;gap:0.5rem;align-items:center;margin-top:0.4rem">
-          <code style="flex:1;padding:0.5rem;background:var(--surface-2);border-radius:var(--radius-xs);font-size:0.92rem">{{ pw }}</code>
+          <span class="copy-field" style="flex:1" data-copy="{{ pw }}" title="Copy the password">
+            <span class="copy-value" style="font-size:0.92rem">{{ pw }}</span>
+            <span class="copy-hint">click to copy</span>
+          </span>
         </div>
-        <div class="muted" style="font-size:0.82rem;margin-top:0.5rem">
-          Connect with:<br>
-          <code style="font-size:0.8rem">ftp://{{ detail.system_user }}@{{ ftp_host }}</code> · port 21 (FTPS) · lands in <code>{{ detail.domain }}/htdocs</code>
+        {# The four things that go into an FTP client, each its own
+           copyable field. They were previously one run-on sentence, which
+           is the shape you cannot paste from. #}
+        <div class="copy-grid" style="margin-top:0.7rem">
+          <div class="copy-field" data-copy="{{ ftp_host }}" title="Copy the host">
+            <span class="copy-label">Host</span>
+            <span class="copy-value">{{ ftp_host }}</span>
+            <span class="copy-hint">click to copy</span>
+          </div>
+          <div class="copy-field" data-copy="{{ detail.system_user }}" title="Copy the username">
+            <span class="copy-label">Username</span>
+            <span class="copy-value">{{ detail.system_user }}</span>
+            <span class="copy-hint">click to copy</span>
+          </div>
+          <div class="copy-field" data-copy="{{ pw }}" title="Copy the password">
+            <span class="copy-label">Password</span>
+            <span class="copy-value">{{ pw }}</span>
+            <span class="copy-hint">click to copy</span>
+          </div>
+          <div class="copy-field" data-copy="21" title="Copy the port">
+            <span class="copy-label">Port</span>
+            <span class="copy-value">21 <span class="muted" style="font-family:inherit">· FTPS (explicit TLS)</span></span>
+            <span class="copy-hint">click to copy</span>
+          </div>
+        </div>
+        <div class="muted" style="font-size:0.82rem">
+          Lands in <code>{{ detail.domain }}/htdocs</code> — the writable web root.
         </div>
       </div>
     </div>

@@ -1310,6 +1310,59 @@ function isShortcutContext(ev) {
 })();
 
 // ============================================================
+//  Click-to-copy. Any element with `data-copy="<text>"` copies it
+//  and says so in place. Generic on purpose — connection details,
+//  paths and hostnames are all things an operator is about to
+//  paste somewhere, and selecting them by hand from a sentence is
+//  fiddly and error-prone.
+//
+//  navigator.clipboard needs a secure context; on plain HTTP it is
+//  undefined. Fall back to the old execCommand path rather than
+//  silently doing nothing, since a panel reached by IP over http
+//  is exactly where someone is setting up their first site.
+// ============================================================
+(function () {
+  'use strict';
+  function flash(el, msg, ok) {
+    const prev = el.getAttribute('data-copy-label') || el.textContent;
+    el.setAttribute('data-copy-label', prev);
+    el.classList.add(ok ? 'copied' : 'copy-failed');
+    const badge = el.querySelector('.copy-hint');
+    if (badge) badge.textContent = msg;
+    setTimeout(() => {
+      el.classList.remove('copied', 'copy-failed');
+      if (badge) badge.textContent = 'click to copy';
+    }, 1600);
+  }
+  async function copy(text) {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return;
+    }
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(ta);
+    if (!ok) throw new Error('copy rejected');
+  }
+  document.addEventListener('click', async (e) => {
+    const el = e.target.closest('[data-copy]');
+    if (!el) return;
+    try {
+      await copy(el.getAttribute('data-copy') || '');
+      flash(el, 'copied', true);
+    } catch (_) {
+      flash(el, 'press ctrl+C', false);
+    }
+  });
+})();
+
+// ============================================================
 //  Sidebar status dots — monitoring / WordPress updates / certs.
 //  One request for all three, so the dots can never disagree with
 //  each other, and a hiccup in one RPC does not turn the sidebar

@@ -454,6 +454,15 @@
           </select>
         </div>
       </div>
+      {# A site under construction that Google indexes is a real problem and
+         an annoying one to undo — the pages stay in the index long after the
+         flag is flipped back. Offer it at the moment the site is created,
+         which is the only moment it is free. #}
+      <label class="field-checkbox" style="margin-top:0.6rem">
+        <input type="checkbox" name="wp_no_index" value="on">
+        Discourage search engines from indexing this site
+        <span class="muted" style="margin-left:0.4rem;font-size:0.82rem">— for a site still being built; turn it off before launch</span>
+      </label>
       <p class="text-soft small" style="margin-top:0.4rem">
         Choose a non-obvious admin username — <code>admin</code> is the
         first guess every brute-force attack tries. WordPress is installed

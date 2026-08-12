@@ -306,6 +306,12 @@ struct PackagesCardTpl {
     /// the only thing that makes the preview / send-now controls
     /// meaningful, so they are absent otherwise.
     sells_report: bool,
+    /// Where a care report would be sent — the hosting's owner e-mail.
+    /// Empty when none is set, which is the case worth shouting about: a
+    /// package that SELLS a periodic report and has nowhere to send it is
+    /// a promise the customer paid for and will never receive, and nothing
+    /// used to say so.
+    report_to: String,
     /// The rendered mail, shown in place after the operator asks for a
     /// preview. `None` on every other render; a preview is never sticky,
     /// because a stale one would show a period that has since moved.
@@ -730,7 +736,7 @@ async fn render_card(
         state,
         owner.as_deref(),
         Request::PackageActivations {
-            sel,
+            sel: sel.clone(),
             history: false,
         },
     )
@@ -801,7 +807,22 @@ async fn render_card(
         })
         .collect();
 
+    let report_to = crate::dispatcher::dispatch_to_node(
+        state,
+        owner.as_deref(),
+        Request::HostingGetExpiry(sel.clone()),
+    )
+    .await
+    .ok()
+    .and_then(|r| match r {
+        RpcResponse::HostingGetExpiry(e) => e.owner_email,
+        _ => None,
+    })
+    .map(|s| s.trim().to_string())
+    .unwrap_or_default();
+
     let tpl = PackagesCardTpl {
+        report_to,
         selector,
         csrf_token: super::session_csrf_token(state, ctx),
         held,

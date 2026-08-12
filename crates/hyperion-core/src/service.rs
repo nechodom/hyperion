@@ -6764,9 +6764,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             let Ok(st) = serde_json::from_str::<StoredVulnScan>(&json) else {
                 continue;
             };
-            if st.result.findings.is_empty() {
-                continue;
-            }
+            // A site with nothing outdated STAYS in the list. Dropping it
+            // made the page unable to distinguish "up to date" from "never
+            // scanned" — both rendered as absent — so a WordPress site the
+            // operator knows they have simply was not there, with no way to
+            // tell whether that was good news or a broken sweep. The page
+            // sorts by severity anyway, so clean sites settle at the bottom.
             let domain = summaries
                 .iter()
                 .find(|s| s.id.as_str() == hid)
