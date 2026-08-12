@@ -3311,3 +3311,46 @@ html, body { overflow-x: clip; }
    in WebKit, which makes it read as a caption rather than a control. */
 summary.btn::-webkit-details-marker { display: none; }
 summary.btn::marker { content: ""; }
+
+/* Click-to-copy field. Reads as a value you can take, not a paragraph you
+   have to select by hand. */
+.copy-field {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  padding: 0.5rem 0.7rem;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+  transition: border-color var(--t-fast), background var(--t-fast);
+  min-width: 0;
+}
+.copy-field:hover { border-color: var(--primary); }
+.copy-field.copied { border-color: var(--ok); }
+.copy-field.copy-failed { border-color: var(--err); }
+.copy-field .copy-value {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.86rem;
+  overflow-x: auto;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+.copy-field .copy-label {
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+  flex: none;
+  min-width: 4.5rem;
+}
+.copy-field .copy-hint {
+  font-size: 0.68rem;
+  color: var(--text-dim);
+  flex: none;
+  white-space: nowrap;
+}
+.copy-field.copied .copy-hint { color: var(--ok); }
+.copy-field.copy-failed .copy-hint { color: var(--err); }
+.copy-grid { display: grid; gap: 0.5rem; margin: 0.6rem 0; }

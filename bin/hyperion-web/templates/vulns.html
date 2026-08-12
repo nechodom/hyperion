@@ -45,12 +45,23 @@
             <td><a href="/hostings/{{ r.domain }}#wordpress">{{ r.domain }}</a></td>
             <td><span class="tag">{{ r.node_id }}</span></td>
             <td>
-              {% if r.count_severity("high") > 0 %}<span class="pill warn">{{ r.count_severity("high") }} major</span> {% endif %}
-              {% if r.count_severity("medium") > 0 %}<span class="pill">{{ r.count_severity("medium") }} minor</span> {% endif %}
-              {% if r.count_severity("low") > 0 %}<span class="pill">{{ r.count_severity("low") }} patch</span>{% endif %}
+              {% if r.findings.is_empty() %}
+                {# A scanned site with nothing outdated. It used to be dropped
+                   from the list entirely, which made "up to date" and "never
+                   scanned" look identical — both simply absent. #}
+                <span class="pill ok">up to date</span>
+              {% else %}
+                {% if r.count_severity("high") > 0 %}<span class="pill warn">{{ r.count_severity("high") }} major</span> {% endif %}
+                {% if r.count_severity("medium") > 0 %}<span class="pill">{{ r.count_severity("medium") }} minor</span> {% endif %}
+                {% if r.count_severity("low") > 0 %}<span class="pill">{{ r.count_severity("low") }} patch</span>{% endif %}
+              {% endif %}
             </td>
             <td class="muted small" style="max-width:28rem">
+              {% if r.findings.is_empty() %}
+                <span class="text-soft">core, plugins and themes all current</span>
+              {% else %}
               {% for f in r.findings %}<code style="font-size:0.74rem">{{ f.kind }}:{{ f.slug }}</code> <span class="text-soft">{{ f.installed_version }}→{{ f.patched_version }}</span>{% if !loop.last %} · {% endif %}{% endfor %}
+              {% endif %}
             </td>
             <td class="right muted numeric" title="{{ r.scanned_at }}">{{ crate::handlers::stats::fmt_ago(r.scanned_at) }}</td>
           </tr>

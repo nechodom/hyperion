@@ -212,6 +212,10 @@ struct DetailTpl<'a> {
     /// Empty otherwise; the template's WP tab shows an "install WP first"
     /// state instead of an empty table.
     wp_plugins: hyperion_types::WpPluginListResponse,
+    /// Whether `redis-cache` is present. Enabling Redis writes the wp-config
+    /// constants and changes nothing observable until that plugin exists, so
+    /// the card offers to install it rather than leaving the gap in prose.
+    redis_plugin_installed: bool,
     /// Per-hosting email log — last 50 emails the agent sent on
     /// behalf of this hosting (alerts, cert reminders, monitor
     /// down/up, billing). Drives the new Emails tab.
@@ -615,6 +619,9 @@ pub struct CreateForm {
     /// Locale; defaults to en_US if blank.
     #[serde(default)]
     pub wp_locale: String,
+    /// "on" when the operator ticked "Discourage search engines".
+    #[serde(default)]
+    pub wp_no_index: Option<String>,
     /// Hosting-profile id selected in the wizard's first step.
     /// `0` (or absent) = no profile — operator wants raw defaults.
     /// When non-zero, post_create dispatches profile_apply right
@@ -1079,7 +1086,12 @@ pub async fn post_create(
                         form.wp_locale.trim().to_string()
                     };
                     let site_url = format!("https://{}", req.domain.as_str());
-                    let no_index = target_is_test && cluster_cfg.test_wp_no_index;
+                    // Either the operator asked for it on this site, or the
+                    // node-wide test-node policy does. Test nodes keep
+                    // forcing it: a throwaway staging copy must never be
+                    // indexable just because nobody remembered to tick a box.
+                    let no_index = form.wp_no_index.as_deref() == Some("on")
+                        || (target_is_test && cluster_cfg.test_wp_no_index);
                     wp_req_opt = Some(hyperion_types::WpInstallRequest {
                         site_url: site_url.clone(),
                         title,
@@ -1308,6 +1320,10 @@ pub async fn post_create(
                 monitor_config: hyperion_types::MonitorConfigView::default(),
                 monitor_history: hyperion_types::MonitorHistory::default(),
                 wp_plugins: hyperion_types::WpPluginListResponse::default(),
+                // Post-create render: the plugin list has not been fetched,
+                // so claim installed to keep the prompt off a page that
+                // cannot know either way.
+                redis_plugin_installed: true,
                 email_log: vec![],
                 site_emails: vec![],
                 ftp_accounts: vec![],
@@ -2158,6 +2174,9 @@ pub async fn get_detail(
         users_for_access: users_for_access_for_detail,
         monitor_config,
         monitor_history,
+        // `wp plugin list` reports the folder slug; redis-cache is the
+        // wordpress.org slug and the folder name both.
+        redis_plugin_installed: wp_plugins.plugins.iter().any(|p| p.slug == "redis-cache"),
         wp_plugins,
         email_log,
         site_emails,
