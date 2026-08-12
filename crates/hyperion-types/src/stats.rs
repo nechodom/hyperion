@@ -426,9 +426,25 @@ pub const EXPIRY_WARNING_DEFAULT_BODY_TEMPLATE: &str = "Hello,\n\
      --\n\
      Hyperion\n";
 
+fn default_cluster_mode() -> String {
+    "master".to_string()
+}
+
 /// Cluster-placement preferences for the master web UI.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ClusterConfigView {
+    /// Deployment role of THIS box: `"standalone"` (one server, no
+    /// workers) or `"master"` (drives worker nodes). Worker-ness is not
+    /// stored here — it is decided by the presence of an enrollment
+    /// credential (`node-id.json`), a fact rather than a preference, so
+    /// the key and the credential can never disagree.
+    ///
+    /// Absent / unrecognised resolves to `"master"`: byte-identical to the
+    /// behaviour before this key existed, and a broken config can never
+    /// hide the cluster surface from an operator who has real workers.
+    #[serde(default = "default_cluster_mode")]
+    pub mode: String,
+
     /// When `false`, /hostings/new hides the master from the
     /// "Target node" dropdown and the agent refuses local
     /// hosting_create calls — turning the master into a
@@ -535,6 +551,9 @@ fn default_true() -> bool {
 impl Default for ClusterConfigView {
     fn default() -> Self {
         Self {
+            // Master, so a read failure never hides the cluster surface
+            // from an operator who has real workers.
+            mode: default_cluster_mode(),
             // Permissive default = old behaviour. Operators
             // opt in to "control plane only" via the toggle.
             master_accepts_hostings: true,

@@ -494,6 +494,29 @@ pub struct HostingService<A: AdapterPort + 'static> {
 /// `[acme] renewal_window_days` in agent.toml.
 pub const CERT_RENEWAL_WINDOW_DAYS: i64 = 30;
 
+/// What a box is for. Resolved by [`HostingService::deployment_role`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeploymentRole {
+    /// One server, no cluster in either direction. The overwhelmingly
+    /// common case, and the one the UI used to have no concept of.
+    Standalone,
+    /// Drives one or more enrolled workers.
+    Master,
+    /// Enrolled to a master. Decided by the presence of the enrollment
+    /// credential, never by config.
+    Worker,
+}
+
+impl DeploymentRole {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Standalone => "standalone",
+            Self::Master => "master",
+            Self::Worker => "worker",
+        }
+    }
+}
+
 /// Cache TTL for the GitHub release check. One hour is enough to
 /// keep the dashboard banner fresh without hammering the API or
 /// hitting their unauthenticated rate limit (60 req/hour/IP).
@@ -1712,6 +1735,34 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// The check is filesystem-level on every call — cheap, and
     /// reflects the current state if the operator removes the file
     /// to force re-enrollment.
+    /// What this box is FOR, resolved from one fact and one preference.
+    ///
+    /// `node-id.json` wins because it is a credential, not an opinion: a box
+    /// that successfully enrolled IS a worker, whatever a config key claims.
+    /// Putting worker-ness in the same key would create a state where the
+    /// two can disagree, which is a bug factory. Everything else falls out
+    /// of `[cluster] mode`, whose absent/garbage case resolves to Master —
+    /// the pre-existing behaviour, so upgrades change nothing until the
+    /// startup backfill writes the key explicitly.
+    pub fn deployment_role(&self) -> DeploymentRole {
+        if self.is_worker_node() {
+            return DeploymentRole::Worker;
+        }
+        match read_cluster_section(self.agent_config_path.as_deref())
+            .mode
+            .as_str()
+        {
+            "standalone" => DeploymentRole::Standalone,
+            _ => DeploymentRole::Master,
+        }
+    }
+
+    /// True when this box has no cluster above or below it, so every
+    /// node/worker surface in the UI is noise rather than information.
+    pub fn is_standalone(&self) -> bool {
+        matches!(self.deployment_role(), DeploymentRole::Standalone)
+    }
+
     pub fn is_worker_node(&self) -> bool {
         match &self.node_state_file {
             Some(p) => p.exists(),
@@ -8012,6 +8063,80 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// Returns `Ok(false)` (no-op) when there's no panel hostname or no cert
     /// yet; `write_panel_vhost` runs `nginx -t` and restores the prior file on
     /// failure, so a bad reload can't take the panel offline.
+    /// Write `[cluster] mode` explicitly, once, if it isn't there yet.
+    ///
+    /// Run at agent boot. Without this the mode is only ever *inferred* at
+    /// runtime, and `cat /etc/hyperion/agent.toml` cannot answer "what is
+    /// this box". With it, an existing install picks the right answer on
+    /// update with no operator action: an empty `nodes` table means nothing
+    /// ever enrolled, which is a standalone box.
+    ///
+    /// Guarded on the KEY being absent, not the section — so a re-run is a
+    /// no-op on CONTENT, and an operator who deliberately set "master" on a
+    /// box with no workers yet is never overridden. Never touches a worker:
+    /// its role comes from the enrollment credential, and writing a
+    /// contradicting key would be the exact confusion this avoids.
+    pub async fn backfill_deployment_mode(&self) -> Result<(), RpcError> {
+        if self.is_worker_node() {
+            return Ok(());
+        }
+        let Some(path) = self.agent_config_path.as_deref() else {
+            return Ok(());
+        };
+        // Read the raw document rather than the parsed view: the view maps
+        // "absent" onto "master", which is exactly the distinction we need.
+        let already_set = std::fs::read_to_string(path)
+            .ok()
+            .and_then(|raw| raw.parse::<toml_edit::DocumentMut>().ok())
+            .map(|doc| {
+                doc.get("cluster")
+                    .and_then(|s| s.get("mode"))
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|m| !m.trim().is_empty())
+            })
+            .unwrap_or(false);
+        if already_set {
+            return Ok(());
+        }
+        let has_nodes = hyperion_state::nodes::list(&self.pool)
+            .await
+            .map(|n| !n.is_empty())
+            .unwrap_or(true); // unreadable ⇒ assume cluster, the safe way
+        let mode = if has_nodes { "master" } else { "standalone" };
+        let mut fields = std::collections::BTreeMap::new();
+        fields.insert("mode".to_string(), mode.to_string());
+        self.agent_config_update("cluster".to_string(), fields)
+            .await?;
+        tracing::info!(
+            mode,
+            has_nodes,
+            "recorded this box's deployment mode in agent.toml"
+        );
+        Ok(())
+    }
+
+    /// Promote a standalone box to master. Called after a node successfully
+    /// enrolls, so adding the first worker never requires the operator to
+    /// find a setting first — the box just stops being standalone.
+    pub(crate) async fn promote_to_master_if_standalone(&self) {
+        if !self.is_standalone() {
+            return;
+        }
+        let mut fields = std::collections::BTreeMap::new();
+        fields.insert("mode".to_string(), "master".to_string());
+        match self
+            .agent_config_update("cluster".to_string(), fields)
+            .await
+        {
+            Ok(()) => tracing::info!("a node enrolled — this box is now a cluster master"),
+            Err(e) => tracing::warn!(
+                error = %e,
+                "a node enrolled but the deployment mode could not be updated — \
+                 the cluster UI stays hidden until it is set in Settings"
+            ),
+        }
+    }
+
     pub async fn ensure_panel_vhost(&self) -> Result<bool, RpcError> {
         let hostname = read_cluster_section(self.agent_config_path.as_deref())
             .panel_hostname
@@ -10748,6 +10873,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         hyperion_state::nodes::upsert_enrollment(&self.pool, &row, now)
             .await
             .map_err(|e| RpcError::Internal_with(format!("nodes upsert: {e}")))?;
+        // A box with a worker is a master by definition. Doing it here means
+        // adding the first node never requires the operator to go and find a
+        // setting — and it makes the cluster UI appear exactly when it starts
+        // being about something.
+        self.promote_to_master_if_standalone().await;
         // The upsert just cleared any previous pin, so this compare-and-set
         // always lands on a fresh enrollment. Failing to pin is NOT fatal —
         // the node re-publishes the key on every heartbeat and gets pinned
@@ -22630,6 +22760,21 @@ pub(crate) fn read_cluster_section(
         .and_then(|s| s.get("master_accepts_hostings"))
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
+    // Absent, empty or unrecognised all resolve to "master" — i.e. exactly
+    // today's behaviour, which is what lets an existing install upgrade with
+    // no config change. The fail-safe direction matters: a broken or
+    // unreadable agent.toml must never HIDE the cluster surface from an
+    // operator who has real workers.
+    let mode = match section
+        .and_then(|s| s.get("mode"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+    {
+        "standalone" => "standalone",
+        _ => "master",
+    }
+    .to_string();
     let test_node_ids = section
         .and_then(|s| s.get("test_node_ids"))
         .and_then(|v| v.as_str())
@@ -22680,6 +22825,7 @@ pub(crate) fn read_cluster_section(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     hyperion_types::ClusterConfigView {
+        mode,
         master_accepts_hostings: accept,
         test_node_ids,
         test_domain_template,
@@ -22752,6 +22898,20 @@ fn parse_agent_section_fields(
             | ("cluster", "panel_hostname") => {
                 crate::config_persist::FieldValue::Str(v.trim().to_string())
             }
+            // Two-valued on purpose: "worker" is not settable, because it is
+            // decided by the enrollment credential on disk. Reject anything
+            // else rather than silently resolving it to master — a typo here
+            // would otherwise be invisible.
+            ("cluster", "mode") => match v.trim() {
+                m @ ("standalone" | "master") => {
+                    crate::config_persist::FieldValue::Str(m.to_string())
+                }
+                other => {
+                    return Err(bad(format!(
+                        "cluster mode must be \"standalone\" or \"master\", got {other:?}"
+                    )))
+                }
+            },
             ("cluster", "trash_retention_days") => {
                 let n = parse_int(v)?;
                 if !(1..=365).contains(&n) {
@@ -25948,6 +26108,96 @@ mod tests {
             s = s.with_node_state_file(path);
         }
         s
+    }
+
+    /// Write an agent.toml carrying just a `[cluster] mode`.
+    async fn svc_with_mode(
+        mode: Option<&str>,
+    ) -> (HostingService<MockAdapterPort>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("agent.toml");
+        let body = match mode {
+            Some(m) => format!("[cluster]\nmode = \"{m}\"\n"),
+            None => "[cluster]\nmaster_accepts_hostings = true\n".to_string(),
+        };
+        std::fs::write(&path, body).expect("write agent.toml");
+        let pool = open_memory().await.expect("memory db");
+        let s = svc(pool, MockAdapterPort::new()).with_agent_config_path(path);
+        (s, dir)
+    }
+
+    /// The whole point of the key: an absent or unreadable one must resolve
+    /// to Master. Guessing "standalone" would hide the cluster surface from
+    /// an operator who has real workers — the failure that actually costs
+    /// something. Guessing "master" only ever shows a node picker with one
+    /// entry.
+    #[tokio::test]
+    async fn deployment_mode_fails_safe_to_master() {
+        let (s, _d) = svc_with_mode(None).await;
+        assert_eq!(s.deployment_role(), DeploymentRole::Master);
+        assert!(!s.is_standalone());
+
+        // Garbage is not "close enough to standalone" either.
+        let (s, _d) = svc_with_mode(Some("stand-alone")).await;
+        assert_eq!(s.deployment_role(), DeploymentRole::Master);
+
+        // No config file at all.
+        let pool = open_memory().await.expect("memory db");
+        let s = svc(pool, MockAdapterPort::new());
+        assert_eq!(s.deployment_role(), DeploymentRole::Master);
+    }
+
+    #[tokio::test]
+    async fn deployment_mode_reads_standalone_and_master() {
+        let (s, _d) = svc_with_mode(Some("standalone")).await;
+        assert_eq!(s.deployment_role(), DeploymentRole::Standalone);
+        assert!(s.is_standalone());
+
+        let (s, _d) = svc_with_mode(Some("master")).await;
+        assert_eq!(s.deployment_role(), DeploymentRole::Master);
+    }
+
+    /// An enrollment credential outranks the config key, always. A box that
+    /// enrolled IS a worker whatever agent.toml claims, so the two can never
+    /// disagree in a way that matters.
+    #[tokio::test]
+    async fn enrollment_credential_outranks_the_mode_key() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let cfg = dir.path().join("agent.toml");
+        std::fs::write(&cfg, "[cluster]\nmode = \"standalone\"\n").expect("write");
+        let node_id = dir.path().join("node-id.json");
+        std::fs::write(&node_id, "{}").expect("write node-id");
+        let pool = open_memory().await.expect("memory db");
+        let s = svc(pool, MockAdapterPort::new())
+            .with_agent_config_path(cfg)
+            .with_node_state_file(node_id);
+        assert_eq!(
+            s.deployment_role(),
+            DeploymentRole::Worker,
+            "an enrolled box is a worker even if the config says standalone"
+        );
+    }
+
+    /// "worker" is not a settable mode — it is a fact about the disk, and a
+    /// key that can contradict it is a bug factory.
+    #[tokio::test]
+    async fn mode_key_rejects_anything_but_standalone_or_master() {
+        for good in ["standalone", "master"] {
+            let mut f = std::collections::BTreeMap::new();
+            f.insert("mode".to_string(), good.to_string());
+            assert!(
+                parse_agent_section_fields("cluster", &f).is_ok(),
+                "{good} must be accepted"
+            );
+        }
+        for bad in ["worker", "", "Standalone", "yes"] {
+            let mut f = std::collections::BTreeMap::new();
+            f.insert("mode".to_string(), bad.to_string());
+            assert!(
+                parse_agent_section_fields("cluster", &f).is_err(),
+                "{bad:?} must be rejected rather than silently resolved"
+            );
+        }
     }
 
     #[tokio::test]

@@ -37,6 +37,13 @@ pub struct AppState {
     /// operator can flip it from /settings without restarting by hand.
     /// In the test harness it's seeded to `false` (fixtures don't enrol).
     pub enforce_admin_2fa: Arc<std::sync::atomic::AtomicBool>,
+    /// Cached `cluster.mode` — `"standalone"` or `"master"`. Refreshed by
+    /// the same 30 s poller as `panel_hostname`, so the UI does not pay an
+    /// extra RPC per page load just to know whether to draw cluster chrome.
+    /// Presentation only: it decides what is worth SHOWING, never what is
+    /// allowed. Defaults to `"master"` so a cold cache shows too much
+    /// rather than hiding a real cluster.
+    pub deployment_mode: Arc<RwLock<String>>,
 }
 
 impl AppState {

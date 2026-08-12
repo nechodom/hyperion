@@ -802,6 +802,14 @@ function isShortcutContext(ev) {
   document.body.dataset.role = 'viewer';
   document.body.dataset.caps = '';
   document.body.dataset.scopeAll = 'false';
+  // Deployment mode is NOT a permission, so the pessimistic default above
+  // is wrong for it: hiding cluster chrome pre-fetch would make a real
+  // master flash its nodes UI off on every page load. Seed from the last
+  // known value instead, so the steady state never flickers in either
+  // direction; a first visit in a fresh browser assumes master, which only
+  // ever shows too much for one frame rather than hiding something real.
+  try { document.body.dataset.mode = localStorage.getItem('hyperionMode') || 'master'; }
+  catch (_) { document.body.dataset.mode = 'master'; }
   apply();
 
   fetch('/api/me/role', { credentials: 'same-origin' })
@@ -816,6 +824,9 @@ function isShortcutContext(ev) {
       document.body.dataset.role = role;
       document.body.dataset.caps = caps.join(' ');
       document.body.dataset.scopeAll = scopeAll ? 'true' : 'false';
+      const mode = (me && typeof me.mode === 'string' && me.mode.trim()) || 'master';
+      document.body.dataset.mode = mode;
+      try { localStorage.setItem('hyperionMode', mode); } catch (_) {}
       // Friendly label for the user-pill — keep in sync with role_label()
       // in handlers/mod.rs.
       const ROLE_LABELS = { super_admin: 'Owner', admin: 'Administrator', operator: 'Operator', customer: 'Customer', viewer: 'Read-only' };
@@ -830,7 +841,16 @@ function isShortcutContext(ev) {
     const myRank = RANK[role] ?? 0;
     const caps = new Set((document.body.dataset.caps || '').split(/\s+/).filter(Boolean));
     const scopeAll = document.body.dataset.scopeAll === 'true';
+    const standalone = document.body.dataset.mode === 'standalone';
     const show = (el, ok) => { el.style.display = ok ? '' : 'none'; };
+
+    // Cluster chrome on a one-server install is noise, not information:
+    // node pickers with one entry, "Node" columns that always say the same
+    // thing, enrollment invites nobody will redeem. This is presentation
+    // only — like every rule here it is NOT a security boundary, so nothing
+    // that needs enforcing may rely on it.
+    document.querySelectorAll('[data-cluster-only]').forEach(el => show(el, !standalone));
+    document.querySelectorAll('[data-standalone-only]').forEach(el => show(el, standalone));
 
     // Legacy role-rank minimum (data-role-min="admin").
     document.querySelectorAll('[data-role-min]').forEach(el => {
