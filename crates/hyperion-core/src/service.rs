@@ -13882,7 +13882,27 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .await
             .map_err(|e| RpcError::Internal_with(format!("metrics: {e}")))?;
         let summaries = self.list().await?;
-        let mut ns = node_stats_from(hostname, version, latest, &summaries);
+        // Local backup archives that are still on disk. Summed here rather
+        // than sampled, so the figure never lags a delete or a fresh run.
+        let (backup_bytes, backup_count) =
+            match hyperion_state::backups::list_all(&self.pool, 5000).await {
+                Ok(rows) => rows
+                    .iter()
+                    .filter(|r| r.state == "ok")
+                    .fold((0i64, 0i64), |(b, c), r| (b + r.bytes_total, c + 1)),
+                Err(e) => {
+                    tracing::debug!(error=%e, "could not total backup sizes");
+                    (0, 0)
+                }
+            };
+        let mut ns = node_stats_from(
+            hostname,
+            version,
+            latest,
+            &summaries,
+            backup_bytes,
+            backup_count,
+        );
         // RAM / load / uptime are INSTANTANEOUS readings. The background sampler
         // only writes them every 5 min, so the gauge could be minutes stale and
         // never match a live `htop`/`free`. Read them LIVE here (this runs on
@@ -19560,6 +19580,8 @@ fn node_stats_from(
     version: &str,
     latest: Option<metrics::NodeMetricsRow>,
     summaries: &[HostingSummary],
+    backup_bytes: i64,
+    backup_count: i64,
 ) -> NodeStats {
     let (a, s, f) = summaries
         .iter()
@@ -19572,6 +19594,8 @@ fn node_stats_from(
     let count = summaries.len() as i64;
     match latest {
         Some(r) => NodeStats {
+            backup_bytes,
+            backup_count,
             node_id: hostname.to_string(),
             label: hostname.to_string(),
             hostings_count: count,
@@ -19602,6 +19626,8 @@ fn node_stats_from(
             last_oom_at: 0,
         },
         None => NodeStats {
+            backup_bytes,
+            backup_count,
             node_id: hostname.to_string(),
             label: hostname.to_string(),
             hostings_count: count,

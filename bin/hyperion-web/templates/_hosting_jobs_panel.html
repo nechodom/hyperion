@@ -1,0 +1,40 @@
+{# Running jobs for THIS hosting, shown where the action was started.
+
+   Long actions are background jobs so they survive a disconnect, and the
+   button that starts one redirects to /jobs/<id> to watch it. That is
+   correct and stays — but it also means leaving the page you were working
+   on, and coming back to it later tells you nothing about what is still
+   running. This panel is the other half: the same progress, in place,
+   polled rather than reloaded.
+
+   Renders NOTHING when nothing is running, so it costs no vertical space
+   on a quiet page. #}
+{% if !jobs.is_empty() %}
+<div id="hosting-jobs" hx-get="/hostings/{{ selector }}/jobs-panel"
+     hx-trigger="every 2s" hx-swap="outerHTML">
+  {% for j in jobs %}
+  <div class="card" style="margin-bottom:0.75rem;border-color:var(--primary)">
+    <div class="spread" style="align-items:center;gap:0.75rem">
+      <div style="min-width:0">
+        <strong>
+          <span class="spinner-inline" style="margin-right:0.35rem"></span>{{ j.step_label }}
+        </strong>
+        <div class="text-soft small" style="margin-top:0.15rem">
+          {{ j.kind }} · started {{ crate::handlers::stats::fmt_ago(j.started_at) }}
+          · <a href="/jobs/{{ j.id }}">full log →</a>
+        </div>
+      </div>
+      <strong style="font-size:1.35rem;font-variant-numeric:tabular-nums">{{ j.progress_pct }}%</strong>
+    </div>
+    <div class="progress-bar" style="margin-top:0.6rem">
+      <div class="progress-bar-fill" style="width:{{ j.progress_pct }}%"></div>
+    </div>
+  </div>
+  {% endfor %}
+</div>
+{% else %}
+{# Keep polling even with nothing to show, so a job started from ANOTHER
+   tab (or by the scheduler) appears here on its own. Empty div, no card. #}
+<div id="hosting-jobs" hx-get="/hostings/{{ selector }}/jobs-panel"
+     hx-trigger="every 5s" hx-swap="outerHTML"></div>
+{% endif %}

@@ -2041,6 +2041,19 @@ pub async fn get_detail(
     // Internal preview URL on the owner node's wildcard cert (shown only
     // when the node actually has one + the domain isn't already under it).
     let preview_domain = compute_preview_domain(&state, target, &detail.domain).await;
+    // TAKE the one-shot FTP password, so a reload, a shared link or a
+    // back-button press cannot show it a second time. Removing it here is
+    // the whole point of the hand-off: the credential exists in memory for
+    // exactly one render.
+    let ftp_new_password = match q.ftp_pw_token.as_deref() {
+        Some(t) if !t.is_empty() => state
+            .ftp_password_handoff
+            .lock()
+            .await
+            .remove(t)
+            .map(|(pw, _)| pw),
+        _ => None,
+    };
     let tpl = DetailTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -2084,7 +2097,7 @@ pub async fn get_detail(
         profiles,
         csrf_ftp_set: csrf_token_for(&state, &ctx, "/hostings/ftp/set"),
         csrf_ftp_disable: csrf_token_for(&state, &ctx, "/hostings/ftp/disable"),
-        ftp_new_password: q.ftp_pw,
+        ftp_new_password: ftp_new_password,
         ftp_host,
         error: None,
         wp_error: q.wp_error,
@@ -2275,8 +2288,11 @@ pub struct DetailQuery {
     /// Newly-set FTP password — shown ONCE then dropped. Carried in
     /// the query string after a successful POST so the redirect lands
     /// the operator on the page WITH the password visible.
+    /// Single-use token for the freshly generated FTP password. The
+    /// password itself never travels in the URL — see the hand-off store
+    /// on AppState.
     #[serde(default)]
-    pub ftp_pw: Option<String>,
+    pub ftp_pw_token: Option<String>,
     /// "1" after a successful vhost-options POST → green banner.
     #[serde(default)]
     pub vhost_saved: Option<String>,
@@ -4481,6 +4497,25 @@ fn profile_has_meaningful_wp_content(list: &str) -> bool {
 /// second-guessing. We use the OS's CSPRNG via `rand::thread_rng()`
 /// which is the same source used elsewhere in the codebase for
 /// generating DB passwords.
+/// A URL-safe single-use token for the FTP password hand-off. Same CSPRNG
+/// as every other secret here; length is well past guessing range for a
+/// value that lives for five minutes and is consumed on first read.
+fn one_shot_token() -> String {
+    use rand::Rng;
+    const CHARSET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789";
+    let mut rng = rand::thread_rng();
+    (0..32)
+        .map(|_| CHARSET[rng.gen_range(0..CHARSET.len())] as char)
+        .collect()
+}
+
+fn now_secs_web() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
 fn generate_wp_admin_password() -> String {
     use rand::Rng;
     const CHARSET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZ\
@@ -5446,6 +5481,92 @@ fn spf_card_error(selector: &str, domain: &str, why: &str) -> Response {
         ))
         .into_response(),
     }
+}
+
+#[derive(Template)]
+#[template(path = "_hosting_jobs_panel.html", escape = "none")]
+struct HostingJobsPanelTpl {
+    jobs: Vec<hyperion_types::JobView>,
+    selector: String,
+}
+
+/// GET /hostings/:selector/jobs-panel — running jobs for this hosting.
+///
+/// Polled, not reloaded: a backup or a restore is a background job precisely
+/// so it survives the operator navigating away, but that also meant the page
+/// they started it from went silent. This puts the same progress back where
+/// the button was.
+///
+/// Renders an (empty) polling div rather than erroring, for the same reason
+/// the SPF/DKIM panels do: HTMX discards a non-2xx, and a panel that stops
+/// polling on the first hiccup silently stops being live.
+pub async fn get_hosting_jobs_panel(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Path(selector): Path<String>,
+) -> Result<Response, AppError> {
+    let empty = |sel: &str| {
+        Html(
+            HostingJobsPanelTpl {
+                jobs: vec![],
+                selector: sel.to_string(),
+            }
+            .render()
+            .unwrap_or_default(),
+        )
+        .into_response()
+    };
+    let sel = match parse_selector(&selector) {
+        Ok(s) => s,
+        Err(_) => return Ok(empty(&selector)),
+    };
+    let detail = match find_hosting_anywhere(&state, sel).await {
+        Ok((d, _)) => d,
+        Err(_) => return Ok(empty(&selector)),
+    };
+    if require_hosting_access(
+        &state,
+        &ctx,
+        detail.id.as_str(),
+        false,
+        Capability::HostingView,
+    )
+    .await
+    .is_err()
+    {
+        return Ok(empty(&selector));
+    }
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::JobList {
+            kind: None,
+            state: Some("running".to_string()),
+            limit: 50,
+        },
+    )
+    .await;
+    let jobs = match resp {
+        Ok(RpcResponse::JobList(v)) => v
+            .into_iter()
+            // `target` is whatever selector the action was started with, so
+            // match BOTH spellings — the id and the domain — or a backup
+            // started from the domain URL would not show on the id URL.
+            .filter(|j| {
+                j.target
+                    .as_deref()
+                    .is_some_and(|t| t == detail.id.as_str() || t == detail.domain || t == selector)
+            })
+            .collect(),
+        _ => vec![],
+    };
+    Ok(Html(
+        HostingJobsPanelTpl {
+            jobs,
+            selector: selector.clone(),
+        }
+        .render()?,
+    )
+    .into_response())
 }
 
 pub async fn get_spf_panel(
@@ -9246,12 +9367,27 @@ pub async fn post_ftp_set(
     )
     .await?;
     match resp {
-        RpcResponse::FtpSetPassword { password } => Ok(Redirect::to(&format!(
-            "/hostings/{}?ftp=set&ftp_pw={}#settings",
-            sel_url,
-            urlencoding(&password)
-        ))
-        .into_response()),
+        RpcResponse::FtpSetPassword { password } => {
+            // The password is shown once, on the next page render — but it
+            // must not travel in the URL to get there. A query string is
+            // written to nginx's access log verbatim, kept in browser
+            // history, and sent as the Referer of anything the page loads.
+            // Hand over a single-use token instead and keep the credential
+            // server-side.
+            let token = one_shot_token();
+            {
+                let now = now_secs_web();
+                let mut g = state.ftp_password_handoff.lock().await;
+                // Drop anything stale before inserting, so an abandoned
+                // hand-off cannot sit in memory indefinitely.
+                g.retain(|_, (_, at)| now - *at < 300);
+                g.insert(token.clone(), (password, now));
+            }
+            Ok(Redirect::to(&format!(
+                "/hostings/{sel_url}?ftp=set&ftp_pw_token={token}#settings"
+            ))
+            .into_response())
+        }
         RpcResponse::Error(e) => {
             let msg = urlencoding(&e.to_string());
             Ok(

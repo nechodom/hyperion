@@ -79,6 +79,11 @@ struct StatsTpl<'a> {
     css_version: &'static str,
     htmx_version: &'static str,
     cluster: Option<ClusterStats>,
+    /// Σ of every node's local backup archives, and how many. Kept out of
+    /// ClusterStats because it is a property of the BOX, not of the sites
+    /// it hosts — the two disk figures above deliberately exclude it.
+    backup_bytes_total: i64,
+    backup_count_total: i64,
     /// The node selected via `?node=<id>`; defaults to the first node
     /// when the cluster has any. None means "no nodes yet".
     selected_node: Option<NodeStats>,
@@ -311,6 +316,16 @@ pub async fn get_stats(
         active: "stats",
         css_version: super::css_version(),
         htmx_version: super::htmx_version(),
+        // Sum across whatever nodes answered — an unreachable node
+        // contributes 0 rather than making the whole figure unavailable.
+        backup_bytes_total: cluster
+            .as_ref()
+            .map(|c| c.nodes.iter().map(|n| n.backup_bytes).sum())
+            .unwrap_or(0),
+        backup_count_total: cluster
+            .as_ref()
+            .map(|c| c.nodes.iter().map(|n| n.backup_count).sum())
+            .unwrap_or(0),
         cluster,
         selected_node,
         spark_load,
@@ -556,6 +571,8 @@ async fn aggregate_cluster_stats(
 /// table shows "agent offline" instead of quietly losing the row.
 fn offline_placeholder(node_id: &str) -> hyperion_types::NodeStats {
     hyperion_types::NodeStats {
+        backup_bytes: 0,
+        backup_count: 0,
         node_id: node_id.to_string(),
         label: node_id.to_string(),
         hostings_count: 0,
