@@ -780,6 +780,14 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     ) -> Result<(), RpcError> {
         self.svc.agent_config_update(section, fields).await
     }
+    async fn email_logo_set(&self, png_or_jpeg: Vec<u8>) -> Result<(), RpcError> {
+        self.svc.email_logo_set(png_or_jpeg).await
+    }
+
+    async fn email_logo_get(&self) -> Result<Option<String>, RpcError> {
+        Ok(self.svc.notify_logo_data_uri_pub().await)
+    }
+
     async fn email_config_set(
         &self,
         fields: std::collections::BTreeMap<String, String>,

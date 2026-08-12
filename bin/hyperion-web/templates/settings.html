@@ -700,6 +700,49 @@
     </form>
   </div>
 
+  {# ───── E-mail branding: the logo embedded into every notification,
+     with a live preview of the rendered message. ───── #}
+  <div class="card">
+    <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.4rem">
+      <h2 style="margin:0">
+        <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
+        E-mail branding
+      </h2>
+    </div>
+    <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">
+      Notifications go out as HTML with a plain-text alternative, so nothing is
+      lost for a client that refuses HTML. The logo is <strong>embedded</strong>
+      in each message rather than linked — mail clients block remote images by
+      default, and a linked logo would show as a broken box for most
+      recipients. PNG, JPEG or GIF, 512 KB max. With no logo the panel hostname
+      is used as the heading.
+    </p>
+    <form method="post" action="/settings/email-logo" enctype="multipart/form-data"
+          class="row" style="gap:0.6rem;align-items:flex-end;flex-wrap:wrap">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <div class="field" style="margin:0">
+        <label for="email_logo">Logo image</label>
+        <input id="email_logo" name="logo" type="file" accept="image/png,image/jpeg,image/gif">
+      </div>
+      <button class="btn primary" type="submit">Upload logo</button>
+      {% if email_logo_set %}
+      <button class="btn" type="submit" name="clear" value="1"
+              data-confirm-title="Remove the logo"
+              data-confirm-body="Notification e-mails fall back to the panel hostname as their heading."
+              data-confirm-confirm-label="Remove">Remove</button>
+      {% endif %}
+      <span class="grow"></span>
+      <a class="btn ghost" href="/settings/email-preview" target="_blank" rel="noopener">
+        Preview a message ↗
+      </a>
+    </form>
+    {% if email_logo_set %}
+    <div style="margin-top:0.8rem;padding:0.8rem;background:#fff;border:1px solid var(--border);border-radius:var(--radius-xs);display:inline-block">
+      <img src="/settings/email-logo.img" alt="Current e-mail logo" style="max-height:44px;max-width:220px;display:block">
+    </div>
+    {% endif %}
+  </div>
+
   {# ───── Message templates: editable Slack + email wording with a
      live preview. Defaults are pass-through, so wording is unchanged
      until you customise a template. ───── #}

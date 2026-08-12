@@ -82,6 +82,24 @@ pub fn normalize_smtp_host(raw: &str) -> (String, Option<u16>) {
     (s.to_string(), None)
 }
 
+/// Re-exported so callers that already depend on the adapter keep working.
+pub use hyperion_types::render_html_shell;
+
+/// Send a notification as multipart/alternative — the plain text exactly as
+/// composed, plus the HTML shell around it.
+///
+/// Multipart rather than HTML-only on purpose: a text/html-only message reads
+/// as spam to several filters, and some operators genuinely prefer text.
+pub async fn send_html(
+    cfg: &EmailConfig,
+    to: &str,
+    subject: &str,
+    body_text: &str,
+    body_html: &str,
+) -> Result<String, AdapterError> {
+    send_inner(cfg, to, subject, Some((body_text, body_html)), None).await
+}
+
 /// Send a plain-text email. Returns the SMTP server's response on
 /// success (mostly diagnostic). Errors are mapped to AdapterError::Other
 /// with a leading "smtp:" prefix so they're easy to grep in logs.
@@ -90,6 +108,19 @@ pub async fn send_text(
     to: &str,
     subject: &str,
     body: &str,
+) -> Result<String, AdapterError> {
+    send_inner(cfg, to, subject, None, Some(body)).await
+}
+
+/// Shared transport for both shapes. `alt` carries (plain, html) for a
+/// multipart/alternative message; `plain` is the text-only form. Exactly one
+/// is set — the two public wrappers above are the only callers.
+async fn send_inner(
+    cfg: &EmailConfig,
+    to: &str,
+    subject: &str,
+    alt: Option<(&str, &str)>,
+    plain: Option<&str>,
 ) -> Result<String, AdapterError> {
     // The dedicated port field is authoritative; only fall back to a port
     // embedded in the host (legacy "host:port" configs) when it's unset.
@@ -114,10 +145,22 @@ pub async fn send_text(
         .to(to
             .parse()
             .map_err(|e| AdapterError::Other(format!("smtp: bad to address: {e}")))?)
-        .subject(subject)
-        .header(lettre::message::header::ContentType::TEXT_PLAIN)
-        .body(body.to_string())
-        .map_err(|e| AdapterError::Other(format!("smtp: build message: {e}")))?;
+        .subject(subject);
+    let msg = match (alt, plain) {
+        (Some((text, html)), _) => msg
+            .multipart(lettre::message::MultiPart::alternative_plain_html(
+                text.to_string(),
+                html.to_string(),
+            ))
+            .map_err(|e| AdapterError::Other(format!("smtp: build message: {e}")))?,
+        (None, Some(text)) => msg
+            .header(lettre::message::header::ContentType::TEXT_PLAIN)
+            .body(text.to_string())
+            .map_err(|e| AdapterError::Other(format!("smtp: build message: {e}")))?,
+        (None, None) => {
+            return Err(AdapterError::Other("smtp: no message body".into()));
+        }
+    };
 
     // Only authenticate when a username is configured. A local/anonymous relay
     // (e.g. postfix on localhost:25 that accepts mail without auth) advertises

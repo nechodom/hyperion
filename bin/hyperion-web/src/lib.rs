@@ -540,6 +540,19 @@ pub fn build_router(state: SharedState) -> Router {
         )
         .route("/api/jobs-active", get(handlers::jobs::get_active_jobs))
         .route("/api/nav-status", get(handlers::jobs::get_nav_status))
+        .route(
+            "/settings/email-logo",
+            post(handlers::settings::post_email_logo)
+                .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024)),
+        )
+        .route(
+            "/settings/email-logo.img",
+            get(handlers::settings::get_email_logo_img),
+        )
+        .route(
+            "/settings/email-preview",
+            get(handlers::settings::get_email_preview),
+        )
         .route("/emails", get(handlers::emails::get_emails))
         .route("/install", get(handlers::install::get_install))
         .route("/install/invite", post(handlers::install::post_invite))

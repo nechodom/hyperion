@@ -56,7 +56,7 @@ pub use package::{
 pub use php::PhpVersion;
 pub use profile::{HostingProfile, ProfileApply, ProfileInput, WpAssetSummary};
 pub use spf::SpfCheckResult;
-pub use stats::decode_mime_header;
+pub use stats::{decode_mime_header, render_html_shell};
 pub use stats::{
     AcmeConfigView, AgentConfigView, BackupRemoteConfigView, BackupRetentionConfigView,
     ClusterConfigView, ClusterStats, CustomRoleSummary, DashboardAlert, EffectiveRoleWire,

@@ -480,6 +480,8 @@ pub trait AgentApi: Send + Sync + 'static {
 
     /// Set + apply THIS node's `[email]` config (write agent.toml, reconfigure
     /// postfix, self-restart). Dispatchable to any node for per-node mail.
+    async fn email_logo_set(&self, png_or_jpeg: Vec<u8>) -> Result<(), RpcError>;
+    async fn email_logo_get(&self) -> Result<Option<String>, RpcError>;
     async fn email_config_set(
         &self,
         fields: std::collections::BTreeMap<String, String>,

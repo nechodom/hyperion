@@ -514,6 +514,14 @@ pub enum Request {
     EmailConfigSet {
         fields: RedactedFields,
     },
+    /// Replace (or, with empty bytes, remove) the logo embedded in
+    /// notification e-mails. Per-node, because the agent that SENDS the mail
+    /// is the one that has to read the file.
+    EmailLogoSet {
+        png_or_jpeg: Vec<u8>,
+    },
+    /// The current logo as a `data:` URI, or `None` when none is set.
+    EmailLogoGet,
     /// Compare the running binary's git SHA against the upstream
     /// `rolling` release tag's SHA. Cached agent-side for an hour
     /// so the dashboard banner doesn't hammer the GitHub API.
@@ -1601,6 +1609,8 @@ pub enum Response {
     NodeUpdateStatus(hyperion_types::NodeUpdateStatus),
     AgentConfigUpdate,
     EmailConfigSet,
+    EmailLogoSet,
+    EmailLogoGet(Option<String>),
     UpdateCheck(hyperion_types::UpdateStatus),
     HostingExport(hyperion_types::HostingMigrationBundle),
     HostingMigrationFetchBundleFile {

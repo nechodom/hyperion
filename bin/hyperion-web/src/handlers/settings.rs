@@ -76,6 +76,9 @@ struct SettingsTpl<'a> {
     flash: Option<String>,
     flash_error: Option<String>,
     csrf_token: String,
+    /// Whether a logo is on file — drives the preview thumbnail and the
+    /// Remove button.
+    email_logo_set: bool,
     /// Capability groups for the "create API key" multiselect (reuses the
     /// roles capability groups). Empty when the user can't manage keys.
     api_key_cap_groups: Vec<ApiKeyCapGroup>,
@@ -334,6 +337,132 @@ fn caps_summary(caps: u64) -> String {
     } else {
         format!("{n} cap{}", if n == 1 { "" } else { "s" })
     }
+}
+
+/// POST /settings/email-logo — replace or clear the notification logo.
+///
+/// Validation is by MAGIC BYTES on the agent side, not by filename or the
+/// browser-supplied content type: both come from whoever is uploading, and
+/// this file is embedded into mail that leaves the building.
+pub async fn post_email_logo(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    mut multipart: axum::extract::Multipart,
+) -> Result<Response, AppError> {
+    if !ctx.is_super_admin() {
+        return Ok(Redirect::to("/settings?error=owner+role+required").into_response());
+    }
+    let mut bytes: Vec<u8> = Vec::new();
+    let mut clear = false;
+
+    while let Ok(Some(field)) = multipart.next_field().await {
+        match field.name().unwrap_or("") {
+            // _csrf is verified by the check_csrf middleware before this
+            // handler runs, same as every other POST.
+            "_csrf" => {}
+            "clear" => {
+                clear = !field.text().await.unwrap_or_default().is_empty();
+            }
+            "logo" => {
+                bytes = field.bytes().await.map(|b| b.to_vec()).unwrap_or_default();
+            }
+            _ => {}
+        }
+    }
+    let payload = if clear { Vec::new() } else { bytes };
+    if payload.is_empty() && !clear {
+        return Ok(Redirect::to("/settings?error=no+image+selected#notifications").into_response());
+    }
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::EmailLogoSet {
+            png_or_jpeg: payload,
+        },
+    )
+    .await?;
+    match resp {
+        RpcResponse::EmailLogoSet => {
+            Ok(Redirect::to("/settings?saved=1#notifications").into_response())
+        }
+        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
+            "/settings?error={}#notifications",
+            super::hostings::urlencoding(&e.to_string())
+        ))
+        .into_response()),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+/// GET /settings/email-logo.img — the stored logo, for the settings preview.
+pub async fn get_email_logo_img(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+) -> Result<Response, AppError> {
+    if !ctx.is_admin_or_higher() {
+        return Err(AppError::Forbidden);
+    }
+    let uri = match hyperion_rpc_client::call(&state.agent_socket, Request::EmailLogoGet).await {
+        Ok(RpcResponse::EmailLogoGet(Some(u))) => u,
+        _ => return Err(AppError::NotFound),
+    };
+    // Re-serve the data URI as real bytes so the browser caches it normally.
+    let (meta, b64) = match uri.split_once(";base64,") {
+        Some(v) => v,
+        None => return Err(AppError::NotFound),
+    };
+    let mime = meta
+        .strip_prefix("data:")
+        .unwrap_or("image/png")
+        .to_string();
+    use base64::Engine;
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64)
+        .map_err(|_| AppError::NotFound)?;
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, mime),
+            (axum::http::header::CACHE_CONTROL, "no-store".to_string()),
+        ],
+        bytes,
+    )
+        .into_response())
+}
+
+/// GET /settings/email-preview — the rendered HTML of a sample notification.
+///
+/// Rendered by the SAME function that composes real mail, so the preview
+/// cannot drift from what recipients get — a preview that is merely
+/// "representative" is worth very little the day it stops matching.
+pub async fn get_email_preview(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+) -> Result<Response, AppError> {
+    if !ctx.is_admin_or_higher() {
+        return Err(AppError::Forbidden);
+    }
+    let logo = match hyperion_rpc_client::call(&state.agent_socket, Request::EmailLogoGet).await {
+        Ok(RpcResponse::EmailLogoGet(v)) => v,
+        _ => None,
+    };
+    let brand = state.panel_hostname.read().await.clone();
+    let brand = if brand.trim().is_empty() {
+        "Hyperion".to_string()
+    } else {
+        brand
+    };
+    let sample = "Certificate for example.cz expires in 7 days.\n\n         It renews automatically 30 days before expiry, so no action is normally \
+         needed — this notice means the last attempt did not succeed.\n\n         Open the site's SSL tab to see what Let's Encrypt reported.";
+    let html = hyperion_types::render_html_shell(
+        &brand,
+        sample,
+        logo.as_deref(),
+        &format!("Sent by Hyperion · https://{brand}"),
+    );
+    Ok((
+        [(axum::http::header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        html,
+    )
+        .into_response())
 }
 
 /// Render a unix timestamp as a short YYYY-MM-DD (UTC), or "—" for None.
@@ -657,6 +786,10 @@ pub async fn get_settings(
     // the master's file is the whole truth and there is nothing to compare.
     let letter_nodes = letter_node_rows(&state, &nodes, &config.notifications).await;
     let csrf_token = super::session_csrf_token(&state, &ctx);
+    let email_logo_set = matches!(
+        hyperion_rpc_client::call(&state.agent_socket, Request::EmailLogoGet).await,
+        Ok(RpcResponse::EmailLogoGet(Some(_)))
+    );
     let tpl = SettingsTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -680,6 +813,7 @@ pub async fn get_settings(
         flash: q.flash,
         flash_error: q.flash_error,
         csrf_token,
+        email_logo_set,
         api_key_cap_groups,
         api_keys,
         can_manage_api_keys,

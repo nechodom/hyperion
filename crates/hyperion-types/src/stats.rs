@@ -1066,6 +1066,83 @@ pub struct FtpAccountSummary {
 /// site-mail-wrapper). Distinct from the Hyperion-sent emails in
 /// EmailLogEntry — those flow through our SMTP config, these flow
 /// through the local sendmail.
+/// Wrap a plain-text notification body in a styled HTML shell.
+///
+/// Mail clients are the least forgiving rendering target there is: no
+/// external stylesheets, no web fonts, no flexbox worth relying on, and
+/// Outlook still parses tables better than divs. So this is deliberately
+/// old-fashioned — one centred table, inline styles, system fonts, a light
+/// palette that survives a dark-mode client without inverting into mud.
+///
+/// `logo_data_uri` is embedded rather than linked. A remote image is blocked
+/// by default in most clients, which would leave a broken box where the
+/// brand should be; a data URI always renders, at the cost of a few KB.
+///
+/// The plain-text body is preserved verbatim as the alternative part, so
+/// nothing is lost for a client that refuses HTML — and everything here is
+/// escaped, because a notification body can contain a domain, a subject line
+/// or an error message that came from outside.
+pub fn render_html_shell(
+    title: &str,
+    body_text: &str,
+    logo_data_uri: Option<&str>,
+    footer: &str,
+) -> String {
+    let esc = |s: &str| {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+    };
+    // Blank lines become paragraph breaks; single newlines become <br>. That
+    // matches how the plain-text templates are actually written.
+    let body_html = esc(body_text)
+        .split("\n\n")
+        .map(|para| {
+            format!(
+                "<p style=\"margin:0 0 1em\">{}</p>",
+                para.replace('\n', "<br>")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("");
+
+    let logo = match logo_data_uri {
+        Some(uri) if !uri.trim().is_empty() => format!(
+            "<img src=\"{}\" alt=\"\" style=\"max-height:44px;max-width:220px;display:block\">",
+            esc(uri)
+        ),
+        // No logo configured: the title carries the identity instead of a
+        // placeholder box.
+        _ => format!(
+            "<span style=\"font-size:18px;font-weight:700;color:#111827\">{}</span>",
+            esc(title)
+        ),
+    };
+
+    format!(
+        r#"<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>{title_esc}</title></head>
+<body style="margin:0;padding:0;background:#f3f4f6">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#f3f4f6;padding:24px 12px">
+  <tr><td align="center">
+    <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:560px;background:#ffffff;border-radius:10px;border:1px solid #e5e7eb">
+      <tr><td style="padding:20px 28px;border-bottom:1px solid #e5e7eb">{logo}</td></tr>
+      <tr><td style="padding:26px 28px;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:15px;line-height:1.55;color:#1f2937">
+        {body_html}
+      </td></tr>
+      <tr><td style="padding:16px 28px;border-top:1px solid #e5e7eb;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;font-size:12px;line-height:1.5;color:#6b7280">
+        {footer_esc}
+      </td></tr>
+    </table>
+  </td></tr>
+</table>
+</body></html>"#,
+        title_esc = esc(title),
+        footer_esc = esc(footer),
+    )
+}
+
 /// Decode RFC 2047 encoded-words (`=?UTF-8?Q?...?=` / `?B?`) into readable
 /// text.
 ///
@@ -1644,6 +1721,61 @@ impl Default for UpdateStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use super::render_html_shell;
+
+    /// A notification body carries a domain, a subject line or an error
+    /// message that came from OUTSIDE — a site name is attacker-influenced.
+    /// It must never reach the recipient's client as markup.
+    #[test]
+    fn html_shell_escapes_the_body() {
+        let out = render_html_shell(
+            "Hyperion",
+            "Site <script>alert(1)</script> & friends went down",
+            None,
+            "footer",
+        );
+        assert!(!out.contains("<script>"), "script tag survived:\n{out}");
+        assert!(out.contains("&lt;script&gt;"));
+        assert!(out.contains("&amp; friends"));
+    }
+
+    /// The title and the footer come from config, which an operator edits —
+    /// same rule.
+    #[test]
+    fn html_shell_escapes_title_and_footer() {
+        let out = render_html_shell("<b>T</b>", "body", None, "<i>f</i>");
+        assert!(!out.contains("<b>T</b>"));
+        assert!(!out.contains("<i>f</i>"));
+    }
+
+    /// Blank lines are paragraphs, single newlines are breaks — that is how
+    /// the plain-text templates are actually written.
+    #[test]
+    fn html_shell_keeps_the_paragraph_shape() {
+        let out = render_html_shell("T", "one\ntwo\n\nthree", None, "f");
+        assert!(out.contains("one<br>two"), "single newline lost:\n{out}");
+        assert_eq!(
+            out.matches("<p style=").count(),
+            2,
+            "expected two paragraphs"
+        );
+    }
+
+    /// With no logo the title carries the identity, rather than a broken
+    /// image box.
+    #[test]
+    fn html_shell_without_a_logo_falls_back_to_the_title() {
+        let out = render_html_shell("Acme Hosting", "hi", None, "f");
+        assert!(!out.contains("<img"));
+        assert!(out.contains("Acme Hosting"));
+    }
+
+    #[test]
+    fn html_shell_embeds_the_logo_when_given_one() {
+        let out = render_html_shell("T", "hi", Some("data:image/png;base64,AAAA"), "f");
+        assert!(out.contains("<img src=\"data:image/png;base64,AAAA\""));
+    }
 
     /// The real subject from the user's own box, which rendered raw in the
     /// panel. Anything with an accent arrives RFC 2047 encoded, so a Czech

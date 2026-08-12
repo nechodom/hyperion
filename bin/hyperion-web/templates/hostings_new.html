@@ -195,6 +195,17 @@
             <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:-2px;margin-right:0.2rem"><polyline points="20 6 9 17 4 12"/></svg>
             This profile requires a WordPress install
           </div>
+          {# Name what actually gets installed. "WP plugins" as a badge told
+             the operator that SOMETHING would be installed but not what, so
+             choosing between two profiles meant opening /profiles in another
+             tab to find out. #}
+          <details style="margin-top:0.3rem">
+            <summary class="text-soft small" style="cursor:pointer">What it installs</summary>
+            <div class="text-soft small" style="margin-top:0.25rem;white-space:pre-wrap;font-family:var(--font-mono,ui-monospace,monospace);font-size:0.72rem;max-height:9rem;overflow:auto">{% if !p.wp_plugins.is_empty() %}Plugins:
+{{ p.wp_plugins }}{% endif %}{% if !p.wp_themes.is_empty() %}
+Themes:
+{{ p.wp_themes }}{% endif %}</div>
+          </details>
           {% endif %}
         </div>
       </label>
