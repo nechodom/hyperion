@@ -300,7 +300,6 @@ pub trait AgentApi: Send + Sync + 'static {
         &self,
         sel: crate::wire::HostingSelector,
         staging: bool,
-        provider: String,
     ) -> Result<(bool, Vec<(String, String)>), RpcError>;
     /// DNS-01 phase 2 — validate + install after the TXT is live.
     async fn cert_dns01_finish(
@@ -313,7 +312,6 @@ pub trait AgentApi: Send + Sync + 'static {
         domain: Domain,
         email: Option<String>,
         staging: bool,
-        provider: String,
     ) -> Result<(bool, Vec<(String, String)>), RpcError>;
     /// DNS-01 phase 2 for a bare (hosting-less) domain.
     async fn cert_dns01_finish_domain(&self, domain: Domain) -> Result<CertInfo, RpcError>;
@@ -327,19 +325,6 @@ pub trait AgentApi: Send + Sync + 'static {
         key_pem: String,
         ca_bundle_pem: Option<String>,
     ) -> Result<CertInfo, RpcError>;
-    /// Report whether THIS node has a Cloudflare DNS-01 token and, if so,
-    /// live-verify it (so the operator can set it up without SSH). Dispatchable
-    /// per node like [`Self::email_config_set`].
-    async fn cloudflare_token_status(
-        &self,
-    ) -> Result<hyperion_types::CloudflareTokenInfo, RpcError>;
-    /// Validate (via the Cloudflare API) then persist THIS node's DNS-01 token
-    /// to `/etc/hyperion/cloudflare.token` (0600). Rejected tokens are not
-    /// written.
-    async fn cloudflare_token_set(
-        &self,
-        token: String,
-    ) -> Result<hyperion_types::CloudflareTokenInfo, RpcError>;
 
     /// Latest stats snapshot for a hosting (disk, bw, reqs).
     async fn hosting_stats(

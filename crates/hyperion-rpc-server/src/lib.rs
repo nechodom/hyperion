@@ -432,14 +432,12 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::CertIssueAcme(v),
             Err(e) => Response::Error(e),
         },
-        Request::CertDns01Begin {
-            sel,
-            staging,
-            provider,
-        } => match api.cert_dns01_begin(sel, staging, provider).await {
-            Ok((completed, records)) => Response::CertDns01Begin { completed, records },
-            Err(e) => Response::Error(e),
-        },
+        Request::CertDns01Begin { sel, staging } => {
+            match api.cert_dns01_begin(sel, staging).await {
+                Ok((completed, records)) => Response::CertDns01Begin { completed, records },
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::CertDns01Finish { sel } => match api.cert_dns01_finish(sel).await {
             Ok(v) => Response::CertDns01Finish(v),
             Err(e) => Response::Error(e),
@@ -448,16 +446,10 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             domain,
             email,
             staging,
-            provider,
-        } => {
-            match api
-                .cert_dns01_begin_domain(domain, email, staging, provider)
-                .await
-            {
-                Ok((completed, records)) => Response::CertDns01BeginDomain { completed, records },
-                Err(e) => Response::Error(e),
-            }
-        }
+        } => match api.cert_dns01_begin_domain(domain, email, staging).await {
+            Ok((completed, records)) => Response::CertDns01BeginDomain { completed, records },
+            Err(e) => Response::Error(e),
+        },
         Request::CertDns01FinishDomain { domain } => {
             match api.cert_dns01_finish_domain(domain).await {
                 Ok(v) => Response::CertDns01FinishDomain(v),
@@ -669,16 +661,6 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(()) => Response::EmailConfigSet,
             Err(e) => Response::Error(e),
         },
-        Request::CloudflareTokenStatus => match api.cloudflare_token_status().await {
-            Ok(v) => Response::CloudflareToken(v),
-            Err(e) => Response::Error(e),
-        },
-        Request::CloudflareTokenSet { token } => {
-            match api.cloudflare_token_set(token.into_inner()).await {
-                Ok(v) => Response::CloudflareToken(v),
-                Err(e) => Response::Error(e),
-            }
-        }
         Request::UpdateCheck { force_refresh } => match api.update_check(force_refresh).await {
             Ok(v) => Response::UpdateCheck(v),
             Err(e) => Response::Error(e),
@@ -1833,7 +1815,6 @@ mod tests {
             &self,
             _: HostingSelector,
             _: bool,
-            _: String,
         ) -> Result<(bool, Vec<(String, String)>), RpcError> {
             Err(RpcError::Internal {
                 message: "not supported by this agent".into(),
@@ -1849,7 +1830,6 @@ mod tests {
             _: Domain,
             _: Option<String>,
             _: bool,
-            _: String,
         ) -> Result<(bool, Vec<(String, String)>), RpcError> {
             Err(RpcError::Internal {
                 message: "not supported by this agent".into(),
@@ -2038,17 +2018,6 @@ mod tests {
             _: std::collections::BTreeMap<String, String>,
         ) -> Result<(), RpcError> {
             Ok(())
-        }
-        async fn cloudflare_token_status(
-            &self,
-        ) -> Result<hyperion_types::CloudflareTokenInfo, RpcError> {
-            Ok(hyperion_types::CloudflareTokenInfo::default())
-        }
-        async fn cloudflare_token_set(
-            &self,
-            _: String,
-        ) -> Result<hyperion_types::CloudflareTokenInfo, RpcError> {
-            Ok(hyperion_types::CloudflareTokenInfo::default())
         }
         async fn update_check(&self, _: bool) -> Result<hyperion_types::UpdateStatus, RpcError> {
             Ok(hyperion_types::UpdateStatus::default())

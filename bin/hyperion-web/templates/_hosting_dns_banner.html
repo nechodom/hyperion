@@ -3,9 +3,11 @@
    on the OWNING node so the operator never has to wonder "does this
    domain actually point here?" The agent compares resolved A/AAAA
    against the node's public IP. #}
-{# The 525 trap: a proxied site still on the self-signed bootstrap cert.
-   Cloudflare Full (strict) rejects the untrusted origin → SSL handshake
-   failed (525), the site is "down" while nginx is perfectly healthy. This
+{# The 525/526 trap: a proxied site still on the self-signed bootstrap cert.
+   Cloudflare Full (strict) rejects the untrusted origin — 525 is a failed
+   handshake, 526 an untrusted cert, and both are seen here. The site is
+   "down" while nginx is perfectly healthy, and it is a DEADLOCK: no real
+   cert can be issued while strict is refusing the origin. This
    is invisible to the plain DNS match (a proxied site "matches"), so it
    gets its own red banner with both fixes. #}
 {% if dns.proxied && dns.origin_cert_self_signed %}
@@ -16,14 +18,16 @@
       This node still serves the temporary self-signed cert for
       <code>{{ dns.domain }}</code> — no real certificate has been issued. If
       Cloudflare's SSL/TLS mode is <strong>Full (strict)</strong> the site
-      returns <strong>error 525 (SSL handshake failed)</strong> to every
-      visitor, even though nginx is fine.
+      returns <strong>error 525/526</strong> to every visitor, even though
+      nginx is fine.
       <span class="text-soft small" style="display:block;margin-top:0.25rem">
-        Fix: issue a real certificate below (<em>Issue via Cloudflare DNS</em>,
-        or <em>Manual</em> if the domain lives in a different Cloudflare
-        account than your API token) — then it works under strict. As an
-        immediate unblock, set Cloudflare SSL/TLS to <strong>Full</strong>
-        (not strict), which accepts the self-signed origin.
+        This is a deadlock: strict mode refuses the origin, so Let's Encrypt
+        cannot reach the challenge, so no real certificate can be issued.
+        Fix: set Cloudflare SSL/TLS to <strong>Full</strong> (not strict),
+        press <em>Issue HTTPS certificate</em> below, then switch back to
+        <strong>Full (strict)</strong> once it is installed — about a minute,
+        and visitors are not interrupted. Alternatively upload a Cloudflare
+        Origin CA certificate, which strict mode accepts.
       </span>
     </div>
   </div>

@@ -572,9 +572,8 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         &self,
         sel: HostingSelector,
         staging: bool,
-        provider: String,
     ) -> Result<(bool, Vec<(String, String)>), RpcError> {
-        self.svc.cert_dns01_begin(sel, staging, provider).await
+        self.svc.cert_dns01_begin(sel, staging).await
     }
 
     async fn cert_dns01_finish(&self, sel: HostingSelector) -> Result<CertInfo, RpcError> {
@@ -586,10 +585,9 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         domain: Domain,
         email: Option<String>,
         staging: bool,
-        provider: String,
     ) -> Result<(bool, Vec<(String, String)>), RpcError> {
         self.svc
-            .cert_dns01_begin_domain(domain.as_str(), email.as_deref(), staging, provider)
+            .cert_dns01_begin_domain(domain.as_str(), email.as_deref(), staging)
             .await
     }
 
@@ -783,19 +781,6 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         fields: std::collections::BTreeMap<String, String>,
     ) -> Result<(), RpcError> {
         self.svc.email_config_set(fields).await
-    }
-
-    async fn cloudflare_token_status(
-        &self,
-    ) -> Result<hyperion_types::CloudflareTokenInfo, RpcError> {
-        self.svc.cloudflare_token_status().await
-    }
-
-    async fn cloudflare_token_set(
-        &self,
-        token: String,
-    ) -> Result<hyperion_types::CloudflareTokenInfo, RpcError> {
-        self.svc.cloudflare_token_set(token).await
     }
 
     async fn update_check(

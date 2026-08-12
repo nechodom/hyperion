@@ -652,38 +652,6 @@
     </form>
   </div>
 
-  <div class="card" id="cloudflare-certs" style="margin-top:1rem">
-    <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Cloudflare certs (DNS-01)</h2>
-    <p class="text-soft small" style="margin:0 0 0.6rem">
-      For sites behind Cloudflare, issue <strong>real Let's Encrypt certs via DNS-01</strong> — it validates
-      over DNS, so it works even when traffic is proxied and HTTP-01 can't reach the origin. Save a Cloudflare
-      API token here once; then use <em>Issue via Cloudflare DNS</em> on a site's SSL tab, or the bulk button
-      on <a href="/certs">Certificates</a>.
-    </p>
-    {% match cloudflare.valid %}
-    {% when Some with (v) %}
-      <p class="text-soft" style="margin:0 0 0.6rem">{% if v %}✓{% else %}⚠{% endif %} {{ cloudflare.message }}</p>
-    {% when None %}
-      <p class="text-soft" style="margin:0 0 0.6rem">{{ cloudflare.message }}</p>
-    {% endmatch %}
-    <form method="post" action="/settings/cloudflare/token"
-          style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:flex-end">
-      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-      <div class="field" style="flex:1;min-width:260px">
-        <label>Cloudflare API token <span class="text-soft">(Zone:Read + DNS:Edit)</span></label>
-        <input type="password" name="token" autocomplete="off"
-               placeholder="paste token — it's validated before saving">
-      </div>
-      <button class="btn primary" type="submit">Save &amp; test</button>
-    </form>
-    <p class="text-soft small" style="margin:0.6rem 0 0">
-      Create one at Cloudflare → My Profile → API Tokens → <em>Edit zone DNS</em> template (scope it to your
-      zone(s)). It's stored <code>0600</code> on the master and never shown again. Unsure of your SSL mode?
-      In Cloudflare see <strong>SSL/TLS → Overview</strong> — <strong>Full (strict)</strong> with a real cert
-      here is the safest.
-    </p>
-  </div>
-
   <div class="card muted" style="margin-top:1rem">
     <h2 style="font-size:0.95rem;margin:0 0 0.6rem">How HTTPS issuing works</h2>
     <ul class="text-soft small" style="margin:0;padding-left:1.2rem;line-height:1.7">
@@ -1708,13 +1676,13 @@
       production sites keep their real domain, and a site whose DNS is not switched yet is
       reachable immediately. Needs a DNS record <code>*.&lt;base&gt;</code> → this node's IP
       (grey-cloud it in Cloudflare — the universal certificate does not cover two-level
-      subdomains) and a Cloudflare API token for the DNS-01 issuance
-      (<a href="/settings#tls">TLS / ACME tab</a>).
+      subdomains).
     </p>
     <p class="text-soft small" style="margin:0 0 0.8rem">
       Issue one <code>*.&lt;base&gt;</code> certificate per test node, and every auto-subdomain it
       creates reuses it — instant HTTPS, with no per-site Let's Encrypt rate-limit hits.
-      It renews automatically via Cloudflare. The <strong>Status</strong> column below shows
+      A wildcard has to be renewed by hand roughly every 60 days — it can only be validated
+      over DNS, and this server holds no DNS credentials. The <strong>Status</strong> column below shows
       whether each wildcard is live and when it expires — after a manual validation, reload this
       page and the row turns green. The full cert list is on the
       <a href="/certs">Certificates page</a>.
@@ -1759,10 +1727,8 @@
                       style="display:inline-flex;gap:0.4rem;flex-wrap:wrap;justify-content:flex-end">
                   <input type="hidden" name="_csrf" value="{{ csrf_token }}">
                   <input type="hidden" name="node_id" value="{{ n.node_id }}">
-                  <button class="btn small" type="submit" name="provider" value="manual"
-                          title="Show the TXT records to publish, then validate">Manual DNS</button>
-                  <button class="btn small primary" type="submit" name="provider" value="cloudflare"
-                          title="Publish and validate with the node's Cloudflare token">Cloudflare</button>
+                  <button class="btn small primary" type="submit" name="provider" value="manual"
+                          title="Show the TXT records to publish, then validate">Issue wildcard</button>
                 </form>
               </td>
             </tr>
@@ -1771,18 +1737,12 @@
         </table>
       </div>
       <p class="text-soft small" style="margin:0.6rem 0 0">
-        Both options require control of the base domain's DNS. Cloudflare needs a token on the node
-        (<code>/etc/hyperion/cloudflare.token</code>, with Zone:Read + DNS:Edit); Manual DNS walks
-        you through the TXT records by hand.
+        Requires control of the base domain's DNS: the flow shows you the TXT records to publish,
+        then validates them. Keep that browser tab open until you finish — starting over generates
+        different values and invalidates the ones you just published.
       </p>
     {% endif %}
   </div>
-
-  <p class="text-soft small" style="margin-top:1rem">
-    The Cloudflare API token for DNS-01 certificates lives on the
-    <a href="/settings#tls">TLS / ACME tab</a> now — it serves every site behind Cloudflare,
-    not just test nodes.
-  </p>
 
 
   <div class="card muted" style="margin-top:1rem">

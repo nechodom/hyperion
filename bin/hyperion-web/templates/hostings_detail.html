@@ -1055,9 +1055,12 @@
       then you continue to validate. Requires control of the domain's DNS.
     </p>
     <p class="text-soft small" style="margin:-0.3rem 0 0.7rem;padding:0.5rem 0.7rem;background:var(--surface-1);border-radius:6px">
-      <strong>Behind Cloudflare / a CDN?</strong> Choose the <em>Cloudflare</em> provider below — DNS-01
-      validates over DNS, so it issues a real cert even when traffic is proxied and HTTP-01 can't reach this
-      server. Set the API token once in <a href="/settings#tls">Settings → Cloudflare certs</a>.
+      <strong>This certificate will not renew itself.</strong> A wildcard can only be validated
+      over DNS, and Hyperion holds no DNS credentials — so every renewal needs you to publish a
+      fresh <code>TXT</code> record by hand, roughly every 60 days, for as long as the site
+      exists. You'll be reminded 30, 14 and 7 days before it expires. If you only need
+      <code>{{ detail.domain }}</code> and its aliases, use <em>Issue HTTPS certificate</em>
+      above instead — that one renews automatically and needs nothing from you.
     </p>
     <p class="text-soft small" style="margin:-0.3rem 0 0.7rem;padding:0.5rem 0.7rem;background:var(--surface-1);border-radius:6px">
       On a <strong>test node</strong>? Issue one <code>*.&lt;base&gt;</code> wildcard for the
@@ -1072,13 +1075,6 @@
         Use Let's Encrypt <strong>staging</strong> first
         <span class="muted" style="margin-left:0.4rem;font-size:0.82rem">— untrusted, but no rate limits</span>
       </label>
-      <div class="field" style="margin:0.5rem 0">
-        <label for="dns01_provider">DNS provider</label>
-        <select id="dns01_provider" name="provider">
-          <option value="manual">Manual — show me the TXT records to publish</option>
-          <option value="cloudflare">Cloudflare — automatic, needs an API token</option>
-        </select>
-      </div>
       <button class="btn" type="submit" style="margin-top:0.4rem">
         <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15 15 0 0 1 0 20 15 15 0 0 1 0-20z"/></svg>
         Start wildcard issuance
