@@ -5421,13 +5421,58 @@ struct SpfCardTpl {
     checked_at: String,
 }
 
+/// Render the SPF card in its `unknown` state carrying `why`.
+///
+/// Exists so this endpoint can report a failure INSIDE the card. The card is
+/// lazily swapped into a placeholder that is itself a spinner, and HTMX does
+/// not swap on a non-2xx — so any error status left that spinner on screen
+/// forever. "A spinner that never resolves" is the least informative failure
+/// a UI can have: it looks like a hung request, gives no reason, and reads as
+/// a broken button rather than a broken lookup.
+fn spf_card_error(selector: &str, domain: &str, why: &str) -> Response {
+    match (SpfCardTpl {
+        sp: unknown_spf(domain, why),
+        domain: domain.to_string(),
+        selector: selector.to_string(),
+        checked_at: chrono::Local::now().format("%H:%M:%S").to_string(),
+    })
+    .render()
+    {
+        Ok(html) => Html(html).into_response(),
+        // The template itself failed — plain text still beats a spinner.
+        Err(e) => Html(format!(
+            "<div class=\"card hover\"><h2>Email DNS (SPF)</h2>\
+             <p class=\"muted\">Could not render the SPF card: {e}</p></div>"
+        ))
+        .into_response(),
+    }
+}
+
 pub async fn get_spf_panel(
     State(state): State<SharedState>,
     ctx: AuthCtx,
     Path(selector): Path<String>,
 ) -> Result<Response, AppError> {
-    let sel = parse_selector(&selector)?;
-    let (detail, owner_node) = find_hosting_anywhere(&state, sel).await?;
+    let sel = match parse_selector(&selector) {
+        Ok(s) => s,
+        Err(e) => {
+            return Ok(spf_card_error(
+                &selector,
+                &selector,
+                &format!("could not read the site selector: {e}"),
+            ))
+        }
+    };
+    let (detail, owner_node) = match find_hosting_anywhere(&state, sel).await {
+        Ok(v) => v,
+        Err(e) => {
+            return Ok(spf_card_error(
+                &selector,
+                &selector,
+                &format!("could not look up this site: {e}"),
+            ))
+        }
+    };
     if let Err(r) = require_hosting_access(
         &state,
         &ctx,
@@ -5509,8 +5554,26 @@ pub async fn get_dkim_panel(
     ctx: AuthCtx,
     Path(selector): Path<String>,
 ) -> Result<Response, AppError> {
-    let sel = parse_selector(&selector)?;
-    let (detail, owner_node) = find_hosting_anywhere(&state, sel.clone()).await?;
+    let sel = match parse_selector(&selector) {
+        Ok(s) => s,
+        Err(e) => {
+            return render_dkim_error_card(
+                &selector,
+                super::session_csrf_token(&state, &ctx),
+                format!("could not read the site selector: {e}"),
+            )
+        }
+    };
+    let (detail, owner_node) = match find_hosting_anywhere(&state, sel.clone()).await {
+        Ok(v) => v,
+        Err(e) => {
+            return render_dkim_error_card(
+                &selector,
+                super::session_csrf_token(&state, &ctx),
+                format!("could not look up this site: {e}"),
+            )
+        }
+    };
     if let Err(r) = require_hosting_access(
         &state,
         &ctx,
