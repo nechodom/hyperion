@@ -37,9 +37,87 @@ pub struct VhostInput<'a> {
     pub preview_cert_key_path: Option<&'a str>,
 }
 
+/// How this box's nginx wants HTTP/2 turned on.
+///
+/// The two spellings are NOT interchangeable, and the failure modes are
+/// wildly asymmetric:
+///
+///   * `listen 443 ssl http2;` — the only form nginx < 1.25.1 understands.
+///     On 1.25.1+ it still works but logs a deprecation warning per listen
+///     line, and because the flag is a per-listening-socket option, a second
+///     server block on the same address also draws "protocol options
+///     redefined".
+///   * `http2 on;` — the 1.25.1+ form, and the only one that silences both
+///     warnings. On 1.22 (Debian 12's nginx) it is an `unknown directive`,
+///     which does not degrade: nginx refuses to start AT ALL, taking every
+///     site on the box down with it.
+///
+/// So detection failure must fall back to the parameter form. Guessing "old"
+/// on a new nginx costs a cosmetic warning; guessing "new" on an old one is
+/// an outage.
+fn http2_uses_directive(version: Option<(u32, u32, u32)>) -> bool {
+    // Tuple ordering is lexicographic, which is exactly version ordering.
+    version.is_some_and(|v| v >= (1, 25, 1))
+}
+
+/// Parse `nginx/1.24.0` out of `nginx -v` output (which nginx writes to
+/// stderr, and which may carry a build suffix like `1.22.1-9+deb12u1`).
+fn parse_nginx_version(output: &str) -> Option<(u32, u32, u32)> {
+    let after = output.split("nginx/").nth(1)?;
+    let ver: String = after
+        .chars()
+        .take_while(|c| c.is_ascii_digit() || *c == '.')
+        .collect();
+    let mut parts = ver.split('.').map(|p| p.parse::<u32>().ok());
+    let major = parts.next()??;
+    let minor = parts.next()??;
+    // A two-component version ("nginx/1.26") is legal; treat it as .0.
+    let patch = parts.next().flatten().unwrap_or(0);
+    Some((major, minor, patch))
+}
+
+/// Detected once per process — the nginx binary does not change under a
+/// running agent, and re-shelling out on every vhost render would be a
+/// process spawn per site on a full re-render.
+fn nginx_wants_http2_directive() -> bool {
+    static CACHED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CACHED.get_or_init(|| {
+        let version = std::process::Command::new("nginx")
+            .arg("-v")
+            .output()
+            .ok()
+            .and_then(|o| {
+                // -v writes to stderr; check both so a future nginx that
+                // moves it to stdout doesn't silently regress us to the
+                // fallback.
+                let text = format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&o.stderr),
+                    String::from_utf8_lossy(&o.stdout)
+                );
+                parse_nginx_version(&text)
+            });
+        let uses = http2_uses_directive(version);
+        match version {
+            Some((a, b, c)) => tracing::debug!(
+                version = format!("{a}.{b}.{c}"),
+                http2_directive = uses,
+                "detected nginx version for vhost rendering"
+            ),
+            None => tracing::debug!(
+                "could not detect the nginx version — using the `listen ... ssl http2` \
+                 parameter form, which every version understands"
+            ),
+        }
+        uses
+    })
+}
+
 #[derive(Template)]
 #[template(path = "nginx-vhost.conf.j2", escape = "none")]
 struct VhostTpl<'a> {
+    /// See `http2_uses_directive`.
+    http2_directive: bool,
     domain: &'a str,
     aliases: &'a [String],
     root_dir: &'a str,
@@ -120,6 +198,8 @@ pub(crate) fn parse_admin_allowlist(raw: &str) -> Vec<String> {
 #[derive(askama::Template)]
 #[template(path = "nginx-vhost-suspended.conf.j2", escape = "none")]
 struct SuspendedTpl<'a> {
+    /// See `http2_uses_directive`.
+    http2_directive: bool,
     domain: &'a str,
     aliases: &'a [String],
     cert_path: &'a str,
@@ -166,6 +246,8 @@ pub struct RedirectVhostInput<'a> {
 #[derive(askama::Template)]
 #[template(path = "nginx-vhost-redirect.conf.j2", escape = "none")]
 struct RedirectVhostTpl<'a> {
+    /// See `http2_uses_directive`.
+    http2_directive: bool,
     domain: &'a str,
     aliases: &'a [String],
     cert_path: &'a str,
@@ -213,6 +295,7 @@ pub fn render_redirect(input: &RedirectVhostInput<'_>) -> Result<String, Adapter
         (target.clone(), target.clone())
     };
     let tpl = RedirectVhostTpl {
+        http2_directive: nginx_wants_http2_directive(),
         domain: input.domain,
         aliases: input.aliases,
         cert_path: input.cert_path,
@@ -255,6 +338,8 @@ pub struct PanelVhostInput<'a> {
 #[derive(askama::Template)]
 #[template(path = "nginx-panel.conf.j2", escape = "none")]
 struct PanelVhostTpl<'a> {
+    /// See `http2_uses_directive`.
+    http2_directive: bool,
     domain: &'a str,
     cert_path: &'a str,
     key_path: &'a str,
@@ -263,6 +348,7 @@ struct PanelVhostTpl<'a> {
 
 pub fn render_panel(input: &PanelVhostInput<'_>) -> Result<String, AdapterError> {
     let tpl = PanelVhostTpl {
+        http2_directive: nginx_wants_http2_directive(),
         domain: input.domain,
         cert_path: input.cert_path,
         key_path: input.key_path,
@@ -404,6 +490,8 @@ pub struct ProxyVhostInput<'a> {
 #[derive(askama::Template)]
 #[template(path = "nginx-vhost-proxy.conf.j2", escape = "none")]
 struct ProxyVhostTpl<'a> {
+    /// See `http2_uses_directive`.
+    http2_directive: bool,
     domain: &'a str,
     aliases: &'a [String],
     logs_dir: &'a str,
@@ -415,6 +503,7 @@ struct ProxyVhostTpl<'a> {
 
 pub fn render_proxy(input: &ProxyVhostInput<'_>) -> Result<String, AdapterError> {
     let tpl = ProxyVhostTpl {
+        http2_directive: nginx_wants_http2_directive(),
         domain: input.domain,
         aliases: input.aliases,
         logs_dir: input.logs_dir,
@@ -475,6 +564,7 @@ pub fn render_suspended(input: &SuspendedInput<'_>) -> Result<String, AdapterErr
         .take(300)
         .collect();
     let tpl = SuspendedTpl {
+        http2_directive: nginx_wants_http2_directive(),
         domain: input.domain,
         aliases: input.aliases,
         cert_path: input.cert_path,
@@ -500,6 +590,7 @@ pub async fn apply_suspended(
 
 pub fn render(input: &VhostInput<'_>) -> Result<String, AdapterError> {
     let tpl = VhostTpl {
+        http2_directive: nginx_wants_http2_directive(),
         domain: input.domain,
         aliases: input.aliases,
         root_dir: input.root_dir,
@@ -1004,15 +1095,21 @@ mod tests {
             acme_challenge_root: "/var/lib/hyperion/acme-challenges",
         })
         .expect("render_panel");
-        // Debian-12 nginx 1.22 footgun (same guard as the per-hosting vhost):
-        // the parameter form, never the standalone `http2 on;` directive.
-        assert!(
-            out.contains("ssl http2;"),
-            "panel vhost lost the http2 param form:\n{out}"
+        // HTTP/2 spelling is chosen from the detected nginx version, so
+        // assert the invariant that holds either way: exactly one form, and
+        // the 1.25.1-only directive ONLY when this box's nginx accepts it.
+        // (The boundary itself is pinned by
+        // http2_directive_only_on_nginx_1_25_1_and_newer.)
+        let wants_directive = nginx_wants_http2_directive();
+        assert_eq!(
+            out.contains("\n    http2 on;"),
+            wants_directive,
+            "panel vhost used the wrong HTTP/2 spelling for this nginx:\n{out}"
         );
-        assert!(
-            !out.contains("\n    http2 on;"),
-            "panel vhost uses the 1.25.1-only `http2 on;` directive:\n{out}"
+        assert_eq!(
+            out.contains("ssl http2;"),
+            !wants_directive,
+            "panel vhost used the wrong HTTP/2 spelling for this nginx:\n{out}"
         );
         // The upstream-down "updating" fallback must stay wired.
         assert!(
@@ -1047,13 +1144,17 @@ mod tests {
             preview_cert_key_path: None,
         })
         .expect("render");
-        assert!(
+        let wants_directive = nginx_wants_http2_directive();
+        assert_eq!(
             out.contains("ssl http2;"),
-            "vhost is missing the `listen ... ssl http2;` parameter form: \n{out}"
+            !wants_directive,
+            "vhost used the wrong HTTP/2 spelling for this nginx: \n{out}"
         );
-        assert!(
-            !out.contains("\n    http2 on;"),
-            "vhost uses the standalone `http2 on;` directive — that's nginx 1.25.1+ only and breaks Debian 12: \n{out}"
+        assert_eq!(
+            out.contains("\n    http2 on;"),
+            wants_directive,
+            "the standalone `http2 on;` directive is nginx 1.25.1+ only and \
+             stops Debian 12's 1.22 from starting at all: \n{out}"
         );
     }
 
@@ -1070,6 +1171,88 @@ mod tests {
     ///    catch-all `return 301 https://`. Under Flexible/Off the edge reaches
     ///    the origin on :80, and an unconditional redirect there bounces the
     ///    challenge back to the edge — an infinite edge<->origin loop.
+    /// The version boundary is 1.25.1, and getting it wrong in the unsafe
+    /// direction takes every site on the box down — `http2 on;` is an
+    /// `unknown directive` on Debian 12's nginx 1.22 and nginx then refuses
+    /// to start at all, rather than degrading.
+    #[test]
+    fn http2_directive_only_on_nginx_1_25_1_and_newer() {
+        // Too old — the parameter form is the ONLY one these understand.
+        assert!(!http2_uses_directive(Some((1, 22, 1))), "Debian 12");
+        assert!(!http2_uses_directive(Some((1, 24, 0))));
+        assert!(!http2_uses_directive(Some((1, 25, 0))), "one patch short");
+        // The boundary itself and everything after.
+        assert!(http2_uses_directive(Some((1, 25, 1))));
+        assert!(http2_uses_directive(Some((1, 26, 0))), "Debian 13");
+        assert!(http2_uses_directive(Some((1, 27, 4))));
+        assert!(http2_uses_directive(Some((2, 0, 0))));
+        // Undetectable nginx must fall back to the form that cannot brick
+        // the box, not to the "modern" one.
+        assert!(
+            !http2_uses_directive(None),
+            "unknown version must use the parameter form — guessing new on an \
+             old nginx is an outage, guessing old on a new one is a warning"
+        );
+    }
+
+    #[test]
+    fn nginx_version_parses_from_real_v_output() {
+        // Real `nginx -v` output, including Debian's build suffix.
+        assert_eq!(
+            parse_nginx_version("nginx version: nginx/1.22.1\n"),
+            Some((1, 22, 1))
+        );
+        assert_eq!(
+            parse_nginx_version("nginx version: nginx/1.22.1-9+deb12u1"),
+            Some((1, 22, 1)),
+            "a Debian build suffix must not defeat the parse and silently \
+             fall back"
+        );
+        assert_eq!(
+            parse_nginx_version("nginx version: nginx/1.26.0 (Ubuntu)"),
+            Some((1, 26, 0))
+        );
+        // Two-component versions are legal.
+        assert_eq!(parse_nginx_version("nginx/1.26"), Some((1, 26, 0)));
+        // Garbage answers None, which routes to the safe fallback.
+        assert_eq!(parse_nginx_version("command not found"), None);
+        assert_eq!(parse_nginx_version(""), None);
+        assert_eq!(parse_nginx_version("nginx/"), None);
+    }
+
+    /// Whichever form is chosen, exactly one of them must appear — a vhost
+    /// carrying both would be a duplicate-directive error, and one carrying
+    /// neither serves HTTP/1.1 only.
+    #[test]
+    fn rendered_vhost_picks_exactly_one_http2_spelling() {
+        let aliases: Vec<String> = vec![];
+        let opts = hyperion_types::VhostOptions::default();
+        let out = render(&VhostInput {
+            domain: "example.cz",
+            aliases: &aliases,
+            root_dir: "/srv/x/htdocs",
+            logs_dir: "/srv/x/logs",
+            system_user: "x",
+            php_version: None,
+            cert_path: "/etc/lm/certs/example.cz/fullchain.pem",
+            key_path: "/etc/lm/certs/example.cz/privkey.pem",
+            acme_challenge_root: "/var/lib/lm/acme-challenges",
+            hosting_id: "01HMOD",
+            options: &opts,
+            preview_server_name: None,
+            preview_cert_path: None,
+            preview_cert_key_path: None,
+        })
+        .expect("render");
+        let param_form = out.contains("ssl http2;");
+        let directive_form = out.contains("\n    http2 on;");
+        assert!(
+            param_form ^ directive_form,
+            "expected exactly one HTTP/2 spelling, got param={param_form} \
+             directive={directive_form}:\n{out}"
+        );
+    }
+
     #[test]
     fn acme_challenge_survives_a_cloudflare_proxy_in_every_ssl_mode() {
         let aliases: Vec<String> = vec![];
