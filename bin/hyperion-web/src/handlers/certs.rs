@@ -8,6 +8,8 @@
 
 use crate::auth::AuthCtx;
 use crate::error::AppError;
+#[allow(unused_imports)] // askama resolves {{ x|date }} through this
+use crate::filters;
 use crate::state::SharedState;
 use askama::Template;
 use axum::extract::State;

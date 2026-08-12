@@ -135,7 +135,7 @@
                 <code>{{ r.node_id }}</code>
               {% endif %}
             </td>
-            <td class="right" title="{{ r.not_after }}">{{ r.not_after }}</td>
+            <td class="right" title="unix {{ r.not_after }}">{{ r.not_after|date }}</td>
             <td class="right">
               {% if r.days_left < 0 %}
                 <strong>{{ r.days_left.abs() }} days ago</strong>

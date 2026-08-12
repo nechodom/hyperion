@@ -999,10 +999,42 @@
     <dt>SANs</dt><dd>{{ cert.sans.join(", ") }}</dd>
     {% endif %}
     <dt>Not after</dt><dd class="muted numeric" title="{{ cert.not_after }}">{{ crate::handlers::stats::fmt_future(cert.not_after) }}</dd>
+    {% if !cert.fingerprint_sha256.is_empty() %}
     <dt>Fingerprint</dt><dd><code style="font-size:0.74rem">{{ cert.fingerprint_sha256 }}</code></dd>
+    {% endif %}
   </dl>
 
   <div class="card-section">
+  {%- if cert.issuer != "self-signed" %}
+    {# A working certificate is in place. Re-issuing over it is nearly always
+       a mistake — it spends Let's Encrypt's per-hostname budget on something
+       that already works, and a failed attempt leaves the site worse off than
+       before. So make replacing it a deliberate two-step: delete, then issue. #}
+    <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Replace this certificate</h2>
+    <p class="muted" style="margin:0 0 1rem;font-size:0.88rem">
+      <code>{{ detail.domain }}</code> already has a trusted certificate, and it
+      renews itself — there is normally nothing to do here. Issuing a new one is
+      only useful after changing the domain's aliases, and Let's Encrypt limits
+      how often that can be repeated, so the current certificate has to be
+      removed first.
+    </p>
+    <p class="muted" style="margin:0 0 1rem;font-size:0.88rem">
+      Deleting it drops <code>{{ detail.domain }}</code> back to a self-signed
+      certificate. The site keeps serving, but browsers show a security warning
+      until a new certificate is issued.
+    </p>
+    <form method="post" action="/hostings/cert/delete"
+          data-confirm-title="Delete this certificate"
+          data-confirm-body="{{ detail.domain }} falls back to a self-signed certificate and visitors will see a browser security warning until you issue a new one. Continue?"
+          data-confirm-confirm-label="Delete certificate"
+          data-confirm-variant="danger">
+      <input type="hidden" name="_csrf" value="{{ csrf_cert_delete }}">
+      <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+      <button class="btn danger" type="submit">Delete certificate</button>
+    </form>
+  </div>
+  <div class="card-section" hidden>
+  {%- endif %}
     <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Issue a trusted Let's Encrypt certificate</h2>
     <p class="muted" style="margin:0 0 1rem;font-size:0.88rem">
       First confirm that DNS for <code>{{ detail.domain }}</code> resolves to this server. Issuance refuses to start otherwise.
@@ -1030,11 +1062,6 @@
           data-confirm-variant="primary">
       <input type="hidden" name="_csrf" value="{{ csrf_cert_issue }}">
       <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
-      <label class="field-checkbox">
-        <input type="checkbox" name="staging" value="on" checked>
-        Use Let's Encrypt <strong>staging</strong> first (recommended)
-        <span class="muted" style="margin-left:0.4rem;font-size:0.82rem">— untrusted CA, but no rate limits</span>
-      </label>
       <label class="field-checkbox">
         <input type="checkbox" name="require_dns_match" value="off">
         <strong>Skip</strong> the DNS pre-check
@@ -1070,11 +1097,6 @@
     <form method="post" action="/hostings/cert/dns01/begin">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
-      <label class="field-checkbox">
-        <input type="checkbox" name="staging" value="on">
-        Use Let's Encrypt <strong>staging</strong> first
-        <span class="muted" style="margin-left:0.4rem;font-size:0.82rem">— untrusted, but no rate limits</span>
-      </label>
       <button class="btn" type="submit" style="margin-top:0.4rem">
         <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15 15 0 0 1 0 20 15 15 0 0 1 0-20z"/></svg>
         Start wildcard issuance

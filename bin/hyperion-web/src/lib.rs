@@ -19,6 +19,7 @@ pub mod auth;
 pub mod config;
 pub mod dispatcher;
 pub mod error;
+pub mod filters;
 pub mod handlers;
 pub mod ratelimit;
 pub mod state;
@@ -143,6 +144,10 @@ pub fn build_router(state: SharedState) -> Router {
         .route(
             "/hostings/cert/issue",
             post(handlers::hostings::post_cert_issue),
+        )
+        .route(
+            "/hostings/cert/delete",
+            post(handlers::hostings::post_cert_delete),
         )
         .route(
             "/hostings/cert/dns01/begin",

@@ -568,6 +568,10 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.issue_real_cert(sel, req).await
     }
 
+    async fn cert_delete(&self, sel: HostingSelector) -> Result<(), RpcError> {
+        self.svc.cert_delete(sel).await
+    }
+
     async fn cert_dns01_begin(
         &self,
         sel: HostingSelector,
