@@ -75,6 +75,56 @@ pub struct JobsListQuery {
 /// state=`running`. Polled every 10s from `base.html` so the
 /// operator sees the badge appear seconds after kicking off a
 /// migration. Empty array is fine — the JS hides the badge then.
+/// GET /api/nav-status — the counts the sidebar paints its status dots from.
+///
+/// One request for all of them: three separate pollers would triple the
+/// traffic for numbers that are read at a glance, and would let the dots
+/// disagree with each other mid-refresh.
+///
+/// Every failure answers zero rather than erroring. A sidebar dot is an
+/// at-a-glance hint, and a hint that turns a page red because one RPC hiccuped
+/// is worse than one that briefly says nothing.
+pub async fn get_nav_status(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+) -> Result<Response, AppError> {
+    let zero = serde_json::json!({"monitors_down": 0, "wp_outdated": 0, "certs_expiring": 0});
+    if !ctx.is_admin_or_higher() {
+        return Ok(axum::Json(zero).into_response());
+    }
+    let (mon, vuln, certs) = tokio::join!(
+        hyperion_rpc_client::call(&state.agent_socket, Request::MonitorOverview),
+        hyperion_rpc_client::call(&state.agent_socket, Request::VulnFindingsList),
+        hyperion_rpc_client::call(&state.agent_socket, Request::CertOverview),
+    );
+    let monitors_down = match mon {
+        Ok(RpcResponse::MonitorOverview(v)) => {
+            v.iter().filter(|m| m.alert_state == "alerting").count()
+        }
+        _ => 0,
+    };
+    // Sites with at least one outdated component — not the total number of
+    // findings. The badge answers "how many sites need me", and one site with
+    // nine old plugins is still one site to open.
+    let wp_outdated = match vuln {
+        Ok(RpcResponse::VulnFindingsList(v)) => v.iter().filter(|s| !s.findings.is_empty()).count(),
+        _ => 0,
+    };
+    let certs_expiring = match certs {
+        Ok(RpcResponse::CertOverview(v)) => v
+            .iter()
+            .filter(|c| c.days_left < 14 && c.issuer.to_lowercase().contains("letsencrypt"))
+            .count(),
+        _ => 0,
+    };
+    Ok(axum::Json(serde_json::json!({
+        "monitors_down": monitors_down,
+        "wp_outdated": wp_outdated,
+        "certs_expiring": certs_expiring,
+    }))
+    .into_response())
+}
+
 pub async fn get_running_count(
     State(state): State<SharedState>,
     ctx: AuthCtx,

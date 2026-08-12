@@ -303,6 +303,14 @@ struct DetailTpl<'a> {
     /// override (master hosting_kv) or the default `staging.<domain>`.
     /// Drives the staging card's input prefill, confirm text + "Open" link.
     staging_domain: String,
+    /// Whether a staging site has actually been created.
+    ///
+    /// `staging_domain` is a computed DEFAULT (`staging.<domain>`) when no
+    /// staging site exists, so rendering "Open staging ↗" from it alone
+    /// offered a link to a hostname that had never been provisioned — and a
+    /// "Push staging → production" button for a source that was not there.
+    /// The card now shows the create form OR the live actions, never both.
+    staging_exists: bool,
     /// Operator php.ini overrides (applied via .user.ini).
     php_ini: PhpIniSettings,
     csrf_php_ini: String,
@@ -1326,6 +1334,7 @@ pub async fn post_create(
                 tags: vec![],
                 csrf_notes: csrf_token_for(&state, &ctx, "/hostings/notes"),
                 staging_domain: staging_domain_default,
+                staging_exists: false,
                 php_ini: PhpIniSettings::default(),
                 csrf_php_ini: csrf_token_for(&state, &ctx, "/hostings/php-ini"),
                 csrf_repair_perms: csrf_token_for(&state, &ctx, "/hostings/repair-permissions"),
@@ -2175,6 +2184,11 @@ pub async fn get_detail(
         notes,
         tags,
         csrf_notes: csrf_token_for(&state, &ctx, "/hostings/notes"),
+        // KV presence is the record of a create having run. Cheap, and it is
+        // exactly what the create writes — no extra lookup on the hot path.
+        staging_exists: kv_pairs
+            .iter()
+            .any(|(k, v)| k == "staging_domain" && !v.trim().is_empty()),
         staging_domain,
         php_ini: PhpIniSettings::from_kv(&kv_pairs),
         csrf_php_ini: csrf_token_for(&state, &ctx, "/hostings/php-ini"),

@@ -1066,13 +1066,30 @@ pub struct FtpAccountSummary {
 /// site-mail-wrapper). Distinct from the Hyperion-sent emails in
 /// EmailLogEntry — those flow through our SMTP config, these flow
 /// through the local sendmail.
+/// One captured outbound message.
+///
+/// `#[serde(default)]` on the struct, and aliases on the two renamed fields,
+/// because the WRITER and the READER disagreed and nothing said so: the
+/// wrapper emits `from` / `to` (site-mail-wrapper.sh), this type declared
+/// only `from_address` / `to_address`, and the reader parses with
+/// `filter_map(.. .ok())` — so serde failed on every single line and the
+/// panel showed "No outbound mail captured yet" forever, however much mail
+/// the site sent. A missing field must degrade one column, never drop the
+/// record.
+///
+/// `alias` rather than `rename` on purpose: the RPC wire and the templates
+/// keep the long names, while the jsonl already on disk on every node stays
+/// readable.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default)]
 pub struct SiteEmailLogEntry {
     pub ts: i64,
     /// system_user — maps to a hosting via the same field on
     /// HostingDetail (`detail.system_user`).
     pub user: String,
+    #[serde(alias = "from")]
     pub from_address: String,
+    #[serde(alias = "to")]
     pub to_address: String,
     pub subject: String,
     /// First ~1 KB of body, captured at send time.
@@ -1509,6 +1526,45 @@ impl Default for UpdateStatus {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The exact line shape `site-mail-wrapper.sh` writes must parse.
+    ///
+    /// It did not, for the whole life of the feature: the wrapper emits
+    /// `from`/`to`, this struct declared `from_address`/`to_address`, and the
+    /// reader's `.ok()` turned every parse error into a silently dropped
+    /// record — so the panel read "No outbound mail captured yet" no matter
+    /// how much mail went out. Pin the writer's spelling, not ours.
+    #[test]
+    fn site_email_log_parses_what_the_wrapper_actually_writes() {
+        let line = r#"{"ts":1786310000,"user":"ingratia_cz","from":"wp@ingratia.cz","to":"kevin@example.cz","subject":"Password reset","body_excerpt":"Someone requested..."}"#;
+        let e: SiteEmailLogEntry = serde_json::from_str(line).expect("wrapper output must parse");
+        assert_eq!(e.from_address, "wp@ingratia.cz");
+        assert_eq!(e.to_address, "kevin@example.cz");
+        assert_eq!(e.subject, "Password reset");
+        assert_eq!(e.user, "ingratia_cz");
+    }
+
+    /// A record missing a field loses that column, not the whole row —
+    /// otherwise one odd message hides every message around it.
+    #[test]
+    fn site_email_log_survives_a_missing_field() {
+        let e: SiteEmailLogEntry =
+            serde_json::from_str(r#"{"ts":1,"user":"u","from":"a@b.cz"}"#).expect("must parse");
+        assert_eq!(e.from_address, "a@b.cz");
+        assert!(e.to_address.is_empty());
+    }
+
+    /// We still SERIALIZE the long names, so the RPC wire and the templates
+    /// are unaffected by the aliases above.
+    #[test]
+    fn site_email_log_still_serializes_long_names() {
+        let e = SiteEmailLogEntry {
+            from_address: "a@b.cz".into(),
+            ..Default::default()
+        };
+        let j = serde_json::to_string(&e).expect("ser");
+        assert!(j.contains("from_address"), "wire format changed: {j}");
+    }
 
     #[test]
     fn node_wildcard_base_strips_first_label() {

@@ -222,13 +222,51 @@ pub fn clamav_available() -> bool {
 /// of the tree could not be read and a partial pass must not be reported as
 /// a pass.
 pub async fn scan_malware(path: &str) -> Result<MalwareScan, AdapterError> {
+    scan_malware_niced(path, 0).await
+}
+
+/// How hard a scan is allowed to lean on the box.
+///
+/// `clamscan` is single-threaded but CPU-bound, and on a small VPS it will
+/// happily saturate a core for minutes — long enough for sites on that box to
+/// go visibly slow while an unattended sweep runs. `nice` is the right tool:
+/// unlike a hard cap it costs nothing when the machine is idle (the scan still
+/// gets the full core) and yields immediately when a web request wants the
+/// CPU. A hard percentage cap would make the scan slower even on a quiet box,
+/// for no benefit.
+///
+/// `ionice` best-effort class 7 goes with it. Scanning a docroot is mostly I/O
+/// against files the web server also wants, and starving nginx of disk is the
+/// other half of "the site went slow during a scan".
+///
+/// `niceness` is clamped to clamscan's useful range. 0 means "no change",
+/// which is what callers that never configured this get.
+pub async fn scan_malware_niced(path: &str, niceness: i32) -> Result<MalwareScan, AdapterError> {
     guard_path(path)?;
     let Some(bin) = clamscan_bin() else {
         return Ok(MalwareScan::default());
     };
     // `--infected` prints detections only, `--no-summary` drops the trailing
     // stats block — both keep the output to exactly the lines we parse.
-    let out = run_capturing(bin, &["-r", "--infected", "--no-summary", path]).await?;
+    let scan_args = ["-r", "--infected", "--no-summary", path];
+    let niceness = niceness.clamp(0, 19);
+    let out = if niceness > 0 && std::path::Path::new("/usr/bin/nice").exists() {
+        let n = niceness.to_string();
+        // ionice is best-effort: on a kernel or filesystem that does not
+        // support it the wrapper still runs the scan, so a missing scheduler
+        // class must not become a failed scan.
+        let mut args: Vec<&str> = Vec::new();
+        let have_ionice = std::path::Path::new("/usr/bin/ionice").exists();
+        if have_ionice {
+            args.extend(["-n", &n, "/usr/bin/ionice", "-c", "2", "-n", "7", bin]);
+        } else {
+            args.extend(["-n", &n, bin]);
+        }
+        args.extend(scan_args);
+        run_capturing("/usr/bin/nice", &args).await?
+    } else {
+        run_capturing(bin, &scan_args).await?
+    };
     match out.code {
         0 => Ok(MalwareScan {
             available: true,
