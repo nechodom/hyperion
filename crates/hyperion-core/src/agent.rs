@@ -767,8 +767,13 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     ) -> Result<(), RpcError> {
         self.svc.wp_staging_push(sel, staging_domain).await
     }
-    async fn node_update_run(&self, do_apt: bool, do_hyperion: bool) -> Result<i64, RpcError> {
-        self.svc.node_update_run(do_apt, do_hyperion).await
+    async fn node_update_run(
+        &self,
+        do_apt: bool,
+        do_hyperion: bool,
+        safe: bool,
+    ) -> Result<i64, RpcError> {
+        self.svc.node_update_run(do_apt, do_hyperion, safe).await
     }
     async fn node_update_status(&self) -> Result<hyperion_types::NodeUpdateStatus, RpcError> {
         self.svc.node_update_status().await

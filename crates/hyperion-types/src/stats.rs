@@ -305,6 +305,10 @@ pub struct FirewallPort {
 /// agent.toml file, this is for at-a-glance visibility.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct AgentConfigView {
+    /// `[update] auto` — whether this node installs new Hyperion releases
+    /// by itself (always in safe mode). Off unless the operator says so.
+    #[serde(default)]
+    pub update_auto: bool,
     pub hostname: String,
     pub agent_version: String,
     /// Detected nginx user — relevant because FPM pool ownership

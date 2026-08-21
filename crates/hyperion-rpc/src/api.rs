@@ -468,7 +468,12 @@ pub trait AgentApi: Send + Sync + 'static {
     /// Start a background node-update job. Returns the unix
     /// timestamp the job started at. `NodeUpdateStatus` polls the
     /// log tail + state.
-    async fn node_update_run(&self, do_apt: bool, do_hyperion: bool) -> Result<i64, RpcError>;
+    async fn node_update_run(
+        &self,
+        do_apt: bool,
+        do_hyperion: bool,
+        safe: bool,
+    ) -> Result<i64, RpcError>;
     /// Read the state of the most-recent / in-progress update job.
     async fn node_update_status(&self) -> Result<hyperion_types::NodeUpdateStatus, RpcError>;
     /// Update one section of `/etc/hyperion/agent.toml`.

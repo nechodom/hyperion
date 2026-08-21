@@ -407,10 +407,10 @@
         <div id="upd-{{ n.node_id }}" class="node-card__pane" hidden>
           <form method="post" action="/install/update-node"
                 data-confirm-title="Update {{ n.label }}"
-                data-confirm-body="apt-get dist-upgrade and/or the Hyperion update will run on {{ n.label }} ({% if let Some(ip) = n.public_ip.as_ref() %}{{ ip }}{% else %}{{ n.node_id }}{% endif %}). The node's services may briefly restart. This can take several minutes."
+                data-confirm-body="apt-get dist-upgrade and/or the Hyperion update will run on {{ n.label }} ({% if let Some(ip) = n.public_ip.as_ref() %}{{ ip }}{% else %}{{ n.node_id }}{% endif %}). The node's services may briefly restart. This can take several minutes. With Safe update ticked, the previous binaries are restored automatically if the node does not come back healthy — note that this restores BINARIES, not data."
                 data-confirm-confirm-label="Start update"
                 data-confirm-variant="primary"
-                class="node-card__inline-form" style="grid-template-columns:1fr 1fr auto auto">
+                class="node-card__inline-form" style="grid-template-columns:1fr 1fr 1fr auto auto">
             <input type="hidden" name="_csrf" value="{{ csrf_update }}">
             <input type="hidden" name="node_id" value="{{ n.node_id }}">
             <label class="field-checkbox" style="margin:0">
@@ -420,6 +420,15 @@
             <label class="field-checkbox" style="margin:0">
               <input type="checkbox" name="do_hyperion" value="on" checked>
               <span><strong>Hyperion</strong> <span class="text-soft small">(rebuild and restart the agent and web)</span></span>
+            </label>
+            {# Default ON. The operator is usually clicking this from the very
+               panel an update can take down, so "it broke, now SSH in" is the
+               worst outcome available — and the cost of the snapshot is a
+               binary copy. Untick only to reproduce a failure deliberately. #}
+            <label class="field-checkbox" style="margin:0"
+                   title="Copies the running binaries aside first. If the health check fails after the restart, they are put back automatically and the update is reported as failed.">
+              <input type="checkbox" name="safe" value="on" checked>
+              <span><strong>Safe update</strong> <span class="text-soft small">(snapshot + auto-rollback)</span></span>
             </label>
             <button type="submit" class="btn small primary">Start update</button>
             <button type="button" class="btn small ghost"

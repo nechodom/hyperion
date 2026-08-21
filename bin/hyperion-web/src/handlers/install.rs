@@ -243,6 +243,9 @@ pub struct UpdateNodeForm {
     do_apt: Option<String>,
     #[serde(default)]
     do_hyperion: Option<String>,
+    /// Snapshot + auto-restore on a failed health check.
+    #[serde(default)]
+    safe: Option<String>,
 }
 
 pub async fn post_update_node(
@@ -259,6 +262,7 @@ pub async fn post_update_node(
     }
     let do_apt = matches!(form.do_apt.as_deref(), Some("on" | "true" | "1"));
     let do_hyperion = matches!(form.do_hyperion.as_deref(), Some("on" | "true" | "1"));
+    let safe = matches!(form.safe.as_deref(), Some("on" | "true" | "1"));
     if !do_apt && !do_hyperion {
         return Ok(Redirect::to(
             "/install?flash_error=nothing+to+update+%28tick+at+least+one+option%29",
@@ -277,6 +281,7 @@ pub async fn post_update_node(
         Request::NodeUpdateRun {
             do_apt,
             do_hyperion,
+            safe,
         },
     )
     .await?;
