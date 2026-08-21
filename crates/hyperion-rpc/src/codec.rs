@@ -484,6 +484,12 @@ pub enum Request {
     /// "started" marker. Operator polls `NodeUpdateStatus` (see
     /// below) to follow the log tail.
     NodeUpdateRun {
+        /// Snapshot the running binaries first and restore them
+        /// automatically if the post-update health check fails. The
+        /// operator is usually clicking Update from the very panel an
+        /// update can take down.
+        #[serde(default)]
+        safe: bool,
         /// `apt-get update && apt-get dist-upgrade -y --quiet`.
         /// Typically 1–10 min depending on what's outdated.
         do_apt: bool,

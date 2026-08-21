@@ -646,7 +646,8 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
         Request::NodeUpdateRun {
             do_apt,
             do_hyperion,
-        } => match api.node_update_run(do_apt, do_hyperion).await {
+            safe,
+        } => match api.node_update_run(do_apt, do_hyperion, safe).await {
             Ok(started_at) => Response::NodeUpdateRun { started_at },
             Err(e) => Response::Error(e),
         },
@@ -1917,7 +1918,7 @@ mod tests {
         async fn service_restart(&self, _: String) -> Result<(), RpcError> {
             Ok(())
         }
-        async fn node_update_run(&self, _: bool, _: bool) -> Result<i64, RpcError> {
+        async fn node_update_run(&self, _: bool, _: bool, _: bool) -> Result<i64, RpcError> {
             Ok(0)
         }
         async fn node_update_status(&self) -> Result<hyperion_types::NodeUpdateStatus, RpcError> {

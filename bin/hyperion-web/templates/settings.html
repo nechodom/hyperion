@@ -700,6 +700,43 @@
     </form>
   </div>
 
+  {# ───── Automatic updates. Off by default and deliberately so. ───── #}
+  <div class="card">
+    <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.4rem">
+      <h2 style="margin:0">
+        <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+        Automatic updates
+      </h2>
+    </div>
+    <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">
+      When on, this node checks hourly for a new Hyperion release and installs
+      it <strong>in safe mode</strong>: the running binaries are snapshotted
+      first, and restored automatically if the node does not come back healthy.
+      Automatic and irreversible is a combination worth avoiding — you are
+      asleep exactly when this fires.
+      <br><br>
+      System packages are <strong>not</strong> touched: an unattended
+      <code>apt dist-upgrade</code> has a far bigger blast radius than a
+      Hyperion update, and is not what this promises. Run that from
+      <a href="/install">Nodes</a> when you are watching.
+      <br><br>
+      Note that a rollback restores <strong>binaries, not data</strong>.
+      Migrations in this project are additive, so an older binary starts
+      against a newer schema — which is the case this is built to survive.
+    </p>
+    <form method="post" action="/settings/config" class="row" style="gap:0.6rem;align-items:center">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="update">
+      <input type="hidden" name="_checkboxes" value="auto">
+      <label class="field-checkbox" style="margin:0">
+        <input type="checkbox" name="auto" value="true"
+               {% if config.update_auto %}checked{% endif %}>
+        <span><strong>Update this node automatically</strong></span>
+      </label>
+      <button class="btn primary" type="submit">Save</button>
+    </form>
+  </div>
+
   {# ───── E-mail branding: the logo embedded into every notification,
      with a live preview of the rendered message. ───── #}
   <div class="card">

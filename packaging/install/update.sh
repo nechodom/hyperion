@@ -35,6 +35,11 @@
 #                  touch on-disk artefacts (vhost, db, system user) — use
 #                  the diagnostic snippet printed on screen if those linger.
 #   --no-build     Skip binary install (useful for unit/config-only refreshes).
+#   --safe         Snapshot the running binaries first and RESTORE them
+#                  automatically if the post-update health check fails.
+#                  Turns "the update broke the panel" into a bad minute
+#                  instead of an SSH session — the operator is usually
+#                  clicking Update from the very UI an update can take down.
 #   --from-source  Skip the pre-built release; cargo build locally.
 #                  Useful for testing local commits before they're pushed.
 #   --release=TAG  Pull a specific release tag instead of "main" (rolling).
@@ -134,12 +139,15 @@ RELEASE_TAG="${HYPERION_RELEASE_TAG:-rolling}"   # rolling tag, set by GH Action
 REPAIR=0
 DO_BUILD=1
 PREFER_PREBUILT=1
+SAFE=0
+ROLLED_BACK=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --repair)        REPAIR=1; shift;;
     --no-build)      DO_BUILD=0; shift;;
     --from-source)   PREFER_PREBUILT=0; shift;;
+    --safe)          SAFE=1; shift;;
     --release=*)     RELEASE_TAG="${1#*=}"; shift;;
     --ref=*)         REF="${1#*=}"; shift;;
     -h|--help)       sed -n '2,40p' "$0"; exit 0;;
@@ -149,6 +157,46 @@ done
 
 log()  { printf '\033[36m[hyperion]\033[0m %s\n' "$*"; }
 warn() { printf '\033[33m[warn]\033[0m %s\n' "$*"; }
+
+# --- Safe update: snapshot / restore -------------------------------------
+# What gets snapshotted is deliberately ONLY the binaries. Restoring those
+# undoes a bad build; it does not undo a migration, and pretending otherwise
+# would be the dangerous kind of reassuring. Migrations in this project are
+# additive, so an older binary against a newer schema starts — which is the
+# case this exists to survive.
+SNAP_DIR=/var/lib/hyperion/update-snapshot
+snapshot_binaries() {
+  (( SAFE )) || return 0
+  rm -rf "$SNAP_DIR"
+  install -d -m 0700 "$SNAP_DIR"
+  local f
+  for f in /usr/sbin/hyperion-agent /usr/sbin/hyperion-web /usr/bin/hctl; do
+    [[ -x "$f" ]] && cp -a "$f" "$SNAP_DIR/$(basename "$f")"
+  done
+  # Record what we snapshotted so the log says what a restore would give back.
+  if [[ -x "$SNAP_DIR/hyperion-agent" ]]; then
+    "$SNAP_DIR/hyperion-agent" --version > "$SNAP_DIR/VERSION" 2>/dev/null || true
+    log "Safe update: snapshotted $(tr -d '\n' < "$SNAP_DIR/VERSION" 2>/dev/null || echo 'current binaries')"
+  fi
+}
+
+restore_snapshot() {
+  [[ -d "$SNAP_DIR" ]] || { warn "No snapshot to restore from."; return 1; }
+  local f restored=0
+  for f in hyperion-agent hyperion-web hctl; do
+    [[ -x "$SNAP_DIR/$f" ]] || continue
+    case "$f" in
+      hctl) install -m 0755 "$SNAP_DIR/$f" /usr/bin/hctl ;;
+      *)    install -m 0755 "$SNAP_DIR/$f" "/usr/sbin/$f" ;;
+    esac
+    restored=1
+  done
+  (( restored )) || { warn "Snapshot directory held no binaries."; return 1; }
+  systemctl restart hyperion-agent 2>/dev/null || true
+  systemctl restart hyperion-web 2>/dev/null || true
+  sleep 2
+  return 0
+}
 fail() { printf '\033[31m[error]\033[0m %s\n' "$*" >&2; exit 1; }
 
 # Run `cargo "$@"` with a live progress bar driven by the number of compiled
@@ -222,6 +270,7 @@ if (( DO_BUILD )); then
 fi
 
 #-------- 1. Stop services ------------------------------------------------
+snapshot_binaries
 (( HAVE_WEB ))   && { log "Stopping hyperion-web ...";   systemctl stop hyperion-web   || true; }
 (( HAVE_AGENT )) && { log "Stopping hyperion-agent ..."; systemctl stop hyperion-agent || true; }
 
@@ -1193,6 +1242,29 @@ check_agent_serving() {
 (( HAVE_AGENT )) && check_agent_serving
 (( HAVE_WEB   )) && check_active hyperion-web
 
+#-------- 7a-bis. Safe update: restore on a failed health check -----------
+# The operator is usually clicking Update from the very panel an update can
+# take down, so "it broke, go and SSH in" is the worst possible outcome. If
+# the checks above say the new binaries are not serving, put the old ones
+# back and re-check — and be explicit that this restored BINARIES, not data.
+if (( SAFE )) && (( ! HEALTHY )); then
+  warn "Health check FAILED after update — restoring the previous binaries."
+  if restore_snapshot; then
+    HEALTHY=1
+    (( HAVE_AGENT )) && check_active hyperion-agent
+    (( HAVE_AGENT )) && check_agent_serving
+    (( HAVE_WEB   )) && check_active hyperion-web
+    if (( HEALTHY )); then
+      warn "Rolled back to $(tr -d '\n' < "$SNAP_DIR/VERSION" 2>/dev/null || echo 'the previous build') — the panel is serving again."
+      warn "The update did NOT apply. Check the journal above before retrying."
+      ROLLED_BACK=1
+    else
+      warn "Rollback did not restore health either. This needs a look by hand:"
+      warn "  journalctl -u hyperion-agent -n 50"
+    fi
+  fi
+fi
+
 #-------- 7b. Verify installed binaries match the source ------------------
 # Final safety net behind the staleness guard. Each binary embeds its build
 # commit (`--version`); confirm what's on disk was built from the commit we
@@ -1203,7 +1275,7 @@ bin_sha() { "$1" --version 2>/dev/null | grep -oE '[0-9a-f]{40}' | head -n1 || t
 AGENT_SHA=""; WEB_SHA=""
 [[ -x /usr/sbin/hyperion-agent ]] && AGENT_SHA=$(bin_sha /usr/sbin/hyperion-agent)
 (( HAVE_WEB )) && [[ -x /usr/sbin/hyperion-web ]] && WEB_SHA=$(bin_sha /usr/sbin/hyperion-web)
-if (( DO_BUILD )); then
+if (( DO_BUILD )) && (( ! ROLLED_BACK )); then
   skew=0
   if [[ -n "$AGENT_SHA" && "$AGENT_SHA" != "$HEAD_FULL" ]]; then
     warn "hyperion-agent on disk is built from ${AGENT_SHA:0:12}, but your source is ${HEAD_FULL:0:12}."
@@ -1236,6 +1308,12 @@ echo "  Hyperion update — $PREV → $NEW"
 (( HAVE_WEB   )) && echo "  hyperion-web:   $(systemctl is-active hyperion-web)"
 echo "============================================================"
 
+# A rollback is a FAILED update, even though the box is healthy again —
+# exit non-zero so the panel reports it as such and nobody reads "done".
+if (( ROLLED_BACK )); then
+  echo "  RESULT: update rolled back — the previous version is running."
+  exit 1
+fi
 if (( HEALTHY == 0 )); then
   exit 1
 fi

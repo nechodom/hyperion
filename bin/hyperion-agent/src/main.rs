@@ -600,6 +600,28 @@ async fn main() -> anyhow::Result<()> {
             }
         });
     }
+    // Auto-update, when the operator has opted in. Hourly probe, but the
+    // release check itself is cached agent-side for an hour, so this costs
+    // one HTTP request a day in the common case and applies a new release
+    // within the hour otherwise.
+    {
+        let au_svc = svc.clone();
+        tokio::spawn(async move {
+            // Not at boot: an update that restarts the agent, at the moment
+            // the agent starts, is a loop waiting to happen if anything goes
+            // wrong. Give the box time to prove it is healthy first.
+            tokio::time::sleep(std::time::Duration::from_secs(15 * 60)).await;
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(3600));
+            tick.tick().await;
+            loop {
+                if au_svc.auto_update_tick().await {
+                    tracing::info!("auto-update started — this process may be replaced");
+                }
+                tick.tick().await;
+            }
+        });
+    }
+
     // Record what this box IS, once, so it is a literal in agent.toml rather
     // than something inferred on every read. An install that predates the key
     // gets the right answer here with no operator action.

@@ -1104,6 +1104,7 @@ async fn run_update_script(
     slot: std::sync::Arc<tokio::sync::Mutex<hyperion_types::NodeUpdateStatus>>,
     do_apt: bool,
     do_hyperion: bool,
+    safe: bool,
 ) {
     use tokio::io::AsyncBufReadExt;
     /// Roughly 8 kB of tail — enough to see what's currently
@@ -1221,15 +1222,17 @@ async fn run_update_script(
             .await;
             last_code = 2;
         } else {
-            last_code = run_one(
-                &slot,
-                "hyperion-update",
-                "/bin/bash",
-                &[script
-                    .to_str()
-                    .unwrap_or("/opt/hyperion/packaging/install/update.sh")],
-            )
-            .await;
+            let path = script
+                .to_str()
+                .unwrap_or("/opt/hyperion/packaging/install/update.sh");
+            // --safe snapshots the running binaries first and restores them
+            // if the post-update health check fails.
+            let args: Vec<&str> = if safe {
+                vec![path, "--safe"]
+            } else {
+                vec![path]
+            };
+            last_code = run_one(&slot, "hyperion-update", "/bin/bash", &args).await;
         }
     }
 
@@ -1865,6 +1868,59 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             "data:{mime};base64,{}",
             base64::engine::general_purpose::STANDARD.encode(&bytes)
         ))
+    }
+
+    /// Whether this node applies Hyperion updates by itself, from
+    /// `[update] auto`. Default OFF.
+    ///
+    /// Off by default because unattended updates of the thing that runs
+    /// everyone's sites is a decision an operator makes deliberately, not one
+    /// they discover. When it IS on, the update always runs in safe mode:
+    /// automatic and irreversible is a combination worth avoiding, and the
+    /// operator is asleep precisely when this fires.
+    pub fn auto_update_enabled(&self) -> bool {
+        self.agent_config_path
+            .as_deref()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .and_then(|raw| raw.parse::<toml_edit::DocumentMut>().ok())
+            .and_then(|doc| {
+                doc.get("update")
+                    .and_then(|s| s.get("auto"))
+                    .and_then(|v| v.as_bool())
+            })
+            .unwrap_or(false)
+    }
+
+    /// Check for a new release and, when auto-update is on, apply it in safe
+    /// mode. Returns true when an update was STARTED.
+    pub async fn auto_update_tick(&self) -> bool {
+        if !self.auto_update_enabled() {
+            return false;
+        }
+        let status = match self.update_check(false).await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::debug!(error=%e, "auto-update: version probe failed");
+                return false;
+            }
+        };
+        if !status.update_available {
+            return false;
+        }
+        tracing::info!(
+            current = %status.current_sha,
+            latest = %status.latest_sha,
+            "auto-update: applying a new release in safe mode"
+        );
+        // do_apt = false: an unattended dist-upgrade is a much bigger blast
+        // radius than a Hyperion update and is not what this toggle promises.
+        match self.node_update_run(false, true, true).await {
+            Ok(_) => true,
+            Err(e) => {
+                tracing::warn!(error=%e, "auto-update: could not start");
+                false
+            }
+        }
     }
 
     pub fn is_worker_node(&self) -> bool {
@@ -16006,6 +16062,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // web UI does, by hiding the master target option).
         let cluster_view = read_cluster_section(self.agent_config_path.as_deref());
         Ok(hyperion_types::AgentConfigView {
+            update_auto: self.auto_update_enabled(),
             hostname: hostname.to_string(),
             agent_version: version.to_string(),
             nginx_user: self.adapters.nginx_user(),
@@ -18314,7 +18371,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     ///
     /// Refuses to start when an update is already running (one job
     /// per node at a time — `apt-get` would lock dpkg anyway).
-    pub async fn node_update_run(&self, do_apt: bool, do_hyperion: bool) -> Result<i64, RpcError> {
+    pub async fn node_update_run(
+        &self,
+        do_apt: bool,
+        do_hyperion: bool,
+        safe: bool,
+    ) -> Result<i64, RpcError> {
         if !do_apt && !do_hyperion {
             return Err(RpcError::Validation {
                 message: "node_update_run: nothing to do (do_apt=false, do_hyperion=false)".into(),
@@ -18346,7 +18408,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // gets the start time back and polls status.
         let slot = self.node_update.clone();
         tokio::spawn(async move {
-            run_update_script(slot, do_apt, do_hyperion).await;
+            run_update_script(slot, do_apt, do_hyperion, safe).await;
         });
         self.append_audit(
             "node.update.start",
@@ -23319,6 +23381,7 @@ fn parse_agent_section_fields(
             // decided by the enrollment credential on disk. Reject anything
             // else rather than silently resolving it to master — a typo here
             // would otherwise be invisible.
+            ("update", "auto") => crate::config_persist::FieldValue::Bool(parse_bool(v)?),
             ("cluster", "mode") => match v.trim() {
                 m @ ("standalone" | "master") => {
                     crate::config_persist::FieldValue::Str(m.to_string())
