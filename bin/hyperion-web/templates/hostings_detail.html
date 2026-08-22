@@ -2068,6 +2068,23 @@
     </label>
     {% endfor %}
 
+    <h3 class="section-title">Countries</h3>
+    <p class="muted small" style="margin:-0.3rem 0 0.6rem">
+      Refuse visitors by country. Needs the GeoIP database
+      (<a href="/settings#geoip">Settings → GeoIP</a>) — without it every
+      visitor resolves to <code>ZZ</code> and nothing is blocked, so turning
+      this on early cannot cut the site off by accident.
+      <strong>Blocking a country blocks its people, not just its bots</strong>
+      — customers travelling, VPN users and mobile carriers routed abroad all
+      land on the 403.
+    </p>
+    <div class="field" style="margin:0">
+      <label for="blocked_countries_text">Blocked countries <span class="hint">ISO codes, comma-separated · e.g. RU, CN, KP</span></label>
+      <input id="blocked_countries_text" name="blocked_countries" type="text"
+             value="{{ detail.vhost_options.blocked_countries }}"
+             placeholder="leave empty to allow everyone">
+    </div>
+
     <div class="field" style="margin-top:0.75rem">
       <label for="wp_admin_allowlist">
         Restrict <code>/wp-admin</code> + <code>/wp-login.php</code> to these IPs

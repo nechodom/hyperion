@@ -942,6 +942,14 @@ fn print_pretty(resp: &Response) {
             println!("note:     {}", c.note);
         }
         Response::WebSessionRevokeAll(n) => println!("✓ signed out of {n} session(s)"),
+        Response::GeoipRefresh(n) => println!("✓ GeoIP database refreshed — {n} ranges"),
+        Response::GeoipStatus {
+            installed,
+            updated_at,
+        } => println!(
+            "geoip: {} (updated_at {updated_at})",
+            if *installed { "installed" } else { "not installed" }
+        ),
         Response::EmailLogoSet => println!("✓ e-mail logo updated"),
         Response::EmailLogoGet(v) => match v {
             Some(_) => println!("e-mail logo: set"),

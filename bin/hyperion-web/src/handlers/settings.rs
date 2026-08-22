@@ -6,6 +6,8 @@
 
 use crate::auth::AuthCtx;
 use crate::error::AppError;
+#[allow(unused_imports)] // askama resolves {{ x|datetime }} through this
+use crate::filters;
 use crate::ratelimit::Bucket;
 use crate::state::SharedState;
 use askama::Template;
@@ -79,6 +81,8 @@ struct SettingsTpl<'a> {
     /// Whether a logo is on file — drives the preview thumbnail and the
     /// Remove button.
     email_logo_set: bool,
+    geoip_installed: bool,
+    geoip_updated_at: i64,
     /// Capability groups for the "create API key" multiselect (reuses the
     /// roles capability groups). Empty when the user can't manage keys.
     api_key_cap_groups: Vec<ApiKeyCapGroup>,
@@ -465,6 +469,34 @@ pub async fn get_email_preview(
         .into_response())
 }
 
+/// POST /settings/geoip-refresh — download or refresh the country database.
+///
+/// Synchronous: it is one download and a parse, and the operator pressed a
+/// button expecting an answer. Errors come back on the page rather than in
+/// a log, because the usual one — a rejected licence key — is something
+/// only they can fix.
+pub async fn post_geoip_refresh(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+) -> Result<Response, AppError> {
+    if !ctx.is_super_admin() {
+        return Ok(Redirect::to("/settings?error=owner+role+required").into_response());
+    }
+    match hyperion_rpc_client::call(&state.agent_socket, Request::GeoipRefresh).await? {
+        RpcResponse::GeoipRefresh(n) => Ok(Redirect::to(&format!(
+            "/settings?saved={}#geoip",
+            super::hostings::urlencoding(&format!("GeoIP database installed — {n} ranges"))
+        ))
+        .into_response()),
+        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
+            "/settings?error={}#geoip",
+            super::hostings::urlencoding(&e.to_string())
+        ))
+        .into_response()),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
 /// Render a unix timestamp as a short YYYY-MM-DD (UTC), or "—" for None.
 fn fmt_date(ts: Option<i64>) -> String {
     match ts {
@@ -786,6 +818,14 @@ pub async fn get_settings(
     // the master's file is the whole truth and there is nothing to compare.
     let letter_nodes = letter_node_rows(&state, &nodes, &config.notifications).await;
     let csrf_token = super::session_csrf_token(&state, &ctx);
+    let (geoip_installed, geoip_updated_at) =
+        match hyperion_rpc_client::call(&state.agent_socket, Request::GeoipStatus).await {
+            Ok(RpcResponse::GeoipStatus {
+                installed,
+                updated_at,
+            }) => (installed, updated_at),
+            _ => (false, 0),
+        };
     let email_logo_set = matches!(
         hyperion_rpc_client::call(&state.agent_socket, Request::EmailLogoGet).await,
         Ok(RpcResponse::EmailLogoGet(Some(_)))
@@ -814,6 +854,8 @@ pub async fn get_settings(
         flash_error: q.flash_error,
         csrf_token,
         email_logo_set,
+        geoip_installed,
+        geoip_updated_at,
         api_key_cap_groups,
         api_keys,
         can_manage_api_keys,

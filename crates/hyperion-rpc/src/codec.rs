@@ -528,6 +528,10 @@ pub enum Request {
     },
     /// The current logo as a `data:` URI, or `None` when none is set.
     EmailLogoGet,
+    /// Download / refresh the MaxMind GeoLite2 country database.
+    GeoipRefresh,
+    /// (installed, last_updated_at) for the Settings card.
+    GeoipStatus,
     /// Compare the running binary's git SHA against the upstream
     /// `rolling` release tag's SHA. Cached agent-side for an hour
     /// so the dashboard banner doesn't hammer the GitHub API.
@@ -1622,6 +1626,11 @@ pub enum Response {
     EmailConfigSet,
     EmailLogoSet,
     EmailLogoGet(Option<String>),
+    GeoipRefresh(i64),
+    GeoipStatus {
+        installed: bool,
+        updated_at: i64,
+    },
     UpdateCheck(hyperion_types::UpdateStatus),
     HostingExport(hyperion_types::HostingMigrationBundle),
     HostingMigrationFetchBundleFile {

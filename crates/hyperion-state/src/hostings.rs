@@ -306,24 +306,33 @@ type RawHostingHead = (
     Option<String>, // node_id
     Option<i64>,    // trashed_at (NULL when not trashed)
 );
-type RawHostingVhost = (
-    i64,    // basic_auth_enabled
-    String, // basic_auth_user
-    String, // basic_auth_hash
-    i64,    // force_https
-    i64,    // hsts_max_age
-    String, // custom_nginx_snippet
-    i64,    // maintenance_mode
-    i64,    // fastcgi_cache_enabled
-    i64,    // fastcgi_cache_ttl
-    String, // redirect_url
-    i64,    // redirect_code
-    i64,    // redirect_preserve_path
-    i64,    // waf_enabled
-    String, // wp_admin_allowlist
-    String, // blocked_bots
-    String, // canonical_host
-);
+/// The vhost-option columns.
+///
+/// A named `FromRow` struct rather than a tuple: sqlx only implements
+/// `FromRow` for tuples up to a fixed arity, and this row has outgrown it.
+/// It also stops a column being silently read into the wrong field the next
+/// time one is added in the middle — with a tuple, position is the only
+/// thing binding a value to its meaning.
+#[derive(sqlx::FromRow)]
+struct RawHostingVhost {
+    basic_auth_enabled: i64,
+    basic_auth_user: String,
+    basic_auth_hash: String,
+    force_https: i64,
+    hsts_max_age: i64,
+    custom_nginx_snippet: String,
+    maintenance_mode: i64,
+    fastcgi_cache_enabled: i64,
+    fastcgi_cache_ttl: i64,
+    redirect_url: String,
+    redirect_code: i64,
+    redirect_preserve_path: i64,
+    waf_enabled: i64,
+    wp_admin_allowlist: String,
+    blocked_bots: String,
+    blocked_countries: String,
+    canonical_host: String,
+}
 
 const QUERY_BASE: &str =
     "SELECT id, domain, state, system_user_id, php_version, root_dir, created_at, updated_at, \
@@ -337,7 +346,8 @@ const QUERY_VHOST_BY_ID: &str =
     "SELECT basic_auth_enabled, basic_auth_user, basic_auth_hash, force_https, hsts_max_age, \
             custom_nginx_snippet, maintenance_mode, fastcgi_cache_enabled, fastcgi_cache_ttl, \
             redirect_url, redirect_code, redirect_preserve_path, waf_enabled, wp_admin_allowlist, \
-             blocked_bots, \
+             blocked_bots,
+            blocked_countries, blocked_countries, \
             canonical_host \
      FROM hostings WHERE id = ?";
 
@@ -389,7 +399,7 @@ async fn fetch_one<'a>(
         .fetch_optional(pool)
         .await?;
     let vhost_options = match vhost_row {
-        Some((
+        Some(RawHostingVhost {
             basic_auth_enabled,
             basic_auth_user,
             basic_auth_hash,
@@ -405,8 +415,9 @@ async fn fetch_one<'a>(
             waf_enabled,
             wp_admin_allowlist,
             blocked_bots,
+            blocked_countries,
             canonical_host,
-        )) => hyperion_types::VhostOptions {
+        }) => hyperion_types::VhostOptions {
             basic_auth_enabled: basic_auth_enabled != 0,
             basic_auth_user,
             basic_auth_set: !basic_auth_hash.is_empty(),
@@ -422,6 +433,7 @@ async fn fetch_one<'a>(
             waf_enabled: waf_enabled != 0,
             wp_admin_allowlist,
             blocked_bots,
+            blocked_countries,
             canonical_host,
         },
         None => hyperion_types::VhostOptions::default(),
@@ -506,7 +518,7 @@ pub async fn set_vhost_options(
                 force_https=?, hsts_max_age=?, custom_nginx_snippet=?, \
                 maintenance_mode=?, fastcgi_cache_enabled=?, fastcgi_cache_ttl=?, \
                 redirect_url=?, redirect_code=?, redirect_preserve_path=?, \
-                waf_enabled=?, wp_admin_allowlist=?, blocked_bots=?, canonical_host=?, updated_at=? \
+                waf_enabled=?, wp_admin_allowlist=?, blocked_bots=?, blocked_countries=?, canonical_host=?, updated_at=? \
              WHERE id = ?",
         )
         .bind(opts.basic_auth_enabled as i64)
@@ -524,6 +536,7 @@ pub async fn set_vhost_options(
         .bind(opts.waf_enabled as i64)
         .bind(&opts.wp_admin_allowlist)
         .bind(&opts.blocked_bots)
+        .bind(&opts.blocked_countries)
         // POSITION MATTERS: canonical_host sits between wp_admin_allowlist
         // and updated_at in both UPDATE statements above — a bind out of
         // order here silently writes the wrong column (the sqlx
@@ -539,7 +552,7 @@ pub async fn set_vhost_options(
                 force_https=?, hsts_max_age=?, custom_nginx_snippet=?, \
                 maintenance_mode=?, fastcgi_cache_enabled=?, fastcgi_cache_ttl=?, \
                 redirect_url=?, redirect_code=?, redirect_preserve_path=?, \
-                waf_enabled=?, wp_admin_allowlist=?, blocked_bots=?, canonical_host=?, updated_at=? \
+                waf_enabled=?, wp_admin_allowlist=?, blocked_bots=?, blocked_countries=?, canonical_host=?, updated_at=? \
              WHERE id = ?",
         )
         .bind(opts.basic_auth_enabled as i64)
@@ -556,6 +569,7 @@ pub async fn set_vhost_options(
         .bind(opts.waf_enabled as i64)
         .bind(&opts.wp_admin_allowlist)
         .bind(&opts.blocked_bots)
+        .bind(&opts.blocked_countries)
         // POSITION MATTERS: canonical_host sits between wp_admin_allowlist
         // and updated_at in both UPDATE statements above — a bind out of
         // order here silently writes the wrong column (the sqlx

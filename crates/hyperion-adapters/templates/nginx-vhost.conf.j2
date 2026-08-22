@@ -110,6 +110,17 @@
     auth_basic_user_file /etc/nginx/.htpasswd-{{ hosting_id }};
     {%- endif %}
 
+{%- if !blocked_countries.is_empty() %}
+    # Countries the operator refuses. $hyperion_country comes from the
+    # generated geo map (conf.d/hyperion-geo.conf) and is ZZ when the
+    # database has no answer — so an unknown address is never blocked by a
+    # country rule, and enabling this before the database exists cuts nobody
+    # off. Above the content locations, below ACME: a country block must
+    # never be able to stop a certificate renewal.
+    if ($hyperion_country ~ "^({% for c in blocked_countries %}{{ c }}{% if !loop.last %}|{% endif %}{% endfor %})$") {
+        return 403;
+    }
+{%- endif %}
 {%- if !blocked_bots.is_empty() %}
     # Bot families the operator switched off. 403 rather than 444: a crawler
     # that gets a clean refusal backs off, whereas a dropped connection reads
