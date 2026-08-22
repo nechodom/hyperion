@@ -499,6 +499,11 @@ pub const CERT_RENEWAL_WINDOW_DAYS: i64 = 30;
 /// mail is the one that must read it.
 pub const EMAIL_LOGO_PATH: &str = "/etc/hyperion/email-logo";
 
+/// `hosting_kv` key written when a care report came due and could not be
+/// sent for want of a recipient. Read back by the dashboard so the failure
+/// is visible where operators look, not only in the journal.
+const CARE_REPORT_BLOCKED_KEY: &str = "care_report_blocked";
+
 /// What a box is for. Resolved by [`HostingService::deployment_role`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeploymentRole {
@@ -1923,6 +1928,42 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
     }
 
+    /// Write the vhost that matches the hosting's STATE.
+    ///
+    /// `nginx_write_vhost` renders the serving vhost unconditionally — it is
+    /// a dumb renderer and has no database to ask. Calling it directly on a
+    /// suspended site therefore brings that site back online as a side effect
+    /// of an unrelated edit: changing a PHP version or an alias silently
+    /// un-suspends a customer who has not paid. Route those through here.
+    ///
+    /// Only the reason TEXT comes from the database; everything else is the
+    /// detail the caller already has. The operator's existing suspension
+    /// notice is preserved rather than reworded by an unrelated action.
+    pub(crate) async fn write_vhost_for_state(
+        &self,
+        detail: &HostingDetail,
+    ) -> Result<(), RpcError> {
+        if matches!(
+            detail.state,
+            HostingState::Suspended | HostingState::Trashed
+        ) {
+            let reason = hyperion_state::limits::get_suspension(&self.pool, &detail.id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|s| s.reason_message);
+            return self
+                .adapters
+                .nginx_apply_suspended(&detail.domain, detail.aliases.clone(), reason)
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("suspended vhost: {e}")));
+        }
+        self.adapters
+            .nginx_write_vhost(detail)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("vhost: {e}")))
+    }
+
     pub fn is_worker_node(&self) -> bool {
         match &self.node_state_file {
             Some(p) => p.exists(),
@@ -3306,7 +3347,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // 5. Re-render vhost so fastcgi_pass points at the new socket.
         //    Pull the FRESH detail (with new php_version) for rendering.
         let new_detail = self.get(HostingSelector::Id(detail.id.clone())).await?;
-        if let Err(e) = self.adapters.nginx_write_vhost(&new_detail).await {
+        if let Err(e) = self.write_vhost_for_state(&new_detail).await {
             return Err(RpcError::Internal_with(format!(
                 "nginx_write_vhost after PHP version change failed: {e} \
                  (FPM pool for PHP {new_version} is up; site still serves via the old socket \
@@ -3635,7 +3676,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // ─── Re-render vhost (nginx -t inside write_vhost) ─────────
         let mut new_detail = detail.clone();
         new_detail.vhost_options = options.clone();
-        if let Err(e) = self.adapters.nginx_write_vhost(&new_detail).await {
+        if let Err(e) = self.write_vhost_for_state(&new_detail).await {
             // nginx -t rejected the new vhost. Roll the DB back to
             // the old options so the persisted state matches what
             // nginx is actually serving.
@@ -3769,7 +3810,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // Re-render the vhost with the new server_name. On nginx -t failure,
         // roll the alias set back to what nginx is still serving.
         let new_detail = self.get(HostingSelector::Id(detail.id.clone())).await?;
-        if let Err(e) = self.adapters.nginx_write_vhost(&new_detail).await {
+        if let Err(e) = self.write_vhost_for_state(&new_detail).await {
             let _ = hyperion_state::hostings::replace_aliases(&self.pool, &detail.id, &old_aliases)
                 .await;
             return Err(RpcError::Validation {
@@ -10424,6 +10465,19 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     "care report: due, but the site has no owner e-mail — nothing sent. \
                      Set one on the hosting; the period stays open until then"
                 );
+                // Leave a marker so this is visible in the PANEL, not only in
+                // journalctl. A warning nobody reads is the same as no warning,
+                // and this one means a customer is paying for something they
+                // will never receive. One row per affected site, read back by
+                // dashboard_alerts in a single query.
+                let _ = hyperion_state::hosting_kv::set(
+                    &self.pool,
+                    detail.id.as_str(),
+                    CARE_REPORT_BLOCKED_KEY,
+                    &detail.domain,
+                    now_secs(),
+                )
+                .await;
                 continue;
             }
 
@@ -10612,6 +10666,27 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let mut out: Vec<DashboardAlert> = Vec::new();
         let now = now_secs();
         let summaries = self.list().await?;
+
+        // Care reports that came due with nowhere to send them. A single
+        // query for the whole node — the marker is written by the tick that
+        // hit the problem, so this costs nothing on a healthy box and cannot
+        // drift out of date the way a re-derived scan would.
+        if let Ok(blocked) =
+            hyperion_state::hosting_kv::list_by_key(&self.pool, CARE_REPORT_BLOCKED_KEY).await
+        {
+            for (hid, domain) in blocked {
+                out.push(DashboardAlert {
+                    kind: "care_report_blocked".into(),
+                    severity: "error".into(),
+                    message: format!(
+                        "{domain} is paying for a care report that cannot be sent — the site \
+                         has no owner e-mail. Set one under Expiration on the site, then the \
+                         report goes out on the next sweep with the period intact."
+                    ),
+                    hosting: Some(if domain.is_empty() { hid } else { domain }),
+                });
+            }
+        }
 
         // Failed hostings — straight pass.
         for s in &summaries {
@@ -28873,6 +28948,70 @@ mod tests {
     /// A reverse proxy serves an upstream and has no document root to run
     /// PHP from, so it is still refused — giving it a pool would produce
     /// a site that silently does not work.
+    /// Editing a SUSPENDED site must not bring it back online.
+    ///
+    /// nginx_write_vhost renders the serving vhost with no idea what state the
+    /// hosting is in. set_php_version happens to refuse on a suspended site
+    /// already ("resume first"), but the alias and vhost-option editors did
+    /// not — so an alias edit quietly un-suspended a customer who had not
+    /// paid. The serving writer must not be touched at all here.
+    #[tokio::test]
+    async fn editing_aliases_on_a_suspended_site_does_not_unsuspend_it() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let pool = open_memory().await.expect("open");
+        let serving = std::sync::Arc::new(AtomicUsize::new(0));
+        let counter = serving.clone();
+        // Built from scratch: mockall matches expectations in REGISTRATION
+        // order, so a permissive nginx_write_vhost inherited from a helper
+        // would win and the counter would never move.
+        let mut a = MockAdapterPort::new();
+        a.expect_nginx_write_vhost().returning(move |_| {
+            counter.fetch_add(1, Ordering::Relaxed);
+            Ok(())
+        });
+        a.expect_ensure_user().returning(|_, _| Ok(1042));
+        a.expect_ensure_dirs().returning(|_, _, _, _| Ok(()));
+        a.expect_fpm_ensure().returning(|_, _, _| Ok(()));
+        a.expect_db_create().returning(|_, _, _| Ok(db_creds()));
+        a.expect_acme_issue().returning(|d, _| Ok(cert_for(d)));
+        a.expect_redis_is_available().returning(|| true);
+        a.expect_nginx_apply_suspended().returning(|_, _, _| Ok(()));
+        a.expect_fpm_delete().returning(|_, _| Ok(()));
+        a.expect_db_lock().returning(|_, _| Ok(()));
+        a.expect_linux_lock_login().returning(|_| Ok(()));
+        a.expect_kill_user_procs().returning(|_| Ok(()));
+        let s = svc(pool.clone(), a);
+        s.create(req("paused2.cz")).await.expect("create");
+        let sel = HostingSelector::Domain(Domain::parse("paused2.cz").unwrap());
+        s.suspend(
+            sel.clone(),
+            hyperion_types::SuspendReason::Manual {
+                message: Some("Unpaid".into()),
+            },
+        )
+        .await
+        .expect("suspend");
+        let after_suspend = serving.load(Ordering::Relaxed);
+
+        s.hosting_set_aliases(
+            sel.clone(),
+            vec![Domain::parse("www.paused2.cz").expect("alias")],
+        )
+        .await
+        .expect("alias edit");
+
+        assert_eq!(
+            serving.load(Ordering::Relaxed),
+            after_suspend,
+            "the SERVING vhost was written for a suspended site — that puts a \
+             non-paying customer back online as a side effect of an unrelated edit"
+        );
+        assert_eq!(
+            s.get(sel).await.expect("get").state,
+            HostingState::Suspended
+        );
+    }
+
     #[tokio::test]
     async fn set_php_version_still_rejects_a_reverse_proxy() {
         let pool = open_memory().await.expect("open");
