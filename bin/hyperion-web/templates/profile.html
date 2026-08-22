@@ -233,5 +233,62 @@
   </details>
 </div>
 
+{# ───── Signed-in devices ───── #}
+<div class="card" style="margin-top:1rem">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+    Signed-in devices
+    <span class="text-soft small" style="font-weight:400;margin-left:0.5rem">{{ sessions.len() }}</span>
+  </h2>
+  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">
+    Every browser currently signed in to this account. A stolen session cookie
+    is invisible until you can see the list it is in — if anything here is not
+    you, sign out everywhere and change your password.
+  </p>
+  {% if sessions.is_empty() %}
+    <p class="muted small" style="margin:0">No other sessions.</p>
+  {% else %}
+  <div class="table-wrap" style="margin:0 -1.5rem 0.9rem">
+    <table>
+      <thead>
+        <tr><th>Device</th><th>IP</th><th>Signed in</th><th>Last seen</th><th class="right">Action</th></tr>
+      </thead>
+      <tbody>
+      {% for s in sessions %}
+        <tr>
+          <td style="max-width:22rem">
+            {% if s.sid == current_sid %}<span class="pill ok" style="margin-right:0.4rem">this device</span>{% endif %}
+            <span class="text-soft small">{% if let Some(ua) = s.user_agent %}{{ ua }}{% else %}unknown{% endif %}</span>
+          </td>
+          <td><code style="font-size:0.8rem">{% if let Some(ip) = s.ip %}{{ ip }}{% else %}—{% endif %}</code></td>
+          <td class="muted small">{{ s.created_at|datetime }}</td>
+          <td class="muted small">{{ s.last_seen_at|datetime }}</td>
+          <td class="right">
+            {% if s.sid != current_sid %}
+            <form method="post" action="/profile/sessions/revoke" style="display:inline">
+              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+              <input type="hidden" name="sid" value="{{ s.sid }}">
+              <button class="btn small" type="submit">Sign out</button>
+            </form>
+            {% else %}
+            <span class="text-soft small">—</span>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+  <form method="post" action="/profile/sessions/revoke-all"
+        data-confirm-title="Sign out everywhere"
+        data-confirm-body="Every session including this one is ended and you will be asked to sign in again. Do this if you think someone else has access to your account — sparing the browser you are holding would be exactly wrong if that browser is theirs."
+        data-confirm-confirm-label="Sign out everywhere"
+        data-confirm-variant="danger">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <button class="btn danger" type="submit">Sign out of all devices</button>
+  </form>
+</div>
+
 </div>
 {% endblock %}

@@ -541,6 +541,14 @@ pub fn build_router(state: SharedState) -> Router {
         .route("/api/jobs-active", get(handlers::jobs::get_active_jobs))
         .route("/api/nav-status", get(handlers::jobs::get_nav_status))
         .route(
+            "/profile/sessions/revoke",
+            post(handlers::profile::post_revoke_session),
+        )
+        .route(
+            "/profile/sessions/revoke-all",
+            post(handlers::profile::post_revoke_all_sessions),
+        )
+        .route(
             "/settings/email-logo",
             post(handlers::settings::post_email_logo)
                 .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024)),

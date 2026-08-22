@@ -2051,6 +2051,23 @@
       <code>wp-content/uploads</code> and <code>cache</code>; and <code>403</code>
       obvious probe query-strings and scanner user-agents.
     </p>
+    <h3 class="section-title">Bots</h3>
+    <p class="muted small" style="margin:-0.3rem 0 0.6rem">
+      Refuse whole families of crawlers with a <code>403</code>. A clean refusal
+      is deliberate — a dropped connection reads as a timeout and gets retried,
+      so it costs more traffic than it saves.
+      <strong>Search engines are not listed here on purpose:</strong> nothing on
+      this card can deindex the site.
+    </p>
+    {% for b in bot_families %}
+    <label class="field-checkbox">
+      <input type="checkbox" name="blocked_bots" value="{{ b.0 }}"
+             {% if b.3 %}checked{% endif %}>
+      <strong>{{ b.1 }}</strong>
+      <span class="muted" style="margin-left:0.4rem;font-size:0.82rem">— {{ b.2 }}</span>
+    </label>
+    {% endfor %}
+
     <div class="field" style="margin-top:0.75rem">
       <label for="wp_admin_allowlist">
         Restrict <code>/wp-admin</code> + <code>/wp-login.php</code> to these IPs
@@ -3472,9 +3489,22 @@
   {% if site_emails.is_empty() %}
     <div class="empty" style="padding:1.5rem 1rem">
       <p class="muted">
-        No outbound mail captured yet. The wrapper is configured through this hosting's
-        FPM pool (php_admin_value[sendmail_path]). If you've recently installed Hyperion,
-        restart php-fpm so the new value takes effect.
+        <strong>No outbound mail captured yet.</strong> Two ordinary reasons, and
+        neither is a fault:
+      </p>
+      <ul class="muted" style="text-align:left;max-width:44rem;margin:0.4rem auto 0;font-size:0.88rem;line-height:1.6">
+        <li>The site has not sent anything yet.</li>
+        <li><strong>The site sends over SMTP.</strong> A plugin like WP Mail SMTP,
+          Post SMTP or Brevo replaces WordPress's mail transport and talks to a
+          mail server directly — which bypasses PHP's <code>sendmail_path</code>
+          entirely, so this log never sees it. That is why one site here shows
+          mail and another shows none. Nothing is broken; the mail is simply not
+          going through this machine's sendmail.</li>
+      </ul>
+      <p class="muted" style="margin-top:0.5rem;font-size:0.88rem">
+        The wrapper itself is wired through this hosting's FPM pool
+        (<code>php_admin_value[sendmail_path]</code>), re-applied on every agent
+        start.
       </p>
     </div>
   {% else %}

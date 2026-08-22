@@ -201,6 +201,7 @@ pub trait AgentApi: Send + Sync + 'static {
     /// Flip `revoked_at`. Returns true if the row existed and was
     /// still live.
     async fn web_session_revoke(&self, sid: String, revoked_by: i64) -> Result<bool, RpcError>;
+    async fn web_session_revoke_all(&self, user_id: i64, revoked_by: i64) -> Result<i64, RpcError>;
 
     /// Mint an API key owned by `owner_user_id`. The requested `caps` /
     /// `scope_all` are clamped server-side to the owner's effective

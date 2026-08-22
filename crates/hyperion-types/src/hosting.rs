@@ -213,6 +213,19 @@ pub struct VhostOptions {
     /// admin-ajax.php is never gated so front-end AJAX keeps working.
     #[serde(default)]
     pub wp_admin_allowlist: String,
+    /// Bot families to refuse, comma-separated. Recognised groups:
+    /// `ai` (GPTBot, ClaudeBot, CCBot, PerplexityBot, Bytespider, …),
+    /// `social` (facebookexternalhit, Twitterbot, Instagram, Pinterest),
+    /// `seo` (AhrefsBot, SemrushBot, MJ12bot, DotBot, DataForSeo),
+    /// `shopping` (Heureka, Zbozi, Google Shopping).
+    ///
+    /// Deliberately NOT a free-text user-agent box: an operator typing a
+    /// loose pattern into an nginx regex can block real visitors, and the
+    /// families are the units people actually reason in ("no AI scrapers").
+    /// Search engines are absent on purpose — there is no group here that
+    /// can accidentally deindex a customer's site.
+    #[serde(default)]
+    pub blocked_bots: String,
 }
 
 fn default_kind() -> String {

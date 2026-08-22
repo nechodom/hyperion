@@ -1310,6 +1310,47 @@ function isShortcutContext(ev) {
 })();
 
 // ============================================================
+//  Session watchdog. A page left open past its session showed a
+//  fully-populated panel that was, in fact, logged out — every
+//  number on it stale, every button about to bounce to /login.
+//  That is worse than being logged out visibly: it looks live.
+//
+//  /api/me/role sits behind the auth middleware, so an expired
+//  session answers with a redirect to the login page rather than
+//  JSON. `fetch` follows that redirect transparently, so the tell
+//  is the FINAL url, not the status.
+// ============================================================
+(function () {
+  'use strict';
+  let goneAlready = false;
+  async function check() {
+    if (document.hidden || goneAlready) return;
+    try {
+      const r = await fetch('/api/me/role', {
+        credentials: 'same-origin',
+        headers: { 'accept': 'application/json' },
+      });
+      const loggedOut = r.status === 401
+        || /\/login(\?|$)/.test(new URL(r.url, location.href).pathname + location.search)
+        || new URL(r.url, location.href).pathname === '/login';
+      if (!loggedOut) return;
+      goneAlready = true;
+      // Carry where they were, so signing back in returns them to it
+      // instead of the dashboard.
+      const back = encodeURIComponent(location.pathname + location.search);
+      location.href = '/login?error=expired&next=' + back;
+    } catch (_) {
+      // Network blip — say nothing. Bouncing someone to /login because
+      // their wifi dropped for two seconds would be its own bug.
+    }
+  }
+  setInterval(check, 60_000);
+  // Coming back to a tab is exactly when a session has most likely
+  // lapsed, so check then rather than waiting out the interval.
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) check(); });
+})();
+
+// ============================================================
 //  Click-to-copy. Any element with `data-copy="<text>"` copies it
 //  and says so in place. Generic on purpose — connection details,
 //  paths and hostnames are all things an operator is about to
@@ -1534,10 +1575,26 @@ function isShortcutContext(ev) {
       } catch (_) { /* swallow — try again next tick */ }
     }
     ticks.push(tick);
-    let timer = setInterval(tick, secs * 1000);
+    // The interval is re-read from the attribute rather than captured, so a
+    // control on the page can retune it live — see the refresh picker on
+    // /stats. One timer, restarted; never two racing each other.
+    let timer = null;
+    function period() {
+      const v = parseInt(node.getAttribute('data-live-refresh'), 10);
+      return (!v || v < 2) ? secs * 1000 : v * 1000;
+    }
+    function arm() {
+      if (timer) clearInterval(timer);
+      timer = setInterval(tick, period());
+    }
+    arm();
+    node.addEventListener('live-refresh-changed', arm);
     document.addEventListener('visibilitychange', () => {
-      clearInterval(timer);
-      if (!document.hidden) timer = setInterval(tick, secs * 1000);
+      if (timer) clearInterval(timer);
+      timer = null;
+      // Nothing ticks while hidden — a background tab polling every 5 s is
+      // just load on the box for a page nobody is looking at.
+      if (!document.hidden) { arm(); tick(true); }
     });
   });
   // Back/forward navigation restores a frozen page from the bfcache with

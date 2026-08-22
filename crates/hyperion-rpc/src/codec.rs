@@ -704,6 +704,11 @@ pub enum Request {
         sid: String,
         revoked_by: i64,
     },
+    /// Sign a user out of every device at once.
+    WebSessionRevokeAll {
+        user_id: i64,
+        revoked_by: i64,
+    },
     /// Mint an API key owned by `owner_user_id`. `caps`/`scope_all` are
     /// clamped server-side to the owner's effective caps. The agent is
     /// the source of truth for `api_keys` (master-only table).
@@ -1703,6 +1708,8 @@ pub enum Response {
     WebSessionTouch(bool),
     /// `/settings/sessions` list payload.
     WebSessionList(Vec<hyperion_types::WebSessionView>),
+    /// How many sessions "sign out everywhere" actually revoked.
+    WebSessionRevokeAll(i64),
     /// Newly-minted API key — carries the RAW key (shown once).
     ApiKeyCreated(hyperion_types::ApiKeyCreated),
     /// Admin "API keys" card list payload (never the hash/raw).

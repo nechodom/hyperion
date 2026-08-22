@@ -404,6 +404,10 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.web_session_revoke(&sid, revoked_by).await
     }
 
+    async fn web_session_revoke_all(&self, user_id: i64, revoked_by: i64) -> Result<i64, RpcError> {
+        self.svc.web_session_revoke_all(user_id, revoked_by).await
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn api_key_create(
         &self,

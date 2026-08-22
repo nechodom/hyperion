@@ -212,6 +212,10 @@ struct DetailTpl<'a> {
     /// Empty otherwise; the template's WP tab shows an "install WP first"
     /// state instead of an empty table.
     wp_plugins: hyperion_types::WpPluginListResponse,
+    /// (value, label, description, checked) for the bot-family checkboxes.
+    /// Built server-side so the list of families lives in ONE place — the
+    /// renderer that turns them into nginx patterns.
+    bot_families: Vec<(&'static str, &'static str, &'static str, bool)>,
     /// Whether `redis-cache` is present. Enabling Redis writes the wp-config
     /// constants and changes nothing observable until that plugin exists, so
     /// the card offers to install it rather than leaving the gap in prose.
@@ -1323,6 +1327,7 @@ pub async fn post_create(
                 // Post-create render: the plugin list has not been fetched,
                 // so claim installed to keep the prompt off a page that
                 // cannot know either way.
+                bot_families: bot_family_rows(""),
                 redis_plugin_installed: true,
                 email_log: vec![],
                 site_emails: vec![],
@@ -2079,6 +2084,7 @@ pub async fn get_detail(
             .map(|(pw, _)| pw),
         _ => None,
     };
+    let bot_families = bot_family_rows(&detail.vhost_options.blocked_bots);
     let tpl = DetailTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -2174,6 +2180,7 @@ pub async fn get_detail(
         users_for_access: users_for_access_for_detail,
         monitor_config,
         monitor_history,
+        bot_families,
         // `wp plugin list` reports the folder slug; redis-cache is the
         // wordpress.org slug and the folder name both.
         redis_plugin_installed: wp_plugins.plugins.iter().any(|p| p.slug == "redis-cache"),
@@ -3377,6 +3384,9 @@ pub struct VhostOptionsForm {
     redirect_preserve_path: Option<String>,
     #[serde(default)]
     waf_enabled: Option<String>,
+    /// One entry per ticked family; axum's Form gives us every value.
+    #[serde(default)]
+    blocked_bots: Vec<String>,
     #[serde(default)]
     wp_admin_allowlist: String,
     #[serde(default)]
@@ -3420,6 +3430,16 @@ pub async fn post_vhost_options(
         redirect_code: form.redirect_code,
         redirect_preserve_path: checkbox_on(&form.redirect_preserve_path),
         waf_enabled: checkbox_on(&form.waf_enabled),
+        // Only the families the renderer knows — anything else is dropped
+        // rather than persisted, so an edited form cannot smuggle a pattern
+        // of its own into an nginx regex.
+        blocked_bots: form
+            .blocked_bots
+            .iter()
+            .map(|f| f.trim())
+            .filter(|f| matches!(*f, "ai" | "social" | "seo" | "shopping"))
+            .collect::<Vec<_>>()
+            .join(","),
         wp_admin_allowlist: form.wp_admin_allowlist.trim().to_string(),
         canonical_host: form.canonical_host.trim().to_string(),
     };
@@ -4547,6 +4567,20 @@ fn now_secs_web() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+/// The bot families offered in the UI, with whichever are currently on.
+fn bot_family_rows(selected: &str) -> Vec<(&'static str, &'static str, &'static str, bool)> {
+    let on: Vec<&str> = selected.split(',').map(|s| s.trim()).collect();
+    [
+        ("ai", "AI scrapers", "GPTBot, ClaudeBot, CCBot, PerplexityBot, Bytespider, Google-Extended and friends — the crawlers that train models on the site", ),
+        ("social", "Social previews", "facebookexternalhit, Twitterbot, Instagram, Discord, WhatsApp — blocking these stops link previews from rendering"),
+        ("seo", "SEO crawlers", "AhrefsBot, SemrushBot, MJ12bot, DotBot — third-party backlink and audit tools, usually the bulk of nuisance traffic"),
+        ("shopping", "Price comparison", "Heureka, Zboží, Google Shopping — block only if the site is not selling through them"),
+    ]
+    .into_iter()
+    .map(|(v, label, desc)| (v, label, desc, on.contains(&v)))
+    .collect()
 }
 
 fn generate_wp_admin_password() -> String {
