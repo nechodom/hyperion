@@ -40,6 +40,24 @@
    (base.html) — swaps only this region's innerHTML, no full reload, no
    flicker. The node switcher above stays outside so a mid-selection isn't
    clobbered. #}
+{# Refresh picker. The cadence people want depends entirely on why they are
+   here: watching a node during a deploy wants seconds, leaving the page open
+   on a second monitor wants a minute. The choice is remembered, because
+   re-picking it on every visit is the kind of small tax that makes a feature
+   feel unfinished. #}
+<div class="row" style="justify-content:flex-end;align-items:center;gap:0.5rem;margin-bottom:0.6rem">
+  <label for="stats-refresh" class="text-soft small" style="margin:0">Refresh</label>
+  <select id="stats-refresh" class="input small" style="width:auto;padding:0.25rem 0.5rem">
+    <option value="5">every 5 s</option>
+    <option value="15">every 15 s</option>
+    <option value="30" selected>every 30 s</option>
+    <option value="60">every minute</option>
+    <option value="300">every 5 min</option>
+    <option value="0">paused</option>
+  </select>
+  <span id="stats-refresh-note" class="text-soft small"></span>
+</div>
+
 <div id="stats-live" data-live-refresh="30">
 
 {% if let Some(e) = error %}
@@ -424,4 +442,32 @@
   </div>
 {% endif %}
 </div>{# /stats-live #}
+<script>
+// Retune the shared live-refresh driver for THIS page and remember the pick.
+(function () {
+  'use strict';
+  const sel = document.getElementById('stats-refresh');
+  const region = document.getElementById('stats-live');
+  const note = document.getElementById('stats-refresh-note');
+  if (!sel || !region) return;
+  const KEY = 'hyperionStatsRefresh';
+  function apply(secs, persist) {
+    // 0 = paused. The driver ignores anything under 2 s, so parking the
+    // attribute there is how "off" is expressed without a second flag.
+    region.setAttribute('data-live-refresh', secs > 0 ? String(secs) : '0');
+    region.dispatchEvent(new CustomEvent('live-refresh-changed'));
+    if (note) {
+      note.textContent = secs > 0 ? '' : 'paused — reload to see changes';
+    }
+    if (persist) { try { localStorage.setItem(KEY, String(secs)); } catch (_) {} }
+  }
+  let saved = null;
+  try { saved = localStorage.getItem(KEY); } catch (_) {}
+  if (saved !== null && [...sel.options].some(o => o.value === saved)) {
+    sel.value = saved;
+  }
+  apply(parseInt(sel.value, 10) || 0, false);
+  sel.addEventListener('change', () => apply(parseInt(sel.value, 10) || 0, true));
+})();
+</script>
 {% endblock %}

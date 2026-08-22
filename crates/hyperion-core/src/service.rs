@@ -12309,6 +12309,36 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .collect())
     }
 
+    /// Revoke every session a user holds — "sign out everywhere".
+    ///
+    /// Returns how many were live. The CALLER decides whether to spare the
+    /// current session: from the profile page it does not, because the point
+    /// of the button is usually "someone else has my cookie" and sparing the
+    /// browser you are holding is exactly wrong if that browser is theirs.
+    pub async fn web_session_revoke_all(
+        &self,
+        user_id: i64,
+        revoked_by: i64,
+    ) -> Result<i64, RpcError> {
+        let n = hyperion_state::web_sessions::revoke_all_for_user(
+            &self.pool,
+            user_id,
+            revoked_by,
+            now_secs(),
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("web_session_revoke_all: {e}")))?;
+        self.append_audit(
+            "web_session.revoke_all",
+            None,
+            &serde_json::json!({"user_id": user_id, "revoked_by": revoked_by, "count": n})
+                .to_string(),
+            "ok",
+        )
+        .await;
+        Ok(n as i64)
+    }
+
     pub async fn web_session_revoke(&self, sid: &str, revoked_by: i64) -> Result<bool, RpcError> {
         let r = hyperion_state::web_sessions::revoke(&self.pool, sid, revoked_by, now_secs())
             .await

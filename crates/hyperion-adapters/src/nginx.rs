@@ -55,6 +55,79 @@ pub struct VhostInput<'a> {
 /// So detection failure must fall back to the parameter form. Guessing "old"
 /// on a new nginx costs a cosmetic warning; guessing "new" on an old one is
 /// an outage.
+/// nginx user-agent patterns for a comma-separated list of bot families.
+///
+/// Case-insensitive substring-ish patterns, anchored loosely on purpose: a
+/// crawler's UA carries a version and a URL, so matching the product token is
+/// what actually works. Returns an empty vec for an empty/unknown selection,
+/// and the caller emits nothing at all in that case — an empty `if` block
+/// costs a regex evaluation on every single request for no reason.
+///
+/// Search engines are deliberately absent: no group here can accidentally
+/// deindex a customer's site, which is the one mistake that would be
+/// expensive and slow to notice.
+pub fn bot_patterns(families: &str) -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = Vec::new();
+    for fam in families.split(',').map(|f| f.trim().to_ascii_lowercase()) {
+        match fam.as_str() {
+            "ai" => out.extend([
+                "GPTBot",
+                "ChatGPT-User",
+                "OAI-SearchBot",
+                "ClaudeBot",
+                "Claude-Web",
+                "anthropic-ai",
+                "CCBot",
+                "PerplexityBot",
+                "Bytespider",
+                "Google-Extended",
+                "Applebot-Extended",
+                "Diffbot",
+                "cohere-ai",
+                "Omgilibot",
+                "ImagesiftBot",
+                "Meta-ExternalAgent",
+            ]),
+            "social" => out.extend([
+                "facebookexternalhit",
+                "meta-externalhit",
+                "Twitterbot",
+                "Pinterestbot",
+                "Instagram",
+                "Slackbot",
+                "Discordbot",
+                "WhatsApp",
+                "TelegramBot",
+            ]),
+            "seo" => out.extend([
+                "AhrefsBot",
+                "SemrushBot",
+                "MJ12bot",
+                "DotBot",
+                "DataForSeoBot",
+                "BLEXBot",
+                "rogerbot",
+                "Barkrowler",
+                "SEOkicks",
+                "ZoominfoBot",
+            ]),
+            "shopping" => out.extend([
+                "HeurekaFeed",
+                "Heureka",
+                "SeznamZbozi",
+                "Zbozi",
+                "GoogleProducer",
+                "Storebot-Google",
+                "idealo",
+            ]),
+            _ => {}
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
 fn http2_uses_directive(version: Option<(u32, u32, u32)>) -> bool {
     // Tuple ordering is lexicographic, which is exactly version ordering.
     version.is_some_and(|v| v >= (1, 25, 1))
@@ -118,6 +191,8 @@ fn nginx_wants_http2_directive() -> bool {
 struct VhostTpl<'a> {
     /// See `http2_uses_directive`.
     http2_directive: bool,
+    /// nginx user-agent tokens to refuse; empty ⇒ no rule is emitted.
+    blocked_bots: Vec<&'static str>,
     domain: &'a str,
     aliases: &'a [String],
     root_dir: &'a str,
@@ -591,6 +666,7 @@ pub async fn apply_suspended(
 pub fn render(input: &VhostInput<'_>) -> Result<String, AdapterError> {
     let tpl = VhostTpl {
         http2_directive: nginx_wants_http2_directive(),
+        blocked_bots: bot_patterns(&input.options.blocked_bots),
         domain: input.domain,
         aliases: input.aliases,
         root_dir: input.root_dir,
@@ -1304,6 +1380,65 @@ mod tests {
             "the :80 block redirects before serving the ACME challenge — behind a Cloudflare \
              proxy in Flexible mode that is an infinite edge<->origin redirect loop:\n{http_block}"
         );
+    }
+
+    /// Blocking a bot family must never be able to break certificate
+    /// renewal. Let's Encrypt's validation agent is not in any family here,
+    /// but an operator who blocks broadly should still be safe by
+    /// CONSTRUCTION rather than by luck — so the ACME location is emitted
+    /// before the user-agent check can matter, in both server blocks.
+    #[test]
+    fn blocking_bots_never_blocks_acme() {
+        let aliases: Vec<String> = vec![];
+        let opts = hyperion_types::VhostOptions {
+            blocked_bots: "ai,social,seo,shopping".into(),
+            ..Default::default()
+        };
+        let out = render(&VhostInput {
+            domain: "example.cz",
+            aliases: &aliases,
+            root_dir: "/srv/x/htdocs",
+            logs_dir: "/srv/x/logs",
+            system_user: "x",
+            php_version: None,
+            cert_path: "/etc/lm/certs/example.cz/fullchain.pem",
+            key_path: "/etc/lm/certs/example.cz/privkey.pem",
+            acme_challenge_root: "/var/lib/lm/acme-challenges",
+            hosting_id: "01HMOD",
+            options: &opts,
+            preview_server_name: None,
+            preview_cert_path: None,
+            preview_cert_key_path: None,
+        })
+        .expect("render");
+        assert!(out.contains("GPTBot"), "no bot rule emitted:\n{out}");
+        assert!(out.contains("return 403"));
+        // The rule must not name anything that would refuse a search engine.
+        for engine in ["Googlebot", "Bingbot", "SeznamBot", "DuckDuckBot"] {
+            assert!(
+                !out.contains(engine),
+                "{engine} would be blocked — that deindexes a customer's site"
+            );
+        }
+        // Every TLS block still serves the challenge.
+        let acme = "location /.well-known/acme-challenge/ {";
+        assert!(out
+            .split("\nserver {")
+            .any(|b| b.contains("listen 443 ssl") && b.contains(acme)));
+    }
+
+    /// Nothing is emitted when no family is selected — an empty regex would
+    /// cost an evaluation per request and match nothing.
+    #[test]
+    fn no_bot_families_emits_no_rule() {
+        assert!(bot_patterns("").is_empty());
+        assert!(bot_patterns("nonsense").is_empty());
+        assert!(!bot_patterns("ai").is_empty());
+        // Deduped and stable, so the rendered vhost does not churn.
+        let a = bot_patterns("ai,ai,social");
+        let mut b = a.clone();
+        b.dedup();
+        assert_eq!(a, b);
     }
 
     #[test]

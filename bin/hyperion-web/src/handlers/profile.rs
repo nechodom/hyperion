@@ -5,6 +5,8 @@
 
 use crate::auth::AuthCtx;
 use crate::error::AppError;
+#[allow(unused_imports)] // askama resolves {{ x|datetime }} through this
+use crate::filters;
 use crate::state::SharedState;
 use askama::Template;
 use axum::extract::State;
@@ -32,6 +34,13 @@ struct ProfileTpl<'a> {
     /// 2FA) — renders a blocking banner above the enrolment card.
     require_2fa: bool,
     csrf_token: String,
+    /// Every live session this account holds — "where am I signed in".
+    /// A stolen cookie is invisible without this list, and the only way to
+    /// act on one is to be able to see it first.
+    sessions: Vec<hyperion_types::WebSessionView>,
+    /// The sid of the session viewing the page, so it can be labelled
+    /// rather than looking like just another device.
+    current_sid: String,
 }
 
 /// View-shape — the SVG is rendered server-side.
@@ -72,6 +81,24 @@ pub async fn get_profile(
         _ => None,
     };
     let csrf_token = super::session_csrf_token(&state, &ctx);
+    // Live sessions for this account. Failure renders an empty list rather
+    // than a 500: the rest of the profile page is still useful, and a
+    // missing list is obvious on its own.
+    let sessions = match hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::WebSessionList {
+            user_id: session.user_id,
+        },
+    )
+    .await
+    {
+        Ok(RpcResponse::WebSessionList(v)) => {
+            v.into_iter().filter(|s| s.revoked_at.is_none()).collect()
+        }
+        _ => Vec::new(),
+    };
+    let current_sid = session.sid.clone();
+
     let tpl = ProfileTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -84,6 +111,8 @@ pub async fn get_profile(
         flash: q.flash,
         require_2fa: session.needs_2fa_enrollment(),
         csrf_token,
+        sessions,
+        current_sid,
     };
     Ok(Html(tpl.render()?).into_response())
 }
@@ -91,6 +120,71 @@ pub async fn get_profile(
 /// POST /profile/2fa/start — generate a fresh TOTP secret + 10 backup
 /// codes for the current user. Renders the QR + codes in-place so the
 /// operator can scan + save before confirming.
+#[derive(serde::Deserialize)]
+pub struct RevokeSessionForm {
+    pub sid: String,
+}
+
+/// POST /profile/sessions/revoke — end ONE other session.
+pub async fn post_revoke_session(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    axum::extract::Form(form): axum::extract::Form<RevokeSessionForm>,
+) -> Result<Response, AppError> {
+    let Some(session) = ctx.session.clone() else {
+        return Ok(Redirect::to("/login").into_response());
+    };
+    // Revoking is scoped to sessions this user OWNS. Without the ownership
+    // check a sid from anywhere would do, which turns a profile page into a
+    // way to sign out any other account.
+    let owned = match hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::WebSessionList {
+            user_id: session.user_id,
+        },
+    )
+    .await
+    {
+        Ok(RpcResponse::WebSessionList(v)) => v.iter().any(|s| s.sid == form.sid),
+        _ => false,
+    };
+    if !owned {
+        return Ok(Redirect::to("/profile?error=unknown+session").into_response());
+    }
+    let _ = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::WebSessionRevoke {
+            sid: form.sid,
+            revoked_by: session.user_id,
+        },
+    )
+    .await?;
+    Ok(Redirect::to("/profile?flash=device+signed+out").into_response())
+}
+
+/// POST /profile/sessions/revoke-all — end every session, including this one.
+///
+/// Deliberately including this one: the reason to press it is "someone else
+/// may have my cookie", and sparing the browser you are holding is exactly
+/// wrong if that browser is theirs.
+pub async fn post_revoke_all_sessions(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+) -> Result<Response, AppError> {
+    let Some(session) = ctx.session.clone() else {
+        return Ok(Redirect::to("/login").into_response());
+    };
+    let _ = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::WebSessionRevokeAll {
+            user_id: session.user_id,
+            revoked_by: session.user_id,
+        },
+    )
+    .await?;
+    Ok(Redirect::to("/login?error=expired").into_response())
+}
+
 pub async fn post_2fa_start(
     State(state): State<SharedState>,
     ctx: AuthCtx,
@@ -158,6 +252,10 @@ pub async fn post_2fa_start(
         flash: None,
         require_2fa: session.needs_2fa_enrollment(),
         csrf_token,
+        // The 2FA-enrolment render is a focused, blocking screen — the
+        // session list would be noise there.
+        sessions: Vec::new(),
+        current_sid: String::new(),
     };
     Ok(Html(tpl.render()?).into_response())
 }

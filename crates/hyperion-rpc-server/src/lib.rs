@@ -271,6 +271,13 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::WebSessionList(v),
             Err(e) => Response::Error(e),
         },
+        Request::WebSessionRevokeAll {
+            user_id,
+            revoked_by,
+        } => match api.web_session_revoke_all(user_id, revoked_by).await {
+            Ok(n) => Response::WebSessionRevokeAll(n),
+            Err(e) => Response::Error(e),
+        },
         Request::WebSessionRevoke { sid, revoked_by } => {
             match api.web_session_revoke(sid, revoked_by).await {
                 Ok(_) => Response::WebSessionAck,
@@ -1697,6 +1704,10 @@ mod tests {
         ) -> Result<Vec<hyperion_types::WebSessionView>, RpcError> {
             Ok(Vec::new())
         }
+        async fn web_session_revoke_all(&self, _: i64, _: i64) -> Result<i64, RpcError> {
+            Ok(0)
+        }
+
         async fn web_session_revoke(&self, _: String, _: i64) -> Result<bool, RpcError> {
             Ok(true)
         }

@@ -110,6 +110,17 @@
     auth_basic_user_file /etc/nginx/.htpasswd-{{ hosting_id }};
     {%- endif %}
 
+{%- if !blocked_bots.is_empty() %}
+    # Bot families the operator switched off. 403 rather than 444: a crawler
+    # that gets a clean refusal backs off, whereas a dropped connection reads
+    # as a timeout and is usually RETRIED. The check sits above every content
+    # location so it costs one regex before any work is done, and below the
+    # ACME location so a blocked family can never stop a renewal.
+    if ($http_user_agent ~* "({% for b in blocked_bots %}{{ b }}{% if !loop.last %}|{% endif %}{% endfor %})") {
+        return 403;
+    }
+{%- endif %}
+
     # Always allow ACME challenges past basic-auth.
     location /.well-known/acme-challenge/ {
         {%- if basic_auth_enabled %}

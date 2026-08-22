@@ -941,6 +941,7 @@ fn print_pretty(resp: &Response) {
             println!("matches:  {}", if c.matches { "yes ✓" } else { "no ✗" });
             println!("note:     {}", c.note);
         }
+        Response::WebSessionRevokeAll(n) => println!("✓ signed out of {n} session(s)"),
         Response::EmailLogoSet => println!("✓ e-mail logo updated"),
         Response::EmailLogoGet(v) => match v {
             Some(_) => println!("e-mail logo: set"),
