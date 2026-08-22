@@ -18,6 +18,7 @@ pub mod dkim;
 pub mod email;
 pub mod fs;
 pub mod ftp;
+pub mod geoip;
 pub mod integrity;
 pub mod logscan;
 pub mod mariadb;

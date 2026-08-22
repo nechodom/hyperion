@@ -66,6 +66,24 @@ pub struct VhostInput<'a> {
 /// Search engines are deliberately absent: no group here can accidentally
 /// deindex a customer's site, which is the one mistake that would be
 /// expensive and slow to notice.
+/// Sanitize a comma-separated country list down to real ISO-3166-1
+/// alpha-2 codes.
+///
+/// Two letters, uppercased, nothing else — this value is interpolated into
+/// an nginx regex, so anything that is not a country code is dropped rather
+/// than escaped. A dropped code blocks nobody; a smuggled one could match
+/// every visitor on the site.
+pub fn country_codes(list: &str) -> Vec<String> {
+    let mut out: Vec<String> = list
+        .split(',')
+        .map(|c| c.trim().to_ascii_uppercase())
+        .filter(|c| c.len() == 2 && c.bytes().all(|b| b.is_ascii_uppercase()))
+        .collect();
+    out.sort();
+    out.dedup();
+    out
+}
+
 pub fn bot_patterns(families: &str) -> Vec<&'static str> {
     let mut out: Vec<&'static str> = Vec::new();
     for fam in families.split(',').map(|f| f.trim().to_ascii_lowercase()) {
@@ -193,6 +211,8 @@ struct VhostTpl<'a> {
     http2_directive: bool,
     /// nginx user-agent tokens to refuse; empty ⇒ no rule is emitted.
     blocked_bots: Vec<&'static str>,
+    /// ISO country codes to refuse; empty ⇒ no rule is emitted.
+    blocked_countries: Vec<String>,
     domain: &'a str,
     aliases: &'a [String],
     root_dir: &'a str,
@@ -667,6 +687,7 @@ pub fn render(input: &VhostInput<'_>) -> Result<String, AdapterError> {
     let tpl = VhostTpl {
         http2_directive: nginx_wants_http2_directive(),
         blocked_bots: bot_patterns(&input.options.blocked_bots),
+        blocked_countries: country_codes(&input.options.blocked_countries),
         domain: input.domain,
         aliases: input.aliases,
         root_dir: input.root_dir,
@@ -1439,6 +1460,62 @@ mod tests {
         let mut b = a.clone();
         b.dedup();
         assert_eq!(a, b);
+    }
+
+    /// A country list is interpolated straight into an nginx regex, so
+    /// anything that is not a two-letter code must be DROPPED rather than
+    /// escaped. A dropped code blocks nobody; a smuggled one could match
+    /// every visitor on the site.
+    #[test]
+    fn country_codes_reject_anything_that_is_not_a_code() {
+        assert_eq!(country_codes("cz, sk"), vec!["CZ", "SK"]);
+        assert_eq!(country_codes("CZ,CZ,cz"), vec!["CZ"], "must dedupe");
+        assert!(
+            country_codes(").*|(").is_empty(),
+            "regex metacharacters must not survive"
+        );
+        assert!(
+            country_codes("CZE").is_empty(),
+            "three letters is not alpha-2"
+        );
+        assert!(country_codes("C1").is_empty());
+        assert!(country_codes("").is_empty());
+    }
+
+    /// Blocking countries must not be able to break renewal either.
+    #[test]
+    fn blocking_countries_never_blocks_acme() {
+        let aliases: Vec<String> = vec![];
+        let opts = hyperion_types::VhostOptions {
+            blocked_countries: "RU,CN".into(),
+            ..Default::default()
+        };
+        let out = render(&VhostInput {
+            domain: "example.cz",
+            aliases: &aliases,
+            root_dir: "/srv/x/htdocs",
+            logs_dir: "/srv/x/logs",
+            system_user: "x",
+            php_version: None,
+            cert_path: "/etc/lm/certs/example.cz/fullchain.pem",
+            key_path: "/etc/lm/certs/example.cz/privkey.pem",
+            acme_challenge_root: "/var/lib/lm/acme-challenges",
+            hosting_id: "01HMOD",
+            options: &opts,
+            preview_server_name: None,
+            preview_cert_path: None,
+            preview_cert_key_path: None,
+        })
+        .expect("render");
+        assert!(out.contains("$hyperion_country"), "no country rule:\n{out}");
+        assert!(
+            out.contains("^(CN|RU)$"),
+            "codes not sorted/anchored:\n{out}"
+        );
+        let acme = "location /.well-known/acme-challenge/ {";
+        assert!(out
+            .split("\nserver {")
+            .any(|b| b.contains("listen 443 ssl") && b.contains(acme)));
     }
 
     #[test]

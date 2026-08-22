@@ -1964,6 +1964,68 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .map_err(|e| RpcError::Internal_with(format!("vhost: {e}")))
     }
 
+    /// Download / refresh the GeoIP country database, then validate and
+    /// reload nginx.
+    ///
+    /// `nginx -t` before the reload is not optional here: the generated map
+    /// is ~400 000 lines included at http{} level, so a truncated or
+    /// malformed one takes EVERY site on the box down, not just the ones
+    /// using it.
+    pub async fn geoip_refresh(&self) -> Result<usize, RpcError> {
+        let creds = hyperion_adapters::geoip::discover_creds(None)
+            .await
+            .ok_or_else(|| RpcError::Validation {
+                message: "no MaxMind credentials found. Put an AccountID and LicenseKey in \
+                          /etc/GeoIP.conf (the same file geoipupdate uses)."
+                    .into(),
+            })?;
+        let n = hyperion_adapters::geoip::refresh(&creds)
+            .await
+            .map_err(|e| RpcError::Internal_with(e.to_string()))?;
+        // Validate before reloading. If the map is bad, take it back out
+        // rather than leaving nginx unable to start.
+        let t = tokio::process::Command::new("nginx")
+            .arg("-t")
+            .output()
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("nginx -t: {e}")))?;
+        if !t.status.success() {
+            let _ = tokio::fs::remove_file(hyperion_adapters::geoip::NGINX_GEO_CONF).await;
+            return Err(RpcError::Internal_with(format!(
+                "the generated geo map was rejected by nginx and has been removed: {}",
+                String::from_utf8_lossy(&t.stderr).trim()
+            )));
+        }
+        let _ = tokio::process::Command::new("systemctl")
+            .args(["reload", "nginx"])
+            .output()
+            .await;
+        self.append_audit(
+            "geoip.refresh",
+            None,
+            &serde_json::json!({ "ranges": n }).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(n)
+    }
+
+    /// (ranges on disk, when it was last written) — drives the Settings card.
+    pub async fn geoip_status(&self) -> (bool, i64) {
+        match tokio::fs::metadata(hyperion_adapters::geoip::RANGES_CSV).await {
+            Ok(m) => {
+                let at = m
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or(0);
+                (m.len() > 0, at)
+            }
+            Err(_) => (false, 0),
+        }
+    }
+
     pub fn is_worker_node(&self) -> bool {
         match &self.node_state_file {
             Some(p) => p.exists(),
