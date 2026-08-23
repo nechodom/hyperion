@@ -3651,15 +3651,46 @@
     ev.preventDefault();
     const id = t.dataset.tab;
     activate(id);
+    remember(id);
     if (history.replaceState) history.replaceState(null, '', '#' + id);
   }));
+  // A hash can name a TAB (#settings) or an element INSIDE one. The old
+  // code only handled the first, so every deep link into a card landed on
+  // the default tab and the result of the action was invisible — which
+  // reads as "nothing happened" even when it worked.
+  function resolve(id) {
+    if (!id) return false;
+    if (activate(id)) { remember(id); return true; }
+    const el = document.getElementById(id);
+    const panel = el && el.closest('.tab-panel');
+    if (panel && panel.id.indexOf('tab-') === 0) {
+      const tab = panel.id.slice(4);
+      if (activate(tab)) {
+        remember(tab);
+        // Scroll after the panel is visible — the browser's native anchor
+        // jump happened while it was display:none and went nowhere.
+        setTimeout(() => el.scrollIntoView({ block: 'start' }), 0);
+        return true;
+      }
+    }
+    return false;
+  }
+  // Plain reloads with no hash come back to the tab you were on, not to
+  // the first one. Keyed per path, so /settings and each hosting keep
+  // separate memories.
+  const memKey = 'hyperionTab:' + location.pathname;
+  function remember(id) {
+    try { localStorage.setItem(memKey, id); } catch (_) {}
+  }
+  function remembered() {
+    try { return localStorage.getItem(memKey); } catch (_) { return null; }
+  }
   const hashId = (location.hash || '').replace(/^#/, '');
-  if (!activate(hashId)) activate('overview');
+  if (!resolve(hashId) && !activate(remembered() || '')) activate('overview');
   // In-page deep links (e.g. the Overview "Security" card → Settings tab)
   // change the hash; activate the matching tab when they do.
   window.addEventListener('hashchange', () => {
-    const h = (location.hash || '').replace(/^#/, '');
-    if (h) activate(h);
+    resolve((location.hash || '').replace(/^#/, ''));
   });
 
   // Persist the current tab across POST submits. Server-issued
