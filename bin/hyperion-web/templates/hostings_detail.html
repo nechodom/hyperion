@@ -2440,14 +2440,18 @@
       <button class="btn small" type="submit">Clear expiry</button>
     </form>
   {% else %}
-    <p class="muted">No expiry set — this hosting will never auto-suspend.</p>
+    <p class="muted">
+      No expiry set — this hosting will never auto-suspend. You can still set
+      an owner e-mail below; it is where the care report goes, and saving it
+      does not create an expiry.
+    </p>
   {% endif %}
   <form method="post" action="/hostings/expiry/set" style="margin-top:1rem">
     <input type="hidden" name="_csrf" value="{{ csrf_expiry_set }}">
     <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
     <div class="field-row">
       <div class="field">
-        <label for="expires_on">Expires on <span class="hint">date · UTC</span></label>
+        <label for="expires_on">Expires on <span class="hint">date · UTC · leave empty for no expiry</span></label>
         {#- Prefilled, in this order: the expiry already set, else the next
             billing date. The field is `required`, so leaving it blank made
             editing the grace period or owner e-mail mean re-typing a date
@@ -2455,7 +2459,12 @@
             the answer that is right nearly every time — a hosting is
             normally paid up to the day it would expire — and it is only a
             default: the operator can still pick any date. #}
-        <input id="expires_on" name="expires_on" type="date" required
+        {#- NOT `required`. The owner e-mail lives on this card and is used
+            for things that have nothing to do with expiry — the care report
+            is sent to it — so demanding a date to save an address would
+            force operators to invent an expiry they do not want. An empty
+            date already means "never expires" on the server. -#}
+        <input id="expires_on" name="expires_on" type="date"
                value="{% if let Some(t) = expiry.expires_at %}{{ t|date }}{% else if let Some(pa) = profile_apply %}{% if let Some(nb) = pa.next_billing_at %}{{ nb|date }}{% endif %}{% endif %}">
       </div>
       <div class="field">
@@ -2466,7 +2475,7 @@
     </div>
     <div class="field-row">
       <div class="field">
-        <label for="owner_email">Owner email <span class="hint">for warning notifications</span></label>
+        <label for="owner_email">Owner email <span class="hint">expiry warnings and the care report · can be set without an expiry</span></label>
         <input id="owner_email" name="owner_email" type="email"
                value="{% if let Some(e) = expiry.owner_email %}{{ e }}{% endif %}"
                placeholder="owner@example.com">
