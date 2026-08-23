@@ -1964,6 +1964,40 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .map_err(|e| RpcError::Internal_with(format!("vhost: {e}")))
     }
 
+    /// Store MaxMind credentials, then immediately prove they work by
+    /// downloading with them.
+    ///
+    /// Verifying on save matters: a licence key that is wrong fails at
+    /// 03:00 in a background tick otherwise, and the operator finds out
+    /// weeks later when a country rule silently never matched.
+    pub async fn geoip_set_creds(
+        &self,
+        account_id: String,
+        license_key: String,
+    ) -> Result<usize, RpcError> {
+        let creds = hyperion_adapters::geoip::MaxmindCreds {
+            account_id: account_id.trim().to_string(),
+            license_key: license_key.trim().to_string(),
+        };
+        if creds.account_id.is_empty() || creds.license_key.is_empty() {
+            return Err(RpcError::Validation {
+                message: "both the account ID and the licence key are required".into(),
+            });
+        }
+        hyperion_adapters::geoip::write_creds(&creds, std::path::Path::new("/etc/GeoIP.conf"))
+            .await
+            .map_err(|e| RpcError::Internal_with(e.to_string()))?;
+        // Never log or audit the key itself — only that it changed.
+        self.append_audit(
+            "geoip.creds.set",
+            None,
+            &serde_json::json!({ "account_id": &creds.account_id }).to_string(),
+            "ok",
+        )
+        .await;
+        self.geoip_refresh().await
+    }
+
     /// Download / refresh the GeoIP country database, then validate and
     /// reload nginx.
     ///

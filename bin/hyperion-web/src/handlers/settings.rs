@@ -83,6 +83,12 @@ struct SettingsTpl<'a> {
     email_logo_set: bool,
     geoip_installed: bool,
     geoip_updated_at: i64,
+    /// Whether credentials are on file. The KEY itself is never sent to
+    /// the page — only whether one exists.
+    geoip_configured: bool,
+    /// The account id IS shown: it is an identifier, not a secret, and
+    /// seeing it is how an operator confirms which account is in use.
+    geoip_account_id: String,
     /// Capability groups for the "create API key" multiselect (reuses the
     /// roles capability groups). Empty when the user can't manage keys.
     api_key_cap_groups: Vec<ApiKeyCapGroup>,
@@ -469,6 +475,55 @@ pub async fn get_email_preview(
         .into_response())
 }
 
+/// The account id on file, if any. Asks the AGENT rather than reading the
+/// file here — on a worker the panel and the credentials are not on the
+/// same box, and reading locally would answer for the wrong machine.
+async fn hyperion_adapters_geoip_creds(state: &SharedState) -> Option<String> {
+    match hyperion_rpc_client::call(&state.agent_socket, Request::GeoipCredsAccount).await {
+        Ok(RpcResponse::GeoipCredsAccount(Some(id))) => Some(id),
+        _ => None,
+    }
+}
+
+/// POST /settings/geoip-creds — store the MaxMind credentials, then prove
+/// they work by downloading with them.
+pub async fn post_geoip_creds(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    axum::extract::Form(form): axum::extract::Form<GeoipCredsForm>,
+) -> Result<Response, AppError> {
+    if !ctx.is_super_admin() {
+        return Ok(Redirect::to("/settings?error=owner+role+required").into_response());
+    }
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::GeoipSetCreds {
+            account_id: form.account_id,
+            license_key: form.license_key.into(),
+        },
+    )
+    .await?;
+    match resp {
+        RpcResponse::GeoipSetCreds(n) => Ok(Redirect::to(&format!(
+            "/settings?saved={}#geoip",
+            super::hostings::urlencoding(&format!("GeoIP ready — {n} ranges"))
+        ))
+        .into_response()),
+        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
+            "/settings?error={}#geoip",
+            super::hostings::urlencoding(&e.to_string())
+        ))
+        .into_response()),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct GeoipCredsForm {
+    pub account_id: String,
+    pub license_key: String,
+}
+
 /// POST /settings/geoip-refresh — download or refresh the country database.
 ///
 /// Synchronous: it is one download and a parse, and the operator pressed a
@@ -826,6 +881,10 @@ pub async fn get_settings(
             }) => (installed, updated_at),
             _ => (false, 0),
         };
+    let (geoip_configured, geoip_account_id) = match hyperion_adapters_geoip_creds(&state).await {
+        Some(id) => (true, id),
+        None => (false, String::new()),
+    };
     let email_logo_set = matches!(
         hyperion_rpc_client::call(&state.agent_socket, Request::EmailLogoGet).await,
         Ok(RpcResponse::EmailLogoGet(Some(_)))
@@ -856,6 +915,8 @@ pub async fn get_settings(
         email_logo_set,
         geoip_installed,
         geoip_updated_at,
+        geoip_configured,
+        geoip_account_id,
         api_key_cap_groups,
         api_keys,
         can_manage_api_keys,

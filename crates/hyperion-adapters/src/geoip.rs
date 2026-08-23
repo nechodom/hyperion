@@ -294,6 +294,65 @@ pub async fn discover_creds(explicit: Option<&Path>) -> Option<MaxmindCreds> {
     None
 }
 
+/// Write credentials to `/etc/GeoIP.conf`, 0600 root.
+///
+/// The same file `geoipupdate` reads, so configuring it here does not
+/// create a second place for the key to live — and an operator who later
+/// runs that tool inherits what was set in the panel.
+///
+/// `EditionIDs` is preserved when the file already has one, because
+/// replacing it would silently narrow what an existing `geoipupdate` cron
+/// fetches. A fresh file gets Country, which is all Hyperion uses.
+pub async fn write_creds(creds: &MaxmindCreds, path: &Path) -> Result<(), AdapterError> {
+    let editions = tokio::fs::read_to_string(path)
+        .await
+        .ok()
+        .and_then(|t| {
+            t.lines()
+                .map(str::trim)
+                .find(|l| l.starts_with("EditionIDs"))
+                .map(|l| l.to_string())
+        })
+        .unwrap_or_else(|| "EditionIDs GeoLite2-Country".to_string());
+
+    let body = format!(
+        "# Managed by Hyperion (Settings -> GeoIP). Also read by geoipupdate.\n\
+         AccountID {}\n\
+         LicenseKey {}\n\
+         {}\n",
+        creds.account_id.trim(),
+        creds.license_key.trim(),
+        editions
+    );
+
+    // Write with the final permissions from the start rather than
+    // chmod-ing afterwards: between a 0644 create and a later chmod there
+    // is a window in which any local user can read the key.
+    let tmp = path.with_extension("hyperion-new");
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        use tokio::io::AsyncWriteExt;
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)
+            .map_err(|e| AdapterError::Other(format!("geoip: open {}: {e}", tmp.display())))?;
+        let mut f = tokio::fs::File::from_std(file);
+        f.write_all(body.as_bytes())
+            .await
+            .map_err(|e| AdapterError::Other(format!("geoip: write creds: {e}")))?;
+        f.flush()
+            .await
+            .map_err(|e| AdapterError::Other(format!("geoip: flush creds: {e}")))?;
+    }
+    tokio::fs::rename(&tmp, path)
+        .await
+        .map_err(|e| AdapterError::Other(format!("geoip: install creds: {e}")))?;
+    Ok(())
+}
+
 /// Download the Country CSV edition and regenerate both artifacts.
 ///
 /// Returns how many ranges were imported. Everything is written to a temp
@@ -454,6 +513,55 @@ mod tests {
         assert!(parse_geoip_conf("AccountID 1\n").is_none());
         assert!(parse_geoip_conf("LicenseKey k\n").is_none());
         assert!(parse_geoip_conf("# nothing\n").is_none());
+    }
+
+    #[tokio::test]
+    async fn writing_creds_preserves_existing_editions() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let p = dir.path().join("GeoIP.conf");
+        std::fs::write(
+            &p,
+            "AccountID 1\nLicenseKey old\nEditionIDs GeoLite2-ASN GeoLite2-City\n",
+        )
+        .expect("seed");
+        write_creds(
+            &MaxmindCreds {
+                account_id: "42".into(),
+                license_key: "newkey".into(),
+            },
+            &p,
+        )
+        .await
+        .expect("write");
+        let back = std::fs::read_to_string(&p).expect("read");
+        let parsed = parse_geoip_conf(&back).expect("round-trips");
+        assert_eq!(parsed.account_id, "42");
+        assert_eq!(parsed.license_key, "newkey");
+        // Narrowing someone's editions would silently change what their
+        // existing geoipupdate cron fetches.
+        assert!(
+            back.contains("GeoLite2-ASN GeoLite2-City"),
+            "editions lost:\n{back}"
+        );
+    }
+
+    /// The key must never be world-readable, not even briefly.
+    #[tokio::test]
+    async fn creds_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tmp");
+        let p = dir.path().join("GeoIP.conf");
+        write_creds(
+            &MaxmindCreds {
+                account_id: "1".into(),
+                license_key: "k".into(),
+            },
+            &p,
+        )
+        .await
+        .expect("write");
+        let mode = std::fs::metadata(&p).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "creds file is {mode:o}, must be 600");
     }
 
     #[test]

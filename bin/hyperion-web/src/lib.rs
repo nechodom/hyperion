@@ -558,6 +558,10 @@ pub fn build_router(state: SharedState) -> Router {
             get(handlers::settings::get_email_logo_img),
         )
         .route(
+            "/settings/geoip-creds",
+            post(handlers::settings::post_geoip_creds),
+        )
+        .route(
             "/settings/geoip-refresh",
             post(handlers::settings::post_geoip_refresh),
         )

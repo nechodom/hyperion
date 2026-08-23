@@ -797,8 +797,25 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         Ok(self.svc.notify_logo_data_uri_pub().await)
     }
 
+    async fn geoip_creds_account(&self) -> Result<Option<String>, RpcError> {
+        Ok(hyperion_adapters::geoip::discover_creds(None)
+            .await
+            .map(|c| c.account_id))
+    }
+
     async fn geoip_refresh(&self) -> Result<i64, RpcError> {
         self.svc.geoip_refresh().await.map(|n| n as i64)
+    }
+
+    async fn geoip_set_creds(
+        &self,
+        account_id: String,
+        license_key: String,
+    ) -> Result<i64, RpcError> {
+        self.svc
+            .geoip_set_creds(account_id, license_key)
+            .await
+            .map(|n| n as i64)
     }
 
     async fn geoip_status(&self) -> Result<(bool, i64), RpcError> {

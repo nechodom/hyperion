@@ -730,10 +730,34 @@
         by a rule set before the data existed.
       {% endif %}
     </p>
+    <form method="post" action="/settings/geoip-creds" class="field-row" style="align-items:flex-end">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <div class="field">
+        <label for="mm_account">MaxMind account ID</label>
+        <input id="mm_account" name="account_id" type="text" autocomplete="off"
+               value="{{ geoip_account_id }}" placeholder="123456">
+      </div>
+      <div class="field">
+        <label for="mm_key">Licence key
+          <span class="hint">{% if geoip_configured %}stored — type a new one to replace it{% else %}from MaxMind → My Account → Manage licence keys{% endif %}</span>
+        </label>
+        <input id="mm_key" name="license_key" type="password" autocomplete="off"
+               placeholder="{% if geoip_configured %}••••••••••••{% else %}paste the key{% endif %}">
+      </div>
+      <div class="field" style="flex:0">
+        <button class="btn primary" type="submit">Save &amp; download</button>
+      </div>
+    </form>
+    <p class="text-soft small" style="margin:0.2rem 0 0.9rem">
+      Saving downloads the database straight away, so a wrong key fails here
+      and now rather than silently at 03:00 in a background refresh. The key
+      is written to <code>/etc/GeoIP.conf</code> (owner-only) and is never
+      shown back on this page.
+    </p>
     <form method="post" action="/settings/geoip-refresh">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-      <button class="btn primary" type="submit">
-        {% if geoip_installed %}Refresh now{% else %}Download database{% endif %}
+      <button class="btn" type="submit">
+        {% if geoip_installed %}Refresh now{% else %}Download using /etc/GeoIP.conf{% endif %}
       </button>
     </form>
   </div>

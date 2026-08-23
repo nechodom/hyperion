@@ -1265,6 +1265,45 @@ fn decode_b(payload: &str) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
+/// Requests from one country over the window.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct CountryTraffic {
+    /// ISO-3166-1 alpha-2, uppercase. `"ZZ"` is the bucket for addresses
+    /// the database could not place — kept visible rather than folded into
+    /// a country, because a large unknown share is itself the finding.
+    pub code: String,
+    /// English country name from MaxMind's locations file, or the code
+    /// again when we have no name for it.
+    pub name: String,
+    pub requests: i64,
+    pub bytes_out: i64,
+    /// Percent of the window's requests, 0-100, rounded.
+    pub share_pct: i64,
+}
+
+impl CountryTraffic {
+    /// The country's flag as a pair of Unicode regional-indicator symbols.
+    ///
+    /// Derived arithmetically from the ISO code, so it is exact for every
+    /// real country and needs no lookup table to drift out of date. `ZZ`
+    /// and anything that is not two ASCII letters render as a globe rather
+    /// than as the tofu box a bogus pair would produce.
+    pub fn flag(&self) -> String {
+        let b = self.code.as_bytes();
+        if self.code == "ZZ" || b.len() != 2 || !b.iter().all(|c| c.is_ascii_uppercase()) {
+            return "🌐".to_string();
+        }
+        let base = 0x1F1E6u32 - 'A' as u32;
+        match (
+            char::from_u32(base + b[0] as u32),
+            char::from_u32(base + b[1] as u32),
+        ) {
+            (Some(a), Some(c)) => format!("{a}{c}"),
+            _ => "🌐".to_string(),
+        }
+    }
+}
+
 /// One captured outbound message.
 ///
 /// `#[serde(default)]` on the struct, and aliases on the two renamed fields,
@@ -1779,6 +1818,26 @@ mod tests {
     fn html_shell_embeds_the_logo_when_given_one() {
         let out = render_html_shell("T", "hi", Some("data:image/png;base64,AAAA"), "f");
         assert!(out.contains("<img src=\"data:image/png;base64,AAAA\""));
+    }
+
+    #[test]
+    fn flags_are_derived_from_the_code_not_a_table() {
+        let f = |c: &str| {
+            CountryTraffic {
+                code: c.into(),
+                ..Default::default()
+            }
+            .flag()
+        };
+        assert_eq!(f("CZ"), "\u{1F1E8}\u{1F1FF}");
+        assert_eq!(f("SK"), "\u{1F1F8}\u{1F1F0}");
+        assert_eq!(f("US"), "\u{1F1FA}\u{1F1F8}");
+        // The unknown bucket and any malformed code render as a globe —
+        // a bogus regional-indicator pair shows as tofu boxes.
+        assert_eq!(f("ZZ"), "\u{1F310}");
+        assert_eq!(f(""), "\u{1F310}");
+        assert_eq!(f("cz"), "\u{1F310}");
+        assert_eq!(f("CZE"), "\u{1F310}");
     }
 
     /// The real subject from the user's own box, which rendered raw in the

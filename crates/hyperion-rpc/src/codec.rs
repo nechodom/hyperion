@@ -69,6 +69,31 @@ impl std::fmt::Debug for RedactedPem {
     }
 }
 
+/// A single secret carried in an RPC request. Transparent on the wire; its
+/// `Debug` prints nothing, so the `debug!(?req)` at the socket boundary
+/// cannot spill a MaxMind licence key into the agent log.
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(transparent)]
+pub struct RedactedString(pub String);
+
+impl RedactedString {
+    pub fn into_inner(self) -> String {
+        self.0
+    }
+}
+
+impl From<String> for RedactedString {
+    fn from(s: String) -> Self {
+        RedactedString(s)
+    }
+}
+
+impl std::fmt::Debug for RedactedString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RedactedString(<redacted>)")
+    }
+}
+
 /// A `field → value` config map carried in an RPC request. On the wire it is
 /// exactly its inner `BTreeMap` (`#[serde(transparent)]`), but its `Debug`
 /// masks the VALUE of any secret-looking key (password / secret / token /
@@ -528,6 +553,16 @@ pub enum Request {
     },
     /// The current logo as a `data:` URI, or `None` when none is set.
     EmailLogoGet,
+    /// Store MaxMind credentials and verify them by downloading.
+    /// `license_key` is redacted in Debug so it cannot reach a request log.
+    GeoipSetCreds {
+        account_id: String,
+        license_key: RedactedString,
+    },
+    /// The MaxMind account id on file, if any. Deliberately account-only:
+    /// there is no RPC that can read the licence key back out, so a bug in
+    /// the panel cannot turn into a way to exfiltrate it.
+    GeoipCredsAccount,
     /// Download / refresh the MaxMind GeoLite2 country database.
     GeoipRefresh,
     /// (installed, last_updated_at) for the Settings card.
@@ -1627,6 +1662,8 @@ pub enum Response {
     EmailLogoSet,
     EmailLogoGet(Option<String>),
     GeoipRefresh(i64),
+    GeoipSetCreds(i64),
+    GeoipCredsAccount(Option<String>),
     GeoipStatus {
         installed: bool,
         updated_at: i64,
