@@ -563,6 +563,11 @@ pub enum Request {
     /// there is no RPC that can read the licence key back out, so a bug in
     /// the panel cannot turn into a way to exfiltrate it.
     GeoipCredsAccount,
+    /// Requests per country for one hosting over the last `hours`.
+    HostingCountryTraffic {
+        sel: HostingSelector,
+        hours: i64,
+    },
     /// Download / refresh the MaxMind GeoLite2 country database.
     GeoipRefresh,
     /// (installed, last_updated_at) for the Settings card.
@@ -1664,6 +1669,7 @@ pub enum Response {
     GeoipRefresh(i64),
     GeoipSetCreds(i64),
     GeoipCredsAccount(Option<String>),
+    HostingCountryTraffic(Vec<hyperion_types::CountryTraffic>),
     GeoipStatus {
         installed: bool,
         updated_at: i64,

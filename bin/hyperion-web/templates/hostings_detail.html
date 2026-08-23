@@ -529,6 +529,10 @@
     Emails &amp; deliverability
     {% if !email_log.is_empty() %}<span class="tab-badge">{{ email_log.len() }}</span>{% endif %}
   </a>
+  <a class="tab" data-tab="traffic" href="#traffic" role="tab">
+    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+    Traffic
+  </a>
   <a class="tab" data-tab="ftp" href="#ftp" role="tab">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
     FTP
@@ -2610,6 +2614,34 @@
 </div>
 
 </div><!-- /tab-settings -->
+
+<div class="tab-panel" id="tab-traffic">
+{# Lazy: parses the site's whole access log, so it must not hold up the
+   page. The window picker re-requests this same panel. #}
+<div class="row" style="justify-content:flex-end;gap:0.5rem;align-items:center;margin-bottom:0.6rem">
+  <label class="text-soft small" style="margin:0" for="traffic-window">Window</label>
+  <select id="traffic-window" class="input small" style="width:auto;padding:0.25rem 0.5rem"
+          hx-get="/hostings/{{ detail.id.as_str() }}/traffic-panel"
+          hx-target="#traffic-card" hx-swap="outerHTML"
+          hx-include="this" name="hours" hx-trigger="change">
+    <option value="24" selected>last 24 hours</option>
+    <option value="168">last 7 days</option>
+    <option value="720">last 30 days</option>
+  </select>
+</div>
+<div hx-get="/hostings/{{ detail.id.as_str() }}/traffic-panel?hours=24"
+     hx-trigger="load" hx-swap="outerHTML">
+  <div class="card hover" id="traffic-card">
+    <h2>
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+      Where the traffic comes from
+    </h2>
+    <p class="muted" style="margin:0;font-size:0.85rem">
+      <span class="spinner-inline"></span> Reading the access log…
+    </p>
+  </div>
+</div>
+</div>
 
 <div class="tab-panel" id="tab-ftp">
 <p class="text-soft small" style="margin:0 0 0.8rem">

@@ -942,6 +942,12 @@ fn print_pretty(resp: &Response) {
             println!("note:     {}", c.note);
         }
         Response::WebSessionRevokeAll(n) => println!("✓ signed out of {n} session(s)"),
+        Response::HostingCountryTraffic(rows) => {
+            println!("{:<6} {:<28} {:>10} {:>7}", "CODE", "COUNTRY", "REQUESTS", "SHARE");
+            for r in rows {
+                println!("{:<6} {:<28} {:>10} {:>6}%", r.code, r.name, r.requests, r.share_pct);
+            }
+        }
         Response::GeoipCredsAccount(v) => match v {
             Some(id) => println!("geoip account: {id}"),
             None => println!("geoip: no credentials configured"),

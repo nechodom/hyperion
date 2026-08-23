@@ -1,0 +1,74 @@
+{# Traffic by country — lazily swapped in, because it parses the site's
+   whole access log and that is not something the detail page should wait
+   on. #}
+<div class="card hover" id="traffic-card">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+    Where the traffic comes from
+    <span class="text-soft small" style="font-weight:400;margin-left:0.5rem">last {{ hours }} h</span>
+  </h2>
+
+  {% if let Some(e) = error %}
+    <div class="flash warn" style="margin:0.4rem 0 0">
+      <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+      <div class="flash-body">{{ e }}</div>
+    </div>
+  {% else if rows.is_empty() %}
+    <p class="muted" style="margin:0.4rem 0 0">
+      No requests in this window — nothing to place on a map yet.
+    </p>
+  {% else %}
+
+  {# A cartogram, not a geographic map: each country is a tile sized by its
+     share. Drawing real borders would need a world-map asset with per-country
+     paths, and approximating coordinates from memory would put countries in
+     the wrong places — which is worse than not drawing them, because a map
+     that is subtly wrong is still believed. This answers the same question
+     ("who is hitting this site, and how much") from data that is exact. #}
+  <div class="country-cartogram">
+    {% for r in rows %}
+      {% if r.share_pct >= 1 %}
+      <div class="country-tile" style="flex-grow:{{ r.share_pct }}"
+           title="{{ r.name }} — {{ r.requests }} requests ({{ r.share_pct }}%)">
+        <span class="country-tile-flag">{{ r.flag() }}</span>
+        <span class="country-tile-code">{{ r.code }}</span>
+        <span class="country-tile-pct">{{ r.share_pct }}%</span>
+      </div>
+      {% endif %}
+    {% endfor %}
+  </div>
+
+  <div class="table-wrap" style="margin:0.9rem -1.5rem -1.4rem">
+    <table>
+      <thead>
+        <tr>
+          <th>Country</th>
+          <th class="right">Requests</th>
+          <th class="right">Share</th>
+          <th class="right hide-on-phone">Bytes out</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in rows %}
+        <tr>
+          <td>
+            <span style="font-size:1.1rem;margin-right:0.45rem">{{ r.flag() }}</span>
+            {{ r.name }}
+            <code class="text-soft" style="font-size:0.74rem;margin-left:0.35rem">{{ r.code }}</code>
+            {% if r.code == "ZZ" %}
+              <span class="text-soft small" style="margin-left:0.3rem">— IPv6, or not in the database</span>
+            {% endif %}
+          </td>
+          <td class="right numeric">{{ r.requests }}</td>
+          <td class="right numeric">
+            {{ r.share_pct }}%
+            <div class="progress-bar share"><div class="progress-bar-fill" style="width:{{ r.share_pct }}%"></div></div>
+          </td>
+          <td class="right numeric hide-on-phone">{{ crate::handlers::stats::fmt_bytes(r.bytes_out) }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% endif %}
+</div>

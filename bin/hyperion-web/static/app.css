@@ -3354,3 +3354,30 @@ summary.btn::marker { content: ""; }
 .copy-field.copied .copy-hint { color: var(--ok); }
 .copy-field.copy-failed .copy-hint { color: var(--err); }
 .copy-grid { display: grid; gap: 0.5rem; margin: 0.6rem 0; }
+
+/* Traffic cartogram: tiles sized by share of requests. Deliberately not a
+   geographic map — see the template comment. */
+.country-cartogram {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 0.7rem;
+}
+.country-tile {
+  flex-basis: 0;
+  min-width: 4.5rem;
+  padding: 0.7rem 0.5rem;
+  border-radius: var(--radius-xs);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  text-align: center;
+  line-height: 1.25;
+}
+.country-tile-flag { display: block; font-size: 1.5rem; }
+.country-tile-code {
+  display: block;
+  font-size: 0.7rem;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+}
+.country-tile-pct { display: block; font-weight: 700; font-size: 0.9rem; }
