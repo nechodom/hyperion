@@ -488,6 +488,14 @@ pub trait AgentApi: Send + Sync + 'static {
     /// postfix, self-restart). Dispatchable to any node for per-node mail.
     async fn email_logo_set(&self, png_or_jpeg: Vec<u8>) -> Result<(), RpcError>;
     async fn email_logo_get(&self) -> Result<Option<String>, RpcError>;
+    async fn geoip_refresh(&self) -> Result<i64, RpcError>;
+    async fn geoip_creds_account(&self) -> Result<Option<String>, RpcError>;
+    async fn geoip_set_creds(
+        &self,
+        account_id: String,
+        license_key: String,
+    ) -> Result<i64, RpcError>;
+    async fn geoip_status(&self) -> Result<(bool, i64), RpcError>;
     async fn email_config_set(
         &self,
         fields: std::collections::BTreeMap<String, String>,

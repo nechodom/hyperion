@@ -3387,6 +3387,9 @@ pub struct VhostOptionsForm {
     /// One entry per ticked family; axum's Form gives us every value.
     #[serde(default)]
     blocked_bots: Vec<String>,
+    /// Comma-separated ISO codes from the text field.
+    #[serde(default)]
+    blocked_countries: Option<String>,
     #[serde(default)]
     wp_admin_allowlist: String,
     #[serde(default)]
@@ -3438,6 +3441,18 @@ pub async fn post_vhost_options(
             .iter()
             .map(|f| f.trim())
             .filter(|f| matches!(*f, "ai" | "social" | "seo" | "shopping"))
+            .collect::<Vec<_>>()
+            .join(","),
+        // Sanitized again in the renderer, but rejecting non-codes here too
+        // means the DB never stores something the vhost would drop — the
+        // saved value and the applied value stay the same thing.
+        blocked_countries: form
+            .blocked_countries
+            .as_deref()
+            .unwrap_or("")
+            .split(',')
+            .map(|c| c.trim().to_ascii_uppercase())
+            .filter(|c| c.len() == 2 && c.bytes().all(|b| b.is_ascii_uppercase()))
             .collect::<Vec<_>>()
             .join(","),
         wp_admin_allowlist: form.wp_admin_allowlist.trim().to_string(),

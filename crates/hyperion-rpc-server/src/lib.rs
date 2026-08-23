@@ -672,6 +672,31 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(()) => Response::EmailLogoSet,
             Err(e) => Response::Error(e),
         },
+        Request::GeoipSetCreds {
+            account_id,
+            license_key,
+        } => match api
+            .geoip_set_creds(account_id, license_key.into_inner())
+            .await
+        {
+            Ok(n) => Response::GeoipSetCreds(n),
+            Err(e) => Response::Error(e),
+        },
+        Request::GeoipCredsAccount => match api.geoip_creds_account().await {
+            Ok(v) => Response::GeoipCredsAccount(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::GeoipRefresh => match api.geoip_refresh().await {
+            Ok(n) => Response::GeoipRefresh(n),
+            Err(e) => Response::Error(e),
+        },
+        Request::GeoipStatus => match api.geoip_status().await {
+            Ok((installed, updated_at)) => Response::GeoipStatus {
+                installed,
+                updated_at,
+            },
+            Err(e) => Response::Error(e),
+        },
         Request::EmailLogoGet => match api.email_logo_get().await {
             Ok(v) => Response::EmailLogoGet(v),
             Err(e) => Response::Error(e),
@@ -2051,6 +2076,26 @@ mod tests {
 
         async fn email_logo_get(&self) -> Result<Option<String>, RpcError> {
             Ok(None)
+        }
+
+        async fn geoip_set_creds(&self, _: String, _: String) -> Result<i64, RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
+        }
+
+        async fn geoip_creds_account(&self) -> Result<Option<String>, RpcError> {
+            Ok(None)
+        }
+
+        async fn geoip_refresh(&self) -> Result<i64, RpcError> {
+            Err(RpcError::Internal {
+                message: "not supported by this agent".into(),
+            })
+        }
+
+        async fn geoip_status(&self) -> Result<(bool, i64), RpcError> {
+            Ok((false, 0))
         }
 
         async fn email_config_set(

@@ -942,6 +942,19 @@ fn print_pretty(resp: &Response) {
             println!("note:     {}", c.note);
         }
         Response::WebSessionRevokeAll(n) => println!("✓ signed out of {n} session(s)"),
+        Response::GeoipCredsAccount(v) => match v {
+            Some(id) => println!("geoip account: {id}"),
+            None => println!("geoip: no credentials configured"),
+        },
+        Response::GeoipSetCreds(n) => println!("✓ credentials saved and verified — {n} ranges"),
+        Response::GeoipRefresh(n) => println!("✓ GeoIP database refreshed — {n} ranges"),
+        Response::GeoipStatus {
+            installed,
+            updated_at,
+        } => println!(
+            "geoip: {} (updated_at {updated_at})",
+            if *installed { "installed" } else { "not installed" }
+        ),
         Response::EmailLogoSet => println!("✓ e-mail logo updated"),
         Response::EmailLogoGet(v) => match v {
             Some(_) => println!("e-mail logo: set"),

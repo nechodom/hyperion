@@ -6,6 +6,8 @@
 
 use crate::auth::AuthCtx;
 use crate::error::AppError;
+#[allow(unused_imports)] // askama resolves {{ x|datetime }} through this
+use crate::filters;
 use crate::ratelimit::Bucket;
 use crate::state::SharedState;
 use askama::Template;
@@ -79,6 +81,14 @@ struct SettingsTpl<'a> {
     /// Whether a logo is on file — drives the preview thumbnail and the
     /// Remove button.
     email_logo_set: bool,
+    geoip_installed: bool,
+    geoip_updated_at: i64,
+    /// Whether credentials are on file. The KEY itself is never sent to
+    /// the page — only whether one exists.
+    geoip_configured: bool,
+    /// The account id IS shown: it is an identifier, not a secret, and
+    /// seeing it is how an operator confirms which account is in use.
+    geoip_account_id: String,
     /// Capability groups for the "create API key" multiselect (reuses the
     /// roles capability groups). Empty when the user can't manage keys.
     api_key_cap_groups: Vec<ApiKeyCapGroup>,
@@ -465,6 +475,83 @@ pub async fn get_email_preview(
         .into_response())
 }
 
+/// The account id on file, if any. Asks the AGENT rather than reading the
+/// file here — on a worker the panel and the credentials are not on the
+/// same box, and reading locally would answer for the wrong machine.
+async fn hyperion_adapters_geoip_creds(state: &SharedState) -> Option<String> {
+    match hyperion_rpc_client::call(&state.agent_socket, Request::GeoipCredsAccount).await {
+        Ok(RpcResponse::GeoipCredsAccount(Some(id))) => Some(id),
+        _ => None,
+    }
+}
+
+/// POST /settings/geoip-creds — store the MaxMind credentials, then prove
+/// they work by downloading with them.
+pub async fn post_geoip_creds(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    axum::extract::Form(form): axum::extract::Form<GeoipCredsForm>,
+) -> Result<Response, AppError> {
+    if !ctx.is_super_admin() {
+        return Ok(Redirect::to("/settings?error=owner+role+required").into_response());
+    }
+    let resp = hyperion_rpc_client::call(
+        &state.agent_socket,
+        Request::GeoipSetCreds {
+            account_id: form.account_id,
+            license_key: form.license_key.into(),
+        },
+    )
+    .await?;
+    match resp {
+        RpcResponse::GeoipSetCreds(n) => Ok(Redirect::to(&format!(
+            "/settings?saved={}#geoip",
+            super::hostings::urlencoding(&format!("GeoIP ready — {n} ranges"))
+        ))
+        .into_response()),
+        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
+            "/settings?error={}#geoip",
+            super::hostings::urlencoding(&e.to_string())
+        ))
+        .into_response()),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct GeoipCredsForm {
+    pub account_id: String,
+    pub license_key: String,
+}
+
+/// POST /settings/geoip-refresh — download or refresh the country database.
+///
+/// Synchronous: it is one download and a parse, and the operator pressed a
+/// button expecting an answer. Errors come back on the page rather than in
+/// a log, because the usual one — a rejected licence key — is something
+/// only they can fix.
+pub async fn post_geoip_refresh(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+) -> Result<Response, AppError> {
+    if !ctx.is_super_admin() {
+        return Ok(Redirect::to("/settings?error=owner+role+required").into_response());
+    }
+    match hyperion_rpc_client::call(&state.agent_socket, Request::GeoipRefresh).await? {
+        RpcResponse::GeoipRefresh(n) => Ok(Redirect::to(&format!(
+            "/settings?saved={}#geoip",
+            super::hostings::urlencoding(&format!("GeoIP database installed — {n} ranges"))
+        ))
+        .into_response()),
+        RpcResponse::Error(e) => Ok(Redirect::to(&format!(
+            "/settings?error={}#geoip",
+            super::hostings::urlencoding(&e.to_string())
+        ))
+        .into_response()),
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
 /// Render a unix timestamp as a short YYYY-MM-DD (UTC), or "—" for None.
 fn fmt_date(ts: Option<i64>) -> String {
     match ts {
@@ -786,6 +873,18 @@ pub async fn get_settings(
     // the master's file is the whole truth and there is nothing to compare.
     let letter_nodes = letter_node_rows(&state, &nodes, &config.notifications).await;
     let csrf_token = super::session_csrf_token(&state, &ctx);
+    let (geoip_installed, geoip_updated_at) =
+        match hyperion_rpc_client::call(&state.agent_socket, Request::GeoipStatus).await {
+            Ok(RpcResponse::GeoipStatus {
+                installed,
+                updated_at,
+            }) => (installed, updated_at),
+            _ => (false, 0),
+        };
+    let (geoip_configured, geoip_account_id) = match hyperion_adapters_geoip_creds(&state).await {
+        Some(id) => (true, id),
+        None => (false, String::new()),
+    };
     let email_logo_set = matches!(
         hyperion_rpc_client::call(&state.agent_socket, Request::EmailLogoGet).await,
         Ok(RpcResponse::EmailLogoGet(Some(_)))
@@ -814,6 +913,10 @@ pub async fn get_settings(
         flash_error: q.flash_error,
         csrf_token,
         email_logo_set,
+        geoip_installed,
+        geoip_updated_at,
+        geoip_configured,
+        geoip_account_id,
         api_key_cap_groups,
         api_keys,
         can_manage_api_keys,

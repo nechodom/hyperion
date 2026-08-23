@@ -700,6 +700,68 @@
     </form>
   </div>
 
+  {# ───── GeoIP database ───── #}
+  <div class="card" id="geoip">
+    <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.4rem">
+      <h2 style="margin:0">
+        <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+        GeoIP database
+      </h2>
+      {% if geoip_installed %}
+        <span class="pill ok">installed</span>
+      {% else %}
+        <span class="pill warn">not installed</span>
+      {% endif %}
+    </div>
+    <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">
+      MaxMind GeoLite2 Country, used for per-site country blocking and the
+      traffic-by-country view. Credentials are read from
+      <code>/etc/GeoIP.conf</code> — the same file MaxMind's own
+      <code>geoipupdate</code> uses — so if you already run that tool there is
+      nothing to configure here. The key is never copied into Hyperion's
+      config or into this page.
+      {% if geoip_installed %}
+        <br><br>Last refreshed {{ geoip_updated_at|datetime }} UTC.
+        MaxMind publishes updates twice a week; refreshing more often than
+        that just re-downloads the same data.
+      {% else %}
+        <br><br>Until this is installed, every visitor resolves to
+        <code>ZZ</code> and no country rule matches — sites are never cut off
+        by a rule set before the data existed.
+      {% endif %}
+    </p>
+    <form method="post" action="/settings/geoip-creds" class="field-row" style="align-items:flex-end">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <div class="field">
+        <label for="mm_account">MaxMind account ID</label>
+        <input id="mm_account" name="account_id" type="text" autocomplete="off"
+               value="{{ geoip_account_id }}" placeholder="123456">
+      </div>
+      <div class="field">
+        <label for="mm_key">Licence key
+          <span class="hint">{% if geoip_configured %}stored — type a new one to replace it{% else %}from MaxMind → My Account → Manage licence keys{% endif %}</span>
+        </label>
+        <input id="mm_key" name="license_key" type="password" autocomplete="off"
+               placeholder="{% if geoip_configured %}••••••••••••{% else %}paste the key{% endif %}">
+      </div>
+      <div class="field" style="flex:0">
+        <button class="btn primary" type="submit">Save &amp; download</button>
+      </div>
+    </form>
+    <p class="text-soft small" style="margin:0.2rem 0 0.9rem">
+      Saving downloads the database straight away, so a wrong key fails here
+      and now rather than silently at 03:00 in a background refresh. The key
+      is written to <code>/etc/GeoIP.conf</code> (owner-only) and is never
+      shown back on this page.
+    </p>
+    <form method="post" action="/settings/geoip-refresh">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <button class="btn" type="submit">
+        {% if geoip_installed %}Refresh now{% else %}Download using /etc/GeoIP.conf{% endif %}
+      </button>
+    </form>
+  </div>
+
   {# ───── Automatic updates. Off by default and deliberately so. ───── #}
   <div class="card">
     <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.4rem">
