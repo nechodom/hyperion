@@ -490,6 +490,11 @@ pub trait AgentApi: Send + Sync + 'static {
     async fn email_logo_get(&self) -> Result<Option<String>, RpcError>;
     async fn geoip_refresh(&self) -> Result<i64, RpcError>;
     async fn geoip_creds_account(&self) -> Result<Option<String>, RpcError>;
+    async fn hosting_country_traffic(
+        &self,
+        sel: crate::wire::HostingSelector,
+        hours: i64,
+    ) -> Result<Vec<hyperion_types::CountryTraffic>, RpcError>;
     async fn geoip_set_creds(
         &self,
         account_id: String,

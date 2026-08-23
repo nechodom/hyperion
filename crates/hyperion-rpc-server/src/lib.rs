@@ -686,6 +686,12 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::GeoipCredsAccount(v),
             Err(e) => Response::Error(e),
         },
+        Request::HostingCountryTraffic { sel, hours } => {
+            match api.hosting_country_traffic(sel, hours).await {
+                Ok(v) => Response::HostingCountryTraffic(v),
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::GeoipRefresh => match api.geoip_refresh().await {
             Ok(n) => Response::GeoipRefresh(n),
             Err(e) => Response::Error(e),
@@ -2086,6 +2092,14 @@ mod tests {
 
         async fn geoip_creds_account(&self) -> Result<Option<String>, RpcError> {
             Ok(None)
+        }
+
+        async fn hosting_country_traffic(
+            &self,
+            _: HostingSelector,
+            _: i64,
+        ) -> Result<Vec<hyperion_types::CountryTraffic>, RpcError> {
+            Ok(Vec::new())
         }
 
         async fn geoip_refresh(&self) -> Result<i64, RpcError> {

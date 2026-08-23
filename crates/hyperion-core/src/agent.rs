@@ -803,6 +803,14 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
             .map(|c| c.account_id))
     }
 
+    async fn hosting_country_traffic(
+        &self,
+        sel: HostingSelector,
+        hours: i64,
+    ) -> Result<Vec<hyperion_types::CountryTraffic>, RpcError> {
+        self.svc.hosting_country_traffic(sel, hours).await
+    }
+
     async fn geoip_refresh(&self) -> Result<i64, RpcError> {
         self.svc.geoip_refresh().await.map(|n| n as i64)
     }
