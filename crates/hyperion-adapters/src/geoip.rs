@@ -269,6 +269,45 @@ fn range_to_cidrs(mut start: u32, end: u32) -> Vec<(u32, u32)> {
     out
 }
 
+/// Extract a zip archive into `dest`, refusing entries that escape it.
+///
+/// The archive comes from MaxMind over TLS, but "trusted source" is not a
+/// reason to skip the zip-slip check: `enclosed_name` rejects `../` and
+/// absolute paths, so a hostile or corrupted archive cannot write outside
+/// the extraction directory — which for a process running as root is the
+/// difference between a failed refresh and a rewritten /etc.
+fn extract_zip(zip_path: &Path, dest: &Path) -> Result<(), AdapterError> {
+    let file = std::fs::File::open(zip_path)
+        .map_err(|e| AdapterError::Other(format!("geoip: open archive: {e}")))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|e| AdapterError::Other(format!("geoip: not a zip archive: {e}")))?;
+    for i in 0..archive.len() {
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| AdapterError::Other(format!("geoip: read entry: {e}")))?;
+        let Some(rel) = entry.enclosed_name() else {
+            return Err(AdapterError::Other(
+                "geoip: archive entry escapes the extraction directory — refusing".into(),
+            ));
+        };
+        let out = dest.join(rel);
+        if entry.is_dir() {
+            std::fs::create_dir_all(&out)
+                .map_err(|e| AdapterError::Other(format!("geoip: mkdir: {e}")))?;
+            continue;
+        }
+        if let Some(parent) = out.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| AdapterError::Other(format!("geoip: mkdir: {e}")))?;
+        }
+        let mut f = std::fs::File::create(&out)
+            .map_err(|e| AdapterError::Other(format!("geoip: create {}: {e}", out.display())))?;
+        std::io::copy(&mut entry, &mut f)
+            .map_err(|e| AdapterError::Other(format!("geoip: extract: {e}")))?;
+    }
+    Ok(())
+}
+
 /// Find MaxMind credentials: the operator's own `geoipupdate` config
 /// first, then an explicit path.
 ///
@@ -406,20 +445,17 @@ pub async fn refresh(creds: &MaxmindCreds) -> Result<usize, AdapterError> {
         )));
     }
 
-    let un = tokio::process::Command::new("unzip")
-        .arg("-o")
-        .arg("-q")
-        .arg(&zip)
-        .arg("-d")
-        .arg(&tmp)
-        .output()
+    // Pure-Rust extraction. This used to shell out to `unzip`, which no
+    // installer ever installed — so on a minimal Debian the whole feature
+    // failed at this exact step, every time, with nothing the operator
+    // could do about it short of guessing the missing package. A runtime
+    // dependency nobody guarantees is a failure mode; a compiled-in one is
+    // not.
+    let zip_path = zip.clone();
+    let dest = tmp.clone();
+    tokio::task::spawn_blocking(move || extract_zip(&zip_path, &dest))
         .await
-        .map_err(|e| AdapterError::Other(format!("geoip: unzip missing? {e}")))?;
-    if !un.status.success() {
-        return Err(AdapterError::Other(
-            "geoip: could not unpack the MaxMind archive (is `unzip` installed?)".into(),
-        ));
-    }
+        .map_err(|e| AdapterError::Other(format!("geoip: unzip task: {e}")))??;
 
     // MaxMind nests the CSVs in a dated directory, so find them.
     let (mut blocks, mut locations) = (None, None);
@@ -464,6 +500,33 @@ pub async fn refresh(creds: &MaxmindCreds) -> Result<usize, AdapterError> {
         return Err(AdapterError::Other(
             "geoip: the archive parsed to zero ranges — refusing to install an empty map".into(),
         ));
+    }
+
+    // Country names for the traffic table — without this file the panel
+    // falls back to bare ISO codes, which is technically correct and
+    // useless to read.
+    {
+        let mut names = String::new();
+        for (i, line) in locations_csv.lines().enumerate() {
+            if i == 0 {
+                continue;
+            }
+            let cols: Vec<&str> = line.split(',').collect();
+            if let (Some(iso), Some(name)) = (cols.get(4), cols.get(5)) {
+                let iso = iso.trim_matches('"');
+                let name = name.trim_matches('"');
+                if iso.len() == 2 && !name.is_empty() {
+                    names.push_str(&format!("{iso},{name}\n"));
+                }
+            }
+        }
+        let names_tmp = dir.join("country-names.csv.new");
+        tokio::fs::write(&names_tmp, names)
+            .await
+            .map_err(|e| AdapterError::Other(format!("geoip: write names: {e}")))?;
+        tokio::fs::rename(&names_tmp, dir.join("country-names.csv"))
+            .await
+            .map_err(|e| AdapterError::Other(format!("geoip: install names: {e}")))?;
     }
 
     // Compact table for the panel.
@@ -562,6 +625,69 @@ mod tests {
         .expect("write");
         let mode = std::fs::metadata(&p).expect("stat").permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "creds file is {mode:o}, must be 600");
+    }
+
+    /// Extraction must handle the shape MaxMind actually ships: CSVs nested
+    /// in a dated directory the archive also declares as an entry.
+    #[test]
+    fn extracts_a_maxmind_shaped_zip() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().expect("tmp");
+        let zp = dir.path().join("a.zip");
+        {
+            let f = std::fs::File::create(&zp).expect("create");
+            let mut w = zip::ZipWriter::new(f);
+            let o = zip::write::SimpleFileOptions::default();
+            w.add_directory("GeoLite2-Country-CSV_20260821/", o)
+                .expect("dir");
+            w.start_file(
+                "GeoLite2-Country-CSV_20260821/GeoLite2-Country-Blocks-IPv4.csv",
+                o,
+            )
+            .expect("start");
+            w.write_all(
+                b"network,geoname_id
+1.2.3.0/24,1
+",
+            )
+            .expect("write");
+            w.finish().expect("finish");
+        }
+        let out = dir.path().join("out");
+        extract_zip(&zp, &out).expect("extract");
+        let extracted = out
+            .join("GeoLite2-Country-CSV_20260821")
+            .join("GeoLite2-Country-Blocks-IPv4.csv");
+        let body = std::fs::read_to_string(extracted).expect("read back");
+        assert!(body.contains("1.2.3.0/24"));
+    }
+
+    /// A path that escapes the destination is refused outright. The agent
+    /// runs as root; "failed refresh" and "rewrote /etc" must never be the
+    /// same bug.
+    #[test]
+    fn zip_slip_is_refused() {
+        use std::io::Write;
+        let dir = tempfile::tempdir().expect("tmp");
+        let zp = dir.path().join("evil.zip");
+        {
+            let f = std::fs::File::create(&zp).expect("create");
+            let mut w = zip::ZipWriter::new(f);
+            let o = zip::write::SimpleFileOptions::default();
+            w.start_file("../evil.txt", o).expect("start");
+            w.write_all(b"nope").expect("write");
+            w.finish().expect("finish");
+        }
+        let out = dir.path().join("out");
+        std::fs::create_dir_all(&out).expect("mkdir");
+        assert!(
+            extract_zip(&zp, &out).is_err(),
+            "escaping entry must be refused"
+        );
+        assert!(
+            !dir.path().join("evil.txt").exists(),
+            "file escaped the sandbox"
+        );
     }
 
     #[test]

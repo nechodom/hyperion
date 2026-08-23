@@ -2159,14 +2159,50 @@
     panels.forEach(p => p.classList.toggle('active', p.id === 'tab-' + id));
     return matched;
   }
+  // A hash can name a TAB (#tls) or an element INSIDE one (#geoip — the
+  // redirect anchor after saving GeoIP credentials). The old code only
+  // handled the first, so every deep link into a card landed on the
+  // default tab and the result of the action was invisible — which reads
+  // as "nothing happened" even when it worked.
+  function resolve(id) {
+    if (!id) return false;
+    if (activate(id)) { remember(id); return true; }
+    const el = document.getElementById(id);
+    const panel = el && el.closest('.tab-panel');
+    if (panel && panel.id.indexOf('tab-') === 0) {
+      const tab = panel.id.slice(4);
+      if (activate(tab)) {
+        remember(tab);
+        // Scroll after the panel is visible — the browser's native anchor
+        // jump happened while it was display:none and went nowhere.
+        setTimeout(() => el.scrollIntoView({ block: 'start' }), 0);
+        return true;
+      }
+    }
+    return false;
+  }
+  // Plain reloads with no hash come back to the tab you were on, not to
+  // the first one. Keyed per path, so /settings and each hosting keep
+  // separate memories.
+  const memKey = 'hyperionTab:' + location.pathname;
+  function remember(id) {
+    try { localStorage.setItem(memKey, id); } catch (_) {}
+  }
+  function remembered() {
+    try { return localStorage.getItem(memKey); } catch (_) { return null; }
+  }
   tabs.forEach(t => t.addEventListener('click', ev => {
     ev.preventDefault();
     const id = t.dataset.tab;
     activate(id);
+    remember(id);
     if (history.replaceState) history.replaceState(null, '', '#' + id);
   }));
   const hashId = (location.hash || '').replace(/^#/, '');
-  if (!activate(hashId)) activate('cluster');
+  if (!resolve(hashId) && !activate(remembered() || '')) activate('cluster');
+  window.addEventListener('hashchange', () => {
+    resolve((location.hash || '').replace(/^#/, ''));
+  });
 })();
 </script>
 

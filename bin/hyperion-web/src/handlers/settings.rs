@@ -360,7 +360,7 @@ pub async fn post_email_logo(
     mut multipart: axum::extract::Multipart,
 ) -> Result<Response, AppError> {
     if !ctx.is_super_admin() {
-        return Ok(Redirect::to("/settings?error=owner+role+required").into_response());
+        return Ok(Redirect::to("/settings?flash_error=owner+role+required").into_response());
     }
     let mut bytes: Vec<u8> = Vec::new();
     let mut clear = false;
@@ -381,7 +381,9 @@ pub async fn post_email_logo(
     }
     let payload = if clear { Vec::new() } else { bytes };
     if payload.is_empty() && !clear {
-        return Ok(Redirect::to("/settings?error=no+image+selected#notifications").into_response());
+        return Ok(
+            Redirect::to("/settings?flash_error=no+image+selected#notifications").into_response(),
+        );
     }
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
@@ -392,10 +394,10 @@ pub async fn post_email_logo(
     .await?;
     match resp {
         RpcResponse::EmailLogoSet => {
-            Ok(Redirect::to("/settings?saved=1#notifications").into_response())
+            Ok(Redirect::to("/settings?flash=saved#notifications").into_response())
         }
         RpcResponse::Error(e) => Ok(Redirect::to(&format!(
-            "/settings?error={}#notifications",
+            "/settings?flash_error={}#notifications",
             super::hostings::urlencoding(&e.to_string())
         ))
         .into_response()),
@@ -493,7 +495,7 @@ pub async fn post_geoip_creds(
     axum::extract::Form(form): axum::extract::Form<GeoipCredsForm>,
 ) -> Result<Response, AppError> {
     if !ctx.is_super_admin() {
-        return Ok(Redirect::to("/settings?error=owner+role+required").into_response());
+        return Ok(Redirect::to("/settings?flash_error=owner+role+required").into_response());
     }
     let resp = hyperion_rpc_client::call(
         &state.agent_socket,
@@ -505,12 +507,12 @@ pub async fn post_geoip_creds(
     .await?;
     match resp {
         RpcResponse::GeoipSetCreds(n) => Ok(Redirect::to(&format!(
-            "/settings?saved={}#geoip",
+            "/settings?flash={}#geoip",
             super::hostings::urlencoding(&format!("GeoIP ready — {n} ranges"))
         ))
         .into_response()),
         RpcResponse::Error(e) => Ok(Redirect::to(&format!(
-            "/settings?error={}#geoip",
+            "/settings?flash_error={}#geoip",
             super::hostings::urlencoding(&e.to_string())
         ))
         .into_response()),
@@ -535,16 +537,16 @@ pub async fn post_geoip_refresh(
     ctx: AuthCtx,
 ) -> Result<Response, AppError> {
     if !ctx.is_super_admin() {
-        return Ok(Redirect::to("/settings?error=owner+role+required").into_response());
+        return Ok(Redirect::to("/settings?flash_error=owner+role+required").into_response());
     }
     match hyperion_rpc_client::call(&state.agent_socket, Request::GeoipRefresh).await? {
         RpcResponse::GeoipRefresh(n) => Ok(Redirect::to(&format!(
-            "/settings?saved={}#geoip",
+            "/settings?flash={}#geoip",
             super::hostings::urlencoding(&format!("GeoIP database installed — {n} ranges"))
         ))
         .into_response()),
         RpcResponse::Error(e) => Ok(Redirect::to(&format!(
-            "/settings?error={}#geoip",
+            "/settings?flash_error={}#geoip",
             super::hostings::urlencoding(&e.to_string())
         ))
         .into_response()),
