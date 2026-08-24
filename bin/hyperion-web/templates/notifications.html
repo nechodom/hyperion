@@ -93,7 +93,9 @@
               <div><strong>{{ n.title }}</strong></div>
               <div class="text-soft small">{{ n.body }}</div>
             </td>
-            <td><code style="font-size:0.78rem">{{ n.kind }}</code></td>
+            {# Readable label; the raw kind stays in the tooltip for grepping
+               journald/audit by exact string. #}
+            <td title="{{ n.kind }}">{{ crate::handlers::stats::fmt_action_label(n.kind) }}</td>
             <td class="text-soft small" title="{{ n.created_at }}">
               {{ crate::handlers::stats::fmt_ago(n.created_at) }}
             </td>

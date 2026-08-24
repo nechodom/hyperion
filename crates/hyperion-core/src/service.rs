@@ -17345,6 +17345,165 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// Each step is run only when prior steps left writability
     /// false. After each step the writability probe re-runs so
     /// the report shows incremental progress.
+    /// Detect a read-only rootfs and repair it without waiting for a human.
+    ///
+    /// ext4 remounts itself `ro` on I/O errors, and from that moment the box
+    /// is dead in the way that is hardest to see remotely: nginx serves
+    /// stale content, SQLite refuses every write, jobs fail with EROFS —
+    /// and the panel that carries the fix button may itself be broken. The
+    /// manual diagnose/fix card assumed an operator watching; this tick is
+    /// for the 3 a.m. version of the same event. Returns true when a fix
+    /// was ATTEMPTED.
+    ///
+    /// Guard rails, each of which exists because the naive loop is harmful:
+    ///
+    ///   * **Three attempts per boot, then alerts only.** A filesystem that
+    ///     keeps flipping back to ro has failing storage or real
+    ///     corruption; remounting it rw in a loop risks making the
+    ///     corruption worse. After the third attempt the watchdog stops
+    ///     touching the mount and repeats a loud alert instead — at that
+    ///     point a human with `dmesg` and SMART data is the fix.
+    ///   * **Immutable images are never "fixed".** squashfs/overlay roots
+    ///     (snap-managed, ostree) are ro BY DESIGN; remounting them fails
+    ///     every time, so attempting would burn all three tries on a box
+    ///     that was never broken. One alert names the real problem.
+    ///   * **Success still alerts.** A remount that worked is a symptom
+    ///     handled, not a cause cured — the operator must hear that the
+    ///     disk did this, because the next flip may be the one that stays.
+    pub async fn rofs_watchdog_tick(&self) -> bool {
+        use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
+        static ATTEMPTS: AtomicU32 = AtomicU32::new(0);
+        static LAST_ALERT: AtomicI64 = AtomicI64::new(0);
+        const MAX_ATTEMPTS: u32 = 3;
+        const ALERT_EVERY_SECS: i64 = 3600;
+
+        // Cheap detection: /proc/mounts is authoritative and free to read.
+        // The kernel's emergency remount lands there as a literal `ro`
+        // option on / or /usr.
+        let Ok(mounts) = tokio::fs::read_to_string("/proc/mounts").await else {
+            return false;
+        };
+        let is_ro = |mp: &str| {
+            mounts.lines().any(|l| {
+                let p: Vec<&str> = l.split_whitespace().collect();
+                p.len() >= 4 && p[1] == mp && p[3].split(',').any(|o| o == "ro")
+            })
+        };
+        if !is_ro("/") && !is_ro("/usr") {
+            // Healthy — reset so a fresh incident gets fresh attempts.
+            ATTEMPTS.store(0, Ordering::Relaxed);
+            return false;
+        }
+
+        let now = now_secs();
+        let alert_due = || {
+            let last = LAST_ALERT.load(Ordering::Relaxed);
+            if now - last >= ALERT_EVERY_SECS {
+                LAST_ALERT.store(now, Ordering::Relaxed);
+                true
+            } else {
+                false
+            }
+        };
+
+        // Classify before touching anything — an immutable image is not a
+        // fault and must not consume attempts.
+        let gathered = match self.fs_diagnose_and_fix(true).await {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!(error=%e, "rofs watchdog: gather failed");
+                return false;
+            }
+        };
+        if gathered.image_kind != "standard" && gathered.image_kind != "unknown" {
+            if alert_due() {
+                tracing::error!(
+                    image_kind = %gathered.image_kind,
+                    "rofs watchdog: rootfs is read-only BY DESIGN on this image — not fixable"
+                );
+                self.notify_admins(
+                    "error",
+                    "Root filesystem is read-only by design",
+                    &format!(
+                        "This node runs a {} image whose root filesystem is immutable.                          Hyperion cannot install packages or write outside its data                          directories here; pick a standard (non-immutable) base image.",
+                        gathered.image_kind
+                    ),
+                    "/services",
+                    "system.rofs",
+                )
+                .await;
+            }
+            return false;
+        }
+
+        let attempt = ATTEMPTS.fetch_add(1, Ordering::Relaxed) + 1;
+        if attempt > MAX_ATTEMPTS {
+            if alert_due() {
+                tracing::error!(
+                    "rofs watchdog: rootfs is read-only AGAIN after {MAX_ATTEMPTS} repairs —                      standing down. This pattern means failing storage or filesystem                      corruption; check dmesg and SMART before remounting by hand"
+                );
+                self.notify_admins(
+                    "error",
+                    "Root filesystem keeps going read-only",
+                    &format!(
+                        "The rootfs flipped to read-only again after {MAX_ATTEMPTS} automatic                          repairs this boot. The watchdog has stopped remounting: a filesystem                          that keeps doing this usually means failing storage, and remounting                          in a loop can make corruption worse. Check `dmesg` and the disk's                          SMART data, then repair by hand from Services → Read-only rootfs."
+                    ),
+                    "/services",
+                    "system.rofs",
+                )
+                .await;
+            }
+            return false;
+        }
+
+        tracing::warn!(
+            attempt,
+            "rofs watchdog: rootfs is read-only — attempting repair"
+        );
+        match self.fs_diagnose_and_fix(false).await {
+            Ok(d) if d.usr_writable_now => {
+                // The DB lives on the rootfs, so the audit row could not
+                // have been written while it was ro — write it now that it
+                // can be.
+                self.append_audit(
+                    "system.rofs_autofix",
+                    None,
+                    &serde_json::json!({"attempt": attempt}).to_string(),
+                    "ok",
+                )
+                .await;
+                self.notify_admins(
+                    "warning",
+                    "Root filesystem was read-only — repaired automatically",
+                    &format!(
+                        "The rootfs had remounted itself read-only (attempt {attempt} of                          {MAX_ATTEMPTS} this boot) and Hyperion remounted it read-write.                          Services should be working again — but a filesystem only does                          this in response to I/O errors, so treat it as a disk warning:                          check `dmesg` and SMART data soon. After {MAX_ATTEMPTS}                          repeats the watchdog stops and asks for a human."
+                    ),
+                    "/services",
+                    "system.rofs",
+                )
+                .await;
+                true
+            }
+            Ok(_) => {
+                if alert_due() {
+                    self.notify_admins(
+                        "error",
+                        "Root filesystem is read-only and the automatic repair failed",
+                        "Hyperion detected a read-only rootfs and tried to remount it                          read-write, but the mount refused. This needs a human: see                          Services → Read-only rootfs for the full diagnostic.",
+                        "/services",
+                        "system.rofs",
+                    )
+                    .await;
+                }
+                true
+            }
+            Err(e) => {
+                tracing::error!(error=%e, "rofs watchdog: repair RPC failed");
+                true
+            }
+        }
+    }
+
     pub async fn fs_diagnose_and_fix(
         &self,
         dry_run: bool,

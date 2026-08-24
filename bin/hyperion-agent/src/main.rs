@@ -622,6 +622,26 @@ async fn main() -> anyhow::Result<()> {
         });
     }
 
+    // Read-only rootfs watchdog. ext4 remounts itself ro on I/O errors,
+    // and from that moment the panel the operator would use to fix it may
+    // itself be broken — so this cannot wait for a click. One-minute
+    // cadence: the check is a read of /proc/mounts, and every minute a box
+    // spends read-only is a minute of failed writes for every site on it.
+    // The tick carries its own guard rails (attempt cap, immutable-image
+    // refusal, loud notifications) — see rofs_watchdog_tick.
+    {
+        let rofs_svc = svc.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(90)).await;
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(60));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                rofs_svc.rofs_watchdog_tick().await;
+            }
+        });
+    }
+
     // Record what this box IS, once, so it is a literal in agent.toml rather
     // than something inferred on every read. An install that predates the key
     // gets the right answer here with no operator action.
