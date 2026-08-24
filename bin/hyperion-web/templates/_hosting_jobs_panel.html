@@ -20,7 +20,7 @@
           <span class="spinner-inline" style="margin-right:0.35rem"></span>{{ j.step_label }}
         </strong>
         <div class="text-soft small" style="margin-top:0.15rem">
-          {{ j.kind }} · started {{ crate::handlers::stats::fmt_ago(j.started_at) }}
+          {{ crate::handlers::stats::fmt_action_label(j.kind) }} · started {{ crate::handlers::stats::fmt_ago(j.started_at) }}
           · <a href="/jobs/{{ j.id }}">full log →</a>
         </div>
       </div>

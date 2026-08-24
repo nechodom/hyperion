@@ -127,7 +127,8 @@
             <td class="muted numeric" title="{{ r.ts }}">{{ crate::handlers::stats::fmt_ago(r.ts) }}</td>
             <td>{% if let Some(node) = r.node %}<span class="pill" style="background:var(--surface-2);color:var(--text-soft)">{{ node }}</span>{% else %}<span class="text-soft">—</span>{% endif %}</td>
             <td><strong>{{ r.actor_label }}</strong></td>
-            <td><code>{{ r.action }}</code></td>
+            <td title="{{ r.action }}">{{ crate::handlers::stats::fmt_action_label(r.action) }}
+              <code class="text-soft" style="font-size:0.7rem;display:block">{{ r.action }}</code></td>
             <td>{% if let Some(t) = r.target %}<code>{{ t }}</code>{% else %}<span class="text-soft">—</span>{% endif %}</td>
             <td class="right">
               <span class="pill {% if r.result == "ok" %}ok{% else %}err{% endif %}">{{ r.result }}</span>

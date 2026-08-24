@@ -968,7 +968,11 @@ pub fn fmt_short_id(s: &str) -> String {
 /// "WordPress plugin", `service.install.start` → "Service install
 /// started". Falls through to the raw string for unknown codes
 /// so we don't lose information.
-pub fn fmt_action_label(s: &str) -> &str {
+pub fn fmt_action_label(s: &str) -> String {
+    fmt_action_label_inner(s)
+}
+
+fn fmt_action_label_inner(s: &str) -> String {
     match s {
         "hosting.create" => "Created hosting",
         "hosting.delete" => "Deleted hosting",
@@ -1007,14 +1011,90 @@ pub fn fmt_action_label(s: &str) -> &str {
         "node.revoke" => "Node revoked",
         "hosting.migration.move" => "Hosting migrated",
         "hosting.rotate_wp_debug_log" => "debug.log rotated",
-        // Unknown / new — strip the prefix for a less technical look.
-        other => other,
+        // Anything not named above gets a GENERATED label instead of the
+        // raw kind. The hand map exists for the labels where natural
+        // English beats a mechanical one; the generator exists because the
+        // codebase writes ~160 distinct kinds and grows more with every
+        // feature — a hand list alone is permanently behind, which is
+        // exactly how `wp.vuln.scan` reached the operator's screen raw.
+        other => return humanize_kind(other),
+    }
+    .to_string()
+}
+
+/// Mechanical kind → label: split on `.`/`_`, expand the abbreviations the
+/// codebase actually uses, capitalize once. "wp.vuln.scan" → "WordPress
+/// vulnerability scan"; "web.login.2fa_ok" → "Web login 2FA succeeded".
+fn humanize_kind(kind: &str) -> String {
+    let words: Vec<&str> = kind
+        .split(['.', '_'])
+        .filter(|w| !w.is_empty())
+        .map(|w| match w {
+            "wp" => "WordPress",
+            "db" => "database",
+            "cert" => "certificate",
+            "vuln" => "vulnerability",
+            "2fa" => "2FA",
+            "acme" => "ACME",
+            "ftp" => "FTP",
+            "dns" => "DNS",
+            "dkim" => "DKIM",
+            "spf" => "SPF",
+            "geoip" => "GeoIP",
+            "smtp" => "SMTP",
+            "tls" => "TLS",
+            "s3" => "S3",
+            "kv" => "settings",
+            "ok" => "succeeded",
+            "rofs" => "read-only rootfs",
+            "autofix" => "auto-repaired",
+            "creds" => "credentials",
+            "config" => "configuration",
+            other => other,
+        })
+        .collect();
+    let joined = words.join(" ");
+    let mut c = joined.chars();
+    match c.next() {
+        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+        None => joined,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The exact kinds from the operator's notification feed that rendered
+    /// raw. Every one must come out readable — and the generator, not the
+    /// hand map, is what guarantees the NEXT new kind does too.
+    #[test]
+    fn action_labels_are_readable() {
+        assert_eq!(
+            fmt_action_label("wp.vuln.scan"),
+            "WordPress vulnerability scan"
+        );
+        assert_eq!(
+            fmt_action_label("wp.integrity.scan"),
+            "WordPress integrity scan"
+        );
+        assert_eq!(
+            fmt_action_label("web.login.2fa_ok"),
+            "Web login 2FA succeeded"
+        );
+        assert_eq!(
+            fmt_action_label("cert.panel_adopted"),
+            "Certificate panel adopted"
+        );
+        assert_eq!(
+            fmt_action_label("system.rofs_autofix"),
+            "System read-only rootfs auto-repaired"
+        );
+        // Hand-mapped ones keep their natural labels.
+        assert_eq!(fmt_action_label("hosting.create"), "Created hosting");
+        // No input renders as its raw dotted form.
+        assert_ne!(fmt_action_label("geoip.creds.set"), "geoip.creds.set");
+    }
 
     fn site(domain: &str, cpu: i64, mem: i64, disk: i64, bw: i64, reqs: i64) -> SiteRow {
         SiteRow {
