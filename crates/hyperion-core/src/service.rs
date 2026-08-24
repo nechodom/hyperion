@@ -2003,12 +2003,37 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
         let since = now_secs() - hours.clamp(1, 24 * 30) * 3600;
 
+        // The box's own requests are noise here, not traffic: the uptime
+        // monitor probing the site, wp-cron hitting itself, the cert
+        // pre-flight, wp-cli. Counting them inflates whichever country the
+        // SERVER sits in — which is exactly the row the operator then
+        // mis-reads as visitors. Two filters, each doing half the job:
+        // private/loopback addresses (the hairpin cases), and the node's
+        // own public IPv4 (probes that go out and come back).
+        //
+        // The public IP is fetched once per process life — it does not
+        // change under a running agent, and a per-request probe would add
+        // a network round trip and a failure mode to every panel load. A
+        // failed fetch degrades to filtering private addresses only.
+        static OWN_PUBLIC_IP: tokio::sync::OnceCell<Option<String>> =
+            tokio::sync::OnceCell::const_new();
+        let own_ip = OWN_PUBLIC_IP
+            .get_or_init(|| async { fetch_public_ip_v4("https://api4.ipify.org").await.ok() })
+            .await
+            .clone();
+
         let mut by_cc: std::collections::HashMap<String, (i64, i64)> = Default::default();
         for line in body.lines() {
             let Some((ip, ts, bytes)) = parse_access_line(line) else {
                 continue;
             };
             if ts < since {
+                continue;
+            }
+            if !hyperion_adapters::logscan::is_public_bannable_ip(&ip) {
+                continue;
+            }
+            if own_ip.as_deref() == Some(ip) {
                 continue;
             }
             let cc = ip
