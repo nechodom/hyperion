@@ -1574,7 +1574,13 @@ fn section_to_tab(section: &str) -> &'static str {
         // the save bounced the operator to Mail mid-edit.
         "notifications" => "notifications",
         "backup_remote" | "backup_retention" => "backups",
-        "cluster" => "cluster",
+        // [cluster] fields are now split across two tabs: the Security card
+        // (2FA + hardening flags) lives on General, Cluster placement on
+        // Cluster. General is the default; the placement form carries a
+        // `_return_tab=cluster` override, same pattern the Retention tab
+        // already uses for its cluster.* fields.
+        "cluster" => "general",
+        "update" => "system",
         "fail2ban" => "bruteforce",
         _ => "mail",
     }
@@ -1591,6 +1597,8 @@ fn sanitize_return_tab(v: &str) -> Option<&'static str> {
         "backups" => Some("backups"),
         "bruteforce" => Some("bruteforce"),
         "cluster" => Some("cluster"),
+        "general" => Some("general"),
+        "system" => Some("system"),
         "testnodes" => Some("testnodes"),
         "retention" => Some("retention"),
         "raw" => Some("raw"),
@@ -1719,7 +1727,7 @@ pub async fn post_panel_provision(
     let hostname = form.hostname.trim().to_lowercase();
     if hostname.is_empty() {
         return Ok(
-            Redirect::to("/settings?flash_error=Panel+hostname+is+required#cluster")
+            Redirect::to("/settings?flash_error=Panel+hostname+is+required#general")
                 .into_response(),
         );
     }
@@ -1761,10 +1769,10 @@ pub async fn post_panel_provision(
                 format!(" — {}", panel_url)
             };
             let summary = format!("{status}: {first_line}{url_hint}");
-            format!("/settings?{key}={}#cluster", urlencode(&summary))
+            format!("/settings?{key}={}#general", urlencode(&summary))
         }
         RpcResponse::Error(e) => format!(
-            "/settings?flash_error={}#cluster",
+            "/settings?flash_error={}#general",
             urlencode(&e.to_string())
         ),
         _ => return Err(AppError::Internal("unexpected response".into())),
@@ -2227,7 +2235,7 @@ pub async fn post_node_wildcard_begin(
         Ok(d) => d,
         Err(e) => {
             return Ok(Redirect::to(&format!(
-                "/settings?flash_error={}#cluster",
+                "/settings?flash_error={}#testnodes",
                 urlencode(&format!("invalid wildcard base {base}: {e}"))
             ))
             .into_response());

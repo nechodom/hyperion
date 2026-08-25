@@ -68,14 +68,9 @@
 {# Tabs — same pattern as the hosting detail page. Hash routing
    so deep links like /settings#mail land directly on a section. #}
 <nav class="tabs" role="tablist">
-  <a class="tab" data-tab="cluster" href="#cluster" role="tab" title="Panel domain, hosting placement, and security policy">
-    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
-    Control plane
-    {# The "every node signs, enforcement still off" nag. The warning
-       itself lives in the Security card, and nobody opens this tab
-       unprompted — without the badge the downgrade branch stays open
-       forever because no one ever looks. #}
-    {% if resp_auth_total > 0 && resp_auth_pending.is_empty() && !config.cluster.enforce_response_auth %}<span class="tab-badge" style="background:var(--warn);color:white" title="Every node can sign its responses but enforcement is still off">!</span>{% endif %}
+  <a class="tab" data-tab="general" href="#general" role="tab" title="The panel’s own domain and sign-in security">
+    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h.01a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h.01a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v.01a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+    General
   </a>
   <a class="tab" data-tab="mail" href="#mail" role="tab">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
@@ -89,13 +84,15 @@
     {% if config.slack.default_webhook_set %}<span class="tab-badge" style="background:var(--success);color:white">●</span>
     {% else %}<span class="tab-badge" style="background:var(--surface-2)">off</span>{% endif %}
   </a>
-  <a class="tab" data-tab="system" href="#system" role="tab" title="Updates and the GeoIP database — settings about the BOX, not about a site">
-    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
-    System
-  </a>
   <a class="tab" data-tab="tls" href="#tls" role="tab">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
     SSL / TLS certs
+  </a>
+  <a class="tab" data-tab="backups" href="#backups" role="tab">
+    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+    Backups
+    {% if config.backup_remote.enabled %}<span class="tab-badge" style="background:var(--success);color:white">●</span>
+    {% else %}<span class="tab-badge" style="background:var(--surface-2)">local</span>{% endif %}
   </a>
   <a class="tab" data-tab="bruteforce" href="#bruteforce" role="tab" title="How many failed logins earn an IP a firewall ban, and for how long">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
@@ -105,26 +102,31 @@
       {% else %}<span class="tab-badge" style="background:var(--surface-2)">off</span>{% endif %}
     {% endif %}
   </a>
-  <a class="tab" data-tab="backups" href="#backups" role="tab">
-    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-    Backups
-    {% if config.backup_remote.enabled %}<span class="tab-badge" style="background:var(--success);color:white">●</span>
-    {% else %}<span class="tab-badge" style="background:var(--surface-2)">local</span>{% endif %}
-  </a>
   <a class="tab" data-tab="retention" href="#retention" role="tab" title="How long trashed hostings and audit-log entries are kept">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
     Data retention
   </a>
-  <a class="tab" data-tab="testnodes" href="#testnodes" role="tab">
+  <a class="tab" data-tab="system" href="#system" role="tab" title="Updates and the GeoIP database — settings about the BOX, not about a site">
+    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
+    System
+  </a>
+  <a class="tab" data-tab="cluster" href="#cluster" role="tab" data-cluster-only title="Panel domain, hosting placement, and security policy">
+    <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
+    Control plane
+    {# The "every node signs, enforcement still off" nag. The warning
+       itself lives in the Security card, and nobody opens this tab
+       unprompted — without the badge the downgrade branch stays open
+       forever because no one ever looks. #}
+    {% if resp_auth_total > 0 && resp_auth_pending.is_empty() && !config.cluster.enforce_response_auth %}<span class="tab-badge" style="background:var(--warn);color:white" title="Every node can sign its responses but enforcement is still off">!</span>{% endif %}
+  </a>
+  <a class="tab" data-tab="testnodes" href="#testnodes" role="tab" data-cluster-only>
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
     Test nodes &amp; previews
   </a>
-  {% if can_manage_api_keys %}
   <a class="tab" data-tab="api" href="#api" role="tab" title="Bearer API keys for the remote management API">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
     API keys
   </a>
-  {% endif %}
   <a class="tab" data-tab="raw" href="#raw" role="tab" style="margin-left:auto">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
     Raw TOML
@@ -137,6 +139,7 @@
    MAIL — SMTP relay + test + how-it-works panel.
    ========================================================== #}
 <div class="tab-panel" id="tab-mail">
+  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">How this node sends e-mail: through your SMTP relay when one is set, otherwise via the local postfix. The test send below is the fastest way to prove the path works.</p>
   <div class="card">
     {# Per-node: each node has its own [email] in agent.toml. Pick a node to
        view + edit its mail config; saving writes + applies on THAT node. #}
@@ -635,6 +638,7 @@
    TLS / ACME — Let's Encrypt contact email
    ========================================================== #}
 <div class="tab-panel" id="tab-system">
+  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">Settings about this machine itself — automatic Hyperion updates and the GeoIP database behind the per-site traffic map and country blocking.</p>
   {# Settings about the MACHINE rather than about a site or a message.
      These lived under Notifications, where neither belonged: an operator
      looking for "does this box update itself" does not think of it as a
@@ -741,6 +745,7 @@
 </div>
 
 <div class="tab-panel" id="tab-tls">
+  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">The Let’s Encrypt account this node uses when issuing certificates. Per-site issuance lives on each hosting’s SSL tab; only the shared contact belongs here.</p>
   <div class="card">
     <h2>
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
@@ -783,6 +788,7 @@
    NOTIFICATIONS — Slack webhook (email is in its own tab)
    ========================================================== #}
 <div class="tab-panel" id="tab-notifications">
+  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">Where alerts go and what they look like — Slack, the e-mail design and wording, and the letters customers receive.</p>
   <div class="card">
     <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.5rem">
       <h2 style="margin:0">
@@ -1169,6 +1175,7 @@
    BACKUPS — remote target + retention policy
    ========================================================== #}
 <div class="tab-panel" id="tab-backups">
+  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">Cluster-wide backup targets and how many copies are kept. Each site chooses its own schedule and target on its Backups tab.</p>
 
   {# Two off-site destination types: the FTP/FTPS/SFTP single-target push
      (below) is the path that runs TODAY; the S3 multi-target page is the
@@ -1249,7 +1256,7 @@
   <div class="card" style="margin-top:1rem">
     <h2>
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
-      Retention policy
+      Backup retention
     </h2>
     <p class="text-soft small" style="margin:0.3rem 0 0.6rem">
       This governs <strong>backup archives</strong> only. Trash and audit-log retention live on the
@@ -1282,6 +1289,7 @@
    BRUTE FORCE — the native scanner's [fail2ban] section
    ========================================================== #}
 <div class="tab-panel" id="tab-bruteforce">
+  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">How many failed logins earn an IP a firewall ban, and for how long. Applies to FTP, mail and WordPress logins on this node.</p>
 
   <div class="flash info" style="margin-bottom:1rem">
     <div class="flash-body">
@@ -1438,7 +1446,7 @@
   <div class="card">
     <h2 style="font-size:0.95rem;margin:0 0 0.6rem">
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
-      Brute-force scanner
+      Brute-force scanner — config unreadable
     </h2>
     <p class="text-soft small" style="margin:0;line-height:1.55">
       <code>/etc/hyperion/agent.toml</code> could not be read or did not parse, so
@@ -1452,14 +1460,14 @@
 {# ==========================================================
    CLUSTER — multi-node controls
    ========================================================== #}
-<div class="tab-panel" id="tab-cluster">
-
-  {# ==========================================================
-     PANEL DOMAIN — bind the control panel itself to a hostname.
-     This is the very first thing operators look for after the
-     initial install, so it sits at the top of the cluster tab.
-     ========================================================== #}
-  <div class="card">
+<div class="tab-panel" id="tab-general">
+  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">
+    The two things every install has to decide once: what domain the
+    panel itself answers on, and how signing in is protected. These
+    lived under “Cluster”, where nobody running one server thought to
+    look for them.
+  </p>
+<div class="card">
     <h2>
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
       Panel domain
@@ -1541,30 +1549,7 @@
     </div>
   </div>
 
-  <div class="card" style="margin-top:1rem">
-    <h2>
-      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
-      Cluster placement
-    </h2>
-    <form method="post" action="/settings/config" autocomplete="off">
-      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
-      <input type="hidden" name="section" value="cluster">
-      <input type="hidden" name="_checkboxes" value="master_accepts_hostings">
-      <label class="field-checkbox" style="font-weight:600">
-        <input type="checkbox" name="master_accepts_hostings" value="true"
-               {% if config.cluster.master_accepts_hostings %}checked{% endif %}>
-        Allow new hostings to be created on the master node
-      </label>
-      <p class="text-soft small" style="margin:0.4rem 0 0.8rem;line-height:1.55">
-        Turn this off to make the master a <strong>control plane only</strong>, with every hosting living on a worker.
-        <br>
-        While off, the target-node dropdown in the create wizard hides the master option, and creating directly with <code>hctl</code> on the master is refused. Existing hostings on the master stay put — this toggle affects new creates only.
-      </p>
-      <button type="submit" class="btn primary">Save cluster settings</button>
-    </form>
-  </div>
-
-  <div class="card" style="margin-top:1rem">
+  <div class="card">
     <h2 style="font-size:0.95rem;margin:0 0 0.6rem">
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
       Security
@@ -1711,12 +1696,41 @@
       <button type="submit" class="btn primary">Save security settings</button>
     </form>
   </div>
-</div>{# /tab-cluster #}
+</div>
 
-{# Test nodes split into their own tab — the test-node feature (auto
-   subdomains, staging, wildcard certs) is a distinct concern from core
-   cluster topology, so it no longer crowds the Cluster tab. #}
-<div class="tab-panel" id="tab-testnodes">
+<div class="tab-panel" id="tab-cluster">
+  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">
+    Where new hostings land when this box drives worker nodes, and the
+    hardening that protects master↔node traffic. On a single server
+    nothing here applies — the panel’s own domain and access security
+    moved to <strong>General</strong>.
+  </p>
+<div class="card">
+    <h2>
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
+      Cluster placement
+    </h2>
+    <form method="post" action="/settings/config" autocomplete="off">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="section" value="cluster">
+      <input type="hidden" name="_return_tab" value="cluster">
+      <input type="hidden" name="_checkboxes" value="master_accepts_hostings">
+      <label class="field-checkbox" style="font-weight:600">
+        <input type="checkbox" name="master_accepts_hostings" value="true"
+               {% if config.cluster.master_accepts_hostings %}checked{% endif %}>
+        Allow new hostings to be created on the master node
+      </label>
+      <p class="text-soft small" style="margin:0.4rem 0 0.8rem;line-height:1.55">
+        Turn this off to make the master a <strong>control plane only</strong>, with every hosting living on a worker.
+        <br>
+        While off, the target-node dropdown in the create wizard hides the master option, and creating directly with <code>hctl</code> on the master is refused. Existing hostings on the master stay put — this toggle affects new creates only.
+      </p>
+      <button type="submit" class="btn primary">Save cluster settings</button>
+    </form>
+  </div>
+
+  </div><div class="tab-panel" id="tab-testnodes">
+  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">Marks whole nodes as disposable test machines: their sites get auto-generated subdomains, a shared wildcard certificate and no-index. Nothing here affects production nodes.</p>
 
   <div class="card">
     <h2 style="font-size:0.95rem;margin:0 0 0.6rem">
@@ -1922,6 +1936,7 @@
    a glance without scrolling past four other cards.
    ========================================================== #}
 <div class="tab-panel" id="tab-retention">
+  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">How long deleted things stay recoverable: trashed hostings and audit-log history. Backup copies have their own retention under Backups.</p>
   <div class="card">
     <h2 style="margin:0 0 0.4rem">
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>
@@ -2007,6 +2022,7 @@
    RAW TOML — read-only view of agent.toml with secrets masked
    ========================================================== #}
 <div class="tab-panel" id="tab-raw">
+  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">The agent’s raw configuration file, read-only. For checking what is actually on disk when a setting misbehaves.</p>
   <div class="card">
     <h2>
       <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
@@ -2026,6 +2042,7 @@
    ========================================================== #}
 {% if can_manage_api_keys %}
 <div class="tab-panel" id="tab-api">
+  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">Bearer keys for the management API — for scripts and integrations. Every key is clamped to the permissions of the user who created it.</p>
   {% if new_api_key.is_some() %}
   <div class="flash ok" style="margin-bottom:1rem">
     <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
@@ -2199,7 +2216,7 @@
     if (history.replaceState) history.replaceState(null, '', '#' + id);
   }));
   const hashId = (location.hash || '').replace(/^#/, '');
-  if (!resolve(hashId) && !activate(remembered() || '')) activate('cluster');
+  if (!resolve(hashId) && !activate(remembered() || '')) activate('general');
   window.addEventListener('hashchange', () => {
     resolve((location.hash || '').replace(/^#/, ''));
   });
