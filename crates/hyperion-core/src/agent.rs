@@ -576,6 +576,13 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.cert_delete(sel).await
     }
 
+    async fn wp_fatal_check(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::WpFatalReport, RpcError> {
+        self.svc.wp_fatal_check(sel).await
+    }
+
     async fn cert_dns01_begin(
         &self,
         sel: HostingSelector,

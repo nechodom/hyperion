@@ -435,6 +435,10 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::DnsSpfCheck(v),
             Err(e) => Response::Error(e),
         },
+        Request::WpFatalCheck { sel } => match api.wp_fatal_check(sel).await {
+            Ok(v) => Response::WpFatalCheck(v),
+            Err(e) => Response::Error(e),
+        },
         Request::CertDelete { sel } => match api.cert_delete(sel).await {
             Ok(()) => Response::CertDelete,
             Err(e) => Response::Error(e),
@@ -1857,6 +1861,13 @@ mod tests {
                 message: "not supported by this agent".into(),
             })
         }
+        async fn wp_fatal_check(
+            &self,
+            _: HostingSelector,
+        ) -> Result<hyperion_types::WpFatalReport, RpcError> {
+            Ok(Default::default())
+        }
+
         async fn cert_delete(&self, _: HostingSelector) -> Result<(), RpcError> {
             Err(RpcError::Internal {
                 message: "not supported by this agent".into(),

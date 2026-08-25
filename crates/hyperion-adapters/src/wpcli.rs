@@ -508,6 +508,35 @@ pub async fn install_item(
 /// List installed WP plugins via `wp plugin list --format=json` and
 /// `wp core version`. Both calls run under `system_user` against
 /// `htdocs`. Returns the parsed plugin table + wp version string.
+/// Pull the offending plugin/theme slug out of a PHP fatal.
+///
+/// When a plugin fatals during bootstrap, EVERY wp-cli invocation dies with
+/// the same stack trace — which names the file:
+/// `.../wp-content/plugins/<slug>/...`. That makes the trace, which reads
+/// as noise, actually the most actionable line on the page: it says exactly
+/// which plugin to deactivate. Themes are recognised the same way.
+///
+/// First match wins: PHP reports the frame that threw first, and in a
+/// bootstrap fatal that is the culprit, not a bystander.
+pub fn culprit_from_output(output: &str) -> Option<(String, String)> {
+    for (marker, kind) in [
+        ("/wp-content/plugins/", "plugin"),
+        ("/wp-content/themes/", "theme"),
+    ] {
+        if let Some(i) = output.find(marker) {
+            let rest = &output[i + marker.len()..];
+            let slug: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                .collect();
+            if !slug.is_empty() {
+                return Some((slug, kind.to_string()));
+            }
+        }
+    }
+    None
+}
+
 pub async fn plugin_list(
     user: &str,
     htdocs: &str,
@@ -897,6 +926,26 @@ fn parse_wp_json<T: serde::de::DeserializeOwned>(
 
 #[cfg(test)]
 mod tests {
+    /// The exact failure from a live site: WP Rocket fatals in its
+    /// Cloudflare integration and takes every wp-cli call down with it.
+    #[test]
+    fn culprit_is_read_from_a_real_stack_trace() {
+        let trace = "PHP Fatal error: Uncaught TypeError: substr(): Argument #1 (%string) must be of type string, int given in /home/soptik_hosting_nechodom_cz/soptik.hosting.nechodom.cz/htdocs/wp-content/plugins/wp-rocket/inc/ThirdParty/Plugins/CDN/Cloudflare.php:496";
+        assert_eq!(
+            super::culprit_from_output(trace),
+            Some(("wp-rocket".to_string(), "plugin".to_string()))
+        );
+    }
+
+    #[test]
+    fn culprit_handles_themes_and_absence() {
+        assert_eq!(
+            super::culprit_from_output("boom in /x/wp-content/themes/astra/functions.php"),
+            Some(("astra".to_string(), "theme".to_string()))
+        );
+        assert_eq!(super::culprit_from_output("connection refused"), None);
+    }
+
     use super::*;
 
     #[test]

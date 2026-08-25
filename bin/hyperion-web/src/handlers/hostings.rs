@@ -5652,6 +5652,104 @@ pub async fn get_hosting_jobs_panel(
 }
 
 #[derive(Template)]
+#[template(path = "_hosting_fatal_card.html", escape = "none")]
+struct FatalCardTpl {
+    report: hyperion_types::WpFatalReport,
+    selector: String,
+    csrf_token: String,
+    csrf_wp_debug: String,
+    target_node: String,
+    wp_debug_enabled: bool,
+    error: Option<String>,
+}
+
+/// GET /hostings/:selector/health-panel — is the site throwing a fatal?
+///
+/// Runs on the OWNING node (the probe goes over that box's loopback, and
+/// the wp-cli reproduction needs the site's files). Failures render in the
+/// card — the placeholder is a spinner and HTMX discards a non-2xx.
+pub async fn get_health_panel(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Path(selector): Path<String>,
+) -> Result<Response, AppError> {
+    let card = |report, target_node: String, wp_debug: bool, error: Option<String>| {
+        Html(
+            FatalCardTpl {
+                report,
+                selector: selector.clone(),
+                csrf_token: super::session_csrf_token(&state, &ctx),
+                csrf_wp_debug: csrf_token_for(&state, &ctx, "/hostings/wp/debug"),
+                target_node,
+                wp_debug_enabled: wp_debug,
+                error,
+            }
+            .render()
+            .unwrap_or_default(),
+        )
+        .into_response()
+    };
+    let sel = match parse_selector(&selector) {
+        Ok(s) => s,
+        Err(e) => {
+            return Ok(card(
+                Default::default(),
+                String::new(),
+                false,
+                Some(format!("could not read the selector: {e}")),
+            ))
+        }
+    };
+    let (detail, owner) = match find_hosting_anywhere(&state, sel.clone()).await {
+        Ok(v) => v,
+        Err(e) => {
+            return Ok(card(
+                Default::default(),
+                String::new(),
+                false,
+                Some(format!("could not look up this site: {e}")),
+            ))
+        }
+    };
+    if require_hosting_access(
+        &state,
+        &ctx,
+        detail.id.as_str(),
+        false,
+        Capability::HostingView,
+    )
+    .await
+    .is_err()
+    {
+        return Ok(card(
+            Default::default(),
+            String::new(),
+            false,
+            Some("not permitted".into()),
+        ));
+    }
+    let tn = owner.clone().unwrap_or_default();
+    let dbg = detail.wp_extras.wp_debug_enabled;
+    match crate::dispatcher::dispatch_to_node(
+        &state,
+        owner.as_deref(),
+        Request::WpFatalCheck { sel },
+    )
+    .await
+    {
+        Ok(RpcResponse::WpFatalCheck(r)) => Ok(card(r, tn, dbg, None)),
+        Ok(RpcResponse::Error(e)) => Ok(card(Default::default(), tn, dbg, Some(e.to_string()))),
+        Ok(_) => Ok(card(
+            Default::default(),
+            tn,
+            dbg,
+            Some("unexpected response from the node".into()),
+        )),
+        Err(e) => Ok(card(Default::default(), tn, dbg, Some(e.to_string()))),
+    }
+}
+
+#[derive(Template)]
 #[template(path = "_hosting_traffic_card.html", escape = "none")]
 struct TrafficCardTpl {
     rows: Vec<hyperion_types::CountryTraffic>,

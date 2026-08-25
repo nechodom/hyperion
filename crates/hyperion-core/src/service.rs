@@ -12955,6 +12955,76 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// A non-loop failure (curl missing, connection refused, timeout) returns
     /// `None`: an inconclusive probe must not block a legitimate change. This
     /// catches the certain case and stays out of the way otherwise.
+    /// Probe a site for a WordPress fatal and, when there is one, name the
+    /// plugin or theme that caused it.
+    ///
+    /// Two independent measurements, deliberately:
+    ///
+    ///   1. HTTP over loopback with the site's own Host — what a VISITOR
+    ///      sees. A production WP fatal is a 500 with a friendly page and
+    ///      no diagnostic, because display_errors is off.
+    ///   2. A wp-cli run — a plugin that fatals during bootstrap kills
+    ///      every wp-cli call with a stack trace that NAMES the file. The
+    ///      trace visitors never see is exactly the diagnostic the panel
+    ///      needs: it says what to deactivate.
+    ///
+    /// Neither alone is enough: the probe knows THAT it is broken, the
+    /// trace knows WHY. `-k` because the origin may be on the bootstrap
+    /// cert; the probe asks "does PHP answer", not "is TLS trusted".
+    pub async fn wp_fatal_check(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::WpFatalReport, RpcError> {
+        let detail = self.get(sel).await?;
+        let mut report = hyperion_types::WpFatalReport::default();
+
+        let out = tokio::process::Command::new("curl")
+            .args([
+                "-sS",
+                "-o",
+                "/dev/null",
+                "-k",
+                "--max-time",
+                "15",
+                "--resolve",
+                &format!("{}:443:127.0.0.1", detail.domain),
+                "-w",
+                "%{http_code}",
+                &format!("https://{}/", detail.domain),
+            ])
+            .output()
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("probe: {e}")))?;
+        report.http_status = String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse::<i64>()
+            .unwrap_or(0);
+        report.fatal = report.http_status >= 500;
+
+        // Only chase a culprit when something is actually wrong — a healthy
+        // site does not need a wp-cli round trip on every panel load.
+        if report.fatal {
+            if let Err(e) =
+                hyperion_adapters::wpcli::plugin_list(&detail.system_user, &detail.root_dir).await
+            {
+                let text = e.to_string();
+                if let Some((slug, kind)) = hyperion_adapters::wpcli::culprit_from_output(&text) {
+                    report.culprit = Some(slug);
+                    report.culprit_kind = kind;
+                }
+                // The first fatal line is the readable part; the trace
+                // below it is noise at panel level.
+                if let Some(line) = text
+                    .lines()
+                    .find(|l| l.contains("Fatal error") || l.contains("PHP Fatal"))
+                {
+                    report.error_excerpt = line.chars().take(300).collect();
+                }
+            }
+        }
+        Ok(report)
+    }
+
     async fn redirect_loop_probe(&self, domain: &str) -> Option<String> {
         const MAX_HOPS: u8 = 6;
         let url = format!("https://{domain}/");
