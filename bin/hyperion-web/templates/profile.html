@@ -106,11 +106,17 @@
 </div>
 
 {# 2FA SECTION — three states: enrollment-in-progress | enrolled | disabled. #}
-<div class="grid cols-2">
+{# Stacked, not a grid. Three of these are short forms, but the fourth
+   carries a per-device table that needs the full content width — an
+   auto-fit grid packed all four abreast on a wide screen and the table
+   came out crushed, headers truncated mid-word. One column reads top to
+   bottom in the order people actually use: security state first, then
+   the actions, then the audit of where you are signed in. #}
+<div style="display:grid;grid-template-columns:1fr;gap:1rem;max-width:56rem">
 
 {# Enrollment-in-progress: show QR + secret + backup codes. #}
 {% if let Some(en) = enrollment %}
-<div class="card" style="grid-column:1/-1">
+<div class="card">
   <h2>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
     Set up two-factor authentication
@@ -187,7 +193,7 @@
   <p class="text-soft small" style="margin-top:0.4rem">At least 8 characters. Enter your current password to confirm. Your other signed-in devices will be signed out.</p>
 </div>
 
-<div class="card" style="margin-top:1rem">
+<div class="card">
   <h2 style="margin:0 0 0.6rem">
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
     Change email
@@ -234,7 +240,7 @@
 </div>
 
 {# ───── Signed-in devices ───── #}
-<div class="card" style="margin-top:1rem">
+<div class="card">
   <h2>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
     Signed-in devices
@@ -256,9 +262,13 @@
       <tbody>
       {% for s in sessions %}
         <tr>
-          <td style="max-width:22rem">
+          <td style="max-width:26rem">
             {% if s.sid == current_sid %}<span class="pill ok" style="margin-right:0.4rem">this device</span>{% endif %}
-            <span class="text-soft small">{% if let Some(ua) = s.user_agent %}{{ ua }}{% else %}unknown{% endif %}</span>
+            <span class="text-soft small"
+                  {% if let Some(ua) = s.user_agent %}title="{{ ua }}"{% endif %}
+                  style="display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">
+              {%- if let Some(ua) = s.user_agent %}{{ ua }}{% else %}unknown{% endif -%}
+            </span>
           </td>
           <td><code style="font-size:0.8rem">{% if let Some(ip) = s.ip %}{{ ip }}{% else %}—{% endif %}</code></td>
           <td class="muted small">{{ s.created_at|datetime }}</td>

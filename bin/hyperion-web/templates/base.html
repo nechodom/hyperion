@@ -22,6 +22,16 @@
        tall (super_admin sees 16). Without this, items like Trash
        overflowed below the fold with no way to reach them. #}
     <div class="sidebar-nav">
+    {# Grouped by the QUESTION the operator is asking, not by subsystem.
+       "How are my sites doing" → Overview. "What is the box busy with" →
+       Operations. "What am I selling" → Products. "Is anything at risk" →
+       Security. The old layout filed Trash, Jobs, Profiles and Care
+       packages under "Cluster", which they are not — they exist identically
+       on a single server, and the label sent people hunting through a
+       section they had no reason to open. Cluster now holds exactly the
+       one thing that is about MORE THAN ONE BOX: nodes. Sections whose
+       every link is hidden for a role disappear on their own (the shim
+       below), so nothing here needs extra gating. #}
     <nav class="nav-section">
       <span class="nav-label">Overview</span>
       <a class="nav-link {% if active == "dashboard" %}active{% endif %}" href="/"
@@ -50,22 +60,27 @@
         <span id="nav-monitoring-dot" class="nav-status-dot" hidden></span>
       </a>
     </nav>
-    <nav class="nav-section" data-hide-roles="customer">
-      <span class="nav-label">Cluster</span>
-      <a class="nav-link {% if active == "install" %}active{% endif %}" href="/install"
-         data-role-min="super_admin">
-        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
-        Nodes
-      </a>
-      <a class="nav-link {% if active == "import" %}active{% endif %}" href="/import"
-         data-require-caps="panel_import">
-        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-        Import
+    <nav class="nav-section" data-hide-roles="customer,viewer">
+      <span class="nav-label">Operations</span>
+      <a class="nav-link {% if active == "jobs" %}active{% endif %}" href="/jobs"
+         data-role-min="admin">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4"/><path d="M12 18v4"/><path d="m4.93 4.93 2.83 2.83"/><path d="m16.24 16.24 2.83 2.83"/><path d="M2 12h4"/><path d="M18 12h4"/><path d="m4.93 19.07 2.83-2.83"/><path d="m16.24 7.76 2.83-2.83"/></svg>
+        Background jobs
+        {# Live badge — number of currently running jobs. Pulled by
+           a tiny periodic fetch (same pattern as the trash badge).
+           Hidden when 0 so a quiet cluster doesn't draw the eye. #}
+        <span id="nav-jobs-badge" class="tab-badge" hidden
+              style="margin-left:auto;background:var(--accent);color:white">0</span>
       </a>
       <a class="nav-link {% if active == "services" %}active{% endif %}" href="/services"
          data-require-caps="services_view">
         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
         Service health
+      </a>
+      <a class="nav-link {% if active == "import" %}active{% endif %}" href="/import"
+         data-require-caps="panel_import">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        Import
       </a>
       <a class="nav-link {% if active == "trash" %}active{% endif %}" href="/trash"
          data-require-caps="trash_manage">
@@ -77,28 +92,14 @@
         <span id="nav-trash-badge" class="tab-badge" hidden
               style="margin-left:auto;background:var(--warn);color:white">0</span>
       </a>
-      <a class="nav-link {% if active == "jobs" %}active{% endif %}" href="/jobs"
-         data-role-min="admin">
-        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v4"/><path d="M12 18v4"/><path d="m4.93 4.93 2.83 2.83"/><path d="m16.24 16.24 2.83 2.83"/><path d="M2 12h4"/><path d="M18 12h4"/><path d="m4.93 19.07 2.83-2.83"/><path d="m16.24 7.76 2.83-2.83"/></svg>
-        Background jobs
-        {# Live badge — number of currently running jobs. Pulled by
-           a tiny periodic fetch (same pattern as the trash badge).
-           Hidden when 0 so a quiet cluster doesn't draw the eye. #}
-        <span id="nav-jobs-badge" class="tab-badge" hidden
-              style="margin-left:auto;background:var(--accent);color:white">0</span>
-      </a>
-      {# Profiles = reusable templates of limits/expiry/pricing/WP plugins,
-         applied at create time. It's configuration, not a dashboard, so it
-         lives with the cluster infrastructure rather than under Overview. #}
+    </nav>
+    <nav class="nav-section" data-hide-roles="customer">
+      <span class="nav-label">Products</span>
       <a class="nav-link {% if active == "profiles" %}active{% endif %}" href="/profiles"
          data-require-caps="profiles_manage">
         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M20 7h-9"/><path d="M14 17H5"/><circle cx="17" cy="17" r="3"/><circle cx="7" cy="7" r="3"/></svg>
         Profiles &amp; limits
       </a>
-      {# Care packages sit next to Profiles because they're the same kind of
-         object — an admin-authored plan applied to a hosting — and differ
-         only in being a paid entitlement that stays enforced. Same
-         capability gate for the same reason. #}
       <a class="nav-link {% if active == "packages" %}active{% endif %}" href="/packages"
          data-require-caps="profiles_manage">
         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41 13.42 20.58a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"/><line x1="7" y1="7" x2="7.01" y2="7"/></svg>
@@ -143,21 +144,27 @@
         Email log
       </a>
     </nav>
+    <nav class="nav-section" data-hide-roles="customer">
+      <span class="nav-label">Cluster</span>
+      <a class="nav-link {% if active == "install" %}active{% endif %}" href="/install"
+         data-role-min="super_admin">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg>
+        Nodes
+      </a>
+    </nav>
     <nav class="nav-section">
       <span class="nav-label">Account</span>
-      <a class="nav-link {% if active == "users" %}active{% endif %}" href="/admin/users"
-         data-require-caps="users_manage">
-        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
-        Users
+      <a class="nav-link {% if active == "profile" %}active{% endif %}" href="/profile">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+        My profile
       </a>
+    </nav>
+    <nav class="nav-section" data-hide-roles="customer,viewer">
+      <span class="nav-label">Administration</span>
       <a class="nav-link {% if active == "roles" %}active{% endif %}" href="/roles"
          data-require-caps="roles_manage">
         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M9 12l2 2 4-4"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M12 22a10 10 0 0 0 0-20 10 10 0 0 0 0 20z"/></svg>
         Roles
-      </a>
-      <a class="nav-link {% if active == "profile" %}active{% endif %}" href="/profile">
-        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-        My profile
       </a>
       <a class="nav-link {% if active == "settings" %}active{% endif %}" href="/settings"
          data-require-caps="settings_manage">
