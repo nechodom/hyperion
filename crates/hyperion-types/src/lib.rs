@@ -71,7 +71,7 @@ pub use stats::{
 };
 pub use stats::{CARE_REPORT_DEFAULT_BODY_TEMPLATE, EXPIRY_WARNING_DEFAULT_BODY_TEMPLATE};
 pub use wp::{
-    HostingIntegritySummary, HostingVulnSummary, WpInstallRequest, WpInstallStatus,
+    HostingIntegritySummary, HostingVulnSummary, WpFatalReport, WpInstallRequest, WpInstallStatus,
     WpIntegrityFileIssue, WpIntegrityPluginResult, WpIntegrityScanResult, WpMalwareHit, WpPlugin,
     WpPluginAction, WpPluginActionResult, WpPluginListResponse, WpTheme, WpThemeAction,
     WpThemeActionResult, WpThemeListResponse, WpVulnFinding, WpVulnScanResult,

@@ -941,6 +941,19 @@ fn print_pretty(resp: &Response) {
             println!("matches:  {}", if c.matches { "yes ✓" } else { "no ✗" });
             println!("note:     {}", c.note);
         }
+        Response::WpFatalCheck(r) => {
+            if r.fatal {
+                println!("✗ site answers HTTP {} — WordPress fatal", r.http_status);
+                if let Some(c) = &r.culprit {
+                    println!("  culprit {}: {} (deactivate it)", r.culprit_kind, c);
+                }
+                if !r.error_excerpt.is_empty() {
+                    println!("  {}", r.error_excerpt);
+                }
+            } else {
+                println!("✓ site answers HTTP {} — no fatal", r.http_status);
+            }
+        }
         Response::WebSessionRevokeAll(n) => println!("✓ signed out of {n} session(s)"),
         Response::HostingCountryTraffic(rows) => {
             println!("{:<6} {:<28} {:>10} {:>7}", "CODE", "COUNTRY", "REQUESTS", "SHARE");

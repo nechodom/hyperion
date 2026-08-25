@@ -484,3 +484,24 @@ mod tests {
         assert_eq!(s, back);
     }
 }
+
+/// Result of the "is the site throwing a fatal?" probe.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq, Default)]
+pub struct WpFatalReport {
+    /// HTTP status the site answered with over loopback. 0 = no answer.
+    pub http_status: i64,
+    /// True when the front page answers 5xx — the shape a WordPress
+    /// "critical error" page takes in production.
+    pub fatal: bool,
+    /// Slug of the plugin/theme whose file threw, when a wp-cli run
+    /// reproduced the fatal and named it. The single most actionable
+    /// fact on the page: it says what to deactivate.
+    pub culprit: Option<String>,
+    /// "plugin" | "theme" — only meaningful when `culprit` is set.
+    #[serde(default)]
+    pub culprit_kind: String,
+    /// First fatal line from the reproduction, for the operator to read.
+    /// Capped server-side; never contains the full trace.
+    #[serde(default)]
+    pub error_excerpt: String,
+}

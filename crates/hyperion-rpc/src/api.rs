@@ -299,6 +299,10 @@ pub trait AgentApi: Send + Sync + 'static {
     /// Delete a hosting's certificate; the vhost falls back to a
     /// self-signed bootstrap so the site keeps answering on :443.
     async fn cert_delete(&self, sel: crate::wire::HostingSelector) -> Result<(), RpcError>;
+    async fn wp_fatal_check(
+        &self,
+        sel: crate::wire::HostingSelector,
+    ) -> Result<hyperion_types::WpFatalReport, RpcError>;
     /// DNS-01 phase 1. Returns (completed, record_name, values).
     async fn cert_dns01_begin(
         &self,

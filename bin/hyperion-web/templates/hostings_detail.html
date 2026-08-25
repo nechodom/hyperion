@@ -1194,6 +1194,22 @@
 </div><!-- /tab-ssl -->
 
 <div class="tab-panel" id="tab-wordpress">
+{# Site health first: when the site is down with a fatal, everything else
+   on this tab is secondary. Lazy — the probe + possible wp-cli run must
+   not hold up the page. #}
+<div hx-get="/hostings/{{ detail.id.as_str() }}/health-panel"
+     hx-trigger="load" hx-swap="outerHTML">
+  <div class="card hover" id="fatal-card">
+    <h2>
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+      Site health
+    </h2>
+    <p class="muted" style="margin:0;font-size:0.85rem">
+      <span class="spinner-inline"></span> Probing the site…
+    </p>
+  </div>
+</div>
+
 
 <div class="card hover">
   <h2>

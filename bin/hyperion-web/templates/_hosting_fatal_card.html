@@ -1,0 +1,102 @@
+{# Site-health card — is the front page throwing a WordPress fatal?
+
+   Lazy, and every failure renders IN the card: the placeholder it replaces
+   is a spinner, and HTMX does not swap on a non-2xx.
+
+   Neither action fires by itself. Debug mode changes what ERRORS VISITORS
+   SEE if misused, and deactivating a plugin changes the site — both are
+   the operator's call, so the card asks (confirm dialogs) rather than
+   fixing silently. #}
+<div class="card hover" id="fatal-card">
+  <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>
+    Site health
+    {% if let Some(e) = error %}
+      <span class="pill warn" style="margin-left:0.4rem;font-size:0.65rem">could not check</span>
+    {% else if report.fatal %}
+      <span class="pill err" style="margin-left:0.4rem;font-size:0.65rem">throwing an error</span>
+    {% else %}
+      <span class="pill ok" style="margin-left:0.4rem;font-size:0.65rem">responding</span>
+    {% endif %}
+  </h2>
+
+  {% if let Some(e) = error %}
+    <p class="muted" style="margin:0.3rem 0 0;font-size:0.88rem">{{ e }}</p>
+  {% else if !report.fatal %}
+    <p class="muted" style="margin:0.3rem 0 0;font-size:0.88rem">
+      The front page answers HTTP {{ report.http_status }} from this server —
+      no fatal error. Checked just now.
+    </p>
+  {% else %}
+    <p class="muted" style="margin:0.3rem 0 0.6rem;font-size:0.88rem">
+      The front page answers <strong>HTTP {{ report.http_status }}</strong> —
+      visitors are seeing WordPress's "critical error" page.
+    </p>
+
+    {% if let Some(c) = report.culprit %}
+    <div class="flash error" style="margin:0 0 0.6rem">
+      <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+      <div class="flash-body">
+        <strong>The crash comes from the {{ report.culprit_kind }} <code>{{ c }}</code>.</strong>
+        Its file is the one that threw the fatal, so deactivating it should bring
+        the site back — the {{ report.culprit_kind }} stays installed, only
+        switched off, and can be reactivated after an update fixes it.
+        {% if !report.error_excerpt.is_empty() %}
+        <div class="text-soft small" style="margin-top:0.4rem;font-family:var(--font-mono,ui-monospace,monospace);font-size:0.72rem;word-break:break-all">{{ report.error_excerpt }}</div>
+        {% endif %}
+        {% if report.culprit_kind == "plugin" %}
+        <form method="post" action="/hostings/wp/plugin-action" style="margin-top:0.6rem"
+              data-confirm-title="Deactivate {{ c }}"
+              data-confirm-body="The plugin is switched off, not removed. The site loses whatever {{ c }} was doing (caching, redirects…) until it is reactivated — but it stops crashing. Continue?"
+              data-confirm-confirm-label="Deactivate"
+              data-confirm-variant="primary">
+          <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+          <input type="hidden" name="selector" value="{{ selector }}">
+          <input type="hidden" name="slug" value="{{ c }}">
+          <input type="hidden" name="action" value="deactivate">
+          <button class="btn primary" type="submit">Deactivate {{ c }}</button>
+        </form>
+        {% endif %}
+      </div>
+    </div>
+    {% else %}
+    <p class="muted small" style="margin:0 0 0.6rem">
+      No single plugin could be blamed from here — the error may be in the
+      theme, wp-config.php, or PHP itself. Enabling debug mode writes the
+      real error to <code>wp-content/debug.log</code>, readable from the
+      Debug card below.
+    </p>
+    {% endif %}
+
+    {% if !wp_debug_enabled %}
+    <form method="post" action="/hostings/wp/debug" style="display:inline"
+          data-confirm-title="Enable WordPress debug mode"
+          data-confirm-body="Writes WP_DEBUG + WP_DEBUG_LOG into wp-config.php so the real error lands in wp-content/debug.log. Errors are logged, not displayed to visitors. Turn it off again once the cause is found."
+          data-confirm-confirm-label="Enable debug mode"
+          data-confirm-variant="primary">
+      <input type="hidden" name="_csrf" value="{{ csrf_wp_debug }}">
+      <input type="hidden" name="selector" value="{{ selector }}">
+      {% if !target_node.is_empty() %}<input type="hidden" name="target_node" value="{{ target_node }}">{% endif %}
+      <input type="hidden" name="enabled" value="on">
+      <input type="hidden" name="log" value="on">
+      <button class="btn" type="submit">Enable debug mode…</button>
+    </form>
+    {% else %}
+    <p class="text-soft small" style="margin:0">
+      Debug mode is on — the full error is in <code>wp-content/debug.log</code>
+      (Debug card below).
+    </p>
+    {% endif %}
+  {% endif %}
+
+  <div style="margin-top:0.7rem">
+    <button class="btn small" hx-get="/hostings/{{ selector }}/health-panel"
+            hx-target="#fatal-card" hx-swap="outerHTML"
+            hx-indicator="#fatal-spinner" hx-disabled-elt="this">
+      Check again
+    </button>
+    <span id="fatal-spinner" class="muted htmx-indicator" style="font-size:0.85rem">
+      <span class="spinner-inline"></span> probing…
+    </span>
+  </div>
+</div>
