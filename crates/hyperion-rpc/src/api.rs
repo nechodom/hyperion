@@ -303,6 +303,16 @@ pub trait AgentApi: Send + Sync + 'static {
         &self,
         sel: crate::wire::HostingSelector,
     ) -> Result<hyperion_types::WpFatalReport, RpcError>;
+    async fn wp_emergency_disable(
+        &self,
+        sel: crate::wire::HostingSelector,
+        slug: String,
+    ) -> Result<(), RpcError>;
+    async fn wp_emergency_restore(
+        &self,
+        sel: crate::wire::HostingSelector,
+        slug: String,
+    ) -> Result<(), RpcError>;
     /// DNS-01 phase 1. Returns (completed, record_name, values).
     async fn cert_dns01_begin(
         &self,

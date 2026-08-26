@@ -583,6 +583,22 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.wp_fatal_check(sel).await
     }
 
+    async fn wp_emergency_disable(
+        &self,
+        sel: HostingSelector,
+        slug: String,
+    ) -> Result<(), RpcError> {
+        self.svc.wp_emergency_disable(sel, slug).await
+    }
+
+    async fn wp_emergency_restore(
+        &self,
+        sel: HostingSelector,
+        slug: String,
+    ) -> Result<(), RpcError> {
+        self.svc.wp_emergency_restore(sel, slug).await
+    }
+
     async fn cert_dns01_begin(
         &self,
         sel: HostingSelector,

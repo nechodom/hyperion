@@ -504,4 +504,8 @@ pub struct WpFatalReport {
     /// Capped server-side; never contains the full trace.
     #[serde(default)]
     pub error_excerpt: String,
+    /// Plugins currently parked as `<slug>-old` by the emergency disable —
+    /// each restorable with one click once the site is back.
+    #[serde(default)]
+    pub parked_plugins: Vec<String>,
 }

@@ -642,6 +642,14 @@ pub fn build_router(state: SharedState) -> Router {
             get(handlers::hostings::get_hosting_jobs_panel),
         )
         .route(
+            "/hostings/wp/emergency-disable",
+            post(handlers::hostings::post_wp_emergency_disable),
+        )
+        .route(
+            "/hostings/wp/emergency-restore",
+            post(handlers::hostings::post_wp_emergency_restore),
+        )
+        .route(
             "/hostings/:selector/health-panel",
             get(handlers::hostings::get_health_panel),
         )

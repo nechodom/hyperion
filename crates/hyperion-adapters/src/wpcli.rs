@@ -537,6 +537,84 @@ pub fn culprit_from_output(output: &str) -> Option<(String, String)> {
     None
 }
 
+/// Emergency-disable a plugin by renaming its directory — the one lever
+/// that works when WordPress itself cannot boot.
+///
+/// `wp plugin deactivate` needs WordPress to START: wp-cli loads the whole
+/// site, so a plugin that fatals during bootstrap kills the very command
+/// meant to remove it. Renaming `wp-content/plugins/<slug>` to
+/// `<slug>-old` needs nothing from PHP at all — WordPress treats a missing
+/// plugin directory as "plugin gone" and boots without it.
+///
+/// `disable=false` reverses the rename. It REFUSES when the original name
+/// exists again (the plugin was reinstalled meanwhile) — a silent
+/// overwrite would destroy the fresh copy to restore the broken one.
+pub async fn emergency_rename_plugin(
+    root_dir: &str,
+    slug: &str,
+    disable: bool,
+) -> Result<(), AdapterError> {
+    // The slug becomes a path segment. Reject anything that could step out
+    // of the plugins directory — this runs as root.
+    if slug.is_empty()
+        || slug.len() > 64
+        || !slug
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(AdapterError::Other(format!("invalid plugin slug {slug:?}")));
+    }
+    let plugins = std::path::Path::new(root_dir)
+        .join("wp-content")
+        .join("plugins");
+    let live = plugins.join(slug);
+    let parked = plugins.join(format!("{slug}-old"));
+    let (src, dst, verb) = if disable {
+        (&live, &parked, "disable")
+    } else {
+        (&parked, &live, "restore")
+    };
+    if !src.is_dir() {
+        return Err(AdapterError::Other(format!(
+            "{verb}: {} is not a directory — nothing to {verb}",
+            src.display()
+        )));
+    }
+    if dst.exists() {
+        return Err(AdapterError::Other(format!(
+            "{verb}: {} already exists — refusing to overwrite it",
+            dst.display()
+        )));
+    }
+    tokio::fs::rename(src, dst)
+        .await
+        .map_err(|e| AdapterError::Other(format!("{verb} rename: {e}")))
+}
+
+/// Plugin directories currently parked with the `-old` suffix — the ones
+/// [`emergency_rename_plugin`] can restore. Only names whose LIVE
+/// counterpart is absent count: if `foo` exists again, `foo-old` is a
+/// leftover to clean up by hand, not something we may rename onto it.
+pub async fn parked_plugins(root_dir: &str) -> Vec<String> {
+    let plugins = std::path::Path::new(root_dir)
+        .join("wp-content")
+        .join("plugins");
+    let mut out = Vec::new();
+    let Ok(mut rd) = tokio::fs::read_dir(&plugins).await else {
+        return out;
+    };
+    while let Ok(Some(e)) = rd.next_entry().await {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if let Some(base) = name.strip_suffix("-old") {
+            if !base.is_empty() && e.path().is_dir() && !plugins.join(base).exists() {
+                out.push(base.to_string());
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
 pub async fn plugin_list(
     user: &str,
     htdocs: &str,
@@ -926,6 +1004,72 @@ fn parse_wp_json<T: serde::de::DeserializeOwned>(
 
 #[cfg(test)]
 mod tests {
+    fn mk_site(dir: &std::path::Path, plugins: &[&str]) -> String {
+        let root = dir.join("htdocs");
+        for p in plugins {
+            std::fs::create_dir_all(root.join("wp-content/plugins").join(p)).unwrap();
+        }
+        root.to_str().unwrap().to_string()
+    }
+
+    /// Disable parks the folder; restore brings it back. Neither needs PHP,
+    /// which is the entire point — wp-cli dies with the site it loads.
+    #[tokio::test]
+    async fn emergency_rename_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = mk_site(dir.path(), &["wp-rocket"]);
+        super::emergency_rename_plugin(&root, "wp-rocket", true)
+            .await
+            .expect("disable");
+        let plugins = std::path::Path::new(&root).join("wp-content/plugins");
+        assert!(!plugins.join("wp-rocket").exists());
+        assert!(plugins.join("wp-rocket-old").is_dir());
+        assert_eq!(
+            super::parked_plugins(&root).await,
+            vec!["wp-rocket".to_string()]
+        );
+        super::emergency_rename_plugin(&root, "wp-rocket", false)
+            .await
+            .expect("restore");
+        assert!(plugins.join("wp-rocket").is_dir());
+        assert!(!plugins.join("wp-rocket-old").exists());
+        assert!(super::parked_plugins(&root).await.is_empty());
+    }
+
+    /// A reinstalled plugin must never be overwritten by the parked copy —
+    /// restoring would replace a fresh fixed version with the broken one.
+    #[tokio::test]
+    async fn restore_refuses_when_the_live_name_returned() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = mk_site(dir.path(), &["wp-rocket"]);
+        super::emergency_rename_plugin(&root, "wp-rocket", true)
+            .await
+            .expect("disable");
+        std::fs::create_dir_all(std::path::Path::new(&root).join("wp-content/plugins/wp-rocket"))
+            .unwrap();
+        assert!(super::emergency_rename_plugin(&root, "wp-rocket", false)
+            .await
+            .is_err());
+        // And it is no longer offered as restorable either.
+        assert!(super::parked_plugins(&root).await.is_empty());
+    }
+
+    /// The slug becomes a path segment under a root-owned rename — anything
+    /// that could step out of the plugins directory is refused outright.
+    #[tokio::test]
+    async fn emergency_rename_rejects_hostile_slugs() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = mk_site(dir.path(), &[]);
+        for bad in ["../../../etc", "a/b", ".", "", "x".repeat(65).as_str()] {
+            assert!(
+                super::emergency_rename_plugin(&root, bad, true)
+                    .await
+                    .is_err(),
+                "slug {bad:?} must be refused"
+            );
+        }
+    }
+
     /// The exact failure from a live site: WP Rocket fatals in its
     /// Cloudflare integration and takes every wp-cli call down with it.
     #[test]
