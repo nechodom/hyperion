@@ -8769,6 +8769,57 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(true)
     }
 
+    /// Post a test message to the default Slack webhook and REPORT what
+    /// happened.
+    ///
+    /// Deliberately not a thin wrapper over `notify_slack`: that path is
+    /// fire-and-forget by design (a failed alert must never take down the
+    /// operation that raised it), so it swallows every error into the audit
+    /// log. A test button that swallows errors tells the operator nothing —
+    /// the entire question being asked is "did this work?".
+    ///
+    /// Goes through the same `http_post_json` SSRF guard as the real
+    /// notification path, so a webhook pointed at 169.254.169.254 is
+    /// refused here exactly as it would be in production.
+    pub async fn slack_send_test(&self) -> Result<(), RpcError> {
+        let Some(url) = self.slack_default_webhook.clone() else {
+            return Err(RpcError::Validation {
+                message: "No Slack webhook is configured — save one first.".into(),
+            });
+        };
+        let tmpls = read_notifications_section(self.agent_config_path.as_deref());
+        let time = fmt_notif_time(now_secs());
+        let panel = self.notify_panel_url();
+        let message = render_template(
+            &tmpls.slack_template,
+            &[
+                (
+                    "message",
+                    "Hyperion test message — your Slack webhook is working.",
+                ),
+                ("time", &time),
+                ("panel", &panel),
+            ],
+        );
+        let body = serde_json::json!({ "text": message }).to_string();
+        let outcome = http_post_json(&url, &body).await;
+        // Audited either way: a test send is still a message leaving the
+        // box, and the failure text is what the operator will quote.
+        self.append_audit(
+            "notify.slack.test",
+            None,
+            &serde_json::json!({
+                "error": outcome.as_ref().err().map(|e| e.to_string()),
+            })
+            .to_string(),
+            if outcome.is_ok() { "ok" } else { "failed" },
+        )
+        .await;
+        outcome.map_err(|e| RpcError::Validation {
+            message: format!("Slack refused the test message: {e}"),
+        })
+    }
+
     pub(crate) async fn notify_slack(&self, specific: Option<&str>, message: &str) {
         let url = specific
             .filter(|s| !s.trim().is_empty())

@@ -1087,6 +1087,10 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.email_send_test(to).await
     }
 
+    async fn slack_send_test(&self) -> Result<(), RpcError> {
+        self.svc.slack_send_test().await
+    }
+
     // --- web users ---
     async fn web_login(
         &self,

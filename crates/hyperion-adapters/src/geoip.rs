@@ -439,9 +439,26 @@ pub async fn refresh(creds: &MaxmindCreds) -> Result<usize, AdapterError> {
     if !out.status.success() {
         // The stderr tail can contain the URL but never the credentials —
         // curl does not echo a --config body.
+        let tail = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        // "Check the account id and licence key" was too vague to act on:
+        // MaxMind answers 401 for several distinct mistakes and the
+        // operator cannot tell which one they made from the HTTP code.
+        let hint = if tail.contains("401") {
+            " MaxMind rejected these credentials. The three things that \
+             produce a 401 here: the Account ID is not the numeric ID from \
+             the MaxMind account page (an e-mail address will not work), the \
+             licence key belongs to a different account, or the key is a \
+             web-service/GeoIP2 API key rather than one created for GeoIP \
+             Update / GeoLite2 downloads. Generate a fresh key under Manage \
+             License Keys and paste it with the numeric Account ID."
+        } else if tail.contains("403") {
+            " MaxMind accepted the credentials but refuses this database — \
+             the account is usually missing the GeoLite2 end-user agreement."
+        } else {
+            " Check the MaxMind account id and licence key."
+        };
         return Err(AdapterError::Other(format!(
-            "geoip: download failed ({}). Check the MaxMind account id and licence key.",
-            String::from_utf8_lossy(&out.stderr).trim()
+            "geoip: download failed ({tail}).{hint}"
         )));
     }
 

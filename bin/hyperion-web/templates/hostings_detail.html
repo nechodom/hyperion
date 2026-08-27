@@ -106,11 +106,18 @@
        in this DOM already, so generating the file here adds no exposure that
        does not already exist, whereas a server-generated download would put
        every password of a new site into a file, a request log, or both. #}
-    <button class="btn" type="button" id="creds-download"
-            data-domain="{{ detail.domain }}">
-      <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-      Download as .txt
-    </button>
+    <div class="row" style="gap:0.4rem;flex-wrap:wrap">
+      <button class="btn" type="button" id="creds-copy-all"
+              data-domain="{{ detail.domain }}">
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        Copy all
+      </button>
+      <button class="btn" type="button" id="creds-download"
+              data-domain="{{ detail.domain }}">
+        <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        Download as .txt
+      </button>
+    </div>
   </div>
 
   <div class="creds-grid">
@@ -606,14 +613,14 @@
 <p class="text-soft" style="font-size:0.8rem;margin:-0.4rem 0 1rem">
   <strong>Preview subdomain not active yet.</strong> This site (and every other on this node)
   will get an internal address under <code>*.{{ preview_domain.base }}</code> once you issue that
-  wildcard certificate — <a href="/settings#testnodes">Settings → Test nodes &amp; previews → Step 2</a>.
+  wildcard certificate — <a href="/settings#testnodes">Settings → Previews &amp; test nodes → Step 2</a>.
 </p>
 {% else if preview_domain.reason == "no-template" %}
 <p class="text-soft" style="font-size:0.8rem;margin:-0.4rem 0 1rem">
   <strong>Want a preview URL for this site?</strong> Preview subdomains give every hosting on the
   node an internal address (e.g. <code>{{ detail.domain }}</code> → <code>preview.&lt;base&gt;</code>)
   with valid TLS, so you can open a site before its real DNS points here. Set it up once in
-  <a href="/settings#testnodes">Settings → Test nodes &amp; previews</a> — it applies to all sites,
+  <a href="/settings#testnodes">Settings → Previews &amp; test nodes</a> — it applies to all sites,
   production included.
 </p>
 {% else if preview_domain.reason == "under-base" %}
@@ -1105,7 +1112,7 @@
     </p>
     <p class="text-soft small" style="margin:-0.3rem 0 0.7rem;padding:0.5rem 0.7rem;background:var(--surface-1);border-radius:6px">
       On a <strong>test node</strong>? Issue one <code>*.&lt;base&gt;</code> wildcard for the
-      whole node under <a href="/settings#testnodes">Settings → Test nodes &amp; previews</a> instead — every
+      whole node under <a href="/settings#testnodes">Settings → Previews &amp; test nodes</a> instead — every
       auto-subdomain reuses it, so this per-site certificate isn't needed there.
     </p>
     <form method="post" action="/hostings/cert/dns01/begin">
@@ -2120,6 +2127,7 @@
       </p>
     </div>
 
+    {% if can_edit_nginx_raw %}
     <h3 class="section-title">Custom nginx snippet</h3>
     <div class="field">
       <label for="custom_nginx_snippet">
@@ -2131,6 +2139,7 @@
                 style="font-family:ui-monospace,Menlo,Consolas,monospace;font-size:13px"
                 placeholder="# e.g. raise upload size\nclient_max_body_size 64M;\n\n# e.g. extra security header\nadd_header Permissions-Policy &quot;geolocation=()&quot; always;">{{ detail.vhost_options.custom_nginx_snippet }}</textarea>
     </div>
+    {% endif %}
 
     {% if detail.kind == "redirect" %}
     <h3 class="section-title">Redirect target</h3>
@@ -3782,43 +3791,128 @@
 })();
 </script>
 <script>
-// Credentials download. Reads the rendered rows rather than a server
-// endpoint — see the comment on the button. A text file, not JSON or CSV:
-// this gets pasted into an e-mail or a password manager by a human.
+// Credentials: copy-all and download-as-.txt.
+//
+// Both read the rendered rows rather than a server endpoint — the values
+// are in this DOM already, so building the file here adds no exposure,
+// whereas a server-generated download would put every password of a new
+// site into a file, a request log, or both.
+//
+// DELEGATED from `document` rather than bound to the button at parse
+// time: this card is the response body of the create POST, and panels on
+// this page are also swapped in by HTMX, so a handler bound to an element
+// that must already exist is one reorder away from silently doing nothing
+// — which is exactly how the download button came to be dead.
+//
+// Every failure path ends in a toast. A button that quietly does nothing
+// costs an operator far more than an ugly error does.
 (function () {
   'use strict';
-  const btn = document.getElementById('creds-download');
-  if (!btn) return;
-  btn.addEventListener('click', () => {
+
+  function credentialsText(domain) {
     const lines = [];
     document.querySelectorAll('.creds-section').forEach((sec) => {
-      const title = sec.querySelector('.creds-section-title');
-      if (title) lines.push('', title.textContent.trim(), '-'.repeat(title.textContent.trim().length));
+      const titleEl = sec.querySelector('.creds-section-title');
+      if (titleEl) {
+        const t = titleEl.textContent.trim();
+        lines.push('', t, '-'.repeat(t.length));
+      }
       sec.querySelectorAll('.creds-row').forEach((row) => {
         const k = row.querySelector('.creds-label');
         const v = row.querySelector('.creds-value');
         if (k && v) lines.push(k.textContent.trim().padEnd(16) + v.textContent.trim());
       });
     });
-    const domain = btn.getAttribute('data-domain') || 'hosting';
+    if (!lines.length) return null;
     const header = [
       'Credentials for ' + domain,
       'Generated ' + new Date().toISOString().slice(0, 16).replace('T', ' ') + ' UTC',
       '',
       'These are shown once. Store them somewhere safe and delete this file.',
     ];
-    const blob = new Blob([header.concat(lines).join('\n') + '\n'], {
-      type: 'text/plain;charset=utf-8',
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = domain + '-credentials.txt';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    // Revoke promptly — the blob holds every password for this site.
-    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    return header.concat(lines).join('\n') + '\n';
+  }
+
+  // navigator.clipboard is unavailable outside a secure context — which
+  // includes a panel reached by IP over a certificate the browser does not
+  // trust, i.e. every install before its first real certificate. The
+  // execCommand path is deprecated but still works exactly there.
+  async function copyText(text) {
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch (e) { /* fall through */ }
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.top = '-1000px';
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      return ok;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function note(msg, kind) {
+    if (window.toast) window.toast(msg, kind || 'info');
+    else if (kind === 'error') alert(msg);
+  }
+
+  document.addEventListener('click', async function (ev) {
+    const btn = ev.target.closest('#creds-copy-all, #creds-download');
+    if (!btn) return;
+    ev.preventDefault();
+    const domain = btn.getAttribute('data-domain') || 'hosting';
+    const text = credentialsText(domain);
+    if (!text) {
+      note('Could not read the credentials from this page.', 'error');
+      return;
+    }
+
+    if (btn.id === 'creds-copy-all') {
+      const ok = await copyText(text);
+      note(
+        ok
+          ? 'All credentials copied to the clipboard.'
+          : 'The browser refused clipboard access — use "Download as .txt" instead.',
+        ok ? 'success' : 'error'
+      );
+      return;
+    }
+
+    let url = null;
+    try {
+      const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+      url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = domain + '-credentials.txt';
+      a.rel = 'noopener';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      note('Saved ' + domain + '-credentials.txt to your downloads.', 'success');
+    } catch (e) {
+      // Downloads can be refused outright (extensions, hardened policies).
+      // Falling back to the clipboard beats leaving the operator with a
+      // page of passwords they cannot get off the screen.
+      note(
+        (await copyText(text))
+          ? 'The download was blocked, so the credentials were copied to your clipboard instead.'
+          : 'The download was blocked and clipboard access was refused — copy the rows manually.',
+        'error'
+      );
+    } finally {
+      // Revoke promptly — the blob holds every password for this site.
+      if (url) setTimeout(() => URL.revokeObjectURL(url), 2000);
+    }
   });
 })();
 </script>
