@@ -549,6 +549,63 @@ pub fn culprit_from_output(output: &str) -> Option<(String, String)> {
 /// `disable=false` reverses the rename. It REFUSES when the original name
 /// exists again (the plugin was reinstalled meanwhile) — a silent
 /// overwrite would destroy the fresh copy to restore the broken one.
+/// Resolve `<root_dir>/wp-content/plugins`, refusing to follow a symlink at
+/// any step, and prove the result is still inside the hosting root.
+///
+/// Everything below the hosting root is writable by the SITE USER — over
+/// FTP, SSH, or a compromised WordPress. The emergency-plugin actions run
+/// as ROOT, so a plain `Path::join` here hands that site user a root file
+/// operation aimed anywhere on the box: replace `wp-content/plugins` with a
+/// symlink to `/etc`, make the site fatal with a stack trace naming a slug
+/// that exists there, and the operator's "Disable" click renames `/etc/ssh`
+/// out from under sshd. Pointing the link at another customer's webroot is
+/// the cross-tenant version of the same trick.
+///
+/// The slug in that stack trace is attacker-chosen too — the site's own PHP
+/// decides what the trace says — so neither end of this can be trusted.
+///
+/// Canonicalising each component and rejecting symlinks defeats the planted
+/// link, which is the actual exploit: the attacker cannot leave a trap and
+/// wait. A residual race remains in theory (swapping a component between
+/// this resolve and the rename), but that needs the attacker to win a
+/// microsecond window with no signal that an operator is about to click.
+/// Closing it fully needs `openat2(RESOLVE_BENEATH)`, which would mean a
+/// new unsafe dependency for a much smaller risk than the one fixed here.
+async fn resolve_plugins_dir(root_dir: &str) -> Result<std::path::PathBuf, AdapterError> {
+    let root = tokio::fs::canonicalize(root_dir)
+        .await
+        .map_err(|e| AdapterError::Other(format!("hosting root {root_dir} is unreadable: {e}")))?;
+    let mut cur = root.clone();
+    for seg in ["wp-content", "plugins"] {
+        cur = cur.join(seg);
+        let md = tokio::fs::symlink_metadata(&cur)
+            .await
+            .map_err(|e| AdapterError::Other(format!("{} is unreadable: {e}", cur.display())))?;
+        if md.file_type().is_symlink() {
+            return Err(AdapterError::Other(format!(
+                "{} is a symlink — refusing to operate through it as root",
+                cur.display()
+            )));
+        }
+        if !md.is_dir() {
+            return Err(AdapterError::Other(format!(
+                "{} is not a directory",
+                cur.display()
+            )));
+        }
+    }
+    // No component was a link, so this cannot leave the root — assert it
+    // anyway, because the whole point here is not to trust the filesystem.
+    if !cur.starts_with(&root) {
+        return Err(AdapterError::Other(format!(
+            "{} escaped the hosting root {}",
+            cur.display(),
+            root.display()
+        )));
+    }
+    Ok(cur)
+}
+
 pub async fn emergency_rename_plugin(
     root_dir: &str,
     slug: &str,
@@ -564,9 +621,7 @@ pub async fn emergency_rename_plugin(
     {
         return Err(AdapterError::Other(format!("invalid plugin slug {slug:?}")));
     }
-    let plugins = std::path::Path::new(root_dir)
-        .join("wp-content")
-        .join("plugins");
+    let plugins = resolve_plugins_dir(root_dir).await?;
     let live = plugins.join(slug);
     let parked = plugins.join(format!("{slug}-old"));
     let (src, dst, verb) = if disable {
@@ -574,11 +629,24 @@ pub async fn emergency_rename_plugin(
     } else {
         (&parked, &live, "restore")
     };
-    if !src.is_dir() {
-        return Err(AdapterError::Other(format!(
-            "{verb}: {} is not a directory — nothing to {verb}",
-            src.display()
-        )));
+    // symlink_metadata, NOT is_dir(): a symlink pointing at a directory
+    // passes is_dir(), and while rename() would move the link rather than
+    // its target, accepting one here would mean reporting a plugin as
+    // "disabled" when nothing about the live code changed.
+    match tokio::fs::symlink_metadata(src).await {
+        Ok(md) if md.file_type().is_symlink() => {
+            return Err(AdapterError::Other(format!(
+                "{verb}: {} is a symlink, not a plugin directory",
+                src.display()
+            )))
+        }
+        Ok(md) if md.is_dir() => {}
+        _ => {
+            return Err(AdapterError::Other(format!(
+                "{verb}: {} is not a directory — nothing to {verb}",
+                src.display()
+            )))
+        }
     }
     if dst.exists() {
         return Err(AdapterError::Other(format!(
@@ -596,9 +664,12 @@ pub async fn emergency_rename_plugin(
 /// counterpart is absent count: if `foo` exists again, `foo-old` is a
 /// leftover to clean up by hand, not something we may rename onto it.
 pub async fn parked_plugins(root_dir: &str) -> Vec<String> {
-    let plugins = std::path::Path::new(root_dir)
-        .join("wp-content")
-        .join("plugins");
+    // Same resolver as the rename: listing through a planted symlink would
+    // leak directory names from wherever it points, and would offer the
+    // operator a "Restore" button aimed outside the hosting.
+    let Ok(plugins) = resolve_plugins_dir(root_dir).await else {
+        return Vec::new();
+    };
     let mut out = Vec::new();
     let Ok(mut rd) = tokio::fs::read_dir(&plugins).await else {
         return out;
@@ -1056,6 +1127,98 @@ mod tests {
 
     /// The slug becomes a path segment under a root-owned rename — anything
     /// that could step out of the plugins directory is refused outright.
+    /// The attack this defends against, end to end: the site user replaces
+    /// wp-content/plugins with a link to a directory they do not own, and
+    /// makes the site fatal with a trace naming something inside it. If the
+    /// rename followed that link, root would move `<outside>/victim` away.
+    #[tokio::test]
+    async fn refuses_to_rename_through_a_symlinked_plugins_dir() {
+        let d = tempfile::tempdir().expect("tmp");
+        let root = d.path().join("htdocs");
+        let outside = d.path().join("etc");
+        std::fs::create_dir_all(root.join("wp-content")).expect("mk root");
+        std::fs::create_dir_all(outside.join("victim")).expect("mk outside");
+        std::os::unix::fs::symlink(&outside, root.join("wp-content").join("plugins"))
+            .expect("plant link");
+
+        let err = emergency_rename_plugin(root.to_str().expect("utf8"), "victim", true)
+            .await
+            .expect_err("must refuse to follow the planted symlink");
+        assert!(
+            format!("{err}").contains("symlink"),
+            "wrong refusal reason: {err}"
+        );
+        assert!(
+            outside.join("victim").is_dir() && !outside.join("victim-old").exists(),
+            "the target outside the hosting root was touched"
+        );
+    }
+
+    /// The same trap one level up — linking wp-content itself.
+    #[tokio::test]
+    async fn refuses_to_rename_through_a_symlinked_wp_content() {
+        let d = tempfile::tempdir().expect("tmp");
+        let root = d.path().join("htdocs");
+        let outside = d.path().join("elsewhere");
+        std::fs::create_dir_all(&root).expect("mk root");
+        std::fs::create_dir_all(outside.join("plugins").join("victim")).expect("mk outside");
+        std::os::unix::fs::symlink(&outside, root.join("wp-content")).expect("plant link");
+
+        let err = emergency_rename_plugin(root.to_str().expect("utf8"), "victim", true)
+            .await
+            .expect_err("must refuse to follow the planted symlink");
+        assert!(
+            format!("{err}").contains("symlink"),
+            "wrong refusal reason: {err}"
+        );
+        assert!(
+            !outside.join("plugins").join("victim-old").exists(),
+            "the target outside the hosting root was renamed"
+        );
+    }
+
+    /// A symlinked plugin entry is refused too: rename() would move the link
+    /// and leave the real code running, so reporting it disabled would be a
+    /// lie the operator acts on.
+    #[tokio::test]
+    async fn refuses_a_symlinked_plugin_entry() {
+        let d = tempfile::tempdir().expect("tmp");
+        let root = d.path().join("htdocs");
+        let plugins = root.join("wp-content").join("plugins");
+        let real = d.path().join("real-code");
+        std::fs::create_dir_all(&plugins).expect("mk plugins");
+        std::fs::create_dir_all(&real).expect("mk real");
+        std::os::unix::fs::symlink(&real, plugins.join("linked")).expect("plant link");
+
+        let err = emergency_rename_plugin(root.to_str().expect("utf8"), "linked", true)
+            .await
+            .expect_err("must refuse a symlinked plugin");
+        assert!(
+            format!("{err}").contains("symlink"),
+            "wrong refusal reason: {err}"
+        );
+    }
+
+    /// Listing must not walk through a planted link either — it would leak
+    /// directory names from outside and offer Restore buttons aimed there.
+    #[tokio::test]
+    async fn parked_plugins_refuses_a_symlinked_plugins_dir() {
+        let d = tempfile::tempdir().expect("tmp");
+        let root = d.path().join("htdocs");
+        let outside = d.path().join("secret");
+        std::fs::create_dir_all(root.join("wp-content")).expect("mk root");
+        std::fs::create_dir_all(outside.join("private-old")).expect("mk outside");
+        std::os::unix::fs::symlink(&outside, root.join("wp-content").join("plugins"))
+            .expect("plant link");
+
+        assert!(
+            parked_plugins(root.to_str().expect("utf8"))
+                .await
+                .is_empty(),
+            "leaked directory names from outside the hosting root"
+        );
+    }
+
     #[tokio::test]
     async fn emergency_rename_rejects_hostile_slugs() {
         let dir = tempfile::tempdir().unwrap();

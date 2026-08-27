@@ -950,6 +950,10 @@ pub enum Request {
     EmailSendTest {
         to: String,
     },
+    /// Post a test message to the configured Slack webhook. Unlike the
+    /// fire-and-forget notification path this REPORTS the outcome —
+    /// the whole point of a test button is learning that it failed.
+    SlackSendTest,
 
     // ─── Web users / roles / 2FA ───────────────────────────────
     /// Verify a username + password. Does NOT mint a session — the web
@@ -1629,6 +1633,7 @@ pub enum Response {
     EmailSendTest {
         smtp_code: String,
     },
+    SlackSendTest,
     ServiceRestart,
     ServiceInstall,
     /// Current state of the most-recent / in-progress

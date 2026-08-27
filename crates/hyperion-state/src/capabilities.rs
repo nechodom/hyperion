@@ -61,11 +61,19 @@ pub enum Capability {
     // variant stays stable (a stored bitmask keeps meaning across the
     // upgrade). Never reorder the variants above this point.
     ApiKeysManage,
+    /// Write the raw nginx snippet that is spliced verbatim into a
+    /// hosting's vhost. Deliberately NOT part of HostingEditConfig and
+    /// never granted to a tenant role: nginx runs as root, so an arbitrary
+    /// directive is not a hosting setting, it is control of the box —
+    /// `fastcgi_pass` at another tenant's PHP-FPM socket executes code as
+    /// that user, `alias /` serves any file nginx can read, and a log
+    /// directive writes attacker-shaped lines to a root-chosen path.
+    HostingEditNginxRaw,
 }
 
 impl Capability {
     /// Every capability, in display order. Keep in sync with the enum.
-    pub const ALL: [Capability; 31] = [
+    pub const ALL: [Capability; 32] = [
         Capability::HostingView,
         Capability::HostingCreate,
         Capability::HostingDelete,
@@ -97,6 +105,7 @@ impl Capability {
         Capability::PanelImport,
         Capability::TrashManage,
         Capability::ApiKeysManage,
+        Capability::HostingEditNginxRaw,
     ];
 
     /// Bit for this capability in a [`CapSet`].
@@ -112,6 +121,7 @@ impl Capability {
             Capability::HostingDelete => "hosting_delete",
             Capability::HostingSuspend => "hosting_suspend",
             Capability::HostingEditConfig => "hosting_edit_config",
+            Capability::HostingEditNginxRaw => "hosting_edit_nginx_raw",
             Capability::HostingFiles => "hosting_files",
             Capability::HostingDatabases => "hosting_databases",
             Capability::HostingCron => "hosting_cron",
@@ -148,7 +158,10 @@ impl Capability {
             Capability::HostingCreate => "Create hostings",
             Capability::HostingDelete => "Delete hostings",
             Capability::HostingSuspend => "Suspend / resume",
-            Capability::HostingEditConfig => "Edit hosting config (PHP, nginx, cache, …)",
+            Capability::HostingEditConfig => "Edit hosting config (PHP, cache, redirects, …)",
+            Capability::HostingEditNginxRaw => {
+                "Write raw nginx config (admin-level: nginx runs as root)"
+            }
             Capability::HostingFiles => "File manager",
             Capability::HostingDatabases => "Manage databases",
             Capability::HostingCron => "Manage cron jobs",
@@ -265,6 +278,7 @@ pub fn groups() -> Vec<(&'static str, Vec<Capability>)> {
                 HostingDelete,
                 HostingSuspend,
                 HostingEditConfig,
+                HostingEditNginxRaw,
                 HostingFiles,
                 HostingDatabases,
                 HostingCron,
@@ -373,12 +387,37 @@ impl WebRole {
 mod tests {
     use super::*;
 
+    /// The raw nginx snippet is spliced into a config that root loads, so
+    /// no tenant role may hold it: `fastcgi_pass` at another tenant's
+    /// PHP-FPM socket runs code as that user, `alias /` serves any file
+    /// nginx can read, and a log directive writes attacker-shaped lines to
+    /// a path root chose. Customer held it via HostingEditConfig until this
+    /// was split out.
+    #[test]
+    fn raw_nginx_is_never_granted_to_a_tenant_role() {
+        for role in [WebRole::Operator, WebRole::Customer, WebRole::Viewer] {
+            assert!(
+                !role
+                    .capabilities()
+                    .contains(Capability::HostingEditNginxRaw),
+                "{role:?} must not be able to write raw nginx config"
+            );
+        }
+        for role in [WebRole::SuperAdmin, WebRole::Admin] {
+            assert!(
+                role.capabilities()
+                    .contains(Capability::HostingEditNginxRaw),
+                "{role:?} should keep raw nginx config"
+            );
+        }
+    }
+
     #[test]
     fn all_array_matches_count() {
-        // 31 distinct bits, none above 63.
+        // 32 distinct bits, none above 63.
         let s = CapSet::all();
-        assert_eq!(s.count(), 31);
-        assert_eq!(Capability::ALL.len(), 31);
+        assert_eq!(s.count(), 32);
+        assert_eq!(Capability::ALL.len(), 32);
     }
 
     #[test]

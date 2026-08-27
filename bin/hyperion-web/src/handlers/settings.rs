@@ -31,6 +31,9 @@ struct SettingsTpl<'a> {
     css_version: &'static str,
     htmx_version: &'static str,
     config: AgentConfigView,
+    /// Per-form CSRF token for the Slack test-message button. Scoped to
+    /// its own path like every other non-/settings/config form here.
+    csrf_slack_test: String,
     update_status: UpdateStatus,
     update_current_short: String,
     update_latest_short: String,
@@ -914,6 +917,7 @@ pub async fn get_settings(
         flash: q.flash,
         flash_error: q.flash_error,
         csrf_token,
+        csrf_slack_test: super::hostings::csrf_token_for(&state, &ctx, "/settings/slack-test"),
         email_logo_set,
         geoip_installed,
         geoip_updated_at,
@@ -1138,6 +1142,48 @@ pub struct EmailTestForm {
 
 /// POST /settings/email-test — fires a one-off SMTP send + redirects
 /// back to /settings with a flash message.
+/// POST /settings/slack-test — post a test message to the saved webhook.
+///
+/// Same gate and rate limit as the e-mail test: this makes the box emit an
+/// outbound request to an operator-supplied URL, so an authenticated viewer
+/// must not be able to drive it, and a stolen admin cookie must not be able
+/// to drive it in a loop.
+pub async fn post_slack_test(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    if !ctx.can(Capability::SettingsManage) {
+        return Ok(Redirect::to(
+            "/settings?flash_error=admin+role+required+to+send+a+test+message#notifications",
+        )
+        .into_response());
+    }
+    let ip = email_test_ip(&headers, peer);
+    if !state
+        .ratelimit
+        .check("slack-test", ip, Bucket::per_minute(3))
+    {
+        return Ok(Redirect::to(
+            "/settings?flash_error=test+message+rate+limit+exceeded+%E2%80%94+wait+a+minute#notifications",
+        )
+        .into_response());
+    }
+    let resp = crate::dispatcher::dispatch_to_node(&state, None, Request::SlackSendTest).await?;
+    Ok(match resp {
+        RpcResponse::SlackSendTest => Redirect::to(
+            "/settings?flash=Test+message+posted+%E2%80%94+check+the+Slack+channel#notifications",
+        )
+        .into_response(),
+        RpcResponse::Error(e) => {
+            let msg = super::hostings::urlencoding(&e.to_string());
+            Redirect::to(&format!("/settings?flash_error={msg}#notifications")).into_response()
+        }
+        _ => return Err(AppError::Internal("unexpected response".into())),
+    })
+}
+
 pub async fn post_email_test(
     State(state): State<SharedState>,
     ctx: AuthCtx,

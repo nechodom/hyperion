@@ -710,6 +710,9 @@ pub trait AgentApi: Send + Sync + 'static {
     /// Send a one-off test email through the configured SMTP relay.
     /// Returns Ok on a successful relay handshake + DATA accept.
     async fn email_send_test(&self, to: String) -> Result<String, RpcError>;
+    /// Post a test message to the configured Slack webhook, reporting
+    /// success or the reason it failed.
+    async fn slack_send_test(&self) -> Result<(), RpcError>;
 
     // Web users / roles / 2FA — see codec.rs for semantics.
     async fn web_login(

@@ -119,9 +119,14 @@
        forever because no one ever looks. #}
     {% if resp_auth_total > 0 && resp_auth_pending.is_empty() && !config.cluster.enforce_response_auth %}<span class="tab-badge" style="background:var(--warn);color:white" title="Every node can sign its responses but enforcement is still off">!</span>{% endif %}
   </a>
-  <a class="tab" data-tab="testnodes" href="#testnodes" role="tab" data-cluster-only>
+  {# NOT data-cluster-only: preview subdomains are what this tab is mostly
+     for and they apply to EVERY site on the node, production included. On a
+     standalone box the cluster-only rule hid the tab entirely, so links that
+     told the operator to "set it up in Settings" pointed at a tab that was
+     not there. The test-node section inside stays cluster-gated. #}
+  <a class="tab" data-tab="testnodes" href="#testnodes" role="tab">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"/><path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"/></svg>
-    Test nodes &amp; previews
+    Previews &amp; test nodes
   </a>
   <a class="tab" data-tab="api" href="#api" role="tab" title="Bearer API keys for the remote management API">
     <svg class="tab-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>
@@ -798,22 +803,49 @@
       {% if config.slack.default_webhook_set %}<span class="pill ok">configured</span>
       {% else %}<span class="pill warn">not configured</span>{% endif %}
     </div>
+    <p class="text-soft small" style="margin:0 0 0.8rem">
+      Cluster-wide alerts (backup failures, certificate renewals, monitor down/up, billing reminders) post here. A per-hosting webhook, set on the hosting's detail page, overrides this one.
+    </p>
+    {% if config.slack.default_webhook_set %}
+    {# Connected: no URL field at all. The old card left the input showing
+       while a webhook was stored, and an empty submit CLEARED it — so the
+       way to check "is it still set?" was also the way to wipe it. Send a
+       test to verify, or disconnect deliberately, then reconnect. #}
+    <p class="small" style="margin:0 0 0.8rem">
+      A webhook is stored. Hyperion never shows it again — Slack issues the URL
+      as a secret and it is the only credential the integration has.
+    </p>
+    <div class="row" style="gap:0.5rem;flex-wrap:wrap">
+      <form method="post" action="/settings/slack-test" style="margin:0">
+        <input type="hidden" name="_csrf" value="{{ csrf_slack_test }}">
+        <button type="submit" class="btn primary">
+          <svg class="btn-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+          Send test message
+        </button>
+      </form>
+      <form method="post" action="/settings/config" style="margin:0" autocomplete="off">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <input type="hidden" name="section" value="slack">
+        <input type="hidden" name="default_webhook" value="">
+        <button type="submit" class="btn"
+                data-confirm-title="Disconnect Slack"
+                data-confirm-body="Alerts stop posting to Slack immediately. The webhook URL is not recoverable from Hyperion — reconnecting means pasting a URL from Slack again."
+                data-confirm-confirm-label="Disconnect">Disconnect</button>
+      </form>
+    </div>
+    {% else %}
     <form method="post" action="/settings/config" autocomplete="off">
       <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <input type="hidden" name="section" value="slack">
       <div class="field">
-        <label for="default_webhook">Default Slack incoming webhook URL
-          {% if config.slack.default_webhook_set %}<span class="text-soft">— stored; enter a new URL to replace it, or leave blank to clear</span>{% endif %}
-        </label>
+        <label for="default_webhook">Default Slack incoming webhook URL</label>
         <input id="default_webhook" name="default_webhook" type="url"
                placeholder="https://hooks.slack.com/services/T…/B…/…"
                value="">
       </div>
-      <p class="text-soft small" style="margin:0 0 0.8rem">
-        Cluster-wide alerts (backup failures, certificate renewals, monitor down/up, billing reminders) post here. A per-hosting webhook, set on the hosting's detail page, overrides this one.
-      </p>
-      <button type="submit" class="btn primary">Save Slack webhook</button>
+      <button type="submit" class="btn primary">Connect Slack</button>
     </form>
+    {% endif %}
   </div>
 
   {# ───── E-mail branding: the logo embedded into every notification,
@@ -833,9 +865,12 @@
       recipients. PNG, JPEG or GIF, 512 KB max. With no logo the panel hostname
       is used as the heading.
     </p>
-    <form method="post" action="/settings/email-logo" enctype="multipart/form-data"
+    {# Multipart: the CSRF middleware does not buffer these bodies, so the
+       token MUST ride in the query string. A hidden _csrf field is never
+       read here and the upload 403s every single time. #}
+    <form method="post" action="/settings/email-logo?_csrf={{ csrf_token }}"
+          enctype="multipart/form-data"
           class="row" style="gap:0.6rem;align-items:flex-end;flex-wrap:wrap">
-      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
       <div class="field" style="margin:0">
         <label for="email_logo">Logo image</label>
         <input id="email_logo" name="logo" type="file" accept="image/png,image/jpeg,image/gif">
@@ -1730,7 +1765,7 @@
   </div>
 
   </div><div class="tab-panel" id="tab-testnodes">
-  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">Marks whole nodes as disposable test machines: their sites get auto-generated subdomains, a shared wildcard certificate and no-index. Nothing here affects production nodes.</p>
+  <p class="text-soft small" style="margin:0 0 0.9rem;line-height:1.55">Gives every site on this server an internal preview address with valid TLS, so you can open a site before its real DNS points here — production sites included. The same wildcard also backs <em>test nodes</em>: whole machines marked disposable, whose sites additionally get an auto-generated domain and no-index.</p>
 
   <div class="card">
     <h2 style="font-size:0.95rem;margin:0 0 0.6rem">
@@ -1796,13 +1831,16 @@
         <label for="test_domain_template">Preview / auto-domain template <span class="hint">the base for every site's preview subdomain</span></label>
         <input id="test_domain_template" name="test_domain_template" type="text" autocomplete="off"
                value="{{ config.cluster.test_domain_template }}"
-               placeholder="e.g. {name}.hosting.nechodom.cz">
+               placeholder="e.g. {name}.{{ config.hostname }}">
+        {# Examples are built from THIS server's hostname. They used to be a
+           hardcoded domain from the author's own install, which read as an
+           instruction to type someone else's domain in. #}
         <p class="text-soft small" style="margin:0.3rem 0 0;padding:0.55rem 0.75rem;background:var(--surface-1);border-radius:6px">
           <strong>This is what turns on preview URLs — for EVERY site on the node, production
           included, not just test nodes.</strong> The part after <code>{name}</code> is the
-          wildcard base: with <code>{name}.hosting.nechodom.cz</code>, every hosting gets an
-          internal address like <code>beeenglish.hosting.nechodom.cz</code> once you issue the
-          <code>*.hosting.nechodom.cz</code> certificate in Step 2. A <em>Preview site</em> button
+          wildcard base: with <code>{name}.{{ config.hostname }}</code>, every hosting gets an
+          internal address like <code>mysite.{{ config.hostname }}</code> once you issue the
+          <code>*.{{ config.hostname }}</code> certificate in Step 2. A <em>Preview site</em> button
           then appears on each site's detail page.
         </p>
         <p class="text-soft small" style="margin:0.3rem 0 0">

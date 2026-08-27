@@ -904,6 +904,10 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(code) => Response::EmailSendTest { smtp_code: code },
             Err(e) => Response::Error(e),
         },
+        Request::SlackSendTest => match api.slack_send_test().await {
+            Ok(()) => Response::SlackSendTest,
+            Err(e) => Response::Error(e),
+        },
         Request::WebLogin {
             username,
             password,
@@ -2334,6 +2338,9 @@ mod tests {
         }
         async fn agent_config_view(&self) -> Result<hyperion_types::AgentConfigView, RpcError> {
             Ok(hyperion_types::AgentConfigView::default())
+        }
+        async fn slack_send_test(&self) -> Result<(), RpcError> {
+            Ok(())
         }
         async fn email_send_test(&self, _: String) -> Result<String, RpcError> {
             Ok("Code(250)".into())

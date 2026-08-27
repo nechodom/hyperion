@@ -263,6 +263,10 @@ struct DetailTpl<'a> {
     /// CSRF token for the vhost options form (basic auth, HSTS,
     /// FastCGI cache, custom snippet, maintenance mode, redirect).
     csrf_vhost_options: String,
+    /// Whether this viewer may write the raw nginx snippet. The server
+    /// enforces it regardless; this only decides whether the textarea is
+    /// shown, so a tenant is not handed a field whose every save 403s.
+    can_edit_nginx_raw: bool,
     /// Per-hosting quota report (policy + current usage + kernel
     /// enabled flag). Drives the Quota tab. Best-effort: a
     /// `QuotaGet` RPC failure on a worker node yields a default
@@ -1338,6 +1342,7 @@ pub async fn post_create(
                 wp_assets: fetch_wp_assets(&state).await.unwrap_or_default(),
                 wp_themes: hyperion_types::WpThemeListResponse::default(),
                 csrf_vhost_options: csrf_token_for(&state, &ctx, "/hostings/vhost-options"),
+                can_edit_nginx_raw: ctx.can(Capability::HostingEditNginxRaw),
                 quota: hyperion_types::HostingQuotaReport::default(),
                 csrf_quota_set: csrf_token_for(&state, &ctx, "/hostings/quota/set"),
                 vhost_saved: false,
@@ -2194,6 +2199,7 @@ pub async fn get_detail(
         wp_assets: fetch_wp_assets(&state).await.unwrap_or_default(),
         wp_themes,
         csrf_vhost_options: csrf_token_for(&state, &ctx, "/hostings/vhost-options"),
+        can_edit_nginx_raw: ctx.can(Capability::HostingEditNginxRaw),
         quota,
         csrf_quota_set: csrf_token_for(&state, &ctx, "/hostings/quota/set"),
         vhost_saved: q.vhost_saved.as_deref() == Some("1"),
@@ -3419,13 +3425,42 @@ pub async fn post_vhost_options(
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
+    // The raw nginx snippet is spliced verbatim into a config that root
+    // loads, so it is gated on its OWN capability rather than travelling
+    // with the rest of the hosting settings — see HostingEditNginxRaw.
+    //
+    // A caller without it keeps whatever is stored instead of being
+    // refused outright: the field ships inside the same form as every
+    // other vhost setting, so dropping the submitted value would let a
+    // tenant WIPE an admin's snippet by saving an unrelated checkbox.
+    // Only an actual attempt to CHANGE it is an error.
+    let stored_snippet = find_hosting_anywhere(&state, sel.clone())
+        .await
+        .map(|(d, _)| d.vhost_options.custom_nginx_snippet)
+        .unwrap_or_default();
+    let custom_nginx_snippet = if ctx.can(Capability::HostingEditNginxRaw) {
+        form.custom_nginx_snippet
+    } else {
+        if form.custom_nginx_snippet.trim() != stored_snippet.trim() {
+            return Ok((
+                axum::http::StatusCode::FORBIDDEN,
+                [("content-type", "text/html; charset=utf-8")],
+                "<h1>403 Forbidden</h1><p>Editing the raw nginx snippet needs the \
+                 \"Write raw nginx config\" capability — nginx runs as root, so that \
+                 field is admin-level.</p>"
+                    .to_string(),
+            )
+                .into_response());
+        }
+        stored_snippet
+    };
     let options = hyperion_types::VhostOptions {
         basic_auth_enabled: checkbox_on(&form.basic_auth_enabled),
         basic_auth_user: form.basic_auth_user.trim().to_string(),
         basic_auth_set: false, // service decides — based on pw + existing
         force_https: checkbox_on(&form.force_https),
         hsts_max_age: form.hsts_max_age,
-        custom_nginx_snippet: form.custom_nginx_snippet,
+        custom_nginx_snippet,
         maintenance_mode: checkbox_on(&form.maintenance_mode),
         fastcgi_cache_enabled: checkbox_on(&form.fastcgi_cache_enabled),
         fastcgi_cache_ttl: form.fastcgi_cache_ttl,
@@ -4731,7 +4766,7 @@ fn parse_selector(s: &str) -> Result<HostingSelector, AppError> {
     }
 }
 
-fn csrf_token_for(state: &SharedState, ctx: &AuthCtx, form_id: &str) -> String {
+pub(crate) fn csrf_token_for(state: &SharedState, ctx: &AuthCtx, form_id: &str) -> String {
     let sid = ctx
         .session
         .as_ref()

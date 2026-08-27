@@ -744,12 +744,63 @@ fn login_failed(next: &str) -> Response {
     Redirect::to(&dest).into_response()
 }
 
+/// Clamp a caller-supplied `?next=` to a path on THIS panel.
+///
+/// A leading `/` alone is not enough. Browsers parse a URL for a special
+/// scheme with backslashes folded to forward slashes, so `Location:
+/// /\evil.com` is read as the protocol-relative `//evil.com` and the
+/// victim lands on the attacker's site — wearing the panel's login flow as
+/// the referrer. That matters here because `next` survives the whole login
+/// sequence, including the 2FA hop, so a phishing link can point at the
+/// real panel and still exit to an attacker page the moment the operator
+/// authenticates.
+///
+/// Checked on the SECOND byte rather than by scanning: the only shape that
+/// can reach an authority component is a slash-or-backslash immediately
+/// after the first `/`. Control characters go too — browsers strip tab and
+/// newline out of URLs before parsing, which lets `/\t/evil.com` reassemble
+/// into an authority after the check has already looked at it.
 fn redirect_target(next: &str) -> &str {
-    // Refuse open redirects: must start with '/'
-    if next.starts_with('/') && !next.starts_with("//") {
+    let b = next.as_bytes();
+    let ok = b.first() == Some(&b'/')
+        && !matches!(b.get(1), Some(b'/') | Some(b'\\'))
+        && !b.iter().any(|c| c.is_ascii_control());
+    if ok {
         next
     } else {
         "/"
+    }
+}
+
+#[cfg(test)]
+mod redirect_target_tests {
+    use super::redirect_target;
+
+    #[test]
+    fn keeps_ordinary_panel_paths() {
+        for p in ["/", "/hostings", "/hostings/example.com?tab=wordpress#x"] {
+            assert_eq!(redirect_target(p), p, "clamped a legitimate path: {p}");
+        }
+    }
+
+    #[test]
+    fn refuses_every_shape_that_leaves_the_panel() {
+        for hostile in [
+            "//evil.com",
+            "/\\evil.com", // browsers fold \ to / — reads as //evil.com
+            "/\\/evil.com",
+            "https://evil.com",
+            "evil.com",
+            "/\tevil.com", // tab is stripped by the browser, not by us
+            "/\n//evil.com",
+            "",
+        ] {
+            assert_eq!(
+                redirect_target(hostile),
+                "/",
+                "open redirect survived: {hostile:?}"
+            );
+        }
     }
 }
 

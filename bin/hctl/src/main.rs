@@ -1455,6 +1455,9 @@ fn print_pretty(resp: &Response) {
         Response::EmailSendTest { smtp_code } => {
             println!("test email sent — SMTP response: {smtp_code}");
         }
+        Response::SlackSendTest => {
+            println!("test message posted to the Slack webhook");
+        }
         Response::WebLogin(r) => match r {
             hyperion_types::WebLoginResult::Ok {
                 user_id,
