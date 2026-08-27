@@ -1413,6 +1413,7 @@ mod tests {
         let aliases: Vec<String> = vec![];
         let opts = hyperion_types::VhostOptions {
             blocked_bots: "ai,social,seo,shopping".into(),
+            blocked_countries: "RU,CN,KP".into(),
             ..Default::default()
         };
         let out = render(&VhostInput {
@@ -1434,6 +1435,24 @@ mod tests {
         .expect("render");
         assert!(out.contains("GPTBot"), "no bot rule emitted:\n{out}");
         assert!(out.contains("return 403"));
+        // The exemption is the load-bearing part. Server-context `if`s run
+        // BEFORE location matching, so the ACME location cannot protect
+        // renewals — only clearing the deny variable for the challenge path
+        // inside the same rewrite pass can. It must sit after every deny
+        // verdict and before the final return, or it exempts nothing.
+        let exempt = out
+            .find("if ($uri ~ \"^/\\.well-known/acme-challenge/\")")
+            .expect("ACME exemption missing — blocking a country Let's Encrypt validates from would break every renewal");
+        let verdict = out
+            .find("set $hyperion_deny \"1\";")
+            .expect("deny verdict missing");
+        let act = out
+            .find("if ($hyperion_deny) {")
+            .expect("final act missing");
+        assert!(
+            verdict < exempt && exempt < act,
+            "exemption must sit between the deny verdicts and the final return"
+        );
         // The rule must not name anything that would refuse a search engine.
         for engine in ["Googlebot", "Bingbot", "SeznamBot", "DuckDuckBot"] {
             assert!(
