@@ -43,3 +43,71 @@ pub mod wordpress;
 pub mod wp_assets;
 
 pub use db::{open, open_memory, StateError};
+
+#[cfg(test)]
+mod migration_immutability {
+    /// Applied migrations are IMMUTABLE — sqlx checksums every applied
+    /// migration at startup and refuses to run when one changed, which
+    /// takes the whole agent down on every box that already ran it. Even a
+    /// comment edit counts: the checksum is over bytes.
+    ///
+    /// This lock exists because exactly that happened: a comments-only
+    /// rewrite of 060 shipped in a release, and the next update on a live
+    /// box failed its migration dry-run with "migration 60 was previously
+    /// applied but has been modified" — services stopped, panel down,
+    /// until the original bytes were restored.
+    ///
+    /// To ADD a migration: create the new file and add its line to
+    /// migrations.sha256 (sha256sum <file>). To CHANGE schema that an old
+    /// migration created: write a NEW migration. Editing the lock line of
+    /// an EXISTING migration is never correct and will be caught in
+    /// review — that is the point of keeping the lock in the diff.
+    #[test]
+    fn applied_migrations_are_never_edited() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations");
+        let lock_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations.sha256");
+        let lock = std::fs::read_to_string(&lock_path).expect("migrations.sha256 missing");
+        let mut locked = std::collections::BTreeMap::new();
+        for line in lock.lines().filter(|l| !l.trim().is_empty()) {
+            let (hash, name) = line
+                .split_once("  ")
+                .expect("lock line format: <sha256>  <file>");
+            locked.insert(name.trim().to_string(), hash.trim().to_string());
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for entry in std::fs::read_dir(&dir).expect("read migrations dir") {
+            let entry = entry.expect("dir entry");
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.ends_with(".sql") {
+                continue;
+            }
+            seen.insert(name.clone());
+            let bytes = std::fs::read(entry.path()).expect("read migration");
+            let actual = {
+                use sha2::{Digest, Sha256};
+                let mut h = Sha256::new();
+                h.update(&bytes);
+                hex::encode(h.finalize())
+            };
+            match locked.get(&name) {
+                Some(expected) if *expected == actual => {}
+                Some(_) => panic!(
+                    "{name} was EDITED after being locked. An applied migration must never \
+                     change — sqlx checksums it and every box that already ran it goes down \
+                     on the next update. Revert the edit and put the change in a NEW migration."
+                ),
+                None => panic!(
+                    "{name} is not in migrations.sha256 — add its line:\n  sha256sum {}",
+                    entry.path().display()
+                ),
+            }
+        }
+        for name in locked.keys() {
+            assert!(
+                seen.contains(name),
+                "{name} is locked but the file is gone — deleting an applied migration \
+                 breaks every existing database the same way editing one does"
+            );
+        }
+    }
+}
