@@ -941,6 +941,8 @@ fn print_pretty(resp: &Response) {
             println!("matches:  {}", if c.matches { "yes ✓" } else { "no ✗" });
             println!("note:     {}", c.note);
         }
+        Response::WpEmergencyDisable => println!("✓ plugin folder parked as <slug>-old — the site boots without it"),
+        Response::WpEmergencyRestore => println!("✓ plugin folder restored — left INACTIVE; activate it from the plugin list"),
         Response::WpFatalCheck(r) => {
             if r.fatal {
                 println!("✗ site answers HTTP {} — WordPress fatal", r.http_status);

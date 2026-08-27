@@ -45,16 +45,21 @@
         <div class="text-soft small" style="margin-top:0.4rem;font-family:var(--font-mono,ui-monospace,monospace);font-size:0.72rem;word-break:break-all">{{ report.error_excerpt }}</div>
         {% endif %}
         {% if report.culprit_kind == "plugin" %}
-        <form method="post" action="/hostings/wp/plugin-action" style="margin-top:0.6rem"
-              data-confirm-title="Deactivate {{ c }}"
-              data-confirm-body="The plugin is switched off, not removed. The site loses whatever {{ c }} was doing (caching, redirects…) until it is reactivated — but it stops crashing. Continue?"
-              data-confirm-confirm-label="Deactivate"
+        {# RENAME, not `wp plugin deactivate`. The deactivate command loads
+           WordPress — the very thing the fataling plugin kills — so the
+           button that "deactivates" fails exactly when it is needed. Moving
+           wp-content/plugins/{{ c }} to {{ c }}-old needs nothing from PHP:
+           WordPress boots without a folder it cannot find. The card offers
+           the reverse rename once the site answers again. #}
+        <form method="post" action="/hostings/wp/emergency-disable" style="margin-top:0.6rem"
+              data-confirm-title="Disable {{ c }} by renaming its folder"
+              data-confirm-body="wp-content/plugins/{{ c }} is renamed to {{ c }}-old, so WordPress boots without it — this works even while the site is down, which normal deactivation does not. Nothing is deleted. Once the site is back, this card offers to rename it back (it returns switched off)."
+              data-confirm-confirm-label="Rename &amp; disable"
               data-confirm-variant="primary">
           <input type="hidden" name="_csrf" value="{{ csrf_token }}">
           <input type="hidden" name="selector" value="{{ selector }}">
           <input type="hidden" name="slug" value="{{ c }}">
-          <input type="hidden" name="action" value="deactivate">
-          <button class="btn primary" type="submit">Deactivate {{ c }}</button>
+          <button class="btn primary" type="submit">Disable {{ c }} (rename folder)</button>
         </form>
         {% endif %}
       </div>
@@ -87,6 +92,30 @@
       (Debug card below).
     </p>
     {% endif %}
+  {% endif %}
+
+  {% if !report.parked_plugins.is_empty() %}
+  <div style="margin-top:0.8rem;padding-top:0.7rem;border-top:1px solid var(--border)">
+    <strong style="font-size:0.9rem">Disabled by emergency rename</strong>
+    <p class="text-soft small" style="margin:0.25rem 0 0.5rem">
+      These plugin folders are parked as <code>&lt;name&gt;-old</code>.
+      Restoring renames the folder back and leaves the plugin
+      <strong>switched off</strong> — update it first, then activate it from
+      the Plugins card below.
+    </p>
+    {% for pp in report.parked_plugins %}
+    <form method="post" action="/hostings/wp/emergency-restore" style="display:inline-block;margin:0 0.4rem 0.4rem 0"
+          data-confirm-title="Restore {{ pp }}"
+          data-confirm-body="{{ pp }}-old is renamed back to {{ pp }}. The plugin comes back INACTIVE — the crash cannot return until you activate it yourself."
+          data-confirm-confirm-label="Restore folder"
+          data-confirm-variant="primary">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <input type="hidden" name="selector" value="{{ selector }}">
+      <input type="hidden" name="slug" value="{{ pp }}">
+      <button class="btn small" type="submit">Restore {{ pp }}</button>
+    </form>
+    {% endfor %}
+  </div>
   {% endif %}
 
   <div style="margin-top:0.7rem">

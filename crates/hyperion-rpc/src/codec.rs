@@ -301,6 +301,16 @@ pub enum Request {
     WpFatalCheck {
         sel: HostingSelector,
     },
+    /// Park a fataling plugin by renaming its directory (no PHP involved).
+    WpEmergencyDisable {
+        sel: HostingSelector,
+        slug: String,
+    },
+    /// Rename a parked plugin back; it comes back INACTIVE.
+    WpEmergencyRestore {
+        sel: HostingSelector,
+        slug: String,
+    },
     /// Phase 1 of a DNS-01 wildcard issuance.
     /// Always the manual flow: returns the TXT records for the operator
     /// to publish, since the server holds no DNS credentials.
@@ -1571,6 +1581,8 @@ pub enum Response {
     CertIssueAcme(CertInfo),
     CertDelete,
     WpFatalCheck(hyperion_types::WpFatalReport),
+    WpEmergencyDisable,
+    WpEmergencyRestore,
     /// `completed = true` ⇒ the cert was issued;
     /// otherwise `record_name` + `values` must be published as TXT and
     /// the caller follows up with `CertDns01Finish`.

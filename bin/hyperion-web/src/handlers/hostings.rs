@@ -5668,6 +5668,75 @@ struct FatalCardTpl {
 /// Runs on the OWNING node (the probe goes over that box's loopback, and
 /// the wp-cli reproduction needs the site's files). Failures render in the
 /// card — the placeholder is a spinner and HTMX discards a non-2xx.
+#[derive(serde::Deserialize)]
+pub struct EmergencyPluginForm {
+    pub selector: String,
+    pub slug: String,
+}
+
+/// Shared body of the two emergency-plugin actions: authorize, dispatch to
+/// the owning node, land back on the WordPress tab with the outcome.
+async fn emergency_plugin_action(
+    state: SharedState,
+    ctx: AuthCtx,
+    form: EmergencyPluginForm,
+    build: impl FnOnce(HostingSelector, String) -> Request,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector, Capability::WpManage)
+        .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let sel_url = urlencoding(&form.selector);
+    let node: Option<String> = find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
+    let resp =
+        crate::dispatcher::dispatch_to_node(&state, node.as_deref(), build(sel, form.slug.clone()))
+            .await?;
+    match resp {
+        RpcResponse::WpEmergencyDisable | RpcResponse::WpEmergencyRestore => {
+            Ok(Redirect::to(&format!("/hostings/{sel_url}#wordpress")).into_response())
+        }
+        RpcResponse::Error(e) => {
+            let msg = urlencoding(&e.to_string());
+            Ok(
+                Redirect::to(&format!("/hostings/{sel_url}?wp_error={msg}#wordpress"))
+                    .into_response(),
+            )
+        }
+        _ => Err(AppError::Internal("unexpected response".into())),
+    }
+}
+
+/// POST /hostings/wp/emergency-disable — park the plugin folder.
+pub async fn post_wp_emergency_disable(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<EmergencyPluginForm>,
+) -> Result<Response, AppError> {
+    emergency_plugin_action(state, ctx, form, |sel, slug| Request::WpEmergencyDisable {
+        sel,
+        slug,
+    })
+    .await
+}
+
+/// POST /hostings/wp/emergency-restore — folder back, plugin left inactive.
+pub async fn post_wp_emergency_restore(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<EmergencyPluginForm>,
+) -> Result<Response, AppError> {
+    emergency_plugin_action(state, ctx, form, |sel, slug| Request::WpEmergencyRestore {
+        sel,
+        slug,
+    })
+    .await
+}
+
 pub async fn get_health_panel(
     State(state): State<SharedState>,
     ctx: AuthCtx,

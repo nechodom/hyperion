@@ -13022,7 +13022,66 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 }
             }
         }
+        report.parked_plugins = hyperion_adapters::wpcli::parked_plugins(&detail.root_dir).await;
         Ok(report)
+    }
+
+    /// Park a fataling plugin by renaming its directory — the fix that works
+    /// when WordPress cannot boot and therefore wp-cli cannot run. See the
+    /// adapter for the mechanism and its refusals.
+    pub async fn wp_emergency_disable(
+        &self,
+        sel: HostingSelector,
+        slug: String,
+    ) -> Result<(), RpcError> {
+        let detail = self.get(sel).await?;
+        hyperion_adapters::wpcli::emergency_rename_plugin(&detail.root_dir, &slug, true)
+            .await
+            .map_err(|e| RpcError::Internal_with(e.to_string()))?;
+        self.append_audit(
+            "wp.plugin.emergency_disable",
+            Some(detail.id.as_str()),
+            &serde_json::json!({"slug": &slug}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
+    }
+
+    /// Put a parked plugin's directory back — and leave it INACTIVE.
+    ///
+    /// The rename alone is not enough: if WordPress never booted between
+    /// park and restore, `active_plugins` still lists the plugin, so the
+    /// restored folder would be live again with the same fatal. A
+    /// best-effort `wp plugin deactivate` right after the rename pins the
+    /// deterministic outcome — folder back, plugin off — and the operator
+    /// reactivates from the plugin list once an update fixed it. wp-cli
+    /// works here by definition: restore is only offered when the site is
+    /// answering again.
+    pub async fn wp_emergency_restore(
+        &self,
+        sel: HostingSelector,
+        slug: String,
+    ) -> Result<(), RpcError> {
+        let detail = self.get(sel.clone()).await?;
+        hyperion_adapters::wpcli::emergency_rename_plugin(&detail.root_dir, &slug, false)
+            .await
+            .map_err(|e| RpcError::Internal_with(e.to_string()))?;
+        let _ = self
+            .wp_plugin_action(
+                sel,
+                slug.clone(),
+                hyperion_types::WpPluginAction::Deactivate,
+            )
+            .await;
+        self.append_audit(
+            "wp.plugin.emergency_restore",
+            Some(detail.id.as_str()),
+            &serde_json::json!({"slug": &slug}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(())
     }
 
     async fn redirect_loop_probe(&self, domain: &str) -> Option<String> {
