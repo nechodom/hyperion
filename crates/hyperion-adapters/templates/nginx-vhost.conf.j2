@@ -110,24 +110,36 @@
     auth_basic_user_file /etc/nginx/.htpasswd-{{ hosting_id }};
     {%- endif %}
 
+{%- if !blocked_countries.is_empty() || !blocked_bots.is_empty() %}
+    # Operator refusals — countries (via the GeoIP map; ZZ = unknown, never
+    # blocked) and bot families. 403 rather than 444: a clean refusal makes
+    # a crawler back off, a dropped connection reads as a timeout and gets
+    # RETRIED.
+    #
+    # The shape below is load-bearing. These are rewrite-module directives
+    # in SERVER context, which nginx evaluates BEFORE it selects a location
+    # — so where they sit in this file relative to the ACME location block
+    # protects nothing (an earlier version claimed it did). The exemption
+    # has to happen inside the same rewrite pass: accumulate the verdict in
+    # a variable, CLEAR it for the ACME path, and only then act on it.
+    # Without that, blocking a country Let's Encrypt validates from — it
+    # checks each challenge from several countries and needs them to agree
+    # — silently breaks every issuance and renewal on the site.
+    set $hyperion_deny "";
 {%- if !blocked_countries.is_empty() %}
-    # Countries the operator refuses. $hyperion_country comes from the
-    # generated geo map (conf.d/hyperion-geo.conf) and is ZZ when the
-    # database has no answer — so an unknown address is never blocked by a
-    # country rule, and enabling this before the database exists cuts nobody
-    # off. Above the content locations, below ACME: a country block must
-    # never be able to stop a certificate renewal.
     if ($hyperion_country ~ "^({% for c in blocked_countries %}{{ c }}{% if !loop.last %}|{% endif %}{% endfor %})$") {
-        return 403;
+        set $hyperion_deny "1";
     }
 {%- endif %}
 {%- if !blocked_bots.is_empty() %}
-    # Bot families the operator switched off. 403 rather than 444: a crawler
-    # that gets a clean refusal backs off, whereas a dropped connection reads
-    # as a timeout and is usually RETRIED. The check sits above every content
-    # location so it costs one regex before any work is done, and below the
-    # ACME location so a blocked family can never stop a renewal.
     if ($http_user_agent ~* "({% for b in blocked_bots %}{{ b }}{% if !loop.last %}|{% endif %}{% endfor %})") {
+        set $hyperion_deny "1";
+    }
+{%- endif %}
+    if ($uri ~ "^/\.well-known/acme-challenge/") {
+        set $hyperion_deny "";
+    }
+    if ($hyperion_deny) {
         return 403;
     }
 {%- endif %}

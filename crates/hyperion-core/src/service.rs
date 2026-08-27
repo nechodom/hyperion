@@ -21692,6 +21692,21 @@ fn acme_failure_message(domain: &str, proxied: bool, raw: &str) -> String {
              forwarding is the classic one — it must preserve ${{1}}), a Worker route on /*, an \
              Origin Rule pointing elsewhere, or DNS pointing at a different server."
         ))
+    } else if low.contains("poll_ready") || low.contains("timed out") {
+        // The order never left pending/processing: challenges were
+        // published, but Let's Encrypt's validators could not fetch them
+        // in time. On a fresh server this is almost always one of two
+        // things, and neither is visible in the CA's message.
+        Some(format!(
+            "Let's Encrypt accepted the request but never managed to validate it — its \
+             servers could not reach {domain} in time. Two usual causes on a new server: \
+             the domain's DNS A record does not point at THIS machine yet (check with \
+             `dig +short A {domain}` — it must return this server's IP), or inbound port \
+             80 is blocked by a firewall (HTTP-01 always starts on port 80; redirecting \
+             it to HTTPS is fine, blocking it is not — check the provider's cloud \
+             firewall too). Fix whichever applies, then press 'Issue HTTPS certificate' \
+             again."
+        ))
     } else if low.contains("timeout") || low.contains("connection") || low.contains("refused") {
         Some(format!(
             "Nothing answered on port 80 for {domain}. HTTP-01 always STARTS on port 80 — it \
