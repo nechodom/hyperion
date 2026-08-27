@@ -398,6 +398,14 @@ cargo build --release --bin hyperion-agent --bin hctl --quiet
 
 install -m 0755 target/release/hyperion-agent /usr/sbin/hyperion-agent
 install -m 0755 target/release/hctl           /usr/bin/hctl
+# The `hyperion` front-door command (`hyperion update`, `status`, `logs`).
+# update.sh installs this too, but a FRESH box must not need one manual
+# full-path update.sh run before the short command everyone guesses first
+# starts existing — that gap is exactly how "hyperion: command not found"
+# gets reported from every new install.
+install -d -m 0755 /usr/local/bin
+install -m 0755 packaging/install/hyperion-wrapper.sh /usr/local/bin/hyperion
+
 
 #-------- 5. Users + dirs --------------------------------------------------
 groupadd --system hyperion-admin 2>/dev/null || true
