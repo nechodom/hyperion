@@ -64,6 +64,69 @@ pub async fn remove_dir_all(path: &Path) -> Result<(), AdapterError> {
 /// mode, not the link itself).
 ///
 /// Stops at filesystem root.
+/// Can `user` actually create a directory inside `dir`?
+///
+/// Performs the real operation instead of inferring it from modes, because
+/// "could not create directory" has several causes that look identical from
+/// the outside and only one of them is a permission:
+///
+///   * the disk quota is exhausted (EDQUOT),
+///   * the filesystem is out of inodes (ENOSPC with bytes still free),
+///   * the mount went read-only (EROFS),
+///   * `open_basedir`, SELinux or AppArmor refuses the path,
+///   * ownership or mode really is wrong.
+///
+/// A mode-based check reports "looks fine" for the first four and sends the
+/// operator hunting for a permission bug that does not exist. mkdir answers
+/// the question the operator actually asked.
+///
+/// Runs as `user` via sudo, so it tests the uid WordPress runs under rather
+/// than root's view — root can write into a directory the site user cannot.
+pub async fn write_probe(user: &str, dir: &str) -> Result<(), String> {
+    if user.is_empty() || user.contains([':', '\n', '\r', '\0']) {
+        return Err("illegal user name".into());
+    }
+    if dir.is_empty() || dir.contains(['\n', '\r', '\0']) {
+        return Err("illegal directory path".into());
+    }
+    let probe = format!("{dir}/.hyperion-write-probe");
+    // Remove a leftover from an interrupted earlier run first, so a stale
+    // directory cannot make every later probe report EEXIST as a failure.
+    let _ = crate::cmd::run("/usr/bin/sudo", &["-u", user, "/bin/rmdir", "--", &probe]).await;
+    let made = crate::cmd::run("/usr/bin/sudo", &["-u", user, "/bin/mkdir", "--", &probe]).await;
+    // Clean up whatever happened — never leave the probe behind.
+    let _ = crate::cmd::run("/usr/bin/sudo", &["-u", user, "/bin/rmdir", "--", &probe]).await;
+    made.map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// Free space and free inodes on the filesystem holding `path`, as
+/// (bytes_free, inodes_free). Either is `None` when `df` could not say.
+///
+/// Inodes are asked about separately on purpose: a filesystem with
+/// gigabytes free but no inodes left fails every mkdir, and looking only at
+/// bytes makes that look impossible.
+pub async fn filesystem_headroom(path: &str) -> (Option<u64>, Option<u64>) {
+    let parse = |out: String| -> Option<u64> {
+        // `df -P` guarantees one record per line; field 4 is "available".
+        out.lines()
+            .nth(1)?
+            .split_whitespace()
+            .nth(3)?
+            .parse::<u64>()
+            .ok()
+    };
+    let bytes = crate::cmd::run("/usr/bin/df", &["-Pk", path])
+        .await
+        .ok()
+        .and_then(parse)
+        .map(|kib| kib * 1024);
+    let inodes = crate::cmd::run("/usr/bin/df", &["-Pi", path])
+        .await
+        .ok()
+        .and_then(parse);
+    (bytes, inodes)
+}
+
 /// One entry from [`scan_tree`]: what it is, its mode, its owner, its path.
 #[derive(Debug, Clone)]
 pub struct TreeEntry {
