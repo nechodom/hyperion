@@ -2147,4 +2147,15 @@ impl FtpCheckReport {
     pub fn has_node_repair(&self) -> bool {
         self.items.iter().any(|i| i.fix == "node_config")
     }
+    /// True when FTPS is off and the card should offer to switch it on.
+    pub fn can_enable_ftps(&self) -> bool {
+        self.items.iter().any(|i| i.fix == "enable_ftps")
+    }
+    /// True when FTPS is on, so the card can offer to switch it back off.
+    /// The way back matters more than the way in: this is the setting most
+    /// likely to need reverting in a hurry, and the operator should not have
+    /// to reach for a shell to do it.
+    pub fn can_disable_ftps(&self) -> bool {
+        self.items.iter().any(|i| i.fix == "disable_ftps")
+    }
 }

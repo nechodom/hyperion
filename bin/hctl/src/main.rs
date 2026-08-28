@@ -43,6 +43,9 @@ enum Cmd {
     /// Certificate management.
     #[command(subcommand)]
     Cert(CertCmd),
+    /// FTP diagnosis and node-wide FTPS.
+    #[command(subcommand)]
+    Ftp(FtpCmd),
     /// Print recent audit log entries.
     Audit {
         #[arg(long, default_value_t = 50)]
@@ -215,6 +218,23 @@ enum HostingCmd {
         /// archive mode: node-local path to an export bundle (`bundle.tar`).
         #[arg(long)]
         archive: Option<String>,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum FtpCmd {
+    /// Diagnose one hosting's FTP setup.
+    Check { selector: String },
+    /// Repair one hosting's FTP (landing directory, ownership, traversal).
+    Repair { selector: String },
+    /// Turn node-wide FTPS on (required) or off.
+    ///
+    /// The OFF direction is the reason this exists: enabling FTPS can lock
+    /// out a client, and the operator must not need a working browser
+    /// session to undo it.
+    Ftps {
+        #[arg(long)]
+        off: bool,
     },
 }
 
@@ -441,6 +461,16 @@ async fn call(cli: &Cli) -> anyhow::Result<Response> {
         Cmd::Cert(CertCmd::RenewAll) => Request::CertRenewAll,
         Cmd::Cert(CertCmd::Issue { domain }) => Request::CertIssue {
             domain: Domain::parse(domain)?,
+        },
+        Cmd::Ftp(FtpCmd::Check { selector }) => Request::FtpSelfCheck {
+            sel: parse_selector(selector)?,
+        },
+        Cmd::Ftp(FtpCmd::Repair { selector }) => Request::FtpRepairSite {
+            sel: parse_selector(selector)?,
+        },
+        Cmd::Ftp(FtpCmd::Ftps { off }) => Request::FtpSetFtps {
+            enabled: !off,
+            require_tls: !off,
         },
     };
     Ok(hyperion_rpc_client::call(&cli.socket, req).await?)
@@ -1483,7 +1513,7 @@ fn print_pretty(resp: &Response) {
                 println!("  [{mark}] {}: {}", it.label, it.detail);
             }
         }
-        Response::FtpRepairSite(m) | Response::FtpRepairNodeConfig(m) => {
+        Response::FtpRepairSite(m) | Response::FtpRepairNodeConfig(m) | Response::FtpSetFtps(m) => {
             println!("{m}");
         }
         Response::WebLogin(r) => match r {

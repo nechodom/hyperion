@@ -5779,6 +5779,7 @@ struct FtpCardTpl {
     selector: String,
     csrf_repair: String,
     csrf_repair_node: String,
+    csrf_ftps: String,
     target_node: String,
     error: Option<String>,
 }
@@ -5800,6 +5801,7 @@ pub async fn get_ftp_panel(
                 selector: selector.clone(),
                 csrf_repair: csrf_token_for(&state, &ctx, "/hostings/ftp/repair"),
                 csrf_repair_node: csrf_token_for(&state, &ctx, "/hostings/ftp/repair-node"),
+                csrf_ftps: csrf_token_for(&state, &ctx, "/hostings/ftp/ftps"),
                 target_node,
                 error,
             }
@@ -5874,6 +5876,74 @@ pub async fn post_ftp_repair(
     Form(form): Form<FtpRepairForm>,
 ) -> Result<Response, AppError> {
     ftp_repair_action(state, ctx, form, false).await
+}
+
+#[derive(serde::Deserialize)]
+pub struct FtpsForm {
+    pub selector: String,
+    #[serde(default)]
+    pub enabled: Option<String>,
+}
+
+/// POST /hostings/ftp/ftps — turn FTPS on/off for the whole node.
+///
+/// Admin only, and always with `require_tls`: FTPS that is merely *offered*
+/// protects nobody, because a client that skips it still sends the password
+/// in the clear and the server accepts it.
+pub async fn post_ftp_ftps(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<FtpsForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::HostingEditConfig,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    if !ctx.is_admin_or_higher() {
+        return Ok((
+            axum::http::StatusCode::FORBIDDEN,
+            [("content-type", "text/html; charset=utf-8")],
+            "<h1>403 Forbidden</h1><p>FTPS is a node-wide setting — it restarts a \
+             service every site on this node shares. Admin only.</p>"
+                .to_string(),
+        )
+            .into_response());
+    }
+    let enabled = checkbox_on(&form.enabled);
+    let sel_url = urlencoding(&form.selector);
+    let node: Option<String> = find_hosting_anywhere(&state, sel)
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        node.as_deref(),
+        Request::FtpSetFtps {
+            enabled,
+            require_tls: enabled,
+        },
+    )
+    .await?;
+    Ok(match resp {
+        RpcResponse::FtpSetFtps(m) => Redirect::to(&format!(
+            "/hostings/{sel_url}?flash={}#ftp",
+            urlencoding(&m)
+        ))
+        .into_response(),
+        RpcResponse::Error(e) => Redirect::to(&format!(
+            "/hostings/{sel_url}?flash_error={}#ftp",
+            urlencoding(&e.to_string())
+        ))
+        .into_response(),
+        _ => return Err(AppError::Internal("unexpected response".into())),
+    })
 }
 
 /// POST /hostings/ftp/repair-node — node-wide vsftpd config repair. Admin

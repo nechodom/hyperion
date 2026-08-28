@@ -1363,6 +1363,13 @@ pub enum Request {
     /// Repair the node-wide vsftpd config. Separate from FtpRepairSite
     /// because it can restart a daemon every hosting on the box shares.
     FtpRepairNodeConfig,
+    /// Turn FTPS on or off for the whole node. `require_tls` refuses
+    /// plaintext logins — the setting that actually protects the password,
+    /// and the one that locks out clients which cannot negotiate TLS.
+    FtpSetFtps {
+        enabled: bool,
+        require_tls: bool,
+    },
     /// DKIM signing status for a hosting's domain (key present? in the
     /// signing tables? last DNS verification?).
     DkimStatus {
@@ -1972,6 +1979,7 @@ pub enum Response {
     FtpSelfCheck(hyperion_types::FtpCheckReport),
     FtpRepairSite(String),
     FtpRepairNodeConfig(String),
+    FtpSetFtps(String),
     DkimStatus(hyperion_types::DkimStatus),
     DkimEnable(hyperion_types::DkimStatus),
     DkimDisable(hyperion_types::DkimStatus),

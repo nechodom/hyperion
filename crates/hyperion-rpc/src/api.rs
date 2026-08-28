@@ -719,6 +719,7 @@ pub trait AgentApi: Send + Sync + 'static {
     ) -> Result<hyperion_types::FtpCheckReport, RpcError>;
     async fn ftp_repair_site(&self, sel: HostingSelector) -> Result<String, RpcError>;
     async fn ftp_repair_node_config(&self) -> Result<String, RpcError>;
+    async fn ftp_set_ftps(&self, enabled: bool, require_tls: bool) -> Result<String, RpcError>;
 
     // Web users / roles / 2FA — see codec.rs for semantics.
     async fn web_login(

@@ -1373,6 +1373,13 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(m) => Response::FtpRepairNodeConfig(m),
             Err(e) => Response::Error(e),
         },
+        Request::FtpSetFtps {
+            enabled,
+            require_tls,
+        } => match api.ftp_set_ftps(enabled, require_tls).await {
+            Ok(m) => Response::FtpSetFtps(m),
+            Err(e) => Response::Error(e),
+        },
         Request::DkimStatus { sel } => match api.dkim_status(sel).await {
             Ok(s) => Response::DkimStatus(s),
             Err(e) => Response::Error(e),
@@ -2731,6 +2738,9 @@ mod tests {
             Ok(String::new())
         }
         async fn ftp_repair_node_config(&self) -> Result<String, RpcError> {
+            Ok(String::new())
+        }
+        async fn ftp_set_ftps(&self, _: bool, _: bool) -> Result<String, RpcError> {
             Ok(String::new())
         }
         async fn dkim_status(

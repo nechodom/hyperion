@@ -238,7 +238,34 @@ pub async fn ftps_enabled() -> bool {
     let conf = tokio::fs::read_to_string(VSFTPD_CONF)
         .await
         .unwrap_or_default();
-    conf_sets(&conf, "ssl_enable") && conf_sets(&conf, "rsa_cert_file")
+    // The VALUE, not merely the directive's presence. `ssl_enable=NO` left
+    // beside a stale `rsa_cert_file` — the exact shape of a hand-rolled
+    // recovery over SSH — otherwise reads as "FTPS is on", and this is the
+    // sole gate on the in-panel way back.
+    conf_value(&conf, "ssl_enable").is_some_and(|v| v.eq_ignore_ascii_case("YES"))
+        && conf_value(&conf, "rsa_cert_file").is_some_and(|v| !v.is_empty())
+}
+
+/// True when this node refuses plaintext FTP logins, i.e. FTPS is not merely
+/// offered but required. Anything that probes a login has to know.
+pub async fn ftps_required() -> bool {
+    let conf = tokio::fs::read_to_string(VSFTPD_CONF)
+        .await
+        .unwrap_or_default();
+    conf_value(&conf, "force_local_logins_ssl").is_some_and(|v| v.eq_ignore_ascii_case("YES"))
+}
+
+/// The pinned passive data range, if any. Reported so the operator can be
+/// told to open it: with TLS the kernel's conntrack helper cannot read the
+/// PASV reply, so an unopened range means every listing hangs AFTER a
+/// successful login — which looks like anything except a firewall problem.
+pub async fn passive_range() -> Option<(u16, u16)> {
+    let conf = tokio::fs::read_to_string(VSFTPD_CONF)
+        .await
+        .unwrap_or_default();
+    let lo = conf_value(&conf, "pasv_min_port")?.parse().ok()?;
+    let hi = conf_value(&conf, "pasv_max_port")?.parse().ok()?;
+    Some((lo, hi))
 }
 
 /// Any `userlist_*` / ftpusers gating that could refuse this user. Hyperion
@@ -499,6 +526,34 @@ pub async fn ensure_vsftpd_configured() -> Result<(), AdapterError> {
                 body.push_str(&format!("listen_port={port}\n"));
             }
         }
+        // Carry the FTPS block across too. This function runs on every FTP
+        // password set, so on a node whose vsftpd came from outside Hyperion
+        // (`already_ours` false) generating one customer password would
+        // otherwise DELETE FTPS for every site — silently downgrading the
+        // whole node to cleartext at the exact moment a new password is
+        // handed out.
+        for key in [
+            "ssl_enable",
+            "rsa_cert_file",
+            "rsa_private_key_file",
+            "force_local_logins_ssl",
+            "force_local_data_ssl",
+            "ssl_tlsv1_2",
+            "ssl_tlsv1_1",
+            "ssl_tlsv1",
+            "ssl_sslv2",
+            "ssl_sslv3",
+            "allow_anon_ssl",
+            "require_ssl_reuse",
+            "ssl_ciphers",
+            "pasv_enable",
+            "pasv_min_port",
+            "pasv_max_port",
+        ] {
+            if let Some(v) = conf_value(&current, key) {
+                body.push_str(&format!("{key}={v}\n"));
+            }
+        }
         atomic_write(Path::new(VSFTPD_CONF), body.as_bytes(), 0o644)
             .await
             .map_err(|e| AdapterError::Other(format!("write {VSFTPD_CONF}: {e}")))?;
@@ -559,6 +614,364 @@ pub async fn ensure_vsftpd_configured() -> Result<(), AdapterError> {
     Ok(())
 }
 
+// ── FTPS ──────────────────────────────────────────────────────────────────
+//
+// The FTP password is the site's real Linux password — the same credential
+// PHP-FPM runs under. Without TLS it crosses the network in the clear, so
+// enabling FTPS is a real fix, not a checkbox.
+//
+// Two things make this riskier than it looks, and both are handled below:
+//
+//   1. vsftpd has NO config-test flag. A bad TLS block is only discovered
+//      when the daemon fails to start — taking FTP down for every site on
+//      the node. So the write is transactional: back up, write, restart,
+//      verify the unit is actually running, and restore + restart on
+//      failure.
+//   2. With an encrypted control channel the kernel's `nf_conntrack_ftp`
+//      helper cannot read the PASV reply, so it can no longer open the data
+//      port on demand. The passive range has to be pinned and opened in the
+//      firewall explicitly, or every directory listing hangs after a
+//      successful login — the classic "connected but LIST times out".
+
+/// Where Hyperion keeps the FTPS certificate when no panel certificate is
+/// available on this node.
+const FTPS_DIR: &str = "/etc/hyperion/ftps";
+/// Passive data range. Matches the `ftp` firewall preset's 40000-50000 —
+/// they have to agree, and until now vsftpd pinned nothing at all while the
+/// preset opened a range the daemon never used.
+const PASV_MIN: u16 = 40000;
+const PASV_MAX: u16 = 50000;
+
+/// Which of `wanted` the installed vsftpd actually understands.
+///
+/// vsftpd has no config test mode and treats an unknown directive as FATAL —
+/// `500 OOPS: unrecognised variable in config file` and the daemon exits. So
+/// emitting a directive that this build does not know takes FTP down for
+/// every site on the node.
+///
+/// The option names live as NUL-terminated literals in vsftpd's parser
+/// tables, so the binary itself is the authority on what it accepts. Reading
+/// it is cheap, deterministic, needs no `strings`/binutils, and unlike a
+/// version check it stays correct across distro backports.
+///
+/// Unreadable binary ⇒ empty result ⇒ callers emit only the directives that
+/// have existed since vsftpd 2.x. Failing closed here costs a little
+/// hardening; failing open costs the node's FTP.
+pub async fn vsftpd_known_directives(wanted: &[&'static str]) -> Vec<&'static str> {
+    const BIN: &[&str] = &["/usr/sbin/vsftpd", "/usr/local/sbin/vsftpd"];
+    let mut blob = Vec::new();
+    for p in BIN {
+        if let Ok(b) = tokio::fs::read(p).await {
+            blob = b;
+            break;
+        }
+    }
+    if blob.is_empty() {
+        return Vec::new();
+    }
+    wanted
+        .iter()
+        .copied()
+        .filter(|d| {
+            // NUL-terminated so `ssl_tlsv1` cannot match inside `ssl_tlsv1_2`.
+            let needle: Vec<u8> = d.bytes().chain(std::iter::once(0u8)).collect();
+            blob.windows(needle.len()).any(|w| w == needle)
+        })
+        .collect()
+}
+
+/// Reject a certificate or key that exists but is not usable.
+///
+/// `metadata().is_ok()` is not "usable": a zero-byte or half-written PEM
+/// passes it and then kills vsftpd at ssl_init. Checked BEFORE the config is
+/// written, because not restarting into a fatal config beats any amount of
+/// detecting it afterwards.
+async fn pem_looks_usable(path: &str, header: &str) -> bool {
+    match tokio::fs::read_to_string(path).await {
+        Ok(body) => body.contains(header),
+        Err(_) => false,
+    }
+}
+
+/// Resolve a certificate for FTPS: the panel's real certificate when this
+/// node has one, otherwise a self-signed pair Hyperion maintains.
+///
+/// A self-signed certificate makes clients show a trust prompt — but it
+/// still encrypts the session, which is the property that matters here. A
+/// warning the operator clicks through beats a password on the wire.
+pub async fn ensure_ftps_cert(
+    panel_cert: Option<(&str, &str)>,
+    hostname: &str,
+) -> Result<(String, String), AdapterError> {
+    // Content-checked, not existence-checked, and it FALLS THROUGH on a bad
+    // pair: a zero-byte or half-written panel certificate must not beat a
+    // good self-signed one and take the daemon down.
+    if let Some((cert, key)) = panel_cert {
+        if pem_looks_usable(cert, "-----BEGIN CERTIFICATE-----").await
+            && pem_looks_usable(key, "-----BEGIN").await
+        {
+            return Ok((cert.to_string(), key.to_string()));
+        }
+        tracing::warn!(
+            cert,
+            "ftps: panel certificate is missing or unreadable — using a self-signed pair"
+        );
+    }
+    let cert_path = format!("{FTPS_DIR}/fullchain.pem");
+    let key_path = format!("{FTPS_DIR}/privkey.pem");
+    if pem_looks_usable(&cert_path, "-----BEGIN CERTIFICATE-----").await
+        && pem_looks_usable(&key_path, "-----BEGIN").await
+    {
+        return Ok((cert_path, key_path));
+    }
+    tokio::fs::create_dir_all(FTPS_DIR)
+        .await
+        .map_err(|e| AdapterError::Other(format!("mkdir {FTPS_DIR}: {e}")))?;
+    let names = vec![
+        if hostname.is_empty() {
+            "hyperion".to_string()
+        } else {
+            hostname.to_string()
+        },
+        "localhost".to_string(),
+    ];
+    let params = rcgen::CertificateParams::new(names)
+        .map_err(|e| AdapterError::Other(format!("ftps cert params: {e}")))?;
+    let kp = rcgen::KeyPair::generate()
+        .map_err(|e| AdapterError::Other(format!("ftps keypair: {e}")))?;
+    let cert = params
+        .self_signed(&kp)
+        .map_err(|e| AdapterError::Other(format!("ftps self-sign: {e}")))?;
+    atomic_write(Path::new(&cert_path), cert.pem().as_bytes(), 0o644)
+        .await
+        .map_err(|e| AdapterError::Other(format!("write {cert_path}: {e}")))?;
+    // 0600: this key protects every FTP session on the node, and hosting
+    // users have shell-less but real accounts on this box.
+    atomic_write(Path::new(&key_path), kp.serialize_pem().as_bytes(), 0o600)
+        .await
+        .map_err(|e| AdapterError::Other(format!("write {key_path}: {e}")))?;
+    Ok((cert_path, key_path))
+}
+
+/// Strip every directive Hyperion manages for FTPS, leaving the rest of the
+/// operator's config untouched.
+fn without_ftps_block(conf: &str) -> String {
+    const MANAGED: &[&str] = &[
+        "ssl_enable",
+        "rsa_cert_file",
+        "rsa_private_key_file",
+        "force_local_logins_ssl",
+        "force_local_data_ssl",
+        "ssl_tlsv1_2",
+        "ssl_tlsv1_1",
+        "ssl_tlsv1",
+        "ssl_sslv2",
+        "ssl_sslv3",
+        "require_ssl_reuse",
+        "ssl_ciphers",
+        "allow_anon_ssl",
+        "pasv_min_port",
+        "pasv_max_port",
+        "pasv_enable",
+    ];
+    conf.lines()
+        .filter(|l| {
+            let t = l.trim();
+            if t.starts_with('#') {
+                return true;
+            }
+            !MANAGED
+                .iter()
+                .any(|k| t.starts_with(k) && t[k.len()..].starts_with('='))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n"
+}
+
+/// Turn FTPS on (or off) for this node, transactionally.
+///
+/// `require_tls` refuses plaintext logins outright. That is the setting
+/// worth having — without it a client simply stays unencrypted and nothing
+/// is actually protected — but it DOES lock out any client that cannot
+/// negotiate TLS, which is why it is never a default and never automatic.
+pub async fn set_ftps(
+    enabled: bool,
+    require_tls: bool,
+    cert_path: &str,
+    key_path: &str,
+) -> Result<(), AdapterError> {
+    let current = tokio::fs::read_to_string(VSFTPD_CONF)
+        .await
+        .unwrap_or_default();
+    if current.trim().is_empty() {
+        return Err(AdapterError::Other(
+            "vsftpd.conf is missing or empty — run the vsftpd config repair first".into(),
+        ));
+    }
+    for p in [cert_path, key_path] {
+        if enabled && tokio::fs::metadata(p).await.is_err() {
+            return Err(AdapterError::Other(format!("{p} does not exist")));
+        }
+    }
+    let mut body = without_ftps_block(&current);
+    // The passive range stays pinned whether FTPS is on or off. It has to
+    // match the `ftp` firewall preset (40000-50000) either way, and stripping
+    // it on the way out would make the recovery button leave a firewalled
+    // node WORSE than it found it.
+    body.push_str(&format!(
+        "\n# ── Passive data range (managed by Hyperion) ───────────────\n\
+         pasv_enable=YES\n\
+         pasv_min_port={PASV_MIN}\n\
+         pasv_max_port={PASV_MAX}\n"
+    ));
+    if enabled {
+        // Version-gated. An unknown directive is FATAL to vsftpd, and the
+        // TLS-version toggles in particular are not present in every build,
+        // so they are emitted only when this binary actually knows them.
+        // Everything unconditional below has existed since vsftpd 2.x.
+        let optional = vsftpd_known_directives(&[
+            "ssl_tlsv1_2",
+            "ssl_tlsv1_1",
+            "ssl_tlsv1",
+            "ssl_sslv2",
+            "ssl_sslv3",
+            "require_ssl_reuse",
+            "allow_anon_ssl",
+            "ssl_ciphers",
+        ])
+        .await;
+        let known = |d: &str| optional.contains(&d);
+        body.push_str(&format!(
+            "\n# ── FTPS (managed by Hyperion) ─────────────────────────────\n\
+             ssl_enable=YES\n\
+             rsa_cert_file={cert_path}\n\
+             rsa_private_key_file={key_path}\n\
+             force_local_logins_ssl={ssl}\n\
+             force_local_data_ssl={ssl}\n",
+            ssl = if require_tls { "YES" } else { "NO" }
+        ));
+        // Pin TLS 1.2+ where the build supports saying so. Where it does not,
+        // ssl_ciphers plus the platform's OpenSSL policy still keeps the old
+        // protocols out — and a missing hardening line is survivable, while
+        // an unrecognised one is not.
+        if known("ssl_tlsv1_2") {
+            body.push_str("ssl_tlsv1_2=YES\n");
+        }
+        if known("ssl_tlsv1_1") {
+            body.push_str("ssl_tlsv1_1=NO\n");
+        }
+        if known("ssl_tlsv1") {
+            body.push_str("ssl_tlsv1=NO\n");
+        }
+        if known("ssl_sslv2") {
+            body.push_str("ssl_sslv2=NO\n");
+        }
+        if known("ssl_sslv3") {
+            body.push_str("ssl_sslv3=NO\n");
+        }
+        if known("allow_anon_ssl") {
+            body.push_str("allow_anon_ssl=NO\n");
+        }
+        if known("require_ssl_reuse") {
+            // NO deliberately: several widely used clients (current FileZilla
+            // among them) open the data connection without resuming the
+            // control session, and YES rejects them with an error that reads
+            // like a server fault.
+            body.push_str("require_ssl_reuse=NO\n");
+        }
+        if known("ssl_ciphers") {
+            body.push_str("ssl_ciphers=HIGH\n");
+        }
+        // If the build knows NONE of the version toggles, refuse rather than
+        // ship plain ssl_enable with whatever protocols OpenSSL defaults to.
+        if optional.is_empty() {
+            return Err(AdapterError::Other(
+                "could not read the vsftpd binary to confirm which TLS directives it \
+                 accepts, so enabling FTPS would risk writing a config that kills the \
+                 daemon. Check that /usr/sbin/vsftpd exists and is readable."
+                    .into(),
+            ));
+        }
+    }
+    // Transactional: vsftpd has no config-test mode, so the only way to know
+    // the new config parses is to start it and look — carefully.
+    let backup = format!("{VSFTPD_CONF}.hyperion-pre-ftps");
+    let _ = tokio::fs::write(&backup, current.as_bytes()).await;
+    atomic_write(Path::new(VSFTPD_CONF), body.as_bytes(), 0o644)
+        .await
+        .map_err(|e| AdapterError::Other(format!("write {VSFTPD_CONF}: {e}")))?;
+    if let Err(e) = cmd::run("/usr/bin/systemctl", &["restart", "vsftpd"]).await {
+        return Err(rollback_or_report(&current, format!("vsftpd refused to restart: {e}")).await);
+    }
+    if let Err(why) = vsftpd_settled_running().await {
+        return Err(rollback_or_report(&current, why).await);
+    }
+    Ok(())
+}
+
+/// Wait for vsftpd to be genuinely up, not merely just-exec'd.
+///
+/// Debian ships vsftpd as `Type=simple` with no `Restart=`, so systemd
+/// completes the start job at exec and `systemctl restart` returns 0 for a
+/// config the daemon is about to die on. A single unsettled `systemctl show`
+/// can then read `active` in the window before the SIGCHLD is processed —
+/// which is exactly the case this whole transaction exists to catch, so
+/// sampling once would defeat it.
+///
+/// Two samples a second apart, both required to be active+running.
+async fn vsftpd_settled_running() -> Result<(), String> {
+    let mut last = String::new();
+    for i in 0..2 {
+        tokio::time::sleep(std::time::Duration::from_millis(if i == 0 {
+            700
+        } else {
+            1000
+        }))
+        .await;
+        let st = crate::systemctl_status_rich("vsftpd").await;
+        last = format!(
+            "active_state={} sub_state={}",
+            st.active_state, st.sub_state
+        );
+        if st.active_state != "active" || st.sub_state == "dead" {
+            return Err(format!("vsftpd did not stay up ({last})"));
+        }
+    }
+    let _ = last;
+    Ok(())
+}
+
+/// Restore `previous` and say TRUTHFULLY what state the node ended in.
+///
+/// The old code logged rollback failures and returned a message that claimed
+/// the restore had succeeded regardless. On the one path where the operator
+/// must act immediately — restore failed, FTP is down — it told them the
+/// opposite.
+async fn rollback_or_report(previous: &str, why: String) -> AdapterError {
+    match rollback_vsftpd(previous).await {
+        Ok(()) => AdapterError::Other(format!(
+            "{why} — the previous configuration was restored and vsftpd is running again."
+        )),
+        Err(e) => AdapterError::Other(format!(
+            "{why}. THE ROLLBACK ALSO FAILED ({e}) — FTP is DOWN on this node right now. \
+             The previous config is at {VSFTPD_CONF}.hyperion-pre-ftps; restore it and run \
+             `systemctl restart vsftpd`."
+        )),
+    }
+}
+
+async fn rollback_vsftpd(previous: &str) -> Result<(), String> {
+    atomic_write(Path::new(VSFTPD_CONF), previous.as_bytes(), 0o644)
+        .await
+        .map_err(|e| format!("could not restore the previous config: {e}"))?;
+    cmd::run("/usr/bin/systemctl", &["restart", "vsftpd"])
+        .await
+        .map_err(|e| format!("restart after restoring the config failed: {e}"))?;
+    // The restore is only a restore if the daemon actually came back.
+    vsftpd_settled_running().await
+}
+
 /// Names of every system user that currently has an FTP-usable
 /// password (shadow field 2 is a real hash, not `!` / `*` / empty).
 /// Read in one shot from /etc/shadow — root only, agent runs as
@@ -588,6 +1001,88 @@ pub async fn list_users_with_password() -> Result<Vec<String>, AdapterError> {
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod ftps_tests {
+    use super::*;
+
+    /// An unknown directive is FATAL to vsftpd, so the emitter must only ever
+    /// use names the installed binary actually contains. The needle is
+    /// NUL-terminated, which is what stops `ssl_tlsv1` matching inside
+    /// `ssl_tlsv1_2` and vice versa.
+    #[test]
+    fn directive_matching_is_nul_terminated() {
+        let blob: Vec<u8> = b"junk\0ssl_tlsv1_2\0more\0listen\0".to_vec();
+        let has = |d: &str| {
+            let needle: Vec<u8> = d.bytes().chain(std::iter::once(0u8)).collect();
+            blob.windows(needle.len()).any(|w| w == needle)
+        };
+        assert!(has("ssl_tlsv1_2"));
+        assert!(has("listen"));
+        assert!(
+            !has("ssl_tlsv1"),
+            "a prefix must not match — emitting ssl_tlsv1 on a build that only \
+             has ssl_tlsv1_2 would kill the daemon"
+        );
+        assert!(!has("listen_port"));
+    }
+
+    /// FTPS state must be read from the VALUE. `ssl_enable=NO` next to a
+    /// stale rsa_cert_file is what a hand-rolled recovery over SSH leaves
+    /// behind, and reading it as "on" hides the only in-panel way back.
+    #[test]
+    fn ftps_state_is_read_from_the_value() {
+        let off = "ssl_enable=NO\nrsa_cert_file=/x/cert.pem\n";
+        assert_eq!(conf_value(off, "ssl_enable"), Some("NO"));
+        let on = "ssl_enable=YES\nrsa_cert_file=/x/cert.pem\n";
+        assert_eq!(conf_value(on, "ssl_enable"), Some("YES"));
+    }
+
+    /// The managed block must be replaceable without eating the operator's
+    /// own directives — this runs on a live config every time FTPS is
+    /// toggled.
+    #[test]
+    fn stripping_keeps_everything_else() {
+        let conf = "listen=YES\nssl_enable=YES\nlocal_enable=YES\n                    rsa_cert_file=/old/cert.pem\nlisten_port=2121\n                    #ssl_enable=NO\npasv_min_port=1\n";
+        let out = without_ftps_block(conf);
+        assert!(out.contains("listen=YES"));
+        assert!(out.contains("local_enable=YES"));
+        assert!(out.contains("listen_port=2121"), "custom port must survive");
+        assert!(out.contains("#ssl_enable=NO"), "comments are left alone");
+        assert!(!conf_sets(&out, "ssl_enable"));
+        assert!(!conf_sets(&out, "rsa_cert_file"));
+        assert!(!conf_sets(&out, "pasv_min_port"));
+    }
+
+    /// Toggling twice must not accumulate duplicates — vsftpd takes the last
+    /// value, so a stale earlier line is silently ignored right up until
+    /// someone reads the file to debug something.
+    #[test]
+    fn stripping_is_idempotent() {
+        let conf = "listen=YES\nssl_enable=YES\nssl_enable=YES\npasv_max_port=50000\n";
+        let once = without_ftps_block(conf);
+        assert_eq!(once, without_ftps_block(&once));
+        assert!(!once.contains("ssl_enable"));
+    }
+
+    /// A key prefix must not be mistaken for the key itself.
+    #[test]
+    fn a_similar_directive_is_not_stripped() {
+        let conf = "ssl_enable_extra=YES\npasv_min_portx=1\n";
+        let out = without_ftps_block(conf);
+        assert!(out.contains("ssl_enable_extra=YES"));
+        assert!(out.contains("pasv_min_portx=1"));
+    }
+
+    /// The pinned passive range has to match the `ftp` firewall preset
+    /// (40000-50000). With TLS the conntrack helper cannot open the data
+    /// port on demand, so a mismatch means every listing hangs after a
+    /// successful login.
+    #[test]
+    fn the_passive_range_matches_the_firewall_preset() {
+        assert_eq!((PASV_MIN, PASV_MAX), (40000, 50000));
+    }
 }
 
 #[cfg(test)]
@@ -707,20 +1202,35 @@ pub async fn probe_login(user: &str, password: &str) -> Result<bool, AdapterErro
     // when passed via --user `<u>:<p>` because we're not going
     // through a shell.
     let user_arg = format!("{}:{}", user, password);
+    // Match the server's own policy, and the real port. Without --ssl-reqd a
+    // node with force_local_logins_ssl=YES answers a perfectly valid password
+    // with 530, so the probe would report every account as "login refused"
+    // the moment FTPS is required — and the operator would conclude that
+    // enabling FTPS broke authentication.
+    let port = read_listen_port().await;
+    let url = format!("ftp://127.0.0.1:{port}/");
+    let mut args: Vec<&str> = vec![
+        "-s",
+        "-S",
+        "-o",
+        "/dev/null",
+        "-w",
+        "%{http_code}",
+        "--max-time",
+        "5",
+    ];
+    if ftps_required().await {
+        // The certificate is commonly self-signed and this is a loopback
+        // probe of our own daemon, so trust is not the property being
+        // tested here — reachability and credentials are.
+        args.push("--ssl-reqd");
+        args.push("-k");
+    }
+    args.push("--user");
+    args.push(&user_arg);
+    args.push(&url);
     let out = tokio::process::Command::new("/usr/bin/curl")
-        .args([
-            "-s",
-            "-S",
-            "-o",
-            "/dev/null",
-            "-w",
-            "%{http_code}",
-            "--max-time",
-            "5",
-            "--user",
-            &user_arg,
-            "ftp://127.0.0.1/",
-        ])
+        .args(&args)
         .output()
         .await
         .map_err(|e| AdapterError::Other(format!("spawn curl: {e}")))?;
