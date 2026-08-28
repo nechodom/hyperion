@@ -161,6 +161,16 @@
     </nav>
     <nav class="nav-section" data-hide-roles="customer,viewer">
       <span class="nav-label">Administration</span>
+      {# Users sat behind no navigation at all — the only link to it in the
+         whole panel was a passing mention inside the role editor, which you
+         reach by editing a role you may not have. It belongs next to Roles:
+         the two answer "who can sign in" and "what can they do". Gated on
+         users_manage, matching the handler's own super-admin check. #}
+      <a class="nav-link {% if active == "users" %}active{% endif %}" href="/admin/users"
+         data-require-caps="users_manage">
+        <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
+        Users
+      </a>
       <a class="nav-link {% if active == "roles" %}active{% endif %}" href="/roles"
          data-require-caps="roles_manage">
         <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round"><path d="M9 12l2 2 4-4"/><path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"/><path d="M12 22a10 10 0 0 0 0-20 10 10 0 0 0 0 20z"/></svg>

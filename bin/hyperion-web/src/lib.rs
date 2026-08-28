@@ -674,6 +674,14 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::hostings::post_ftp_ftps),
         )
         .route(
+            "/hostings/:selector/perm-panel",
+            get(handlers::hostings::get_perm_panel),
+        )
+        .route(
+            "/hostings/wp/perm-repair",
+            post(handlers::hostings::post_perm_repair),
+        )
+        .route(
             "/hostings/:selector/traffic-panel",
             get(handlers::hostings::get_traffic_panel),
         )
