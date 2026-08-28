@@ -6248,6 +6248,74 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
 
         if is_wp {
+            // The definitive test, before any mode-based inference: can the
+            // site user ACTUALLY create a directory where WordPress needs
+            // one? "Could not create directory" has several causes that look
+            // identical from outside and only one of them is a permission —
+            // an exhausted disk quota, a filesystem out of inodes, a mount
+            // gone read-only, open_basedir. A mode check calls all of those
+            // healthy and sends the operator hunting for a bug that is not
+            // there.
+            //
+            // Probed inside wp-content, because that is the directory
+            // WordPress creates `upgrade/<plugin>` under during an install.
+            let probe_dir = format!("{root}/wp-content");
+            if tokio::fs::metadata(&probe_dir).await.is_ok() {
+                match hyperion_adapters::fs::write_probe(&user, &probe_dir).await {
+                    Ok(()) => push(
+                        "write_probe",
+                        "WordPress can create directories",
+                        "ok",
+                        format!("{user} created and removed a directory in wp-content"),
+                        "",
+                    ),
+                    Err(e) => {
+                        let (bytes, inodes) =
+                            hyperion_adapters::fs::filesystem_headroom(&probe_dir).await;
+                        // Inodes reported separately on purpose: a filesystem
+                        // with gigabytes free and no inodes left fails every
+                        // mkdir, and looking only at bytes makes that look
+                        // impossible.
+                        let headroom = format!(
+                            "filesystem has {} free and {} free inodes",
+                            bytes
+                                .map(|b| format!("{:.1} GiB", b as f64 / 1024.0 / 1024.0 / 1024.0))
+                                .unwrap_or_else(|| "unknown".into()),
+                            inodes
+                                .map(|i| i.to_string())
+                                .unwrap_or_else(|| "an unknown number of".into()),
+                        );
+                        let quota_hint = if e.contains("Disk quota exceeded") || e.contains("quota")
+                        {
+                            " This is the hosting's DISK QUOTA, not a permission —                              raise it under Settings & limits, or free space in the site."
+                        } else if inodes == Some(0) {
+                            " The filesystem is OUT OF INODES — no file can be created                              anywhere on it, whatever the free space says."
+                        } else if e.contains("Read-only file system") {
+                            " The filesystem is mounted READ-ONLY — see Services →                              Read-only rootfs."
+                        } else {
+                            ""
+                        };
+                        push(
+                            "write_probe",
+                            "WordPress can create directories",
+                            "error",
+                            format!(
+                                "{user} could not create a directory in wp-content: {e}.{quota_hint}                                  ({headroom})"
+                            ),
+                            // Only offer the permission repair when it could
+                            // plausibly be the cause — offering it for a full
+                            // disk would waste the operator's time and teach
+                            // them the button does nothing.
+                            if quota_hint.is_empty() {
+                                "site_repair"
+                            } else {
+                                ""
+                            },
+                        );
+                    }
+                }
+            }
+
             // What WordPress itself must be able to write. 0o300, not
             // 0o200: creating an entry needs write AND search, so a 0600
             // plugins directory passes "owner can write" and still fails
