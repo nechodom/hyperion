@@ -46,6 +46,51 @@ syslog_enable=YES
 seccomp_sandbox=NO
 ";
 
+/// True when `conf` sets `key` on a real, uncommented line.
+///
+/// Line-anchored on purpose. A bare `contains("local_enable=YES")` is also
+/// satisfied by Debian's stock `#local_enable=YES`, so a box whose vsftpd was
+/// installed outside Hyperion looked "already ours", was never repaired, and
+/// refused every login — while the same commented lines suppressed the
+/// user_config_dir and syslog upgrades below.
+fn conf_sets(conf: &str, key: &str) -> bool {
+    conf.lines().any(|l| {
+        let l = l.trim();
+        !l.starts_with('#') && l.starts_with(key) && l[key.len()..].starts_with('=')
+    })
+}
+
+/// The value of an uncommented `key=` line, last one wins (vsftpd's own rule).
+fn conf_value<'a>(conf: &'a str, key: &str) -> Option<&'a str> {
+    let mut found = None;
+    for l in conf.lines() {
+        let l = l.trim();
+        if l.starts_with('#') || !l.starts_with(key) {
+            continue;
+        }
+        if let Some(rest) = l[key.len()..].strip_prefix('=') {
+            found = Some(rest.trim());
+        }
+    }
+    found
+}
+
+/// The control port vsftpd is actually listening on (`listen_port`, default 21).
+///
+/// The installer appends this directive when the operator picks a non-default
+/// port, but nothing read it back — so the login probe dialled 21, the
+/// credentials card told the customer "21", and the firewall preset opened 21,
+/// all regardless of what the box was really running.
+pub async fn read_listen_port() -> u16 {
+    let conf = tokio::fs::read_to_string(VSFTPD_CONF)
+        .await
+        .unwrap_or_default();
+    conf_value(&conf, "listen_port")
+        .and_then(|v| v.parse().ok())
+        .filter(|p| *p > 0)
+        .unwrap_or(21)
+}
+
 /// Set / replace the Linux password for `user` via `chpasswd`. Used
 /// after generating a fresh FTP password so the client can connect.
 pub async fn set_user_password(user: &str, password: &str) -> Result<(), AdapterError> {
@@ -91,6 +136,185 @@ pub async fn set_user_web_root(user: &str, web_root: &str) -> Result<(), Adapter
     Ok(())
 }
 
+/// The `local_root` currently configured for `user`, as vsftpd would read it.
+/// `Ok(None)` means there is no per-user file at all (FTP never enabled, or
+/// the override was removed).
+pub async fn read_user_web_root(user: &str) -> Result<Option<String>, AdapterError> {
+    if user.is_empty() || user.contains(['/', '\n', '\r', '\0', ':', '.']) {
+        return Err(AdapterError::Other(
+            "ftp user has an illegal character for a per-user config".into(),
+        ));
+    }
+    let path = format!("{VSFTPD_USER_CONF_DIR}/{user}");
+    match tokio::fs::read_to_string(&path).await {
+        Ok(body) => Ok(Some(
+            conf_value(&body, "local_root")
+                .unwrap_or_default()
+                .to_string(),
+        )),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(AdapterError::Other(format!("read {path}: {e}"))),
+    }
+}
+
+/// Classify `user`'s shadow password field WITHOUT copying the hash out.
+///
+/// Returns `hash` (a usable password — FTP can log in), `locked` (`!`-prefixed,
+/// which is what suspension does), `star` (`*` — deliberately disabled),
+/// `empty` (the state the old `passwd -d` left behind), or `no_user`.
+/// Never returns the hash itself: the caller renders this into a web page.
+pub async fn password_state(user: &str) -> String {
+    let raw = match tokio::fs::read_to_string("/etc/shadow").await {
+        Ok(r) => r,
+        Err(_) => return "no_user".into(),
+    };
+    for line in raw.lines() {
+        let mut it = line.splitn(3, ':');
+        let (Some(u), Some(hash)) = (it.next(), it.next()) else {
+            continue;
+        };
+        if u != user {
+            continue;
+        }
+        return if hash.is_empty() {
+            "empty"
+        } else if hash.starts_with('!') {
+            "locked"
+        } else if hash.starts_with('*') {
+            "star"
+        } else {
+            "hash"
+        }
+        .into();
+    }
+    "no_user".into()
+}
+
+/// The login shell recorded for `user` in passwd, and whether it appears in
+/// `/etc/shells`. vsftpd's PAM stack refuses a login whose shell is not
+/// listed, with a 530 that says nothing about why.
+pub async fn shell_state(user: &str) -> (String, bool) {
+    let shell = match cmd::run("/usr/bin/getent", &["passwd", user]).await {
+        Ok(out) => out
+            .trim()
+            .rsplit(':')
+            .next()
+            .unwrap_or_default()
+            .to_string(),
+        Err(_) => String::new(),
+    };
+    if shell.is_empty() {
+        return (String::new(), false);
+    }
+    let shells = tokio::fs::read_to_string("/etc/shells")
+        .await
+        .unwrap_or_default();
+    let listed = shells.lines().any(|l| l.trim() == shell);
+    (shell, listed)
+}
+
+/// Whether the node's vsftpd.conf sets the directives local-user FTP needs.
+/// Returns the names of the MISSING ones, so the caller can say which.
+pub async fn missing_conf_directives() -> Vec<&'static str> {
+    let conf = tokio::fs::read_to_string(VSFTPD_CONF)
+        .await
+        .unwrap_or_default();
+    [
+        "local_enable",
+        "pam_service_name",
+        "user_config_dir",
+        "chroot_local_user",
+        "allow_writeable_chroot",
+    ]
+    .into_iter()
+    .filter(|k| !conf_sets(&conf, k))
+    .collect()
+}
+
+/// True when the node's vsftpd.conf enables FTPS. Reported, never auto-set:
+/// flipping it on restarts a daemon every hosting shares and locks out any
+/// client that cannot negotiate TLS.
+pub async fn ftps_enabled() -> bool {
+    let conf = tokio::fs::read_to_string(VSFTPD_CONF)
+        .await
+        .unwrap_or_default();
+    conf_sets(&conf, "ssl_enable") && conf_sets(&conf, "rsa_cert_file")
+}
+
+/// Any `userlist_*` / ftpusers gating that could refuse this user. Hyperion
+/// writes none of it, so whatever is here is foreign and deliberate —
+/// reported, never modified.
+pub async fn userlist_blocks(user: &str) -> Option<String> {
+    let conf = tokio::fs::read_to_string(VSFTPD_CONF)
+        .await
+        .unwrap_or_default();
+    // /etc/ftpusers is consulted by the stock PAM stack regardless of conf.
+    if let Ok(f) = tokio::fs::read_to_string("/etc/ftpusers").await {
+        if f.lines().any(|l| l.trim() == user) {
+            return Some("/etc/ftpusers lists this user (PAM refuses the login)".into());
+        }
+    }
+    if !conf_sets(&conf, "userlist_enable") {
+        return None;
+    }
+    let file = conf_value(&conf, "userlist_file").unwrap_or("/etc/vsftpd.user_list");
+    let listed = tokio::fs::read_to_string(file)
+        .await
+        .map(|f| f.lines().any(|l| l.trim() == user))
+        .unwrap_or(false);
+    // userlist_deny defaults to YES: presence blocks. With deny=NO the file
+    // is an ALLOW list and ABSENCE is what blocks — reporting only the first
+    // sense would tell the operator the opposite of the truth.
+    let deny = conf_value(&conf, "userlist_deny")
+        .unwrap_or("YES")
+        .eq_ignore_ascii_case("YES");
+    match (deny, listed) {
+        (true, true) => Some(format!("{file} denies this user")),
+        (false, false) => Some(format!(
+            "{file} is an allow-list and this user is not on it"
+        )),
+        _ => None,
+    }
+}
+
+/// The first path at or just under `web_root` that `user` does NOT own, or
+/// `None` when everything checks out.
+///
+/// Two levels deep, not just `stat(web_root)`: a wrong-uid SUBDIRECTORY is
+/// what blocks MKD/STOR one level down while the root itself looks fine, and
+/// that is exactly the state a restore from another box leaves behind.
+pub async fn web_root_owner_drift(
+    user: &str,
+    web_root: &str,
+) -> Result<Option<String>, AdapterError> {
+    if web_root.is_empty() || web_root.contains(['\n', '\r', '\0']) {
+        return Err(AdapterError::Other("illegal web root path".into()));
+    }
+    if user.is_empty() || user.contains(['\n', '\r', '\0', ':']) {
+        return Err(AdapterError::Other("illegal user name".into()));
+    }
+    let out = cmd::run(
+        "/usr/bin/find",
+        &[
+            web_root,
+            "-maxdepth",
+            "2",
+            "!",
+            "-user",
+            user,
+            "-print",
+            "-quit",
+        ],
+    )
+    .await?;
+    let first = out.trim();
+    Ok(if first.is_empty() {
+        None
+    } else {
+        Some(first.to_string())
+    })
+}
+
 /// Ensure `user` actually OWNS their web root, so FTP uploads / MKD work.
 ///
 /// A site restored or imported from another box keeps the SOURCE uid on its
@@ -123,10 +347,25 @@ pub async fn clear_user_web_root(user: &str) -> Result<(), AdapterError> {
     Ok(())
 }
 
-/// `passwd -d <user>` removes the password (FTP login impossible).
-/// Idempotent — passwd is fine with already-disabled accounts.
+/// Make `user`'s password unusable so FTP login is impossible. Idempotent.
+///
+/// Sets the shadow field to `*`. Two things this is NOT, both deliberate:
+///
+/// * NOT `passwd -d`, which is what this used to do. That EMPTIES the field,
+///   and an empty field is not "login impossible" — under Debian's stock
+///   `pam_unix … nullok` in common-auth it is a usable credential, for every
+///   PAM consumer on the box (`su`, `login`, console), not just FTP. Hyperion
+///   never writes PAM config, so the distro default decides.
+/// * NOT `usermod -L`, which prefixes the existing hash with `!`. That is the
+///   SAME state suspension uses (`users::lock_login`), so resuming a site
+///   would `usermod -U` it away and silently switch FTP back on for an
+///   operator who had deliberately turned it off.
+///
+/// `*` is the canonical "no password login" marker: it is not a valid crypt
+/// hash, so no PAM stack accepts it; `usermod -U` only strips a leading `!`
+/// and leaves it alone; and `chpasswd` overwrites it when FTP is re-enabled.
 pub async fn clear_user_password(user: &str) -> Result<(), AdapterError> {
-    cmd::run("/usr/bin/passwd", &["-d", user]).await?;
+    cmd::run("/usr/sbin/usermod", &["-p", "*", user]).await?;
     Ok(())
 }
 
@@ -233,18 +472,36 @@ pub async fn ensure_vsftpd_configured() -> Result<(), AdapterError> {
         .await
         .unwrap_or_default();
     let already_ours =
-        current.contains("local_enable=YES") && current.contains("pam_service_name=vsftpd");
+        conf_sets(&current, "local_enable") && conf_sets(&current, "pam_service_name");
     if !already_ours {
-        if !current.is_empty() && tokio::fs::metadata(VSFTPD_CONF_ORIG).await.is_err() {
-            let _ = tokio::fs::copy(VSFTPD_CONF, VSFTPD_CONF_ORIG).await;
+        if !current.is_empty() {
+            // The pristine copy, kept once. Plus a timestamped copy on EVERY
+            // rewrite: an installer-provisioned box already has
+            // `.hyperion-orig`, so without this second copy the operator's
+            // live config is replaced with no recoverable backup of what it
+            // actually said.
+            if tokio::fs::metadata(VSFTPD_CONF_ORIG).await.is_err() {
+                let _ = tokio::fs::copy(VSFTPD_CONF, VSFTPD_CONF_ORIG).await;
+            }
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let _ = tokio::fs::copy(VSFTPD_CONF, format!("{VSFTPD_CONF}.hyperion-{stamp}")).await;
         }
-        atomic_write(
-            Path::new(VSFTPD_CONF),
-            HYPERION_VSFTPD_CONF.as_bytes(),
-            0o644,
-        )
-        .await
-        .map_err(|e| AdapterError::Other(format!("write {VSFTPD_CONF}: {e}")))?;
+        // HYPERION_VSFTPD_CONF carries no `listen_port` — the installer
+        // appends it separately when the operator chooses a non-default port.
+        // Carrying it across the rewrite is what stops this self-heal from
+        // silently moving a custom-port box back to 21 mid-operation.
+        let mut body = HYPERION_VSFTPD_CONF.to_string();
+        if let Some(port) = conf_value(&current, "listen_port") {
+            if port.parse::<u16>().is_ok_and(|p| p > 0 && p != 21) {
+                body.push_str(&format!("listen_port={port}\n"));
+            }
+        }
+        atomic_write(Path::new(VSFTPD_CONF), body.as_bytes(), 0o644)
+            .await
+            .map_err(|e| AdapterError::Other(format!("write {VSFTPD_CONF}: {e}")))?;
         cmd::run("/usr/bin/systemctl", &["restart", "vsftpd"]).await?;
     }
 
@@ -256,7 +513,7 @@ pub async fn ensure_vsftpd_configured() -> Result<(), AdapterError> {
     let cfg = tokio::fs::read_to_string(VSFTPD_CONF)
         .await
         .unwrap_or_default();
-    if !cfg.contains("user_config_dir=") {
+    if !conf_sets(&cfg, "user_config_dir") {
         let mut c = cfg;
         if !c.is_empty() && !c.ends_with('\n') {
             c.push('\n');
@@ -283,7 +540,7 @@ pub async fn ensure_vsftpd_configured() -> Result<(), AdapterError> {
     let mut c = cfg.clone();
     for directive in ["dual_log_enable=YES", "syslog_enable=YES"] {
         let key = directive.split('=').next().unwrap_or(directive);
-        if !c.contains(&format!("{key}=")) {
+        if !conf_sets(&c, key) {
             if !c.is_empty() && !c.ends_with('\n') {
                 c.push('\n');
             }
@@ -331,6 +588,100 @@ pub async fn list_users_with_password() -> Result<Vec<String>, AdapterError> {
         }
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod local_root_tests {
+    use super::*;
+
+    /// The shape of the outage: `root_dir` IS the htdocs, so appending
+    /// "/htdocs" produced `<site>/htdocs/htdocs` and vsftpd answered every
+    /// login with "500 OOPS: cannot change directory".
+    ///
+    /// Asserted on the round-trip rather than on the caller, because the
+    /// value that matters is what ends up in the per-user file.
+    #[tokio::test]
+    async fn the_web_root_round_trips_verbatim() {
+        let d = tempfile::tempdir().expect("tmp");
+        let root = d.path().join("home/u/example.cz/htdocs");
+        std::fs::create_dir_all(&root).expect("mk");
+        let want = root.to_str().expect("utf8");
+        let body = format!("local_root={want}\nwrite_enable=YES\n");
+        assert_eq!(
+            conf_value(&body, "local_root"),
+            Some(want),
+            "the configured local_root must be exactly the hosting's root_dir"
+        );
+        assert!(
+            !want.contains("htdocs/htdocs"),
+            "the fixture itself must not carry the doubled path"
+        );
+    }
+
+    /// A per-user file that predates the fix still says htdocs/htdocs. The
+    /// check has to notice by COMPARING to root_dir — not by string-matching
+    /// "htdocs/htdocs", which misses drift onto a sibling site's real
+    /// directory, and not by testing that the path exists, which is a
+    /// strictly weaker predicate.
+    #[test]
+    fn drift_is_detected_by_comparison_not_by_shape() {
+        let expected = "/home/u/example.cz/htdocs";
+        for stale in [
+            "/home/u/example.cz/htdocs/htdocs", // the old bug
+            "/home/u/other.cz/htdocs",          // a sibling site: exists, still wrong
+            "/home/u",                          // the global fallback
+            "",                                 // empty value
+        ] {
+            assert_ne!(
+                stale, expected,
+                "fixture must differ from the expected root"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod conf_parsing_tests {
+    use super::{conf_sets, conf_value};
+
+    /// The exact shape that defeated the old substring check: Debian ships
+    /// vsftpd.conf with the directives present but COMMENTED OUT.
+    #[test]
+    fn a_commented_directive_is_not_set() {
+        let stock = "# Example config file\n#local_enable=YES\n#write_enable=YES\nlisten=NO\n";
+        assert!(!conf_sets(stock, "local_enable"));
+        assert!(!conf_sets(stock, "write_enable"));
+        assert!(conf_sets(stock, "listen"));
+    }
+
+    /// A prefix must not satisfy a shorter key — `listen_port=2121` is not
+    /// `listen=`, and treating it as one would misread the whole file.
+    #[test]
+    fn a_longer_key_is_not_a_shorter_one() {
+        let c = "listen_port=2121\n";
+        assert!(!conf_sets(c, "listen"));
+        assert!(conf_sets(c, "listen_port"));
+        assert_eq!(conf_value(c, "listen_port"), Some("2121"));
+    }
+
+    #[test]
+    fn indentation_and_trailing_space_are_tolerated() {
+        let c = "  local_enable=YES   \n";
+        assert!(conf_sets(c, "local_enable"));
+    }
+
+    /// vsftpd applies the LAST occurrence, so the parser must agree with it.
+    #[test]
+    fn the_last_uncommented_value_wins() {
+        let c = "listen_port=21\n#listen_port=99\nlisten_port=2121\n";
+        assert_eq!(conf_value(c, "listen_port"), Some("2121"));
+    }
+
+    #[test]
+    fn missing_and_commented_values_are_none() {
+        assert_eq!(conf_value("#listen_port=2121\n", "listen_port"), None);
+        assert_eq!(conf_value("", "listen_port"), None);
+    }
 }
 
 /// Probe vsftpd by attempting an FTP login against localhost with

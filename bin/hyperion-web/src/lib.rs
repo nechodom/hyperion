@@ -658,6 +658,18 @@ pub fn build_router(state: SharedState) -> Router {
             get(handlers::hostings::get_health_panel),
         )
         .route(
+            "/hostings/:selector/ftp-panel",
+            get(handlers::hostings::get_ftp_panel),
+        )
+        .route(
+            "/hostings/ftp/repair",
+            post(handlers::hostings::post_ftp_repair),
+        )
+        .route(
+            "/hostings/ftp/repair-node",
+            post(handlers::hostings::post_ftp_repair_node),
+        )
+        .route(
             "/hostings/:selector/traffic-panel",
             get(handlers::hostings::get_traffic_panel),
         )

@@ -843,6 +843,15 @@ async fn main() -> anyhow::Result<()> {
                 Ok(_) => {}
                 Err(e) => tracing::warn!(error=%e, "startup: quota re-apply failed"),
             }
+            // Repoint any stale vsftpd local_root ONCE at startup, before the
+            // loop. The loop skips its first tick, so without this an FTP
+            // population broken by a bug the deploy just fixed would stay
+            // broken for another five minutes after the upgrade.
+            match tick_svc.ftp_autoheal_tick().await {
+                Ok(n) if n > 0 => tracing::info!(healed = n, "startup: repaired FTP roots"),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error=%e, "startup: FTP autoheal failed"),
+            }
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(5 * 60));
             interval.tick().await; // skip the immediate first tick
             loop {
@@ -880,6 +889,17 @@ async fn main() -> anyhow::Result<()> {
                     }
                     Ok(_) => {}
                     Err(e) => tracing::warn!(error=%e, "permissions autoheal tick failed"),
+                }
+                // Repoint a stale vsftpd local_root, fix web-root ownership
+                // and ancestor traversal. Never touches the daemon, a
+                // node-wide file, or any password state — see the doc comment
+                // on ftp_autoheal_tick for why those are operator decisions.
+                match tick_svc.ftp_autoheal_tick().await {
+                    Ok(n) if n > 0 => {
+                        tracing::warn!(healed = n, "ftp autoheal: repaired FTP roots")
+                    }
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error=%e, "ftp autoheal tick failed"),
                 }
             }
         });

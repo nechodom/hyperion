@@ -1091,6 +1091,21 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.slack_send_test().await
     }
 
+    async fn ftp_self_check(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::FtpCheckReport, RpcError> {
+        self.svc.ftp_self_check(sel).await
+    }
+
+    async fn ftp_repair_site(&self, sel: HostingSelector) -> Result<String, RpcError> {
+        self.svc.ftp_repair_site(sel).await
+    }
+
+    async fn ftp_repair_node_config(&self) -> Result<String, RpcError> {
+        self.svc.ftp_repair_node_config().await
+    }
+
     // --- web users ---
     async fn web_login(
         &self,

@@ -1361,6 +1361,18 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(_) => Response::FtpDisable,
             Err(e) => Response::Error(e),
         },
+        Request::FtpSelfCheck { sel } => match api.ftp_self_check(sel).await {
+            Ok(r) => Response::FtpSelfCheck(r),
+            Err(e) => Response::Error(e),
+        },
+        Request::FtpRepairSite { sel } => match api.ftp_repair_site(sel).await {
+            Ok(m) => Response::FtpRepairSite(m),
+            Err(e) => Response::Error(e),
+        },
+        Request::FtpRepairNodeConfig => match api.ftp_repair_node_config().await {
+            Ok(m) => Response::FtpRepairNodeConfig(m),
+            Err(e) => Response::Error(e),
+        },
         Request::DkimStatus { sel } => match api.dkim_status(sel).await {
             Ok(s) => Response::DkimStatus(s),
             Err(e) => Response::Error(e),
@@ -2708,6 +2720,18 @@ mod tests {
         }
         async fn ftp_disable(&self, _: HostingSelector) -> Result<(), RpcError> {
             Ok(())
+        }
+        async fn ftp_self_check(
+            &self,
+            _: HostingSelector,
+        ) -> Result<hyperion_types::FtpCheckReport, RpcError> {
+            Ok(Default::default())
+        }
+        async fn ftp_repair_site(&self, _: HostingSelector) -> Result<String, RpcError> {
+            Ok(String::new())
+        }
+        async fn ftp_repair_node_config(&self) -> Result<String, RpcError> {
+            Ok(String::new())
         }
         async fn dkim_status(
             &self,

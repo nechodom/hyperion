@@ -2098,3 +2098,53 @@ mod tests {
         assert_eq!(c, back);
     }
 }
+
+/// One line of the FTP self-check.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+pub struct FtpCheckItem {
+    /// Stable machine id (`local_root`, `shadow`, `vsftpd_unit`, …).
+    pub id: String,
+    /// One-line operator-facing statement of what was checked.
+    pub label: String,
+    /// `ok` | `warn` | `error` | `info`.
+    pub severity: String,
+    /// What was actually measured, verbatim — the operator quotes this.
+    pub detail: String,
+    /// Empty, or the repair that fixes it: `site_repair` | `node_config`.
+    pub fix: String,
+}
+
+/// Result of probing one hosting's FTP setup on its owning node.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+pub struct FtpCheckReport {
+    pub items: Vec<FtpCheckItem>,
+    /// `local_root` as read from the per-user vsftpd config; "" = no file.
+    pub local_root: String,
+    /// What it should be — the hosting's `root_dir`.
+    pub expected_root: String,
+    pub listen_port: u16,
+    /// `hash` | `locked` | `star` | `empty` | `no_user`.
+    pub shadow_state: String,
+    /// Which node answered, for the multi-node case.
+    pub node_id: String,
+}
+
+impl FtpCheckReport {
+    /// Worst severity present, for the card's header pill.
+    pub fn worst(&self) -> &'static str {
+        if self.items.iter().any(|i| i.severity == "error") {
+            "error"
+        } else if self.items.iter().any(|i| i.severity == "warn") {
+            "warn"
+        } else {
+            "ok"
+        }
+    }
+    /// True when at least one finding has a one-click repair.
+    pub fn has_site_repair(&self) -> bool {
+        self.items.iter().any(|i| i.fix == "site_repair")
+    }
+    pub fn has_node_repair(&self) -> bool {
+        self.items.iter().any(|i| i.fix == "node_config")
+    }
+}

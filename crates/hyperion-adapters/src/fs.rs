@@ -64,6 +64,35 @@ pub async fn remove_dir_all(path: &Path) -> Result<(), AdapterError> {
 /// mode, not the link itself).
 ///
 /// Stops at filesystem root.
+/// Read-only counterpart to [`ensure_ancestors_traversable`]: is every
+/// directory from `leaf` up to `/` world-traversable?
+///
+/// Same 0o001 predicate the rest of the codebase uses. Kept next to the
+/// mutator so the two cannot drift apart — a check that disagreed with its
+/// own repair would either flag forever or never flag at all.
+pub async fn ancestors_traversable(leaf: &Path) -> bool {
+    let mut current: Option<&Path> = Some(leaf);
+    while let Some(p) = current {
+        match fs::metadata(p).await {
+            Ok(md) if md.is_dir() => {
+                if md.permissions().mode() & 0o001 == 0 {
+                    return false;
+                }
+            }
+            // Unreadable or not a directory: not something this predicate can
+            // judge, and not something the repair would change either.
+            _ => break,
+        }
+        current = p.parent();
+        if matches!(current.map(|c| c.as_os_str().is_empty()), Some(true))
+            || current == Some(Path::new("/"))
+        {
+            break;
+        }
+    }
+    true
+}
+
 pub async fn ensure_ancestors_traversable(leaf: &Path) {
     let mut current: Option<&Path> = Some(leaf);
     while let Some(p) = current {
