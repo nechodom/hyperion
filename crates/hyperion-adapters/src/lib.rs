@@ -309,7 +309,11 @@ fn strip_ansi(s: &str) -> String {
 pub enum AdapterError {
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
-    #[error("command {cmd} failed with exit {code}: {stderr_tail}")]
+    // Reason FIRST, command last. Every consumer of this string truncates
+    // somewhere — a flash, a URL, a log line — and with the command in front
+    // it is always the REASON that gets cut. An operator saw exactly that:
+    // a message that ended mid-`plugin ins` and told them nothing.
+    #[error("{stderr_tail} (exit {code} from: {cmd})")]
     Command {
         cmd: String,
         code: i32,

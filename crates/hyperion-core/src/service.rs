@@ -5981,6 +5981,481 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok("vsftpd configuration checked and repaired".into())
     }
 
+    // ── WordPress permissions self-check ──────────────────────────────────
+    //
+    // Runs on the OWNING node: modes, uids and the nginx user are all
+    // node-local facts.
+    //
+    // What "correct" means here is decided by this architecture, not by
+    // internet advice. PHP-FPM runs AS the site user, so the site user must
+    // own and be able to write what WordPress writes. nginx runs as a
+    // DIFFERENT user and only reads, so static files need world-read and
+    // every directory needs world-traverse. That last part is why the
+    // popular "chmod 750 everything" hardening advice produces a site that
+    // 404s here, and why an imported CloudPanel tree (nginx inside the
+    // site's group there) breaks on arrival.
+
+    /// Diagnose one hosting's file permissions. Read-only.
+    pub async fn wp_perm_check(&self, sel: HostingSelector) -> Result<FtpCheckReport, RpcError> {
+        let detail = self.get(sel).await?;
+        let user = detail.system_user.trim().to_string();
+        let root = detail.root_dir.trim().to_string();
+        let mut items: Vec<FtpCheckItem> = Vec::new();
+        let mut push = |id: &str, label: &str, severity: &str, detail: String, fix: &str| {
+            items.push(FtpCheckItem {
+                id: id.into(),
+                label: label.into(),
+                severity: severity.into(),
+                detail,
+                fix: fix.into(),
+            });
+        };
+        let done = |items: Vec<FtpCheckItem>| FtpCheckReport {
+            items,
+            local_root: root.clone(),
+            expected_root: root.clone(),
+            listen_port: 0,
+            shadow_state: String::new(),
+            node_id: String::new(),
+        };
+
+        // Same skip set as permissions_autoheal_tick: these have no document
+        // tree of their own to judge.
+        if user.is_empty()
+            || root.is_empty()
+            || matches!(detail.kind.as_str(), "reverse_proxy" | "redirect")
+        {
+            push(
+                "not_applicable",
+                "File permissions",
+                "info",
+                "this hosting serves no document tree of its own".into(),
+                "",
+            );
+            return Ok(done(items));
+        }
+        match tokio::fs::symlink_metadata(&root).await {
+            Ok(md) if md.is_dir() => {}
+            _ => {
+                push(
+                    "docroot",
+                    "Document root",
+                    "error",
+                    format!("{root} is missing or is not a directory"),
+                    "",
+                );
+                return Ok(done(items));
+            }
+        }
+
+        let site_uid = uid_of_user(&user).await;
+        let Some(site_uid) = site_uid else {
+            push(
+                "system_user",
+                "System user",
+                "error",
+                format!("no system user named {user} on this node"),
+                "",
+            );
+            return Ok(done(items));
+        };
+
+        // nginx must be able to path-resolve into the docroot. Probed as the
+        // real nginx user rather than inferred from modes, because that is
+        // the question the operator actually has ("does the site 404?").
+        let nginx_user = self.adapters.nginx_user();
+        let traverse_ok = hyperion_adapters::cmd::run(
+            "/usr/bin/sudo",
+            &["-u", &nginx_user, "/usr/bin/find", &root, "-maxdepth", "0"],
+        )
+        .await
+        .is_ok();
+        push(
+            "nginx_traverse",
+            "nginx can reach the document root",
+            if traverse_ok { "ok" } else { "error" },
+            if traverse_ok {
+                format!("{nginx_user} can path-resolve into {root}")
+            } else {
+                format!(
+                    "{nginx_user} cannot path-resolve into {root} — every request 404s \
+                     regardless of what the files themselves say"
+                )
+            },
+            if traverse_ok { "" } else { "site_repair" },
+        );
+
+        let is_wp = detect_wp_install_on_disk(&root).await.is_some();
+        let entries = hyperion_adapters::fs::scan_tree(&root)
+            .await
+            .unwrap_or_default();
+        if entries.is_empty() {
+            push(
+                "scan",
+                "Tree scan",
+                "warn",
+                "could not read the document tree — the checks below are incomplete".into(),
+                "",
+            );
+        }
+
+        // Ownership. PHP runs as this user; anything it does not own, it
+        // cannot write — the state a restore or an import from another box
+        // leaves behind.
+        let foreign: Vec<&hyperion_adapters::fs::TreeEntry> =
+            entries.iter().filter(|e| e.uid != site_uid).collect();
+        push(
+            "owner",
+            "Owned by the site user",
+            if foreign.is_empty() { "ok" } else { "error" },
+            match foreign.first() {
+                None => format!("everything is owned by {user}"),
+                Some(e) => format!(
+                    "{} is owned by uid {}, not {user}{}",
+                    e.path,
+                    e.uid,
+                    if foreign.len() > 1 {
+                        format!(" (and {} more)", foreign.len() - 1)
+                    } else {
+                        String::new()
+                    }
+                ),
+            },
+            if foreign.is_empty() {
+                ""
+            } else {
+                "site_repair"
+            },
+        );
+
+        // Directories need world-traverse and static files world-read,
+        // because nginx opens them itself as a different user.
+        let unreadable_dirs: Vec<&str> = entries
+            .iter()
+            .filter(|e| e.kind == 'd' && e.mode & 0o001 == 0)
+            .map(|e| e.path.as_str())
+            .collect();
+        push(
+            "dir_traverse",
+            "Directories traversable by nginx",
+            if unreadable_dirs.is_empty() {
+                "ok"
+            } else {
+                "error"
+            },
+            match unreadable_dirs.first() {
+                None => "every directory has o+x".into(),
+                Some(p) => format!(
+                    "{p} has no o+x, so nginx cannot enter it ({} affected)",
+                    unreadable_dirs.len()
+                ),
+            },
+            if unreadable_dirs.is_empty() {
+                ""
+            } else {
+                "site_repair"
+            },
+        );
+
+        // .php is served through PHP-FPM (which reads as the site user), and
+        // the vhost already denies dotfiles and a list of archive/backup
+        // extensions — flagging those would be noise about files nginx will
+        // never serve anyway.
+        let denied_ext = [
+            "sql", "bak", "old", "orig", "save", "swp", "tar", "gz", "tgz", "zip", "log", "ini",
+            "sh", "php",
+        ];
+        let unreadable_files: Vec<&str> = entries
+            .iter()
+            .filter(|e| e.kind == 'f' && e.mode & 0o004 == 0)
+            .filter(|e| {
+                let name = e.path.rsplit('/').next().unwrap_or("");
+                if name.starts_with('.') {
+                    return false;
+                }
+                !denied_ext
+                    .iter()
+                    .any(|x| name.to_ascii_lowercase().ends_with(&format!(".{x}")))
+            })
+            .map(|e| e.path.as_str())
+            .collect();
+        push(
+            "static_readable",
+            "Static files readable by nginx",
+            if unreadable_files.is_empty() {
+                "ok"
+            } else {
+                "error"
+            },
+            match unreadable_files.first() {
+                None => "every servable file has o+r".into(),
+                Some(p) => format!(
+                    "{p} has no o+r, so it 403s ({} affected)",
+                    unreadable_files.len()
+                ),
+            },
+            if unreadable_files.is_empty() {
+                ""
+            } else {
+                "site_repair"
+            },
+        );
+
+        // World-writable is a real finding on a shared box — every other
+        // hosting has a local user. Symlinks are excluded: their mode is
+        // unconditionally 0777 on Linux and chmod cannot change it, so
+        // flagging them would be a finding no repair can ever clear.
+        let ww: Vec<&str> = entries
+            .iter()
+            .filter(|e| e.kind != 'l' && e.mode & 0o002 != 0)
+            .map(|e| e.path.as_str())
+            .collect();
+        push(
+            "world_writable",
+            "Nothing world-writable",
+            if ww.is_empty() { "ok" } else { "error" },
+            match ww.first() {
+                None => "no world-writable files or directories".into(),
+                Some(p) => format!(
+                    "{p} is writable by every local user on this node ({} affected) — \
+                     usually the result of a chmod 777 'fix'",
+                    ww.len()
+                ),
+            },
+            if ww.is_empty() { "" } else { "site_repair" },
+        );
+
+        let suid: Vec<&str> = entries
+            .iter()
+            .filter(|e| e.kind == 'f' && e.mode & 0o6000 != 0)
+            .map(|e| e.path.as_str())
+            .collect();
+        if !suid.is_empty() {
+            // Reported, never auto-cleared: a setuid binary in a web root is
+            // either a compromise or something deliberate, and both deserve a
+            // human rather than a silent chmod.
+            push(
+                "setuid",
+                "No setuid/setgid files",
+                "warn",
+                format!(
+                    "{} carries setuid/setgid ({} total) — investigate before removing it",
+                    suid[0],
+                    suid.len()
+                ),
+                "",
+            );
+        }
+
+        if is_wp {
+            // What WordPress itself must be able to write. 0o300, not
+            // 0o200: creating an entry needs write AND search, so a 0600
+            // plugins directory passes "owner can write" and still fails
+            // every install.
+            for (rel, label) in [
+                ("wp-content", "wp-content"),
+                ("wp-content/plugins", "Plugins directory"),
+                ("wp-content/themes", "Themes directory"),
+                ("wp-content/uploads", "Uploads directory"),
+                ("wp-content/upgrade", "Upgrade directory"),
+            ] {
+                let path = format!("{root}/{rel}");
+                let md = tokio::fs::metadata(&path).await;
+                let Ok(md) = md else {
+                    // upgrade/ and uploads/ are created on demand; absent is
+                    // not a fault.
+                    continue;
+                };
+                use std::os::unix::fs::MetadataExt;
+                use std::os::unix::fs::PermissionsExt;
+                let mode = md.permissions().mode() & 0o7777;
+                let ok = md.uid() == site_uid && mode & 0o300 == 0o300;
+                push(
+                    "wp_writable",
+                    label,
+                    if ok { "ok" } else { "error" },
+                    if ok {
+                        format!("{rel} is writable by {user}")
+                    } else {
+                        format!(
+                            "{rel} is uid {} mode {:o} — WordPress cannot write here, so \
+                             plugin/theme installs and updates fail",
+                            md.uid(),
+                            mode
+                        )
+                    },
+                    if ok { "" } else { "site_repair" },
+                );
+            }
+
+            // wp-config.php holds the database credentials and is read by PHP
+            // running as the site user — nginx never serves it (the vhost
+            // sends .php to FPM). Every OTHER hosting on this node has a
+            // local user who can read a world-readable file.
+            let cfg = format!("{root}/wp-config.php");
+            if let Ok(md) = tokio::fs::metadata(&cfg).await {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = md.permissions().mode() & 0o7777;
+                let exposed = mode & 0o004 != 0;
+                push(
+                    "wp_config",
+                    "wp-config.php not readable by other users",
+                    if exposed { "warn" } else { "ok" },
+                    if exposed {
+                        format!(
+                            "mode {mode:o} — every other site's system user on this node can \
+                             read the database password. 0640 is enough for PHP, which runs \
+                             as {user}."
+                        )
+                    } else {
+                        format!("mode {mode:o}")
+                    },
+                    if exposed { "wp_config_tighten" } else { "" },
+                );
+            }
+        }
+
+        // The PHP session directory. World-readable sessions on a shared box
+        // means another tenant can read (and forge) logged-in sessions.
+        let site_dir = std::path::Path::new(&root)
+            .parent()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        if !site_dir.is_empty() {
+            let tmp = format!("{site_dir}/tmp");
+            if let Ok(md) = tokio::fs::symlink_metadata(&tmp).await {
+                use std::os::unix::fs::MetadataExt;
+                use std::os::unix::fs::PermissionsExt;
+                let mode = md.permissions().mode() & 0o7777;
+                let bad = !md.is_dir()
+                    || md.uid() != site_uid
+                    || mode & 0o300 != 0o300
+                    || mode & 0o007 != 0;
+                push(
+                    "session_dir",
+                    "PHP session directory private",
+                    if bad { "error" } else { "ok" },
+                    if bad {
+                        format!(
+                            "{tmp} is uid {} mode {:o} — sessions live here \
+                             (session.save_path), so any other local user who can read it \
+                             can hijack a logged-in session",
+                            md.uid(),
+                            mode
+                        )
+                    } else {
+                        format!("{tmp} is {mode:o}, owned by {user}")
+                    },
+                    if bad { "site_dirs_tighten" } else { "" },
+                );
+            }
+            let logs = format!("{site_dir}/logs");
+            if let Ok(md) = tokio::fs::symlink_metadata(&logs).await {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = md.permissions().mode() & 0o7777;
+                // 0750 by design — a check must not demand 0755 here.
+                if mode & 0o007 != 0 {
+                    push(
+                        "logs_dir",
+                        "Log directory private",
+                        "warn",
+                        format!("{logs} is {mode:o}; access logs record visitor IPs"),
+                        "site_dirs_tighten",
+                    );
+                }
+            }
+        }
+
+        Ok(done(items))
+    }
+
+    /// Repair what the permissions check found, at the level the operator
+    /// asked for.
+    ///
+    /// `scope`:
+    ///   * `tree` — ownership + 0755/0644 across the document tree. This is
+    ///     the existing repair the panel button and the import pipeline
+    ///     already use; one behaviour, not a fourth implementation.
+    ///   * `wp_config` — tighten wp-config.php to 0640. Separate because it
+    ///     is the only fix that makes something MORE restrictive than the
+    ///     tree repair would leave it, and the tree repair would undo it.
+    ///   * `site_dirs` — put logs/ and tmp/ back to 0750. Deliberately not
+    ///     part of the tree repair, which chmods directories to 0755 and
+    ///     would widen exactly these two.
+    pub async fn wp_perm_repair(
+        &self,
+        sel: HostingSelector,
+        scope: String,
+    ) -> Result<String, RpcError> {
+        let detail = self.get(sel).await?;
+        let user = detail.system_user.trim().to_string();
+        let root = detail.root_dir.trim().to_string();
+        if user.is_empty() || root.is_empty() {
+            return Err(RpcError::Validation {
+                message: "this hosting has no system user or document root".into(),
+            });
+        }
+        let site_dir = std::path::Path::new(&root)
+            .parent()
+            .map(|p| p.to_path_buf())
+            .ok_or_else(|| RpcError::Validation {
+                message: format!("{root} has no parent directory"),
+            })?;
+        let msg = match scope.as_str() {
+            "tree" => {
+                repair_tree_permissions(&user, std::path::Path::new(&root))
+                    .await
+                    .map_err(|e| RpcError::Validation { message: e })?;
+                // The tree repair sets directories to 0755, which would widen
+                // logs/ and tmp/ if they were inside it. They are siblings,
+                // so they are untouched — but wp-config.php IS inside, and
+                // 0644 is the mode we just applied to it. Re-tighten in the
+                // same action rather than leaving the operator to notice.
+                let _ = chmod_path(&format!("{root}/wp-config.php"), 0o640).await;
+                format!("ownership and modes repaired under {root}")
+            }
+            "wp_config" => {
+                chmod_path(&format!("{root}/wp-config.php"), 0o640)
+                    .await
+                    .map_err(|e| RpcError::Validation { message: e })?;
+                "wp-config.php is now 0640 — readable by the site user only".to_string()
+            }
+            "site_dirs" => {
+                let mut done = Vec::new();
+                for name in ["logs", "tmp"] {
+                    let p = site_dir.join(name);
+                    if tokio::fs::metadata(&p).await.is_ok() {
+                        chmod_path(&p.display().to_string(), 0o750)
+                            .await
+                            .map_err(|e| RpcError::Validation { message: e })?;
+                        // tmp holds PHP sessions; it must be owned by the
+                        // site user or PHP cannot write there at all.
+                        let _ = hyperion_adapters::ftp::ensure_web_root_owned(
+                            &user,
+                            &p.display().to_string(),
+                        )
+                        .await;
+                        done.push(name);
+                    }
+                }
+                format!("{} set to 0750", done.join(" and "))
+            }
+            other => {
+                return Err(RpcError::Validation {
+                    message: format!("unknown repair scope {other:?}"),
+                })
+            }
+        };
+        self.append_audit(
+            "hosting.permissions.repair",
+            Some(detail.id.as_str()),
+            &serde_json::json!({"scope": scope, "user": user}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(msg)
+    }
+
     /// Turn FTPS on or off for this node.
     ///
     /// Never called from a tick and never implied by another action: it
@@ -20390,6 +20865,19 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     reason: e.to_string(),
                 });
             }
+            // `tar -xzf` as root PRESERVES the archive's ownership, so a
+            // restore from another box — or from a backup taken when the uid
+            // differed — leaves the tree owned by someone the site user is
+            // not. PHP then cannot write, wp-cli fails, and the site 403s or
+            // 404s depending on the modes that came with it. Reuse the same
+            // repair the panel button and the import pipeline run, so all
+            // three doors leave the tree in one state.
+            if let Err(e) = repair_tree_permissions(&detail.system_user, &host_root).await {
+                tracing::warn!(
+                    error = %e, domain = %detail.domain,
+                    "restore: permission repair failed — the site may be unwritable"
+                );
+            }
         }
 
         // 2. Look for sibling .sql dump and restore it if hosting has a DB
@@ -24922,6 +25410,35 @@ async fn single_smtp_probe(port: u16, host: &str, purpose: &str) -> hyperion_typ
 /// strict "no WP here" answer. Never panics. Never errors out
 /// (the caller treats `None` as "no install" the same way it
 /// treats an empty DB row).
+/// chmod a single path, reporting failure rather than swallowing it.
+async fn chmod_path(path: &str, mode: u32) -> Result<(), String> {
+    if path.is_empty() || path.contains(['\n', '\r', '\0']) {
+        return Err("illegal path".into());
+    }
+    if tokio::fs::metadata(path).await.is_err() {
+        return Err(format!("{path} does not exist"));
+    }
+    use std::os::unix::fs::PermissionsExt;
+    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+        .await
+        .map_err(|e| format!("chmod {mode:o} {path}: {e}"))
+}
+
+/// The numeric uid of `user`, or `None` when there is no such account.
+///
+/// Compared numerically rather than by name: `find -printf %U` reports uids,
+/// and resolving those back to names for every entry would be a lookup per
+/// file on a tree with thousands of them.
+async fn uid_of_user(user: &str) -> Option<u32> {
+    if user.is_empty() || user.contains([':', '\n', '\r', '\0']) {
+        return None;
+    }
+    let out = hyperion_adapters::cmd::run("/usr/bin/getent", &["passwd", user])
+        .await
+        .ok()?;
+    out.split(':').nth(2)?.trim().parse().ok()
+}
+
 pub(crate) async fn detect_wp_install_on_disk(root_dir: &str) -> Option<String> {
     use std::path::Path;
     let root = Path::new(root_dir);

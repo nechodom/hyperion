@@ -823,14 +823,14 @@
           Send test message
         </button>
       </form>
-      <form method="post" action="/settings/config" style="margin:0" autocomplete="off">
+      <form method="post" action="/settings/config" style="margin:0" autocomplete="off"
+            data-confirm-title="Disconnect Slack"
+            data-confirm-body="Alerts stop posting to Slack immediately. The webhook URL is not recoverable from Hyperion — reconnecting means pasting a URL from Slack again."
+            data-confirm-confirm-label="Disconnect">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
         <input type="hidden" name="section" value="slack">
         <input type="hidden" name="default_webhook" value="">
-        <button type="submit" class="btn"
-                data-confirm-title="Disconnect Slack"
-                data-confirm-body="Alerts stop posting to Slack immediately. The webhook URL is not recoverable from Hyperion — reconnecting means pasting a URL from Slack again."
-                data-confirm-confirm-label="Disconnect">Disconnect</button>
+        <button type="submit" class="btn">Disconnect</button>
       </form>
     </div>
     {% else %}
@@ -876,17 +876,25 @@
         <input id="email_logo" name="logo" type="file" accept="image/png,image/jpeg,image/gif">
       </div>
       <button class="btn primary" type="submit">Upload logo</button>
-      {% if email_logo_set %}
-      <button class="btn" type="submit" name="clear" value="1"
-              data-confirm-title="Remove the logo"
-              data-confirm-body="Notification e-mails fall back to the panel hostname as their heading."
-              data-confirm-confirm-label="Remove">Remove</button>
-      {% endif %}
       <span class="grow"></span>
       <a class="btn ghost" href="/settings/email-preview" target="_blank" rel="noopener">
         Preview a message ↗
       </a>
     </form>
+    {% if email_logo_set %}
+    {# Its own form on purpose. The confirm driver reads data-confirm-* off
+       the FORM (the submit event's target), so these attributes were dead on
+       the button — and moving them onto the upload form would have made
+       uploading a logo prompt "Remove the logo?" too. #}
+    <form method="post" action="/settings/email-logo?_csrf={{ csrf_token }}"
+          enctype="multipart/form-data" style="margin:0.5rem 0 0"
+          data-confirm-title="Remove the logo"
+          data-confirm-body="Notification e-mails fall back to the panel hostname as their heading."
+          data-confirm-confirm-label="Remove">
+      <input type="hidden" name="clear" value="1">
+      <button class="btn" type="submit">Remove</button>
+    </form>
+    {% endif %}
     {% if email_logo_set %}
     <div style="margin-top:0.8rem;padding:0.8rem;background:#fff;border:1px solid var(--border);border-radius:var(--radius-xs);display:inline-block">
       <img src="/settings/email-logo.img" alt="Current e-mail logo" style="max-height:44px;max-width:220px;display:block">

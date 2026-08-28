@@ -227,6 +227,8 @@ enum FtpCmd {
     Check { selector: String },
     /// Repair one hosting's FTP (landing directory, ownership, traversal).
     Repair { selector: String },
+    /// Diagnose a hosting's file permissions.
+    Perms { selector: String },
     /// Turn node-wide FTPS on (required) or off.
     ///
     /// The OFF direction is the reason this exists: enabling FTPS can lock
@@ -466,6 +468,9 @@ async fn call(cli: &Cli) -> anyhow::Result<Response> {
             sel: parse_selector(selector)?,
         },
         Cmd::Ftp(FtpCmd::Repair { selector }) => Request::FtpRepairSite {
+            sel: parse_selector(selector)?,
+        },
+        Cmd::Ftp(FtpCmd::Perms { selector }) => Request::WpPermCheck {
             sel: parse_selector(selector)?,
         },
         Cmd::Ftp(FtpCmd::Ftps { off }) => Request::FtpSetFtps {
@@ -1513,8 +1518,23 @@ fn print_pretty(resp: &Response) {
                 println!("  [{mark}] {}: {}", it.label, it.detail);
             }
         }
-        Response::FtpRepairSite(m) | Response::FtpRepairNodeConfig(m) | Response::FtpSetFtps(m) => {
+        Response::FtpRepairSite(m)
+        | Response::FtpRepairNodeConfig(m)
+        | Response::FtpSetFtps(m)
+        | Response::WpPermRepair(m) => {
             println!("{m}");
+        }
+        Response::WpPermCheck(r) => {
+            println!("permissions check for {}", r.expected_root);
+            for it in &r.items {
+                let mark = match it.severity.as_str() {
+                    "ok" => "ok  ",
+                    "warn" => "WARN",
+                    "error" => "FAIL",
+                    _ => "    ",
+                };
+                println!("  [{mark}] {}: {}", it.label, it.detail);
+            }
         }
         Response::WebLogin(r) => match r {
             hyperion_types::WebLoginResult::Ok {

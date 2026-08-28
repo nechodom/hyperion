@@ -2136,7 +2136,21 @@ pub async fn get_detail(
         ftp_new_password: ftp_new_password,
         ftp_host,
         error: None,
-        wp_error: q.wp_error,
+        // Cloned, not removed. A credential hand-off is single-use for a
+        // reason; a diagnostic is not — taking it would mean a page reload
+        // (or the back button) silently loses the only copy of the error the
+        // operator is still reading. The 300 s TTL in `stash_error` reclaims
+        // it instead.
+        wp_error: match q.wp_error_ref.as_deref() {
+            Some(t) if !t.is_empty() => state
+                .error_handoff
+                .lock()
+                .await
+                .get(t)
+                .map(|(m, _)| m.clone())
+                .or(q.wp_error),
+            _ => q.wp_error,
+        },
         wp_flash: q.wp.map(|s| {
             if s == "reset" {
                 "WordPress admin password reset.".to_string()
@@ -2295,6 +2309,10 @@ pub struct DetailQuery {
     /// Surface WP install failures back into the detail page.
     #[serde(default)]
     pub wp_error: Option<String>,
+    /// Single-use token for a failure message held server-side. The old
+    /// `wp_error` query param stays readable so a link already in a
+    /// browser's history still renders something.
+    pub wp_error_ref: Option<String>,
     #[serde(default)]
     pub backup: Option<String>,
     #[serde(default)]
@@ -5736,14 +5754,34 @@ async fn emergency_plugin_action(
             Ok(Redirect::to(&format!("/hostings/{sel_url}#wordpress")).into_response())
         }
         RpcResponse::Error(e) => {
-            let msg = urlencoding(&e.to_string());
-            Ok(
-                Redirect::to(&format!("/hostings/{sel_url}?wp_error={msg}#wordpress"))
-                    .into_response(),
-            )
+            let token = stash_error(&state, &e.to_string()).await;
+            Ok(Redirect::to(&format!(
+                "/hostings/{sel_url}?wp_error_ref={token}#wordpress"
+            ))
+            .into_response())
         }
         _ => Err(AppError::Internal("unexpected response".into())),
     }
+}
+
+/// Stash a failure message server-side and return a single-use token for
+/// the redirect.
+///
+/// A wp-cli failure is routinely longer than a URL can carry, and the
+/// message puts the REASON at the end — so routing it through the query
+/// string truncated away exactly the part the operator needed, leaving them
+/// with a command line and no explanation. Query strings are also written
+/// verbatim to nginx's access log, and a failure can quote a path or a
+/// database error.
+pub(crate) async fn stash_error(state: &SharedState, msg: &str) -> String {
+    let token = one_shot_token();
+    let now = now_secs_web();
+    let mut g = state.error_handoff.lock().await;
+    // Drop stale entries before inserting, so an abandoned hand-off cannot
+    // sit in memory indefinitely.
+    g.retain(|_, (_, at)| now - *at < 300);
+    g.insert(token.clone(), (msg.to_string(), now));
+    token
 }
 
 /// POST /hostings/wp/emergency-disable — park the plugin folder.
@@ -5770,6 +5808,141 @@ pub async fn post_wp_emergency_restore(
         slug,
     })
     .await
+}
+
+#[derive(Template)]
+#[template(path = "_hosting_perm_card.html")]
+struct PermCardTpl {
+    report: hyperion_types::FtpCheckReport,
+    selector: String,
+    system_user: String,
+    csrf_repair: String,
+    error: Option<String>,
+}
+
+/// GET /hostings/:selector/perm-panel — diagnose this site's file permissions.
+pub async fn get_perm_panel(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Path(selector): Path<String>,
+) -> Result<Response, AppError> {
+    let card = |report, system_user: String, error: Option<String>| {
+        Html(
+            PermCardTpl {
+                report,
+                selector: selector.clone(),
+                system_user,
+                csrf_repair: csrf_token_for(&state, &ctx, "/hostings/wp/perm-repair"),
+                error,
+            }
+            .render()
+            .unwrap_or_default(),
+        )
+        .into_response()
+    };
+    let sel = match parse_selector(&selector) {
+        Ok(s) => s,
+        Err(e) => {
+            return Ok(card(
+                Default::default(),
+                String::new(),
+                Some(format!("could not read the selector: {e}")),
+            ))
+        }
+    };
+    let (detail, owner) = match find_hosting_anywhere(&state, sel.clone()).await {
+        Ok(v) => v,
+        Err(e) => return Ok(card(Default::default(), String::new(), Some(e.to_string()))),
+    };
+    // A read probe, so HostingView is the right gate — the repair below is
+    // what needs manage rights.
+    if require_hosting_access(
+        &state,
+        &ctx,
+        detail.id.as_str(),
+        false,
+        Capability::HostingView,
+    )
+    .await
+    .is_err()
+    {
+        return Ok(card(
+            Default::default(),
+            String::new(),
+            Some("You do not have access to this hosting.".into()),
+        ));
+    }
+    let user = detail.system_user.clone();
+    match crate::dispatcher::dispatch_to_node(
+        &state,
+        owner.as_deref(),
+        Request::WpPermCheck { sel },
+    )
+    .await
+    {
+        Ok(RpcResponse::WpPermCheck(r)) => Ok(card(r, user, None)),
+        Ok(RpcResponse::Error(e)) => Ok(card(Default::default(), user, Some(e.to_string()))),
+        Ok(_) => Ok(card(
+            Default::default(),
+            user,
+            Some("unexpected response from the node".into()),
+        )),
+        Err(e) => Ok(card(Default::default(), user, Some(e.to_string()))),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct PermRepairForm {
+    pub selector: String,
+    pub scope: String,
+}
+
+/// POST /hostings/wp/perm-repair — apply one of the permission repairs.
+pub async fn post_perm_repair(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<PermRepairForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::HostingEditConfig,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let sel_url = urlencoding(&form.selector);
+    let node: Option<String> = find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        node.as_deref(),
+        Request::WpPermRepair {
+            sel,
+            scope: form.scope.clone(),
+        },
+    )
+    .await?;
+    Ok(match resp {
+        RpcResponse::WpPermRepair(m) => Redirect::to(&format!(
+            "/hostings/{sel_url}?flash={}#wordpress",
+            urlencoding(&m)
+        ))
+        .into_response(),
+        RpcResponse::Error(e) => {
+            let token = stash_error(&state, &e.to_string()).await;
+            Redirect::to(&format!(
+                "/hostings/{sel_url}?wp_error_ref={token}#wordpress"
+            ))
+            .into_response()
+        }
+        _ => return Err(AppError::Internal("unexpected response".into())),
+    })
 }
 
 #[derive(Template)]
@@ -8248,23 +8421,30 @@ pub async fn post_wp_theme_action(
     .await?;
     match resp {
         RpcResponse::WpThemeAction(r) => {
-            let msg = format!("Theme {}: {}", r.state, r.message);
-            Ok(Redirect::to(&format!(
-                "/hostings/{}?{}={}#wordpress",
-                sel_url,
-                if r.state == "failed" {
-                    "wp_error"
+            if r.state == "failed" {
+                // Full text through the hand-off, including wp-cli's own
+                // output — same reasoning as the plugin path.
+                let detail_text = if r.output_tail.trim().is_empty() {
+                    r.message.clone()
                 } else {
-                    "wp_flash"
-                },
-                urlencoding(&msg)
-            ))
-            .into_response())
+                    format!("{}\n\n{}", r.message, r.output_tail)
+                };
+                let token = stash_error(&state, &format!("Theme failed: {detail_text}")).await;
+                return Ok(Redirect::to(&format!(
+                    "/hostings/{sel_url}?wp_error_ref={token}#wordpress"
+                ))
+                .into_response());
+            }
+            let msg = urlencoding(&format!("Theme {}: {}", r.state, r.message));
+            Ok(
+                Redirect::to(&format!("/hostings/{sel_url}?wp_flash={msg}#wordpress"))
+                    .into_response(),
+            )
         }
         RpcResponse::Error(e) => Ok(Redirect::to(&format!(
-            "/hostings/{}?wp_error={}#wordpress",
+            "/hostings/{}?wp_error_ref={}#wordpress",
             sel_url,
-            urlencoding(&e.to_string())
+            stash_error(&state, &e.to_string()).await
         ))
         .into_response()),
         _ => Err(AppError::Internal("unexpected response".into())),
@@ -9812,27 +9992,39 @@ pub async fn post_wp_plugin_action(
     .await?;
     match resp {
         RpcResponse::WpPluginAction(r) => {
-            // Encode the state + a short message into the redirect so the
-            // detail page can pop a toast on next render.
-            let flash = format!(
-                "Plugin {}: {}",
-                r.state,
-                r.message.chars().take(140).collect::<String>(),
-            );
-            let q = urlencoding(&flash);
-            let key = if r.state == "ok" || r.state == "noop" {
-                "flash"
+            let ok = r.state == "ok" || r.state == "noop";
+            if ok {
+                // Success stays a short query-string flash — there is nothing
+                // to read.
+                let q = urlencoding(&format!("Plugin {}: {}", r.state, r.message));
+                return Ok(
+                    Redirect::to(&format!("/hostings/{sel_url}?flash={q}#wordpress"))
+                        .into_response(),
+                );
+            }
+            // Failure goes through the server-side hand-off with the FULL
+            // text. This path used to `take(140)` and put the result in the
+            // query string, which is what cut an operator's error off
+            // mid-command and told them nothing. `output_tail` is the real
+            // wp-cli output — up to 4 KiB of it — and it was produced,
+            // typed, carried over RPC, and then thrown away here.
+            let detail_text = if r.output_tail.trim().is_empty() {
+                r.message.clone()
             } else {
-                "flash_error"
+                format!("{}\n\n{}", r.message, r.output_tail)
             };
-            Ok(Redirect::to(&format!("/hostings/{}?{}={}#wp", sel_url, key, q)).into_response())
+            let token = stash_error(&state, &format!("Plugin {}: {detail_text}", r.state)).await;
+            Ok(Redirect::to(&format!(
+                "/hostings/{sel_url}?wp_error_ref={token}#wordpress"
+            ))
+            .into_response())
         }
         RpcResponse::Error(e) => {
-            let msg = urlencoding(&format!("Plugin action failed: {}", e));
-            Ok(
-                Redirect::to(&format!("/hostings/{}?flash_error={}#wp", sel_url, msg))
-                    .into_response(),
-            )
+            let token = stash_error(&state, &format!("Plugin action failed: {e}")).await;
+            Ok(Redirect::to(&format!(
+                "/hostings/{sel_url}?wp_error_ref={token}#wordpress"
+            ))
+            .into_response())
         }
         _ => Err(AppError::Internal("unexpected response".into())),
     }
@@ -9871,8 +10063,11 @@ pub async fn post_wp_reset(
             Ok(Redirect::to(&format!("/hostings/{}?wp=reset", sel_url)).into_response())
         }
         RpcResponse::Error(e) => {
-            let msg = urlencoding(&e.to_string());
-            Ok(Redirect::to(&format!("/hostings/{}?wp_error={}", sel_url, msg)).into_response())
+            let token = stash_error(&state, &e.to_string()).await;
+            Ok(
+                Redirect::to(&format!("/hostings/{}?wp_error_ref={}", sel_url, token))
+                    .into_response(),
+            )
         }
         _ => Err(AppError::Internal("unexpected response".into())),
     }

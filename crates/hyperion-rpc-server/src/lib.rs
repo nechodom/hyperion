@@ -1380,6 +1380,14 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(m) => Response::FtpSetFtps(m),
             Err(e) => Response::Error(e),
         },
+        Request::WpPermCheck { sel } => match api.wp_perm_check(sel).await {
+            Ok(r) => Response::WpPermCheck(r),
+            Err(e) => Response::Error(e),
+        },
+        Request::WpPermRepair { sel, scope } => match api.wp_perm_repair(sel, scope).await {
+            Ok(m) => Response::WpPermRepair(m),
+            Err(e) => Response::Error(e),
+        },
         Request::DkimStatus { sel } => match api.dkim_status(sel).await {
             Ok(s) => Response::DkimStatus(s),
             Err(e) => Response::Error(e),
@@ -2741,6 +2749,15 @@ mod tests {
             Ok(String::new())
         }
         async fn ftp_set_ftps(&self, _: bool, _: bool) -> Result<String, RpcError> {
+            Ok(String::new())
+        }
+        async fn wp_perm_check(
+            &self,
+            _: HostingSelector,
+        ) -> Result<hyperion_types::FtpCheckReport, RpcError> {
+            Ok(Default::default())
+        }
+        async fn wp_perm_repair(&self, _: HostingSelector, _: String) -> Result<String, RpcError> {
             Ok(String::new())
         }
         async fn dkim_status(

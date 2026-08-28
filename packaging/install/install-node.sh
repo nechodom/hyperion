@@ -252,6 +252,11 @@ optional_pkgs=()
 [[ "$WITH_VSFTPD"   == "1" ]] && optional_pkgs+=(vsftpd)
 apt-get install -y -qq \
   curl ca-certificates gnupg lsb-release pkg-config build-essential git \
+  `# sudo is NOT optional: every wp-cli call is "sudo -u <site user> wp …",
+   # which is how the root agent drops to the site's uid. A minimal Debian
+   # has no sudo, and its absence surfaces as "io: No such file or
+   # directory" — a message that points at the site, not at the box.` \
+  sudo \
   bind9-dnsutils \
   nginx "${optional_pkgs[@]}"
 

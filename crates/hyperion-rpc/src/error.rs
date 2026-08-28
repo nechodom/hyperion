@@ -13,7 +13,10 @@ pub enum RpcError {
     NotFound { kind: String, id: String },
     #[error("provisioning failed at stage '{stage}': {reason}")]
     ProvisioningFailed { stage: String, reason: String },
-    #[error("system command failed: {cmd} (exit {code}): {stderr_tail}")]
+    // Reason first — same rule as AdapterError::Command. Every consumer
+    // truncates somewhere, and with the command in front it is always the
+    // reason that gets cut.
+    #[error("{stderr_tail} (system command exit {code}: {cmd})")]
     SystemCommand {
         cmd: String,
         code: i32,

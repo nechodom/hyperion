@@ -1363,6 +1363,18 @@ pub enum Request {
     /// Repair the node-wide vsftpd config. Separate from FtpRepairSite
     /// because it can restart a daemon every hosting on the box shares.
     FtpRepairNodeConfig,
+    /// Read-only permission diagnosis for one hosting's document tree. Runs
+    /// on the OWNING node — modes, uids and the nginx user are node-local.
+    WpPermCheck {
+        sel: HostingSelector,
+    },
+    /// Apply one of the permission repairs. `scope` is `tree`, `wp_config`
+    /// or `site_dirs`; they are separate because the tree repair widens
+    /// exactly what the other two tighten.
+    WpPermRepair {
+        sel: HostingSelector,
+        scope: String,
+    },
     /// Turn FTPS on or off for the whole node. `require_tls` refuses
     /// plaintext logins — the setting that actually protects the password,
     /// and the one that locks out clients which cannot negotiate TLS.
@@ -1979,6 +1991,8 @@ pub enum Response {
     FtpSelfCheck(hyperion_types::FtpCheckReport),
     FtpRepairSite(String),
     FtpRepairNodeConfig(String),
+    WpPermCheck(hyperion_types::FtpCheckReport),
+    WpPermRepair(String),
     FtpSetFtps(String),
     DkimStatus(hyperion_types::DkimStatus),
     DkimEnable(hyperion_types::DkimStatus),

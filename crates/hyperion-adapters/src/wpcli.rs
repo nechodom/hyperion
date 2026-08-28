@@ -767,6 +767,13 @@ pub async fn plugin_action(
             } else {
                 validate_plugin_slug(source)?;
             }
+            // `--activate` is deliberate (the UI button says "install &
+            // activate"), but it means an ACTIVATION fatal — a plugin that
+            // installs fine and then dies on load — is reported as an
+            // install failure, sending the operator to look at downloads and
+            // permissions instead of at the plugin's own error. The message
+            // is disambiguated by the caller from wp-cli's output; keeping
+            // the tail is what makes that possible.
             vec![
                 "plugin".into(),
                 "install".into(),
@@ -823,7 +830,23 @@ pub async fn plugin_action(
         }
         Err(e) => {
             let msg = e.to_string();
-            ("failed".into(), msg.clone(), tail_4k(&msg))
+            // Say WHICH half failed. `plugin install --activate` is two
+            // operations, and wp-cli reports both under one exit code — so
+            // "install failed" sent operators looking at downloads and
+            // permissions for a plugin that had installed perfectly and then
+            // fataled on load.
+            let labelled = if msg.contains("Plugin installed successfully")
+                || msg.contains("Downloading installation package") && msg.contains("Activating")
+            {
+                format!("the plugin installed but FAILED TO ACTIVATE: {msg}")
+            } else if msg.contains("No such file or directory") && msg.contains("sudo") {
+                "sudo is not installed on this node — every wp-cli call runs through it. \
+                 Re-run update.sh, which installs it."
+                    .to_string()
+            } else {
+                msg.clone()
+            };
+            ("failed".into(), labelled, tail_4k(&msg))
         }
     };
     Ok(hyperion_types::WpPluginActionResult {
