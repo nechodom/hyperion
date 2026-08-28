@@ -920,7 +920,16 @@ impl AdapterPort for RealAdapter {
                     e
                 })?;
         }
-        let logs_dir = detail.root_dir.replace("/htdocs", "/logs");
+        // From the PARENT, not a substring replace. `str::replace` rewrites
+        // EVERY occurrence, so a domain containing "htdocs" poisons the whole
+        // path: domain `htdocs.cz` gives user `htdocs_cz` and root_dir
+        // `/home/htdocs_cz/htdocs.cz/htdocs`, which replaced becomes
+        // `/home/logs_cz/logs.cz/logs` — a directory create never made, so
+        // `nginx -t` fails and the create rolls back.
+        let logs_dir = std::path::Path::new(&detail.root_dir)
+            .parent()
+            .map(|p| p.join("logs").display().to_string())
+            .unwrap_or_else(|| detail.root_dir.replace("/htdocs", "/logs"));
         let acme_root = self.acme_challenge_root.display().to_string();
         // Dispatch on hosting kind. Reverse-proxy uses a completely
         // different template (proxy_pass instead of root + PHP-FPM);

@@ -18,10 +18,10 @@ use hyperion_types::package::{
 use hyperion_types::{
     now_secs, BackupCadence, CertInfo, CertIssueRequest, CertRenewOutcome, CertRenewResult,
     ClusterStats, DashboardAlert, DbProvision, DbSummary, DnsCheckResult, FeatureToggle,
-    HostingDetail, HostingId, HostingPackage, HostingProfile, HostingState, HostingStats,
-    HostingSummary, LiveFeatureState, NodeStats, PackageFeatures, PackageInput, PackagePriorState,
-    PhpVersion, ProfileApply, ProfileInput, SecretId, ServicePackage, WpInstallRequest,
-    WpInstallStatus,
+    FtpCheckItem, FtpCheckReport, HostingDetail, HostingId, HostingPackage, HostingProfile,
+    HostingState, HostingStats, HostingSummary, LiveFeatureState, NodeStats, PackageFeatures,
+    PackageInput, PackagePriorState, PhpVersion, ProfileApply, ProfileInput, SecretId,
+    ServicePackage, WpInstallRequest, WpInstallStatus,
 };
 use hyperion_validate::{Domain, SystemUserName};
 use sqlx::SqlitePool;
@@ -5535,9 +5535,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             })?;
         // Land the FTP client directly in the site's writable web root
         // (htdocs, owned by the user) rather than the root-owned home — else
-        // STOR at the chroot root fails with 550. `root_dir` is the hosting
-        // root (`/home/<user>/<domain>`); htdocs lives one level down.
-        let web_root = format!("{}/htdocs", detail.root_dir);
+        // STOR at the chroot root fails with 550.
+        //
+        // `root_dir` IS the htdocs. Create stores it that way
+        // (`let htdocs = format!("{}/htdocs", hosting_root); ... root_dir:
+        // htdocs`) and every other consumer reads it that way — wp-cli's
+        // `--path`, `root_dir/wp-content/debug.log`, the file-manager jail.
+        // Appending "/htdocs" here produced `<site>/htdocs/htdocs`, so vsftpd
+        // answered EVERY login with "500 OOPS: cannot change directory" and
+        // FTP had never worked for any hosting.
+        let web_root = detail.root_dir.clone();
         hyperion_adapters::ftp::set_user_web_root(&detail.system_user, &web_root)
             .await
             .map_err(|e| RpcError::ProvisioningFailed {
@@ -5564,6 +5571,443 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         )
         .await;
         Ok(password)
+    }
+
+    // ── FTP self-check / repair ───────────────────────────────────────────
+    //
+    // Runs on the OWNING node. Everything FTP depends on — the per-user
+    // vsftpd config, the passwd/shadow entry, the web root and its ancestors
+    // — is node-local, so a master-local scan would report every remote
+    // hosting as broken.
+
+    /// Diagnose one hosting's FTP setup. STRICTLY read-only: no writes, no
+    /// daemon restarts, nothing an operator has to undo.
+    pub async fn ftp_self_check(&self, sel: HostingSelector) -> Result<FtpCheckReport, RpcError> {
+        let detail = self.get(sel).await?;
+        let user = detail.system_user.trim().to_string();
+        let expected_root = detail.root_dir.trim().to_string();
+        let mut items: Vec<FtpCheckItem> = Vec::new();
+        let mut push = |id: &str, label: &str, severity: &str, detail: String, fix: &str| {
+            items.push(FtpCheckItem {
+                id: id.into(),
+                label: label.into(),
+                severity: severity.into(),
+                detail,
+                fix: fix.into(),
+            });
+        };
+
+        let shadow_state = if user.is_empty() {
+            "no_user".to_string()
+        } else {
+            hyperion_adapters::ftp::password_state(&user).await
+        };
+        // "Is FTP meant to be on?" gates how loudly the rest is reported. A
+        // site that never enabled FTP must not light up the card in red.
+        let ftp_intended = shadow_state == "hash";
+
+        // ── node scope ────────────────────────────────────────────────────
+        let present = hyperion_adapters::systemctl_unit_present("vsftpd").await;
+        if !present {
+            // Not installed is a legitimate opt-out (the installer asks), so
+            // it is only an error for a hosting that actually has FTP on.
+            push(
+                "vsftpd_present",
+                "vsftpd installed",
+                if ftp_intended { "error" } else { "info" },
+                "vsftpd is not installed on this node".into(),
+                "",
+            );
+        } else {
+            let st = hyperion_adapters::systemctl_status_rich("vsftpd").await;
+            let masked = st.unit_file_state == "masked";
+            push(
+                "vsftpd_unit",
+                "vsftpd running",
+                if st.active_state == "active" {
+                    "ok"
+                } else if masked || !ftp_intended {
+                    // Masked is an operator decision, not drift.
+                    "info"
+                } else {
+                    "error"
+                },
+                format!(
+                    "active_state={} sub_state={} unit_file_state={}",
+                    st.active_state, st.sub_state, st.unit_file_state
+                ),
+                "",
+            );
+
+            let missing = hyperion_adapters::ftp::missing_conf_directives().await;
+            push(
+                "vsftpd_conf",
+                "vsftpd configured for local-user FTP",
+                if missing.is_empty() {
+                    "ok"
+                } else if ftp_intended {
+                    "error"
+                } else {
+                    "warn"
+                },
+                if missing.is_empty() {
+                    "all required directives set".into()
+                } else {
+                    format!("missing (or commented out): {}", missing.join(", "))
+                },
+                if missing.is_empty() {
+                    ""
+                } else {
+                    "node_config"
+                },
+            );
+        }
+
+        let listen_port = hyperion_adapters::ftp::read_listen_port().await;
+        push(
+            "listen_port",
+            "Control port",
+            "info",
+            format!("vsftpd listens on {listen_port}"),
+            "",
+        );
+
+        if !hyperion_adapters::ftp::ftps_enabled().await {
+            // Reported, never auto-enabled: switching FTPS on restarts a
+            // daemon every hosting shares and locks out clients that cannot
+            // negotiate TLS. The operator decides.
+            push(
+                "ftps",
+                "FTP over TLS",
+                "warn",
+                "FTPS is not enabled — the FTP password crosses the network in \
+                 cleartext, and it is the site's real Linux password. Prefer SFTP \
+                 (port 22) for anything over the public internet."
+                    .into(),
+                "",
+            );
+        }
+
+        // ── per-hosting scope ─────────────────────────────────────────────
+        if user.is_empty() {
+            push(
+                "system_user",
+                "System user",
+                "error",
+                "this hosting has no system user".into(),
+                "",
+            );
+            return Ok(FtpCheckReport {
+                items,
+                local_root: String::new(),
+                expected_root,
+                listen_port,
+                shadow_state,
+                // Filled in by the web layer, which already knows which node
+                // it dispatched to. The agent has no reliable name for
+                // itself here — the master stores its own rows under its
+                // hostname while a worker knows only its node id.
+                node_id: String::new(),
+            });
+        }
+
+        push(
+            "shadow",
+            "FTP password",
+            match shadow_state.as_str() {
+                "hash" => "ok",
+                // `!` is also what suspension sets, so say which it is rather
+                // than guessing — the operator reads this and acts on it.
+                "locked" if detail.state != HostingState::Active => "info",
+                "empty" => "warn",
+                _ => "info",
+            },
+            match shadow_state.as_str() {
+                "hash" => "a password is set — FTP login is possible".into(),
+                "locked" if detail.state != HostingState::Active => {
+                    format!("locked because the hosting is {}", detail.state.as_str())
+                }
+                "locked" => "the account is locked (usermod -L)".into(),
+                "star" => "FTP is switched off for this site".into(),
+                "empty" => "the password field is EMPTY — a pre-0.37 disable left it \
+                            that way, which some PAM stacks accept as a valid login. \
+                            Set a password or disable FTP again to replace it."
+                    .into(),
+                _ => "no such system user".into(),
+            },
+            if shadow_state == "empty" {
+                "site_repair"
+            } else {
+                ""
+            },
+        );
+
+        let local_root = hyperion_adapters::ftp::read_user_web_root(&user)
+            .await
+            .ok()
+            .flatten();
+        match &local_root {
+            // Compared to root_dir, NOT string-matched for "htdocs/htdocs" and
+            // NOT tested for mere existence: drift onto a sibling site's real
+            // directory passes both of those weaker checks.
+            Some(v) if *v == expected_root => push(
+                "local_root",
+                "FTP lands in the web root",
+                "ok",
+                v.clone(),
+                "",
+            ),
+            Some(v) => push(
+                "local_root",
+                "FTP lands in the web root",
+                "error",
+                format!("vsftpd would chdir to {v} — it should be {expected_root}"),
+                "site_repair",
+            ),
+            None if ftp_intended => push(
+                "local_root",
+                "FTP lands in the web root",
+                "error",
+                format!(
+                    "no per-user config, so vsftpd falls back to /home/{user} — \
+                     which is root-owned, so uploads fail"
+                ),
+                "site_repair",
+            ),
+            None => push(
+                "local_root",
+                "FTP lands in the web root",
+                "info",
+                "FTP has never been enabled for this site".into(),
+                "",
+            ),
+        }
+
+        let (shell, shell_listed) = hyperion_adapters::ftp::shell_state(&user).await;
+        push(
+            "shell",
+            "Login shell accepted by PAM",
+            if shell_listed || !ftp_intended {
+                "ok"
+            } else {
+                "error"
+            },
+            if shell.is_empty() {
+                "could not read the passwd entry".into()
+            } else if shell_listed {
+                format!("{shell} is listed in /etc/shells")
+            } else {
+                format!("{shell} is NOT in /etc/shells — vsftpd's PAM stack refuses with 530")
+            },
+            // /etc/shells is a box-wide file gating chsh and every pam_shells
+            // consumer; only ensure_vsftpd_configured's allowlist touches it.
+            if shell_listed { "" } else { "node_config" },
+        );
+
+        if let Some(reason) = hyperion_adapters::ftp::userlist_blocks(&user).await {
+            // Hyperion writes no userlist, so anything here is foreign and
+            // deliberate. Report both senses; never offer to change it.
+            push(
+                "userlist",
+                "Access lists",
+                "warn",
+                format!("{reason} — Hyperion did not set this up and will not change it"),
+                "",
+            );
+        }
+
+        if !expected_root.is_empty() {
+            let root_exists = tokio::fs::metadata(&expected_root).await.is_ok();
+            push(
+                "web_root",
+                "Web root exists",
+                if root_exists { "ok" } else { "error" },
+                if root_exists {
+                    expected_root.clone()
+                } else {
+                    format!("{expected_root} does not exist")
+                },
+                "",
+            );
+            if root_exists {
+                let owned = hyperion_adapters::ftp::web_root_owner_drift(&user, &expected_root)
+                    .await
+                    .unwrap_or(None);
+                push(
+                    "web_root_owner",
+                    "Web root owned by the site user",
+                    if owned.is_none() { "ok" } else { "error" },
+                    match &owned {
+                        None => format!("owned by {user}"),
+                        Some(p) => format!("{p} is not owned by {user} — uploads there fail 550"),
+                    },
+                    if owned.is_none() { "" } else { "site_repair" },
+                );
+                let traversable = hyperion_adapters::fs::ancestors_traversable(
+                    std::path::Path::new(&expected_root),
+                )
+                .await;
+                push(
+                    "ancestors",
+                    "Parent directories traversable",
+                    if traversable { "ok" } else { "error" },
+                    if traversable {
+                        "every parent has o+x".into()
+                    } else {
+                        "a parent directory is missing o+x, so vsftpd cannot chdir into the \
+                         web root even though it exists"
+                            .into()
+                    },
+                    if traversable { "" } else { "site_repair" },
+                );
+            }
+        }
+
+        Ok(FtpCheckReport {
+            items,
+            local_root: local_root.unwrap_or_default(),
+            expected_root,
+            listen_port,
+            shadow_state,
+            node_id: String::new(),
+        })
+    }
+
+    /// Repair the per-hosting half of FTP. Idempotent, touches no daemon and
+    /// no node-wide file, so it is safe to run unattended.
+    pub async fn ftp_repair_site(&self, sel: HostingSelector) -> Result<String, RpcError> {
+        let detail = self.get(sel).await?;
+        let (user, root) = (
+            detail.system_user.trim().to_string(),
+            detail.root_dir.trim().to_string(),
+        );
+        if user.is_empty() || root.is_empty() {
+            return Err(RpcError::Validation {
+                message: "this hosting has no system user or web root to repair".into(),
+            });
+        }
+        // Refuse rather than swap one dead local_root for another.
+        if tokio::fs::metadata(&root).await.is_err() {
+            return Err(RpcError::Validation {
+                message: format!("{root} does not exist — repair the site's files first"),
+            });
+        }
+        let mut done: Vec<String> = Vec::new();
+        // Order matters: point local_root at the right place BEFORE chowning,
+        // or the chown lands on whatever the stale path was.
+        hyperion_adapters::ftp::set_user_web_root(&user, &root)
+            .await
+            .map_err(|e| RpcError::Validation {
+                message: format!("set local_root: {e}"),
+            })?;
+        done.push(format!("local_root → {root}"));
+        if let Err(e) = hyperion_adapters::ftp::ensure_web_root_owned(&user, &root).await {
+            tracing::warn!(error = %e, user = %user, "ftp_repair_site: chown failed");
+        } else {
+            done.push(format!("web root owned by {user}"));
+        }
+        hyperion_adapters::fs::ensure_ancestors_traversable(std::path::Path::new(&root)).await;
+        done.push("parent directories traversable".into());
+        self.append_audit(
+            "hosting.ftp.repair",
+            Some(detail.id.as_str()),
+            &serde_json::json!({"user": user, "root": root}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(done.join("; "))
+    }
+
+    /// Repair the node-wide vsftpd config. Kept separate from
+    /// `ftp_repair_site` because it can restart a daemon every hosting on the
+    /// box shares — never call it from a background tick.
+    pub async fn ftp_repair_node_config(&self) -> Result<String, RpcError> {
+        hyperion_adapters::ftp::ensure_vsftpd_configured()
+            .await
+            .map_err(|e| RpcError::Validation {
+                message: format!("vsftpd config repair: {e}"),
+            })?;
+        self.append_audit("node.ftp.repair_config", None, "{}", "ok")
+            .await;
+        Ok("vsftpd configuration checked and repaired".into())
+    }
+
+    /// Background self-heal for the per-hosting half of FTP.
+    ///
+    /// Deliberately narrow. It repoints a stale `local_root` and fixes
+    /// ownership/traversal — small, idempotent, no auth change, no daemon
+    /// touch. It never installs or restarts vsftpd, never edits a node-wide
+    /// file, and never changes a password state: those are operator
+    /// decisions, and a background restart of a shared daemon is not a
+    /// self-heal.
+    pub async fn ftp_autoheal_tick(&self) -> Result<i64, RpcError> {
+        let mut healed = 0i64;
+        for s in self.list().await? {
+            // A suspended or trashed site's locked account is intentional.
+            if s.state != HostingState::Active {
+                continue;
+            }
+            let Ok(detail) = self.get(HostingSelector::Id(s.id.clone())).await else {
+                continue;
+            };
+            let (user, root) = (
+                detail.system_user.trim().to_string(),
+                detail.root_dir.trim().to_string(),
+            );
+            if user.is_empty()
+                || root.is_empty()
+                || matches!(detail.kind.as_str(), "reverse_proxy" | "redirect")
+            {
+                continue;
+            }
+            // Only sites where FTP is actually on. Creating a per-user config
+            // for a site that never enabled FTP would be inventing state.
+            if hyperion_adapters::ftp::password_state(&user).await != "hash" {
+                continue;
+            }
+            if tokio::fs::metadata(&root).await.is_err() {
+                continue;
+            }
+            let current = hyperion_adapters::ftp::read_user_web_root(&user)
+                .await
+                .ok()
+                .flatten();
+            if current.as_deref() != Some(root.as_str()) {
+                match hyperion_adapters::ftp::set_user_web_root(&user, &root).await {
+                    Ok(()) => {
+                        healed += 1;
+                        // Audited on success so a REPEATING heal is visible as
+                        // a pattern rather than looking like steady state.
+                        self.append_audit(
+                            "hosting.ftp.autoheal",
+                            Some(detail.id.as_str()),
+                            &serde_json::json!({
+                                "user": user,
+                                "was": current.unwrap_or_default(),
+                                "now": root,
+                            })
+                            .to_string(),
+                            "ok",
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, user = %user, "ftp_autoheal: local_root");
+                    }
+                }
+            }
+            // Ownership + traversal only — NOT repair_tree_permissions, which
+            // chmods every directory to 0755 and would widen logs/ and tmp/
+            // from the 0750 create deliberately gives them.
+            if let Ok(Some(_)) = hyperion_adapters::ftp::web_root_owner_drift(&user, &root).await {
+                let _ = hyperion_adapters::ftp::ensure_web_root_owned(&user, &root).await;
+            }
+            if !hyperion_adapters::fs::ancestors_traversable(std::path::Path::new(&root)).await {
+                hyperion_adapters::fs::ensure_ancestors_traversable(std::path::Path::new(&root))
+                    .await;
+            }
+        }
+        Ok(healed)
     }
 
     /// Disable FTP for the hosting's system user (`passwd -d <user>`).
@@ -9581,7 +10025,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         self.adapters
             .wp_cli(
                 &detail.system_user,
-                &format!("/home/{}/{}/htdocs", detail.system_user, detail.domain),
+                // root_dir, not a hand-built path: identical only while
+                // home_root is the default "/home", and silently wrong the
+                // moment an operator changes it.
+                &detail.root_dir,
                 kind,
                 &source,
                 activate,
@@ -18814,7 +19261,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 "asset id {asset_id} ZIP not present on disk at {source} (out-of-band delete?)"
             )));
         }
-        let htdocs = format!("/home/{}/{}/htdocs", detail.system_user, detail.domain);
+        // root_dir, not a hand-built path — see the note at the other
+        // wp-cli call site that used to do this.
+        let htdocs = detail.root_dir.clone();
         self.adapters
             .wp_cli(&detail.system_user, &htdocs, &row.kind, &source, activate)
             .await

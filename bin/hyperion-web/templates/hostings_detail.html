@@ -1721,7 +1721,12 @@
       <form method="post" action="/hostings/wp/plugin-action" style="margin-top:0.6rem">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">
         <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+        {# `source` is the field the install branch reads — `slug` alone
+           reaches the handler as an empty source and 400s. Both are sent:
+           slug names the plugin for the audit entry, source is what wp-cli
+           installs (with --activate, so the button label is accurate). #}
         <input type="hidden" name="slug" value="redis-cache">
+        <input type="hidden" name="source" value="redis-cache">
         <input type="hidden" name="action" value="install">
         <button class="btn primary small" type="submit">Install &amp; activate Redis Object Cache</button>
       </form>
@@ -2669,9 +2674,21 @@
 </div>
 
 <div class="tab-panel" id="tab-ftp">
+{# Lazy: the probe reads files on the OWNING node, so it must not block the
+   page. `revealed` rather than `load` — the panel is one of many tabs. #}
+<div id="ftp-panel"
+     hx-get="/hostings/{{ detail.id.as_str() }}/ftp-panel"
+     hx-trigger="revealed once"
+     hx-swap="innerHTML">
+  <div class="card" style="margin-bottom:0.9rem">
+    <span class="spinner-inline" style="margin-right:0.4rem"></span>
+    <span class="text-soft small">Checking this site's FTP setup…</span>
+  </div>
+</div>
 <p class="text-soft small" style="margin:0 0 0.8rem">
-  Uploads failing, or files that cannot be overwritten? That is almost always
-  ownership, not FTP — use <a href="#settings">Repair file permissions</a>
+  Uploads failing, or files that cannot be overwritten? The check above covers
+  ownership and the landing directory. For a full tree repair use
+  <a href="#settings">Repair file permissions</a>
   (Settings &amp; limits → PHP settings); FTP signs in as the same system user.
 </p>
 

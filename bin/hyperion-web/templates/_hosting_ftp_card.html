@@ -1,0 +1,73 @@
+{# FTP self-check card. Lazy-loaded over HTMX from the FTP tab.
+
+   Every failure renders INSIDE this card via `error` — HTMX does not swap on
+   a non-2xx response, so returning an error status would leave the operator
+   watching a spinner forever. #}
+<div class="card" style="margin-bottom:0.9rem">
+  <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.5rem">
+    <h2 style="margin:0;font-size:0.95rem">
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+      FTP self-check
+    </h2>
+    {% if error.is_some() %}<span class="pill err">could not check</span>
+    {% else if report.worst() == "error" %}<span class="pill err">needs attention</span>
+    {% else if report.worst() == "warn" %}<span class="pill warn">warnings</span>
+    {% else %}<span class="pill ok">all good</span>{% endif %}
+    <span class="grow"></span>
+    <button class="btn ghost small" type="button"
+            hx-get="/hostings/{{ selector }}/ftp-panel"
+            hx-target="#ftp-panel" hx-swap="innerHTML">Re-check</button>
+  </div>
+
+  {% if let Some(e) = error %}
+  <p class="text-soft small" style="margin:0">{{ e }}</p>
+  {% else %}
+
+  <table class="table small" style="margin:0 0 0.6rem">
+    <tbody>
+      {% for it in report.items %}
+      <tr>
+        <td style="width:1.6rem;vertical-align:top">
+          {% if it.severity == "ok" %}<span style="color:var(--success)">●</span>
+          {% else if it.severity == "error" %}<span style="color:var(--danger)">●</span>
+          {% else if it.severity == "warn" %}<span style="color:var(--warn)">●</span>
+          {% else %}<span class="text-soft">●</span>{% endif %}
+        </td>
+        <td style="vertical-align:top"><strong>{{ it.label }}</strong></td>
+        <td class="text-soft" style="vertical-align:top">{{ it.detail }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <p class="text-soft small" style="margin:0 0 0.6rem">
+    Checked on <strong>{{ target_node }}</strong> · connect to port
+    <code>{{ report.listen_port }}</code>{% if !report.expected_root.is_empty() %} ·
+    the client should land in <code>{{ report.expected_root }}</code>{% endif %}
+  </p>
+
+  <div class="row" style="gap:0.5rem;flex-wrap:wrap">
+    {% if report.has_site_repair() %}
+    <form method="post" action="/hostings/ftp/repair" style="margin:0">
+      <input type="hidden" name="_csrf" value="{{ csrf_repair }}">
+      <input type="hidden" name="selector" value="{{ selector }}">
+      <button class="btn primary small" type="submit"
+              data-confirm-title="Repair this site's FTP"
+              data-confirm-body="Points vsftpd at the site's real web root, gives the site user ownership of it, and makes the parent directories traversable. Only this site is touched — no service is restarted."
+              data-confirm-confirm-label="Repair">Fix this site</button>
+    </form>
+    {% endif %}
+    {% if report.has_node_repair() %}
+    <form method="post" action="/hostings/ftp/repair-node" style="margin:0">
+      <input type="hidden" name="_csrf" value="{{ csrf_repair_node }}">
+      <input type="hidden" name="selector" value="{{ selector }}">
+      <button class="btn small" type="submit"
+              data-confirm-title="Repair the node's vsftpd config"
+              data-confirm-variant="danger"
+              data-confirm-body="Rewrites /etc/vsftpd.conf on this node (keeping a timestamped backup and your custom port) and RESTARTS vsftpd. Every site on this node shares that daemon, so in-flight transfers will drop."
+              data-confirm-confirm-label="Repair and restart">Fix this node's vsftpd</button>
+    </form>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>

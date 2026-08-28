@@ -5772,6 +5772,173 @@ pub async fn post_wp_emergency_restore(
     .await
 }
 
+#[derive(Template)]
+#[template(path = "_hosting_ftp_card.html")]
+struct FtpCardTpl {
+    report: hyperion_types::FtpCheckReport,
+    selector: String,
+    csrf_repair: String,
+    csrf_repair_node: String,
+    target_node: String,
+    error: Option<String>,
+}
+
+/// GET /hostings/:selector/ftp-panel — diagnose this site's FTP.
+///
+/// Runs on the OWNING node: the vsftpd config, the shadow entry and the web
+/// root are all node-local, so checking them on the master would report every
+/// remote hosting as broken.
+pub async fn get_ftp_panel(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Path(selector): Path<String>,
+) -> Result<Response, AppError> {
+    let card = |report, target_node: String, error: Option<String>| {
+        Html(
+            FtpCardTpl {
+                report,
+                selector: selector.clone(),
+                csrf_repair: csrf_token_for(&state, &ctx, "/hostings/ftp/repair"),
+                csrf_repair_node: csrf_token_for(&state, &ctx, "/hostings/ftp/repair-node"),
+                target_node,
+                error,
+            }
+            .render()
+            .unwrap_or_default(),
+        )
+        .into_response()
+    };
+    let sel = match parse_selector(&selector) {
+        Ok(s) => s,
+        Err(e) => {
+            return Ok(card(
+                Default::default(),
+                String::new(),
+                Some(format!("could not read the selector: {e}")),
+            ))
+        }
+    };
+    let (detail, owner) = match find_hosting_anywhere(&state, sel.clone()).await {
+        Ok(v) => v,
+        Err(e) => return Ok(card(Default::default(), String::new(), Some(e.to_string()))),
+    };
+    if require_hosting_access(
+        &state,
+        &ctx,
+        detail.id.as_str(),
+        false,
+        Capability::HostingView,
+    )
+    .await
+    .is_err()
+    {
+        return Ok(card(
+            Default::default(),
+            String::new(),
+            Some("You do not have access to this hosting.".into()),
+        ));
+    }
+    let node_label = owner.clone().unwrap_or_else(|| "this server".to_string());
+    match crate::dispatcher::dispatch_to_node(
+        &state,
+        owner.as_deref(),
+        Request::FtpSelfCheck { sel },
+    )
+    .await
+    {
+        Ok(RpcResponse::FtpSelfCheck(mut r)) => {
+            // The agent cannot name itself reliably; the web layer already
+            // knows which node it dispatched to.
+            r.node_id = node_label.clone();
+            Ok(card(r, node_label, None))
+        }
+        Ok(RpcResponse::Error(e)) => Ok(card(Default::default(), node_label, Some(e.to_string()))),
+        Ok(_) => Ok(card(
+            Default::default(),
+            node_label,
+            Some("unexpected response from the node".into()),
+        )),
+        Err(e) => Ok(card(Default::default(), node_label, Some(e.to_string()))),
+    }
+}
+
+#[derive(serde::Deserialize)]
+pub struct FtpRepairForm {
+    pub selector: String,
+}
+
+/// POST /hostings/ftp/repair — per-site repair. No daemon is touched.
+pub async fn post_ftp_repair(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<FtpRepairForm>,
+) -> Result<Response, AppError> {
+    ftp_repair_action(state, ctx, form, false).await
+}
+
+/// POST /hostings/ftp/repair-node — node-wide vsftpd config repair. Admin
+/// only: it restarts a daemon every hosting on the node shares.
+pub async fn post_ftp_repair_node(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<FtpRepairForm>,
+) -> Result<Response, AppError> {
+    ftp_repair_action(state, ctx, form, true).await
+}
+
+async fn ftp_repair_action(
+    state: SharedState,
+    ctx: AuthCtx,
+    form: FtpRepairForm,
+    node_wide: bool,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(
+        &state,
+        &ctx,
+        &form.selector,
+        Capability::HostingEditConfig,
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    // Rewriting the node's vsftpd.conf and restarting the daemon affects
+    // every hosting on the box, so per-hosting manage rights are not enough.
+    if node_wide && !ctx.is_admin_or_higher() {
+        return Ok((
+            axum::http::StatusCode::FORBIDDEN,
+            [("content-type", "text/html; charset=utf-8")],
+            "<h1>403 Forbidden</h1><p>Repairing the node's vsftpd configuration              restarts a service every site on this node shares — admin only.</p>"
+                .to_string(),
+        )
+            .into_response());
+    }
+    let sel_url = urlencoding(&form.selector);
+    let node: Option<String> = find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
+    let req = if node_wide {
+        Request::FtpRepairNodeConfig
+    } else {
+        Request::FtpRepairSite { sel }
+    };
+    let resp = crate::dispatcher::dispatch_to_node(&state, node.as_deref(), req).await?;
+    Ok(match resp {
+        RpcResponse::FtpRepairSite(m) | RpcResponse::FtpRepairNodeConfig(m) => Redirect::to(
+            &format!("/hostings/{sel_url}?flash={}#ftp", urlencoding(&m)),
+        )
+        .into_response(),
+        RpcResponse::Error(e) => Redirect::to(&format!(
+            "/hostings/{sel_url}?flash_error={}#ftp",
+            urlencoding(&e.to_string())
+        ))
+        .into_response(),
+        _ => return Err(AppError::Internal("unexpected response".into())),
+    })
+}
+
 pub async fn get_health_panel(
     State(state): State<SharedState>,
     ctx: AuthCtx,

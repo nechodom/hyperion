@@ -1347,6 +1347,22 @@ pub enum Request {
     FtpDisable {
         sel: HostingSelector,
     },
+    /// Read-only diagnosis of one hosting's FTP setup, run on the OWNING
+    /// node (the vsftpd config, the passwd/shadow entry and the web root
+    /// are all node-local — a master-local scan would call every remote
+    /// hosting broken).
+    FtpSelfCheck {
+        sel: HostingSelector,
+    },
+    /// Repair the per-hosting half of FTP: point `local_root` at the real
+    /// web root, chown it, make the ancestors traversable. Touches no
+    /// daemon and no global file.
+    FtpRepairSite {
+        sel: HostingSelector,
+    },
+    /// Repair the node-wide vsftpd config. Separate from FtpRepairSite
+    /// because it can restart a daemon every hosting on the box shares.
+    FtpRepairNodeConfig,
     /// DKIM signing status for a hosting's domain (key present? in the
     /// signing tables? last DNS verification?).
     DkimStatus {
@@ -1953,6 +1969,9 @@ pub enum Response {
         password: String,
     },
     FtpDisable,
+    FtpSelfCheck(hyperion_types::FtpCheckReport),
+    FtpRepairSite(String),
+    FtpRepairNodeConfig(String),
     DkimStatus(hyperion_types::DkimStatus),
     DkimEnable(hyperion_types::DkimStatus),
     DkimDisable(hyperion_types::DkimStatus),

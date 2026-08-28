@@ -1458,6 +1458,34 @@ fn print_pretty(resp: &Response) {
         Response::SlackSendTest => {
             println!("test message posted to the Slack webhook");
         }
+        Response::FtpSelfCheck(r) => {
+            println!("ftp check on {} (port {})", r.node_id, r.listen_port);
+            if !r.expected_root.is_empty() {
+                println!("  web root: {}", r.expected_root);
+                println!(
+                    "  local_root: {}",
+                    if r.local_root.is_empty() {
+                        "(no per-user config)"
+                    } else {
+                        &r.local_root
+                    }
+                );
+            }
+            for it in &r.items {
+                // Same glyphs the card uses, so a terminal report and a
+                // browser report read the same way.
+                let mark = match it.severity.as_str() {
+                    "ok" => "ok  ",
+                    "warn" => "WARN",
+                    "error" => "FAIL",
+                    _ => "    ",
+                };
+                println!("  [{mark}] {}: {}", it.label, it.detail);
+            }
+        }
+        Response::FtpRepairSite(m) | Response::FtpRepairNodeConfig(m) => {
+            println!("{m}");
+        }
         Response::WebLogin(r) => match r {
             hyperion_types::WebLoginResult::Ok {
                 user_id,
