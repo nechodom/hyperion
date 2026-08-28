@@ -847,6 +847,17 @@ if ! command -v dig >/dev/null 2>&1; then
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq bind9-dnsutils 2>/dev/null     || DEBIAN_FRONTEND=noninteractive apt-get install -y -qq dnsutils     || warn "could not install dig — SPF/DKIM verification will report unknown on this node"
 fi
 
+# sudo is how the root agent drops to a site's uid for EVERY wp-cli call
+# ("sudo -u <site user> wp …"). A minimal Debian ships without it, and the
+# installers did not list it until v0.40 — so a box installed before then
+# fails every WordPress action with "io: No such file or directory", which
+# reads like a problem with the site rather than a missing package.
+if ! command -v sudo >/dev/null 2>&1; then
+  log "Installing sudo — wp-cli runs as the site user through it ..."
+  DEBIAN_FRONTEND=noninteractive apt-get install -y -qq sudo \
+    || warn "could not install sudo — every WordPress action will fail on this node"
+fi
+
 declare -A NEEDED_PKGS=(
   [nginx.service]="nginx"
   [vsftpd.service]="vsftpd"

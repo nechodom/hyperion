@@ -1110,6 +1110,21 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.ftp_set_ftps(enabled, require_tls).await
     }
 
+    async fn wp_perm_check(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<hyperion_types::FtpCheckReport, RpcError> {
+        self.svc.wp_perm_check(sel).await
+    }
+
+    async fn wp_perm_repair(
+        &self,
+        sel: HostingSelector,
+        scope: String,
+    ) -> Result<String, RpcError> {
+        self.svc.wp_perm_repair(sel, scope).await
+    }
+
     // --- web users ---
     async fn web_login(
         &self,

@@ -415,7 +415,10 @@
 {% if let Some(e) = wp_error %}
   <div class="flash error">
     <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-    <div class="flash-body"><strong>WordPress install failed:</strong> {{ e }}</div>
+    {# "install" was wrong: this same banner carries plugin, theme, password
+       and emergency-action failures. Naming the wrong operation sends the
+       operator looking in the wrong place. #}
+    <div class="flash-body"><strong>WordPress action failed:</strong> {{ e }}</div>
   </div>
 {% endif %}
 {% if let Some(m) = backup_flash %}
@@ -1217,6 +1220,20 @@
   </div>
 </div>
 
+{# Permissions check, below site health. `revealed once` rather than `load`:
+   the health card above already pays a load-triggered probe, and a second
+   one would double the work on every detail render whether or not the
+   operator ever opens this tab. #}
+<div id="perm-panel"
+     hx-get="/hostings/{{ detail.id.as_str() }}/perm-panel"
+     hx-trigger="revealed once"
+     hx-swap="innerHTML">
+  <div class="card" style="margin-bottom:0.9rem">
+    <span class="spinner-inline" style="margin-right:0.4rem"></span>
+    <span class="text-soft small">Checking file permissions…</span>
+  </div>
+</div>
+
 
 <div class="card hover">
   <h2>
@@ -1739,20 +1756,18 @@
     <strong>DB slot:</strong> {{ detail.wp_extras.redis_db_number.unwrap_or(-1) }}<br>
     <strong>Password:</strong> {% if detail.wp_extras.redis_password_set %}set (stored in wp-config){% else %}not set{% endif %}
   </p>
-  <form method="post" action="/hostings/wp/redis" style="display:inline">
+  <form method="post" action="/hostings/wp/redis" style="display:inline"
+        data-confirm-title="Disable Redis"
+        data-confirm-body="The WP_REDIS_* constants are removed from wp-config.php and the Redis ACL user is deleted. The Redis Object Cache plugin falls back to a no-op (or a database-only cache, depending on configuration). Items currently cached in Redis are lost — but they're only cached items, so that's safe."
+        data-confirm-confirm-label="Disable Redis"
+        data-confirm-variant="danger">
     <input type="hidden" name="_csrf" value="{{ csrf_wp_redis }}">
     <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
     <input type="hidden" name="enabled" value="off">
     {% if !target_node.is_empty() %}
     <input type="hidden" name="target_node" value="{{ target_node }}">
     {% endif %}
-    <button class="btn"
-            data-confirm
-            data-confirm-title="Disable Redis"
-            data-confirm-body="The WP_REDIS_* constants are removed from wp-config.php and the Redis ACL user is deleted. The Redis Object Cache plugin falls back to a no-op (or a database-only cache, depending on configuration). Items currently cached in Redis are lost — but they're only cached items, so that's safe."
-            data-confirm-confirm-label="Disable Redis"
-            data-confirm-variant="danger"
-            type="submit">Disable Redis</button>
+    <button class="btn" type="submit">Disable Redis</button>
   </form>
   <form method="post" action="/hostings/wp/redis/rotate" style="display:inline">
     <input type="hidden" name="_csrf" value="{{ csrf_wp_redis_rotate }}">

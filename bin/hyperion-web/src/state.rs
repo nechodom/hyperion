@@ -59,6 +59,18 @@ pub struct AppState {
     /// does not need to be.
     pub ftp_password_handoff:
         Arc<tokio::sync::Mutex<std::collections::HashMap<String, (String, i64)>>>,
+    /// One-shot store for a long failure message, keyed by a random token.
+    ///
+    /// Same mechanism as `ftp_password_handoff`, for the opposite reason.
+    /// Errors used to travel in the redirect's query string, and a wp-cli
+    /// failure is easily longer than a URL can carry — so the operator got a
+    /// message cut off mid-command, with the actual reason (the tail) gone.
+    /// Query strings also land in nginx's access log, and a failure message
+    /// can quote a path or a database error.
+    ///
+    /// In memory and single-use: a diagnostic that outlives the page that
+    /// showed it is just another place for it to leak from.
+    pub error_handoff: Arc<tokio::sync::Mutex<std::collections::HashMap<String, (String, i64)>>>,
 }
 
 impl AppState {

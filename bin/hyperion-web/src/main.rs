@@ -102,6 +102,7 @@ async fn serve(cfg: Config) -> anyhow::Result<()> {
         enforce_admin_2fa: Arc::new(std::sync::atomic::AtomicBool::new(true)),
         deployment_mode: Arc::new(tokio::sync::RwLock::new("master".to_string())),
         ftp_password_handoff: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+        error_handoff: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
     });
     // Spawn a background refresher that polls the agent for the
     // current `cluster.panel_hostname` every 30 s. The host-enforce

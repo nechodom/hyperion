@@ -48,49 +48,49 @@
 
   <div class="row" style="gap:0.5rem;flex-wrap:wrap">
     {% if report.has_site_repair() %}
-    <form method="post" action="/hostings/ftp/repair" style="margin:0">
+    <form method="post" action="/hostings/ftp/repair" style="margin:0"
+          data-confirm-title="Repair this site's FTP"
+          data-confirm-body="Points vsftpd at the site's real web root, gives the site user ownership of it, and makes the parent directories traversable. Only this site is touched — no service is restarted."
+          data-confirm-confirm-label="Repair">
       <input type="hidden" name="_csrf" value="{{ csrf_repair }}">
       <input type="hidden" name="selector" value="{{ selector }}">
-      <button class="btn primary small" type="submit"
-              data-confirm-title="Repair this site's FTP"
-              data-confirm-body="Points vsftpd at the site's real web root, gives the site user ownership of it, and makes the parent directories traversable. Only this site is touched — no service is restarted."
-              data-confirm-confirm-label="Repair">Fix this site</button>
+      <button class="btn primary small" type="submit">Fix this site</button>
     </form>
     {% endif %}
     {% if report.can_enable_ftps() %}
-    <form method="post" action="/hostings/ftp/ftps" style="margin:0">
+    <form method="post" action="/hostings/ftp/ftps" style="margin:0"
+          data-confirm-title="Turn on FTPS and require it"
+          data-confirm-variant="danger"
+          data-confirm-body="Encrypts every FTP session on THIS NODE and refuses plaintext logins — the FTP password is the site's real Linux password, so today it crosses the network in the clear. Two consequences: vsftpd restarts (in-flight transfers drop), and any client that cannot do FTPS stops working, including your customers'. Passive ports 40000-50000 must be open in the firewall — with TLS the kernel can no longer open them on demand. If vsftpd fails to start, Hyperion restores the previous config automatically."
+          data-confirm-confirm-label="Turn on and require TLS">
       <input type="hidden" name="_csrf" value="{{ csrf_ftps }}">
       <input type="hidden" name="selector" value="{{ selector }}">
       <input type="hidden" name="enabled" value="on">
-      <button class="btn small" type="submit"
-              data-confirm-title="Turn on FTPS and require it"
-              data-confirm-variant="danger"
-              data-confirm-body="Encrypts every FTP session on THIS NODE and refuses plaintext logins — the FTP password is the site's real Linux password, so today it crosses the network in the clear. Two consequences: vsftpd restarts (in-flight transfers drop), and any client that cannot do FTPS stops working, including your customers'. Passive ports 40000-50000 must be open in the firewall — with TLS the kernel can no longer open them on demand. If vsftpd fails to start, Hyperion restores the previous config automatically."
-              data-confirm-confirm-label="Turn on and require TLS">Enable FTPS (required)</button>
+      <button class="btn small" type="submit">Enable FTPS (required)</button>
     </form>
     {% endif %}
     {% if report.can_disable_ftps() %}
-    <form method="post" action="/hostings/ftp/ftps" style="margin:0">
+    <form method="post" action="/hostings/ftp/ftps" style="margin:0"
+          data-confirm-title="Turn FTPS off"
+          data-confirm-variant="danger"
+          data-confirm-body="FTP sessions on this node go back to plaintext — the password is the site's real Linux password, so it will cross the network in the clear again. vsftpd restarts. Do this only to recover from a client that cannot connect."
+          data-confirm-confirm-label="Turn off">
       <input type="hidden" name="_csrf" value="{{ csrf_ftps }}">
       <input type="hidden" name="selector" value="{{ selector }}">
       {# No `enabled` field at all — checkbox_on treats a missing value as
          false, which is what turns FTPS off. #}
-      <button class="btn small" type="submit"
-              data-confirm-title="Turn FTPS off"
-              data-confirm-variant="danger"
-              data-confirm-body="FTP sessions on this node go back to plaintext — the password is the site's real Linux password, so it will cross the network in the clear again. vsftpd restarts. Do this only to recover from a client that cannot connect."
-              data-confirm-confirm-label="Turn off">Disable FTPS</button>
+      <button class="btn small" type="submit">Disable FTPS</button>
     </form>
     {% endif %}
     {% if report.has_node_repair() %}
-    <form method="post" action="/hostings/ftp/repair-node" style="margin:0">
+    <form method="post" action="/hostings/ftp/repair-node" style="margin:0"
+          data-confirm-title="Repair the node's vsftpd config"
+          data-confirm-variant="danger"
+          data-confirm-body="Rewrites /etc/vsftpd.conf on this node (keeping a timestamped backup and your custom port) and RESTARTS vsftpd. Every site on this node shares that daemon, so in-flight transfers will drop."
+          data-confirm-confirm-label="Repair and restart">
       <input type="hidden" name="_csrf" value="{{ csrf_repair_node }}">
       <input type="hidden" name="selector" value="{{ selector }}">
-      <button class="btn small" type="submit"
-              data-confirm-title="Repair the node's vsftpd config"
-              data-confirm-variant="danger"
-              data-confirm-body="Rewrites /etc/vsftpd.conf on this node (keeping a timestamped backup and your custom port) and RESTARTS vsftpd. Every site on this node shares that daemon, so in-flight transfers will drop."
-              data-confirm-confirm-label="Repair and restart">Fix this node's vsftpd</button>
+      <button class="btn small" type="submit">Fix this node's vsftpd</button>
     </form>
     {% endif %}
   </div>

@@ -2147,6 +2147,14 @@ impl FtpCheckReport {
     pub fn has_node_repair(&self) -> bool {
         self.items.iter().any(|i| i.fix == "node_config")
     }
+    /// True when a finding is fixed by tightening wp-config.php.
+    pub fn has_config_fix(&self) -> bool {
+        self.items.iter().any(|i| i.fix == "wp_config_tighten")
+    }
+    /// True when a finding is fixed by tightening logs/ and tmp/.
+    pub fn has_site_dirs_fix(&self) -> bool {
+        self.items.iter().any(|i| i.fix == "site_dirs_tighten")
+    }
     /// True when FTPS is off and the card should offer to switch it on.
     pub fn can_enable_ftps(&self) -> bool {
         self.items.iter().any(|i| i.fix == "enable_ftps")

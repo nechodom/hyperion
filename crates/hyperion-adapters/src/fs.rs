@@ -64,6 +64,83 @@ pub async fn remove_dir_all(path: &Path) -> Result<(), AdapterError> {
 /// mode, not the link itself).
 ///
 /// Stops at filesystem root.
+/// One entry from [`scan_tree`]: what it is, its mode, its owner, its path.
+#[derive(Debug, Clone)]
+pub struct TreeEntry {
+    /// `find`'s `%y`: `d` directory, `f` regular file, `l` symlink, …
+    pub kind: char,
+    /// Permission bits (octal, from `%m`).
+    pub mode: u32,
+    /// Owning uid (`%U`).
+    pub uid: u32,
+    pub path: String,
+}
+
+/// Walk a site tree once and return type, mode, owner and path for every
+/// entry, so a diagnosis can ask many questions from a single pass.
+///
+/// One walk, not one per question. Each permission check wants a different
+/// predicate over the same entries, and `find … -quit` only short-circuits
+/// on a HIT — so a healthy site (the common case) would pay the full cost of
+/// every separate walk.
+///
+/// Bounded on purpose: depth 3, one filesystem, and the two directories that
+/// are unbounded in practice are pruned. `uploads` and `cache` are pruned by
+/// PATH rather than by name, because a `-name` prune never tests the pruned
+/// directory itself — and the mode of `uploads` is one of the things worth
+/// knowing.
+pub async fn scan_tree(root: &str) -> Result<Vec<TreeEntry>, AdapterError> {
+    if root.is_empty() || root.contains(['\n', '\r', '\0']) {
+        return Err(AdapterError::Other("illegal tree path".into()));
+    }
+    // `-printf` and `-quit` are both GNU findutils; the repo already depends
+    // on `-quit` elsewhere, so this adds no new assumption.
+    let out = crate::cmd::run(
+        "/usr/bin/find",
+        &[
+            root,
+            "-xdev",
+            "-maxdepth",
+            "3",
+            "-path",
+            "*/wp-content/uploads/*",
+            "-prune",
+            "-o",
+            "-path",
+            "*/wp-content/cache/*",
+            "-prune",
+            "-o",
+            "-name",
+            "node_modules",
+            "-prune",
+            "-o",
+            "-name",
+            ".git",
+            "-prune",
+            "-o",
+            "-printf",
+            "%y %m %U %p\n",
+        ],
+    )
+    .await?;
+    Ok(out
+        .lines()
+        .filter_map(|l| {
+            let mut it = l.splitn(4, ' ');
+            let kind = it.next()?.chars().next()?;
+            let mode = u32::from_str_radix(it.next()?, 8).ok()?;
+            let uid = it.next()?.parse().ok()?;
+            let path = it.next()?.to_string();
+            Some(TreeEntry {
+                kind,
+                mode,
+                uid,
+                path,
+            })
+        })
+        .collect())
+}
+
 /// Read-only counterpart to [`ensure_ancestors_traversable`]: is every
 /// directory from `leaf` up to `/` world-traversable?
 ///
@@ -292,5 +369,63 @@ mod tests {
         ensure_dir(&p, 0o750).await.expect("mkdir");
         remove_dir_all(&p).await.expect("remove");
         assert!(!p.exists());
+    }
+}
+
+#[cfg(test)]
+mod scan_tree_tests {
+    /// A symlink's mode is unconditionally 0777 on Linux, and `chmod` cannot
+    /// change it (there is no `lchmod`). A world-writable check that does not
+    /// exclude symlinks therefore reports every Composer `vendor/bin` link as
+    /// a permanent finding behind a button that can never clear it.
+    #[test]
+    fn symlinks_are_excluded_from_the_world_writable_rule() {
+        let world_writable = |kind: char, mode: u32| kind != 'l' && mode & 0o002 != 0;
+        assert!(world_writable('f', 0o666), "a 0666 file is a real finding");
+        assert!(world_writable('d', 0o777), "a 0777 dir is a real finding");
+        assert!(
+            !world_writable('l', 0o777),
+            "a symlink is always 0777 and cannot be chmod-ed — flagging it \
+             would be a finding no repair can clear"
+        );
+    }
+
+    /// Creating an entry inside a directory needs write AND search, so the
+    /// writability test is 0o300, not 0o200. A 0600 plugins directory
+    /// satisfies "owner can write" and still fails every plugin install.
+    #[test]
+    fn directory_writability_needs_write_and_search() {
+        let can_create = |mode: u32| mode & 0o300 == 0o300;
+        assert!(can_create(0o755));
+        assert!(can_create(0o700));
+        assert!(!can_create(0o600), "no search bit — creation still fails");
+        assert!(!can_create(0o500), "no write bit");
+    }
+
+    /// `find -printf '%y %m %U %p'` output must parse, including paths that
+    /// contain spaces — the path is the LAST field for exactly that reason.
+    #[test]
+    fn printf_lines_parse_including_paths_with_spaces() {
+        let parse = |l: &str| {
+            let mut it = l.splitn(4, ' ');
+            let kind = it.next()?.chars().next()?;
+            let mode = u32::from_str_radix(it.next()?, 8).ok()?;
+            let uid: u32 = it.next()?.parse().ok()?;
+            Some((kind, mode, uid, it.next()?.to_string()))
+        };
+        assert_eq!(
+            parse("d 755 1001 /home/u/site/htdocs"),
+            Some(('d', 0o755, 1001, "/home/u/site/htdocs".to_string()))
+        );
+        assert_eq!(
+            parse("f 644 1001 /home/u/site/htdocs/my file.txt"),
+            Some((
+                'f',
+                0o644,
+                1001,
+                "/home/u/site/htdocs/my file.txt".to_string()
+            ))
+        );
+        assert_eq!(parse("garbage"), None);
     }
 }

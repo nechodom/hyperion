@@ -1,0 +1,87 @@
+{# File-permissions self-check. Lazy-loaded over HTMX from the WordPress tab.
+
+   Failures render INSIDE the card via `error` — HTMX does not swap on a
+   non-2xx response, so returning an error status would leave the operator
+   watching a spinner. Confirm attributes go on the <form>, never the
+   <button>: the driver reads them off the submit event's target. #}
+<div class="card" style="margin-bottom:0.9rem">
+  <div class="row" style="align-items:center;gap:0.6rem;margin-bottom:0.5rem">
+    <h2 style="margin:0;font-size:0.95rem">
+      <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+      File permissions
+    </h2>
+    {% if error.is_some() %}<span class="pill err">could not check</span>
+    {% else if report.worst() == "error" %}<span class="pill err">needs attention</span>
+    {% else if report.worst() == "warn" %}<span class="pill warn">warnings</span>
+    {% else %}<span class="pill ok">all good</span>{% endif %}
+    <span class="grow"></span>
+    <button class="btn ghost small" type="button"
+            hx-get="/hostings/{{ selector }}/perm-panel"
+            hx-target="#perm-panel" hx-swap="innerHTML"
+            hx-disabled-elt="this">Re-check</button>
+  </div>
+
+  {% if let Some(e) = error %}
+  <p class="text-soft small" style="margin:0">{{ e }}</p>
+  {% else %}
+
+  <table class="table small" style="margin:0 0 0.6rem">
+    <tbody>
+      {% for it in report.items %}
+      <tr id="perm-{{ it.id }}">
+        <td style="width:1.6rem;vertical-align:top">
+          {% if it.severity == "ok" %}<span style="color:var(--success)">●</span>
+          {% else if it.severity == "error" %}<span style="color:var(--danger)">●</span>
+          {% else if it.severity == "warn" %}<span style="color:var(--warn)">●</span>
+          {% else %}<span class="text-soft">●</span>{% endif %}
+        </td>
+        <td style="vertical-align:top"><strong>{{ it.label }}</strong></td>
+        <td class="text-soft" style="vertical-align:top;word-break:break-word">{{ it.detail }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+
+  <p class="text-soft small" style="margin:0 0 0.6rem">
+    PHP runs as <strong>{{ system_user }}</strong> and writes the site; nginx runs as a
+    different user and only reads it. That is why directories need world-traverse and
+    static files world-read — and why “chmod 750 everything” hardening makes a site 404.
+  </p>
+
+  <div class="row" style="gap:0.5rem;flex-wrap:wrap">
+    {% if report.has_site_repair() %}
+    <form method="post" action="/hostings/wp/perm-repair" style="margin:0"
+          data-confirm-title="Repair file permissions"
+          data-confirm-body="Gives the site user ownership of the whole document tree and sets directories to 0755 and files to 0644 — then re-tightens wp-config.php to 0640. Nothing outside this site is touched, and no service restarts. On a large site this can take a moment."
+          data-confirm-confirm-label="Repair">
+      <input type="hidden" name="_csrf" value="{{ csrf_repair }}">
+      <input type="hidden" name="selector" value="{{ selector }}">
+      <input type="hidden" name="scope" value="tree">
+      <button class="btn primary small" type="submit">Repair permissions</button>
+    </form>
+    {% endif %}
+    {% if report.has_config_fix() %}
+    <form method="post" action="/hostings/wp/perm-repair" style="margin:0"
+          data-confirm-title="Tighten wp-config.php"
+          data-confirm-body="Sets wp-config.php to 0640, so only this site's own user can read the database password. PHP runs as that user, so WordPress is unaffected."
+          data-confirm-confirm-label="Tighten">
+      <input type="hidden" name="_csrf" value="{{ csrf_repair }}">
+      <input type="hidden" name="selector" value="{{ selector }}">
+      <input type="hidden" name="scope" value="wp_config">
+      <button class="btn small" type="submit">Tighten wp-config.php</button>
+    </form>
+    {% endif %}
+    {% if report.has_site_dirs_fix() %}
+    <form method="post" action="/hostings/wp/perm-repair" style="margin:0"
+          data-confirm-title="Tighten logs and sessions"
+          data-confirm-body="Sets this site's logs/ and tmp/ directories to 0750 and gives tmp/ to the site user. tmp/ holds PHP sessions, so leaving it readable lets another local user hijack a logged-in session; logs/ records visitor IP addresses."
+          data-confirm-confirm-label="Tighten">
+      <input type="hidden" name="_csrf" value="{{ csrf_repair }}">
+      <input type="hidden" name="selector" value="{{ selector }}">
+      <input type="hidden" name="scope" value="site_dirs">
+      <button class="btn small" type="submit">Tighten logs &amp; sessions</button>
+    </form>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>
