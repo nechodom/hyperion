@@ -1106,6 +1106,10 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.ftp_repair_node_config().await
     }
 
+    async fn ftp_set_ftps(&self, enabled: bool, require_tls: bool) -> Result<String, RpcError> {
+        self.svc.ftp_set_ftps(enabled, require_tls).await
+    }
+
     // --- web users ---
     async fn web_login(
         &self,

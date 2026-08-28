@@ -5672,7 +5672,55 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             "",
         );
 
-        if !hyperion_adapters::ftp::ftps_enabled().await {
+        // Passive data ports. Reported loudly when TLS is on, because an
+        // encrypted control channel stops the kernel's conntrack helper
+        // reading the PASV reply and opening the port on demand — so an
+        // unopened range means every directory listing hangs AFTER a
+        // successful login, which looks like anything except a firewall.
+        // Hyperion cannot prove a cloud security group is open, so this
+        // states the requirement rather than claiming a verdict.
+        let ftps_on = hyperion_adapters::ftp::ftps_enabled().await;
+        match hyperion_adapters::ftp::passive_range().await {
+            Some((lo, hi)) => push(
+                "pasv_range",
+                "Passive data ports",
+                if ftps_on { "warn" } else { "info" },
+                if ftps_on {
+                    format!(
+                        "vsftpd uses {lo}-{hi}. With FTPS the kernel can no longer open \
+                         these on demand, so {lo}-{hi} MUST be open in every firewall in \
+                         front of this node — including your provider's cloud firewall. \
+                         If logins work but directory listings hang, this is why."
+                    )
+                } else {
+                    format!("vsftpd uses {lo}-{hi}")
+                },
+                "",
+            ),
+            None => push(
+                "pasv_range",
+                "Passive data ports",
+                if ftps_on { "error" } else { "info" },
+                "no passive range is pinned — vsftpd will pick arbitrary high ports, \
+                 which no firewall rule can match"
+                    .into(),
+                "node_config",
+            ),
+        }
+
+        if hyperion_adapters::ftp::ftps_enabled().await {
+            // Reported as OK with its own fix slot, so the card can offer to
+            // turn it back OFF. Without this row the operator who enabled it
+            // has no way back from the UI — and this is the one setting most
+            // likely to need reverting in a hurry.
+            push(
+                "ftps",
+                "FTP over TLS",
+                "ok",
+                "FTPS is enabled — FTP sessions on this node are encrypted".into(),
+                "disable_ftps",
+            );
+        } else {
             // Reported, never auto-enabled: switching FTPS on restarts a
             // daemon every hosting shares and locks out clients that cannot
             // negotiate TLS. The operator decides.
@@ -5681,10 +5729,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 "FTP over TLS",
                 "warn",
                 "FTPS is not enabled — the FTP password crosses the network in \
-                 cleartext, and it is the site's real Linux password. Prefer SFTP \
-                 (port 22) for anything over the public internet."
+                 cleartext, and it is the site's real Linux password. Turn on FTPS \
+                 below, or use SFTP (port 22), which is key-only and already \
+                 encrypted."
                     .into(),
-                "",
+                "enable_ftps",
             );
         }
 
@@ -5930,6 +5979,70 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         self.append_audit("node.ftp.repair_config", None, "{}", "ok")
             .await;
         Ok("vsftpd configuration checked and repaired".into())
+    }
+
+    /// Turn FTPS on or off for this node.
+    ///
+    /// Never called from a tick and never implied by another action: it
+    /// restarts a daemon every site on the node shares, and with
+    /// `require_tls` it locks out any client that cannot negotiate TLS. The
+    /// adapter rolls the config back if vsftpd does not come back up.
+    pub async fn ftp_set_ftps(&self, enabled: bool, require_tls: bool) -> Result<String, RpcError> {
+        let (cert, key) = if enabled {
+            // Prefer this node's real panel certificate — clients then see no
+            // trust prompt at all. Self-signed is the fallback, and still
+            // encrypts, which is the property that matters.
+            let panel = read_cluster_section(self.agent_config_path.as_deref()).panel_hostname;
+            let panel_pair = if panel.is_empty() {
+                None
+            } else {
+                Some((
+                    format!("/etc/hyperion/certs/{panel}/fullchain.pem"),
+                    format!("/etc/hyperion/certs/{panel}/privkey.pem"),
+                ))
+            };
+            let hostname = tokio::process::Command::new("hostname")
+                .arg("-f")
+                .output()
+                .await
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_default();
+            hyperion_adapters::ftp::ensure_ftps_cert(
+                panel_pair.as_ref().map(|(c, k)| (c.as_str(), k.as_str())),
+                &hostname,
+            )
+            .await
+            .map_err(|e| RpcError::Validation {
+                message: format!("FTPS certificate: {e}"),
+            })?
+        } else {
+            (String::new(), String::new())
+        };
+        hyperion_adapters::ftp::set_ftps(enabled, require_tls, &cert, &key)
+            .await
+            .map_err(|e| RpcError::Validation {
+                message: e.to_string(),
+            })?;
+        self.append_audit(
+            "node.ftp.ftps",
+            None,
+            &serde_json::json!({"enabled": enabled, "require_tls": require_tls, "cert": cert})
+                .to_string(),
+            "ok",
+        )
+        .await;
+        Ok(if !enabled {
+            "FTPS switched off".to_string()
+        } else if require_tls {
+            format!(
+                "FTPS is on and REQUIRED — plaintext logins are refused.                  Certificate: {cert}. Passive data ports 40000-50000 must be open                  in the firewall; with TLS the kernel cannot open them on demand."
+            )
+        } else {
+            format!("FTPS is available but not required. Certificate: {cert}")
+        })
     }
 
     /// Background self-heal for the per-hosting half of FTP.
@@ -18001,8 +18114,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
         static ATTEMPTS: AtomicU32 = AtomicU32::new(0);
         static LAST_ALERT: AtomicI64 = AtomicI64::new(0);
+        /// Successful repairs since this agent started. Unlike ATTEMPTS this
+        /// does NOT reset when the filesystem goes healthy — that reset is
+        /// what let a flapping disk repair itself forever without ever
+        /// reaching the stand-down threshold.
+        static REPAIRS_THIS_BOOT: AtomicU32 = AtomicU32::new(0);
         const MAX_ATTEMPTS: u32 = 3;
         const ALERT_EVERY_SECS: i64 = 3600;
+        /// How many silent repairs before the operator is told. One remount
+        /// is worth an audit row; a pattern is worth waking someone.
+        const REPAIRS_BEFORE_ALERT: u32 = 3;
 
         // Cheap detection: /proc/mounts is authoritative and free to read.
         // The kernel's emergency remount lands there as a literal `ro`
@@ -18099,16 +18220,32 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     "ok",
                 )
                 .await;
-                self.notify_admins(
-                    "warning",
-                    "Root filesystem was read-only — repaired automatically",
-                    &format!(
-                        "The rootfs had remounted itself read-only (attempt {attempt} of                          {MAX_ATTEMPTS} this boot) and Hyperion remounted it read-write.                          Services should be working again — but a filesystem only does                          this in response to I/O errors, so treat it as a disk warning:                          check `dmesg` and SMART data soon. After {MAX_ATTEMPTS}                          repeats the watchdog stops and asks for a human."
-                    ),
-                    "/services",
-                    "system.rofs",
-                )
-                .await;
+                // A repair that WORKED is not news. It used to notify every
+                // single time — and it was the one alert path that skipped
+                // the rate limit — so a filesystem that flapped produced a
+                // stream of "repaired automatically" cards describing a
+                // problem that was already over. The audit row above is the
+                // durable record; Services → Read-only rootfs shows the
+                // detail on demand.
+                //
+                // The pattern still gets through. Counting repairs per BOOT,
+                // not per incident, is the part that makes that possible:
+                // ATTEMPTS resets to 0 whenever the filesystem looks healthy,
+                // so a disk failing once an hour was silently repaired
+                // forever and never reached the stand-down threshold.
+                let repairs = REPAIRS_THIS_BOOT.fetch_add(1, Ordering::Relaxed) + 1;
+                if repairs == REPAIRS_BEFORE_ALERT {
+                    self.notify_admins(
+                        "error",
+                        "Root filesystem keeps going read-only",
+                        &format!(
+                            "Hyperion has remounted the rootfs read-write {repairs} times                              since this node booted. Each repair worked, so services are                              running — but a filesystem only does this in response to I/O                              errors, and a repeat means the underlying storage is failing.                              Check `dmesg` and SMART data now; the repairs are buying time,                              not fixing anything."
+                        ),
+                        "/services",
+                        "system.rofs",
+                    )
+                    .await;
+                }
                 true
             }
             Ok(_) => {

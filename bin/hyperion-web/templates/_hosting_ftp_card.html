@@ -57,6 +57,31 @@
               data-confirm-confirm-label="Repair">Fix this site</button>
     </form>
     {% endif %}
+    {% if report.can_enable_ftps() %}
+    <form method="post" action="/hostings/ftp/ftps" style="margin:0">
+      <input type="hidden" name="_csrf" value="{{ csrf_ftps }}">
+      <input type="hidden" name="selector" value="{{ selector }}">
+      <input type="hidden" name="enabled" value="on">
+      <button class="btn small" type="submit"
+              data-confirm-title="Turn on FTPS and require it"
+              data-confirm-variant="danger"
+              data-confirm-body="Encrypts every FTP session on THIS NODE and refuses plaintext logins — the FTP password is the site's real Linux password, so today it crosses the network in the clear. Two consequences: vsftpd restarts (in-flight transfers drop), and any client that cannot do FTPS stops working, including your customers'. Passive ports 40000-50000 must be open in the firewall — with TLS the kernel can no longer open them on demand. If vsftpd fails to start, Hyperion restores the previous config automatically."
+              data-confirm-confirm-label="Turn on and require TLS">Enable FTPS (required)</button>
+    </form>
+    {% endif %}
+    {% if report.can_disable_ftps() %}
+    <form method="post" action="/hostings/ftp/ftps" style="margin:0">
+      <input type="hidden" name="_csrf" value="{{ csrf_ftps }}">
+      <input type="hidden" name="selector" value="{{ selector }}">
+      {# No `enabled` field at all — checkbox_on treats a missing value as
+         false, which is what turns FTPS off. #}
+      <button class="btn small" type="submit"
+              data-confirm-title="Turn FTPS off"
+              data-confirm-variant="danger"
+              data-confirm-body="FTP sessions on this node go back to plaintext — the password is the site's real Linux password, so it will cross the network in the clear again. vsftpd restarts. Do this only to recover from a client that cannot connect."
+              data-confirm-confirm-label="Turn off">Disable FTPS</button>
+    </form>
+    {% endif %}
     {% if report.has_node_repair() %}
     <form method="post" action="/hostings/ftp/repair-node" style="margin:0">
       <input type="hidden" name="_csrf" value="{{ csrf_repair_node }}">

@@ -670,6 +670,10 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::hostings::post_ftp_repair_node),
         )
         .route(
+            "/hostings/ftp/ftps",
+            post(handlers::hostings::post_ftp_ftps),
+        )
+        .route(
             "/hostings/:selector/traffic-panel",
             get(handlers::hostings::get_traffic_panel),
         )

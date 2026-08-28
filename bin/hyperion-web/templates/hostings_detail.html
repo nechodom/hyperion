@@ -2739,14 +2739,24 @@
             <span class="copy-value">{{ pw }}</span>
             <span class="copy-hint">click to copy</span>
           </div>
+          {# Port and TLS state are node facts this render does not have, and
+             fetching them here would add an RPC to every detail page load.
+             The FTP self-check card at the top of this tab reports both
+             accurately — so state the default and point there, rather than
+             asserting "FTPS (explicit TLS)" on a node where FTPS is off,
+             which makes a customer configure "require TLS" and get an
+             immediate failure that reads like a wrong password. #}
           <div class="copy-field" data-copy="21" title="Copy the port">
             <span class="copy-label">Port</span>
-            <span class="copy-value">21 <span class="muted" style="font-family:inherit">· FTPS (explicit TLS)</span></span>
+            <span class="copy-value">21 <span class="muted" style="font-family:inherit">· default</span></span>
             <span class="copy-hint">click to copy</span>
           </div>
         </div>
         <div class="muted" style="font-size:0.82rem">
           Lands in <code>{{ detail.domain }}/htdocs</code> — the writable web root.
+          The check above shows this node's real port and whether FTPS is on;
+          without FTPS the password crosses the network in cleartext, so prefer
+          SFTP for anything over the public internet.
         </div>
       </div>
     </div>
