@@ -2978,10 +2978,17 @@
             {% endif %}
           </td>
           <td>
-            {% if a.has_password %}
+            {# Four states, not two. "locked" is what suspending a site does,
+               and calling that "disabled" told the operator FTP had been
+               switched off when the site itself was. #}
+            {% if a.password_state == "set" %}
               <span class="pill ok">password set</span>
+            {% else if a.password_state == "locked" %}
+              <span class="pill warn" title="Locked — this is what suspending a hosting does">locked</span>
+            {% else if a.password_state == "empty" %}
+              <span class="pill warn" title="Empty password field, left by a pre-0.37 disable. Set a password or disable FTP again to replace it.">empty</span>
             {% else %}
-              <span class="pill">disabled</span>
+              <span class="pill">FTP off</span>
             {% endif %}
           </td>
           {# Per-account actions. Each acts on the account's OWN hosting, not
@@ -3004,7 +3011,7 @@
                 <input type="hidden" name="new_password" value="">
                 <button class="btn small" type="submit">New password</button>
               </form>
-              {% if a.has_password %}
+              {% if a.password_state == "set" %}
               <form method="post" action="/hostings/ftp/disable" style="display:inline"
                     data-confirm-title="Delete this FTP account"
                     data-confirm-body="FTP access for {{ a.user }} ({{ a.domain }}) is revoked and the password cleared. The system user and every file on disk are left alone — the site keeps serving."

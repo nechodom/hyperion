@@ -1930,7 +1930,11 @@ pub async fn get_detail(
     let ftp_login_ok: Option<bool> = ftp_accounts
         .iter()
         .find(|a| a.user == detail.system_user)
-        .map(|a| a.has_password);
+        // Only a real password counts as "FTP works". Locked (which is what
+        // suspending does) and empty are both "no usable login", and the
+        // button that reads this says "Change the password" vs "Set a
+        // password".
+        .map(|a| a.password_state == "set");
     let (monitor_config, monitor_history) = monitor_pair;
 
     let applied_profile_name = profile_apply
@@ -8588,6 +8592,9 @@ async fn run_bulk_job(
 #[derive(Deserialize)]
 pub struct WpPluginActionForm {
     pub selector: String,
+    /// Install without activating. Off by default.
+    #[serde(default)]
+    pub install_only: Option<String>,
     #[serde(default)]
     pub slug: String,
     pub action: String,
@@ -10192,7 +10199,13 @@ pub async fn post_wp_plugin_action(
                     "plugin install requires a source (slug or https URL)".into(),
                 ));
             }
-            hyperion_types::WpPluginAction::Install { source }
+            // Activate by default — the buttons that reach here all say
+            // "install & activate". `install_only=1` opts out, for putting a
+            // plugin in place without loading its code.
+            hyperion_types::WpPluginAction::Install {
+                source,
+                activate: !checkbox_on(&form.install_only),
+            }
         }
         "activate" => hyperion_types::WpPluginAction::Activate,
         "deactivate" => hyperion_types::WpPluginAction::Deactivate,
@@ -10213,7 +10226,7 @@ pub async fn post_wp_plugin_action(
     // gets the slug from `source`). For everything else it MUST validate.
     let slug = match &action {
         hyperion_types::WpPluginAction::UpdateAll => String::new(),
-        hyperion_types::WpPluginAction::Install { source } => source.clone(),
+        hyperion_types::WpPluginAction::Install { source, .. } => source.clone(),
         _ => {
             let s = form.slug.trim().to_string();
             if s.is_empty() {

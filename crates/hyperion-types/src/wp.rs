@@ -8,6 +8,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::HostingId;
 
+/// serde default for a boolean field that should be on unless said otherwise.
+fn default_true() -> bool {
+    true
+}
+
 /// Operator-supplied options for `wp core install`.
 ///
 /// All strings are validated at the boundary (`hyperion-validate`) before
@@ -341,7 +346,18 @@ pub struct HostingIntegritySummary {
 pub enum WpPluginAction {
     /// `wp plugin install <slug> --activate`. Pulls from wordpress.org
     /// or a public URL if `source` starts with http(s)://.
-    Install { source: String },
+    /// `wp plugin install <source>`, optionally `--activate`.
+    ///
+    /// `activate` is a field rather than always-on because the two are
+    /// separate operations under one exit code: a plugin that installs
+    /// cleanly and then fatals on load was reported as an INSTALL failure,
+    /// sending the operator to look at downloads and permissions instead of
+    /// at the plugin. Defaults to true, matching what the button says.
+    Install {
+        source: String,
+        #[serde(default = "default_true")]
+        activate: bool,
+    },
     /// `wp plugin activate <slug>`.
     Activate,
     /// `wp plugin deactivate <slug>`.

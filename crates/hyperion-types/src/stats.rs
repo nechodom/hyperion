@@ -1058,7 +1058,11 @@ pub struct FtpAccountSummary {
     pub domain: String,
     /// True when /etc/shadow has a real bcrypt/sha-512 hash for
     /// this user. False = locked or no-password.
-    pub has_password: bool,
+    /// `set` | `locked` | `off` | `empty`. Was a bare `has_password: bool`
+    /// that the producer hardcoded to `true`, because the list it was built
+    /// from had already filtered out everything else — so the UI could never
+    /// show a site whose FTP is deliberately switched off.
+    pub password_state: String,
     /// Hosting state for context — "active" / "suspended" / etc.
     /// Empty when the user doesn't map to a hosting row.
     pub hosting_state: String,

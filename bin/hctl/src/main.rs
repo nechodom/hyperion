@@ -695,7 +695,7 @@ fn print_pretty(resp: &Response) {
                     a.user,
                     a.domain,
                     a.hosting_state,
-                    if a.has_password { "set" } else { "disabled" }
+                    a.password_state.as_str()
                 );
             }
         }

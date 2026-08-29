@@ -977,6 +977,48 @@ async fn rollback_vsftpd(previous: &str) -> Result<(), String> {
 /// Read in one shot from /etc/shadow — root only, agent runs as
 /// root. Operators with empty/locked shadow rows are excluded so
 /// the result equals "operators who CAN log in via vsftpd".
+/// Every local account and its password state, as `(user, state)`.
+///
+/// Replaces the "only users WITH a password" list, which made two things
+/// impossible: telling a site whose FTP is deliberately OFF from one that
+/// has none (a locked account simply vanished from the result), and saying
+/// so in the UI — the template's "no password" branch was unreachable.
+///
+/// Returns EVERY account, including root and human operators. The caller is
+/// responsible for keeping those out of anything it shows; see
+/// `ftp_accounts_list`, which joins against the hostings table for exactly
+/// that reason.
+pub async fn account_password_states() -> Result<Vec<(String, String)>, AdapterError> {
+    let raw = tokio::fs::read_to_string("/etc/shadow")
+        .await
+        .map_err(|e| {
+            AdapterError::Other(format!("read /etc/shadow: {e} (agent must run as root)"))
+        })?;
+    let mut out = Vec::new();
+    for line in raw.lines() {
+        let mut it = line.splitn(3, ':');
+        let (Some(user), Some(hash)) = (it.next(), it.next()) else {
+            continue;
+        };
+        if user.is_empty() {
+            continue;
+        }
+        // Never carries the hash itself out of this function — the caller
+        // renders this into a web page.
+        let state = if hash.is_empty() {
+            "empty"
+        } else if hash.starts_with('!') {
+            "locked"
+        } else if hash.starts_with('*') {
+            "off"
+        } else {
+            "set"
+        };
+        out.push((user.to_string(), state.to_string()));
+    }
+    Ok(out)
+}
+
 pub async fn list_users_with_password() -> Result<Vec<String>, AdapterError> {
     let raw = match tokio::fs::read_to_string("/etc/shadow").await {
         Ok(s) => s,
