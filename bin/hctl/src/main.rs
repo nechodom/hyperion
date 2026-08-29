@@ -1521,7 +1521,9 @@ fn print_pretty(resp: &Response) {
         Response::FtpRepairSite(m)
         | Response::FtpRepairNodeConfig(m)
         | Response::FtpSetFtps(m)
-        | Response::WpPermRepair(m) => {
+        | Response::WpPermRepair(m)
+        | Response::WpCoreRepair(m)
+        | Response::WpReinstall(m) => {
             println!("{m}");
         }
         Response::WpPermCheck(r) => {

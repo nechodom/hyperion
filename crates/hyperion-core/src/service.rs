@@ -5981,6 +5981,164 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok("vsftpd configuration checked and repaired".into())
     }
 
+    /// Replace WordPress core files, keeping wp-content, wp-config.php and
+    /// the database. Non-destructive by construction.
+    pub async fn wp_core_repair(&self, sel: HostingSelector) -> Result<String, RpcError> {
+        let detail = self.get(sel).await?;
+        let (user, root) = (detail.system_user.clone(), detail.root_dir.clone());
+        if user.is_empty() || root.is_empty() {
+            return Err(RpcError::Validation {
+                message: "this hosting has no system user or document root".into(),
+            });
+        }
+        // Repair to the version that is already installed, not to `latest`:
+        // silently upgrading a site during what the operator asked to be a
+        // REPAIR is a different operation with different consequences.
+        let version = detect_wp_install_on_disk(&root)
+            .await
+            .unwrap_or_else(|| "latest".into());
+        let out = hyperion_adapters::wpcli::core_repair(&user, &root, &version)
+            .await
+            .map_err(|e| RpcError::Validation {
+                message: e.to_string(),
+            })?;
+        self.append_audit(
+            "hosting.wp.core_repair",
+            Some(detail.id.as_str()),
+            &serde_json::json!({"version": version}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(format!(
+            "WordPress {version} core files replaced. wp-content, wp-config.php and the \
+             database were not touched.{}",
+            if out.trim().is_empty() {
+                String::new()
+            } else {
+                format!(" ({})", out.trim())
+            }
+        ))
+    }
+
+    /// Wipe the site and install WordPress fresh.
+    ///
+    /// DESTRUCTIVE: the document tree and every table in the site's database
+    /// are removed. The caller is expected to have taken a backup — the web
+    /// layer orchestrates that and refuses to reach this call when the
+    /// backup did not succeed, because a failed backup followed by a wipe is
+    /// the single worst outcome this feature can produce.
+    ///
+    /// `confirm_domain` is checked HERE as well as in the browser. The
+    /// type-to-confirm dialog is a UX guard against a misclick; it is not a
+    /// control, because a POST can skip it entirely.
+    pub async fn wp_reinstall(
+        &self,
+        sel: HostingSelector,
+        req: hyperion_types::WpInstallRequest,
+        confirm_domain: String,
+    ) -> Result<String, RpcError> {
+        let detail = self.get(sel.clone()).await?;
+        if confirm_domain.trim().to_ascii_lowercase() != detail.domain.to_ascii_lowercase() {
+            return Err(RpcError::Validation {
+                message: format!(
+                    "confirmation does not match: type {} exactly to reinstall it",
+                    detail.domain
+                ),
+            });
+        }
+        let (user, root) = (detail.system_user.clone(), detail.root_dir.clone());
+        if user.is_empty() || root.is_empty() {
+            return Err(RpcError::Validation {
+                message: "this hosting has no system user or document root".into(),
+            });
+        }
+        let db_row = databases::get_for_hosting(&self.pool, &detail.id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("db lookup: {e}")))?
+            .ok_or(RpcError::Conflict {
+                message: format!(
+                    "hosting {} has no database — WordPress needs MariaDB",
+                    detail.domain
+                ),
+            })?;
+        if db_row.engine != DbProvision::MariaDB {
+            return Err(RpcError::Conflict {
+                message: format!(
+                    "WordPress requires MariaDB; hosting {} uses {:?}",
+                    detail.domain, db_row.engine
+                ),
+            });
+        }
+        #[derive(serde::Deserialize)]
+        struct StoredDbCred {
+            password: String,
+        }
+        let stored: StoredDbCred = self
+            .secrets
+            .get(&db_row.secret_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("secret read: {e}")))?;
+
+        // 1. Drop the tables FIRST, while wp-config.php still exists — that
+        //    file is where the credentials are. Doing it after the wipe
+        //    would leave the old tables in place, and `wp core install`
+        //    refuses when WordPress is already installed.
+        if let Err(e) = hyperion_adapters::wpcli::db_reset(&user, &root).await {
+            return Err(RpcError::Validation {
+                message: format!(
+                    "could not reset the database ({e}). Nothing has been deleted. This \
+                     usually means wp-config.php is missing or its credentials are wrong \
+                     — fix that first, or the fresh install would fail with the old \
+                     tables still in place."
+                ),
+            });
+        }
+
+        // 2. Now the files.
+        hyperion_adapters::wpcli::wipe_site_tree(&user, &root)
+            .await
+            .map_err(|e| RpcError::ProvisioningFailed {
+                stage: "wipe_site_tree".into(),
+                reason: format!(
+                    "{e}. The DATABASE HAS ALREADY BEEN RESET, so this site is now empty \
+                     either way — restore the backup, or finish the reinstall."
+                ),
+            })?;
+
+        // 3. Fresh install, using the hosting's existing database.
+        self.adapters
+            .wp_install_run(
+                &user,
+                &root,
+                &db_row.db_name,
+                &db_row.db_user,
+                &stored.password,
+                "localhost",
+                &req,
+            )
+            .await
+            .map_err(|e| RpcError::ProvisioningFailed {
+                stage: "wp_install".into(),
+                reason: format!(
+                    "{e}. The site's files and database were already cleared, so it is \
+                     empty — restore the backup, or retry the reinstall."
+                ),
+            })?;
+
+        self.append_audit(
+            "hosting.wp.reinstall",
+            Some(detail.id.as_str()),
+            &serde_json::json!({"domain": detail.domain, "version": req.version}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(format!(
+            "{} was reinstalled. Everything that was on it is gone — restore a backup if \
+             that was not what you wanted.",
+            detail.domain
+        ))
+    }
+
     // ── WordPress permissions self-check ──────────────────────────────────
     //
     // Runs on the OWNING node: modes, uids and the nginx user are all

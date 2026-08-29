@@ -1375,6 +1375,20 @@ pub enum Request {
         sel: HostingSelector,
         scope: String,
     },
+    /// Replace WordPress core files, keeping wp-content, wp-config.php and
+    /// the database. Non-destructive.
+    WpCoreRepair {
+        sel: HostingSelector,
+    },
+    /// DESTRUCTIVE. Wipe the document tree and every table in the site's
+    /// database, then install WordPress fresh. `confirm_domain` is verified
+    /// again on the node — the browser dialog guards against a misclick, it
+    /// is not a control.
+    WpReinstall {
+        sel: HostingSelector,
+        req: hyperion_types::WpInstallRequest,
+        confirm_domain: String,
+    },
     /// Turn FTPS on or off for the whole node. `require_tls` refuses
     /// plaintext logins — the setting that actually protects the password,
     /// and the one that locks out clients which cannot negotiate TLS.
@@ -1993,6 +2007,8 @@ pub enum Response {
     FtpRepairNodeConfig(String),
     WpPermCheck(hyperion_types::FtpCheckReport),
     WpPermRepair(String),
+    WpCoreRepair(String),
+    WpReinstall(String),
     FtpSetFtps(String),
     DkimStatus(hyperion_types::DkimStatus),
     DkimEnable(hyperion_types::DkimStatus),
