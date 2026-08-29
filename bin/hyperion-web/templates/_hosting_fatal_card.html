@@ -94,6 +94,50 @@
     {% endif %}
   {% endif %}
 
+  {# The object-cache drop-in gets its own block because it is not a plugin.
+     WordPress loads wp-content/object-cache.php before plugins and whether or
+     not its plugin is installed — so when Redis stops answering, the site
+     fatals on every request INCLUDING wp-cli's bootstrap. That is why
+     deactivating the plugin fails, deleting it fails, and even deleting its
+     folder by hand does nothing: the drop-in is a separate file. #}
+  {% if report.object_cache_dropin %}
+  <div style="margin-top:0.8rem;padding:0.7rem;border:1px solid var(--warn);border-radius:var(--radius-xs)">
+    <strong style="font-size:0.9rem">Redis object-cache drop-in is active</strong>
+    <p class="text-soft small" style="margin:0.3rem 0 0.6rem;line-height:1.5">
+      <code>wp-content/object-cache.php</code> is loaded before plugins and
+      independently of whether the Redis plugin is active — or still installed.
+      If Redis is unreachable this alone takes the site down, and it is why
+      deactivating or deleting the plugin does not help. Parking it makes
+      WordPress fall back to its database cache.
+    </p>
+    <form method="post" action="/hostings/wp/dropin" style="margin:0"
+          data-confirm-title="Park the Redis drop-in"
+          data-confirm-body="Renames wp-content/object-cache.php to object-cache.php.hyperion-disabled. WordPress falls back to its database cache — slower, but the site loads. Nothing is deleted; you can put it back from here."
+          data-confirm-confirm-label="Park it">
+      <input type="hidden" name="_csrf" value="{{ csrf_dropin }}">
+      <input type="hidden" name="selector" value="{{ selector }}">
+      <button class="btn small primary" type="submit">Park object-cache.php</button>
+    </form>
+  </div>
+  {% else if report.object_cache_parked %}
+  <div style="margin-top:0.8rem;padding:0.7rem;border:1px solid var(--border);border-radius:var(--radius-xs)">
+    <strong style="font-size:0.9rem">Redis drop-in is parked</strong>
+    <p class="text-soft small" style="margin:0.3rem 0 0.6rem;line-height:1.5">
+      WordPress is using its database cache. Put the drop-in back once Redis
+      answers again — if it still does not, the site will fatal immediately.
+    </p>
+    <form method="post" action="/hostings/wp/dropin" style="margin:0"
+          data-confirm-title="Restore the Redis drop-in"
+          data-confirm-body="Puts wp-content/object-cache.php back. If Redis is still unreachable the site fatals again on the next request."
+          data-confirm-confirm-label="Restore">
+      <input type="hidden" name="_csrf" value="{{ csrf_dropin }}">
+      <input type="hidden" name="selector" value="{{ selector }}">
+      <input type="hidden" name="enabled" value="on">
+      <button class="btn small" type="submit">Restore object-cache.php</button>
+    </form>
+  </div>
+  {% endif %}
+
   {% if !report.parked_plugins.is_empty() %}
   <div style="margin-top:0.8rem;padding-top:0.7rem;border-top:1px solid var(--border)">
     <strong style="font-size:0.9rem">Disabled by emergency rename</strong>

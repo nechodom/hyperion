@@ -1386,6 +1386,17 @@ impl AdapterPort for RealAdapter {
             "+ping",
             "+select",
             "+client|setname",
+            // INFO lives in @dangerous, so -@dangerous took it away — but the
+            // Redis Object Cache plugin calls it on every page load to prove
+            // the connection is alive. The result was that enabling Redis
+            // broke the site with "NOPERM … has no permissions to run the
+            // 'info' command", and the plugin could not even be DEACTIVATED
+            // through wp-cli, because its drop-in runs first and fails there
+            // too.
+            //
+            // Read-only and server-scoped: it exposes version, memory and
+            // connection counts, not another tenant's keys.
+            "+info",
             &pw_arg,
         ];
         hyperion_adapters::cmd::run("/usr/bin/redis-cli", &cmd_args).await?;

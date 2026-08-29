@@ -520,6 +520,21 @@ pub struct WpFatalReport {
     /// Capped server-side; never contains the full trace.
     #[serde(default)]
     pub error_excerpt: String,
+    /// True when `wp-content/object-cache.php` is present.
+    ///
+    /// Reported separately from any plugin because it is a DROP-IN:
+    /// WordPress loads it before plugins and regardless of whether its
+    /// plugin is active or even still installed. When Redis stops answering
+    /// it fatals every request including wp-cli's bootstrap, which is what
+    /// makes the plugin impossible to deactivate or delete — the operator
+    /// needs to move THIS file, and no amount of work on the plugin folder
+    /// will do it.
+    #[serde(default)]
+    pub object_cache_dropin: bool,
+    /// True when a parked `object-cache.php.hyperion-disabled` is waiting to
+    /// be put back.
+    #[serde(default)]
+    pub object_cache_parked: bool,
     /// Plugins currently parked as `<slug>-old` by the emergency disable —
     /// each restorable with one click once the site is back.
     #[serde(default)]

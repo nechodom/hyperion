@@ -727,6 +727,7 @@ pub trait AgentApi: Send + Sync + 'static {
     async fn wp_perm_repair(&self, sel: HostingSelector, scope: String)
         -> Result<String, RpcError>;
     async fn wp_core_repair(&self, sel: HostingSelector) -> Result<String, RpcError>;
+    async fn wp_dropin_set(&self, sel: HostingSelector, enabled: bool) -> Result<String, RpcError>;
     async fn wp_reinstall(
         &self,
         sel: HostingSelector,

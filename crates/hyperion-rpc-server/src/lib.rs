@@ -1392,6 +1392,10 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(m) => Response::WpCoreRepair(m),
             Err(e) => Response::Error(e),
         },
+        Request::WpDropinSet { sel, enabled } => match api.wp_dropin_set(sel, enabled).await {
+            Ok(m) => Response::WpDropinSet(m),
+            Err(e) => Response::Error(e),
+        },
         Request::WpReinstall {
             sel,
             req,
@@ -2773,6 +2777,9 @@ mod tests {
             Ok(String::new())
         }
         async fn wp_core_repair(&self, _: HostingSelector) -> Result<String, RpcError> {
+            Ok(String::new())
+        }
+        async fn wp_dropin_set(&self, _: HostingSelector, _: bool) -> Result<String, RpcError> {
             Ok(String::new())
         }
         async fn wp_reinstall(

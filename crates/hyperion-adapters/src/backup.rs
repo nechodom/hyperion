@@ -53,19 +53,70 @@ pub async fn make_archive(
     // can't be reinterpreted as a tar flag (tar's --use-compress-program /
     // --to-command / --checkpoint-action=exec would be RCE as root). Callers
     // pass the literal "htdocs" today; this keeps it safe for future callers.
-    cmd::run(
-        "/usr/bin/tar",
-        &[
+    // NOT cmd::run: that treats any non-zero exit as failure, and tar's exit
+    // codes are not a simple success/failure pair.
+    //
+    //   0 — everything archived
+    //   1 — "some files differ": a file changed or vanished WHILE being read.
+    //       The archive is complete and restorable; the affected file just
+    //       holds its pre-change contents.
+    //   2 — fatal.
+    //
+    // On a live WordPress site the tar takes minutes once the tree is large,
+    // and in minutes something always changes — a page cache, a session file,
+    // a log. So exit 1 is the NORMAL outcome for a big site and the abnormal
+    // one for a small one, which is exactly why backups "started failing when
+    // the site got big". Treating it as failure threw away a perfectly good
+    // archive and told the operator their backup was broken.
+    let out = tokio::process::Command::new("/usr/bin/tar")
+        .args([
             "-czf",
             &archive_str,
             "-C",
             &source_root_str,
             "--",
             source_subdir,
-        ],
-    )
-    .await?;
+        ])
+        .output()
+        .await?;
+    let code = out.status.code().unwrap_or(-1);
+    if code != 0 && code != 1 {
+        return Err(AdapterError::Command {
+            cmd: format!("tar -czf {archive_str}"),
+            code,
+            stderr_tail: String::from_utf8_lossy(&out.stderr).into_owned(),
+        });
+    }
+    if code == 1 {
+        // Accepted on the exit CODE, not on the message text.
+        //
+        // GNU tar's contract is explicit: 1 means "some files differ" — the
+        // archive was written completely, some members just do not match
+        // what was on disk by the end. 2 is the fatal code that aborts the
+        // archive. Matching on wording instead looked safer and was not: the
+        // first version of this listed "changed as we read it" and friends,
+        // and CI immediately produced a case it did not cover — "File shrank
+        // by 7701504 bytes; padding with zeros". There is no closed set of
+        // sentences to match, and every one missed turns a good backup into
+        // a reported failure. The exit code is the interface.
+        tracing::info!(
+            archive = %archive_str,
+            detail = %String::from_utf8_lossy(&out.stderr)
+                .lines()
+                .take(3)
+                .collect::<Vec<_>>()
+                .join("; "),
+            "tar reported changed files during the archive — expected on a live site; \
+             the archive is complete"
+        );
+    }
     let meta = tokio::fs::metadata(archive_path).await?;
+    // A zero-length archive is a failure whatever tar said.
+    if meta.len() == 0 {
+        return Err(AdapterError::Other(format!(
+            "tar produced an empty archive at {archive_str}"
+        )));
+    }
     Ok(meta.len())
 }
 
@@ -76,9 +127,14 @@ pub async fn dump_mariadb(db_name: &str, path: &Path) -> Result<u64, AdapterErro
             tokio::fs::create_dir_all(parent).await?;
         }
     }
-    // mariadb-dump writes to stdout; capture it as a file.
-    let out = tokio::process::Command::new("/usr/bin/mariadb-dump")
-        .args([
+    // Streamed straight into the file. `.output()` would collect the WHOLE
+    // dump in memory first — for a large site that is gigabytes of RSS in one
+    // spike, which on a modest VPS is an OOM kill dressed up as "the backup
+    // failed". stderr is still captured, because it is small and it is the
+    // only thing worth reporting.
+    dump_to_file(
+        "/usr/bin/mariadb-dump",
+        &[
             "--single-transaction",
             "--routines",
             "--triggers",
@@ -86,19 +142,63 @@ pub async fn dump_mariadb(db_name: &str, path: &Path) -> Result<u64, AdapterErro
             // `--` so a db name beginning with `-` can't become a client option.
             "--",
             db_name,
-        ])
-        .output()
-        .await?;
+        ],
+        path,
+        &format!("mariadb-dump {db_name}"),
+    )
+    .await
+}
+
+/// Run `program` with its stdout going DIRECTLY to `path`, never through a
+/// buffer in this process.
+async fn dump_to_file(
+    program: &str,
+    args: &[&str],
+    path: &Path,
+    label: &str,
+) -> Result<u64, AdapterError> {
+    let file = std::fs::File::create(path)?;
+    // `.spawn()` + `wait_with_output()`, NOT `.output()`. `.output()`
+    // overrides stdout with a pipe of its own — so it silently undoes the
+    // redirection and buffers the whole dump in memory anyway, which is the
+    // exact thing being fixed here.
+    let child = tokio::process::Command::new(program)
+        .args(args)
+        .stdout(std::process::Stdio::from(file))
+        .stderr(std::process::Stdio::piped())
+        .spawn();
+    let child = match child {
+        Ok(c) => c,
+        Err(e) => {
+            // File::create already made the file; do not leave an empty one
+            // behind to be mistaken for a real dump.
+            let _ = tokio::fs::remove_file(path).await;
+            return Err(e.into());
+        }
+    };
+    let out = match child.wait_with_output().await {
+        Ok(o) => o,
+        Err(e) => {
+            let _ = tokio::fs::remove_file(path).await;
+            return Err(e.into());
+        }
+    };
     if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+        // Leave no half-written dump behind to be mistaken for a good one.
+        let _ = tokio::fs::remove_file(path).await;
         return Err(AdapterError::Command {
-            cmd: format!("mariadb-dump {db_name}"),
+            cmd: label.to_string(),
             code: out.status.code().unwrap_or(-1),
-            stderr_tail: stderr,
+            stderr_tail: String::from_utf8_lossy(&out.stderr).into_owned(),
         });
     }
-    tokio::fs::write(path, &out.stdout).await?;
     let meta = tokio::fs::metadata(path).await?;
+    if meta.len() == 0 {
+        let _ = tokio::fs::remove_file(path).await;
+        return Err(AdapterError::Other(format!(
+            "{label} produced an empty dump"
+        )));
+    }
     Ok(meta.len())
 }
 
@@ -109,21 +209,14 @@ pub async fn dump_postgres(db_name: &str, path: &Path) -> Result<u64, AdapterErr
             tokio::fs::create_dir_all(parent).await?;
         }
     }
-    let out = tokio::process::Command::new("/usr/bin/sudo")
-        .args(["-u", "postgres", "/usr/bin/pg_dump", "-Fc", db_name])
-        .output()
-        .await?;
-    if !out.status.success() {
-        let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
-        return Err(AdapterError::Command {
-            cmd: format!("pg_dump {db_name}"),
-            code: out.status.code().unwrap_or(-1),
-            stderr_tail: stderr,
-        });
-    }
-    tokio::fs::write(path, &out.stdout).await?;
-    let meta = tokio::fs::metadata(path).await?;
-    Ok(meta.len())
+    // Streamed, for the same reason as the MariaDB dump.
+    dump_to_file(
+        "/usr/bin/sudo",
+        &["-u", "postgres", "/usr/bin/pg_dump", "-Fc", db_name],
+        path,
+        &format!("pg_dump {db_name}"),
+    )
+    .await
 }
 
 /// Write the manifest JSON.
@@ -923,5 +1016,102 @@ mod tests {
             !target.join("evil").exists(),
             "escaping symlink should not have been created"
         );
+    }
+}
+
+#[cfg(test)]
+mod large_backup_tests {
+    use super::*;
+
+    /// tar exits 1 for "some files differ" — a file changed or vanished while
+    /// being read. The archive is complete and restorable.
+    ///
+    /// This is the NORMAL outcome on a live site big enough that the tar
+    /// takes minutes, because in minutes something always changes: a page
+    /// cache, a session, a log. Treating it as failure is why backups
+    /// "started failing when the site got big" while small sites were fine.
+    #[tokio::test]
+    async fn a_file_changing_mid_archive_still_produces_a_backup() {
+        let d = tempfile::tempdir().expect("tmp");
+        let src = d.path().join("site");
+        std::fs::create_dir_all(src.join("htdocs")).expect("mk");
+        // A file big enough that tar is still reading it when we truncate.
+        std::fs::write(src.join("htdocs/big.bin"), vec![b'x'; 8 * 1024 * 1024]).expect("w");
+        for i in 0..50 {
+            std::fs::write(src.join(format!("htdocs/f{i}.txt")), "hello").expect("w");
+        }
+        let archive = d.path().join("out.tar.gz");
+
+        let changer = {
+            let p = src.join("htdocs/big.bin");
+            std::thread::spawn(move || {
+                // Rewrite it repeatedly while tar runs.
+                for _ in 0..40 {
+                    let _ = std::fs::write(&p, vec![b'y'; 8 * 1024 * 1024]);
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+            })
+        };
+        let res = make_archive(&src, "htdocs", &archive).await;
+        let _ = changer.join();
+
+        // Either tar won the race (exit 0) or it saw the change (exit 1 —
+        // "file changed", "File shrank by …", any of the wordings GNU tar
+        // uses). All must produce a usable archive, never an error.
+        let size = res.expect("a changed file must not fail the backup");
+        assert!(size > 0, "archive is empty");
+        assert!(archive.exists());
+    }
+
+    /// A genuinely fatal tar (exit >= 2) must still be an error — the
+    /// tolerance above must not swallow a real failure.
+    ///
+    /// Linux-only, and that is the point: the tolerance is written against
+    /// GNU tar's exit-code contract (1 = some files differ, 2 = fatal), which
+    /// is what ships on the Debian nodes. bsdtar on a macOS dev box returns 1
+    /// where GNU returns 2, so running this there would assert a contract
+    /// that is not the one in production.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_missing_source_is_still_an_error() {
+        let d = tempfile::tempdir().expect("tmp");
+        let archive = d.path().join("out.tar.gz");
+        let err = make_archive(d.path(), "does-not-exist", &archive).await;
+        assert!(
+            err.is_err(),
+            "tar failing to find its source must not be reported as a good backup"
+        );
+    }
+
+    /// The dumps must never be buffered in this process: `.output()` on a
+    /// multi-gigabyte dump is an OOM kill reported as "the backup failed".
+    #[tokio::test]
+    async fn dumps_stream_to_disk_without_buffering() {
+        let d = tempfile::tempdir().expect("tmp");
+        let out = d.path().join("dump.sql");
+        // 16 MiB through the pipe. The assertion that matters is not the
+        // size — it is that the bytes land in the file without this process
+        // collecting them.
+        let n = dump_to_file(
+            "/usr/bin/env",
+            &["dd", "if=/dev/zero", "bs=1048576", "count=16"],
+            &out,
+            "dd",
+        )
+        .await
+        .expect("stream");
+        assert_eq!(n, 16 * 1024 * 1024);
+        assert_eq!(std::fs::metadata(&out).expect("stat").len(), n);
+    }
+
+    /// A failed dump must not leave a half-written file that a later restore
+    /// would treat as a real one.
+    #[tokio::test]
+    async fn a_failed_dump_leaves_no_file_behind() {
+        let d = tempfile::tempdir().expect("tmp");
+        let out = d.path().join("dump.sql");
+        let err = dump_to_file("/usr/bin/env", &["false"], &out, "false").await;
+        assert!(err.is_err());
+        assert!(!out.exists(), "a failed dump must not leave a file");
     }
 }

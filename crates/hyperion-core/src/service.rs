@@ -4113,6 +4113,37 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         }
 
         if !enabled {
+            // Park the DROP-IN first, before anything else is taken away.
+            //
+            // `wp-content/object-cache.php` is installed by the Redis Object
+            // Cache plugin and is loaded by WordPress before plugins,
+            // regardless of whether that plugin is active or even still on
+            // disk. Removing the credentials while it is still there leaves a
+            // drop-in that cannot connect — so every request fatals,
+            // INCLUDING wp-cli's own bootstrap. That is the deadlock: the
+            // plugin cannot be deactivated or deleted, because doing either
+            // needs a WordPress that boots.
+            //
+            // First, and best-effort: if this fails the site keeps working,
+            // whereas doing it last would mean an error here leaves the site
+            // down.
+            match hyperion_adapters::wpcli::set_object_cache_dropin(
+                &detail.system_user,
+                &detail.root_dir,
+                false,
+            )
+            .await
+            {
+                Ok(true) => tracing::info!(
+                    domain = %detail.domain,
+                    "parked wp-content/object-cache.php before disabling Redis"
+                ),
+                Ok(false) => {}
+                Err(e) => tracing::warn!(
+                    error = %e, domain = %detail.domain,
+                    "could not park the object-cache drop-in — the site may fatal until it is removed"
+                ),
+            }
             // Turn off: drop WP constants, delete ACL, clear DB row.
             self.adapters
                 .wp_set_redis(&detail.system_user, &detail.root_dir, None)
@@ -6744,6 +6775,98 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         } else {
             format!("FTPS is available but not required. Certificate: {cert}")
         })
+    }
+
+    /// Park or restore `wp-content/object-cache.php` by hand.
+    ///
+    /// The escape hatch for a site already down. Everything else that could
+    /// remove this drop-in — deactivating the plugin, deleting it, disabling
+    /// Redis through the panel — needs a WordPress that boots, and the
+    /// drop-in is precisely what stops it booting. This touches the file
+    /// directly.
+    pub async fn wp_dropin_set(
+        &self,
+        sel: HostingSelector,
+        enabled: bool,
+    ) -> Result<String, RpcError> {
+        let detail = self.get(sel).await?;
+        let moved = hyperion_adapters::wpcli::set_object_cache_dropin(
+            &detail.system_user,
+            &detail.root_dir,
+            enabled,
+        )
+        .await
+        .map_err(|e| RpcError::Validation {
+            message: e.to_string(),
+        })?;
+        self.append_audit(
+            "hosting.wp.object_cache_dropin",
+            Some(detail.id.as_str()),
+            &serde_json::json!({"enabled": enabled, "moved": moved}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(if !moved {
+            "Nothing to move — there is no object-cache drop-in here.".to_string()
+        } else if enabled {
+            "object-cache.php restored. If Redis is still unreachable the site will \
+             fatal again."
+                .to_string()
+        } else {
+            "object-cache.php parked as object-cache.php.hyperion-disabled. WordPress \
+             falls back to its database cache, so the site should load again."
+                .to_string()
+        })
+    }
+
+    /// Re-assert the Redis ACL for every hosting that has Redis on, using the
+    /// password already in the secret store.
+    ///
+    /// The ACL is written once at enable and once at rotate, so a site keeps
+    /// whatever rule set was current the day it was switched on. When the
+    /// rules have to change — `+info` was missing, and the Redis Object Cache
+    /// plugin calls INFO on every page load, so the site broke with
+    /// "NOPERM … has no permissions to run the 'info' command" and the plugin
+    /// could not even be deactivated through wp-cli, because its drop-in runs
+    /// first and fails there too — every existing site stays broken until
+    /// someone thinks to rotate the password.
+    ///
+    /// Idempotent, and deliberately reuses the STORED password rather than
+    /// generating one: a new password would have to be written into
+    /// wp-config.php too, and a boot-time task must not be able to break a
+    /// working site.
+    pub async fn redis_acl_reassert_on_boot(&self) -> Result<i64, RpcError> {
+        if !self.adapters.redis_is_available().await {
+            return Ok(0);
+        }
+        let mut fixed = 0i64;
+        for s in self.list().await? {
+            let Ok(detail) = self.get(HostingSelector::Id(s.id.clone())).await else {
+                continue;
+            };
+            if !detail.wp_extras.redis_enabled {
+                continue;
+            }
+            let Some(db_number) = detail.wp_extras.redis_db_number else {
+                continue;
+            };
+            let secret_id = hyperion_types::SecretId(format!("redis-{}", detail.id.as_str()));
+            let Ok(password) = self.secrets.get::<String>(&secret_id).await else {
+                continue;
+            };
+            let username = redis_username_for(detail.id.as_str());
+            match self
+                .adapters
+                .redis_ensure_acl(&username, &password, db_number)
+                .await
+            {
+                Ok(()) => fixed += 1,
+                Err(e) => {
+                    tracing::warn!(error = %e, user = %username, "redis ACL re-assert failed")
+                }
+            }
+        }
+        Ok(fixed)
     }
 
     /// Background self-heal for the per-hosting half of FTP.
@@ -14348,6 +14471,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
         }
         report.parked_plugins = hyperion_adapters::wpcli::parked_plugins(&detail.root_dir).await;
+        report.object_cache_dropin =
+            hyperion_adapters::wpcli::object_cache_dropin_present(&detail.root_dir).await;
+        report.object_cache_parked = tokio::fs::metadata(format!(
+            "{}/wp-content/object-cache.php.hyperion-disabled",
+            detail.root_dir
+        ))
+        .await
+        .is_ok();
         Ok(report)
     }
 
