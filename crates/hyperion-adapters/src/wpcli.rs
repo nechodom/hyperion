@@ -38,9 +38,29 @@ pub fn validate_args(args: &[&str]) -> Result<(), AdapterError> {
 /// converts via `.iter().map(String::as_str).collect()` before invoking
 /// the command.
 pub fn build_argv(user: &str, htdocs: &str, extra: &[&str]) -> Vec<String> {
+    // wp-cli needs a writable HOME. `sudo -u` does NOT give it one: Debian's
+    // sudoers resets the environment but leaves HOME pointing at the CALLING
+    // user's home, which for the agent is /root. wp-cli then tries to write
+    // its cache under /root/.wp-cli and the site user is denied — which
+    // surfaces as a plugin/theme install that fails while every file
+    // permission on the site is perfectly correct.
+    //
+    // `-H` fixes HOME, and the explicit `env` fixes the rest without
+    // depending on what a particular sudoers policy passes through. The
+    // cache and temp directories point at the site's own `tmp/` — created at
+    // provision time, owned by this user, 0750, and on the same filesystem,
+    // so a large plugin download is not copied across devices.
+    let site_tmp = std::path::Path::new(htdocs)
+        .parent()
+        .map(|p| p.join("tmp").display().to_string())
+        .unwrap_or_else(|| "/tmp".to_string());
     let mut v: Vec<String> = vec![
+        "-H".into(),
         "-u".into(),
         user.to_string(),
+        "/usr/bin/env".into(),
+        format!("WP_CLI_CACHE_DIR={site_tmp}/wp-cli-cache"),
+        format!("TMPDIR={site_tmp}"),
         "/usr/local/bin/wp".into(),
         "--allow-root=false".into(),
         format!("--path={}", htdocs),
@@ -104,8 +124,22 @@ pub const WPCLI_PATH: &str = "/usr/local/bin/wp";
 /// auto-download in air-gapped environments by pre-installing wp-cli
 /// themselves; the existence check makes this trivially a no-op.
 pub async fn ensure_wp_cli_present() -> Result<(), AdapterError> {
+    // Existence is not enough. A phar truncated by a half-finished download
+    // or a full disk sits there looking installed and fails every call with
+    // a PHP parse error, which reads like a broken SITE rather than a broken
+    // tool. Ask it to identify itself; re-download when it cannot.
     if std::path::Path::new(WPCLI_PATH).exists() {
-        return Ok(());
+        if cmd::run(WPCLI_PATH, &["--allow-root", "--version"])
+            .await
+            .is_ok()
+        {
+            return Ok(());
+        }
+        tracing::warn!(
+            path = WPCLI_PATH,
+            "wp-cli is present but does not run — re-downloading"
+        );
+        let _ = tokio::fs::remove_file(WPCLI_PATH).await;
     }
     tracing::info!(url = WPCLI_PHAR_URL, "wp-cli missing — downloading");
     cmd::run(
@@ -759,7 +793,7 @@ pub async fn plugin_action(
         validate_plugin_slug(slug)?;
     }
     let args_owned: Vec<String> = match action {
-        hyperion_types::WpPluginAction::Install { source } => {
+        hyperion_types::WpPluginAction::Install { source, activate } => {
             // `source` is either a wordpress.org slug or an https URL.
             let is_url = source.starts_with("http://") || source.starts_with("https://");
             if is_url {
@@ -774,12 +808,11 @@ pub async fn plugin_action(
             // permissions instead of at the plugin's own error. The message
             // is disambiguated by the caller from wp-cli's output; keeping
             // the tail is what makes that possible.
-            vec![
-                "plugin".into(),
-                "install".into(),
-                source.clone(),
-                "--activate".into(),
-            ]
+            let mut v = vec!["plugin".into(), "install".into(), source.clone()];
+            if *activate {
+                v.push("--activate".into());
+            }
+            v
         }
         hyperion_types::WpPluginAction::Activate => {
             vec!["plugin".into(), "activate".into(), slug.into()]
@@ -1393,8 +1426,12 @@ mod tests {
         assert_eq!(
             v,
             vec![
-                "-u".to_string(),
+                "-H".to_string(),
+                "-u".into(),
                 "alice_cz".into(),
+                "/usr/bin/env".into(),
+                "WP_CLI_CACHE_DIR=/home/alice_cz/alice.cz/tmp/wp-cli-cache".into(),
+                "TMPDIR=/home/alice_cz/alice.cz/tmp".into(),
                 "/usr/local/bin/wp".into(),
                 "--allow-root=false".into(),
                 "--path=/home/alice_cz/alice.cz/htdocs".into(),
@@ -1402,6 +1439,41 @@ mod tests {
                 "download".into(),
             ]
         );
+    }
+
+    /// wp-cli needs a HOME it can write. `sudo -u` alone leaves HOME pointing
+    /// at the CALLING user's home — /root for the agent — so wp-cli tries to
+    /// write its cache there, is denied, and the operator sees a plugin
+    /// install fail while every file permission on the site is correct.
+    #[test]
+    fn wp_cli_gets_a_writable_home_and_cache() {
+        let v = build_argv(
+            "alice_cz",
+            "/home/alice_cz/alice.cz/htdocs",
+            &["plugin", "list"],
+        );
+        assert_eq!(
+            v.first().map(String::as_str),
+            Some("-H"),
+            "sudo must set HOME"
+        );
+        let cache = v
+            .iter()
+            .find(|a| a.starts_with("WP_CLI_CACHE_DIR="))
+            .expect("cache dir must be set explicitly, not inherited");
+        assert!(
+            cache.contains("/home/alice_cz/alice.cz/tmp/"),
+            "cache must live in the SITE's tmp — owned by this user, on the same \
+             filesystem, so a large download is not copied across devices: {cache}"
+        );
+        assert!(v.iter().any(|a| a.starts_with("TMPDIR=/home/alice_cz/")));
+    }
+
+    /// A path with no parent must not send the cache somewhere surprising.
+    #[test]
+    fn a_degenerate_path_falls_back_to_tmp() {
+        let v = build_argv("alice_cz", "/", &["plugin", "list"]);
+        assert!(v.iter().any(|a| a == "TMPDIR=/tmp"), "{v:?}");
     }
 
     #[test]

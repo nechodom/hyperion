@@ -8034,6 +8034,18 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 "action": action_label,
                 "slug": slug,
                 "state": out.state,
+                // The reason, on failure only. Without it the explanation
+                // lived in a flash message and nowhere else: once the
+                // operator navigated away it was gone, and the audit row
+                // recorded that something failed while saying nothing about
+                // what. Bounded, because wp-cli output can be long.
+                "reason": if out.state == "failed" {
+                    let mut r = out.message.clone();
+                    r.truncate(600);
+                    Some(r)
+                } else {
+                    None
+                },
             })
             .to_string(),
             &out.state,
@@ -9514,13 +9526,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     pub async fn ftp_accounts_list(
         &self,
     ) -> Result<Vec<hyperion_types::FtpAccountSummary>, RpcError> {
-        let users = hyperion_adapters::ftp::list_users_with_password()
+        let states = hyperion_adapters::ftp::account_password_states()
             .await
             .map_err(|e| RpcError::Internal_with(format!("read shadow: {e}")))?;
         // Index hostings by system_user for the join.
-        // Build a system_user → (domain, state) cache so the
-        // shadow → hostings join is a single SQL query rather
-        // than N fan-out gets.
         let rows: Vec<(String, String, String)> = sqlx::query_as(
             "SELECT su.name, h.domain, h.state \
              FROM hostings h \
@@ -9531,17 +9540,21 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         .map_err(|e| RpcError::Internal_with(format!("join hostings: {e}")))?;
         let by_user: std::collections::HashMap<String, (String, String)> =
             rows.into_iter().map(|(u, d, s)| (u, (d, s))).collect();
-        let mut out = Vec::with_capacity(users.len());
-        for user in users {
-            let (domain, state) = by_user
-                .get(&user)
-                .cloned()
-                .unwrap_or_else(|| (String::new(), String::new()));
+        let mut out = Vec::new();
+        for (user, password_state) in states {
+            // Only accounts that belong to a hosting. /etc/shadow holds root
+            // and every human operator too, and the old code listed them —
+            // presenting system accounts as "FTP accounts", and telling
+            // whoever could open the page which local accounts exist and
+            // which have passwords.
+            let Some((domain, state)) = by_user.get(&user).cloned() else {
+                continue;
+            };
             out.push(hyperion_types::FtpAccountSummary {
                 user,
                 domain,
                 hosting_state: state,
-                has_password: true,
+                password_state,
                 node_id: String::new(),
             });
         }
@@ -20424,9 +20437,27 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         &self,
         template_id: &str,
     ) -> Result<(bool, String, String), RpcError> {
-        let cmds = firewall_template_commands(template_id).ok_or_else(|| RpcError::Validation {
-            message: format!("unknown firewall template id: {template_id}"),
-        })?;
+        let mut cmds =
+            firewall_template_commands(template_id).ok_or_else(|| RpcError::Validation {
+                message: format!("unknown firewall template id: {template_id}"),
+            })?;
+        // The FTP preset's control port is a literal 21 in the table, but the
+        // installer lets the operator pick another one and writes it into
+        // vsftpd.conf. Applying a rule for 21 on a box listening on 2121
+        // reports success and leaves FTP blocked — the worst kind of wrong,
+        // because the panel says the firewall is configured.
+        if template_id == "ftp" {
+            let port = hyperion_adapters::ftp::read_listen_port().await.to_string();
+            if port != "21" {
+                for cmd in cmds.iter_mut() {
+                    for arg in cmd.iter_mut() {
+                        if arg == "21" {
+                            *arg = port.clone();
+                        }
+                    }
+                }
+            }
+        }
         let mut out = String::new();
         let mut err = String::new();
         let mut applied = true;
@@ -23619,7 +23650,7 @@ fn well_known_port_label(port: u16, proto: &str) -> (String, String) {
 /// Keep the ids in lock-step with the `port_templates()` data in
 /// `bin/hyperion-web/src/handlers/firewall.rs` — the template card
 /// passes its id over the wire.
-fn firewall_template_commands(id: &str) -> Option<Vec<Vec<&'static str>>> {
+fn firewall_template_commands(id: &str) -> Option<Vec<Vec<String>>> {
     // Shared idempotent header: create table + chain.
     let header: Vec<Vec<&'static str>> = vec![
         vec!["add", "table", "inet", "hyperion"],
@@ -23742,7 +23773,15 @@ fn firewall_template_commands(id: &str) -> Option<Vec<Vec<&'static str>>> {
         // `None` and the validation error makes it clear.
         _ => return None,
     };
-    Some(header.into_iter().chain(body).collect())
+    // Owned strings so the caller can substitute a non-default port; see
+    // firewall_apply_template.
+    Some(
+        header
+            .into_iter()
+            .chain(body)
+            .map(|c| c.into_iter().map(String::from).collect())
+            .collect(),
+    )
 }
 
 /// nftables binary + our reused `inet hyperion` table (shared with the
