@@ -682,6 +682,14 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::hostings::post_perm_repair),
         )
         .route(
+            "/hostings/wp/core-repair",
+            post(handlers::hostings::post_wp_core_repair),
+        )
+        .route(
+            "/hostings/wp/reinstall",
+            post(handlers::hostings::post_wp_reinstall),
+        )
+        .route(
             "/hostings/:selector/traffic-panel",
             get(handlers::hostings::get_traffic_panel),
         )

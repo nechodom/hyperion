@@ -856,6 +856,76 @@ pub async fn plugin_action(
     })
 }
 
+/// Replace WordPress core files in place, keeping wp-content, wp-config.php
+/// and the database.
+///
+/// This is the repair most broken sites actually need: a core file deleted
+/// by a bad update, corrupted by a half-finished upload, or modified by an
+/// intrusion. `--skip-content` is what makes it non-destructive — without
+/// it, `--force` also replaces the bundled themes, and a site whose theme
+/// happens to be a customised twentytwentyX would silently lose that work.
+pub async fn core_repair(user: &str, htdocs: &str, version: &str) -> Result<String, AdapterError> {
+    let v = if version.trim().is_empty() {
+        "latest".to_string()
+    } else {
+        version.trim().to_string()
+    };
+    validate_args(&[&v])?;
+    let version_arg = format!("--version={v}");
+    let args: Vec<&str> = vec![
+        "core",
+        "download",
+        "--force",
+        "--skip-content",
+        &version_arg,
+    ];
+    let argv = build_argv(user, htdocs, &args);
+    cmd::run("/usr/bin/sudo", &argv_as_refs(&argv)).await
+}
+
+/// Drop every table in the site's database and recreate an empty schema.
+///
+/// Needs a working wp-config.php — that is where the credentials live. A
+/// site broken badly enough to have lost it cannot be reset this way, and
+/// the caller must say so rather than proceeding into an install that will
+/// refuse because the tables are still there.
+pub async fn db_reset(user: &str, htdocs: &str) -> Result<String, AdapterError> {
+    let argv = build_argv(user, htdocs, &["db", "reset", "--yes"]);
+    cmd::run("/usr/bin/sudo", &argv_as_refs(&argv)).await
+}
+
+/// Delete everything inside `htdocs`, leaving the directory itself.
+///
+/// Runs AS THE SITE USER, not as root. Two reasons, both load-bearing:
+/// the tree is writable by that user, so anything they cannot delete is
+/// something a reinstall has no business deleting either; and it bounds a
+/// symlink pointing out of the tree to what that unprivileged user could
+/// have reached anyway. `find -delete` removes a symlink itself rather than
+/// following it, which is the behaviour we want here.
+pub async fn wipe_site_tree(user: &str, htdocs: &str) -> Result<(), AdapterError> {
+    if htdocs.is_empty() || htdocs.contains(['\n', '\r', '\0']) {
+        return Err(AdapterError::Other("illegal htdocs path".into()));
+    }
+    // Refuse anything that is not plausibly a site root. A reinstall that
+    // ran with an empty or truncated path would delete the wrong tree, and
+    // this runs unattended inside a job.
+    if !htdocs.starts_with('/') || htdocs.matches('/').count() < 3 {
+        return Err(AdapterError::Other(format!(
+            "refusing to wipe {htdocs}: not a hosting document root"
+        )));
+    }
+    let argv = vec![
+        "-u",
+        user,
+        "/usr/bin/find",
+        htdocs,
+        "-mindepth",
+        "1",
+        "-delete",
+    ];
+    cmd::run("/usr/bin/sudo", &argv).await.map(|_| ())
+}
+
 /// Set or delete a constant in wp-config.php via `wp config set/delete`.
 /// `value` is wrapped as the constant's literal (numbers/booleans pass
 /// through; strings get quoted). When `value` is None, the constant is

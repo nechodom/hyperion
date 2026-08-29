@@ -1125,6 +1125,19 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.wp_perm_repair(sel, scope).await
     }
 
+    async fn wp_core_repair(&self, sel: HostingSelector) -> Result<String, RpcError> {
+        self.svc.wp_core_repair(sel).await
+    }
+
+    async fn wp_reinstall(
+        &self,
+        sel: HostingSelector,
+        req: hyperion_types::WpInstallRequest,
+        confirm_domain: String,
+    ) -> Result<String, RpcError> {
+        self.svc.wp_reinstall(sel, req, confirm_domain).await
+    }
+
     // --- web users ---
     async fn web_login(
         &self,

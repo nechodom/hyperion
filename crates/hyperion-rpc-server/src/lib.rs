@@ -1388,6 +1388,18 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(m) => Response::WpPermRepair(m),
             Err(e) => Response::Error(e),
         },
+        Request::WpCoreRepair { sel } => match api.wp_core_repair(sel).await {
+            Ok(m) => Response::WpCoreRepair(m),
+            Err(e) => Response::Error(e),
+        },
+        Request::WpReinstall {
+            sel,
+            req,
+            confirm_domain,
+        } => match api.wp_reinstall(sel, req, confirm_domain).await {
+            Ok(m) => Response::WpReinstall(m),
+            Err(e) => Response::Error(e),
+        },
         Request::DkimStatus { sel } => match api.dkim_status(sel).await {
             Ok(s) => Response::DkimStatus(s),
             Err(e) => Response::Error(e),
@@ -2758,6 +2770,17 @@ mod tests {
             Ok(Default::default())
         }
         async fn wp_perm_repair(&self, _: HostingSelector, _: String) -> Result<String, RpcError> {
+            Ok(String::new())
+        }
+        async fn wp_core_repair(&self, _: HostingSelector) -> Result<String, RpcError> {
+            Ok(String::new())
+        }
+        async fn wp_reinstall(
+            &self,
+            _: HostingSelector,
+            _: hyperion_types::WpInstallRequest,
+            _: String,
+        ) -> Result<String, RpcError> {
             Ok(String::new())
         }
         async fn dkim_status(

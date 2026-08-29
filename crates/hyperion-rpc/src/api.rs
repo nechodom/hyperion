@@ -726,6 +726,13 @@ pub trait AgentApi: Send + Sync + 'static {
     ) -> Result<hyperion_types::FtpCheckReport, RpcError>;
     async fn wp_perm_repair(&self, sel: HostingSelector, scope: String)
         -> Result<String, RpcError>;
+    async fn wp_core_repair(&self, sel: HostingSelector) -> Result<String, RpcError>;
+    async fn wp_reinstall(
+        &self,
+        sel: HostingSelector,
+        req: hyperion_types::WpInstallRequest,
+        confirm_domain: String,
+    ) -> Result<String, RpcError>;
 
     // Web users / roles / 2FA — see codec.rs for semantics.
     async fn web_login(

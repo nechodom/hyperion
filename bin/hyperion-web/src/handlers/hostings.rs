@@ -284,6 +284,10 @@ struct DetailTpl<'a> {
     /// than 48 if the agent is freshly installed.
     usage_buckets: Vec<hyperion_types::HostingUsageBucket>,
     csrf_wp_debug: String,
+    /// Own tokens for the two reinstall paths, so a token minted for the
+    /// harmless core repair cannot be replayed against the destructive one.
+    csrf_wp_core_repair: String,
+    csrf_wp_reinstall: String,
     /// WP debug.log rotate button CSRF.
     csrf_wp_debug_rotate: String,
     /// WP Redis enable/disable form CSRF.
@@ -1349,6 +1353,8 @@ pub async fn post_create(
                 vhost_error: None,
                 usage_buckets: vec![],
                 csrf_wp_debug: csrf_token_for(&state, &ctx, "/hostings/wp/debug"),
+                csrf_wp_core_repair: csrf_token_for(&state, &ctx, "/hostings/wp/core-repair"),
+                csrf_wp_reinstall: csrf_token_for(&state, &ctx, "/hostings/wp/reinstall"),
                 csrf_wp_debug_rotate: csrf_token_for(&state, &ctx, "/hostings/wp/debug-log/rotate"),
                 csrf_wp_redis: csrf_token_for(&state, &ctx, "/hostings/wp/redis"),
                 csrf_wp_redis_rotate: csrf_token_for(&state, &ctx, "/hostings/wp/redis/rotate"),
@@ -2220,6 +2226,8 @@ pub async fn get_detail(
         vhost_error: q.vhost_error,
         usage_buckets,
         csrf_wp_debug: csrf_token_for(&state, &ctx, "/hostings/wp/debug"),
+        csrf_wp_core_repair: csrf_token_for(&state, &ctx, "/hostings/wp/core-repair"),
+        csrf_wp_reinstall: csrf_token_for(&state, &ctx, "/hostings/wp/reinstall"),
         csrf_wp_debug_rotate: csrf_token_for(&state, &ctx, "/hostings/wp/debug-log/rotate"),
         csrf_wp_redis: csrf_token_for(&state, &ctx, "/hostings/wp/redis"),
         csrf_wp_redis_rotate: csrf_token_for(&state, &ctx, "/hostings/wp/redis/rotate"),
@@ -5808,6 +5816,248 @@ pub async fn post_wp_emergency_restore(
         slug,
     })
     .await
+}
+
+#[derive(serde::Deserialize)]
+pub struct WpCoreRepairForm {
+    pub selector: String,
+}
+
+/// POST /hostings/wp/core-repair — replace core files, keep everything else.
+pub async fn post_wp_core_repair(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<WpCoreRepairForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector, Capability::WpManage)
+        .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let sel_url = urlencoding(&form.selector);
+    let node: Option<String> = find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
+    let resp =
+        crate::dispatcher::dispatch_to_node(&state, node.as_deref(), Request::WpCoreRepair { sel })
+            .await?;
+    Ok(match resp {
+        RpcResponse::WpCoreRepair(m) => Redirect::to(&format!(
+            "/hostings/{sel_url}?flash={}#wordpress",
+            urlencoding(&m)
+        ))
+        .into_response(),
+        RpcResponse::Error(e) => {
+            let token = stash_error(&state, &e.to_string()).await;
+            Redirect::to(&format!(
+                "/hostings/{sel_url}?wp_error_ref={token}#wordpress"
+            ))
+            .into_response()
+        }
+        _ => return Err(AppError::Internal("unexpected response".into())),
+    })
+}
+
+#[derive(serde::Deserialize)]
+pub struct WpReinstallForm {
+    pub selector: String,
+    /// The operator must type the domain. Checked here AND on the node.
+    pub confirm_domain: String,
+    #[serde(default)]
+    pub backup_first: Option<String>,
+    pub title: String,
+    pub admin_user: String,
+    pub admin_email: String,
+    #[serde(default)]
+    pub locale: String,
+    /// Blank (or under 6 chars) means "generate one for me" — same rule the
+    /// first install uses. Taken from the operator rather than generated
+    /// unconditionally, because a generated password would have to travel
+    /// back through the job log, and job logs are persisted.
+    #[serde(default)]
+    pub admin_password: String,
+}
+
+/// POST /hostings/wp/reinstall — wipe the site and install WordPress fresh.
+///
+/// Gated on `HostingDelete`, not `WpManage`: the outcome is the same class
+/// of loss as deleting the hosting, and anyone who can delete can already
+/// achieve something worse. Runs as a background job because it is minutes
+/// of work and must survive the operator closing the tab.
+pub async fn post_wp_reinstall(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<WpReinstallForm>,
+) -> Result<Response, AppError> {
+    let sel =
+        match require_manage_for_selector(&state, &ctx, &form.selector, Capability::HostingDelete)
+            .await
+        {
+            Ok(s) => s,
+            Err(r) => return Ok(r),
+        };
+    let sel_url = urlencoding(&form.selector);
+    let (detail, node) = match find_hosting_anywhere(&state, sel.clone()).await {
+        Ok(v) => v,
+        Err(e) => {
+            let token = stash_error(&state, &e.to_string()).await;
+            return Ok(Redirect::to(&format!(
+                "/hostings/{sel_url}?wp_error_ref={token}#wordpress"
+            ))
+            .into_response());
+        }
+    };
+    // The typed confirmation is checked here as well as on the node. The
+    // browser dialog only guards against a misclick — a POST skips it.
+    if form.confirm_domain.trim().to_ascii_lowercase() != detail.domain.to_ascii_lowercase() {
+        let token = stash_error(
+            &state,
+            &format!(
+                "Reinstall refused: the confirmation did not match. Type {} exactly.",
+                detail.domain
+            ),
+        )
+        .await;
+        return Ok(Redirect::to(&format!(
+            "/hostings/{sel_url}?wp_error_ref={token}#wordpress"
+        ))
+        .into_response());
+    }
+
+    let generated = form.admin_password.trim().len() < 6;
+    let admin_password = if generated {
+        generate_wp_admin_password()
+    } else {
+        form.admin_password.trim().to_string()
+    };
+    if !is_valid_wp_username(form.admin_user.trim()) {
+        let token = stash_error(
+            &state,
+            &format!(
+                "`{}` is not a valid WordPress username (letters, numbers, _, -, @, . only).",
+                form.admin_user.trim()
+            ),
+        )
+        .await;
+        return Ok(Redirect::to(&format!(
+            "/hostings/{sel_url}?wp_error_ref={token}#wordpress"
+        ))
+        .into_response());
+    }
+    let req = hyperion_types::WpInstallRequest {
+        site_url: format!("https://{}", detail.domain),
+        title: if form.title.trim().is_empty() {
+            detail.domain.clone()
+        } else {
+            form.title.trim().to_string()
+        },
+        admin_user: form.admin_user.trim().to_string(),
+        admin_email: form.admin_email.trim().to_string(),
+        admin_password: admin_password.clone(),
+        locale: if form.locale.trim().is_empty() {
+            "en_US".into()
+        } else {
+            form.locale.trim().to_string()
+        },
+        version: "latest".into(),
+        no_index: false,
+    };
+
+    let backup_first = checkbox_on(&form.backup_first);
+    let s3_targets = resolve_s3_targets(&state).await;
+    let actor_uid = ctx.session.as_ref().map(|s| s.user_id).unwrap_or(0);
+    let actor_label = ctx.username.clone();
+    let job_state = state.clone();
+    let confirm = form.confirm_domain.trim().to_string();
+    let domain = detail.domain.clone();
+
+    let job_id = crate::handlers::jobs::spawn_job(
+        state.clone(),
+        "wp_reinstall",
+        Some(&form.selector),
+        // No password in the payload — job payloads are persisted.
+        "{}",
+        &actor_label,
+        actor_uid,
+        move |reporter| async move {
+            if backup_first {
+                reporter
+                    .step("Backing up before the wipe — files + database…", 5, "")
+                    .await;
+                let backed_up = matches!(
+                    crate::dispatcher::dispatch_to_node(
+                        &job_state,
+                        node.as_deref(),
+                        Request::BackupNow {
+                            sel: sel.clone(),
+                            s3_targets,
+                        },
+                    )
+                    .await,
+                    Ok(RpcResponse::BackupNow(_))
+                );
+                if !backed_up {
+                    // The whole point of the checkbox. A failed backup
+                    // followed by a wipe is the worst outcome this feature
+                    // can produce, so it stops here with the site intact.
+                    reporter
+                        .finish(
+                            false,
+                            Some(
+                                "The backup FAILED, so NOTHING was deleted — the site is \
+                                 exactly as it was. Fix the backup (Backups tab) and try \
+                                 again, or untick \"Back up first\" if you genuinely do \
+                                 not want one."
+                                    .into(),
+                            ),
+                        )
+                        .await;
+                    return;
+                }
+                reporter.step("Backup complete.", 35, "").await;
+            }
+            reporter
+                .step("Resetting the database and wiping the files…", 45, "")
+                .await;
+            match crate::dispatcher::dispatch_to_node(
+                &job_state,
+                node.as_deref(),
+                Request::WpReinstall {
+                    sel,
+                    req,
+                    confirm_domain: confirm,
+                },
+            )
+            .await
+            {
+                Ok(RpcResponse::WpReinstall(m)) => {
+                    // The admin password deliberately does not appear here:
+                    // job rows are persisted, so anything written to one
+                    // outlives the page that showed it.
+                    reporter
+                        .step(
+                            &format!("{m} Sign in at https://{domain}/wp-admin/."),
+                            100,
+                            "",
+                        )
+                        .await;
+                    reporter.finish(true, None).await;
+                }
+                Ok(RpcResponse::Error(e)) => reporter.finish(false, Some(e.to_string())).await,
+                Ok(_) => {
+                    reporter
+                        .finish(false, Some("unexpected response from the node".into()))
+                        .await
+                }
+                Err(e) => reporter.finish(false, Some(e.to_string())).await,
+            }
+        },
+    )
+    .await?;
+
+    Ok(Redirect::to(&format!("/jobs/{job_id}")).into_response())
 }
 
 #[derive(Template)]
@@ -10187,14 +10437,14 @@ pub async fn post_ftp_set(
                 g.insert(token.clone(), (password, now));
             }
             Ok(Redirect::to(&format!(
-                "/hostings/{sel_url}?ftp=set&ftp_pw_token={token}#settings"
+                "/hostings/{sel_url}?ftp=set&ftp_pw_token={token}#ftp"
             ))
             .into_response())
         }
         RpcResponse::Error(e) => {
             let msg = urlencoding(&e.to_string());
             Ok(
-                Redirect::to(&format!("/hostings/{}?ftp_error={}#settings", sel_url, msg))
+                Redirect::to(&format!("/hostings/{}?ftp_error={}#ftp", sel_url, msg))
                     .into_response(),
             )
         }
@@ -10236,15 +10486,13 @@ pub async fn post_ftp_disable(
     )
     .await?;
     match resp {
-        RpcResponse::FtpDisable => Ok(Redirect::to(&format!(
-            "/hostings/{}?ftp=disabled#settings",
-            sel_url
-        ))
-        .into_response()),
+        RpcResponse::FtpDisable => {
+            Ok(Redirect::to(&format!("/hostings/{}?ftp=disabled#ftp", sel_url)).into_response())
+        }
         RpcResponse::Error(e) => {
             let msg = urlencoding(&e.to_string());
             Ok(
-                Redirect::to(&format!("/hostings/{}?ftp_error={}#settings", sel_url, msg))
+                Redirect::to(&format!("/hostings/{}?ftp_error={}#ftp", sel_url, msg))
                     .into_response(),
             )
         }
