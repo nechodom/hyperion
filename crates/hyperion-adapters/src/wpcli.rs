@@ -889,6 +889,67 @@ pub async fn plugin_action(
     })
 }
 
+/// The object-cache drop-in's path for a site.
+fn object_cache_dropin(root_dir: &str) -> String {
+    format!("{root_dir}/wp-content/object-cache.php")
+}
+
+/// Park or restore `wp-content/object-cache.php`.
+///
+/// This file is the reason a broken Redis setup is so hard to escape. The
+/// Redis Object Cache PLUGIN installs it as a WordPress DROP-IN, and a
+/// drop-in is loaded before plugins and independently of whether its plugin
+/// is active — or even still on disk. So when Redis stops answering (an ACL
+/// that denies a command the drop-in calls, a stopped server, deleted
+/// credentials) the site fatals on every request INCLUDING wp-cli's own
+/// bootstrap. `wp plugin deactivate` fails. `wp plugin delete` fails.
+/// Deleting the plugin directory by hand does not help either, because the
+/// drop-in is a separate file and stays behind.
+///
+/// Renamed rather than deleted: it is a real file the operator may want
+/// back, and the reverse direction is one click.
+pub async fn set_object_cache_dropin(
+    user: &str,
+    root_dir: &str,
+    enabled: bool,
+) -> Result<bool, AdapterError> {
+    let live = object_cache_dropin(root_dir);
+    let parked = format!("{live}.hyperion-disabled");
+    let (src, dst) = if enabled {
+        (&parked, &live)
+    } else {
+        (&live, &parked)
+    };
+    // symlink_metadata: a symlink here would make a root-side rename follow
+    // it out of the tree, and the site user owns this directory.
+    match tokio::fs::symlink_metadata(src).await {
+        Ok(md) if md.file_type().is_symlink() => {
+            return Err(AdapterError::Other(format!(
+                "{src} is a symlink — refusing to move it"
+            )))
+        }
+        Ok(_) => {}
+        // Nothing to do is a normal outcome, not a failure: most sites have
+        // no drop-in at all.
+        Err(_) => return Ok(false),
+    }
+    if tokio::fs::metadata(dst).await.is_ok() {
+        return Err(AdapterError::Other(format!(
+            "{dst} already exists — refusing to overwrite it"
+        )));
+    }
+    // As the site user, like every other write into their tree.
+    cmd::run("/usr/bin/sudo", &["-u", user, "/bin/mv", "--", src, dst]).await?;
+    Ok(true)
+}
+
+/// Is a Redis object-cache drop-in currently active for this site?
+pub async fn object_cache_dropin_present(root_dir: &str) -> bool {
+    tokio::fs::metadata(object_cache_dropin(root_dir))
+        .await
+        .is_ok()
+}
+
 /// Replace WordPress core files in place, keeping wp-content, wp-config.php
 /// and the database.
 ///

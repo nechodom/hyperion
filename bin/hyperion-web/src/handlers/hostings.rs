@@ -2644,13 +2644,35 @@ pub(crate) async fn run_backup_now_job(
     reporter
         .step("Backing up — files + database…", 10, "")
         .await;
-    match crate::dispatcher::dispatch_to_node(
+    // The backup is ONE blocking RPC, so nothing updates the job row while
+    // tar runs. The agent reaps jobs with no progress for an hour as stale —
+    // which on a large site meant a backup that was still working was
+    // reported as failed, and the archive it went on to produce looked
+    // orphaned. A heartbeat keeps the row alive; it claims no progress it
+    // cannot see, it just says the work is still going.
+    let hb = {
+        let reporter = reporter.clone();
+        tokio::spawn(async move {
+            let mut pct = 10;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+                // Creeps toward, never reaches, the completion the real
+                // result reports.
+                pct = (pct + 5).min(85);
+                reporter
+                    .step("Still backing up — large sites take a while…", pct, "")
+                    .await;
+            }
+        })
+    };
+    let outcome = crate::dispatcher::dispatch_to_node(
         &state,
         node.as_deref(),
         Request::BackupNow { sel, s3_targets },
     )
-    .await
-    {
+    .await;
+    hb.abort();
+    match outcome {
         Ok(RpcResponse::BackupNow(run)) => {
             let mut log = format!("state={} bytes_total={}\n", run.state, run.bytes_total);
             if let Some(p) = &run.archive_path {
@@ -5723,6 +5745,7 @@ struct FatalCardTpl {
     selector: String,
     csrf_token: String,
     csrf_wp_debug: String,
+    csrf_dropin: String,
     target_node: String,
     wp_debug_enabled: bool,
     error: Option<String>,
@@ -5794,6 +5817,59 @@ pub(crate) async fn stash_error(state: &SharedState, msg: &str) -> String {
     g.retain(|_, (_, at)| now - *at < 300);
     g.insert(token.clone(), (msg.to_string(), now));
     token
+}
+
+#[derive(serde::Deserialize)]
+pub struct DropinForm {
+    pub selector: String,
+    #[serde(default)]
+    pub enabled: Option<String>,
+}
+
+/// POST /hostings/wp/dropin — park or restore `wp-content/object-cache.php`.
+///
+/// Deliberately does NOT go through wp-cli: the whole point is that the
+/// drop-in stops WordPress booting, so every wp-cli remedy fails too.
+pub async fn post_wp_dropin(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<DropinForm>,
+) -> Result<Response, AppError> {
+    let sel = match require_manage_for_selector(&state, &ctx, &form.selector, Capability::WpManage)
+        .await
+    {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let sel_url = urlencoding(&form.selector);
+    let node: Option<String> = find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        node.as_deref(),
+        Request::WpDropinSet {
+            sel,
+            enabled: checkbox_on(&form.enabled),
+        },
+    )
+    .await?;
+    Ok(match resp {
+        RpcResponse::WpDropinSet(m) => Redirect::to(&format!(
+            "/hostings/{sel_url}?flash={}#wordpress",
+            urlencoding(&m)
+        ))
+        .into_response(),
+        RpcResponse::Error(e) => {
+            let token = stash_error(&state, &e.to_string()).await;
+            Redirect::to(&format!(
+                "/hostings/{sel_url}?wp_error_ref={token}#wordpress"
+            ))
+            .into_response()
+        }
+        _ => return Err(AppError::Internal("unexpected response".into())),
+    })
 }
 
 /// POST /hostings/wp/emergency-disable — park the plugin folder.
@@ -6448,6 +6524,7 @@ pub async fn get_health_panel(
                 selector: selector.clone(),
                 csrf_token: super::session_csrf_token(&state, &ctx),
                 csrf_wp_debug: csrf_token_for(&state, &ctx, "/hostings/wp/debug"),
+                csrf_dropin: csrf_token_for(&state, &ctx, "/hostings/wp/dropin"),
                 target_node,
                 wp_debug_enabled: wp_debug,
                 error,

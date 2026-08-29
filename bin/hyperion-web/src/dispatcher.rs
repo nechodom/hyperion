@@ -173,9 +173,13 @@ fn timeout_for_request(req: &Request) -> u64 {
         | Request::HostingImport { .. }
         | Request::HostingImportFromUrl { .. }
         | Request::HostingImportPanel { .. } => 3600,
-        // Create the archive / move a bundle / install WordPress.
-        Request::BackupNow { .. }
-        | Request::BackupFetchChunk { .. }
+        // Creating the archive scales with the SITE, exactly like restoring
+        // one — a 12 GB tree is minutes of tar + gzip before the dump even
+        // starts. 600s was a coin flip on a large site, and losing it was
+        // misreported as "node unreachable".
+        Request::BackupNow { .. } => 3600,
+        // Move a bundle / install WordPress.
+        Request::BackupFetchChunk { .. }
         | Request::HostingExport { .. }
         | Request::HostingCreate(_)
         | Request::HostingDelete { .. }

@@ -1380,6 +1380,13 @@ pub enum Request {
     WpCoreRepair {
         sel: HostingSelector,
     },
+    /// Park or restore `wp-content/object-cache.php` directly on disk. The
+    /// escape hatch for a site whose Redis drop-in stops WordPress booting,
+    /// which also stops every wp-cli remedy.
+    WpDropinSet {
+        sel: HostingSelector,
+        enabled: bool,
+    },
     /// DESTRUCTIVE. Wipe the document tree and every table in the site's
     /// database, then install WordPress fresh. `confirm_domain` is verified
     /// again on the node — the browser dialog guards against a misclick, it
@@ -2008,6 +2015,7 @@ pub enum Response {
     WpPermCheck(hyperion_types::FtpCheckReport),
     WpPermRepair(String),
     WpCoreRepair(String),
+    WpDropinSet(String),
     WpReinstall(String),
     FtpSetFtps(String),
     DkimStatus(hyperion_types::DkimStatus),

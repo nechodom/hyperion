@@ -843,6 +843,16 @@ async fn main() -> anyhow::Result<()> {
                 Ok(_) => {}
                 Err(e) => tracing::warn!(error=%e, "startup: quota re-apply failed"),
             }
+            // Re-assert Redis ACLs at startup. The rule set is only written
+            // at enable/rotate, so a site keeps whatever rules were current
+            // the day Redis was switched on — and when a missing grant is
+            // what breaks the site, every existing site stays broken until
+            // someone thinks to rotate the password.
+            match tick_svc.redis_acl_reassert_on_boot().await {
+                Ok(n) if n > 0 => tracing::info!(sites = n, "startup: re-asserted Redis ACLs"),
+                Ok(_) => {}
+                Err(e) => tracing::warn!(error=%e, "startup: Redis ACL re-assert failed"),
+            }
             // Repoint any stale vsftpd local_root ONCE at startup, before the
             // loop. The loop skips its first tick, so without this an FTP
             // population broken by a bug the deploy just fixed would stay

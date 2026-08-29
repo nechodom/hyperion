@@ -1523,6 +1523,7 @@ fn print_pretty(resp: &Response) {
         | Response::FtpSetFtps(m)
         | Response::WpPermRepair(m)
         | Response::WpCoreRepair(m)
+        | Response::WpDropinSet(m)
         | Response::WpReinstall(m) => {
             println!("{m}");
         }
