@@ -97,6 +97,13 @@ jobs:
           cp target/x86_64-unknown-linux-musl/release/hyperion-export dist/
           cp target/x86_64-unknown-linux-musl/release/hyperion-export dist/hyperion-export-x86_64
           cp target/aarch64-unknown-linux-musl/release/hyperion-export dist/hyperion-export-aarch64
+          # Both must reach the release, not just the build. The first attempt
+          # built them and left them behind, because the upload step names its
+          # files explicitly — so the panel had nothing to serve an ARM source
+          # box and the wizard still refused.
+          test -s dist/hyperion-export-x86_64
+          test -s dist/hyperion-export-aarch64
+          file dist/hyperion-export-aarch64 | grep -q aarch64
           # VERSION = the exact commit these binaries were built from. update.sh
           # fetches just this tiny file to decide whether the rolling release is
           # current with the node's source HEAD before trusting the pre-built
@@ -150,6 +157,8 @@ jobs:
             dist/hyperion-web
             dist/hctl
             dist/hyperion-export
+            dist/hyperion-export-x86_64
+            dist/hyperion-export-aarch64
             dist/SHA256SUMS
             dist/VERSION
           draft: false
@@ -189,6 +198,8 @@ jobs:
             dist/hyperion-web
             dist/hctl
             dist/hyperion-export
+            dist/hyperion-export-x86_64
+            dist/hyperion-export-aarch64
             dist/SHA256SUMS
             dist/VERSION
           draft: false
