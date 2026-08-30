@@ -3114,14 +3114,24 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// Internal: called from `delete()` when cluster.trash_enabled.
     async fn trash_hosting(&self, detail: HostingDetail) -> Result<(), RpcError> {
         // Mirror the suspend side-effects.
-        let _ = self
+        // Logged, not discarded. The FPM pool is stopped a few lines below,
+        // so a vhost that never went live means the site answers 502 rather
+        // than the notice — and silence here is why that looked like a
+        // mystery rather than a failed step.
+        if let Err(e) = self
             .adapters
             .nginx_apply_suspended(
                 &detail.domain,
                 detail.aliases.clone(),
                 Some("Hosting is in trash".into()),
             )
-            .await;
+            .await
+        {
+            tracing::error!(
+                error = %e, domain = %detail.domain,
+                "trash: could not apply the suspended vhost — the site will answer 502"
+            );
+        }
         if let Some(ver) = detail.php_version {
             let _ = self.adapters.fpm_delete(&detail.system_user, ver).await;
         }
@@ -3634,14 +3644,35 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     .map_err(|e| {
                         RpcError::Internal_with(format!("upgrade suspension reason: {e}"))
                     })?;
-                let _ = self
+                // NOT `let _`. Suspension has already stopped the FPM pool by
+                // this point, so if the suspended vhost does not go live the
+                // ACTIVE one is still serving — and it proxies to a pool that
+                // is gone. The visitor gets 502 Bad Gateway instead of the
+                // suspension notice, and the panel says "suspended" because
+                // the failure was discarded here. Report it.
+                if let Err(e) = self
                     .adapters
                     .nginx_apply_suspended(
                         &detail.domain,
                         detail.aliases.clone(),
                         reason.message().map(|s| s.to_string()),
                     )
-                    .await;
+                    .await
+                {
+                    tracing::error!(
+                        error = %e, domain = %detail.domain,
+                        "suspend: could not apply the suspended vhost — the site will \
+                         answer 502 until nginx accepts a config"
+                    );
+                    return Err(RpcError::ProvisioningFailed {
+                        stage: "nginx_suspended_vhost".into(),
+                        reason: format!(
+                            "{e}. The site is suspended but still serving its old vhost, \
+                             which now points at a stopped PHP pool — visitors get 502. \
+                             Fix the nginx error and suspend again."
+                        ),
+                    });
+                }
                 self.append_audit(
                     "hosting.suspend",
                     Some(detail.id.as_str()),
@@ -3685,14 +3716,24 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .await
             .map_err(|e| RpcError::Internal_with(format!("insert suspension: {e}")))?;
 
-        let _ = self
+        // Logged, not discarded. The FPM pool is stopped a few lines below,
+        // so a vhost that never went live means the site answers 502 rather
+        // than the notice — and silence here is why that looked like a
+        // mystery rather than a failed step.
+        if let Err(e) = self
             .adapters
             .nginx_apply_suspended(
                 &detail.domain,
                 detail.aliases.clone(),
                 reason.message().map(|s| s.to_string()),
             )
-            .await;
+            .await
+        {
+            tracing::error!(
+                error = %e, domain = %detail.domain,
+                "suspend: could not apply the suspended vhost — the site will answer 502"
+            );
+        }
         if let Some(ver) = detail.php_version {
             let _ = self.adapters.fpm_delete(&detail.system_user, ver).await;
         }

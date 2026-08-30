@@ -537,7 +537,8 @@ trap cleanup EXIT
 TMP="$(mktemp)"; LIST="$(mktemp)"
 
 echo "[hyperion] downloading exporter from $B …" >&2
-curl -fsSL "$B/import/agent-bin/$T" -o "$TMP"
+ARCH="$(uname -m)"
+curl -fsSL "$B/import/agent-bin/$T?arch=$ARCH" -o "$TMP"
 
 # Verify what arrived is actually an executable for THIS machine before
 # running it. A zero-byte or truncated download, or a binary built for another
@@ -565,8 +566,9 @@ if command -v file >/dev/null 2>&1; then
     x86_64:*x86-64*|aarch64:*aarch64*|armv7*:*ARM*|i?86:*Intel\ 80386*) : ;;
     *) echo "[hyperion] the exporter is for a different CPU than this machine." >&2
        echo "[hyperion] this box: $THIS_ARCH — binary: $DESC" >&2
-       echo "[hyperion] Hyperion ships an x86_64 exporter; import from this box" >&2
-       echo "[hyperion] is not supported yet. Use a manual backup/restore." >&2
+       echo "[hyperion] Hyperion builds x86_64 and aarch64 exporters. Run" >&2
+       echo "[hyperion] update.sh on the Hyperion box so it has both, then" >&2
+       echo "[hyperion] re-run this command." >&2
        exit 1 ;;
   esac
 fi
@@ -715,17 +717,26 @@ fn wire_safe_domain(s: &str) -> bool {
 
 /// `GET /import/agent-bin/:token` — serve the portable `hyperion-export` binary
 /// (static musl, runs on any Linux) so the source box can produce the bundle.
+#[derive(serde::Deserialize, Default)]
+pub struct AgentBinQuery {
+    /// What the SOURCE box reported from `uname -m`.
+    #[serde(default)]
+    pub arch: Option<String>,
+}
+
 pub async fn get_agent_bin(
     State(state): State<SharedState>,
     Path(token): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<AgentBinQuery>,
 ) -> Result<Response, AppError> {
     if resolve(&state, &token, false).await?.is_none() {
         return Ok((StatusCode::NOT_FOUND, "invalid or expired import token\n").into_response());
     }
-    let Some(bin) = exporter_bin_path() else {
+    let Some(bin) = exporter_bin_path_for(q.arch.as_deref()) else {
         return Ok((
             StatusCode::NOT_FOUND,
-            "hyperion-export binary not found on this node — run update.sh to install it\n",
+            "no hyperion-export binary for that architecture on this node.\n\
+             Run update.sh here to install the per-architecture exporters.\n",
         )
             .into_response());
     };
@@ -953,17 +964,37 @@ async fn base_url(state: &SharedState, headers: &HeaderMap) -> String {
 /// Resolve the portable `hyperion-export` binary this node serves to source
 /// boxes — a static musl build that runs on any Linux regardless of glibc.
 /// env override → standard install paths → sibling of the web binary.
-fn exporter_bin_path() -> Option<PathBuf> {
+/// Pick the exporter built for the SOURCE box's CPU.
+///
+/// The source of an import is somebody else's server, and an ARM VPS is
+/// ordinary now — serving the panel's own x86_64 binary to one meant the
+/// bootstrap died on the kernel's bare "Exec format error". `arch` is what
+/// the source reported from `uname -m`; an unknown or absent value falls back
+/// to the unsuffixed binary, which is what older installs have.
+fn exporter_bin_path_for(arch: Option<&str>) -> Option<PathBuf> {
     if let Ok(p) = std::env::var("HYPERION_EXPORT_BIN") {
         let pb = PathBuf::from(p);
         if pb.is_file() {
             return Some(pb);
         }
     }
-    let mut cands = vec![
+    let mut cands: Vec<PathBuf> = Vec::new();
+    // Normalise the handful of spellings uname reports.
+    let suffix = match arch.map(|a| a.trim()) {
+        Some("aarch64") | Some("arm64") => Some("aarch64"),
+        Some("x86_64") | Some("amd64") => Some("x86_64"),
+        _ => None,
+    };
+    if let Some(sfx) = suffix {
+        cands.push(PathBuf::from(format!(
+            "/usr/local/bin/hyperion-export-{sfx}"
+        )));
+        cands.push(PathBuf::from(format!("/usr/sbin/hyperion-export-{sfx}")));
+    }
+    cands.extend([
         PathBuf::from("/usr/local/bin/hyperion-export"),
         PathBuf::from("/usr/sbin/hyperion-export"),
-    ];
+    ]);
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             cands.push(dir.join("hyperion-export"));

@@ -73,6 +73,17 @@ jobs:
           rustup target add x86_64-unknown-linux-musl
           cargo build --release --target x86_64-unknown-linux-musl -p hyperion-export
           ls -lh target/x86_64-unknown-linux-musl/release/hyperion-export
+          # …and the same for aarch64. The source box in an import is somebody
+          # else's server, and ARM VPS hosts are ordinary now — serving only an
+          # x86_64 binary meant those imports died on "Exec format error".
+          # hyperion-export is pure Rust with no C dependencies, so a linker is
+          # all the cross-build needs.
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gcc-aarch64-linux-gnu
+          rustup target add aarch64-unknown-linux-musl
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-gnu-gcc \
+            cargo build --release --target aarch64-unknown-linux-musl -p hyperion-export
+          ls -lh target/aarch64-unknown-linux-musl/release/hyperion-export
 
       - name: Stage build artefacts + checksums
         run: |
@@ -80,8 +91,12 @@ jobs:
           cp target/release/hyperion-agent dist/
           cp target/release/hyperion-web   dist/
           cp target/release/hctl           dist/
-          # Static musl exporter (portable across glibc) for the import wizard.
+          # Static musl exporters (portable across glibc) for the import wizard,
+          # one per architecture. The unsuffixed name stays for compatibility
+          # with an update.sh that predates the aarch64 build.
           cp target/x86_64-unknown-linux-musl/release/hyperion-export dist/
+          cp target/x86_64-unknown-linux-musl/release/hyperion-export dist/hyperion-export-x86_64
+          cp target/aarch64-unknown-linux-musl/release/hyperion-export dist/hyperion-export-aarch64
           # VERSION = the exact commit these binaries were built from. update.sh
           # fetches just this tiny file to decide whether the rolling release is
           # current with the node's source HEAD before trusting the pre-built

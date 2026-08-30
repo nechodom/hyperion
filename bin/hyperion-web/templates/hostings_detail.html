@@ -1005,12 +1005,16 @@
   </form>
 </div>
 
-{% if let Some(cert) = detail.cert %}
+{# The card, the issuance form, the custom-certificate upload and the ACME
+   contact field all used to sit inside `{% if let Some(cert) %}`. A site with
+   NO certificate on disk — precisely the site that needs to issue one — got
+   an empty SSL tab. Only the rows that read `cert` are gated now. #}
 <div class="card hover">
   <h2>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
     Certificate
   </h2>
+{% if let Some(cert) = detail.cert %}
   <dl class="kv">
     <dt>Issuer</dt><dd>
       <span class="tag">{{ cert.issuer }}</span>
@@ -1056,9 +1060,19 @@
       <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
       <button class="btn danger" type="submit">Delete certificate</button>
     </form>
-  </div>
-  <div class="card-section" hidden>
   {%- endif %}
+  </div>
+{% else %}
+  <p class="text-soft" style="margin:0 0 0.4rem;font-size:0.88rem">
+    No certificate on disk for this site yet — issue one below.
+  </p>
+{% endif %}
+
+  {# Always rendered. This was `<div class="card-section" hidden>` whenever a
+     real certificate existed, and nothing ever revealed it — so re-issuing
+     after adding an alias was impossible too. A disclosure keeps it out of
+     the way without taking it away. #}
+  <div class="card-section">
     <h2 style="font-size:0.95rem;margin:0 0 0.6rem">Issue a trusted Let's Encrypt certificate</h2>
     <p class="muted" style="margin:0 0 1rem;font-size:0.88rem">
       First confirm that DNS for <code>{{ detail.domain }}</code> resolves to this server. Issuance refuses to start otherwise.
@@ -1199,7 +1213,6 @@
     {% endif %}
   </form>
 </div>
-{% endif %}
 
 </div><!-- /tab-ssl -->
 
