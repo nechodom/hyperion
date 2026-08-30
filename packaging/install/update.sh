@@ -434,6 +434,27 @@ if (( DO_BUILD && PREFER_PREBUILT )); then
         # Portable (static musl) exporter the self-service import wizard serves.
         install -d -m 0755 /usr/local/bin
         install -m 0755 "$TMP/hyperion-export" /usr/local/bin/hyperion-export
+        # Per-architecture exporters for the import wizard. The source box in
+        # an import is somebody else's server and may not share this one's CPU,
+        # so the wizard serves whichever matches what that box reports.
+        # Optional: a release built before these existed simply has neither.
+        # Fetched separately and tolerantly: a release cut before these
+        # existed returns 404, and putting them in the REQUIRED list would
+        # send every such update down the full cargo-build path.
+        for a in x86_64 aarch64; do
+          acode=$(curl -sSL --max-time 60 -w '%{http_code}' \
+                    -o "$TMP/hyperion-export-$a" "$REL_BASE/hyperion-export-$a" 2>/dev/null) || true
+          if [[ "$acode" == "200" && -s "$TMP/hyperion-export-$a" ]]; then
+            # Verified against the same SHA256SUMS as everything else when the
+            # release lists it; an unlisted file is not installed.
+            if grep -q " hyperion-export-$a\$" "$TMP/SHA256SUMS" 2>/dev/null \
+               && ( cd "$TMP" && grep " hyperion-export-$a\$" SHA256SUMS | sha256sum -c --status - ); then
+              install -m 0755 "$TMP/hyperion-export-$a" "/usr/local/bin/hyperion-export-$a"
+            else
+              warn "hyperion-export-$a failed its checksum — not installed"
+            fi
+          fi
+        done
       fi
       PREBUILT_OK=1
     else

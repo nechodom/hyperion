@@ -677,9 +677,24 @@ pub async fn apply_suspended(
 ) -> Result<(), AdapterError> {
     let body = render_suspended(input)?;
     let vhost = paths.vhost_file(input.domain);
+    // Keep the previous vhost so a rejected config can be put back. Without
+    // this, a suspend that produced invalid nginx left the ACTIVE vhost live
+    // while suspension had already stopped the FPM pool — so the site
+    // answered 502 rather than the suspension notice.
+    let backup = backup_existing(&vhost).await.ok().flatten();
     crate::fs::atomic_write(&vhost, body.as_bytes(), 0o644).await?;
     let symlink = paths.symlink_file(input.domain);
     ensure_symlink(&vhost, &symlink).await?;
+    // `nginx -t` BEFORE reload, like every other vhost write in this module.
+    // apply_suspended was the one path that skipped it.
+    if let Err(e) = cmd::run("/usr/sbin/nginx", &["-t"]).await {
+        restore_or_remove(&vhost, backup.as_deref()).await;
+        if backup.is_none() {
+            let _ = tokio::fs::remove_file(&symlink).await;
+        }
+        let _ = reload().await;
+        return Err(e);
+    }
     reload().await
 }
 
@@ -765,6 +780,37 @@ pub async fn write_vhost(paths: &Paths, input: &VhostInput<'_>) -> Result<(), Ad
     // from a previous "on" state is cleaned up here.
     let cache_path = cache_zone_file(input.hosting_id);
     if input.options.fastcgi_cache_enabled {
+        // nginx creates the LEAF of a fastcgi_cache_path itself, but not the
+        // parents — and Debian's nginx package does not ship /var/cache/nginx
+        // unless something has already used a cache. So the first site to
+        // switch caching on failed `nginx -t` with
+        //   mkdir() "/var/cache/nginx/hyperion-<id>" failed (2: No such file
+        //   or directory)
+        // and, because the check runs before commit, the whole save was
+        // rejected — the operator saw a config error for a directory they had
+        // never heard of.
+        //
+        // 0700 owned by the nginx user: cached pages are rendered responses
+        // and can hold session-specific HTML, so no other local user should
+        // read them.
+        let cache_root = std::path::Path::new("/var/cache/nginx");
+        if let Err(e) = tokio::fs::create_dir_all(cache_root).await {
+            return Err(AdapterError::Other(format!(
+                "create {}: {e}",
+                cache_root.display()
+            )));
+        }
+        let owner = detect_user().await;
+        let _ = cmd::run(
+            "/usr/bin/chown",
+            &[&format!("{owner}:{owner}"), "/var/cache/nginx"],
+        )
+        .await;
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = tokio::fs::set_permissions(cache_root, std::fs::Permissions::from_mode(0o700))
+                .await;
+        }
         let cache_body = render_cache_zone(input.hosting_id);
         atomic_write(&cache_path, cache_body.as_bytes(), 0o644).await?;
     } else {

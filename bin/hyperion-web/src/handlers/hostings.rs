@@ -1891,7 +1891,7 @@ pub async fn get_detail(
                     }
                     rows
                 }
-                _ => vec![],
+                _ => Vec::new(),
             }
         }
     };
@@ -2098,6 +2098,19 @@ pub async fn get_detail(
             .remove(t)
             .map(|(pw, _)| pw),
         _ => None,
+    };
+    // The FTP accounts list is NODE-WIDE, so it is scoped here. A
+    // tenant-scoped viewer sees only their own account: the table names every
+    // hosting's domain and system user on the box, which tells a customer
+    // exactly who else is on the machine and what their Linux usernames are —
+    // the two facts an attacker wants before trying anything local.
+    let ftp_accounts = if ctx.is_tenant_scoped() {
+        ftp_accounts
+            .into_iter()
+            .filter(|a| a.user == detail.system_user)
+            .collect()
+    } else {
+        ftp_accounts
     };
     let bot_families = bot_family_rows(&detail.vhost_options.blocked_bots);
     let tpl = DetailTpl {
