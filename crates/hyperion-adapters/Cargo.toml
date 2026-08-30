@@ -30,6 +30,7 @@ lettre.workspace = true
 tar.workspace = true
 zip.workspace = true
 flate2.workspace = true
+rustix = { version = "1.1.4", features = ["fs"] }
 
 [dev-dependencies]
 tempfile.workspace = true

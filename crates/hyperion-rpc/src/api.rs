@@ -701,7 +701,7 @@ pub trait AgentApi: Send + Sync + 'static {
 
     /// Delete a single backup run + its archive file from disk.
     /// Refuses to act on a backup that is still `running`.
-    async fn backup_delete(&self, backup_id: i64) -> Result<(), RpcError>;
+    async fn backup_delete(&self, sel: HostingSelector, backup_id: i64) -> Result<(), RpcError>;
 
     /// Sanitised view of the agent's effective config — no secrets.
     /// Powers the operator-facing /settings page.
@@ -1261,6 +1261,7 @@ pub trait AgentApi: Send + Sync + 'static {
     /// only (empty data).
     async fn backup_fetch_chunk(
         &self,
+        sel: HostingSelector,
         backup_id: i64,
         offset: u64,
         len: u32,

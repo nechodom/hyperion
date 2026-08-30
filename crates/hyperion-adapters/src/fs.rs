@@ -64,6 +64,169 @@ pub async fn remove_dir_all(path: &Path) -> Result<(), AdapterError> {
 /// mode, not the link itself).
 ///
 /// Stops at filesystem root.
+/// Open a path for reading WITHOUT following a symlink at the final
+/// component, and prove it is a regular file.
+///
+/// The root agent reads and writes inside directories the SITE USER owns —
+/// `logs/`, `wp-content/`, the whole document tree. Opening those by name
+/// means the tenant decides what the name resolves to: replace
+/// `logs/access.log` with a link to `/etc/shadow`, click "Logs" in the panel,
+/// and root reads it out for them. `O_NOFOLLOW` refuses at the kernel, so
+/// there is no window to race.
+///
+/// `st_nlink == 1` on top: a hardlink to a root-owned file cannot be refused
+/// by O_NOFOLLOW (it is not a symlink), and a tenant who can create one in a
+/// directory they own would otherwise get the same read.
+pub fn open_no_follow(path: &Path) -> Result<std::fs::File, AdapterError> {
+    use rustix::fs::{Mode, OFlags};
+    use std::os::unix::fs::MetadataExt;
+
+    let fd = rustix::fs::open(
+        path,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|e| {
+        // ELOOP is the interesting one: it means the final component IS a
+        // symlink, i.e. someone put it there.
+        if e == rustix::io::Errno::LOOP {
+            AdapterError::Other(format!(
+                "{} is a symlink — refusing to read through it as root",
+                path.display()
+            ))
+        } else {
+            AdapterError::Other(format!("open {}: {e}", path.display()))
+        }
+    })?;
+    let file = std::fs::File::from(fd);
+    let md = file
+        .metadata()
+        .map_err(|e| AdapterError::Other(format!("stat {}: {e}", path.display())))?;
+    if !md.is_file() {
+        return Err(AdapterError::Other(format!(
+            "{} is not a regular file",
+            path.display()
+        )));
+    }
+    if md.nlink() != 1 {
+        return Err(AdapterError::Other(format!(
+            "{} has {} hard links — refusing to read it as root",
+            path.display(),
+            md.nlink()
+        )));
+    }
+    Ok(file)
+}
+
+/// Open a path (file OR directory) without following a final symlink, for
+/// metadata operations like `fchmod`.
+///
+/// Separate from [`open_no_follow`], which insists on a regular file: the
+/// permission repair legitimately tightens directories.
+pub fn open_path_no_follow(path: &Path) -> Result<std::fs::File, AdapterError> {
+    use rustix::fs::{Mode, OFlags};
+    let fd = rustix::fs::open(
+        path,
+        // RDONLY, not PATH: an O_PATH descriptor cannot be fchmod-ed, and
+        // read-only opens work for directories as well as files.
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|e| {
+        if e == rustix::io::Errno::LOOP {
+            AdapterError::Other(format!(
+                "{} is a symlink — refusing to change its permissions as root",
+                path.display()
+            ))
+        } else {
+            AdapterError::Other(format!("open {}: {e}", path.display()))
+        }
+    })?;
+    Ok(std::fs::File::from(fd))
+}
+
+/// Truncate a file to zero WITHOUT following a symlink, and without creating
+/// it if it is not there.
+///
+/// `File::create` opens with O_CREAT|O_TRUNC and follows links, so pointing
+/// `wp-content/debug.log` at a root-owned file and asking the panel to clear
+/// it truncates that file instead. The tenant owns wp-content, so they can
+/// place the link; the button is on their own site's page.
+pub fn truncate_no_follow(path: &Path) -> Result<(), AdapterError> {
+    use rustix::fs::{Mode, OFlags};
+    use std::os::unix::fs::MetadataExt;
+
+    let fd = rustix::fs::open(
+        path,
+        OFlags::WRONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|e| {
+        if e == rustix::io::Errno::LOOP {
+            AdapterError::Other(format!(
+                "{} is a symlink — refusing to truncate through it as root",
+                path.display()
+            ))
+        } else if e == rustix::io::Errno::NOENT {
+            // Nothing to clear is success: the caller asked for an empty log.
+            AdapterError::Other(String::new())
+        } else {
+            AdapterError::Other(format!("open {}: {e}", path.display()))
+        }
+    });
+    let file = match fd {
+        Ok(f) => std::fs::File::from(f),
+        Err(AdapterError::Other(m)) if m.is_empty() => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let md = file
+        .metadata()
+        .map_err(|e| AdapterError::Other(format!("stat {}: {e}", path.display())))?;
+    if !md.is_file() || md.nlink() != 1 {
+        return Err(AdapterError::Other(format!(
+            "{} is not a plain single-linked file — refusing to truncate it",
+            path.display()
+        )));
+    }
+    file.set_len(0)
+        .map_err(|e| AdapterError::Other(format!("truncate {}: {e}", path.display())))
+}
+
+/// The last `lines` lines of a file, read safely as root.
+///
+/// Replaces shelling out to `tail`, which takes a PATH and therefore resolves
+/// it again — after any check the caller made, and as root.
+pub async fn tail_lines(path: &Path, lines: usize) -> Result<String, AdapterError> {
+    use std::io::{Read, Seek, SeekFrom};
+
+    let mut file = open_no_follow(path)?;
+    let len = file
+        .metadata()
+        .map_err(|e| AdapterError::Other(format!("stat: {e}")))?
+        .len();
+    // Read a bounded window from the END. A tenant controls how big their own
+    // log is, so reading the whole file would be a memory-exhaustion lever as
+    // well as a slow one.
+    const WINDOW: u64 = 1024 * 1024;
+    let start = len.saturating_sub(WINDOW);
+    file.seek(SeekFrom::Start(start))
+        .map_err(|e| AdapterError::Other(format!("seek: {e}")))?;
+    let mut buf = Vec::with_capacity(WINDOW.min(len) as usize);
+    file.take(WINDOW)
+        .read_to_end(&mut buf)
+        .map_err(|e| AdapterError::Other(format!("read: {e}")))?;
+    let text = String::from_utf8_lossy(&buf);
+    // A partial first line when the window cut mid-line.
+    let text = if start > 0 {
+        text.split_once('\n').map(|(_, rest)| rest).unwrap_or("")
+    } else {
+        &text
+    };
+    let all: Vec<&str> = text.lines().collect();
+    let from = all.len().saturating_sub(lines);
+    Ok(all[from..].join("\n"))
+}
+
 /// Can `user` actually create a directory inside `dir`?
 ///
 /// Performs the real operation instead of inferring it from modes, because
@@ -490,5 +653,84 @@ mod scan_tree_tests {
             ))
         );
         assert_eq!(parse("garbage"), None);
+    }
+}
+
+#[cfg(test)]
+mod no_follow_tests {
+    use super::*;
+
+    /// The attack this exists to stop: `logs/` is owned by the site user, so
+    /// the tenant replaces access.log with a link to a root-only file and
+    /// clicks "Logs" in their own panel.
+    #[tokio::test]
+    async fn a_symlinked_log_is_refused() {
+        let d = tempfile::tempdir().expect("tmp");
+        let secret = d.path().join("shadow");
+        std::fs::write(&secret, "root:$6$verysecret:::\n").expect("w");
+        let logs = d.path().join("logs");
+        std::fs::create_dir_all(&logs).expect("mk");
+        let link = logs.join("access.log");
+        std::os::unix::fs::symlink(&secret, &link).expect("plant link");
+
+        let err = tail_lines(&link, 10)
+            .await
+            .expect_err("reading through a planted symlink must be refused");
+        assert!(
+            format!("{err}").contains("symlink"),
+            "wrong refusal reason: {err}"
+        );
+    }
+
+    /// A hardlink is not a symlink, so O_NOFOLLOW cannot refuse it — the
+    /// link count is what catches that case.
+    #[tokio::test]
+    async fn a_hardlinked_log_is_refused() {
+        let d = tempfile::tempdir().expect("tmp");
+        let secret = d.path().join("shadow");
+        std::fs::write(&secret, "root:$6$verysecret:::\n").expect("w");
+        let logs = d.path().join("logs");
+        std::fs::create_dir_all(&logs).expect("mk");
+        let link = logs.join("access.log");
+        std::fs::hard_link(&secret, &link).expect("plant hardlink");
+
+        let err = tail_lines(&link, 10)
+            .await
+            .expect_err("reading a hardlink to a root file must be refused");
+        assert!(
+            format!("{err}").contains("hard link"),
+            "wrong refusal reason: {err}"
+        );
+    }
+
+    /// An ordinary log still reads, and only the last N lines come back.
+    #[tokio::test]
+    async fn an_ordinary_log_still_tails() {
+        let d = tempfile::tempdir().expect("tmp");
+        let p = d.path().join("access.log");
+        let body: String = (1..=50).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(&p, body).expect("w");
+
+        let out = tail_lines(&p, 5).await.expect("tail");
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), 5, "{out}");
+        assert_eq!(lines[4], "line 50");
+        assert_eq!(lines[0], "line 46");
+    }
+
+    /// A tenant controls how big their own log is, so the read must be
+    /// bounded rather than pulling the whole file into memory.
+    #[tokio::test]
+    async fn a_huge_log_does_not_read_the_whole_file() {
+        let d = tempfile::tempdir().expect("tmp");
+        let p = d.path().join("access.log");
+        // 4 MiB — comfortably past the 1 MiB window.
+        let body: String = (1..=200_000).map(|i| format!("line {i}\n")).collect();
+        assert!(body.len() > 2 * 1024 * 1024);
+        std::fs::write(&p, &body).expect("w");
+
+        let out = tail_lines(&p, 3).await.expect("tail");
+        assert_eq!(out.lines().count(), 3);
+        assert!(out.ends_with("line 200000"), "{out}");
     }
 }

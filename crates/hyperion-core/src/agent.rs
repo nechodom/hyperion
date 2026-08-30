@@ -1073,8 +1073,8 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.wp_plugin_action(hosting, slug, action).await
     }
 
-    async fn backup_delete(&self, backup_id: i64) -> Result<(), RpcError> {
-        self.svc.backup_delete(backup_id).await
+    async fn backup_delete(&self, sel: HostingSelector, backup_id: i64) -> Result<(), RpcError> {
+        self.svc.backup_delete(sel, backup_id).await
     }
 
     async fn agent_config_view(&self) -> Result<hyperion_types::AgentConfigView, RpcError> {
@@ -1426,11 +1426,14 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
 
     async fn backup_fetch_chunk(
         &self,
+        sel: HostingSelector,
         backup_id: i64,
         offset: u64,
         len: u32,
     ) -> Result<(String, u64, String, bool), RpcError> {
-        self.svc.backup_fetch_chunk(backup_id, offset, len).await
+        self.svc
+            .backup_fetch_chunk(sel, backup_id, offset, len)
+            .await
     }
 
     async fn backup_restore_as_new(

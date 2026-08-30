@@ -260,6 +260,47 @@ mod tests {
         id
     }
 
+    /// `get_by_id` is intentionally hosting-agnostic — every caller must bind
+    /// the row to the hosting it authorized. This test pins the fact rather
+    /// than the intent, because the callers that forgot it let a tenant with
+    /// one site download, delete and restore every other site's backups: ids
+    /// are a dense node-wide sequence, and "the path is under a backup root"
+    /// is true of every tenant's archives at once.
+    ///
+    /// If this ever starts filtering, the callers can be simplified — until
+    /// then, treat an id alone as unauthenticated input.
+    #[tokio::test]
+    async fn get_by_id_does_not_filter_by_hosting() {
+        let pool = open_memory().await.expect("open");
+        let a = fixture(&pool).await;
+
+        let suid_b = system_users::insert(&pool, "v", 1043, "/home/v", "/y", 1)
+            .await
+            .expect("user b");
+        let b = HostingId::new_v7();
+        hostings::insert(&pool, &b, "other.cz", suid_b, None, "/r2", 1, None)
+            .await
+            .expect("hosting b");
+
+        let run_b = start(&pool, &b, "local", 100).await.expect("start b");
+        mark_ok(&pool, run_b, "/var/backups/other.tar.gz", None, 10, 200)
+            .await
+            .expect("ok");
+
+        // Fetched with no hosting context at all — this is exactly what a
+        // caller holding only an id gets.
+        let row = get_by_id(&pool, run_b).await.expect("get").expect("row");
+        assert_eq!(
+            row.hosting_id, b,
+            "the row belongs to hosting b, and nothing in this call said so"
+        );
+        assert_ne!(
+            row.hosting_id, a,
+            "a caller authorized for hosting a would be handed b's archive path \
+             unless it checks hosting_id itself"
+        );
+    }
+
     #[tokio::test]
     async fn start_mark_ok_round_trip() {
         let pool = open_memory().await.expect("open");

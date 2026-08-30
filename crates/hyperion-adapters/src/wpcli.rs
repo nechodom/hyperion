@@ -711,7 +711,19 @@ pub async fn parked_plugins(root_dir: &str) -> Vec<String> {
     while let Ok(Some(e)) = rd.next_entry().await {
         let name = e.file_name().to_string_lossy().into_owned();
         if let Some(base) = name.strip_suffix("-old") {
-            if !base.is_empty() && e.path().is_dir() && !plugins.join(base).exists() {
+            // Charset-filtered at the source. These names come from a
+            // directory the SITE USER owns, and they travel two ways that
+            // both matter: into the panel's HTML, and back into a root-side
+            // rename. A plugin slug is [A-Za-z0-9._-] by WordPress
+            // convention, so anything else is not a plugin — it is someone
+            // testing what this field accepts.
+            let sane = !base.is_empty()
+                && base.len() <= 64
+                && base
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'_' || b == b'-')
+                && !base.starts_with('.');
+            if sane && e.path().is_dir() && !plugins.join(base).exists() {
                 out.push(base.to_string());
             }
         }

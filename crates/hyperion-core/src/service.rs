@@ -4328,12 +4328,15 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // hosting exists (.get already does).
         let p = std::path::Path::new(&detail.root_dir).join("wp-content/debug.log");
         // best-effort — if file is missing, we Ok anyway.
-        match tokio::fs::File::create(&p).await {
-            Ok(_) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => {
-                return Err(RpcError::Internal_with(format!("truncate debug.log: {e}")));
-            }
+        // O_NOFOLLOW, not File::create: that opens O_CREAT|O_TRUNC and
+        // follows links, so a tenant who points wp-content/debug.log at a
+        // root-owned file and clicks "Clear debug log" on their own site
+        // truncates that file instead. They own wp-content, so they can
+        // place the link.
+        if let Err(e) = hyperion_adapters::fs::truncate_no_follow(&p) {
+            return Err(RpcError::Validation {
+                message: format!("truncate debug.log: {e}"),
+            });
         }
         // Update sampled size in DB so the UI reflects the new state.
         let _ = hyperion_state::hostings::set_wp_debug_log_size(&self.pool, &detail.id, 0).await;
@@ -14296,8 +14299,22 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         );
         let resolved_a = resolved_a.unwrap_or_default();
         let resolved_aaaa = resolved_aaaa.unwrap_or_default();
+
         let our_ipv4 = our_ipv4.ok();
         let our_ipv6 = our_ipv6.ok();
+
+        // What Let's Encrypt will see. The lookups above went through this
+        // box's resolver, which can serve a stale answer for as long as the
+        // OLD TTL — so a domain repointed an hour ago still looks wrong here
+        // while LE, which asks the authoritative servers, would validate it
+        // without complaint. Asking authoritatively is the only way to answer
+        // the question the operator is actually asking: "will the certificate
+        // issue?"
+        let auth_a = dig_records_authoritative(&d, "A").await.ok().flatten();
+        let auth_matches = match (&auth_a, &our_ipv4) {
+            (Some(list), Some(ip)) => list.iter().any(|r| r == ip),
+            _ => false,
+        };
 
         let mut matches = false;
         if let Some(ref ip) = our_ipv4 {
@@ -14336,13 +14353,44 @@ impl<A: AdapterPort + 'static> HostingService<A> {
              self-signed bootstrap certificate — issue the certificate with the \
              mode on 'Full', then switch back."
                 .into()
-        } else {
+        } else if auth_matches {
+            // The disagreement that matters: this box has a stale cached
+            // answer, but the zone itself is already correct — and the zone
+            // is what Let's Encrypt reads.
             format!(
-                "DNS points elsewhere. We see A={:?} AAAA={:?}; our IPs are {}/{}",
+                "This server's DNS cache still has the OLD address ({:?}), but the \
+                 domain's own nameservers already answer {:?} — which is us. \
+                 Let's Encrypt asks the nameservers directly and ignores caches, \
+                 so issuance will work now. The stale entry here expires on its \
+                 own when the previous record's TTL runs out.",
+                resolved_a,
+                auth_a.as_deref().unwrap_or(&[]),
+            )
+        } else {
+            let authoritative = match &auth_a {
+                Some(list) if list.is_empty() => {
+                    " The domain's own nameservers return no A record at all, so \
+                     Let's Encrypt will not be able to validate it either."
+                        .to_string()
+                }
+                Some(list) => format!(
+                    " Asked directly, the domain's own nameservers also answer {list:?} \
+                     — so this is not a stale cache here, and Let's Encrypt will see \
+                     the same thing. Point the A record at us and try again."
+                ),
+                // Could not reach the authoritative servers; say so rather
+                // than implying the local answer is the whole story.
+                None => " (the domain's own nameservers could not be reached from \
+                         this box, so this is only what our resolver sees)"
+                    .to_string(),
+            };
+            format!(
+                "DNS points elsewhere. We see A={:?} AAAA={:?}; our IPs are {}/{}.{}",
                 resolved_a,
                 resolved_aaaa,
                 our_ipv4.as_deref().unwrap_or("?"),
                 our_ipv6.as_deref().unwrap_or("?"),
+                authoritative,
             )
         };
         // A proxied site counts as matching: the domain is routed to this
@@ -19629,14 +19677,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// in-flight process). Logs `backup.delete` in the audit log
     /// regardless of disk-removal success — DB row removal is the
     /// source of truth and we want the audit chain to reflect it.
-    pub async fn backup_delete(&self, backup_id: i64) -> Result<(), RpcError> {
-        let row = hyperion_state::backups::get_by_id(&self.pool, backup_id)
-            .await
-            .map_err(|e| RpcError::Internal_with(format!("get backup: {e}")))?
-            .ok_or_else(|| RpcError::NotFound {
-                kind: "backup".into(),
-                id: backup_id.to_string(),
-            })?;
+    pub async fn backup_delete(
+        &self,
+        sel: HostingSelector,
+        backup_id: i64,
+    ) -> Result<(), RpcError> {
+        // Bound to the authorized hosting. Deleting by bare id let a tenant
+        // destroy every backup on the node in a loop.
+        let row = self.backup_owned_by(sel, backup_id).await?;
         if row.state == "running" {
             return Err(RpcError::Validation {
                 message: "refusing to delete a backup that is still running. \
@@ -21044,20 +21092,16 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         if !path.exists() {
             return Ok(format!("(no {} log yet at {})", log_kind, path.display()));
         }
-        let path_str = path.display().to_string();
-        let lines_str = lines.to_string();
-        let out = tokio::process::Command::new("/usr/bin/tail")
-            .args(["-n", &lines_str, &path_str])
-            .output()
+        // Read from a file descriptor opened O_NOFOLLOW, not by handing a
+        // PATH to `tail`. `logs/` is owned by the SITE USER — it is created
+        // 0750 under their uid — so they can replace access.log with a link
+        // to /etc/shadow and have root read it out through this very panel.
+        // `tail` resolves the path itself, after any check made here.
+        hyperion_adapters::fs::tail_lines(&path, lines as usize)
             .await
-            .map_err(|e| RpcError::Internal_with(format!("tail: {e}")))?;
-        if !out.status.success() {
-            return Err(RpcError::Internal_with(format!(
-                "tail exit {:?}",
-                out.status.code()
-            )));
-        }
-        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+            .map_err(|e| RpcError::Validation {
+                message: e.to_string(),
+            })
     }
 
     // ================================================================
@@ -21330,12 +21374,43 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(())
     }
 
+    /// Resolve a backup id and prove it belongs to the hosting the caller was
+    /// authorized for.
+    ///
+    /// The web layer authorizes a SELECTOR and then forwards a client-supplied
+    /// backup id. Without this the id was never checked against it: ids are a
+    /// dense node-wide sequence, so a tenant with one site could walk them and
+    /// reach every co-tenant's archive — which contains their files AND their
+    /// SQL dump. The old defence was "the path is under a backup root", and
+    /// every tenant's archives are under the same root.
+    ///
+    /// Answers NotFound, never Forbidden: a distinguishable "exists but not
+    /// yours" turns the id space into an oracle for how many sites the node
+    /// hosts and when each was last backed up.
+    async fn backup_owned_by(
+        &self,
+        sel: HostingSelector,
+        backup_id: i64,
+    ) -> Result<hyperion_state::backups::BackupRun, RpcError> {
+        let detail = self.get(sel).await?;
+        let run = hyperion_state::backups::get_by_id(&self.pool, backup_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("backup lookup: {e}")))?
+            .filter(|r| r.hosting_id == detail.id)
+            .ok_or_else(|| RpcError::NotFound {
+                kind: "backup".into(),
+                id: backup_id.to_string(),
+            })?;
+        Ok(run)
+    }
+
     /// Stream one slice of a backup archive for download. Validates the
     /// backup belongs to a real hosting and its path is under a backup
     /// root, then reads up to `len` bytes from `offset`. `len == 0`
     /// returns metadata only.
     pub async fn backup_fetch_chunk(
         &self,
+        sel: HostingSelector,
         backup_id: i64,
         offset: u64,
         len: u32,
@@ -21343,15 +21418,10 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         use base64::Engine;
         use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
-        // Resolve the backup run → archive path. get_by_id returns the
-        // row regardless of hosting; we re-validate the path is ours.
-        let run = hyperion_state::backups::get_by_id(&self.pool, backup_id)
-            .await
-            .map_err(|e| RpcError::Internal_with(format!("backup lookup: {e}")))?
-            .ok_or_else(|| RpcError::NotFound {
-                kind: "backup".into(),
-                id: backup_id.to_string(),
-            })?;
+        // Bound to the hosting the caller was authorized for. The backup-root
+        // prefix check below stays as defence in depth, but it is not an
+        // authorization: every tenant's archives live under the same root.
+        let run = self.backup_owned_by(sel, backup_id).await?;
         let archive_path = run.archive_path.ok_or_else(|| RpcError::Validation {
             message: "backup has no archive file to download".into(),
         })?;
@@ -23300,6 +23370,78 @@ fn is_cloudflare_ipv6(ip: &str) -> bool {
         };
         (a ^ u128::from(n)) >> (128 - len) == 0
     })
+}
+
+/// Resolve `kind` records for `domain` by asking the zone's AUTHORITATIVE
+/// nameservers directly, bypassing every cache.
+///
+/// This is the answer Let's Encrypt will get. The ordinary lookup goes
+/// through this box's resolver, which can hold a stale record for as long as
+/// the old TTL — so the pre-check would report "DNS points elsewhere" for a
+/// domain that had already been repointed and that LE would validate without
+/// complaint. It fails the other way too: a cached correct answer here while
+/// the authoritative zone still says something else.
+///
+/// Returns `Ok(None)` when the authoritative servers could not be determined
+/// (no `dig`, an unusual delegation), which is different from "no records"
+/// and must not be reported as a mismatch.
+async fn dig_records_authoritative(
+    domain: &str,
+    kind: &str,
+) -> Result<Option<Vec<String>>, std::io::Error> {
+    // Walk up until a label has NS records: `www.example.com` is rarely a
+    // zone of its own, and asking for its NS returns nothing.
+    let mut zone = domain.trim_end_matches('.').to_string();
+    let mut servers: Vec<String> = Vec::new();
+    for _ in 0..4 {
+        if zone.matches('.').count() < 1 {
+            break;
+        }
+        if let Ok(ns) = dig_records(&zone, "NS").await {
+            let ns: Vec<String> = ns
+                .into_iter()
+                .map(|n| n.trim_end_matches('.').to_string())
+                .filter(|n| !n.is_empty())
+                .collect();
+            if !ns.is_empty() {
+                servers = ns;
+                break;
+            }
+        }
+        match zone.split_once('.') {
+            Some((_, rest)) => zone = rest.to_string(),
+            None => break,
+        }
+    }
+    if servers.is_empty() {
+        return Ok(None);
+    }
+    // One authoritative server is enough — they are meant to agree, and
+    // querying all of them turns a slow zone into a slow page. Try them in
+    // turn so a single dead nameserver does not decide the answer.
+    for ns in servers.iter().take(3) {
+        let out = tokio::process::Command::new("/usr/bin/dig")
+            .args([
+                "+short",
+                "+time=3",
+                "+tries=1",
+                kind,
+                domain,
+                &format!("@{ns}"),
+            ])
+            .output()
+            .await?;
+        if out.status.success() {
+            return Ok(Some(
+                String::from_utf8_lossy(&out.stdout)
+                    .lines()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty() && !l.contains(' '))
+                    .collect(),
+            ));
+        }
+    }
+    Ok(None)
 }
 
 async fn dig_records(domain: &str, kind: &str) -> Result<Vec<String>, std::io::Error> {
@@ -25806,17 +25948,37 @@ async fn single_smtp_probe(port: u16, host: &str, purpose: &str) -> hyperion_typ
 /// strict "no WP here" answer. Never panics. Never errors out
 /// (the caller treats `None` as "no install" the same way it
 /// treats an empty DB row).
+/// Open a path for metadata changes without following a final symlink.
+/// Directories are allowed here — `site_dirs` tightens logs/ and tmp/.
+fn rustix_open_no_follow(path: &str) -> Result<std::fs::File, String> {
+    hyperion_adapters::fs::open_path_no_follow(std::path::Path::new(path))
+        .map_err(|e| e.to_string())
+}
+
 /// chmod a single path, reporting failure rather than swallowing it.
 async fn chmod_path(path: &str, mode: u32) -> Result<(), String> {
     if path.is_empty() || path.contains(['\n', '\r', '\0']) {
         return Err("illegal path".into());
     }
-    if tokio::fs::metadata(path).await.is_err() {
-        return Err(format!("{path} does not exist"));
-    }
+    // O_NOFOLLOW on the way in, then fchmod the descriptor. `set_permissions`
+    // takes a PATH and follows links, and every path this is called with sits
+    // inside a directory the SITE USER owns — so pointing wp-config.php at
+    // /etc/passwd and pressing "Tighten wp-config.php" on your own site would
+    // chmod that instead.
+    use std::os::unix::fs::MetadataExt;
     use std::os::unix::fs::PermissionsExt;
-    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
-        .await
+    let file = match rustix_open_no_follow(path) {
+        Ok(f) => f,
+        Err(e) => return Err(e),
+    };
+    let md = file.metadata().map_err(|e| format!("stat {path}: {e}"))?;
+    if md.nlink() != 1 {
+        return Err(format!(
+            "{path} has {} hard links — refusing to chmod it",
+            md.nlink()
+        ));
+    }
+    file.set_permissions(std::fs::Permissions::from_mode(mode))
         .map_err(|e| format!("chmod {mode:o} {path}: {e}"))
 }
 

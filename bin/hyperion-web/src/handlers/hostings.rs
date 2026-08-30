@@ -3875,7 +3875,7 @@ pub async fn post_backup_delete(
         Err(r) => return Ok(r),
     };
     let sel_url = urlencoding(&form.selector);
-    let target_owned: Option<String> = find_hosting_anywhere(&state, sel)
+    let target_owned: Option<String> = find_hosting_anywhere(&state, sel.clone())
         .await
         .ok()
         .and_then(|(_d, n)| n);
@@ -3883,6 +3883,10 @@ pub async fn post_backup_delete(
         &state,
         target_owned.as_deref(),
         Request::BackupDelete {
+            // The node re-checks that this id belongs to `sel`. Authorizing
+            // the selector here and forwarding a bare id was how a tenant
+            // could delete every backup on the node.
+            sel,
             backup_id: form.backup_id,
         },
     )
@@ -5576,7 +5580,7 @@ pub async fn get_dns_panel(
     Path(selector): Path<String>,
 ) -> Result<Response, AppError> {
     let sel = parse_selector(&selector)?;
-    let (detail, owner_node) = find_hosting_anywhere(&state, sel).await?;
+    let (detail, owner_node) = find_hosting_anywhere(&state, sel.clone()).await?;
     if let Err(r) = require_hosting_access(
         &state,
         &ctx,
@@ -5653,7 +5657,7 @@ fn spf_card_error(selector: &str, domain: &str, why: &str) -> Response {
 }
 
 #[derive(Template)]
-#[template(path = "_hosting_jobs_panel.html", escape = "none")]
+#[template(path = "_hosting_jobs_panel.html")]
 struct HostingJobsPanelTpl {
     jobs: Vec<hyperion_types::JobView>,
     selector: String,
@@ -5739,7 +5743,7 @@ pub async fn get_hosting_jobs_panel(
 }
 
 #[derive(Template)]
-#[template(path = "_hosting_fatal_card.html", escape = "none")]
+#[template(path = "_hosting_fatal_card.html")]
 struct FatalCardTpl {
     report: hyperion_types::WpFatalReport,
     selector: String,
@@ -6595,7 +6599,7 @@ pub async fn get_health_panel(
 }
 
 #[derive(Template)]
-#[template(path = "_hosting_traffic_card.html", escape = "none")]
+#[template(path = "_hosting_traffic_card.html")]
 struct TrafficCardTpl {
     rows: Vec<hyperion_types::CountryTraffic>,
     hours: i64,
@@ -8417,7 +8421,21 @@ pub async fn post_restore_upload(
         ));
     }
 
-    let incoming_dir = std::path::PathBuf::from("/var/lib/hyperion/backups/incoming");
+    // Namespaced by hosting. A flat incoming/ directory meant the node could
+    // not tell whose upload an archive was, so restore had nothing to check a
+    // caller-supplied path against beyond "is it under a backup root" — and
+    // every tenant's archives are under the same root.
+    // Namespaced by the hosting's own id, resolved here rather than taken
+    // from the request. A flat incoming/ directory meant the node could not
+    // tell whose upload an archive was, so restore had nothing to check a
+    // caller-supplied path against beyond "is it under a backup root" — and
+    // every tenant's archives are under the same root.
+    let hosting_ns = find_hosting_anywhere(&state, sel.clone())
+        .await
+        .map(|(d, _)| d.id.as_str().to_string())
+        .map_err(|e| AppError::Internal(format!("resolve hosting: {e}")))?;
+    let incoming_dir =
+        std::path::PathBuf::from("/var/lib/hyperion/backups/incoming").join(&hosting_ns);
     tokio::fs::create_dir_all(&incoming_dir)
         .await
         .map_err(|e| AppError::Internal(format!("mkdir incoming: {e}")))?;
@@ -10691,7 +10709,7 @@ pub async fn get_backup_download(
 ) -> Result<Response, AppError> {
     use base64::Engine;
     let sel = parse_selector(&selector)?;
-    let (detail, owner_node) = find_hosting_anywhere(&state, sel).await?;
+    let (detail, owner_node) = find_hosting_anywhere(&state, sel.clone()).await?;
     if let Err(r) = require_hosting_access(
         &state,
         &ctx,
@@ -10703,12 +10721,15 @@ pub async fn get_backup_download(
     {
         return Ok(r);
     }
-    // Metadata probe (len=0): total size + filename, and it validates
-    // the backup belongs to a hosting + the path is under a backup root.
+    // Metadata probe (len=0): total size + filename. The node re-checks that
+    // the backup belongs to `sel` — the old comment claimed it validated "the
+    // backup belongs to a hosting", which was true and useless: it belonged
+    // to SOME hosting, not necessarily this one.
     let meta = crate::dispatcher::dispatch_to_node(
         &state,
         owner_node.as_deref(),
         Request::BackupFetchChunk {
+            sel: sel.clone(),
             backup_id,
             offset: 0,
             len: 0,
@@ -10729,6 +10750,7 @@ pub async fn get_backup_download(
     let (mut writer, reader) = tokio::io::duplex(CHUNK as usize);
     let task_state = state.clone();
     let task_owner = owner_node.clone();
+    let task_sel = sel.clone();
     tokio::spawn(async move {
         use tokio::io::AsyncWriteExt;
         let mut offset: u64 = 0;
@@ -10737,6 +10759,7 @@ pub async fn get_backup_download(
                 &task_state,
                 task_owner.as_deref(),
                 Request::BackupFetchChunk {
+                    sel: task_sel.clone(),
                     backup_id,
                     offset,
                     len: CHUNK,

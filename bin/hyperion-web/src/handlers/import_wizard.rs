@@ -518,34 +518,89 @@ pub async fn get_agent_script(
 # Hyperion self-service import — runs on the SOURCE panel box (as root).
 # It reports your sites to Hyperion, waits for you to pick them in the panel,
 # then exports only those and streams them back. Nothing touches your machine.
-set -eu
+#
+# pipefail is set UP HERE, not just before the export: without it a failing
+# producer in any pipeline is masked by a succeeding consumer, and the script
+# marches on with empty data.
+set -euo pipefail
 T='{token}'
 B='{base}'
 K='{kind}'
-echo "[hyperion] downloading exporter from $B …" >&2
+
+# Cleanup via trap, not by hand. `set -e` aborts on the first failing command,
+# so every hand-written `rm` further down is unreachable on exactly the paths
+# that need it — a network blip or a bad binary would leave the temporary
+# files in /tmp forever.
+TMP=""; LIST=""
+cleanup() {{ [ -n "$TMP" ] && rm -f "$TMP"; [ -n "$LIST" ] && rm -f "$LIST"; }}
+trap cleanup EXIT
 TMP="$(mktemp)"; LIST="$(mktemp)"
+
+echo "[hyperion] downloading exporter from $B …" >&2
 curl -fsSL "$B/import/agent-bin/$T" -o "$TMP"
+
+# Verify what arrived is actually an executable for THIS machine before
+# running it. A zero-byte or truncated download, or a binary built for another
+# architecture, otherwise fails with the kernel's bare "cannot execute binary
+# file: Exec format error" — which says nothing about what went wrong or where
+# to look.
+if [ ! -s "$TMP" ]; then
+  echo "[hyperion] the exporter downloaded as an EMPTY file." >&2
+  echo "[hyperion] On the Hyperion box: ls -l /usr/local/bin/hyperion-export" >&2
+  echo "[hyperion] and re-run update.sh if it is missing or 0 bytes." >&2
+  exit 1
+fi
+if command -v file >/dev/null 2>&1; then
+  DESC="$(file -b "$TMP" 2>/dev/null || true)"
+  case "$DESC" in
+    *ELF*) : ;;
+    *) echo "[hyperion] what downloaded is not a Linux executable: $DESC" >&2
+       echo "[hyperion] The first bytes were: $(head -c 120 "$TMP" | tr -d '\0')" >&2
+       exit 1 ;;
+  esac
+  # Architecture mismatch is the other cause of "Exec format error": Hyperion
+  # serves the binary it has, and that is built for the Hyperion box.
+  THIS_ARCH="$(uname -m)"
+  case "$THIS_ARCH:$DESC" in
+    x86_64:*x86-64*|aarch64:*aarch64*|armv7*:*ARM*|i?86:*Intel\ 80386*) : ;;
+    *) echo "[hyperion] the exporter is for a different CPU than this machine." >&2
+       echo "[hyperion] this box: $THIS_ARCH — binary: $DESC" >&2
+       echo "[hyperion] Hyperion ships an x86_64 exporter; import from this box" >&2
+       echo "[hyperion] is not supported yet. Use a manual backup/restore." >&2
+       exit 1 ;;
+  esac
+fi
 chmod +x "$TMP"
+
 echo "[hyperion] scanning $K and reporting the sites to Hyperion …" >&2
 "$TMP" --kind "$K" --list --json > "$LIST"
 curl -fsS -X POST -H 'Content-Type: application/json' --data-binary @"$LIST" "$B/import/manifest/$T" >/dev/null
 echo "[hyperion] reported. Open Hyperion -> Import, tick the sites you want, click Import. Waiting…" >&2
+
 SEL=""
-for _ in $(seq 1 2640); do
+# Brace expansion, not $(seq …): no subshell, no external binary. And a named
+# loop variable — `_` is a Bash special that holds the previous command's last
+# argument, so writing to it clobbers something the shell owns.
+for _i in {{1..2640}}; do
   R="$(curl -fsS "$B/import/selection/$T" || true)"
   case "$R" in
     pending|"") sleep 5 ;;
-    cancelled) echo "[hyperion] cancelled (or token expired) in the panel." >&2; rm -f "$TMP" "$LIST"; exit 0 ;;
+    cancelled) echo "[hyperion] cancelled (or token expired) in the panel." >&2; exit 0 ;;
+    # A selection is a comma-separated list of domains. Matching that shape
+    # rather than accepting anything non-empty: a proxy's HTML error page also
+    # arrives with HTTP 200, and the old catch-all would have passed it
+    # straight to --only.
+    *[!a-zA-Z0-9.,_-]*) echo "[hyperion] unexpected reply from Hyperion — not a site list:" >&2
+                        echo "$R" | head -c 200 >&2; echo >&2; exit 1 ;;
     *) SEL="$R"; break ;;
   esac
 done
-if [ -z "$SEL" ]; then echo "[hyperion] timed out waiting for a selection." >&2; rm -f "$TMP" "$LIST"; exit 1; fi
+if [ -z "$SEL" ]; then echo "[hyperion] timed out waiting for a selection." >&2; exit 1; fi
+
 echo "[hyperion] exporting the selected sites and streaming to Hyperion …" >&2
-set -o pipefail
 # The panel always sends an explicit comma-separated list of the chosen SOURCE
 # domains (never a wildcard), so the source exports exactly those.
 "$TMP" --kind "$K" --only "$SEL" --out - | curl -fsS --max-time 86400 -X POST -T - "$B/import/ingest/$T"
-rm -f "$TMP" "$LIST"
 echo "[hyperion] done — watch progress in Hyperion -> Import." >&2
 "#
     );

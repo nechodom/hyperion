@@ -353,3 +353,49 @@ fn every_page_is_reachable_from_the_nav() {
         orphans.join("\n  ")
     );
 }
+
+/// No Askama template may opt out of HTML escaping.
+///
+/// `escape = "none"` on a card that renders a site's own PHP error output, or
+/// directory names from a tenant-owned folder, turns a customer's file into
+/// script in the operator's browser — and the operator is up to super_admin.
+/// Three templates shipped that way.
+///
+/// Where a single value genuinely IS markup, use the `|safe` filter on that
+/// value: it is visible at the point of use and reviewable, which a
+/// derive-level opt-out covering the whole file is not.
+#[test]
+fn no_template_disables_escaping() {
+    let mut offenders = Vec::new();
+    let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut stack = vec![src];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read src dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let body = std::fs::read_to_string(&path).expect("read source");
+            for (i, line) in body.lines().enumerate() {
+                if line.contains("escape = \"none\"") || line.contains("escape=\"none\"") {
+                    offenders.push(format!(
+                        "{}:{}",
+                        path.file_name().expect("name").to_string_lossy(),
+                        i + 1
+                    ));
+                }
+            }
+        }
+    }
+    assert!(
+        offenders.is_empty(),
+        "template(s) opting out of HTML escaping — any tenant-controlled value they \
+         render becomes script in the operator's session:\n  {}\nUse |safe on the one \
+         value that is really markup instead.",
+        offenders.join("\n  ")
+    );
+}
