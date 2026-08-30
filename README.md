@@ -49,7 +49,7 @@ already got on HestiaCP or CloudPanel**.
 - [Install](#install)
   - [One-liner](#one-liner--fresh-debian-12-vps-as-root) · [Configurator & port pre-flight](#configurator--port-pre-flight) · [Worker nodes](#adding-a-worker-node-cluster-mode) · [Updates](#in-place-updates) · [Dev](#local-development-macos--dev-vps) · [Versioning](#versioning--releases)
 - [Features](#features)
-  - [Hosting](#hosting) · [Per-hosting controls](#per-hosting-controls) · [WordPress](#wordpress) · [File manager](#file-manager) · [Backups](#backups) · [Security](#security) · [Multi-node](#multi-node-cluster) · [Operator UI](#operator-ui) · [RBAC](#rbac--multi-tenancy)
+  - [Hosting](#hosting) · [Per-hosting controls](#per-hosting-controls) · [WordPress](#wordpress) · [Reinstall](#reinstall) · [File manager](#file-manager) · [Backups](#backups) · [Security](#security) · [Multi-node](#multi-node-cluster) · [Operator UI](#operator-ui) · [RBAC](#rbac--multi-tenancy)
 - [Remote API](#remote-api) — scriptable HTTP + `hctl remote`
 - [CLI](#cli) — local `hctl`
 - [Migrate in (panel import)](#migrate-in-panel-import)
@@ -224,7 +224,7 @@ always tells you exactly what's running:
 
 ```bash
 hyperion-agent --version
-# hyperion-agent v0.8.3-2-gf718fd1 (f718fd1a…full 40-char SHA…)
+# hyperion-agent v0.42.0-2-gf718fd1 (f718fd1a…full 40-char SHA…)
 ```
 
 The human part is `git describe` against the nearest `vX.Y.Z` tag. There's
@@ -247,7 +247,8 @@ for the same commit.
 - **Cross-node hosting migration** with version preflight, and **clone** to a new domain on the same or different node.
 - **Expiration + grace** with scheduled notifications and auto-suspend.
 - **Quota enforcement** — kernel-level disk quota via `setquota`, PHP `memory_limit` per FPM pool, monthly bandwidth alerts.
-- **Let's Encrypt certs** — HTTP-01 one-click with automatic renewal, working through a Cloudflare/CDN proxy as-is. **DNS-01 wildcards** (`*.domain`) are available via guided manual TXT records, but cannot renew themselves — Hyperion holds no DNS credentials by design.
+- **Let's Encrypt certs** — HTTP-01 one-click with automatic renewal, working through a Cloudflare/CDN proxy as-is. **DNS-01 wildcards** (`*.domain`) are available via guided manual TXT records, but cannot renew themselves — Hyperion holds no DNS credentials by design. The DNS pre-check asks the domain's **authoritative** nameservers, not just this box's resolver, so a domain repointed minutes ago is not reported as wrong because of a stale cache.
+- **Standalone or cluster.** A single box is a first-class deployment, not a one-node cluster: cluster chrome is hidden until a second node enrols.
 
 ### Per-hosting controls
 
@@ -257,12 +258,34 @@ Operator knobs mapping straight to nginx / FPM / WordPress. Every save runs
 - **HTTP basic auth** (bcrypt htpasswd + ACME bypass), **HSTS** presets + force-HTTPS, **custom nginx snippet** (validated, 32 KiB cap), **maintenance mode**, **per-hosting FastCGI page cache**.
 - **WP debug toggle** + rotate `debug.log`, **per-hosting Redis object cache** (dedicated ACL user, written to `wp-config.php`), **per-hosting `php.ini` override** via `.user.ini` (no FPM restart).
 - **Live log tail + search** (access/error, no SSH), **health score + notes / tags**, **vhost auto-heal** (missing cert → fresh self-signed bootstrap so `nginx -t` never breaks).
+- **Bot + country blocking** — switch off AI crawlers, SEO scrapers and price-comparison bots by family, or refuse whole countries via a GeoIP map. Both rules exempt the ACME challenge path, so a block can never stop a renewal.
+- **Traffic by country** per hosting, from the access log against a local GeoLite2 database.
+
+> Raw nginx snippets are **admin-only** (`HostingEditNginxRaw`). nginx runs as root, so an arbitrary directive is control of the box, not a hosting setting — see [Security](#security).
 
 ### WordPress
 
 - **Plugin + theme manager** via `wp-cli` — list / install / activate / update / delete, bulk "update all", per-plugin auto-update toggle, upload a `.zip`.
 - **Keyless "defender"** — outdated plugin/theme detection against the public WordPress.org version data (no API key, cached on the node), severity-sorted, with a one-click **minor/patch auto-update**. "Couldn't check" is never reported as "all clear".
 - **Staging → push-to-prod** — one click spins up a `staging.<domain>` copy (files + DB, WP URLs rewritten); another pushes it back over production after a **pre-push safety backup** of prod first.
+- **Site health** — probes the site over loopback, and when it 5xxs, reproduces the fatal through wp-cli and names the plugin or theme in the stack trace. Offers to **park the culprit by renaming its folder**, which is the only remedy that works once WordPress will not boot: `wp plugin deactivate` needs a WordPress that loads.
+- **Object-cache drop-in control** — `wp-content/object-cache.php` is loaded before plugins and regardless of whether its plugin is installed, so an unreachable Redis takes the site down *and* blocks every wp-cli remedy. Park or restore it directly from Site health.
+- **File-permission self-check** — proves nginx can actually reach the docroot, finds ownership drift, unreadable files, world-writable entries, setuid files, an exposed `wp-config.php` and a world-readable PHP session directory. It **performs a real `mkdir` as the site user** rather than inferring from modes, so an exhausted disk quota or an out-of-inodes filesystem is named as itself instead of looking like a permission bug.
+- **Repair core files** (`wp core download --force --skip-content`, pinned to the installed version) and a **full reinstall** behind a backup that has to succeed first — see [Reinstall](#reinstall).
+
+#### Reinstall
+
+Two operations, kept apart because they are not the same risk:
+
+- **Repair core files** replaces WordPress core at the version already installed and
+  leaves `wp-content`, `wp-config.php` and the database alone. This is what fixes most
+  broken sites.
+- **Reinstall** deletes the document tree and every table in the database, then installs
+  fresh. It is collapsed behind a disclosure, gated on `HostingDelete`, requires the
+  domain typed in full — **verified on the node, not only in the browser** — and takes a
+  backup first. If that backup fails, nothing is deleted and the job says so: a failed
+  backup followed by a wipe is the worst outcome the feature can produce, so the control
+  flow is built around preventing exactly that.
 
 ### File manager
 
@@ -274,6 +297,7 @@ Operator knobs mapping straight to nginx / FPM / WordPress. Every save runs
 - **Local** — tar.gz of htdocs + `mysqldump` / `pg_dump` + JSON manifest on `/var/lib/hyperion/backups`.
 - **Off-site S3 + age encryption** — multi-target (Wasabi / Backblaze B2 / Minio / AWS), per-target retention (daily / weekly / monthly), client-side age encryption (operator keeps the private key off the node). Legacy **FTP/FTPS/SFTP** push still supported.
 - **Retention** (max age + minimum N per hosting, pruned hourly), **granular restore** (full / **DB-only** / **files-only**), **chunked download** from the browser, and **restore as a new domain** (mirrors PHP/DB/kind; WP URLs auto-rewritten).
+- **Size-independent.** Database dumps stream to disk rather than through memory; `tar` exit 1 ("a file changed while being read") is treated as the success it is, which on a live site is the normal outcome once the tree is large; and long backups heartbeat so the stale-job reaper cannot fail work that is still running.
 
 ### Security
 
@@ -282,6 +306,10 @@ Operator knobs mapping straight to nginx / FPM / WordPress. Every save runs
 - **Native brute-force protection (fail2ban)** — the agent scans each site's access log for `wp-login.php` / `xmlrpc.php` floods and auto-bans via an `nftables` set (auto-expiring, survives reboots); manual ban/unban per hosting.
 - **WAF-lite + wp-admin IP allowlist** per hosting, **key-only chrooted SFTP** (gated by `sshd -t`), **per-IP rate limit** on login + 2FA verify.
 - **CSP + HSTS + X-Frame-Options + Permissions-Policy + Referrer-Policy** on every response, **per-form CSRF tokens**, **tamper-evident audit log** (BLAKE3 hash chain + `Verify chain` button), **constant-time** secret compares.
+- **The tenant is a local user.** Every hosting has a real Linux account, so isolation is enforced with uids and modes, not convention: PHP-FPM runs as the site's own user with `open_basedir` and a private session directory, and privileged file operations inside a tenant tree resolve symlinks component-by-component before acting — the agent is root, and a path under a customer's webroot is attacker-controlled input.
+- **Admin-only blast radius.** Actions whose reach exceeds one hosting are gated separately from per-hosting rights: raw nginx config, node-wide vsftpd/FTPS changes, and reinstall (gated as `HostingDelete`, since the outcome is the same class of loss).
+- **FTPS** with enforced TLS, available per node. Off by default and deliberately so — the FTP password *is* the site's Linux password, but enabling TLS restarts a shared daemon and locks out clients that cannot negotiate it. `hctl ftp ftps --off` is the way back without a browser. Prefer key-only chrooted SFTP.
+- **Applied migrations are immutable**, enforced by a checksum lock in CI: sqlx refuses to start against a migration whose bytes changed, so an edited comment takes the agent down on every box that already ran it.
 
 ### Multi-node cluster
 
@@ -291,7 +319,9 @@ Operator knobs mapping straight to nginx / FPM / WordPress. Every save runs
 
 ### Operator UI
 
-- **axum + askama + HTMX**, no JS build step, single binary; themed confirm modals (type-the-domain for deletes); live service-install progress; a **`/jobs`** page for every long op (survives browser disconnect, reaper for orphans); role-aware navigation; dark + light themes.
+- **axum + askama + HTMX**, no JS build step, single binary; themed confirm modals (type-the-domain for destructive actions); live service-install progress; a **`/jobs`** page for every long op (survives browser disconnect, reaper for orphans); role-aware navigation; dark + light themes.
+- **Live stats** with a configurable refresh interval, per-hosting traffic maps, signed-in device list with "sign out everywhere", and automatic redirect to the login page when a session expires rather than a silent 403.
+- **Template lints in CI** catch the failures that compile and render perfectly and then fail for every user: a `multipart/form-data` form whose CSRF token is in a hidden field (never read — the upload 403s every time), a `data-confirm-*` on a `<button>` instead of the `<form>` (the dialog never opens), an `hx-get` with no matching route (the panel spins forever), and a page with no way to reach it from the navigation.
 
 ### RBAC + multi-tenancy
 
@@ -361,7 +391,7 @@ HTTP API from *any* host, see [`hctl remote`](#hctl-remote--the-cli-over-the-api
 
 ```console
 $ hctl info
-agent: master.example.com version=v0.8.3-2-gf718fd1 schema=54 hostings=12
+agent: master.example.com version=v0.42.0-2-gf718fd1 schema=61 hostings=12
 
 $ hctl hosting create example.com --php 8.3 --db mariadb
 ✓ created example_com (id=01K4Z…)
@@ -376,6 +406,21 @@ $ hctl audit --limit 3
    42  2026-06-08 14:42 agent    hosting.backup         ok
    41  2026-06-08 14:42 agent    hosting.suspend        ok
    40  2026-06-08 14:42 cli:root hosting.set_limits     ok
+
+$ hctl ftp check example.com          # diagnose FTP on the owning node
+$ hctl ftp perms example.com          # file-permission report
+$ hctl ftp ftps --off                 # turn node-wide FTPS back off
+```
+
+`hctl ftp ftps --off` exists for one reason: enabling FTPS can lock out a client,
+and recovering from that must not need a working browser session.
+
+There is also a short front door, installed alongside the binaries:
+
+```bash
+hyperion update      # same as packaging/install/update.sh
+hyperion status      # both units at a glance
+hyperion logs        # journalctl -u hyperion-agent -u hyperion-web -f
 ```
 
 ---
@@ -389,6 +434,7 @@ at **`/import`** (admin) or `hctl hosting import-panel`.
 - **In-place or remote over SSH** — remote imports from another machine with a host + private key (used for that one run, `0600`, deleted after — never stored); files come across with `rsync`, DBs dumped over `ssh`.
 - **Dry-run first** — a plan shows **created / skipped / conflict** before anything is touched; an existing domain is skipped, never overwritten.
 - **Sites + databases, WordPress included** — `wp-config.php` auto-repointed at the new credentials. **Mail & DNS are reported, never migrated** (Hyperion runs neither). Runs as a background job.
+- **Self-service** — the wizard hands the source box a one-liner that downloads a static-musl exporter, reports its sites, waits for you to tick the ones you want, then streams only those back. The exporter is built for **x86_64**; the bootstrap refuses with a clear message on any other architecture rather than leaving the kernel to say "Exec format error".
 
 ---
 
@@ -477,9 +523,12 @@ hyperion/
 
 ## Project status
 
-**Beta.** A lot is shipped and every line is unit-tested, but none has been
-hardened by real production traffic yet — read the lists as *"implemented and
-demo-tested in VMs"*, not *"proven at scale"*.
+**Beta, now with production mileage.** Everything below is unit-tested, and
+since v0.10 the panel has been run against live customer sites — most of the
+fixes in recent releases came from that rather than from the test suite. Read
+the lists as *"shipped and exercised on a real box"*, not *"proven at scale"*:
+it has not been run across a large fleet, and the multi-node path in particular
+has had far less real traffic than the single-node one.
 
 ### Shipped — single node
 
@@ -502,6 +551,16 @@ demo-tested in VMs"*, not *"proven at scale"*.
 | Panel import — HestiaCP + CloudPanel (in-place + SSH) | UI · CLI · RPC |
 | **Remote API — keys + OpenAPI 3 + IP allowlist + rate limit** | UI · **API** · CLI |
 | Background jobs page with live progress bars | UI · CLI · **API** · RPC |
+| Site health — fatal detection + park the culprit plugin | UI · RPC |
+| File-permission self-check + repair (real write probe) | UI · CLI · RPC |
+| FTP self-check + repair, node-wide FTPS (enforced TLS) | UI · CLI · RPC |
+| WP core repair + full reinstall behind a required backup | UI · RPC |
+| Bot + country blocking, GeoIP, per-hosting traffic map | UI · RPC |
+| Per-hosting DKIM signing, per-site SPF, mail path checks | UI · CLI · RPC |
+| Care packages (paid entitlements) + customer reports | UI · RPC |
+| Monitoring — live gauges, PSI, OOM, per-hosting RSS | UI · RPC |
+| Custom roles from a granular capability set | UI · RPC |
+| Read-only-rootfs watchdog with automatic remount | agent |
 
 ### Shipped — multi-node cluster
 
@@ -526,7 +585,7 @@ demo-tested in VMs"*, not *"proven at scale"*.
 ## Testing
 
 ```bash
-cargo test --workspace                    # 700+ tests, green, runs in seconds
+cargo test --workspace                    # 800+ tests, green, runs in seconds
 cargo fmt --all
 cargo clippy --workspace --all-targets    # clean under -D warnings
 ```

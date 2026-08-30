@@ -938,6 +938,10 @@ pub enum Request {
     /// Delete a single backup run + its archive file(s) on disk.
     /// Refuses if the backup is still "running". Audits the action.
     BackupDelete {
+        /// The hosting the caller was authorized for. The node re-checks
+        /// that `backup_id` belongs to it — the web layer authorizes a
+        /// SELECTOR, and without this the id it forwards is unchecked.
+        sel: HostingSelector,
         backup_id: i64,
     },
     /// View the agent's effective config — agent.toml minus secrets,
@@ -1194,6 +1198,8 @@ pub enum Request {
     /// first byte. Chunked so arbitrarily-large archives never hit
     /// MAX_FRAME.
     BackupFetchChunk {
+        /// See BackupDelete — the id alone is not an authorization.
+        sel: HostingSelector,
         backup_id: i64,
         offset: u64,
         len: u32,

@@ -892,7 +892,7 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(v) => Response::WpPluginAction(v),
             Err(e) => Response::Error(e),
         },
-        Request::BackupDelete { backup_id } => match api.backup_delete(backup_id).await {
+        Request::BackupDelete { sel, backup_id } => match api.backup_delete(sel, backup_id).await {
             Ok(()) => Response::BackupDelete,
             Err(e) => Response::Error(e),
         },
@@ -1184,10 +1184,11 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Err(e) => Response::Error(e),
         },
         Request::BackupFetchChunk {
+            sel,
             backup_id,
             offset,
             len,
-        } => match api.backup_fetch_chunk(backup_id, offset, len).await {
+        } => match api.backup_fetch_chunk(sel, backup_id, offset, len).await {
             Ok((data_b64, total_size, filename, eof)) => Response::BackupFetchChunk {
                 data_b64,
                 total_size,
@@ -2376,7 +2377,7 @@ mod tests {
                 output_tail: String::new(),
             })
         }
-        async fn backup_delete(&self, _: i64) -> Result<(), RpcError> {
+        async fn backup_delete(&self, _: HostingSelector, _: i64) -> Result<(), RpcError> {
             Ok(())
         }
         async fn agent_config_view(&self) -> Result<hyperion_types::AgentConfigView, RpcError> {
@@ -2639,6 +2640,7 @@ mod tests {
         }
         async fn backup_fetch_chunk(
             &self,
+            _: HostingSelector,
             _: i64,
             _: u64,
             _: u32,
