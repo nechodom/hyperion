@@ -179,6 +179,11 @@ struct DetailTpl<'a> {
     /// `maxlength` — so a too-long name is stopped at the keyboard rather
     /// than by a round-trip.
     ftp_login_name_max: usize,
+    /// Every qualifier a name of 1..=`ftp_login_name_max` characters could
+    /// get, so the browser can show a LIVE preview by picking one and
+    /// concatenating — no second copy of the composition rules in
+    /// JavaScript to drift from the Rust one.
+    ftp_login_qualifiers: Vec<String>,
     /// Bare host (no scheme/port) the client should point their FTP/FTPS
     /// client at — the owning node's reachable address, resolved in
     /// [`ftp_host_for`]. Only rendered inside the "new password" block.
@@ -251,6 +256,13 @@ struct DetailTpl<'a> {
     /// is the node-wide shadow view filtered to this site.
     ftp_extra: Vec<hyperion_types::FtpExtraAccount>,
     csrf_ftp_account: String,
+    /// One token PER ROUTE, not one for the card. `check_csrf` verifies
+    /// against `uri.path()`, so a token minted for `/hostings/ftp/account`
+    /// is rejected at `/hostings/ftp/account/reset` and `/delete` — both
+    /// forms shipped dead, failing every submit with "CSRF check failed"
+    /// while the create form beside them worked because its path matched.
+    csrf_ftp_account_reset: String,
+    csrf_ftp_account_delete: String,
     /// Result of `ftp_verify_login` for THIS hosting's system user,
     /// done right after we know there's a password set. Lets the
     /// UI show a green "vsftpd accepts this credential" pill.
@@ -1265,6 +1277,8 @@ pub async fn post_create(
             };
             // Computed before `detail` moves into the template struct.
             let ftp_login_example = ftp_login_example(&detail.domain);
+            let ftp_login_qualifiers =
+                hyperion_validate::ftplogin::login_qualifiers(&detail.domain);
             let limits = fetch_limits(&state, target, HostingSelector::Id(created.id.clone()))
                 .await
                 .unwrap_or_else(|_| hyperion_types::HostingLimits::defaults());
@@ -1320,6 +1334,7 @@ pub async fn post_create(
                 ftp_new_login: None,
                 ftp_login_example,
                 ftp_login_name_max: hyperion_validate::ftplogin::MAX_LOGIN_NAME_LEN,
+                ftp_login_qualifiers,
                 // The FTP "new password" block never renders on the create
                 // path (ftp_new_password is None), so the host is unused here.
                 ftp_host: String::new(),
@@ -1364,6 +1379,8 @@ pub async fn post_create(
                 ftp_accounts: vec![],
                 ftp_extra: vec![],
                 csrf_ftp_account: String::new(),
+                csrf_ftp_account_reset: String::new(),
+                csrf_ftp_account_delete: String::new(),
                 ftp_login_ok: None,
                 csrf_token: super::session_csrf_token(&state, &ctx),
                 target_node: target.unwrap_or("").to_string(),
@@ -2162,6 +2179,7 @@ pub async fn get_detail(
     let bot_families = bot_family_rows(&detail.vhost_options.blocked_bots);
     // Computed before `detail` moves into the template struct.
     let ftp_login_example = ftp_login_example(&detail.domain);
+    let ftp_login_qualifiers = hyperion_validate::ftplogin::login_qualifiers(&detail.domain);
     let tpl = DetailTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -2209,6 +2227,7 @@ pub async fn get_detail(
         ftp_new_login,
         ftp_login_example,
         ftp_login_name_max: hyperion_validate::ftplogin::MAX_LOGIN_NAME_LEN,
+        ftp_login_qualifiers,
         ftp_host,
         error: None,
         // Cloned, not removed. A credential hand-off is single-use for a
@@ -2284,6 +2303,8 @@ pub async fn get_detail(
         ftp_accounts,
         ftp_extra,
         csrf_ftp_account: csrf_token_for(&state, &ctx, "/hostings/ftp/account"),
+        csrf_ftp_account_reset: csrf_token_for(&state, &ctx, "/hostings/ftp/account/reset"),
+        csrf_ftp_account_delete: csrf_token_for(&state, &ctx, "/hostings/ftp/account/delete"),
         ftp_login_ok,
         csrf_token: super::session_csrf_token(&state, &ctx),
         target_node: owner_node.clone().unwrap_or_default(),

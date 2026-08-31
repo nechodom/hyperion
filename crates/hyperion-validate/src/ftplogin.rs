@@ -98,35 +98,55 @@ pub fn compose_extra_login(name: &str, domain: &str) -> Result<String, Validatio
         )));
     }
 
-    let full = format!("{name}.{domain}");
-    let login = if full.len() <= MAX_LOGIN_LEN {
-        full
-    } else {
-        // Everything after `<name>.` is the qualifier's to spend.
-        let budget = MAX_LOGIN_LEN - name.len() - 1;
-        debug_assert!(budget >= MIN_QUALIFIER_LEN);
-        let head_len = budget - DOMAIN_TAG_LEN - 1;
-        // Dots become dashes: truncating a domain can land right after one,
-        // and `deploy.obecni.-3f9a` is both ugly and a `..` risk once the
-        // dash is stripped.
-        let flat: String = domain
-            .chars()
-            .map(|c| if c == '.' { '-' } else { c })
-            .collect();
-        let head = flat
-            .get(..head_len)
-            .unwrap_or(&flat)
-            .trim_end_matches('-')
-            .to_string();
-        let tag = domain_tag(&domain);
-        format!("{name}.{head}-{tag}")
-    };
+    let login = format!("{name}.{}", login_qualifier(&domain, name.len()));
 
     // The composed login is what actually reaches useradd and vsftpd's
     // user_config_dir, so it is checked by the same rule as any other login
     // rather than trusted because this function built it.
     validate_login_name(&login)?;
     Ok(login)
+}
+
+/// Everything after the `.` in a login, for a name of `name_len` characters.
+///
+/// Split out of [`compose_extra_login`] so the panel can render a LIVE preview
+/// without reimplementing any of this in JavaScript. The qualifier depends on
+/// the length of the name and not on its content, and a name is capped at
+/// [`MAX_LOGIN_NAME_LEN`], so the panel asks for all sixteen possible
+/// qualifiers once and the browser only has to pick one and concatenate. A
+/// second implementation in JavaScript would drift from this one, and the
+/// operator would be shown a login the server then refuses to create.
+///
+/// `domain` is expected already trimmed and lowercased; `name_len` is clamped
+/// into the range a valid name can have, so this cannot panic on a caller's
+/// arithmetic.
+pub fn login_qualifier(domain: &str, name_len: usize) -> String {
+    let name_len = name_len.clamp(1, MAX_LOGIN_NAME_LEN);
+    if name_len + 1 + domain.len() <= MAX_LOGIN_LEN {
+        return domain.to_string();
+    }
+    // Everything after `<name>.` is the qualifier's to spend.
+    let budget = MAX_LOGIN_LEN - name_len - 1;
+    debug_assert!(budget >= MIN_QUALIFIER_LEN);
+    let head_len = budget - DOMAIN_TAG_LEN - 1;
+    // Dots become dashes: truncating a domain can land right after one, and
+    // `deploy.obecni.-3f9a` is both ugly and a `..` risk once the dash is
+    // stripped.
+    let flat: String = domain
+        .chars()
+        .map(|c| if c == '.' { '-' } else { c })
+        .collect();
+    let head = flat.get(..head_len).unwrap_or(&flat).trim_end_matches('-');
+    format!("{head}-{}", domain_tag(domain))
+}
+
+/// Every qualifier a name of 1..=[`MAX_LOGIN_NAME_LEN`] characters could get,
+/// indexed by `name.len() - 1`. This is what the panel hands to the browser.
+pub fn login_qualifiers(domain: &str) -> Vec<String> {
+    let domain = domain.trim().trim_matches('.').to_ascii_lowercase();
+    (1..=MAX_LOGIN_NAME_LEN)
+        .map(|n| login_qualifier(&domain, n))
+        .collect()
 }
 
 /// 4 hex characters of BLAKE3 over the domain — stable across releases,
@@ -283,6 +303,38 @@ mod tests {
             "the shortened login changed — every existing account with this \
              shape would be orphaned in passwd"
         );
+    }
+
+    /// The panel's live preview picks a qualifier out of [`login_qualifiers`]
+    /// and concatenates. If that ever stops agreeing with what
+    /// [`compose_extra_login`] builds, the operator is shown one login and the
+    /// server creates another — so the agreement is asserted, for every name
+    /// length and a spread of domain lengths, rather than assumed.
+    #[test]
+    fn the_preview_table_agrees_with_the_real_composition() {
+        for domain in [
+            "a.cz",
+            "example.cz",
+            "masarykovazs.eu",
+            "obecni-urad-velke-prilepy.cz",
+            "zakladni-skola-hradec-kralove.cz",
+            "klientska-zona.staging.firma.cz",
+            "a-very-long-domain-name-nobody-would-choose.example.com",
+        ] {
+            let table = super::login_qualifiers(domain);
+            assert_eq!(table.len(), MAX_LOGIN_NAME_LEN);
+            for len in 1..=MAX_LOGIN_NAME_LEN {
+                let name = "d".repeat(len);
+                let composed = compose_extra_login(&name, domain)
+                    .unwrap_or_else(|e| panic!("refused {name}@{domain}: {e}"));
+                let previewed = format!("{name}.{}", table[len - 1]);
+                assert_eq!(
+                    composed, previewed,
+                    "the preview and the real login disagree for a {len}-character \
+                     name on {domain}"
+                );
+            }
+        }
     }
 
     /// An operator who copies the login out of the panel and pastes it back
