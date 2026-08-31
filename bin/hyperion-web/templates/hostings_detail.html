@@ -2952,6 +2952,92 @@
 
 <div class="card hover" style="margin-top:1rem">
   <h2>
+    <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><line x1="19" y1="8" x2="19" y2="14"/><line x1="22" y1="11" x2="16" y2="11"/></svg>
+    Extra FTP logins
+    <span class="text-soft small" style="font-weight:400;margin-left:0.5rem">{{ ftp_extra.len() }}</span>
+  </h2>
+  <p class="text-soft small" style="margin:0 0 0.8rem;line-height:1.55">
+    Separate logins for the same site — one per person or deploy script, each
+    with its own password you can revoke on its own.
+    <strong>They are separate logins, not separate permissions.</strong>
+    Every one of them can read and write every file this site owns; the landing
+    directory below only decides where a client starts, and a determined client
+    can navigate out of it. Hyperion does it this way on purpose: an account
+    with its own identity would create files PHP could not then modify, which
+    is how “WordPress cannot update this plugin” starts.
+  </p>
+
+  {% if !ftp_extra.is_empty() %}
+  <table class="table small" style="margin:0 0 0.9rem">
+    <thead>
+      <tr><th>Login</th><th>Lands in</th><th>Note</th><th>Password</th><th class="right">Actions</th></tr>
+    </thead>
+    <tbody>
+      {% for a in ftp_extra %}
+      <tr>
+        <td><code>{{ a.login }}</code></td>
+        <td class="text-soft"><code>{{ a.local_root }}</code></td>
+        <td class="text-soft">{{ a.label }}</td>
+        <td>
+          {% if a.password_state == "set" %}<span class="pill ok">set</span>
+          {% else %}<span class="pill warn">{{ a.password_state }}</span>{% endif %}
+        </td>
+        <td class="right">
+          <div class="row-actions">
+            <form method="post" action="/hostings/ftp/account/reset" style="display:inline"
+                  data-confirm-title="New password for {{ a.login }}"
+                  data-confirm-body="A new password is generated and shown once. The old one stops working immediately — anything using it (a deploy script, a colleague's client) will start failing."
+                  data-confirm-confirm-label="Generate">
+              <input type="hidden" name="_csrf" value="{{ csrf_ftp_account }}">
+              <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+              <input type="hidden" name="id" value="{{ a.id }}">
+              <button class="btn small" type="submit">New password</button>
+            </form>
+            <form method="post" action="/hostings/ftp/account/delete" style="display:inline"
+                  data-confirm-title="Delete the login {{ a.login }}"
+                  data-confirm-variant="danger"
+                  data-confirm-body="The Linux account is removed and this login stops working. The site's files are not touched — this deletes a way in, not any content."
+                  data-confirm-confirm-label="Delete login">
+              <input type="hidden" name="_csrf" value="{{ csrf_ftp_account }}">
+              <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+              <input type="hidden" name="id" value="{{ a.id }}">
+              <button class="btn small danger" type="submit">Delete</button>
+            </form>
+          </div>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% endif %}
+
+  <form method="post" action="/hostings/ftp/account" class="row"
+        style="gap:0.6rem;align-items:flex-end;flex-wrap:wrap">
+    <input type="hidden" name="_csrf" value="{{ csrf_ftp_account }}">
+    <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
+    <div class="field" style="margin:0">
+      <label for="ftp_new_login">Login
+        <span class="hint">lowercase, digits, <code>_</code> and <code>-</code></span>
+      </label>
+      <input id="ftp_new_login" name="login" type="text" required
+             placeholder="{{ detail.system_user }}_deploy" pattern="[a-z0-9_-]{1,32}">
+    </div>
+    <div class="field" style="margin:0">
+      <label for="ftp_new_subdir">Lands in
+        <span class="hint">relative to the web root — blank = the web root</span>
+      </label>
+      <input id="ftp_new_subdir" name="subdir" type="text" placeholder="wp-content/uploads">
+    </div>
+    <div class="field" style="margin:0">
+      <label for="ftp_new_label">Note <span class="hint">optional</span></label>
+      <input id="ftp_new_label" name="label" type="text" placeholder="designer, CI, …">
+    </div>
+    <button class="btn primary" type="submit">Add login</button>
+  </form>
+</div>
+
+<div class="card hover" style="margin-top:1rem">
+  <h2>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
     {# Named for what it now shows. It used to list every account on the
        node, on a page about ONE hosting — confusing for an admin, and for a

@@ -19,6 +19,7 @@ pub mod custom_roles;
 pub mod databases;
 pub mod db;
 pub mod email_log;
+pub mod ftp_accounts;
 pub mod hosting_kv;
 pub mod hosting_quotas;
 pub mod hostings;

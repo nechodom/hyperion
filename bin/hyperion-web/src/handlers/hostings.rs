@@ -234,6 +234,10 @@ struct DetailTpl<'a> {
     /// the operator can see "I created 3 accounts" instead of
     /// trusting the silence after a successful POST.
     ftp_accounts: Vec<hyperion_types::FtpAccountSummary>,
+    /// Extra FTP logins for THIS hosting. Separate from `ftp_accounts`, which
+    /// is the node-wide shadow view filtered to this site.
+    ftp_extra: Vec<hyperion_types::FtpExtraAccount>,
+    csrf_ftp_account: String,
     /// Result of `ftp_verify_login` for THIS hosting's system user,
     /// done right after we know there's a password set. Lets the
     /// UI show a green "vsftpd accepts this credential" pill.
@@ -1340,6 +1344,8 @@ pub async fn post_create(
                 email_log: vec![],
                 site_emails: vec![],
                 ftp_accounts: vec![],
+                ftp_extra: vec![],
+                csrf_ftp_account: String::new(),
                 ftp_login_ok: None,
                 csrf_token: super::session_csrf_token(&state, &ctx),
                 target_node: target.unwrap_or("").to_string(),
@@ -1652,7 +1658,7 @@ pub async fn get_detail(
     // (limits, stats, backups, …) goes to the SAME node. Without
     // this, the detail page would show 404 for any hosting that
     // lives on a worker.
-    let (detail, owner_node) = find_hosting_anywhere(&state, sel).await?;
+    let (detail, owner_node) = find_hosting_anywhere(&state, sel.clone()).await?;
     let target = owner_node.as_deref();
     // Reachable FTP host for THIS hosting's node — a worker's own address,
     // not the master's (FTP talks straight to the owning box).
@@ -2111,6 +2117,20 @@ pub async fn get_detail(
         .into_iter()
         .filter(|a| a.user == detail.system_user)
         .collect();
+
+    // Extra FTP logins for this hosting. Best-effort: a node that cannot
+    // answer must not take the whole detail page down, and an empty list
+    // renders as "no extra logins" rather than a broken card.
+    let ftp_extra = match crate::dispatcher::dispatch_to_node(
+        &state,
+        owner_node.as_deref(),
+        Request::FtpAccountList { sel: sel.clone() },
+    )
+    .await
+    {
+        Ok(RpcResponse::FtpAccountList(v)) => v,
+        _ => Vec::new(),
+    };
     let bot_families = bot_family_rows(&detail.vhost_options.blocked_bots);
     let tpl = DetailTpl {
         username: &ctx.username,
@@ -2229,6 +2249,8 @@ pub async fn get_detail(
         email_log,
         site_emails,
         ftp_accounts,
+        ftp_extra,
+        csrf_ftp_account: csrf_token_for(&state, &ctx, "/hostings/ftp/account"),
         ftp_login_ok,
         csrf_token: super::session_csrf_token(&state, &ctx),
         target_node: owner_node.clone().unwrap_or_default(),
@@ -6385,6 +6407,153 @@ pub async fn get_ftp_panel(
         )),
         Err(e) => Ok(card(Default::default(), node_label, Some(e.to_string()))),
     }
+}
+
+#[derive(serde::Deserialize)]
+pub struct FtpAccountForm {
+    pub selector: String,
+    #[serde(default)]
+    pub login: String,
+    #[serde(default)]
+    pub subdir: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub id: i64,
+}
+
+/// POST /hostings/ftp/account — add an extra FTP login.
+///
+/// Gated on `HostingFiles`, matching the existing FTP password action: this
+/// hands out file access, and anyone who can already set the site's FTP
+/// password can hand out exactly the same access.
+pub async fn post_ftp_account_create(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<FtpAccountForm>,
+) -> Result<Response, AppError> {
+    let sel =
+        match require_manage_for_selector(&state, &ctx, &form.selector, Capability::HostingFiles)
+            .await
+        {
+            Ok(s) => s,
+            Err(r) => return Ok(r),
+        };
+    let sel_url = urlencoding(&form.selector);
+    let node: Option<String> = find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        node.as_deref(),
+        Request::FtpAccountCreate {
+            sel,
+            login: form.login.trim().to_string(),
+            subdir: form.subdir.trim().to_string(),
+            label: form.label.trim().to_string(),
+            actor: ctx.username.clone(),
+        },
+    )
+    .await?;
+    ftp_password_redirect(&state, resp, &sel_url).await
+}
+
+/// POST /hostings/ftp/account/reset — new password for one extra login.
+pub async fn post_ftp_account_reset(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<FtpAccountForm>,
+) -> Result<Response, AppError> {
+    let sel =
+        match require_manage_for_selector(&state, &ctx, &form.selector, Capability::HostingFiles)
+            .await
+        {
+            Ok(s) => s,
+            Err(r) => return Ok(r),
+        };
+    let sel_url = urlencoding(&form.selector);
+    let node: Option<String> = find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        node.as_deref(),
+        Request::FtpAccountReset { sel, id: form.id },
+    )
+    .await?;
+    ftp_password_redirect(&state, resp, &sel_url).await
+}
+
+/// POST /hostings/ftp/account/delete — remove an extra login.
+pub async fn post_ftp_account_delete(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<FtpAccountForm>,
+) -> Result<Response, AppError> {
+    let sel =
+        match require_manage_for_selector(&state, &ctx, &form.selector, Capability::HostingFiles)
+            .await
+        {
+            Ok(s) => s,
+            Err(r) => return Ok(r),
+        };
+    let sel_url = urlencoding(&form.selector);
+    let node: Option<String> = find_hosting_anywhere(&state, sel.clone())
+        .await
+        .ok()
+        .and_then(|(_d, n)| n);
+    let resp = crate::dispatcher::dispatch_to_node(
+        &state,
+        node.as_deref(),
+        Request::FtpAccountDelete { sel, id: form.id },
+    )
+    .await?;
+    Ok(match resp {
+        RpcResponse::FtpAccountDelete(m) => Redirect::to(&format!(
+            "/hostings/{sel_url}?flash={}#ftp",
+            urlencoding(&m)
+        ))
+        .into_response(),
+        RpcResponse::Error(e) => {
+            let token = stash_error(&state, &e.to_string()).await;
+            Redirect::to(&format!("/hostings/{sel_url}?wp_error_ref={token}#ftp")).into_response()
+        }
+        _ => return Err(AppError::Internal("unexpected response".into())),
+    })
+}
+
+/// Shared tail for the two actions that mint a password.
+///
+/// The password goes through the same one-shot hand-off the site's own FTP
+/// password uses — never the query string, which nginx writes to its access
+/// log verbatim.
+async fn ftp_password_redirect(
+    state: &SharedState,
+    resp: RpcResponse,
+    sel_url: &str,
+) -> Result<Response, AppError> {
+    Ok(match resp {
+        RpcResponse::FtpAccountCreate(pw) | RpcResponse::FtpAccountReset(pw) => {
+            let token = one_shot_token();
+            {
+                let now = now_secs_web();
+                let mut g = state.ftp_password_handoff.lock().await;
+                g.retain(|_, (_, at)| now - *at < 300);
+                g.insert(token.clone(), (pw, now));
+            }
+            Redirect::to(&format!(
+                "/hostings/{sel_url}?ftp=set&ftp_pw_token={token}#ftp"
+            ))
+            .into_response()
+        }
+        RpcResponse::Error(e) => {
+            let token = stash_error(state, &e.to_string()).await;
+            Redirect::to(&format!("/hostings/{sel_url}?wp_error_ref={token}#ftp")).into_response()
+        }
+        _ => return Err(AppError::Internal("unexpected response".into())),
+    })
 }
 
 #[derive(serde::Deserialize)]

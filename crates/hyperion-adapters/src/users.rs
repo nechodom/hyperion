@@ -112,6 +112,49 @@ pub async fn delete_user(name: &SystemUserName) -> Result<(), AdapterError> {
 }
 
 /// Look up a user by name via `getent passwd`. Returns `None` when absent.
+/// Does an account with this raw login exist?
+///
+/// Takes a `&str` rather than a validated `SystemUserName` because extra FTP
+/// logins are operator-chosen and are checked against their own, narrower
+/// rule — but they still occupy the node-wide passwd namespace, so a
+/// collision has to be caught before `useradd` reports it as a shell error.
+pub async fn lookup_raw(login: &str) -> Result<Option<UserInfo>, AdapterError> {
+    if login.is_empty() || login.contains([':', '\n', '\r', '\0', '/']) {
+        return Err(AdapterError::Other(format!("illegal login {login:?}")));
+    }
+    let out = match cmd::run("/usr/bin/getent", &["passwd", login]).await {
+        Ok(s) => s,
+        Err(AdapterError::Command { code: 2, .. }) => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    parse_passwd_line(out.trim())
+}
+
+/// Parse one `getent passwd` line: `name:x:uid:gid:gecos:home:shell`.
+fn parse_passwd_line(line: &str) -> Result<Option<UserInfo>, AdapterError> {
+    if line.is_empty() {
+        return Ok(None);
+    }
+    let parts: Vec<&str> = line.split(':').collect();
+    if parts.len() < 7 {
+        return Err(AdapterError::Other(format!(
+            "malformed getent line: {line}"
+        )));
+    }
+    let uid: u32 = parts[2]
+        .parse()
+        .map_err(|e| AdapterError::Other(format!("bad uid: {e}")))?;
+    let gid: u32 = parts[3]
+        .parse()
+        .map_err(|e| AdapterError::Other(format!("bad gid: {e}")))?;
+    Ok(Some(UserInfo {
+        uid,
+        gid,
+        home_dir: parts[5].to_string(),
+        shell: parts[6].to_string(),
+    }))
+}
+
 pub async fn lookup(name: &SystemUserName) -> Result<Option<UserInfo>, AdapterError> {
     let out = match cmd::run("/usr/bin/getent", &["passwd", name.as_str()]).await {
         Ok(s) => s,

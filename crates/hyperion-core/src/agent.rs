@@ -1091,6 +1091,34 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         self.svc.slack_send_test().await
     }
 
+    async fn ftp_account_list(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<Vec<hyperion_types::FtpExtraAccount>, RpcError> {
+        self.svc.ftp_account_list(sel).await
+    }
+
+    async fn ftp_account_create(
+        &self,
+        sel: HostingSelector,
+        login: String,
+        subdir: String,
+        label: String,
+        actor: String,
+    ) -> Result<String, RpcError> {
+        self.svc
+            .ftp_account_create(sel, login, subdir, label, actor)
+            .await
+    }
+
+    async fn ftp_account_reset(&self, sel: HostingSelector, id: i64) -> Result<String, RpcError> {
+        self.svc.ftp_account_reset(sel, id).await
+    }
+
+    async fn ftp_account_delete(&self, sel: HostingSelector, id: i64) -> Result<String, RpcError> {
+        self.svc.ftp_account_delete(sel, id).await
+    }
+
     async fn ftp_self_check(
         &self,
         sel: HostingSelector,

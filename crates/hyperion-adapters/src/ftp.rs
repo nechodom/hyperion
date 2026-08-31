@@ -136,6 +136,79 @@ pub async fn set_user_web_root(user: &str, web_root: &str) -> Result<(), Adapter
     Ok(())
 }
 
+/// Create an extra FTP login that shares `uid` with the hosting's own user.
+///
+/// The shared uid is the design, not a shortcut. PHP-FPM runs as the site
+/// user, so a login with a uid of its own would create files PHP cannot then
+/// modify — the "why can't WordPress update this plugin" trap. Sharing it
+/// means every login writes files the site already owns. The cost is stated
+/// in the UI: these are separate LOGINS, not separate permissions.
+///
+/// No home directory is created (`-M`): the landing directory is the site's
+/// own tree, set through the per-user vsftpd config. The shell is
+/// `/usr/sbin/nologin`, so this is not an SSH account.
+pub async fn create_extra_login(
+    login: &str,
+    uid: u32,
+    gid: u32,
+    home: &str,
+) -> Result<(), AdapterError> {
+    // The login becomes a passwd field and a filename under user_config_dir.
+    if login.is_empty()
+        || login.len() > 32
+        || !login
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
+        || login.starts_with('-')
+    {
+        return Err(AdapterError::Other(format!(
+            "invalid FTP login {login:?} — lowercase letters, digits, _ and - only, \
+             up to 32 characters"
+        )));
+    }
+    if crate::users::lookup_raw(login).await?.is_some() {
+        return Err(AdapterError::Other(format!(
+            "the system already has an account called {login:?}"
+        )));
+    }
+    cmd::run(
+        "/usr/sbin/useradd",
+        &[
+            "--no-create-home",
+            "--non-unique",
+            "--uid",
+            &uid.to_string(),
+            "--gid",
+            &gid.to_string(),
+            "--home-dir",
+            home,
+            "--shell",
+            "/usr/sbin/nologin",
+            "--",
+            login,
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
+/// Remove an extra FTP login and its vsftpd override. Idempotent.
+///
+/// `userdel` WITHOUT `-r`: the home directory is the site's own tree, shared
+/// with the hosting's real user, and removing it would delete the website.
+pub async fn delete_extra_login(login: &str) -> Result<(), AdapterError> {
+    if login.is_empty() || login.contains(['/', '\n', '\r', '\0', ':', '.']) {
+        return Err(AdapterError::Other(format!("invalid FTP login {login:?}")));
+    }
+    let _ = clear_user_web_root(login).await;
+    // Absent is success — this runs on teardown paths that may re-run.
+    if crate::users::lookup_raw(login).await?.is_none() {
+        return Ok(());
+    }
+    cmd::run("/usr/sbin/userdel", &["--", login]).await?;
+    Ok(())
+}
+
 /// The `local_root` currently configured for `user`, as vsftpd would read it.
 /// `Ok(None)` means there is no per-user file at all (FTP never enabled, or
 /// the override was removed).

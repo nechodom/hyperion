@@ -1362,6 +1362,31 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(_) => Response::FtpDisable,
             Err(e) => Response::Error(e),
         },
+        Request::FtpAccountList { sel } => match api.ftp_account_list(sel).await {
+            Ok(v) => Response::FtpAccountList(v),
+            Err(e) => Response::Error(e),
+        },
+        Request::FtpAccountCreate {
+            sel,
+            login,
+            subdir,
+            label,
+            actor,
+        } => match api
+            .ftp_account_create(sel, login, subdir, label, actor)
+            .await
+        {
+            Ok(p) => Response::FtpAccountCreate(p),
+            Err(e) => Response::Error(e),
+        },
+        Request::FtpAccountReset { sel, id } => match api.ftp_account_reset(sel, id).await {
+            Ok(p) => Response::FtpAccountReset(p),
+            Err(e) => Response::Error(e),
+        },
+        Request::FtpAccountDelete { sel, id } => match api.ftp_account_delete(sel, id).await {
+            Ok(m) => Response::FtpAccountDelete(m),
+            Err(e) => Response::Error(e),
+        },
         Request::FtpSelfCheck { sel } => match api.ftp_self_check(sel).await {
             Ok(r) => Response::FtpSelfCheck(r),
             Err(e) => Response::Error(e),
@@ -2753,6 +2778,28 @@ mod tests {
         }
         async fn ftp_disable(&self, _: HostingSelector) -> Result<(), RpcError> {
             Ok(())
+        }
+        async fn ftp_account_list(
+            &self,
+            _: HostingSelector,
+        ) -> Result<Vec<hyperion_types::FtpExtraAccount>, RpcError> {
+            Ok(Vec::new())
+        }
+        async fn ftp_account_create(
+            &self,
+            _: HostingSelector,
+            _: String,
+            _: String,
+            _: String,
+            _: String,
+        ) -> Result<String, RpcError> {
+            Ok(String::new())
+        }
+        async fn ftp_account_reset(&self, _: HostingSelector, _: i64) -> Result<String, RpcError> {
+            Ok(String::new())
+        }
+        async fn ftp_account_delete(&self, _: HostingSelector, _: i64) -> Result<String, RpcError> {
+            Ok(String::new())
         }
         async fn ftp_self_check(
             &self,

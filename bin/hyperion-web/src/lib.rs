@@ -674,6 +674,18 @@ pub fn build_router(state: SharedState) -> Router {
             post(handlers::hostings::post_ftp_ftps),
         )
         .route(
+            "/hostings/ftp/account",
+            post(handlers::hostings::post_ftp_account_create),
+        )
+        .route(
+            "/hostings/ftp/account/reset",
+            post(handlers::hostings::post_ftp_account_reset),
+        )
+        .route(
+            "/hostings/ftp/account/delete",
+            post(handlers::hostings::post_ftp_account_delete),
+        )
+        .route(
             "/hostings/:selector/perm-panel",
             get(handlers::hostings::get_perm_panel),
         )

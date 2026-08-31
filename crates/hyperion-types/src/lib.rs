@@ -61,13 +61,13 @@ pub use stats::{
     AcmeConfigView, AgentConfigView, BackupRemoteConfigView, BackupRetentionConfigView,
     ClusterConfigView, ClusterStats, CustomRoleSummary, DashboardAlert, EffectiveRoleWire,
     EmailConfigView, EmailLogEntry, FirewallPort, FirewallView, FsDiagnostics, FsFixStep,
-    FtpAccountSummary, FtpCheckItem, FtpCheckReport, HostingFileContent, HostingFileEntry,
-    HostingStats, MonitorConfigView, MonitorHistory, MonitorOverviewItem, MonitorSamplePoint,
-    MtaDiagnostics, MtaPortProbe, NodeMetricPoint, NodeMetricsHistory, NodeStats, NodeSummary,
-    NodeUpdateStatus, NotificationFeed, NotificationTemplatesView, NotificationView, ServiceHealth,
-    ServiceInstallStatus, ServicesHealth, SiteEmailLogEntry, SlackConfigView, SmtpAutodetect,
-    TrashEntry, UpdateStatus, Web2faEnrollment, WebHostingAccess, WebLoginResult, WebUserSummary,
-    WebVerify2faResult,
+    FtpAccountSummary, FtpCheckItem, FtpCheckReport, FtpExtraAccount, HostingFileContent,
+    HostingFileEntry, HostingStats, MonitorConfigView, MonitorHistory, MonitorOverviewItem,
+    MonitorSamplePoint, MtaDiagnostics, MtaPortProbe, NodeMetricPoint, NodeMetricsHistory,
+    NodeStats, NodeSummary, NodeUpdateStatus, NotificationFeed, NotificationTemplatesView,
+    NotificationView, ServiceHealth, ServiceInstallStatus, ServicesHealth, SiteEmailLogEntry,
+    SlackConfigView, SmtpAutodetect, TrashEntry, UpdateStatus, Web2faEnrollment, WebHostingAccess,
+    WebLoginResult, WebUserSummary, WebVerify2faResult,
 };
 pub use stats::{CARE_REPORT_DEFAULT_BODY_TEMPLATE, EXPIRY_WARNING_DEFAULT_BODY_TEMPLATE};
 pub use wp::{
