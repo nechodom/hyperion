@@ -190,7 +190,11 @@ pub trait AgentApi: Send + Sync + 'static {
 
     /// Per-request liveness probe — true ⇒ live, false ⇒
     /// revoked / unknown.
-    async fn web_session_touch(&self, sid: String) -> Result<bool, RpcError>;
+    async fn web_session_touch(
+        &self,
+        sid: String,
+        user_id: i64,
+    ) -> Result<hyperion_types::SessionStanding, RpcError>;
 
     /// Newest-first list of `user_id`'s sessions.
     async fn web_session_list(

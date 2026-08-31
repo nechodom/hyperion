@@ -684,3 +684,65 @@ fn no_template_has_markup_after_its_last_endblock() {
         offenders.join("\n  ")
     );
 }
+
+/// An item in a tab strip must either switch a panel or navigate.
+///
+/// The switcher binds every `.tab` in the strip, calls `preventDefault()` and
+/// then activates `element.dataset.tab`. An item styled as a tab but WITHOUT
+/// `data-tab` therefore does neither: the click is swallowed, nothing is
+/// activated, and — because activating an unknown id used to deactivate every
+/// panel — the page went blank and stayed blank. That is what the "Move /
+/// copy" link did in production.
+///
+/// The switcher now ignores items with no `data-tab` so the browser follows
+/// their href. This checks the other half: such an item must actually HAVE an
+/// href to follow, and it must not be a bare fragment, which navigates
+/// nowhere.
+#[test]
+fn every_tab_either_switches_a_panel_or_navigates() {
+    let mut offenders = Vec::new();
+    let mut checked = 0usize;
+    for entry in std::fs::read_dir(templates_dir()).expect("read templates dir") {
+        let path = entry.expect("dir entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("html") {
+            continue;
+        }
+        let body = std::fs::read_to_string(&path).expect("read template");
+        let name = path
+            .file_name()
+            .expect("file name")
+            .to_string_lossy()
+            .into_owned();
+
+        let mut rest = body.as_str();
+        while let Some(start) = rest.find("class=\"tab\"") {
+            // Back up to the start of the tag, forward to its end.
+            let before = &rest[..start];
+            let Some(open) = before.rfind('<') else { break };
+            let after = &rest[start..];
+            let Some(end) = after.find('>') else { break };
+            let tag = &rest[open..start + end + 1];
+            rest = &after[end..];
+            checked += 1;
+
+            if tag.contains("data-tab=") {
+                continue;
+            }
+            let href = tag
+                .split("href=\"")
+                .nth(1)
+                .and_then(|s| s.split('"').next())
+                .unwrap_or("");
+            if href.is_empty() || href.starts_with('#') {
+                offenders.push(format!("{name}: {tag}"));
+            }
+        }
+    }
+    assert!(checked > 0, "no tabs found — the lint has drifted");
+    assert!(
+        offenders.is_empty(),
+        "these tab-strip items neither switch a panel (no data-tab) nor navigate \
+         (no usable href), so clicking them does nothing:\n  {}",
+        offenders.join("\n  ")
+    );
+}

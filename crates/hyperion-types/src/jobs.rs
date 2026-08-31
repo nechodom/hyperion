@@ -81,6 +81,36 @@ impl JobView {
 /// `hyperion-auth` is the wire-format the COOKIE carries; this is
 /// the projection the agent stores + the panel renders into
 /// /settings/sessions.
+/// What a session's owner is allowed to do RIGHT NOW.
+///
+/// Authorization used to come entirely from the signed cookie, which stamps
+/// `role`, `caps` and `scope_all` once at login. Nothing re-read them, so a
+/// demotion, a capability revoke, a custom-role edit, an account lock or a
+/// full user delete had NO effect on a live session — the old privileges kept
+/// working until the cookie's own expiry, up to the full session TTL measured
+/// from the user's last login rather than from the admin's action. An admin
+/// who demoted someone at 09:00 took nothing away until as late as 17:00,
+/// with nothing on screen saying so.
+///
+/// The cookie still carries identity, which is signed and cannot be forged.
+/// Privilege comes from here, re-read on every request out of the RPC round
+/// trip that already happens — the same three master-local SQLite reads the
+/// API-key path has always done.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionStanding {
+    /// The session row exists and is not revoked — or there is no row at all,
+    /// which is a pre-migration cookie and is accepted.
+    pub live: bool,
+    /// The `web_users` row still exists. False ⇒ the account was deleted.
+    pub known_user: bool,
+    pub locked: bool,
+    /// Live base role, which may differ from the one stamped in the cookie.
+    pub role: String,
+    /// Live effective capabilities (built-in preset or custom role).
+    pub caps: u64,
+    pub scope_all: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 pub struct WebSessionView {
     pub sid: String,

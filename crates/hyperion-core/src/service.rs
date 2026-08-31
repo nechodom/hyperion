@@ -4055,6 +4055,19 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         if options.canonical_host != detail.vhost_options.canonical_host
             && !options.canonical_host.is_empty()
         {
+            // Bring WordPress along BEFORE probing. The loop is not bad luck,
+            // it is the two halves disagreeing: nginx sends visitors to one
+            // spelling and WordPress's own Site Address sends them back to
+            // the other. Telling the operator to go and fix it by hand makes
+            // this setting a trap; the panel knows both halves, so it sets
+            // both. The probe below stays as the safety net for the cases
+            // this cannot reach — a redirect plugin, a hard-coded constant in
+            // wp-config.php, an application that is not WordPress at all.
+            let canonical = match options.canonical_host.as_str() {
+                "www" => format!("www.{}", detail.domain),
+                _ => detail.domain.clone(),
+            };
+            self.wp_align_site_url(&detail, &canonical).await;
             if let Some(loop_hint) = self.redirect_loop_probe(&detail.domain).await {
                 let _ = hyperion_state::hostings::set_vhost_options(
                     &self.pool,
@@ -6705,24 +6718,51 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             // sends .php to FPM). Every OTHER hosting on this node has a
             // local user who can read a world-readable file.
             let cfg = format!("{root}/wp-config.php");
-            if let Ok(md) = tokio::fs::metadata(&cfg).await {
+            // symlink_metadata, like the session_dir and logs_dir checks
+            // below: the site user owns this tree, so `metadata` would follow
+            // a symlink they planted and report the mode of whatever it aims
+            // at — a check that passes while the real file is wide open.
+            if let Ok(md) = tokio::fs::symlink_metadata(&cfg).await {
                 use std::os::unix::fs::PermissionsExt;
                 let mode = md.permissions().mode() & 0o7777;
-                let exposed = mode & 0o004 != 0;
+                let exposed = md.file_type().is_symlink() || mode & 0o004 != 0;
                 push(
                     "wp_config",
                     "wp-config.php not readable by other users",
-                    if exposed { "warn" } else { "ok" },
-                    if exposed {
+                    // ERROR, not warn. The test is exact — `mode & 0o004` —
+                    // and nothing on this node needs o+r on the file: PHP-FPM
+                    // renders `user = <site_user>` so PHP reads it as the
+                    // OWNER, nginx never reads it (.php goes to FPM), and
+                    // `useradd -U` gives the site its own group. So a world
+                    // -readable wp-config.php is not a smell, it is another
+                    // tenant already able to read it — the same class as
+                    // session_dir, which is graded `error` twenty lines down.
+                    // Graded `warn`, it sat under the triage line and looked
+                    // like housekeeping.
+                    if exposed { "error" } else { "ok" },
+                    if md.file_type().is_symlink() {
+                        "wp-config.php is a SYMLINK — whatever it points at is what \
+                         PHP reads, and its permissions are not this file's. Replace it \
+                         with the real file."
+                            .to_string()
+                    } else if exposed {
                         format!(
                             "mode {mode:o} — every other site's system user on this node can \
-                             read the database password. 0640 is enough for PHP, which runs \
-                             as {user}."
+                             read the database password AND the auth salts, which let any \
+                             local user forge an admin login cookie for this site. 0640 is \
+                             enough for PHP, which runs as {user}."
                         )
                     } else {
                         format!("mode {mode:o}")
                     },
-                    if exposed { "wp_config_tighten" } else { "" },
+                    // A symlink is not fixed by chmod — chmod_path refuses to
+                    // follow one, so offering the button would only produce a
+                    // failure the operator cannot act on.
+                    if exposed && !md.file_type().is_symlink() {
+                        "wp_config_tighten"
+                    } else {
+                        ""
+                    },
                 );
             }
         }
@@ -14388,10 +14428,53 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             .map_err(|e| RpcError::Internal_with(format!("web_session_insert: {e}")))
     }
 
-    pub async fn web_session_touch(&self, sid: &str) -> Result<bool, RpcError> {
-        hyperion_state::web_sessions::touch_if_live(&self.pool, sid, now_secs())
+    /// Liveness AND the session owner's CURRENT privilege.
+    ///
+    /// Used to return a bare `bool`, so authorization came entirely from the
+    /// role and capabilities stamped into the cookie at login and a revoked
+    /// privilege kept working until that cookie expired. These are the same
+    /// three master-local SQLite reads `api_key_resolve` has always done for
+    /// the API-key path; folding them into the probe that already runs on
+    /// every request costs no extra round trip.
+    pub async fn web_session_touch(
+        &self,
+        sid: &str,
+        user_id: i64,
+    ) -> Result<hyperion_types::SessionStanding, RpcError> {
+        let live = hyperion_state::web_sessions::touch_if_live(&self.pool, sid, now_secs())
             .await
-            .map_err(|e| RpcError::Internal_with(format!("web_session_touch: {e}")))
+            .map_err(|e| RpcError::Internal_with(format!("web_session_touch: {e}")))?;
+        let user = hyperion_state::web_users::get_by_id(&self.pool, user_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("web_session_touch user: {e}")))?;
+        let eff = hyperion_state::web_users::effective_role(&self.pool, user_id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("web_session_touch role: {e}")))?;
+        Ok(match (user, eff) {
+            (Some(u), Some(er)) => hyperion_types::SessionStanding {
+                live,
+                known_user: true,
+                locked: u.locked,
+                role: er.base_role.as_str().to_string(),
+                caps: er.caps.bits(),
+                scope_all: er.scope_all,
+            },
+            // No `web_users` row, or no resolvable role — a custom role
+            // deleted out from under the account. Reported as `known_user:
+            // false` and NOT as locked: `locked` means the row says so, and
+            // there is no row. The caller decides what absence means, because
+            // only it can tell a deleted account from the bootstrap admin,
+            // whose record lives in a file on the web host rather than in
+            // this database.
+            _ => hyperion_types::SessionStanding {
+                live,
+                known_user: false,
+                locked: false,
+                role: String::new(),
+                caps: 0,
+                scope_all: false,
+            },
+        })
     }
 
     pub async fn web_session_list(
@@ -15043,6 +15126,93 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         Ok(())
     }
 
+    /// Point WordPress's `siteurl` and `home` at `canonical_host`.
+    ///
+    /// Best-effort and deliberately quiet: a site that is not WordPress, has
+    /// no wp-cli, or stores an address this cannot safely edit is left alone
+    /// and the redirect-loop probe still guards the change. Only the HOST is
+    /// rewritten — the scheme and any subdirectory are the operator's, and
+    /// replacing the whole value would move a site out of its subdirectory.
+    ///
+    /// Runs on the node that owns the hosting, which is where wp-cli and the
+    /// site's database are.
+    async fn wp_align_site_url(&self, detail: &hyperion_types::HostingDetail, canonical: &str) {
+        // Filesystem check, not wp_status: this must work on a hosting whose
+        // install record is missing, and it must not pay for a wp-cli boot on
+        // a site that has no WordPress at all.
+        if detect_wp_install_on_disk(&detail.root_dir).await.is_none() {
+            return;
+        }
+        for option in ["home", "siteurl"] {
+            let current = match hyperion_adapters::wpcli::run(
+                &detail.system_user,
+                &detail.root_dir,
+                &["option", "get", option],
+            )
+            .await
+            {
+                Ok(v) => v.trim().to_string(),
+                Err(e) => {
+                    tracing::warn!(
+                        domain = %detail.domain, option, error = %e,
+                        "canonical host: could not read the WordPress address —                          leaving it to the redirect-loop probe"
+                    );
+                    return;
+                }
+            };
+            let Some(next) = hyperion_adapters::wpcli::rewrite_url_host(&current, canonical) else {
+                tracing::warn!(
+                    domain = %detail.domain, option, %current,
+                    "canonical host: WordPress address is not a plain http(s) URL —                      not touching it"
+                );
+                return;
+            };
+            if next == current {
+                continue;
+            }
+            match hyperion_adapters::wpcli::run(
+                &detail.system_user,
+                &detail.root_dir,
+                &["option", "update", option, &next],
+            )
+            .await
+            {
+                Ok(_) => {
+                    tracing::info!(
+                        domain = %detail.domain, option, from = %current, to = %next,
+                        "canonical host: WordPress address updated to match"
+                    );
+                    self.append_audit(
+                        "hosting.canonical_host.wp_aligned",
+                        Some(detail.id.as_str()),
+                        &serde_json::json!({
+                            "option": option,
+                            "from": current,
+                            "to": next,
+                        })
+                        .to_string(),
+                        "ok",
+                    )
+                    .await;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        domain = %detail.domain, option, error = %e,
+                        "canonical host: could not update the WordPress address"
+                    );
+                    self.append_audit(
+                        "hosting.canonical_host.wp_aligned",
+                        Some(detail.id.as_str()),
+                        &serde_json::json!({"option": option, "error": e.to_string()}).to_string(),
+                        "failed",
+                    )
+                    .await;
+                    return;
+                }
+            }
+        }
+    }
+
     async fn redirect_loop_probe(&self, domain: &str) -> Option<String> {
         const MAX_HOPS: u8 = 6;
         let url = format!("https://{domain}/");
@@ -15076,12 +15246,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let culprit = if headers.contains("x-redirect-by: wordpress") {
             // Name it. Every minute spent looking at nginx here is wasted,
             // and this is the overwhelmingly common cause.
-            "WordPress is redirecting in the opposite direction. Its Site Address \
-             (Settings → General, the `siteurl`/`home` options) points at the other \
-             spelling of the domain, so the two take turns bouncing visitors and the \
-             site fails with ERR_TOO_MANY_REDIRECTS. FIX: either pick the canonical \
-             host that matches WordPress, or change WordPress's Site Address to match \
-             this setting — they have to agree."
+            "WordPress is redirecting in the opposite direction, and it kept doing so \
+             after its Site Address was set to match — so something else is forcing \
+             the address: a `WP_HOME`/`WP_SITEURL` constant hard-coded in \
+             wp-config.php (which overrides the setting and cannot be changed from \
+             the database), or a redirect plugin. Check those, or pick the canonical \
+             host that matches what the site already does."
                 .to_string()
         } else {
             "Something on the site redirects in the opposite direction — most often the \
@@ -32012,6 +32182,85 @@ mod tests {
             .await
             .expect("pending");
         assert!(after.is_empty(), "actions canceled");
+    }
+
+    /// The whole point of widening the session probe: a privilege taken away
+    /// must be gone on the NEXT request, not when the cookie happens to
+    /// expire. Before this, `web_session_touch` returned a bare bool and the
+    /// role and capabilities came from the cookie, so an admin demoted at
+    /// 09:00 kept full access until as late as 17:00.
+    #[tokio::test]
+    async fn a_demotion_takes_effect_on_the_next_request() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), happy_mocks());
+        let uid = s
+            .web_user_create(
+                "vera".into(),
+                "vera@example.cz".into(),
+                "correct horse battery".into(),
+                "admin".into(),
+            )
+            .await
+            .expect("create user");
+
+        let before = s
+            .web_session_touch("sid-not-in-the-ledger", uid)
+            .await
+            .expect("touch");
+        assert!(before.known_user && !before.locked);
+        assert_eq!(before.role, "admin");
+
+        s.web_user_set_role(uid, "viewer".into())
+            .await
+            .expect("demote");
+
+        let after = s
+            .web_session_touch("sid-not-in-the-ledger", uid)
+            .await
+            .expect("touch");
+        assert_eq!(after.role, "viewer", "the demotion did not take effect");
+        assert!(
+            after.caps != before.caps,
+            "a viewer must not keep an admin's capabilities"
+        );
+    }
+
+    /// Locking is how an admin stops someone NOW. It used to stop only their
+    /// next login, which is not what the button says.
+    #[tokio::test]
+    async fn locking_an_account_ends_its_live_session() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), happy_mocks());
+        let uid = s
+            .web_user_create(
+                "lada".into(),
+                "lada@example.cz".into(),
+                "correct horse battery".into(),
+                "operator".into(),
+            )
+            .await
+            .expect("create user");
+        assert!(!s.web_session_touch("sid", uid).await.expect("touch").locked);
+
+        s.web_user_set_locked(uid, true, Some("offboarded".into()))
+            .await
+            .expect("lock");
+        assert!(s.web_session_touch("sid", uid).await.expect("touch").locked);
+    }
+
+    /// A deleted account must not keep acting through a cookie that is still
+    /// validly signed.
+    #[tokio::test]
+    async fn a_deleted_user_has_no_standing() {
+        let pool = open_memory().await.expect("open");
+        let s = svc(pool.clone(), happy_mocks());
+        let st = s.web_session_touch("sid", 999_999).await.expect("touch");
+        assert!(!st.known_user, "an unknown user id must not be known");
+        assert_eq!(st.caps, 0, "and carries no capabilities of its own");
+        // NOT reported as locked: there is no row to say so. The web layer
+        // distinguishes a deleted account from the bootstrap admin, whose
+        // record lives in a file rather than in this table.
+        assert!(!st.locked);
     }
 
     #[tokio::test]

@@ -263,10 +263,12 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(()) => Response::WebSessionAck,
             Err(e) => Response::Error(e),
         },
-        Request::WebSessionTouch { sid } => match api.web_session_touch(sid).await {
-            Ok(v) => Response::WebSessionTouch(v),
-            Err(e) => Response::Error(e),
-        },
+        Request::WebSessionTouch { sid, user_id } => {
+            match api.web_session_touch(sid, user_id).await {
+                Ok(v) => Response::WebSessionTouch(v),
+                Err(e) => Response::Error(e),
+            }
+        }
         Request::WebSessionList { user_id } => match api.web_session_list(user_id).await {
             Ok(v) => Response::WebSessionList(v),
             Err(e) => Response::Error(e),
@@ -1816,8 +1818,19 @@ mod tests {
         ) -> Result<(), RpcError> {
             Ok(())
         }
-        async fn web_session_touch(&self, _: String) -> Result<bool, RpcError> {
-            Ok(true)
+        async fn web_session_touch(
+            &self,
+            _: String,
+            _: i64,
+        ) -> Result<hyperion_types::SessionStanding, RpcError> {
+            Ok(hyperion_types::SessionStanding {
+                live: true,
+                known_user: true,
+                locked: false,
+                role: "super_admin".into(),
+                caps: u64::MAX,
+                scope_all: true,
+            })
         }
         async fn web_session_list(
             &self,
