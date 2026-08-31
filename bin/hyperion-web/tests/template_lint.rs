@@ -6,6 +6,56 @@
 
 use std::path::{Path, PathBuf};
 
+/// The CSRF-minting calls on one line, as `(byte offset, function name)`.
+///
+/// Three spellings exist: `csrf_token_for`, the shorter `csrf_token` some
+/// handlers use, and `session_csrf_token`, which mints the wildcard. The last
+/// CONTAINS the second, so a match is only real when the character before it
+/// cannot be part of an identifier.
+fn mint_calls(line: &str) -> Vec<(usize, &'static str)> {
+    let mut out = Vec::new();
+    for name in ["session_csrf_token", "csrf_token_for", "csrf_token"] {
+        let needle = format!("{name}(");
+        let mut from = 0usize;
+        while let Some(rel) = line[from..].find(&needle) {
+            let at = from + rel;
+            // Written as a match, not `is_none_or`: that is stable since
+            // 1.82 and this workspace's MSRV is 1.80.
+            let boundary = match line[..at].chars().next_back() {
+                Some(c) => !c.is_ascii_alphanumeric() && c != '_',
+                None => true,
+            };
+            if boundary {
+                out.push((at, name));
+            }
+            from = at + needle.len();
+        }
+    }
+    out
+}
+
+/// The template field or local a mint call is assigned to, read from the text
+/// to its left: `csrf_ftp_set: csrf_token_for(..)`, `let csrf_sftp = ..`, and
+/// `csrf_finish: super::session_csrf_token(..)` all yield the name.
+fn mint_field(head: &str) -> Option<String> {
+    let mut h = head.trim_end();
+    for prefix in ["super::", "self::", "crate::", "::"] {
+        if let Some(x) = h.strip_suffix(prefix) {
+            h = x.trim_end();
+        }
+    }
+    let h = h.trim_end_matches([':', '=']).trim_end();
+    let ident: String = h
+        .chars()
+        .rev()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    (!ident.is_empty()).then_some(ident)
+}
+
 fn templates_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("templates")
 }
@@ -397,5 +447,196 @@ fn no_template_disables_escaping() {
          render becomes script in the operator's session:\n  {}\nUse |safe on the one \
          value that is really markup instead.",
         offenders.join("\n  ")
+    );
+}
+
+/// Every form's CSRF token must be minted for the path the form POSTs to.
+///
+/// `check_csrf` derives the form id it verifies against from
+/// `parts.uri.path()` — the literal request path. `csrf_token_for(.., form_id)`
+/// mints against whatever string the handler passed. When the two disagree the
+/// form is dead on arrival: it renders, it submits, and it fails 100% of the
+/// time with "CSRF check failed · Source: body". Nothing catches it at compile
+/// time, and it looks identical to a stale-session failure in the operator's
+/// browser, so the report comes back as "my session expired" rather than "this
+/// button has never worked".
+///
+/// That shipped: the extra-FTP-login card minted ONE token for
+/// `/hostings/ftp/account` and reused it on the `/reset` and `/delete` forms,
+/// so both were broken from the first commit while the create form beside them
+/// worked, because only its path happened to match.
+///
+/// A token minted for `SESSION_WIDE_FORM_ID` ("*") verifies at any path and is
+/// exempt.
+#[test]
+fn csrf_tokens_are_minted_for_the_path_the_form_posts_to() {
+    // template variable -> the form_id(s) its mint call passed.
+    let mut minted: std::collections::HashMap<String, std::collections::BTreeSet<String>> =
+        std::collections::HashMap::new();
+    // Variables ever filled from `session_csrf_token` hold a wildcard token
+    // that verifies at ANY path. The same field name (`csrf_token`) is
+    // path-scoped in one template struct and session-wide in another, and
+    // this lint matches on the name alone, so a name that is EVER session-wide
+    // cannot be proven wrong and is left alone.
+    let mut session_wide: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let handlers = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut stack = vec![handlers];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("read src dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                continue;
+            }
+            let body = std::fs::read_to_string(&path).expect("read handler");
+            // `csrf_field: csrf_token_for(&state, &ctx, "/some/path")`, with the
+            // struct field name immediately before it on the same line.
+            for line in body.lines() {
+                for (call, name) in mint_calls(line) {
+                    let Some(field) = mint_field(&line[..call]) else {
+                        continue;
+                    };
+                    if name == "session_csrf_token" {
+                        session_wide.insert(field);
+                        continue;
+                    }
+                    // The form id is the call's last string literal.
+                    let Some(form_id) = line[call..]
+                        .rsplit_once('"')
+                        .and_then(|(head, _)| head.rsplit('"').next())
+                    else {
+                        continue;
+                    };
+                    minted.entry(field).or_default().insert(form_id.to_string());
+                }
+            }
+        }
+    }
+    assert!(
+        !minted.is_empty(),
+        "found no csrf_token_for calls — the lint's parser has drifted"
+    );
+
+    let mut offenders = Vec::new();
+    let mut checked = 0usize;
+    for entry in std::fs::read_dir(templates_dir()).expect("read templates dir") {
+        let path = entry.expect("dir entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("html") {
+            continue;
+        }
+        let body = std::fs::read_to_string(&path).expect("read template");
+        let name = path
+            .file_name()
+            .expect("file name")
+            .to_string_lossy()
+            .into_owned();
+
+        let mut rest = body.as_str();
+        while let Some(start) = rest.find("<form") {
+            let after = &rest[start..];
+            // The token lives in the form BODY, so take the whole element.
+            let end = after.find("</form>").unwrap_or(after.len());
+            let form = &after[..end];
+            rest = &after[end.max(1)..];
+
+            let Some(action) = form
+                .split("action=\"")
+                .nth(1)
+                .and_then(|s| s.split('"').next())
+            else {
+                continue;
+            };
+            // Only forms whose action is a literal path can be checked; a
+            // templated action ({{ .. }}) is resolved at render time.
+            if action.contains("{{") {
+                continue;
+            }
+            let action_path = action.split('?').next().unwrap_or(action);
+
+            // `<input type="hidden" name="_csrf" value="{{ var }}">`, or the
+            // multipart form of it in the query string.
+            let var = form
+                .split("name=\"_csrf\"")
+                .nth(1)
+                .and_then(|s| s.split("value=\"").nth(1))
+                .and_then(|s| s.split('"').next())
+                .or_else(|| {
+                    action
+                        .split("_csrf={{")
+                        .nth(1)
+                        .and_then(|s| s.split("}}").next())
+                });
+            let Some(var) = var else { continue };
+            let var = var
+                .trim()
+                .trim_start_matches("{{")
+                .trim_end_matches("}}")
+                .trim();
+            // Filters and non-identifier expressions are out of scope.
+            let var = var.split('|').next().unwrap_or(var).trim();
+
+            if session_wide.contains(var) {
+                continue;
+            }
+            let Some(paths) = minted.get(var) else {
+                // Not minted by csrf_token_for — a nested expression, or a
+                // field this parser does not recognise.
+                continue;
+            };
+            // The same field name minted for different paths in different
+            // template structs is ambiguous; this lint reports only what it
+            // can prove.
+            if paths.len() != 1 {
+                continue;
+            }
+            checked += 1;
+            if !paths.iter().any(|p| p == action_path || p == "*") {
+                offenders.push(format!(
+                    "{name}: <form action=\"{action_path}\"> uses `{var}`, minted for {paths:?}"
+                ));
+            }
+        }
+    }
+    assert!(
+        checked > 0,
+        "no template form matched a csrf_token_for variable — the lint has drifted"
+    );
+    assert!(
+        offenders.is_empty(),
+        "these forms carry a CSRF token minted for a DIFFERENT path, so every \
+         submit fails with \"CSRF check failed\":\n  {}",
+        offenders.join("\n  ")
+    );
+}
+
+/// The FTP login preview must stay a lookup, not a reimplementation.
+///
+/// The server renders every qualifier a name could get (`data-qualifiers`,
+/// from `ftplogin::login_qualifiers`) and the browser picks one by length and
+/// concatenates. That is the only reason the preview cannot disagree with the
+/// login the server actually creates. Rewriting the script to compute the
+/// shortening itself — truncating the domain, hashing the tag — puts a second
+/// copy of those rules in a language no test covers, and the first thing that
+/// drifts is what the operator is shown before they click Add.
+#[test]
+fn the_ftp_login_preview_reads_the_servers_table() {
+    let body = std::fs::read_to_string(templates_dir().join("hostings_detail.html"))
+        .expect("read hostings_detail.html");
+    assert!(
+        body.contains("data-qualifiers=\"{{ ftp_login_qualifiers|join(\"|\") }}\""),
+        "the qualifier table is gone from the login input — the preview would \
+         have to compute the shortening itself"
+    );
+    assert!(
+        body.contains("input.dataset.qualifiers"),
+        "the preview script no longer reads the server's qualifier table"
+    );
+    assert!(
+        body.contains("input.dataset.domain"),
+        "the preview script no longer reads the domain it compares against to \
+         decide whether to say the domain was shortened"
     );
 }

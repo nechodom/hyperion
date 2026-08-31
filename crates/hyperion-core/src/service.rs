@@ -7053,7 +7053,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         subdir: String,
         label: String,
         actor: String,
-    ) -> Result<String, RpcError> {
+    ) -> Result<(String, String), RpcError> {
         let detail = self.get(sel).await?;
         if detail.state != HostingState::Active {
             return Err(RpcError::Conflict {
@@ -7070,7 +7070,17 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 message: "this hosting has no document root or system user".into(),
             });
         }
-        let login = login.trim().to_ascii_lowercase();
+        // The operator names the account; Hyperion qualifies it with the
+        // domain. The rule and the 32-byte budget live in the adapter, next
+        // to the useradd call that enforces them — see
+        // `ftp::compose_extra_login` for why a long domain is shortened
+        // instead of refused.
+        let login =
+            hyperion_adapters::ftp::compose_extra_login(&login, &detail.domain).map_err(|e| {
+                RpcError::Validation {
+                    message: e.to_string(),
+                }
+            })?;
 
         // Resolve the landing directory inside the hosting, refusing to
         // follow a symlink out of it — the site user owns this tree and can
@@ -7147,7 +7157,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             "ok",
         )
         .await;
-        Ok(password)
+        Ok((login, password))
     }
 
     /// Replace an extra login's password. Returns the new one.
@@ -7155,7 +7165,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         &self,
         sel: HostingSelector,
         id: i64,
-    ) -> Result<String, RpcError> {
+    ) -> Result<(String, String), RpcError> {
         let detail = self.get(sel).await?;
         let row = hyperion_state::ftp_accounts::get_owned(&self.pool, &detail.id, id)
             .await
@@ -7177,7 +7187,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             "ok",
         )
         .await;
-        Ok(password)
+        Ok((row.login, password))
     }
 
     pub async fn ftp_account_delete(

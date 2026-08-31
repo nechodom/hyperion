@@ -2045,9 +2045,12 @@ pub enum Response {
     FtpDisable,
     FtpSelfCheck(hyperion_types::FtpCheckReport),
     FtpAccountList(Vec<hyperion_types::FtpExtraAccount>),
-    /// The generated password, shown once.
-    FtpAccountCreate(String),
-    FtpAccountReset(String),
+    /// `(login, password)` — the password is shown once, and it is paired
+    /// with the login it belongs to because the panel used to show a fresh
+    /// password beside the SITE's username, which is not the account it was
+    /// for. An operator copied both and got "530 Login incorrect".
+    FtpAccountCreate(String, String),
+    FtpAccountReset(String, String),
     FtpAccountDelete(String),
     FtpRepairSite(String),
     FtpRepairNodeConfig(String),

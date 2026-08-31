@@ -724,8 +724,12 @@ pub trait AgentApi: Send + Sync + 'static {
         subdir: String,
         label: String,
         actor: String,
-    ) -> Result<String, RpcError>;
-    async fn ftp_account_reset(&self, sel: HostingSelector, id: i64) -> Result<String, RpcError>;
+    ) -> Result<(String, String), RpcError>;
+    async fn ftp_account_reset(
+        &self,
+        sel: HostingSelector,
+        id: i64,
+    ) -> Result<(String, String), RpcError>;
     async fn ftp_account_delete(&self, sel: HostingSelector, id: i64) -> Result<String, RpcError>;
     async fn ftp_self_check(
         &self,

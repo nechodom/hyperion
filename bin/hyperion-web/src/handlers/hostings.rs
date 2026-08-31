@@ -166,6 +166,24 @@ struct DetailTpl<'a> {
     csrf_ftp_set: String,
     csrf_ftp_disable: String,
     ftp_new_password: Option<String>,
+    /// Set when the password belongs to an EXTRA login rather than the site's
+    /// own account — the panel must name the right one.
+    ftp_new_login: Option<String>,
+    /// What the login for a name of "deploy" would ACTUALLY be on this
+    /// hosting, built by the same function that will build the real one.
+    /// The form used to promise `<name>.<domain>` in prose, which stops
+    /// being true the moment the domain is too long to fit in Linux's
+    /// 32-character login and Hyperion has to shorten it.
+    ftp_login_example: String,
+    /// The cap on the operator's half of that login, for the input's
+    /// `maxlength` — so a too-long name is stopped at the keyboard rather
+    /// than by a round-trip.
+    ftp_login_name_max: usize,
+    /// Every qualifier a name of 1..=`ftp_login_name_max` characters could
+    /// get, so the browser can show a LIVE preview by picking one and
+    /// concatenating — no second copy of the composition rules in
+    /// JavaScript to drift from the Rust one.
+    ftp_login_qualifiers: Vec<String>,
     /// Bare host (no scheme/port) the client should point their FTP/FTPS
     /// client at — the owning node's reachable address, resolved in
     /// [`ftp_host_for`]. Only rendered inside the "new password" block.
@@ -238,6 +256,13 @@ struct DetailTpl<'a> {
     /// is the node-wide shadow view filtered to this site.
     ftp_extra: Vec<hyperion_types::FtpExtraAccount>,
     csrf_ftp_account: String,
+    /// One token PER ROUTE, not one for the card. `check_csrf` verifies
+    /// against `uri.path()`, so a token minted for `/hostings/ftp/account`
+    /// is rejected at `/hostings/ftp/account/reset` and `/delete` — both
+    /// forms shipped dead, failing every submit with "CSRF check failed"
+    /// while the create form beside them worked because its path matched.
+    csrf_ftp_account_reset: String,
+    csrf_ftp_account_delete: String,
     /// Result of `ftp_verify_login` for THIS hosting's system user,
     /// done right after we know there's a password set. Lets the
     /// UI show a green "vsftpd accepts this credential" pill.
@@ -1250,6 +1275,10 @@ pub async fn post_create(
                 RpcResponse::HostingGet(d) => d,
                 _ => return Err(AppError::Internal("expected HostingGet".into())),
             };
+            // Computed before `detail` moves into the template struct.
+            let ftp_login_example = ftp_login_example(&detail.domain);
+            let ftp_login_qualifiers =
+                hyperion_validate::ftplogin::login_qualifiers(&detail.domain);
             let limits = fetch_limits(&state, target, HostingSelector::Id(created.id.clone()))
                 .await
                 .unwrap_or_else(|_| hyperion_types::HostingLimits::defaults());
@@ -1302,6 +1331,10 @@ pub async fn post_create(
                 csrf_ftp_set: csrf_token_for(&state, &ctx, "/hostings/ftp/set"),
                 csrf_ftp_disable: csrf_token_for(&state, &ctx, "/hostings/ftp/disable"),
                 ftp_new_password: None,
+                ftp_new_login: None,
+                ftp_login_example,
+                ftp_login_name_max: hyperion_validate::ftplogin::MAX_LOGIN_NAME_LEN,
+                ftp_login_qualifiers,
                 // The FTP "new password" block never renders on the create
                 // path (ftp_new_password is None), so the host is unused here.
                 ftp_host: String::new(),
@@ -1346,6 +1379,8 @@ pub async fn post_create(
                 ftp_accounts: vec![],
                 ftp_extra: vec![],
                 csrf_ftp_account: String::new(),
+                csrf_ftp_account_reset: String::new(),
+                csrf_ftp_account_delete: String::new(),
                 ftp_login_ok: None,
                 csrf_token: super::session_csrf_token(&state, &ctx),
                 target_node: target.unwrap_or("").to_string(),
@@ -2096,14 +2131,24 @@ pub async fn get_detail(
     // back-button press cannot show it a second time. Removing it here is
     // the whole point of the hand-off: the credential exists in memory for
     // exactly one render.
-    let ftp_new_password = match q.ftp_pw_token.as_deref() {
+    // The hand-off carries "login\npassword" for an extra FTP account, and a
+    // bare password for the site's own. Splitting here keeps both callers
+    // simple and means the panel always knows which login it is showing.
+    let ftp_handoff = match q.ftp_pw_token.as_deref() {
         Some(t) if !t.is_empty() => state
             .ftp_password_handoff
             .lock()
             .await
             .remove(t)
-            .map(|(pw, _)| pw),
+            .map(|(v, _)| v),
         _ => None,
+    };
+    let (ftp_new_login, ftp_new_password) = match ftp_handoff {
+        Some(v) => match v.split_once('\n') {
+            Some((login, pw)) => (Some(login.to_string()), Some(pw.to_string())),
+            None => (None, Some(v)),
+        },
+        None => (None, None),
     };
     // The RPC returns the NODE-WIDE list; this page shows ONE hosting, so it
     // is filtered to that hosting for everyone.
@@ -2132,6 +2177,9 @@ pub async fn get_detail(
         _ => Vec::new(),
     };
     let bot_families = bot_family_rows(&detail.vhost_options.blocked_bots);
+    // Computed before `detail` moves into the template struct.
+    let ftp_login_example = ftp_login_example(&detail.domain);
+    let ftp_login_qualifiers = hyperion_validate::ftplogin::login_qualifiers(&detail.domain);
     let tpl = DetailTpl {
         username: &ctx.username,
         user_initial: super::user_initial(&ctx.username),
@@ -2176,6 +2224,10 @@ pub async fn get_detail(
         csrf_ftp_set: csrf_token_for(&state, &ctx, "/hostings/ftp/set"),
         csrf_ftp_disable: csrf_token_for(&state, &ctx, "/hostings/ftp/disable"),
         ftp_new_password,
+        ftp_new_login,
+        ftp_login_example,
+        ftp_login_name_max: hyperion_validate::ftplogin::MAX_LOGIN_NAME_LEN,
+        ftp_login_qualifiers,
         ftp_host,
         error: None,
         // Cloned, not removed. A credential hand-off is single-use for a
@@ -2251,6 +2303,8 @@ pub async fn get_detail(
         ftp_accounts,
         ftp_extra,
         csrf_ftp_account: csrf_token_for(&state, &ctx, "/hostings/ftp/account"),
+        csrf_ftp_account_reset: csrf_token_for(&state, &ctx, "/hostings/ftp/account/reset"),
+        csrf_ftp_account_delete: csrf_token_for(&state, &ctx, "/hostings/ftp/account/delete"),
         ftp_login_ok,
         csrf_token: super::session_csrf_token(&state, &ctx),
         target_node: owner_node.clone().unwrap_or_default(),
@@ -6529,19 +6583,34 @@ pub async fn post_ftp_account_delete(
 /// The password goes through the same one-shot hand-off the site's own FTP
 /// password uses — never the query string, which nginx writes to its access
 /// log verbatim.
+/// The login a name of "deploy" would produce on this hosting.
+///
+/// Rendered in the form so the operator sees the real result — including the
+/// shortened form Hyperion falls back to when the domain will not fit. Falls
+/// back to the plain shape only if composition fails, which for a hosting
+/// that exists it cannot.
+fn ftp_login_example(domain: &str) -> String {
+    hyperion_validate::compose_extra_login("deploy", domain)
+        .unwrap_or_else(|_| format!("deploy.{domain}"))
+}
+
 async fn ftp_password_redirect(
     state: &SharedState,
     resp: RpcResponse,
     sel_url: &str,
 ) -> Result<Response, AppError> {
     Ok(match resp {
-        RpcResponse::FtpAccountCreate(pw) | RpcResponse::FtpAccountReset(pw) => {
+        RpcResponse::FtpAccountCreate(login, pw) | RpcResponse::FtpAccountReset(login, pw) => {
             let token = one_shot_token();
             {
                 let now = now_secs_web();
                 let mut g = state.ftp_password_handoff.lock().await;
                 g.retain(|_, (_, at)| now - *at < 300);
-                g.insert(token.clone(), (pw, now));
+                // Login and password together. The panel used to render a
+                // fresh password beside the SITE's username, which is not the
+                // account it belongs to — an operator copied both and got
+                // "530 Login incorrect".
+                g.insert(token.clone(), (format!("{login}\n{pw}"), now));
             }
             Redirect::to(&format!(
                 "/hostings/{sel_url}?ftp=set&ftp_pw_token={token}#ftp"

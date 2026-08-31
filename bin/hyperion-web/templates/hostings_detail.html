@@ -2859,11 +2859,23 @@
             <span class="copy-value">{{ ftp_host }}</span>
             <span class="copy-hint">click to copy</span>
           </div>
+          {# The login this password is FOR. It used to always print the
+             site's system user, so a password minted for an extra login was
+             shown beside the wrong username — copy both and the server says
+             "530 Login incorrect". #}
+          {% if let Some(l) = ftp_new_login %}
+          <div class="copy-field" data-copy="{{ l }}" title="Copy the username">
+            <span class="copy-label">Username</span>
+            <span class="copy-value">{{ l }}</span>
+            <span class="copy-hint">click to copy</span>
+          </div>
+          {% else %}
           <div class="copy-field" data-copy="{{ detail.system_user }}" title="Copy the username">
             <span class="copy-label">Username</span>
             <span class="copy-value">{{ detail.system_user }}</span>
             <span class="copy-hint">click to copy</span>
           </div>
+          {% endif %}
           <div class="copy-field" data-copy="{{ pw }}" title="Copy the password">
             <span class="copy-label">Password</span>
             <span class="copy-value">{{ pw }}</span>
@@ -2958,7 +2970,13 @@
   </h2>
   <p class="text-soft small" style="margin:0 0 0.8rem;line-height:1.55">
     Separate logins for the same site — one per person or deploy script, each
-    with its own password you can revoke on its own.
+    with its own password you can revoke on its own. You pick the name and
+    Hyperion qualifies it with the domain, so <code>deploy</code> becomes
+    <code>{{ ftp_login_example }}</code>: Linux logins are a node-wide
+    namespace, and the domain is what stops two sites both wanting
+    <code>deploy</code>. Linux caps a login at 32 characters, so on a long
+    domain the qualifier is shortened and given a short tag that keeps it
+    unique — the name you choose is never the part that gets cut.
     <strong>They are separate logins, not separate permissions.</strong>
     Every one of them can read and write every file this site owns; the landing
     directory below only decides where a client starts, and a determined client
@@ -2988,7 +3006,7 @@
                   data-confirm-title="New password for {{ a.login }}"
                   data-confirm-body="A new password is generated and shown once. The old one stops working immediately — anything using it (a deploy script, a colleague's client) will start failing."
                   data-confirm-confirm-label="Generate">
-              <input type="hidden" name="_csrf" value="{{ csrf_ftp_account }}">
+              <input type="hidden" name="_csrf" value="{{ csrf_ftp_account_reset }}">
               <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
               <input type="hidden" name="id" value="{{ a.id }}">
               <button class="btn small" type="submit">New password</button>
@@ -2998,7 +3016,7 @@
                   data-confirm-variant="danger"
                   data-confirm-body="The Linux account is removed and this login stops working. The site's files are not touched — this deletes a way in, not any content."
                   data-confirm-confirm-label="Delete login">
-              <input type="hidden" name="_csrf" value="{{ csrf_ftp_account }}">
+              <input type="hidden" name="_csrf" value="{{ csrf_ftp_account_delete }}">
               <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
               <input type="hidden" name="id" value="{{ a.id }}">
               <button class="btn small danger" type="submit">Delete</button>
@@ -3016,11 +3034,26 @@
     <input type="hidden" name="_csrf" value="{{ csrf_ftp_account }}">
     <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
     <div class="field" style="margin:0">
-      <label for="ftp_new_login">Login
-        <span class="hint">lowercase, digits, <code>_</code> and <code>-</code></span>
+      <label for="ftp_new_login">Name
+        <span class="hint">up to {{ ftp_login_name_max }} characters — the login
+          becomes <code>{{ ftp_login_example }}</code></span>
       </label>
       <input id="ftp_new_login" name="login" type="text" required
-             placeholder="{{ detail.system_user }}_deploy" pattern="[a-z0-9_-]{1,32}">
+             placeholder="deploy" pattern="[a-z0-9_-]+"
+             maxlength="{{ ftp_login_name_max }}"
+             autocomplete="off" autocapitalize="off" spellcheck="false"
+             {# One qualifier per possible name length, pipe-separated and
+                indexed by length - 1. Built by the SAME Rust function that
+                composes the real login (ftplogin::login_qualifiers), so the
+                preview cannot drift from what the server will create — a
+                second copy of the shortening rules in JavaScript would.
+                '|' is safe as a separator: it cannot occur in a domain or in
+                the hex tag. #}
+             data-qualifiers="{{ ftp_login_qualifiers|join("|") }}"
+             data-domain="{{ detail.domain }}">
+      {# Live preview. Mirrors the `apply-preview` pattern above. #}
+      <div id="ftp-login-preview" class="muted"
+           style="font-size:0.82rem;margin-top:0.35rem;line-height:1.6"></div>
     </div>
     <div class="field" style="margin:0">
       <label for="ftp_new_subdir">Lands in
@@ -3034,6 +3067,45 @@
     </div>
     <button class="btn primary" type="submit">Add login</button>
   </form>
+  {# Shows the exact login the typed name will produce, including the
+     shortened form a long domain forces. The qualifiers come from the
+     server (see data-qualifiers above); this only picks one by length and
+     concatenates, so there is no second copy of the composition rules to
+     drift. textContent throughout — the name is operator input. #}
+  <script>
+    (function () {
+      var input = document.getElementById('ftp_new_login');
+      var box = document.getElementById('ftp-login-preview');
+      if (!input || !box) return;
+      var quals = (input.dataset.qualifiers || '').split('|');
+      var domain = (input.dataset.domain || '').toLowerCase();
+      var max = quals.length;
+      function render() {
+        var name = input.value.trim().toLowerCase();
+        if (!name) { box.textContent = ''; return; }
+        if (!/^[a-z0-9_-]+$/.test(name)) {
+          box.textContent = 'Lowercase letters, digits, underscore and dash only.';
+          return;
+        }
+        if (name.charAt(0) === '-') {
+          box.textContent = 'The name cannot start with a dash.';
+          return;
+        }
+        var q = quals[Math.min(name.length, max) - 1];
+        if (!q) { box.textContent = ''; return; }
+        var login = name + '.' + q;
+        // The qualifier IS the domain unless it had to be shortened, so
+        // that comparison is the exact test — say so, or the tag reads as a
+        // typo the operator has to guess the reason for.
+        box.textContent = q === domain
+          ? 'Login: ' + login
+          : 'Login: ' + login + '  \u2014 the domain does not fit Linux\u2019s '
+            + '32-character login, so it is shortened and tagged to stay unique';
+      }
+      input.addEventListener('input', render);
+      render();
+    })();
+  </script>
 </div>
 
 <div class="card hover" style="margin-top:1rem">

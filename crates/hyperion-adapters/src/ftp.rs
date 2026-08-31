@@ -120,11 +120,7 @@ pub async fn set_user_password(user: &str, password: &str) -> Result<(), Adapter
 pub async fn set_user_web_root(user: &str, web_root: &str) -> Result<(), AdapterError> {
     // The user becomes a filename under user_config_dir — reject path/newline
     // injection (already a validated SystemUserName upstream; defence in depth).
-    if user.is_empty() || user.contains(['/', '\n', '\r', '\0', ':', '.']) {
-        return Err(AdapterError::Other(
-            "ftp user has an illegal character for a per-user config".into(),
-        ));
-    }
+    validate_login_name(user)?;
     tokio::fs::create_dir_all(VSFTPD_USER_CONF_DIR)
         .await
         .map_err(|e| AdapterError::Other(format!("mkdir {VSFTPD_USER_CONF_DIR}: {e}")))?;
@@ -134,6 +130,24 @@ pub async fn set_user_web_root(user: &str, web_root: &str) -> Result<(), Adapter
         .await
         .map_err(|e| AdapterError::Other(format!("write {path}: {e}")))?;
     Ok(())
+}
+
+/// Re-exported so callers in this module keep one import for "FTP login
+/// rules". The rules themselves are pure string policy and live in
+/// `hyperion-validate`, because the panel needs them too and must not link
+/// the system adapters to get them.
+pub use hyperion_validate::ftplogin::{MAX_LOGIN_LEN, MAX_LOGIN_NAME_LEN};
+
+/// [`hyperion_validate::compose_extra_login`], as an [`AdapterError`].
+pub fn compose_extra_login(name: &str, domain: &str) -> Result<String, AdapterError> {
+    hyperion_validate::compose_extra_login(name, domain)
+        .map_err(|e| AdapterError::Other(e.to_string()))
+}
+
+/// [`hyperion_validate::validate_login_name`], as an [`AdapterError`], so the
+/// `?` in every adapter call site below stays as it was.
+pub fn validate_login_name(login: &str) -> Result<(), AdapterError> {
+    hyperion_validate::validate_login_name(login).map_err(|e| AdapterError::Other(e.to_string()))
 }
 
 /// Create an extra FTP login that shares `uid` with the hosting's own user.
@@ -154,42 +168,95 @@ pub async fn create_extra_login(
     home: &str,
 ) -> Result<(), AdapterError> {
     // The login becomes a passwd field and a filename under user_config_dir.
-    if login.is_empty()
-        || login.len() > 32
-        || !login
-            .bytes()
-            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-')
-        || login.starts_with('-')
-    {
-        return Err(AdapterError::Other(format!(
-            "invalid FTP login {login:?} — lowercase letters, digits, _ and - only, \
-             up to 32 characters"
-        )));
-    }
+    validate_login_name(login)?;
     if crate::users::lookup_raw(login).await?.is_some() {
         return Err(AdapterError::Other(format!(
             "the system already has an account called {login:?}"
         )));
     }
-    cmd::run(
-        "/usr/sbin/useradd",
-        &[
-            "--no-create-home",
-            "--non-unique",
-            "--uid",
-            &uid.to_string(),
-            "--gid",
-            &gid.to_string(),
-            "--home-dir",
-            home,
-            "--shell",
-            "/usr/sbin/nologin",
-            "--",
-            login,
-        ],
-    )
-    .await?;
-    Ok(())
+    let uid_s = uid.to_string();
+    let gid_s = gid.to_string();
+    let base: Vec<&str> = vec![
+        "--no-create-home",
+        "--non-unique",
+        "--uid",
+        &uid_s,
+        "--gid",
+        &gid_s,
+        "--home-dir",
+        home,
+        "--shell",
+        "/usr/sbin/nologin",
+        "--",
+        login,
+    ];
+    match cmd::run("/usr/sbin/useradd", &base).await {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            // shadow refuses a name outside its "portable" charset — which a
+            // dotted `<name>.<domain>` is — unless the bad-name flag is given.
+            // A box that accepts the name never sees this path, so the flag is
+            // a retry rather than the default: passing an unknown option up
+            // front would break every box that does not need it.
+            let msg = e.to_string();
+            if !(msg.contains("invalid user name") || msg.contains("is not valid")) {
+                return Err(e);
+            }
+            // The flag is spelled BOTH ways in the wild: Debian carried
+            // `--badnames` as a downstream patch for years, upstream shadow
+            // added `--badname`. Guessing wrong turns a fixable refusal into
+            // "unrecognized option", so ask this useradd which one it has
+            // instead of hardcoding either.
+            let Some(flag) = useradd_badname_flag().await else {
+                return Err(AdapterError::Other(format!(
+                    "useradd refused {login:?}: {e}. This system's useradd rejects dots in a \
+                     login name and offers no --badname/--badnames option to override it — \
+                     choose a name without dots."
+                )));
+            };
+            let mut retry = vec![flag];
+            retry.extend_from_slice(&base);
+            cmd::run("/usr/sbin/useradd", &retry)
+                .await
+                .map(|_| ())
+                .map_err(|e2| {
+                    AdapterError::Other(format!("useradd refused {login:?} even with {flag}: {e2}"))
+                })
+        }
+    }
+}
+
+/// Which spelling of the "allow a non-portable name" option this `useradd`
+/// supports, read out of its own `--help`.
+///
+/// `None` means neither — the caller must not retry, because an unrecognized
+/// option produces a usage error that hides the real refusal.
+async fn useradd_badname_flag() -> Option<&'static str> {
+    // The exit status of `--help` is not the signal: shadow exits 0 and
+    // prints to stdout, other builds exit non-zero and print to stderr. The
+    // TEXT is the signal, and `run_capturing_all` carries stdout+stderr in
+    // both arms, so read it out of whichever arm comes back.
+    let help = match cmd::run_capturing_all("/usr/sbin/useradd", &["--help"]).await {
+        Ok(out) => out,
+        Err(AdapterError::Command { stderr_tail, .. }) => stderr_tail,
+        Err(_) => return None,
+    };
+    badname_flag_in_help(&help)
+}
+
+/// The text-matching half of [`useradd_badname_flag`], split out so the
+/// spelling precedence is testable without a `useradd` on the box.
+fn badname_flag_in_help(help: &str) -> Option<&'static str> {
+    // Order matters: `--badnames` CONTAINS `--badname`, so the longer
+    // spelling has to be tested first or a Debian box would be told it
+    // supports the singular form and then reject it as unrecognized.
+    if help.contains("--badnames") {
+        Some("--badnames")
+    } else if help.contains("--badname") {
+        Some("--badname")
+    } else {
+        None
+    }
 }
 
 /// Remove an extra FTP login and its vsftpd override. Idempotent.
@@ -197,9 +264,7 @@ pub async fn create_extra_login(
 /// `userdel` WITHOUT `-r`: the home directory is the site's own tree, shared
 /// with the hosting's real user, and removing it would delete the website.
 pub async fn delete_extra_login(login: &str) -> Result<(), AdapterError> {
-    if login.is_empty() || login.contains(['/', '\n', '\r', '\0', ':', '.']) {
-        return Err(AdapterError::Other(format!("invalid FTP login {login:?}")));
-    }
+    validate_login_name(login)?;
     let _ = clear_user_web_root(login).await;
     // Absent is success — this runs on teardown paths that may re-run.
     if crate::users::lookup_raw(login).await?.is_none() {
@@ -213,11 +278,7 @@ pub async fn delete_extra_login(login: &str) -> Result<(), AdapterError> {
 /// `Ok(None)` means there is no per-user file at all (FTP never enabled, or
 /// the override was removed).
 pub async fn read_user_web_root(user: &str) -> Result<Option<String>, AdapterError> {
-    if user.is_empty() || user.contains(['/', '\n', '\r', '\0', ':', '.']) {
-        return Err(AdapterError::Other(
-            "ftp user has an illegal character for a per-user config".into(),
-        ));
-    }
+    validate_login_name(user)?;
     let path = format!("{VSFTPD_USER_CONF_DIR}/{user}");
     match tokio::fs::read_to_string(&path).await {
         Ok(body) => Ok(Some(
@@ -1426,5 +1487,27 @@ mod tests {
                 "vsftpd config missing: {needle}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod login_name_tests {
+    use super::badname_flag_in_help;
+
+    /// Debian carried `--badnames` as a downstream patch for years; upstream
+    /// shadow added `--badname`. The plural CONTAINS the singular, so a naive
+    /// `contains` in the wrong order hands a Debian box the spelling its
+    /// useradd does not know, turning a fixable refusal into a usage error.
+    #[test]
+    fn the_longer_badname_spelling_wins() {
+        assert_eq!(
+            badname_flag_in_help("  --badnames  allow bad names\n"),
+            Some("--badnames")
+        );
+        assert_eq!(
+            badname_flag_in_help("  --badname  allow bad names\n"),
+            Some("--badname")
+        );
+        assert_eq!(badname_flag_in_help("  -m, --create-home\n"), None);
     }
 }

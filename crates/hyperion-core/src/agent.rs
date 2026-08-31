@@ -1105,13 +1105,17 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         subdir: String,
         label: String,
         actor: String,
-    ) -> Result<String, RpcError> {
+    ) -> Result<(String, String), RpcError> {
         self.svc
             .ftp_account_create(sel, login, subdir, label, actor)
             .await
     }
 
-    async fn ftp_account_reset(&self, sel: HostingSelector, id: i64) -> Result<String, RpcError> {
+    async fn ftp_account_reset(
+        &self,
+        sel: HostingSelector,
+        id: i64,
+    ) -> Result<(String, String), RpcError> {
         self.svc.ftp_account_reset(sel, id).await
     }
 

@@ -1640,6 +1640,8 @@ dependencies = [
 name = "hyperion-validate"
 version = "0.1.0"
 dependencies = [
+ "blake3",
+ "hex",
  "once_cell",
  "proptest",
  "regex",
