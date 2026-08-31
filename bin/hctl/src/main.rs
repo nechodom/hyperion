@@ -1545,7 +1545,8 @@ fn print_pretty(resp: &Response) {
                 );
             }
         }
-        Response::FtpAccountCreate(p) | Response::FtpAccountReset(p) => {
+        Response::FtpAccountCreate(l, p) | Response::FtpAccountReset(l, p) => {
+            println!("login:    {l}");
             println!("password (shown once): {p}");
         }
         Response::FtpAccountDelete(m) => println!("{m}"),

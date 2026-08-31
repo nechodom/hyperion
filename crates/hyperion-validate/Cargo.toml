@@ -10,6 +10,10 @@ serde.workspace = true
 once_cell.workspace = true
 regex.workspace = true
 thiserror.workspace = true
+# The shortened-domain tag in an FTP login is persisted in passwd forever, so
+# it needs a hash that is stable across Rust releases — DefaultHasher is not.
+blake3.workspace = true
+hex.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

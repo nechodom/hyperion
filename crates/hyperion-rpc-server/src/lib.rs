@@ -1376,11 +1376,11 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             .ftp_account_create(sel, login, subdir, label, actor)
             .await
         {
-            Ok(p) => Response::FtpAccountCreate(p),
+            Ok((l, p)) => Response::FtpAccountCreate(l, p),
             Err(e) => Response::Error(e),
         },
         Request::FtpAccountReset { sel, id } => match api.ftp_account_reset(sel, id).await {
-            Ok(p) => Response::FtpAccountReset(p),
+            Ok((l, p)) => Response::FtpAccountReset(l, p),
             Err(e) => Response::Error(e),
         },
         Request::FtpAccountDelete { sel, id } => match api.ftp_account_delete(sel, id).await {
@@ -2792,11 +2792,15 @@ mod tests {
             _: String,
             _: String,
             _: String,
-        ) -> Result<String, RpcError> {
-            Ok(String::new())
+        ) -> Result<(String, String), RpcError> {
+            Ok((String::new(), String::new()))
         }
-        async fn ftp_account_reset(&self, _: HostingSelector, _: i64) -> Result<String, RpcError> {
-            Ok(String::new())
+        async fn ftp_account_reset(
+            &self,
+            _: HostingSelector,
+            _: i64,
+        ) -> Result<(String, String), RpcError> {
+            Ok((String::new(), String::new()))
         }
         async fn ftp_account_delete(&self, _: HostingSelector, _: i64) -> Result<String, RpcError> {
             Ok(String::new())

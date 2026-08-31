@@ -2859,11 +2859,23 @@
             <span class="copy-value">{{ ftp_host }}</span>
             <span class="copy-hint">click to copy</span>
           </div>
+          {# The login this password is FOR. It used to always print the
+             site's system user, so a password minted for an extra login was
+             shown beside the wrong username — copy both and the server says
+             "530 Login incorrect". #}
+          {% if let Some(l) = ftp_new_login %}
+          <div class="copy-field" data-copy="{{ l }}" title="Copy the username">
+            <span class="copy-label">Username</span>
+            <span class="copy-value">{{ l }}</span>
+            <span class="copy-hint">click to copy</span>
+          </div>
+          {% else %}
           <div class="copy-field" data-copy="{{ detail.system_user }}" title="Copy the username">
             <span class="copy-label">Username</span>
             <span class="copy-value">{{ detail.system_user }}</span>
             <span class="copy-hint">click to copy</span>
           </div>
+          {% endif %}
           <div class="copy-field" data-copy="{{ pw }}" title="Copy the password">
             <span class="copy-label">Password</span>
             <span class="copy-value">{{ pw }}</span>
@@ -2958,7 +2970,13 @@
   </h2>
   <p class="text-soft small" style="margin:0 0 0.8rem;line-height:1.55">
     Separate logins for the same site — one per person or deploy script, each
-    with its own password you can revoke on its own.
+    with its own password you can revoke on its own. You pick the name and
+    Hyperion qualifies it with the domain, so <code>deploy</code> becomes
+    <code>{{ ftp_login_example }}</code>: Linux logins are a node-wide
+    namespace, and the domain is what stops two sites both wanting
+    <code>deploy</code>. Linux caps a login at 32 characters, so on a long
+    domain the qualifier is shortened and given a short tag that keeps it
+    unique — the name you choose is never the part that gets cut.
     <strong>They are separate logins, not separate permissions.</strong>
     Every one of them can read and write every file this site owns; the landing
     directory below only decides where a client starts, and a determined client
@@ -3016,11 +3034,13 @@
     <input type="hidden" name="_csrf" value="{{ csrf_ftp_account }}">
     <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
     <div class="field" style="margin:0">
-      <label for="ftp_new_login">Login
-        <span class="hint">lowercase, digits, <code>_</code> and <code>-</code></span>
+      <label for="ftp_new_login">Name
+        <span class="hint">up to {{ ftp_login_name_max }} characters — the login
+          becomes <code>{{ ftp_login_example }}</code></span>
       </label>
       <input id="ftp_new_login" name="login" type="text" required
-             placeholder="{{ detail.system_user }}_deploy" pattern="[a-z0-9_-]{1,32}">
+             placeholder="deploy" pattern="[a-z0-9_-]+"
+             maxlength="{{ ftp_login_name_max }}">
     </div>
     <div class="field" style="margin:0">
       <label for="ftp_new_subdir">Lands in
