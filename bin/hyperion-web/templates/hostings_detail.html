@@ -773,6 +773,27 @@
            much as a static site, and it is the case an operator actually
            hits. Only proxy/redirect (no docroot) get no form. #}
         {% if detail.kind == "static" || detail.kind == "php" %}
+          {#- Self-check for the case the operator actually hits: a site
+              imported from another panel whose PHP is off. WordPress is
+              detected from DISK (wp-config.php + wp-includes/version.php),
+              which needs no PHP and therefore still works here — saying
+              "no PHP version yet" and nothing else left the operator with a
+              site the panel refused every WordPress action on, with no hint
+              that the missing PHP was the reason. -#}
+          {% if let Some(w) = wp_status %}
+          <div class="flash warn" style="margin:0 0 0.7rem">
+            <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+            <div class="flash-body">
+              <strong>WordPress {{ w.wp_version }} is installed here, but this
+              hosting has no PHP.</strong>
+              Nothing will run and every WordPress action answers “requires a
+              PHP hosting” until you turn PHP on below. A site imported from
+              another panel usually came off an older PHP, so
+              <strong>8.1</strong> is preselected as the least disruptive
+              landing spot — pick a newer one if you know the site is current.
+            </div>
+          </div>
+          {% endif %}
           <div style="display:flex;align-items:center;gap:0.5rem;flex-wrap:wrap">
             <span class="text-soft">no PHP version yet</span>
             {# Same endpoint as the version switch above: the backend
@@ -793,7 +814,10 @@
               <select name="php_version" aria-label="PHP version"
                       style="padding:0.25rem 0.5rem;font-size:0.85rem">
                 {%- for opt in php_options %}
-                <option value="{{ opt }}">PHP {{ opt }}</option>
+                {#- Preselect the lowest supported version when WordPress is
+                    already on disk: such a site arrived from somewhere else
+                    and its code is likelier to predate 8.3 than to need it. -#}
+                <option value="{{ opt }}"{% if wp_status.is_some() && opt == "8.1" %} selected{% endif %}>PHP {{ opt }}</option>
                 {%- endfor %}
               </select>
               <button type="submit" class="btn small">Convert to PHP</button>
@@ -2596,6 +2620,13 @@
   {% if let Some(t) = expiry.expires_at %}
     <div class="row" style="margin-bottom:0.8rem">
       <span class="pill warn" title="unix {{ t }}">expires {{ t|date }}</span>
+      {#- The year an operator types into a past date is not an expiry, it is
+          the record of when the customer joined. The date field is rolled
+          forward to the next occurrence of its day and month, so without
+          this the year they typed would simply vanish. -#}
+      {% if let Some(cs) = expiry.customer_since %}
+      <span class="pill" title="the date first entered — the renewal day and month come from it">with us since {{ cs|date }}</span>
+      {% endif %}
       <span class="muted" style="font-size:0.88rem">grace {{ expiry.grace_days }} days · warnings {{ expiry.warning_offsets_days }}</span>
     </div>
     <form method="post" action="/hostings/expiry/clear" style="display:inline">
@@ -2615,7 +2646,7 @@
     <input type="hidden" name="selector" value="{{ detail.id.as_str() }}">
     <div class="field-row">
       <div class="field">
-        <label for="expires_on">Expires on <span class="hint">date · UTC · leave empty for no expiry</span></label>
+        <label for="expires_on">Renews on <span class="hint">day and month · UTC · leave empty for no expiry</span></label>
         {#- Prefilled, in this order: the expiry already set, else the next
             billing date. The field is `required`, so leaving it blank made
             editing the grace period or owner e-mail mean re-typing a date
@@ -2629,7 +2660,14 @@
             force operators to invent an expiry they do not want. An empty
             date already means "never expires" on the server. -#}
         <input id="expires_on" name="expires_on" type="date"
-               value="{% if let Some(t) = expiry.expires_at %}{{ t|date }}{% else if let Some(pa) = profile_apply %}{% if let Some(nb) = pa.next_billing_at %}{{ nb|date }}{% endif %}{% endif %}">
+               value="{% if let Some(cs) = expiry.customer_since %}{{ cs|date }}{% else if let Some(t) = expiry.expires_at %}{{ t|date }}{% else if let Some(pa) = profile_apply %}{% if let Some(nb) = pa.next_billing_at %}{{ nb|date }}{% endif %}{% endif %}">
+        <p class="muted" style="font-size:0.8rem;margin:0.35rem 0 0;line-height:1.55">
+          The day and month are what matter. Put in the year the hosting came
+          to us — <code>2024</code> is fine — and Hyperion renews on the next
+          occurrence of that day, while remembering the year so you can see
+          how long the customer has been here. A date in the future is used
+          exactly as you type it.
+        </p>
       </div>
       <div class="field">
         <label for="grace_days">Grace period <span class="hint">days before auto-delete</span></label>

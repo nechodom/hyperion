@@ -183,6 +183,20 @@
     <div class="kpi-meta">
       {% if let Some(info) = agent_info %}{{ info.version }}{% else %}socket unreachable{% endif %}
     </div>
+    {#- The server's public IPv4, click-to-copy. It is what goes into an A
+        record, a firewall allow-list or a migration ticket, and getting it
+        used to mean SSHing into the box. The global data-copy driver in
+        base.html does the copying. None = the probe has not succeeded (no
+        egress, or an IPv6-only host), in which case nothing is shown rather
+        than a misleading blank. -#}
+    {% if let Some(info) = agent_info %}
+      {% if let Some(ip) = info.public_ipv4 %}
+      <div class="kpi-meta" style="margin-top:0.3rem">
+        <code data-copy="{{ ip }}" title="Click to copy the server's public IPv4"
+              style="cursor:pointer;font-size:0.82rem">{{ ip }}</code>
+      </div>
+      {% endif %}
+    {% endif %}
   </div>
 </div>
 

@@ -41,6 +41,53 @@ impl PhpVersion {
     pub fn all() -> &'static [PhpVersion] {
         &[Self::V8_1, Self::V8_2, Self::V8_3, Self::V8_4]
     }
+
+    /// The supported version closest to what another panel reported.
+    ///
+    /// [`FromStr`] is an exact allow-list and must stay one — it guards every
+    /// place a version is chosen deliberately. Importing is the opposite
+    /// problem: the source names a version we do NOT support, and refusing it
+    /// is the worst possible answer. A CloudPanel box running PHP 7.4 or 8.0
+    /// is exactly the box people migrate away from, and CloudPanel also
+    /// reports patch levels like `8.2.10`, which the allow-list rejects for
+    /// being too precise.
+    ///
+    /// Discarding the value instead — which is what `.parse().ok()` did —
+    /// created the site with NO version at all, so every WordPress action
+    /// answered "requires a PHP hosting" on a site the import had just
+    /// reported as successful.
+    ///
+    /// Returns the version and whether it had to be substituted, so the
+    /// caller can tell the operator that a 7.4 site is now on 8.1 and its
+    /// code may need attention. `None` only when nothing numeric is there at
+    /// all.
+    pub fn nearest_supported(raw: &str) -> Option<(Self, bool)> {
+        let cleaned = raw.trim().trim_start_matches("php").trim_start_matches('-');
+        let mut parts = cleaned.split('.').map(str::trim);
+        let major: u32 = parts.next()?.parse().ok()?;
+        // "8" alone means the 8 series; treat the minor as 0 so it lands on
+        // the lowest supported 8.x rather than being thrown away.
+        let minor: u32 = parts.next().unwrap_or("0").parse().unwrap_or(0);
+
+        let exact = match (major, minor) {
+            (8, 1) => Some(Self::V8_1),
+            (8, 2) => Some(Self::V8_2),
+            (8, 3) => Some(Self::V8_3),
+            (8, 4) => Some(Self::V8_4),
+            _ => None,
+        };
+        if let Some(v) = exact {
+            return Some((v, false));
+        }
+        // Older than anything supported — 5.x, 7.x, 8.0 — lands on the
+        // lowest supported version, which is the least disruptive place for
+        // legacy code. Newer than we know lands on the highest.
+        Some(if (major, minor) < (8, 1) {
+            (Self::V8_1, true)
+        } else {
+            (Self::V8_4, true)
+        })
+    }
 }
 
 impl fmt::Display for PhpVersion {
@@ -92,6 +139,62 @@ mod tests {
     fn display_round_trip() {
         for v in PhpVersion::all() {
             assert_eq!(PhpVersion::from_str(&v.to_string()).expect("parse"), *v);
+        }
+    }
+}
+
+#[cfg(test)]
+mod nearest_tests {
+    use super::PhpVersion;
+
+    /// A version we support is used as-is, however the source spells it.
+    #[test]
+    fn a_supported_version_is_not_substituted() {
+        for (raw, want) in [
+            ("8.1", PhpVersion::V8_1),
+            ("8.3", PhpVersion::V8_3),
+            (" 8.4 ", PhpVersion::V8_4),
+            ("php8.2", PhpVersion::V8_2),
+            // CloudPanel reports patch levels; the allow-list rejects these.
+            ("8.2.10", PhpVersion::V8_2),
+            ("8.3.14", PhpVersion::V8_3),
+        ] {
+            assert_eq!(
+                PhpVersion::nearest_supported(raw),
+                Some((want, false)),
+                "{raw}"
+            );
+        }
+    }
+
+    /// The whole reason this exists: the boxes people migrate off run old
+    /// PHP. Refusing them created a site with no PHP at all.
+    #[test]
+    fn an_old_version_lands_on_the_lowest_supported_one() {
+        for raw in ["5.6", "7.0", "7.4", "8.0", "8.0.30", "8"] {
+            assert_eq!(
+                PhpVersion::nearest_supported(raw),
+                Some((PhpVersion::V8_1, true)),
+                "{raw} should land on 8.1 and be marked substituted"
+            );
+        }
+    }
+
+    #[test]
+    fn a_newer_version_lands_on_the_highest_supported_one() {
+        for raw in ["8.5", "9.0", "10.1"] {
+            assert_eq!(
+                PhpVersion::nearest_supported(raw),
+                Some((PhpVersion::V8_4, true)),
+                "{raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn nothing_numeric_yields_nothing() {
+        for raw in ["", "  ", "static", "nodejs", "php", "-"] {
+            assert_eq!(PhpVersion::nearest_supported(raw), None, "{raw:?}");
         }
     }
 }

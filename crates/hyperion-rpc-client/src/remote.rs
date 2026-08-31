@@ -13,8 +13,19 @@
 //! Shell out to curl, same pattern hyperion-agent's enrollment +
 //! heartbeat loops use. Reasons:
 //!
-//! - The signed `Authorization` header carries the secret; argv is
-//!   safe to inspect.
+//! - The body goes via stdin, and the `Authorization` header on argv is a
+//!   SIGNATURE, not a bearer secret: Ed25519 over a blake3 hash of the body,
+//!   bound to the node id, a 60-second timestamp window and a nonce. Reading
+//!   it out of /proc buys a replay of one request whose body the reader does
+//!   not have.
+//!
+//!   That is the only reason argv is tolerable HERE. It is not a general
+//!   rule, and this comment used to state one — "argv is safe to inspect" —
+//!   which is how backup credentials, a migration token, a WordPress admin
+//!   password, a Postgres role password and a Redis ACL password all ended up
+//!   on command lines that every local user can read out of
+//!   /proc/<pid>/cmdline. Anything that is a SECRET goes on stdin: see
+//!   `cmd::run_with_stdin` and `cmd::curl_with_config`.
 //! - The body goes via stdin (`--data-binary @-`) so the encoded
 //!   Request isn't visible on argv either.
 //! - No new HTTPS client dependency (reqwest / hyper).

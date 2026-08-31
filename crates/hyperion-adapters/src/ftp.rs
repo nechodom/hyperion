@@ -259,10 +259,38 @@ fn badname_flag_in_help(help: &str) -> Option<&'static str> {
     }
 }
 
+/// `userdel` exit 8: "user currently used by process".
+const USERDEL_IN_USE: i32 = 8;
+
 /// Remove an extra FTP login and its vsftpd override. Idempotent.
 ///
 /// `userdel` WITHOUT `-r`: the home directory is the site's own tree, shared
 /// with the hosting's real user, and removing it would delete the website.
+///
+/// `-f` when the account looks "in use", which for an extra login is the
+/// NORMAL state of a working site rather than an exceptional one. `userdel`
+/// decides "in use" by UID, and an extra login shares the hosting's UID by
+/// design — that shared UID is the whole point, it is what lets PHP and FTP
+/// write each other's files. So a single live PHP-FPM worker made every extra
+/// login undeletable, forever, with "user X is currently used by process N".
+///
+/// The obvious-looking fix — kill the processes first, the way the hosting
+/// teardown paths do — is exactly wrong here: those processes are the
+/// customer's running website, and this operation is meant to remove one way
+/// IN, not to take the site down.
+///
+/// `-f` is safe in this specific shape and would not be in general:
+///
+/// * no `-r`, so no home directory or mail spool is removed — and the home
+///   directory is the site's tree;
+/// * `create_extra_login` always passes `--gid <the hosting's gid>`, so no
+///   group is ever created bearing the login's name, and `-f`'s one genuinely
+///   destructive behaviour (removing a same-named group even when it is
+///   another user's primary group) has nothing to act on.
+///
+/// What is left is the passwd and shadow entry, which is precisely what has
+/// to go. The processes keep running under the UID, now owned only by the
+/// hosting's own user.
 pub async fn delete_extra_login(login: &str) -> Result<(), AdapterError> {
     validate_login_name(login)?;
     let _ = clear_user_web_root(login).await;
@@ -270,8 +298,20 @@ pub async fn delete_extra_login(login: &str) -> Result<(), AdapterError> {
     if crate::users::lookup_raw(login).await?.is_none() {
         return Ok(());
     }
-    cmd::run("/usr/sbin/userdel", &["--", login]).await?;
-    Ok(())
+    match cmd::run("/usr/sbin/userdel", &["--", login]).await {
+        Ok(_) => Ok(()),
+        Err(e) if userdel_blocked_by_running_process(&e) => {
+            cmd::run("/usr/sbin/userdel", &["-f", "--", login])
+                .await
+                .map(|_| ())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// Did `userdel` refuse because a process still holds the account's UID?
+fn userdel_blocked_by_running_process(e: &AdapterError) -> bool {
+    matches!(e, AdapterError::Command { code, .. } if *code == USERDEL_IN_USE)
 }
 
 /// The `local_root` currently configured for `user`, as vsftpd would read it.
@@ -1367,17 +1407,13 @@ pub async fn probe_login(user: &str, password: &str) -> Result<bool, AdapterErro
     // Defence: curl's --user splits on the first colon, so an
     // operator-supplied password CAN'T contain ':' or it'd be
     // misparsed. We refuse upfront rather than corrupting the test.
-    if password.contains(':') {
-        return Err(AdapterError::Other(
-            "ftp probe refused: password contains ':' which curl's --user can't represent".into(),
-        ));
-    }
-    // Quote-proof: pass the credential via --user-agent? No — just
-    // sanitise the user (we own it; system users match a tight
-    // pattern already). Curl handles arbitrary password chars fine
-    // when passed via --user `<u>:<p>` because we're not going
-    // through a shell.
-    let user_arg = format!("{}:{}", user, password);
+    // A ':' in the password used to be refused here. It never needed to be:
+    // curl splits the credential at the FIRST colon, and a login cannot
+    // contain one, so everything after it is the password whatever it holds.
+    //
+    // The credential goes to curl on STDIN, not argv. /proc/<pid>/cmdline is
+    // world-readable, and this probe runs with a real FTP password for an
+    // account on a node that its own tenants have shell access to.
     // Match the server's own policy, and the real port. Without --ssl-reqd a
     // node with force_local_logins_ssl=YES answers a perfectly valid password
     // with 530, so the probe would report every account as "login refused"
@@ -1385,35 +1421,33 @@ pub async fn probe_login(user: &str, password: &str) -> Result<bool, AdapterErro
     // enabling FTPS broke authentication.
     let port = read_listen_port().await;
     let url = format!("ftp://127.0.0.1:{port}/");
-    let mut args: Vec<&str> = vec![
-        "-s",
-        "-S",
-        "-o",
-        "/dev/null",
-        "-w",
-        "%{http_code}",
-        "--max-time",
-        "5",
-    ];
+    let mut config = format!(
+        concat!(
+            "user = \"{user}:{password}\"\n",
+            "url = \"{url}\"\n",
+            "silent\n",
+            "show-error\n",
+            "output = \"/dev/null\"\n",
+            "write-out = \"%{{http_code}}\"\n",
+            "max-time = 5\n",
+        ),
+        user = cmd::curl_config_quote(user),
+        password = cmd::curl_config_quote(password),
+        url = cmd::curl_config_quote(&url),
+    );
     if ftps_required().await {
         // The certificate is commonly self-signed and this is a loopback
         // probe of our own daemon, so trust is not the property being
         // tested here — reachability and credentials are.
-        args.push("--ssl-reqd");
-        args.push("-k");
+        config.push_str("ssl-reqd\ninsecure\n");
     }
-    args.push("--user");
-    args.push(&user_arg);
-    args.push(&url);
-    let out = tokio::process::Command::new("/usr/bin/curl")
-        .args(&args)
-        .output()
-        .await
-        .map_err(|e| AdapterError::Other(format!("spawn curl: {e}")))?;
+    // The CAPTURE variant: curl exits non-zero on an FTP login failure, and
+    // here that is the answer being asked for, not an error.
+    let (stdout, stderr, _code) = cmd::curl_with_config_capture(&config).await?;
     // curl's "FTP response code" lives in %{http_code} for FTP too.
     // 230 = login OK. 530 = login incorrect / disabled.
     // 0 (or empty) = connection failed before any response.
-    let code = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let code = stdout.trim().to_string();
     match code.as_str() {
         "230" => Ok(true),
         "530" => Ok(false),
@@ -1422,7 +1456,7 @@ pub async fn probe_login(user: &str, password: &str) -> Result<bool, AdapterErro
         // false-negative login.
         _ => Err(AdapterError::Other(format!(
             "ftp probe transport failure (curl code {code}): {}",
-            String::from_utf8_lossy(&out.stderr).trim()
+            stderr.trim()
         ))),
     }
 }
@@ -1492,7 +1526,42 @@ mod tests {
 
 #[cfg(test)]
 mod login_name_tests {
-    use super::badname_flag_in_help;
+    use super::{badname_flag_in_help, userdel_blocked_by_running_process};
+    use crate::AdapterError;
+
+    /// An extra FTP login shares the hosting's UID by design, so `userdel`
+    /// reports "currently used by process" for as long as the site has a
+    /// single PHP-FPM worker alive — i.e. always, for a working site. Exit 8
+    /// is that signal and nothing else; matching it on the message text would
+    /// break under a translated or reworded shadow.
+    #[test]
+    fn exit_eight_is_what_marks_the_account_as_in_use() {
+        let in_use = AdapterError::Command {
+            cmd: "/usr/sbin/userdel -- deploy.example.cz".into(),
+            code: 8,
+            stderr_tail: "userdel: user deploy.example.cz is currently used by process 214619"
+                .into(),
+        };
+        assert!(userdel_blocked_by_running_process(&in_use));
+
+        // Every other failure must NOT be retried with -f: a missing account
+        // (6) or an unwritable passwd file (1) is a different problem, and
+        // forcing would either hide it or make it worse.
+        for code in [1, 2, 6, 10, 12] {
+            let other = AdapterError::Command {
+                cmd: "/usr/sbin/userdel -- x".into(),
+                code,
+                stderr_tail: String::new(),
+            };
+            assert!(
+                !userdel_blocked_by_running_process(&other),
+                "exit {code} must not be forced"
+            );
+        }
+        assert!(!userdel_blocked_by_running_process(&AdapterError::Other(
+            "user is currently used by process".into()
+        )));
+    }
 
     /// Debian carried `--badnames` as a downstream patch for years; upstream
     /// shadow added `--badname`. The plural CONTAINS the singular, so a naive

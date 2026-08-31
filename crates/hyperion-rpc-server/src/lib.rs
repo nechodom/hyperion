@@ -1623,6 +1623,7 @@ mod tests {
                 node_id: None,
                 master_url: None,
                 enrolled_at: None,
+                public_ipv4: None,
             })
         }
         async fn agent_repin(&self) -> Result<Option<String>, RpcError> {

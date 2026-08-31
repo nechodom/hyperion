@@ -388,9 +388,16 @@ pub async fn restore_mariadb_dump(db_name: &str, sql_path: &Path) -> Result<(), 
     Ok(())
 }
 
-/// Remote backup destination — FTP/FTPS/SFTP via curl. Passwords are
-/// passed through `--user user:pass` (so they appear in argv; we run
-/// this only inside the agent process, no shell on argv).
+/// Remote backup destination — FTP/FTPS/SFTP via curl.
+///
+/// The password does NOT go on argv. It used to, with the reasoning that
+/// there is no shell involved — which answers shell injection and not the
+/// actual exposure: `/proc/<pid>/cmdline` is world-readable, so every tenant
+/// with shell, FTP or PHP on this node could read it. And this is the
+/// node-wide backup account: one read gives an attacker every other tenant's
+/// archives and database dumps, and the ability to delete them. A push of a
+/// several-hundred-megabyte archive holds that argv for minutes, on a
+/// schedule, so no race was even needed.
 #[derive(Debug, Clone)]
 pub struct RemoteUpload<'a> {
     /// "ftp", "ftps", or "sftp".
@@ -428,23 +435,29 @@ pub async fn upload_remote(file: &Path, upload: &RemoteUpload<'_>) -> Result<Str
         host = upload.host,
         port = upload.port,
     );
-    let creds = format!("{}:{}", upload.user, upload.password);
-    let args: Vec<&str> = vec![
-        "--fail",
-        "--silent",
-        "--show-error",
-        "--max-time",
-        "300",
-        // FTP: create missing remote directories.
-        "--ftp-create-dirs",
-        "--user",
-        &creds,
-        "--upload-file",
-        file.to_str()
-            .ok_or_else(|| AdapterError::Other("file path not utf8".into()))?,
-        &url,
-    ];
-    cmd::run("/usr/bin/curl", &args).await?;
+    let local = file
+        .to_str()
+        .ok_or_else(|| AdapterError::Other("file path not utf8".into()))?;
+    // Every interpolated value is escaped: a password containing a quote
+    // would otherwise close the value and be read as further directives.
+    let config = format!(
+        concat!(
+            "user = \"{user}:{password}\"\n",
+            "upload-file = \"{local}\"\n",
+            "url = \"{url}\"\n",
+            "fail\n",
+            "silent\n",
+            "show-error\n",
+            "max-time = 300\n",
+            // FTP: create missing remote directories.
+            "ftp-create-dirs\n",
+        ),
+        user = cmd::curl_config_quote(upload.user),
+        password = cmd::curl_config_quote(upload.password),
+        local = cmd::curl_config_quote(local),
+        url = cmd::curl_config_quote(&url),
+    );
+    cmd::curl_with_config(&config).await?;
     Ok(url)
 }
 

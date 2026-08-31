@@ -1453,40 +1453,47 @@ async fn curl_to_file(
     // self-signed cert (same chicken-egg as enrollment — no DNS at
     // install). Trust on first use: the bundle's signed token +
     // BLAKE3 digest are the integrity guarantees, NOT TLS.
-    let mut args: Vec<String> = vec![
-        "-fsS".into(),
-        "-k".into(),
-        "--max-time".into(),
-        "1800".into(),
-        "--max-filesize".into(),
-        MIGRATION_MAX_DOWNLOAD_BYTES.to_string(),
-        "--max-redirs".into(),
-        "0".into(),
-        "--proto".into(),
-        "=https,http".into(),
-    ];
+    //
+    // The URL carries the bundle TOKEN in its query string, so it does not go
+    // on argv: /proc/<pid>/cmdline is world-readable, this download holds for
+    // up to 30 minutes, and the token grants a fetch of the full site export
+    // — every database dump and wp-config in the bundle — from anywhere.
+    // Options ride on stdin instead. Every interpolated value is escaped, so
+    // a crafted URL cannot close its quotes and inject further directives.
+    use hyperion_adapters::cmd::curl_config_quote as q;
+    let mut config = format!(
+        concat!(
+            "url = \"{url}\"\n",
+            "output = \"{dest}\"\n",
+            "fail\n",
+            "silent\n",
+            "show-error\n",
+            "insecure\n",
+            "max-time = 1800\n",
+            "max-filesize = {maxsize}\n",
+            "max-redirs = 0\n",
+            "proto = \"=https,http\"\n",
+        ),
+        url = q(url),
+        dest = q(&dest.display().to_string()),
+        maxsize = MIGRATION_MAX_DOWNLOAD_BYTES,
+    );
     // SSRF guard (sec-findings #4): pin curl to the IP(s) the caller already
     // validated as non-internal, so a DNS-rebind can't swing the host to an
     // internal address between our resolve and curl's.
     for pin in resolve_pins {
-        args.push("--resolve".into());
-        args.push(pin.clone());
+        config.push_str(&format!("resolve = \"{}\"\n", q(pin)));
     }
-    args.extend(["-o".into(), dest.display().to_string(), url.to_string()]);
-    let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    let out = tokio::process::Command::new("/usr/bin/curl")
-        .args(&arg_refs)
-        .output()
+    let (_stdout, stderr_tail, code) = hyperion_adapters::cmd::curl_with_config_capture(&config)
         .await
         .map_err(|e| RpcError::Internal_with(format!("spawn curl: {e}")))?;
-    if !out.status.success() {
+    if code != 0 {
         // SECURITY (sec-findings #4): do NOT reflect the raw curl stderr/exit
         // code back to the caller. The distinct messages for 404 vs connection-
         // refused vs timeout turn this into an internal-reachability oracle for
         // port/host enumeration. Log the detail server-side; return a generic,
         // non-distinguishing error (the >8 GB case keeps a friendlier hint).
-        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-        let code = out.status.code().unwrap_or(-1);
+        let stderr = stderr_tail.trim().to_string();
         tracing::warn!(code, %stderr, "migration download failed");
         let message = if code == 63 {
             "download failed: archive larger than 8 GB — refusing to download".to_string()
@@ -2015,12 +2022,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // change under a running agent, and a per-request probe would add
         // a network round trip and a failure mode to every panel load. A
         // failed fetch degrades to filtering private addresses only.
-        static OWN_PUBLIC_IP: tokio::sync::OnceCell<Option<String>> =
-            tokio::sync::OnceCell::const_new();
-        let own_ip = OWN_PUBLIC_IP
-            .get_or_init(|| async { fetch_public_ip_v4("https://api4.ipify.org").await.ok() })
-            .await
-            .clone();
+        let own_ip = own_public_ipv4().await;
 
         let mut by_cc: std::collections::HashMap<String, (i64, i64)> = Default::default();
         for line in body.lines() {
@@ -2531,6 +2533,22 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 });
             }
         }
+        // NOTE: kind="php" with NO php_version is deliberately ALLOWED.
+        //
+        // It is tempting to reject it here the way reverse_proxy rejects a
+        // missing upstream — such a hosting gets no FPM pool and answers
+        // "requires a PHP hosting" to every WordPress action. But it is a
+        // state an operator asks for on purpose: the create form offers PHP
+        // "none", and the hosting detail page has a converter built for
+        // exactly this row ("no PHP version yet" → pick a version). Refusing
+        // it here would break creating a site with PHP off.
+        //
+        // The real defect was upstream: the panel import silently DISCARDED
+        // any version outside the 8.1-8.4 allow-list — so a CloudPanel site on
+        // 7.4 or "8.2.10" landed in this state without anyone choosing it, and
+        // reported a successful import. That is fixed where it belongs, in
+        // `panel_import::apply_one_import`, which now substitutes the nearest
+        // supported version and says so.
         let hosting_id = HostingId::new_v7();
         let node_id_str = self.current_node_id();
         if let Err(e) = hostings::insert_with_kind(
@@ -3082,7 +3100,23 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     .await
                     .map_err(|e| RpcError::Internal_with(format!("count: {e}")))?;
             if others == 0 {
-                let _ = self.adapters.delete_user(&detail.system_user).await;
+                // `userdel` refuses (exit 8) while any process still holds the
+                // account's UID, and this hosting's PHP-FPM workers do until
+                // the pool is gone. The trash and suspend paths already kill
+                // them; delete did not, so the failure was swallowed by the
+                // `let _ =` below and the Linux user OUTLIVED the hosting —
+                // while the `system_users` row was dropped anyway, which is
+                // the orphan state the create-rollback goes to some length to
+                // avoid. Killing here is right: the hosting is being
+                // destroyed, so its processes are meant to stop.
+                let _ = self.adapters.kill_user_procs(&detail.system_user).await;
+                if let Err(e) = self.adapters.delete_user(&detail.system_user).await {
+                    tracing::error!(
+                        error = %e, user = %detail.system_user,
+                        "delete: the Linux user survived — it will collide with the \
+                         next hosting that derives the same name"
+                    );
+                }
                 // Also drop the system_users row so the UID can be reused
                 // for a future hosting (Linux frees the UID via userdel;
                 // without this cleanup the next useradd allocates the same
@@ -3321,7 +3355,23 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     .await
                     .map_err(|e| RpcError::Internal_with(format!("count: {e}")))?;
             if others == 0 {
-                let _ = self.adapters.delete_user(&detail.system_user).await;
+                // `userdel` refuses (exit 8) while any process still holds the
+                // account's UID, and this hosting's PHP-FPM workers do until
+                // the pool is gone. The trash and suspend paths already kill
+                // them; delete did not, so the failure was swallowed by the
+                // `let _ =` below and the Linux user OUTLIVED the hosting —
+                // while the `system_users` row was dropped anyway, which is
+                // the orphan state the create-rollback goes to some length to
+                // avoid. Killing here is right: the hosting is being
+                // destroyed, so its processes are meant to stop.
+                let _ = self.adapters.kill_user_procs(&detail.system_user).await;
+                if let Err(e) = self.adapters.delete_user(&detail.system_user).await {
+                    tracing::error!(
+                        error = %e, user = %detail.system_user,
+                        "delete: the Linux user survived — it will collide with the \
+                         next hosting that derives the same name"
+                    );
+                }
                 if let Ok(Some(row)) =
                     system_users::get_by_name(&self.pool, &detail.system_user).await
                 {
@@ -4437,6 +4487,30 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     ) -> Result<hyperion_types::HostingExpiry, RpcError> {
         let detail = self.get(sel).await?;
         let grace = expiry.grace_days.clamp(1, 365);
+        // A renewal date is a day and a month. An operator typing 2024 is
+        // recording when the customer came to us, not asking for a hosting
+        // that expired two years ago — which, taken literally, would have the
+        // sweep below suspend a live site the moment this was saved. So a past
+        // date rolls forward to its next occurrence and the original is kept
+        // separately, purely to show. A future date is untouched.
+        let now = now_secs();
+        // A start date already on record survives an edit that does not
+        // restate it — saving a new grace period, or naming a real future end
+        // date, must not erase since when the customer has been with us.
+        let stored_since = hyperion_state::scheduler::get_expiry(&self.pool, &detail.id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|r| r.customer_since);
+        let (expires_at, customer_since) = match expiry.expires_at {
+            // A past date IS the start date, and the operator retyping it is
+            // how they correct it — so it wins over what is stored.
+            Some(entered) if entered <= now => (
+                Some(hyperion_types::next_anniversary(entered, now)),
+                Some(entered),
+            ),
+            other => (other, expiry.customer_since.or(stored_since)),
+        };
         let offsets = hyperion_state::scheduler::parse_offsets(&expiry.warning_offsets_days);
         let csv = if offsets.is_empty() {
             "30,7,1".to_string()
@@ -4450,11 +4524,12 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         hyperion_state::scheduler::set_expiry(
             &self.pool,
             &detail.id,
-            expiry.expires_at,
+            expires_at,
             expiry.owner_email.as_deref(),
             grace,
             &csv,
-            now_secs(),
+            customer_since,
+            now,
         )
         .await
         .map_err(|e| RpcError::Internal_with(format!("set_expiry: {e}")))?;
@@ -4462,7 +4537,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         hyperion_state::scheduler::cancel_for_hosting(&self.pool, &detail.id)
             .await
             .map_err(|e| RpcError::Internal_with(format!("cancel: {e}")))?;
-        if let Some(exp) = expiry.expires_at {
+        if let Some(exp) = expires_at {
             self.reschedule_actions_for(&detail.id, exp, grace, &offsets)
                 .await?;
         }
@@ -4470,7 +4545,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             "hosting.set_expiry",
             Some(detail.id.as_str()),
             &serde_json::json!({
-                "expires_at": expiry.expires_at,
+                "expires_at": expires_at,
+                "entered": expiry.expires_at,
+                "customer_since": customer_since,
                 "grace_days": grace,
             })
             .to_string(),
@@ -4508,11 +4585,14 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // nulling it here silently stops a deliverable the customer is still
         // paying for — and the address itself is then gone, with nothing in
         // the UI saying it was dropped.
-        let owner_email = hyperion_state::scheduler::get_expiry(&self.pool, &detail.id)
+        let existing = hyperion_state::scheduler::get_expiry(&self.pool, &detail.id)
             .await
             .ok()
-            .flatten()
-            .and_then(|r| r.owner_email);
+            .flatten();
+        let owner_email = existing.as_ref().and_then(|r| r.owner_email.clone());
+        // Clearing the expiry says this hosting no longer auto-suspends. It
+        // does not say the customer left, so when they joined stays on record.
+        let customer_since = existing.as_ref().and_then(|r| r.customer_since);
         hyperion_state::scheduler::set_expiry(
             &self.pool,
             &detail.id,
@@ -4520,6 +4600,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             owner_email.as_deref(),
             30,
             "30,7,1",
+            customer_since,
             now_secs(),
         )
         .await
@@ -5555,15 +5636,28 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 message: "hosting must be active to reset WP password".into(),
             });
         }
-        // Use wp user update <user> --user_pass=<pw> ... but feed password
-        // through stdin via --prompt if wp-cli supports it. For simplicity
-        // pass --user_pass=<pw> directly; arg array prevents shell injection.
-        let user_arg = format!("--user_pass={new_password}");
-        let wp_args: [&str; 5] = ["user", "update", &wp_user, &user_arg, "--skip-email"];
+        // The password rides on STDIN through wp-cli's `--prompt`, the same
+        // way `wp config create` and `wp core install` already do it in
+        // wpcli.rs. It used to be `--user_pass=<pw>` on argv "for simplicity",
+        // which answered shell injection and not the real exposure:
+        // /proc/<pid>/cmdline is world-readable, build_argv puts the value on
+        // THREE command lines (sudo, env and the wp PHP process), and it sits
+        // there for the seconds wp-cli takes to boot WordPress. On a node
+        // whose tenants have shell or PHP access, that is another site's
+        // WordPress admin password handed out.
+        let wp_args: [&str; 5] = [
+            "user",
+            "update",
+            &wp_user,
+            "--prompt=user_pass",
+            "--skip-email",
+        ];
         let argv =
             hyperion_adapters::wpcli::build_argv(&detail.system_user, &detail.root_dir, &wp_args);
         let argv_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-        hyperion_adapters::cmd::run("/usr/bin/sudo", &argv_refs)
+        // wp-cli's --prompt reads one "value\n" line per missing argument.
+        let stdin = format!("{new_password}\n");
+        hyperion_adapters::cmd::run_with_stdin("/usr/bin/sudo", &argv_refs, stdin.as_bytes())
             .await
             .map_err(|e| RpcError::ProvisioningFailed {
                 stage: "wp_reset_password".into(),
@@ -7430,17 +7524,19 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             match repair_tree_permissions(&detail.system_user, &site_dir).await {
                 Ok(()) => {
                     healed += 1;
-                    self.append_audit(
-                        "hosting.permissions.autoheal",
-                        Some(detail.id.as_str()),
-                        &serde_json::json!({
-                            "path": site_dir.display().to_string(),
-                            "user": detail.system_user,
-                        })
-                        .to_string(),
-                        "ok",
-                    )
-                    .await;
+                    // Deliberately NOT audited. This runs on a timer over
+                    // every hosting, so a successful repair wrote a row on
+                    // every tick and the activity feed became a list of the
+                    // machine tidying up after itself — with the events an
+                    // operator actually needs pushed off the page. A repair
+                    // that WORKS is housekeeping; the journal keeps it for
+                    // anyone debugging. Only a repair that FAILS is news, and
+                    // that is still audited below.
+                    tracing::info!(
+                        domain = %detail.domain,
+                        path = %site_dir.display(),
+                        "permissions autoheal: repaired"
+                    );
                 }
                 Err(e) => {
                     tracing::warn!(domain = %detail.domain, error = %e,
@@ -9797,13 +9893,19 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let Some(cfg) = self.email_config.as_ref() else {
             return false;
         };
-        let to = if to.is_empty() {
-            match self.email_default_to.as_deref() {
-                Some(t) => t,
-                None => return false,
+        // A named recipient (a hosting owner, a customer) gets the letter and
+        // nobody else. Everything NOT addressed to someone in particular is an
+        // operator alert, and those go to every administrator address on
+        // record — one entry was never enough for a team, and an alert nobody
+        // happened to be reading is an alert that did not happen.
+        let recipients: Vec<String> = if to.is_empty() {
+            let list = parse_recipient_list(self.email_default_to.as_deref().unwrap_or(""));
+            if list.is_empty() {
+                return false;
             }
+            list
         } else {
-            to
+            vec![to.to_string()]
         };
         // Apply the operator's editable email wording (defaults "{subject}"
         // / "{body}" are pass-through). Rendered text is what we send AND
@@ -9851,9 +9953,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             self.notify_logo_data_uri().await.as_deref(),
             &self.notify_email_footer(),
         );
-        match hyperion_adapters::email::send_html(cfg, to, subject, body, &html).await {
-            Ok(code) => {
-                self.append_audit(
+        let mut any_ok = false;
+        for to in &recipients {
+            let to = to.as_str();
+            any_ok |= match hyperion_adapters::email::send_html(cfg, to, subject, body, &html).await
+            {
+                Ok(code) => {
+                    self.append_audit(
                     "notify.email",
                     hosting_id,
                     &serde_json::json!({"to": to, "subject": subject, "code": &code, "kind": kind})
@@ -9861,73 +9967,75 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     "ok",
                 )
                 .await;
-                // tracing::error on append failure — usually means the
-                // migration didn't run on this node (table doesn't
-                // exist) or the SQLite file is read-only. Either way
-                // the operator needs to see this in journalctl.
-                if let Err(e) = hyperion_state::email_log::append(
-                    &self.pool,
-                    hosting_id,
-                    to,
-                    subject,
-                    body,
-                    kind,
-                    "ok",
-                    None,
-                    Some(&code),
-                    now_secs(),
-                )
-                .await
-                {
-                    tracing::error!(
-                        error = %e,
-                        to = %to,
-                        "email_log append failed — email_log table missing? \
-                         restart hyperion-agent after update.sh to apply migration 017"
-                    );
+                    // tracing::error on append failure — usually means the
+                    // migration didn't run on this node (table doesn't
+                    // exist) or the SQLite file is read-only. Either way
+                    // the operator needs to see this in journalctl.
+                    if let Err(e) = hyperion_state::email_log::append(
+                        &self.pool,
+                        hosting_id,
+                        to,
+                        subject,
+                        body,
+                        kind,
+                        "ok",
+                        None,
+                        Some(&code),
+                        now_secs(),
+                    )
+                    .await
+                    {
+                        tracing::error!(
+                            error = %e,
+                            to = %to,
+                            "email_log append failed — email_log table missing? \
+                             restart hyperion-agent after update.sh to apply migration 017"
+                        );
+                    }
+                    true
                 }
-                true
-            }
-            Err(e) => {
-                let err_s = e.to_string();
-                self.append_audit(
-                    "notify.email",
-                    hosting_id,
-                    &serde_json::json!({
-                        "to": to,
-                        "subject": subject,
-                        "error": &err_s,
-                        "kind": kind,
-                    })
-                    .to_string(),
-                    "failed",
-                )
-                .await;
-                if let Err(le) = hyperion_state::email_log::append(
-                    &self.pool,
-                    hosting_id,
-                    to,
-                    subject,
-                    body,
-                    kind,
-                    "failed",
-                    Some(&err_s),
-                    None,
-                    now_secs(),
-                )
-                .await
-                {
-                    tracing::error!(
-                        log_error = %le,
-                        send_error = %err_s,
-                        to = %to,
-                        "email_log append failed AND email send failed — restart agent to apply migration 017"
-                    );
+                Err(e) => {
+                    let err_s = e.to_string();
+                    self.append_audit(
+                        "notify.email",
+                        hosting_id,
+                        &serde_json::json!({
+                            "to": to,
+                            "subject": subject,
+                            "error": &err_s,
+                            "kind": kind,
+                        })
+                        .to_string(),
+                        "failed",
+                    )
+                    .await;
+                    if let Err(le) = hyperion_state::email_log::append(
+                        &self.pool,
+                        hosting_id,
+                        to,
+                        subject,
+                        body,
+                        kind,
+                        "failed",
+                        Some(&err_s),
+                        None,
+                        now_secs(),
+                    )
+                    .await
+                    {
+                        tracing::error!(
+                            log_error = %le,
+                            send_error = %err_s,
+                            to = %to,
+                            "email_log append failed AND email send failed — restart agent to apply migration 017"
+                        );
+                    }
+                    tracing::warn!(to = %to, subject = %subject, error = %err_s, "email send failed");
+                    false
                 }
-                tracing::warn!(to = %to, subject = %subject, error = %err_s, "email send failed");
-                false
-            }
+            };
         }
+        any_ok
     }
 
     /// List recent email-log rows. `hosting_id = None` returns the
@@ -11104,6 +11212,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let expiry = hyperion_types::HostingExpiry {
             expires_at: cur.expires_at,
             owner_email: cur.owner_email,
+            // Carried through: applying a profile changes the expiry POLICY,
+            // not when the customer joined.
+            customer_since: cur.customer_since,
             grace_days: p.expiry_grace_days,
             warning_offsets_days: p.expiry_warning_offsets.clone(),
         };
@@ -14583,12 +14694,33 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         payload_json: &str,
         result: &str,
     ) {
+        self.append_audit_as(0, "agent", action, target, payload_json, result)
+            .await
+    }
+
+    /// [`append_audit`], but naming WHO did it.
+    ///
+    /// The plain helper stamps every row `agent`, and the activity feed hides
+    /// that actor on purpose — it is noise on a line about the machine acting
+    /// on its own. The cost was that a sign-in also read as the machine: the
+    /// feed said "Web login 2FA succeeded" with no name against it, which is
+    /// the one event where the name IS the information.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn append_audit_as(
+        &self,
+        actor_uid: i64,
+        actor_label: &str,
+        action: &str,
+        target: Option<&str>,
+        payload_json: &str,
+        result: &str,
+    ) {
         let r = hyperion_state::audit::append(
             &self.pool,
             hyperion_state::audit::AppendReq {
                 ts: now_secs(),
-                actor_uid: 0,
-                actor_label: "agent",
+                actor_uid,
+                actor_label,
                 action,
                 target,
                 payload_json,
@@ -16520,7 +16652,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 )
                 .await;
             }
-            self.append_audit(
+            self.append_audit_as(
+                user.id,
+                &user.username,
                 "web.login.failed",
                 None,
                 &serde_json::json!({
@@ -16550,7 +16684,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         )
         .await
         .map_err(|e| RpcError::Internal_with(format!("record login: {e}")))?;
-        self.append_audit(
+        self.append_audit_as(
+            user.id,
+            &user.username,
             "web.login.ok",
             None,
             &serde_json::json!({"user_id": user.id, "ip": client_ip}).to_string(),
@@ -16641,7 +16777,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 )
                 .await;
             }
-            self.append_audit(
+            self.append_audit_as(
+                user.id,
+                &user.username,
                 "web.login.2fa_failed",
                 None,
                 &serde_json::json!({
@@ -16658,7 +16796,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         hyperion_state::web_users::record_login(&self.pool, user.id, None, now_secs())
             .await
             .map_err(|e| RpcError::Internal_with(format!("record login: {e}")))?;
-        self.append_audit(
+        self.append_audit_as(
+            user.id,
+            &user.username,
             "web.login.2fa_ok",
             None,
             &serde_json::json!({"user_id": user.id, "via": if is_totp {"totp"} else {"backup_code"}})
@@ -23824,6 +23964,21 @@ async fn dig_records(domain: &str, kind: &str) -> Result<Vec<String>, std::io::E
 ///
 /// `api4.` pins the lookup to A-records only; the parse is the backstop
 /// for the day that host starts answering differently.
+/// This node's public IPv4, fetched once per process.
+///
+/// It does not change under a running agent, so a probe per request would add
+/// a network round trip and a failure mode to every panel load for a value
+/// that is always the same. A failed probe stays `None` and simply is not
+/// shown.
+pub async fn own_public_ipv4() -> Option<String> {
+    static OWN_PUBLIC_IP_V4: tokio::sync::OnceCell<Option<String>> =
+        tokio::sync::OnceCell::const_new();
+    OWN_PUBLIC_IP_V4
+        .get_or_init(|| async { fetch_public_ip_v4("https://api4.ipify.org").await.ok() })
+        .await
+        .clone()
+}
+
 async fn fetch_public_ip_v4(url: &str) -> Result<String, std::io::Error> {
     let raw = fetch_public_ip_raw(url).await?;
     match raw.parse::<std::net::IpAddr>() {
@@ -26212,6 +26367,7 @@ fn expiry_row_to_dto(row: hyperion_state::scheduler::ExpiryRow) -> hyperion_type
         owner_email: row.owner_email,
         grace_days: row.grace_days,
         warning_offsets_days: row.warning_offsets_days,
+        customer_since: row.customer_since,
     }
 }
 
@@ -26319,14 +26475,161 @@ async fn chmod_path(path: &str, mode: u32) -> Result<(), String> {
         Err(e) => return Err(e),
     };
     let md = file.metadata().map_err(|e| format!("stat {path}: {e}"))?;
-    if md.nlink() != 1 {
+    let ft = md.file_type();
+    if ft.is_file() {
+        // A second link to a regular file is the attack: the site user
+        // hardlinks a root-owned file into their own tree and has this chmod
+        // it for them. One link means the name we opened is the only one.
+        if md.nlink() != 1 {
+            return Err(format!(
+                "{path} has {} hard links — refusing to chmod it",
+                md.nlink()
+            ));
+        }
+    } else if !ft.is_dir() {
+        // O_NOFOLLOW already excludes symlinks; this excludes devices,
+        // sockets and fifos, which have no business being chmod'ed here.
         return Err(format!(
-            "{path} has {} hard links — refusing to chmod it",
-            md.nlink()
+            "{path} is neither a regular file nor a directory — refusing to chmod it"
         ));
     }
+    // NOTE for directories: the link count is NOT checked, and must not be.
+    // Every directory has at least two links — its own name in the parent and
+    // the `.` entry inside it — plus one more per subdirectory. Applying the
+    // file rule here refused EVERY directory, always, with "logs has 2 hard
+    // links", which is how a permission repair reported a perfectly ordinary
+    // tree as an attack. Nothing is given up by skipping it: Linux does not
+    // allow hard links to directories at all.
     file.set_permissions(std::fs::Permissions::from_mode(mode))
         .map_err(|e| format!("chmod {mode:o} {path}: {e}"))
+}
+
+#[cfg(test)]
+mod chmod_path_tests {
+    use super::chmod_path;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// A directory has two links before it contains anything — its name in
+    /// the parent, and its own `.` — and one more per subdirectory. The
+    /// hard-link guard is a rule about regular FILES, and applying it here
+    /// refused every directory a permission repair touched, reporting an
+    /// ordinary site tree as an attack: "logs has 2 hard links".
+    #[tokio::test]
+    async fn a_directory_is_chmod_able_despite_its_link_count() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("logs");
+        std::fs::create_dir(&dir).expect("create logs");
+        // Give it a subdirectory so the count is 3, not merely 2.
+        std::fs::create_dir(dir.join("sub")).expect("create sub");
+        let path = dir.to_string_lossy().into_owned();
+
+        chmod_path(&path, 0o750).await.expect("directory refused");
+        let mode = std::fs::metadata(&dir).expect("stat").permissions().mode();
+        assert_eq!(mode & 0o777, 0o750);
+    }
+
+    /// The guard itself must survive: a second link to a regular file is how
+    /// a tenant gets a root-owned file chmod'ed on their behalf.
+    #[tokio::test]
+    async fn a_hardlinked_file_is_still_refused() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let real = tmp.path().join("wp-config.php");
+        std::fs::write(&real, b"<?php\n").expect("write");
+        let link = tmp.path().join("hardlink.php");
+        std::fs::hard_link(&real, &link).expect("hard_link");
+
+        let err = chmod_path(&link.to_string_lossy(), 0o600)
+            .await
+            .expect_err("a hardlinked file must be refused");
+        assert!(err.contains("hard links"), "{err}");
+
+        // And a plain file with one link still goes through.
+        let plain = tmp.path().join("alone.php");
+        std::fs::write(&plain, b"<?php\n").expect("write");
+        chmod_path(&plain.to_string_lossy(), 0o640)
+            .await
+            .expect("a single-link file should be allowed");
+    }
+}
+
+/// Split the administrator notification address setting into addresses.
+///
+/// One field, any number of people. Operators write such a list every way
+/// there is — commas, semicolons, newlines out of a pasted column — so all of
+/// them are accepted rather than making the operator guess which separator
+/// this particular field wanted.
+///
+/// Anything without an `@` is dropped instead of being sent to: the field is
+/// free text, and a stray word between two commas would otherwise fail every
+/// send that shares its batch. Duplicates are dropped too, so the same person
+/// listed twice is not mailed twice.
+fn parse_recipient_list(raw: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for part in raw.split([',', ';', '\n', '\r', ' ', '\t']) {
+        let a = part.trim().trim_matches(['<', '>']).trim();
+        // Cheapest possible check that it is an address at all: something
+        // before an @ and something after it. Full validation belongs to the
+        // SMTP server, which will reject what it does not like.
+        if a.is_empty() || !a.contains('@') || a.starts_with('@') || a.ends_with('@') {
+            continue;
+        }
+        if !out.iter().any(|e| e.eq_ignore_ascii_case(a)) {
+            out.push(a.to_string());
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod recipient_list_tests {
+    use super::parse_recipient_list;
+
+    #[test]
+    fn one_address_still_works() {
+        assert_eq!(parse_recipient_list("ops@example.cz"), ["ops@example.cz"]);
+        assert_eq!(
+            parse_recipient_list("  ops@example.cz  "),
+            ["ops@example.cz"]
+        );
+    }
+
+    /// Every separator an operator might reach for, including a column
+    /// pasted out of a spreadsheet.
+    #[test]
+    fn a_list_is_split_however_it_was_written() {
+        let want = ["a@x.cz", "b@x.cz", "c@x.cz"];
+        for raw in [
+            "a@x.cz,b@x.cz,c@x.cz",
+            "a@x.cz, b@x.cz, c@x.cz",
+            "a@x.cz; b@x.cz; c@x.cz",
+            "a@x.cz\nb@x.cz\nc@x.cz",
+            "a@x.cz b@x.cz c@x.cz",
+            "<a@x.cz>, <b@x.cz>, <c@x.cz>",
+        ] {
+            assert_eq!(parse_recipient_list(raw), want, "{raw:?}");
+        }
+    }
+
+    /// A stray word must not become a recipient — one unsendable address
+    /// would otherwise fail alongside the real ones.
+    #[test]
+    fn non_addresses_are_dropped_not_sent_to() {
+        assert_eq!(
+            parse_recipient_list("ops@example.cz, and, also, admin@example.cz"),
+            ["ops@example.cz", "admin@example.cz"]
+        );
+        for raw in ["", "   ", ",,,", "nobody", "@x.cz", "a@"] {
+            assert!(parse_recipient_list(raw).is_empty(), "{raw:?}");
+        }
+    }
+
+    #[test]
+    fn the_same_person_is_not_mailed_twice() {
+        assert_eq!(
+            parse_recipient_list("ops@example.cz, OPS@Example.cz, ops@example.cz"),
+            ["ops@example.cz"]
+        );
+    }
 }
 
 /// The numeric uid of `user`, or `None` when there is no such account.
@@ -31155,6 +31458,11 @@ mod tests {
         a.expect_db_drop().returning(|_, _, _| Ok(()));
         a.expect_fpm_delete().returning(|_, _| Ok(()));
         a.expect_remove_hosting_tree().returning(|_| Ok(()));
+        // The teardown now stops the site's processes before userdel. Without
+        // it userdel exits 8 ("user is currently used by process") for as long
+        // as a single PHP-FPM worker lives, the failure was swallowed, and the
+        // Linux user outlived the hosting whose DB row had already gone.
+        a.expect_kill_user_procs().returning(|_| Ok(()));
         a.expect_delete_user().returning(|_| Ok(()));
         let s2 = svc(pool.clone(), a);
         let created = s2
@@ -31713,10 +32021,27 @@ mod tests {
         s.create(req("ex.cz")).await.expect("create");
         let sel = HostingSelector::Domain(Domain::parse("ex.cz").unwrap());
 
+        // Written straight to the row, NOT through set_expiry.
+        //
+        // set_expiry now reads a past date as "renews on this day and month,
+        // with us since this year" and rolls it forward, so it can no longer
+        // produce an already-expired hosting — that is the whole point of the
+        // change. The state under test is still perfectly real: it is what
+        // every hosting looks like the day after its expiry passes. So the
+        // row is put into that state directly, the way time does it.
         let past = now_secs() - 86_400;
-        let mut e = hyperion_types::HostingExpiry::defaults();
-        e.expires_at = Some(past);
-        s.set_expiry(sel.clone(), e).await.expect("set");
+        hyperion_state::scheduler::set_expiry(
+            &pool,
+            &s.get(sel.clone()).await.expect("get").id,
+            Some(past),
+            None,
+            30,
+            "30,7,1",
+            None,
+            now_secs(),
+        )
+        .await
+        .expect("set expiry row");
         let processed = s.scheduler_tick().await.expect("tick");
         assert!(processed >= 1, "processed: {processed}");
 
