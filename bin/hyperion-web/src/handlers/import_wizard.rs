@@ -411,6 +411,9 @@ pub async fn post_select(
             target_domain,
             profile_id: r.profile_id.filter(|&p| p > 0),
             next_billing_at: r.billing_at.filter(|&b| b > 0),
+            // The self-service wizard does not offer a PHP choice; the import
+            // derives one from what the source reports.
+            php_version: None,
         });
     }
     if !bad_targets.is_empty() {
