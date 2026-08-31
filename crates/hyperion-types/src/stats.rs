@@ -1991,11 +1991,13 @@ mod tests {
         // name, cz falls back to the slug. Winner is deterministic, not
         // "whichever the operator made first".
         assert_eq!(
-            ClusterConfigView::preview_subdomain_dedup(&com, base, &[cz.clone()]).as_deref(),
+            ClusterConfigView::preview_subdomain_dedup(&com, base, std::slice::from_ref(&cz))
+                .as_deref(),
             Some("beeenglish.hosting.nechodom.cz")
         );
         assert_eq!(
-            ClusterConfigView::preview_subdomain_dedup(&cz, base, &[com.clone()]).as_deref(),
+            ClusterConfigView::preview_subdomain_dedup(&cz, base, std::slice::from_ref(&com))
+                .as_deref(),
             Some("beeenglish-cz.hosting.nechodom.cz")
         );
 
@@ -2006,8 +2008,8 @@ mod tests {
         );
 
         // Both sides, given the SAME set, never pick the same output.
-        let a = ClusterConfigView::preview_subdomain_dedup(&cz, base, &[com.clone()]);
-        let b = ClusterConfigView::preview_subdomain_dedup(&com, base, &[cz.clone()]);
+        let a = ClusterConfigView::preview_subdomain_dedup(&cz, base, std::slice::from_ref(&com));
+        let b = ClusterConfigView::preview_subdomain_dedup(&com, base, std::slice::from_ref(&cz));
         assert_ne!(a, b, "the two must not collide onto one server_name");
     }
 

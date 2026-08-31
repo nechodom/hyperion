@@ -1245,7 +1245,7 @@ pub trait AgentApi: Send + Sync + 'static {
         source: String,
     ) -> Result<(), RpcError>;
     /// Lift an IP ban.
-    async fn ban_remove(&self, ip: String) -> Result<(), RpcError>;
+    async fn ban_remove(&self, ip: String, sel: Option<HostingSelector>) -> Result<(), RpcError>;
 
     /// Restore a hosting from a previously-taken backup archive. The path
     /// must point at one of OUR archives (under /var/lib/hyperion/backups

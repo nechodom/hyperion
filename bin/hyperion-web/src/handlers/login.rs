@@ -772,6 +772,19 @@ fn redirect_target(next: &str) -> &str {
     }
 }
 
+fn subtle_eq(a: &str, b: &str) -> bool {
+    use subtle::ConstantTimeEq;
+    if a.len() != b.len() {
+        return false;
+    }
+    a.as_bytes().ct_eq(b.as_bytes()).unwrap_u8() == 1
+}
+
+#[allow(dead_code)] // used by status-line in 401 responses; reserved
+pub fn unauthorized_html() -> (StatusCode, &'static str) {
+    (StatusCode::UNAUTHORIZED, "unauthorized")
+}
+
 #[cfg(test)]
 mod redirect_target_tests {
     use super::redirect_target;
@@ -802,17 +815,4 @@ mod redirect_target_tests {
             );
         }
     }
-}
-
-fn subtle_eq(a: &str, b: &str) -> bool {
-    use subtle::ConstantTimeEq;
-    if a.len() != b.len() {
-        return false;
-    }
-    a.as_bytes().ct_eq(b.as_bytes()).unwrap_u8() == 1
-}
-
-#[allow(dead_code)] // used by status-line in 401 responses; reserved
-pub fn unauthorized_html() -> (StatusCode, &'static str) {
-    (StatusCode::UNAUTHORIZED, "unauthorized")
 }

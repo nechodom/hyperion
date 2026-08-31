@@ -1463,6 +1463,13 @@ pub enum Request {
     /// Lift an IP ban.
     BanRemove {
         ip: String,
+        /// The hosting the caller was authorized for, when the request came
+        /// from a per-hosting page. The node refuses to lift a ban that is
+        /// node-wide or belongs elsewhere — the nftables set is shared by
+        /// every site, so an unban naming only an IP is not scoped by
+        /// anything. `None` is an unrestricted removal, admin-only.
+        #[serde(default)]
+        sel: Option<HostingSelector>,
     },
     DashboardAlerts,
     ProfileList,

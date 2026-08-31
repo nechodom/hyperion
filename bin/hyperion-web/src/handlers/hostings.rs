@@ -2099,19 +2099,18 @@ pub async fn get_detail(
             .map(|(pw, _)| pw),
         _ => None,
     };
-    // The FTP accounts list is NODE-WIDE, so it is scoped here. A
-    // tenant-scoped viewer sees only their own account: the table names every
-    // hosting's domain and system user on the box, which tells a customer
-    // exactly who else is on the machine and what their Linux usernames are —
-    // the two facts an attacker wants before trying anything local.
-    let ftp_accounts = if ctx.is_tenant_scoped() {
-        ftp_accounts
-            .into_iter()
-            .filter(|a| a.user == detail.system_user)
-            .collect()
-    } else {
-        ftp_accounts
-    };
+    // The RPC returns the NODE-WIDE list; this page shows ONE hosting, so it
+    // is filtered to that hosting for everyone.
+    //
+    // Scoping it by role was the wrong cut: an admin looking at one site does
+    // not want a table of every other site either, and for a tenant the
+    // node-wide version leaked the domains and Linux usernames of everyone
+    // else on the box. A per-hosting page answers a question about that
+    // hosting. The node-wide view belongs on a node page, not here.
+    let ftp_accounts: Vec<_> = ftp_accounts
+        .into_iter()
+        .filter(|a| a.user == detail.system_user)
+        .collect();
     let bot_families = bot_family_rows(&detail.vhost_options.blocked_bots);
     let tpl = DetailTpl {
         username: &ctx.username,
@@ -2156,7 +2155,7 @@ pub async fn get_detail(
         profiles,
         csrf_ftp_set: csrf_token_for(&state, &ctx, "/hostings/ftp/set"),
         csrf_ftp_disable: csrf_token_for(&state, &ctx, "/hostings/ftp/disable"),
-        ftp_new_password: ftp_new_password,
+        ftp_new_password,
         ftp_host,
         error: None,
         // Cloned, not removed. A credential hand-off is single-use for a
@@ -6008,7 +6007,11 @@ pub async fn post_wp_reinstall(
     };
     // The typed confirmation is checked here as well as on the node. The
     // browser dialog only guards against a misclick — a POST skips it.
-    if form.confirm_domain.trim().to_ascii_lowercase() != detail.domain.to_ascii_lowercase() {
+    if !form
+        .confirm_domain
+        .trim()
+        .eq_ignore_ascii_case(&detail.domain)
+    {
         let token = stash_error(
             &state,
             &format!(
@@ -6882,7 +6885,12 @@ async fn dkim_action(
     ctx: AuthCtx,
     selector: String,
     req: impl FnOnce(HostingSelector) -> Request,
-    take: impl FnOnce(RpcResponse) -> Result<hyperion_types::DkimStatus, RpcResponse>,
+    // `Option<String>` rather than the whole RpcResponse: the caller only ever
+    // reads the Error variant's message, and returning the enum made every one
+    // of these an oversized Err (clippy::result_large_err) for a value that was
+    // immediately discarded. `Some(msg)` = the node reported an error;
+    // `None` = an unexpected variant.
+    take: impl FnOnce(RpcResponse) -> Result<hyperion_types::DkimStatus, Option<String>>,
 ) -> Result<Response, AppError> {
     let sel =
         match require_manage_for_selector(&state, &ctx, &selector, Capability::HostingEditConfig)
@@ -6909,7 +6917,7 @@ async fn dkim_action(
     };
     let (st, error) = match take(resp) {
         Ok(st) => (st, None),
-        Err(RpcResponse::Error(e)) => {
+        Err(Some(msg)) => {
             // Re-read current status so the card body stays accurate.
             let st = match crate::dispatcher::dispatch_to_node(
                 &state,
@@ -6921,9 +6929,9 @@ async fn dkim_action(
                 Ok(RpcResponse::DkimStatus(s)) => s,
                 _ => hyperion_types::DkimStatus::default(),
             };
-            (st, Some(e.to_string()))
+            (st, Some(msg))
         }
-        Err(_) => return Err(AppError::Internal("unexpected DKIM response".into())),
+        Err(None) => return Err(AppError::Internal("unexpected DKIM response".into())),
     };
     Ok(Html(
         DkimCardTpl {
@@ -6949,7 +6957,8 @@ pub async fn post_dkim_enable(
         |sel| Request::DkimEnable { sel },
         |r| match r {
             RpcResponse::DkimEnable(s) => Ok(s),
-            other => Err(other),
+            RpcResponse::Error(e) => Err(Some(e.to_string())),
+            _ => Err(None),
         },
     )
     .await
@@ -6967,7 +6976,8 @@ pub async fn post_dkim_disable(
         |sel| Request::DkimDisable { sel },
         |r| match r {
             RpcResponse::DkimDisable(s) => Ok(s),
-            other => Err(other),
+            RpcResponse::Error(e) => Err(Some(e.to_string())),
+            _ => Err(None),
         },
     )
     .await
@@ -6985,7 +6995,8 @@ pub async fn post_dkim_verify(
         |sel| Request::DkimVerify { sel },
         |r| match r {
             RpcResponse::DkimVerify(s) => Ok(s),
-            other => Err(other),
+            RpcResponse::Error(e) => Err(Some(e.to_string())),
+            _ => Err(None),
         },
     )
     .await
@@ -7828,13 +7839,23 @@ pub async fn post_ban(
         Ok((d, _)) => Some(d.id.as_str().to_string()),
         Err(_) => None,
     };
-    let target_owned: Option<String> = find_hosting_anywhere(&state, sel)
+    let target_owned: Option<String> = find_hosting_anywhere(&state, sel.clone())
         .await
         .ok()
         .and_then(|(_d, n)| n);
     let req = if form.op == "remove" {
         Request::BanRemove {
             ip: form.ip.trim().to_string(),
+            // Scoped unless the caller is an admin. The nftables set is one
+            // global set on the input hook, so an unban naming only an IP
+            // lifts whatever protection that IP had — including a
+            // brute-force ban raised for a different tenant. Both Customer
+            // and Operator hold SecurityManage here.
+            sel: if ctx.is_admin_or_higher() {
+                None
+            } else {
+                Some(sel)
+            },
         }
     } else {
         let reason = if form.reason.trim().is_empty() {

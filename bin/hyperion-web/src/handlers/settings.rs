@@ -806,7 +806,7 @@ pub async fn get_settings(
     // not run must not masquerade as a finding.
     for row in wildcard_nodes.iter_mut() {
         let target =
-            (row.node_id != crate::dispatcher::LOCAL_NODE_SENTINEL).then(|| row.node_id.as_str());
+            (row.node_id != crate::dispatcher::LOCAL_NODE_SENTINEL).then_some(row.node_id.as_str());
         let resp = crate::dispatcher::dispatch_to_node(&state, target, Request::CertOverview).await;
         if let Ok(RpcResponse::CertOverview(items)) = resp {
             // The wildcard subject is stored as its base domain (a

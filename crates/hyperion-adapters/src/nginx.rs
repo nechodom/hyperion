@@ -596,7 +596,58 @@ struct ProxyVhostTpl<'a> {
     upstream_url: &'a str,
 }
 
+/// Validate an upstream URL and give back the form that is safe to emit.
+///
+/// The renderer is the chokepoint on purpose. `create()` checked only that
+/// the string starts with `http://` or `https://`, and the vhost is
+/// re-rendered from the stored row on every apply, self-heal, move and clone
+/// — none of which re-run that check. So the only place a bad value cannot
+/// slip past is here.
+///
+/// Parsed and RE-SERIALIZED rather than denylisted: the template emits
+/// `proxy_pass {{ upstream_url }};`, so a value carrying `;` and `}` can
+/// close the directive and open a `location` of its own — and `fastcgi_pass`
+/// at another tenant's PHP-FPM socket is code execution as that tenant. An
+/// Operator can reach this (they hold HostingCreate) while being explicitly
+/// denied HostingEditNginxRaw, so this is the same power by another door.
+pub fn validate_upstream_url(raw: &str) -> Result<String, AdapterError> {
+    let parsed = url::Url::parse(raw.trim())
+        .map_err(|e| AdapterError::Other(format!("upstream URL is not a URL: {e}")))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(AdapterError::Other(format!(
+            "upstream URL must be http:// or https://, got {}://",
+            parsed.scheme()
+        )));
+    }
+    // `map_or`, not `is_none_or`: the latter is Rust 1.82 and this workspace
+    // targets 1.80.
+    if parsed.host_str().map_or(true, str::is_empty) {
+        return Err(AdapterError::Other("upstream URL has no host".into()));
+    }
+    // Credentials in a proxy_pass are silently forwarded upstream and land in
+    // the config file in plaintext.
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(AdapterError::Other(
+            "upstream URL must not contain a username or password".into(),
+        ));
+    }
+    let out = parsed.to_string();
+    // Belt and braces after re-serialisation: url never emits these, so if
+    // one appears the assumption above has broken and emitting would be worse
+    // than refusing.
+    if out
+        .chars()
+        .any(|c| matches!(c, ';' | '{' | '}' | '#' | '\'' | '"' | '\\') || c.is_whitespace())
+    {
+        return Err(AdapterError::Other(format!(
+            "upstream URL contains a character that cannot appear in an nginx directive: {out}"
+        )));
+    }
+    Ok(out)
+}
+
 pub fn render_proxy(input: &ProxyVhostInput<'_>) -> Result<String, AdapterError> {
+    let upstream = validate_upstream_url(input.upstream_url)?;
     let tpl = ProxyVhostTpl {
         http2_directive: nginx_wants_http2_directive(),
         domain: input.domain,
@@ -605,7 +656,7 @@ pub fn render_proxy(input: &ProxyVhostInput<'_>) -> Result<String, AdapterError>
         cert_path: input.cert_path,
         key_path: input.key_path,
         acme_challenge_root: input.acme_challenge_root,
-        upstream_url: input.upstream_url,
+        upstream_url: &upstream,
     };
     Ok(tpl.render()?)
 }
@@ -1301,19 +1352,6 @@ mod tests {
         );
     }
 
-    /// Both of these are what make HTTP-01 survive a Cloudflare proxy, and
-    /// neither is obvious enough to survive a well-meaning "dedupe" — hence a
-    /// test that states WHY rather than just asserting a string is present.
-    ///
-    /// 1. The challenge location must exist in the TLS server block, not only
-    ///    in the :80 one. Under Cloudflare's Full / Full (strict) modes the
-    ///    edge fetches the origin over :443 even though Let's Encrypt arrived
-    ///    on :80. The near-universal certbot layout wires the challenge into
-    ///    :80 alone and would 404 here.
-    /// 2. In the :80 block the challenge location must be ordered ABOVE the
-    ///    catch-all `return 301 https://`. Under Flexible/Off the edge reaches
-    ///    the origin on :80, and an unconditional redirect there bounces the
-    ///    challenge back to the edge — an infinite edge<->origin loop.
     /// The version boundary is 1.25.1, and getting it wrong in the unsafe
     /// direction takes every site on the box down — `http2 on;` is an
     /// `unknown directive` on Debian 12's nginx 1.22 and nginx then refuses
@@ -1396,6 +1434,19 @@ mod tests {
         );
     }
 
+    /// Both of these are what make HTTP-01 survive a Cloudflare proxy, and
+    /// neither is obvious enough to survive a well-meaning "dedupe" — hence a
+    /// test that states WHY rather than just asserting a string is present.
+    ///
+    /// 1. The challenge location must exist in the TLS server block, not only
+    ///    in the :80 one. Under Cloudflare's Full / Full (strict) modes the
+    ///    edge fetches the origin over :443 even though Let's Encrypt arrived
+    ///    on :80. The near-universal certbot layout wires the challenge into
+    ///    :80 alone and would 404 here.
+    /// 2. In the :80 block the challenge location must be ordered ABOVE the
+    ///    catch-all `return 301 https://`. Under Flexible/Off the edge reaches
+    ///    the origin on :80, and an unconditional redirect there bounces the
+    ///    challenge back to the edge — an infinite edge<->origin loop.
     #[test]
     fn acme_challenge_survives_a_cloudflare_proxy_in_every_ssl_mode() {
         let aliases: Vec<String> = vec![];
@@ -2230,5 +2281,76 @@ mod tests {
         assert!(!reload_error_means_inactive(
             "Job for nginx.service failed: reload-success timeout"
         ));
+    }
+}
+
+#[cfg(test)]
+mod upstream_url_tests {
+    use super::validate_upstream_url;
+
+    /// An Operator holds HostingCreate but is explicitly denied
+    /// HostingEditNginxRaw. Injecting through proxy_pass would hand them that
+    /// capability anyway — and `fastcgi_pass` at another tenant's PHP-FPM
+    /// socket is code execution as that tenant.
+    #[test]
+    fn directive_injection_is_refused() {
+        for hostile in [
+            // Closes proxy_pass, opens a location of its own. The template's
+            // own trailing `;` and `}` finish it, so `nginx -t` passes.
+            "http://127.0.0.1:3000; } location ~ \\\\.php$ { fastcgi_pass unix:/run/php/other.sock",
+            "http://127.0.0.1:3000;}",
+            "http://127.0.0.1:3000 # comment",
+            "http://127.0.0.1:3000\nlocation / {}",
+            // Not a proxy target at all.
+            "file:///etc/shadow",
+            "unix:/run/php/other.sock",
+            "gopher://127.0.0.1:6379/",
+            // Credentials would be forwarded upstream and stored in plaintext.
+            "http://user:pass@127.0.0.1:3000",
+            // Nonsense.
+            "",
+            "http://",
+            "not a url",
+        ] {
+            assert!(
+                validate_upstream_url(hostile).is_err(),
+                "accepted a hostile upstream: {hostile:?}"
+            );
+        }
+    }
+
+    /// The shapes an operator legitimately uses must still work.
+    #[test]
+    fn ordinary_upstreams_are_accepted() {
+        for ok in [
+            "http://127.0.0.1:3000",
+            "http://127.0.0.1:3000/",
+            "https://backend.internal:8443/app",
+            "http://[::1]:8080",
+            "http://localhost:5000",
+        ] {
+            assert!(
+                validate_upstream_url(ok).is_ok(),
+                "rejected a legitimate upstream: {ok:?}"
+            );
+        }
+    }
+
+    /// Validation lives in the RENDERER because the vhost is re-rendered from
+    /// the stored row on every apply, self-heal, move and clone — a row
+    /// written before this check existed must not be emitted now.
+    #[test]
+    fn the_renderer_itself_refuses() {
+        let aliases: Vec<String> = vec![];
+        let out = super::render_proxy(&super::ProxyVhostInput {
+            domain: "example.cz",
+            aliases: &aliases,
+            logs_dir: "/srv/x/logs",
+            cert_path: "/c/fullchain.pem",
+            key_path: "/c/privkey.pem",
+            acme_challenge_root: "/var/lib/hyperion/acme",
+            upstream_url: "http://127.0.0.1:3000; } location / { root /etc",
+        });
+        assert!(out.is_err(), "the renderer emitted an injected upstream");
     }
 }

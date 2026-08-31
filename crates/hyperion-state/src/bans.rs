@@ -66,6 +66,24 @@ pub async fn add_or_refresh(
 }
 
 /// Deactivate the active ban for an IP. Returns true if one was removed.
+/// Which hostings an active ban on `ip` belongs to.
+///
+/// `None` in the result means a NODE-WIDE ban — what the fail2ban scanner
+/// creates. Callers use this to refuse a removal that would lift someone
+/// else's protection: the nftables set is one global set dropped on the
+/// input hook, so "unban" is not scoped by anything the packet filter knows.
+pub async fn owners_of_active(
+    pool: &SqlitePool,
+    ip: &str,
+) -> Result<Vec<Option<String>>, StateError> {
+    let rows: Vec<(Option<String>,)> =
+        sqlx::query_as("SELECT hosting_id FROM ip_bans WHERE ip = ? AND active = 1")
+            .bind(ip)
+            .fetch_all(pool)
+            .await?;
+    Ok(rows.into_iter().map(|r| r.0).collect())
+}
+
 pub async fn deactivate(pool: &SqlitePool, ip: &str) -> Result<bool, StateError> {
     let r = sqlx::query("UPDATE ip_bans SET active = 0 WHERE ip = ? AND active = 1")
         .bind(ip)

@@ -257,6 +257,25 @@ pub async fn install_wordpress(
     let stdin = format!("{}\n", req.admin_password);
     cmd::run_with_stdin("/usr/bin/sudo", &install_argv_refs, stdin.as_bytes()).await?;
 
+    // 3b. Tighten wp-config.php. `wp config create` writes it with the
+    // process umask — 0644 — and it holds DB_PASSWORD, the auth salts and
+    // (when Redis is on) WP_REDIS_PASSWORD. Every hosting on the box has a
+    // real local account and open_basedir does not stop a shell_exec from
+    // reading another site's file, so 0644 hands over a working database
+    // credential for a @localhost grant. 0640 is enough: PHP runs as the
+    // owner.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let cfg = format!("{htdocs}/wp-config.php");
+        if tokio::fs::metadata(&cfg).await.is_ok() {
+            if let Err(e) =
+                tokio::fs::set_permissions(&cfg, std::fs::Permissions::from_mode(0o640)).await
+            {
+                tracing::warn!(error = %e, path = %cfg, "could not tighten wp-config.php");
+            }
+        }
+    }
+
     // 4. Optional: flip blog_public off when the caller asked for
     // a no-index install (test-node WP preset). Best-effort —
     // failure here doesn't roll back the install (the operator

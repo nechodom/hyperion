@@ -2030,7 +2030,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             if ts < since {
                 continue;
             }
-            if !hyperion_adapters::logscan::is_public_bannable_ip(&ip) {
+            if !hyperion_adapters::logscan::is_public_bannable_ip(ip) {
                 continue;
             }
             if own_ip.as_deref() == Some(ip) {
@@ -2071,7 +2071,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 },
             )
             .collect();
-        out.sort_by(|a, b| b.requests.cmp(&a.requests));
+        out.sort_by_key(|r| std::cmp::Reverse(r.requests));
         Ok(out)
     }
 
@@ -6113,7 +6113,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         confirm_domain: String,
     ) -> Result<String, RpcError> {
         let detail = self.get(sel.clone()).await?;
-        if confirm_domain.trim().to_ascii_lowercase() != detail.domain.to_ascii_lowercase() {
+        if !confirm_domain.trim().eq_ignore_ascii_case(&detail.domain) {
             return Err(RpcError::Validation {
                 message: format!(
                     "confirmation does not match: type {} exactly to reinstall it",
@@ -7587,11 +7587,47 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     }
 
     /// Lift an IP ban.
-    pub async fn ban_remove(&self, ip: String) -> Result<(), RpcError> {
+    /// Lift a ban. `sel` scopes it: `None` is an unrestricted removal and is
+    /// admin-only at the web layer.
+    ///
+    /// The nftables side is ONE global set dropped on the input hook, so
+    /// "unban" is not scoped by anything the packet filter knows — a request
+    /// naming only an IP lifted whatever protection that IP had, including a
+    /// fail2ban ban raised for a DIFFERENT tenant. Both Customer and Operator
+    /// hold SecurityManage on their own hosting, so the per-hosting gate on
+    /// the route was not the boundary it looked like.
+    pub async fn ban_remove(
+        &self,
+        ip: String,
+        sel: Option<HostingSelector>,
+    ) -> Result<(), RpcError> {
         let parsed: std::net::IpAddr = ip.trim().parse().map_err(|_| RpcError::Validation {
             message: "not a valid IP address".into(),
         })?;
         let ip = parsed.to_string();
+        if let Some(sel) = sel {
+            let detail = self.get(sel).await?;
+            let owners = hyperion_state::bans::owners_of_active(&self.pool, &ip)
+                .await
+                .map_err(|e| RpcError::Internal_with(format!("ban owners: {e}")))?;
+            // Every active ban on this IP must belong to this hosting. A
+            // node-wide one (hosting_id NULL, what the brute-force scanner
+            // raises) protects everybody, so lifting it is an admin decision.
+            let mine = !owners.is_empty()
+                && owners
+                    .iter()
+                    .all(|o| o.as_deref() == Some(detail.id.as_str()));
+            if !mine {
+                return Err(RpcError::Validation {
+                    message: format!(
+                        "{ip} is not banned for {} alone — it is a node-wide ban or \
+                         belongs to another site. Lifting it needs an administrator, \
+                         because the firewall set is shared by every site on this node.",
+                        detail.domain
+                    ),
+                });
+            }
+        }
         nft_unban(&ip).await;
         hyperion_state::bans::deactivate(&self.pool, &ip)
             .await
@@ -9398,6 +9434,19 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         tokio::fs::create_dir_all(&staging)
             .await
             .map_err(|e| RpcError::Internal_with(format!("mkdir staging: {e}")))?;
+        // 0700 on the staging dir AND its parent. A migration bundle holds
+        // plaintext database dumps and wp-config secrets for every site being
+        // moved; the outbound half already did this, the inbound half did
+        // not. The parent matters too — without it another local user can
+        // traverse in and read by name.
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let p700 = std::fs::Permissions::from_mode(0o700);
+            let _ =
+                tokio::fs::set_permissions("/var/lib/hyperion/migration-incoming", p700.clone())
+                    .await;
+            let _ = tokio::fs::set_permissions(&staging, p700).await;
+        }
         let manifest_path = staging.join("manifest.json");
         let archive_path = staging.join("archive.tar.gz");
 
@@ -14662,14 +14711,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let culprit = if headers.contains("x-redirect-by: wordpress") {
             // Name it. Every minute spent looking at nginx here is wasted,
             // and this is the overwhelmingly common cause.
-            format!(
-                "WordPress is redirecting in the opposite direction. Its Site Address \
-                 (Settings → General, the `siteurl`/`home` options) points at the other \
-                 spelling of the domain, so the two take turns bouncing visitors and the \
-                 site fails with ERR_TOO_MANY_REDIRECTS. FIX: either pick the canonical \
-                 host that matches WordPress, or change WordPress's Site Address to match \
-                 this setting — they have to agree."
-            )
+            "WordPress is redirecting in the opposite direction. Its Site Address \
+             (Settings → General, the `siteurl`/`home` options) points at the other \
+             spelling of the domain, so the two take turns bouncing visitors and the \
+             site fails with ERR_TOO_MANY_REDIRECTS. FIX: either pick the canonical \
+             host that matches WordPress, or change WordPress's Site Address to match \
+             this setting — they have to agree."
+                .to_string()
         } else {
             "Something on the site redirects in the opposite direction — most often the \
              application's own canonical-URL setting, or a redirect plugin. The two take \
@@ -24356,6 +24404,31 @@ async fn repair_tree_permissions(user: &str, site_dir: &std::path::Path) -> Resu
         .await?;
     }
     hyperion_adapters::fs::ensure_ancestors_traversable(site_dir).await;
+
+    // Re-tighten what the 0644/0755 sweep above just widened. Doing it HERE
+    // rather than at the call sites is the point: there are five callers and
+    // only one of them remembered, so every other path — import, autoheal,
+    // restore — quietly republished the database password to every local
+    // user on the box.
+    //
+    // Both spellings, because callers pass different roots: some hand in the
+    // site directory, some the document root.
+    for rel in ["wp-config.php", "htdocs/wp-config.php"] {
+        let p = site_dir.join(rel);
+        if tokio::fs::metadata(&p).await.is_ok() {
+            // 0640: PHP runs as the owner, so nothing needs group or other.
+            let _ = chmod_path(&p.display().to_string(), 0o640).await;
+        }
+    }
+    // logs/ records visitor IPs and tmp/ is session.save_path — a readable
+    // session directory on a shared box lets another tenant take over a
+    // logged-in session. The repair's own 0755 pass is what put them at risk.
+    for rel in ["logs", "tmp"] {
+        let p = site_dir.join(rel);
+        if tokio::fs::metadata(&p).await.is_ok() {
+            let _ = chmod_path(&p.display().to_string(), 0o750).await;
+        }
+    }
     Ok(())
 }
 
