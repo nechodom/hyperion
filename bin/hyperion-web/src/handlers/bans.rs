@@ -154,6 +154,10 @@ pub async fn post_unban(
         target,
         Request::BanRemove {
             ip: form.ip.trim().to_string(),
+            // Unrestricted: this is the cluster-wide bans page, which is
+            // already admin-gated. The per-hosting route passes its selector
+            // so the node can refuse a ban that is not that site's.
+            sel: None,
         },
     )
     .await?;

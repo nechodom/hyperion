@@ -1453,7 +1453,7 @@ pub async fn dispatch(api: Arc<dyn AgentApi>, req: Request) -> Response {
             Ok(_) => Response::BanAdd,
             Err(e) => Response::Error(e),
         },
-        Request::BanRemove { ip } => match api.ban_remove(ip).await {
+        Request::BanRemove { ip, sel } => match api.ban_remove(ip, sel).await {
             Ok(_) => Response::BanRemove,
             Err(e) => Response::Error(e),
         },
@@ -2849,7 +2849,7 @@ mod tests {
         ) -> Result<(), RpcError> {
             Ok(())
         }
-        async fn ban_remove(&self, _: String) -> Result<(), RpcError> {
+        async fn ban_remove(&self, _: String, _: Option<HostingSelector>) -> Result<(), RpcError> {
             Ok(())
         }
         async fn dashboard_alerts(&self) -> Result<Vec<DashboardAlert>, RpcError> {

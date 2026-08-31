@@ -2953,12 +2953,16 @@
 <div class="card hover" style="margin-top:1rem">
   <h2>
     <svg class="h-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>
-    All FTP accounts on this node
+    {# Named for what it now shows. It used to list every account on the
+       node, on a page about ONE hosting — confusing for an admin, and for a
+       tenant it handed over the domains and Linux usernames of everyone else
+       on the machine. #}
+    FTP account for this site
     <span class="text-soft small" style="font-weight:400;margin-left:0.5rem">{{ ftp_accounts.len() }}</span>
   </h2>
   {% if ftp_accounts.is_empty() %}
     <p class="muted" style="font-size:0.88rem;margin:0">
-      No FTP accounts on this node yet. Set a password above to create one.
+      No FTP account for this site yet. Set a password above to create one.
     </p>
   {% else %}
   <div class="table-wrap" style="margin:0 -1.5rem -1.4rem">

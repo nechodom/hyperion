@@ -26,6 +26,26 @@ pub async fn open(path: &Path) -> Result<SqlitePool, StateError> {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
+    // Create the file OURSELVES at 0600 before SQLite gets to it.
+    //
+    // SQLite creates a missing database with the process umask, which on a
+    // Debian service is 0644 — and /var/lib/hyperion is 0711, so any local
+    // user can walk in and read it by name. This database holds every
+    // operator's argon2 hash and their TOTP secret in cleartext, so a
+    // world-readable copy makes the second factor decorative. Every hosting
+    // has a real local account, so "any local user" means any customer.
+    //
+    // Created before connecting rather than chmodded after, because a
+    // chmod-after-open leaves a window in which the file is readable — and
+    // the attacker choosing when to look is the whole game.
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let _ = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .mode(0o600)
+            .open(path);
+    }
     let url = format!("sqlite://{}", path.display());
     let opts = SqliteConnectOptions::from_str(&url)?
         .create_if_missing(true)
@@ -37,6 +57,20 @@ pub async fn open(path: &Path) -> Result<SqlitePool, StateError> {
         .connect_with(opts)
         .await?;
     sqlx::migrate!("./migrations").run(&pool).await?;
+    // Heal a database created by an older build, and the WAL sidecars SQLite
+    // makes itself — those carry the same rows and were equally readable.
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for p in [
+            path.to_path_buf(),
+            path.with_extension("db-wal"),
+            path.with_extension("db-shm"),
+        ] {
+            if p.exists() {
+                let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
+            }
+        }
+    }
     Ok(pool)
 }
 
@@ -91,5 +125,59 @@ mod tests {
         let path = d.path().join("nested/state.db");
         let _pool = open(&path).await.expect("open");
         assert!(path.exists(), "db file created");
+    }
+}
+
+#[cfg(test)]
+mod permission_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// The database holds every operator's argon2 hash and their TOTP secret
+    /// in CLEARTEXT, and /var/lib/hyperion is 0711 — so a world-readable file
+    /// there is readable by every hosting's system user, which makes the
+    /// second factor decorative. SQLite would create it with the process
+    /// umask (0644 on a Debian service) if left to itself.
+    #[tokio::test]
+    async fn the_database_is_never_world_readable() {
+        let d = tempfile::tempdir().expect("tmp");
+        let p = d.path().join("state.db");
+        let pool = open(&p).await.expect("open");
+        drop(pool);
+
+        for f in [
+            p.clone(),
+            p.with_extension("db-wal"),
+            p.with_extension("db-shm"),
+        ] {
+            if !f.exists() {
+                continue;
+            }
+            let mode = std::fs::metadata(&f).expect("stat").permissions().mode() & 0o777;
+            assert_eq!(
+                mode & 0o077,
+                0,
+                "{} is {mode:o} — group/other can read the TOTP secrets",
+                f.display()
+            );
+        }
+    }
+
+    /// A database left behind by an older build must be tightened on the next
+    /// start, not only on a fresh create — otherwise every existing box keeps
+    /// the exposure forever.
+    #[tokio::test]
+    async fn an_existing_loose_database_is_tightened() {
+        let d = tempfile::tempdir().expect("tmp");
+        let p = d.path().join("state.db");
+        // Pre-create it wide open, the way an older build left it.
+        std::fs::write(&p, b"").expect("create");
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+
+        let pool = open(&p).await.expect("open");
+        drop(pool);
+
+        let mode = std::fs::metadata(&p).expect("stat").permissions().mode() & 0o777;
+        assert_eq!(mode & 0o077, 0, "still {mode:o} — the heal did not run");
     }
 }

@@ -1673,8 +1673,8 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
             .await
     }
 
-    async fn ban_remove(&self, ip: String) -> Result<(), RpcError> {
-        self.svc.ban_remove(ip).await
+    async fn ban_remove(&self, ip: String, sel: Option<HostingSelector>) -> Result<(), RpcError> {
+        self.svc.ban_remove(ip, sel).await
     }
 
     async fn dashboard_alerts(&self) -> Result<Vec<DashboardAlert>, RpcError> {
