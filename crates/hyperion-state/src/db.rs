@@ -23,8 +23,10 @@ pub enum StateError {
 
 /// Open a SQLite pool at `path`, applying migrations idempotently.
 pub async fn open(path: &Path) -> Result<SqlitePool, StateError> {
-    if let Some(parent) = path.parent() {
-        let _ = std::fs::create_dir_all(parent);
+    if path.to_string_lossy() != ":memory:" {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
     }
     // Create the file OURSELVES at 0600 before SQLite gets to it.
     //
@@ -38,7 +40,16 @@ pub async fn open(path: &Path) -> Result<SqlitePool, StateError> {
     // Created before connecting rather than chmodded after, because a
     // chmod-after-open leaves a window in which the file is readable — and
     // the attacker choosing when to look is the whole game.
-    {
+    //
+    // Skipped for SQLite's special paths. `:memory:` and a `file:` URI are
+    // not filenames, and pre-creating them literally drops a stray `:memory:`
+    // file wherever the process happens to be — which is exactly what landed
+    // in the repository the first time this shipped.
+    let is_real_file = {
+        let p = path.to_string_lossy();
+        p != ":memory:" && !p.starts_with("file:")
+    };
+    if is_real_file {
         use std::os::unix::fs::OpenOptionsExt;
         let _ = std::fs::OpenOptions::new()
             .create(true)
@@ -59,7 +70,7 @@ pub async fn open(path: &Path) -> Result<SqlitePool, StateError> {
     sqlx::migrate!("./migrations").run(&pool).await?;
     // Heal a database created by an older build, and the WAL sidecars SQLite
     // makes itself — those carry the same rows and were equally readable.
-    {
+    if is_real_file {
         use std::os::unix::fs::PermissionsExt;
         for p in [
             path.to_path_buf(),
@@ -179,5 +190,30 @@ mod permission_tests {
 
         let mode = std::fs::metadata(&p).expect("stat").permissions().mode() & 0o777;
         assert_eq!(mode & 0o077, 0, "still {mode:o} — the heal did not run");
+    }
+}
+
+#[cfg(test)]
+mod special_path_tests {
+    use super::*;
+
+    /// `:memory:` is not a filename. Pre-creating the database file to fix
+    /// its permissions must not take that literally — the first version did,
+    /// and a stray `:memory:` file was committed to the repository by a test
+    /// that opens one.
+    #[tokio::test]
+    async fn the_memory_path_creates_no_file() {
+        let d = tempfile::tempdir().expect("tmp");
+        let cwd = std::env::current_dir().expect("cwd");
+        // Run from a scratch directory so a stray file is visible and cannot
+        // land in the source tree.
+        std::env::set_current_dir(d.path()).expect("cd");
+        let pool = open(Path::new(":memory:")).await;
+        std::env::set_current_dir(cwd).expect("cd back");
+        assert!(pool.is_ok(), "an in-memory database must still open");
+        assert!(
+            !d.path().join(":memory:").exists(),
+            "a literal ':memory:' file was created"
+        );
     }
 }
