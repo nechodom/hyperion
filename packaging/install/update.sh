@@ -445,13 +445,19 @@ if (( DO_BUILD && PREFER_PREBUILT )); then
           acode=$(curl -sSL --max-time 60 -w '%{http_code}' \
                     -o "$TMP/hyperion-export-$a" "$REL_BASE/hyperion-export-$a" 2>/dev/null) || true
           if [[ "$acode" == "200" && -s "$TMP/hyperion-export-$a" ]]; then
-            # Verified against the same SHA256SUMS as everything else when the
-            # release lists it; an unlisted file is not installed.
-            if grep -q " hyperion-export-$a\$" "$TMP/SHA256SUMS" 2>/dev/null \
-               && ( cd "$TMP" && grep " hyperion-export-$a\$" SHA256SUMS | sha256sum -c --status - ); then
+            # Verified against the same SHA256SUMS as everything else. The two
+            # failure modes are reported separately on purpose: the first
+            # release to ship these did not list them in SHA256SUMS, and the
+            # old message said "failed its checksum" — sending the operator
+            # looking for a corrupted download when nothing was wrong with it.
+            if ! grep -Eq "[[:space:]]hyperion-export-$a\$" "$TMP/SHA256SUMS" 2>/dev/null; then
+              warn "hyperion-export-$a is not listed in this release's SHA256SUMS — not installed"
+            elif ( cd "$TMP" \
+                   && grep -E "[[:space:]]hyperion-export-$a\$" SHA256SUMS \
+                      | sha256sum --quiet --check - >/dev/null 2>&1 ); then
               install -m 0755 "$TMP/hyperion-export-$a" "/usr/local/bin/hyperion-export-$a"
             else
-              warn "hyperion-export-$a failed its checksum — not installed"
+              warn "hyperion-export-$a did not match its checksum — not installed"
             fi
           fi
         done
