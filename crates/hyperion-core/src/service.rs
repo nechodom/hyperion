@@ -3290,6 +3290,23 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         if let Some(ver) = detail.php_version {
             let _ = self.adapters.fpm_delete(&detail.system_user, ver).await;
         }
+        // Extra FTP logins are real passwd entries. The DB rows go with the
+        // hosting via ON DELETE CASCADE, so if the accounts are not removed
+        // HERE the cascade takes the only record of them and they stay on the
+        // box forever — with a working password and, because they share the
+        // site's uid, whatever that uid is next given.
+        if let Ok(logins) =
+            hyperion_state::ftp_accounts::logins_for_hosting(&self.pool, &detail.id).await
+        {
+            for login in logins {
+                if let Err(e) = hyperion_adapters::ftp::delete_extra_login(&login).await {
+                    tracing::error!(
+                        error = %e, login = %login,
+                        "delete: could not remove an extra FTP login — it will outlive the hosting"
+                    );
+                }
+            }
+        }
         let hosting_root = format!(
             "{}/{}/{}",
             self.paths.home_root, detail.system_user, detail.domain
@@ -6989,6 +7006,212 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
         }
         Ok(healed)
+    }
+
+    // ── Extra FTP logins ──────────────────────────────────────────────────
+    //
+    // See migration 061 for why these share the hosting's uid. The short
+    // version: PHP-FPM runs as the site user, so a login with its own uid
+    // would write files PHP cannot then modify. Sharing the uid means every
+    // login writes files the site already owns — and it means every login can
+    // reach every file the site owns, which the UI says out loud.
+
+    pub async fn ftp_account_list(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<Vec<hyperion_types::FtpExtraAccount>, RpcError> {
+        let detail = self.get(sel).await?;
+        let rows = hyperion_state::ftp_accounts::list_for_hosting(&self.pool, &detail.id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("list ftp accounts: {e}")))?;
+        let mut out = Vec::with_capacity(rows.len());
+        for r in rows {
+            out.push(hyperion_types::FtpExtraAccount {
+                id: r.id,
+                login: r.login.clone(),
+                local_root: r.local_root,
+                label: r.label,
+                created_at: r.created_at,
+                created_by: r.created_by,
+                password_state: hyperion_adapters::ftp::password_state(&r.login).await,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Create an extra FTP login. Returns the generated password.
+    ///
+    /// `subdir` is relative to the hosting's document root and is where the
+    /// client LANDS. It is convenience, not a boundary: the login shares the
+    /// site's uid, so it can walk out of that directory into anything the
+    /// site owns. Validated anyway so the landing path cannot be pointed
+    /// outside the hosting entirely.
+    pub async fn ftp_account_create(
+        &self,
+        sel: HostingSelector,
+        login: String,
+        subdir: String,
+        label: String,
+        actor: String,
+    ) -> Result<String, RpcError> {
+        let detail = self.get(sel).await?;
+        if detail.state != HostingState::Active {
+            return Err(RpcError::Conflict {
+                message: format!(
+                    "hosting {} is {} — resume it before adding FTP logins",
+                    detail.domain,
+                    detail.state.as_str()
+                ),
+            });
+        }
+        let root = detail.root_dir.trim().to_string();
+        if root.is_empty() || detail.system_user.trim().is_empty() {
+            return Err(RpcError::Validation {
+                message: "this hosting has no document root or system user".into(),
+            });
+        }
+        let login = login.trim().to_ascii_lowercase();
+
+        // Resolve the landing directory inside the hosting, refusing to
+        // follow a symlink out of it — the site user owns this tree and can
+        // plant one.
+        let sub = subdir.trim().trim_matches('/').to_string();
+        let landing = if sub.is_empty() {
+            root.clone()
+        } else {
+            let candidate =
+                hyperion_adapters::files::resolve_inside_jail(std::path::Path::new(&root), &sub)
+                    .await
+                    .map_err(|e| RpcError::Validation {
+                        message: format!("landing directory: {e}"),
+                    })?;
+            if !candidate.is_dir() {
+                return Err(RpcError::Validation {
+                    message: format!("{sub} is not a directory inside the site"),
+                });
+            }
+            candidate.display().to_string()
+        };
+
+        let info = hyperion_adapters::users::lookup_raw(&detail.system_user)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("lookup site user: {e}")))?
+            .ok_or_else(|| RpcError::Validation {
+                message: format!(
+                    "the site's system user {} does not exist",
+                    detail.system_user
+                ),
+            })?;
+
+        hyperion_adapters::ftp::create_extra_login(&login, info.uid, info.gid, &root)
+            .await
+            .map_err(|e| RpcError::Validation {
+                message: e.to_string(),
+            })?;
+
+        // Everything after the account exists is rolled back on failure —
+        // a half-made login that cannot be seen in the panel is worse than
+        // none, because nothing will ever clean it up.
+        let password = hyperion_adapters::random_password();
+        let finish = async {
+            hyperion_adapters::ftp::set_user_password(&login, &password).await?;
+            hyperion_adapters::ftp::set_user_web_root(&login, &landing).await?;
+            Ok::<(), hyperion_adapters::AdapterError>(())
+        }
+        .await;
+        if let Err(e) = finish {
+            let _ = hyperion_adapters::ftp::delete_extra_login(&login).await;
+            return Err(RpcError::ProvisioningFailed {
+                stage: "ftp_account".into(),
+                reason: e.to_string(),
+            });
+        }
+        if let Err(e) = hyperion_state::ftp_accounts::insert(
+            &self.pool,
+            &detail.id,
+            &login,
+            &landing,
+            label.trim(),
+            &actor,
+            now_secs(),
+        )
+        .await
+        {
+            let _ = hyperion_adapters::ftp::delete_extra_login(&login).await;
+            return Err(RpcError::Internal_with(format!("record ftp account: {e}")));
+        }
+        self.append_audit(
+            "hosting.ftp.account_create",
+            Some(detail.id.as_str()),
+            &serde_json::json!({"login": login, "landing": landing}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(password)
+    }
+
+    /// Replace an extra login's password. Returns the new one.
+    pub async fn ftp_account_reset(
+        &self,
+        sel: HostingSelector,
+        id: i64,
+    ) -> Result<String, RpcError> {
+        let detail = self.get(sel).await?;
+        let row = hyperion_state::ftp_accounts::get_owned(&self.pool, &detail.id, id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("ftp account: {e}")))?
+            .ok_or_else(|| RpcError::NotFound {
+                kind: "ftp_account".into(),
+                id: id.to_string(),
+            })?;
+        let password = hyperion_adapters::random_password();
+        hyperion_adapters::ftp::set_user_password(&row.login, &password)
+            .await
+            .map_err(|e| RpcError::Validation {
+                message: e.to_string(),
+            })?;
+        self.append_audit(
+            "hosting.ftp.account_reset",
+            Some(detail.id.as_str()),
+            &serde_json::json!({"login": row.login}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(password)
+    }
+
+    pub async fn ftp_account_delete(
+        &self,
+        sel: HostingSelector,
+        id: i64,
+    ) -> Result<String, RpcError> {
+        let detail = self.get(sel).await?;
+        let row = hyperion_state::ftp_accounts::get_owned(&self.pool, &detail.id, id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("ftp account: {e}")))?
+            .ok_or_else(|| RpcError::NotFound {
+                kind: "ftp_account".into(),
+                id: id.to_string(),
+            })?;
+        hyperion_adapters::ftp::delete_extra_login(&row.login)
+            .await
+            .map_err(|e| RpcError::Validation {
+                message: e.to_string(),
+            })?;
+        hyperion_state::ftp_accounts::delete_owned(&self.pool, &detail.id, id)
+            .await
+            .map_err(|e| RpcError::Internal_with(format!("delete ftp account: {e}")))?;
+        self.append_audit(
+            "hosting.ftp.account_delete",
+            Some(detail.id.as_str()),
+            &serde_json::json!({"login": row.login}).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(format!(
+            "FTP login {} removed. The site's files are untouched.",
+            row.login
+        ))
     }
 
     /// Disable FTP for the hosting's system user (`passwd -d <user>`).

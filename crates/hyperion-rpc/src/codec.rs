@@ -1360,6 +1360,27 @@ pub enum Request {
     FtpSelfCheck {
         sel: HostingSelector,
     },
+    /// Extra FTP logins for one hosting.
+    FtpAccountList {
+        sel: HostingSelector,
+    },
+    FtpAccountCreate {
+        sel: HostingSelector,
+        login: String,
+        subdir: String,
+        label: String,
+        actor: String,
+    },
+    /// Both of these take the hosting AND the id — the id alone is not an
+    /// authorization, the same rule the backup ids now follow.
+    FtpAccountReset {
+        sel: HostingSelector,
+        id: i64,
+    },
+    FtpAccountDelete {
+        sel: HostingSelector,
+        id: i64,
+    },
     /// Repair the per-hosting half of FTP: point `local_root` at the real
     /// web root, chown it, make the ancestors traversable. Touches no
     /// daemon and no global file.
@@ -2023,6 +2044,11 @@ pub enum Response {
     },
     FtpDisable,
     FtpSelfCheck(hyperion_types::FtpCheckReport),
+    FtpAccountList(Vec<hyperion_types::FtpExtraAccount>),
+    /// The generated password, shown once.
+    FtpAccountCreate(String),
+    FtpAccountReset(String),
+    FtpAccountDelete(String),
     FtpRepairSite(String),
     FtpRepairNodeConfig(String),
     WpPermCheck(hyperion_types::FtpCheckReport),

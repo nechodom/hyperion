@@ -713,6 +713,20 @@ pub trait AgentApi: Send + Sync + 'static {
     /// Post a test message to the configured Slack webhook, reporting
     /// success or the reason it failed.
     async fn slack_send_test(&self) -> Result<(), RpcError>;
+    async fn ftp_account_list(
+        &self,
+        sel: HostingSelector,
+    ) -> Result<Vec<hyperion_types::FtpExtraAccount>, RpcError>;
+    async fn ftp_account_create(
+        &self,
+        sel: HostingSelector,
+        login: String,
+        subdir: String,
+        label: String,
+        actor: String,
+    ) -> Result<String, RpcError>;
+    async fn ftp_account_reset(&self, sel: HostingSelector, id: i64) -> Result<String, RpcError>;
+    async fn ftp_account_delete(&self, sel: HostingSelector, id: i64) -> Result<String, RpcError>;
     async fn ftp_self_check(
         &self,
         sel: HostingSelector,

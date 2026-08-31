@@ -1765,6 +1765,25 @@ impl Default for UpdateStatus {
     }
 }
 
+/// One extra FTP login for a hosting.
+///
+/// These share the site's uid on purpose (see migration 061): PHP-FPM runs as
+/// the site user, so a login with its own uid would create files PHP cannot
+/// modify. The consequence is that `local_root` is where a client LANDS, not
+/// a boundary — every login can reach every file the site owns.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+pub struct FtpExtraAccount {
+    pub id: i64,
+    pub login: String,
+    pub local_root: String,
+    pub label: String,
+    pub created_at: i64,
+    pub created_by: String,
+    /// `set` | `locked` | `off` | `empty` — same vocabulary as the node-wide
+    /// account list.
+    pub password_state: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

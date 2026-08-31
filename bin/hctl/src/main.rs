@@ -1527,6 +1527,28 @@ fn print_pretty(resp: &Response) {
         | Response::WpReinstall(m) => {
             println!("{m}");
         }
+        Response::FtpAccountList(rows) => {
+            if rows.is_empty() {
+                println!("no extra FTP logins");
+            }
+            for a in rows.iter() {
+                println!(
+                    "  {:<20} {:<8} {}{}",
+                    a.login,
+                    a.password_state,
+                    a.local_root,
+                    if a.label.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  ({})", a.label)
+                    }
+                );
+            }
+        }
+        Response::FtpAccountCreate(p) | Response::FtpAccountReset(p) => {
+            println!("password (shown once): {p}");
+        }
+        Response::FtpAccountDelete(m) => println!("{m}"),
         Response::WpPermCheck(r) => {
             println!("permissions check for {}", r.expected_root);
             for it in &r.items {
