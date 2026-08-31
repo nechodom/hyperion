@@ -85,6 +85,12 @@ pub struct ImportedHosting {
     pub domain: String,
     pub hosting_id: String,
     pub databases: usize,
+    /// Anything the operator has to know about THIS site that the import
+    /// decided on its behalf — chiefly a PHP version we do not support being
+    /// substituted, which can break the very code being migrated. Silence
+    /// here used to mean "fine"; it meant "we threw the version away".
+    #[serde(default)]
+    pub notes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

@@ -1,0 +1,13 @@
+-- The date an operator typed into "expires on", when it was in the past.
+--
+-- A renewal date is a day and a month; the year an operator types records
+-- when the customer came to us. Typing 2024-03-15 in 2026 has to mean
+-- "renews 15 March, with us since 2024" -- taken literally it means the
+-- hosting expired two years ago, and the expiry sweep would suspend a live
+-- customer site the moment it was saved.
+--
+-- So `expires_at` is rolled forward to the next occurrence of that day and
+-- month before it is stored, which throws the year away. This column keeps
+-- it, purely so the panel can show it. NULL when the operator typed a future
+-- date, which carries no such information.
+ALTER TABLE hostings ADD COLUMN customer_since INTEGER;

@@ -176,6 +176,7 @@ pub async fn mark_failed_or_retry(
 
 // ------- Per-hosting expiry helpers -------
 
+#[allow(clippy::too_many_arguments)]
 pub async fn set_expiry(
     pool: &SqlitePool,
     id: &HostingId,
@@ -183,18 +184,20 @@ pub async fn set_expiry(
     owner_email: Option<&str>,
     grace_days: i64,
     warning_offsets_csv: &str,
+    customer_since: Option<i64>,
     now: i64,
 ) -> Result<(), StateError> {
     sqlx::query(
         "UPDATE hostings
          SET expires_at = ?, owner_email = ?, grace_days = ?,
-             warning_offsets_days = ?, updated_at = ?
+             warning_offsets_days = ?, customer_since = ?, updated_at = ?
          WHERE id = ?",
     )
     .bind(expires_at)
     .bind(owner_email)
     .bind(grace_days)
     .bind(warning_offsets_csv)
+    .bind(customer_since)
     .bind(now)
     .bind(id.as_str())
     .execute(pool)
@@ -210,46 +213,72 @@ pub struct ExpiryRow {
     pub owner_email: Option<String>,
     pub grace_days: i64,
     pub warning_offsets_days: String,
+    /// The past date the operator typed, before it was rolled forward to the
+    /// next occurrence of its day and month. Records since when the hosting
+    /// has been with us; `None` when a future date was typed.
+    pub customer_since: Option<i64>,
 }
 
 pub async fn get_expiry(
     pool: &SqlitePool,
     id: &HostingId,
 ) -> Result<Option<ExpiryRow>, StateError> {
-    let row: Option<(String, String, Option<i64>, Option<String>, i64, String)> = sqlx::query_as(
-        "SELECT id, domain, expires_at, owner_email, grace_days, warning_offsets_days
+    let row: Option<(
+        String,
+        String,
+        Option<i64>,
+        Option<String>,
+        i64,
+        String,
+        Option<i64>,
+    )> = sqlx::query_as(
+        "SELECT id, domain, expires_at, owner_email, grace_days, warning_offsets_days,
+                customer_since
          FROM hostings WHERE id = ?",
     )
     .bind(id.as_str())
     .fetch_optional(pool)
     .await?;
-    Ok(row.map(|(id, domain, exp, email, grace, offs)| ExpiryRow {
-        id: HostingId(id),
-        domain,
-        expires_at: exp,
-        owner_email: email,
-        grace_days: grace,
-        warning_offsets_days: offs,
-    }))
-}
-
-/// All hostings with a non-NULL expiry, sorted ascending.
-pub async fn list_with_expiry(pool: &SqlitePool) -> Result<Vec<ExpiryRow>, StateError> {
-    let rows: Vec<(String, String, Option<i64>, Option<String>, i64, String)> = sqlx::query_as(
-        "SELECT id, domain, expires_at, owner_email, grace_days, warning_offsets_days
-         FROM hostings WHERE expires_at IS NOT NULL ORDER BY expires_at ASC",
-    )
-    .fetch_all(pool)
-    .await?;
-    Ok(rows
-        .into_iter()
-        .map(|(id, domain, exp, email, grace, offs)| ExpiryRow {
+    Ok(
+        row.map(|(id, domain, exp, email, grace, offs, since)| ExpiryRow {
             id: HostingId(id),
             domain,
             expires_at: exp,
             owner_email: email,
             grace_days: grace,
             warning_offsets_days: offs,
+            customer_since: since,
+        }),
+    )
+}
+
+/// All hostings with a non-NULL expiry, sorted ascending.
+pub async fn list_with_expiry(pool: &SqlitePool) -> Result<Vec<ExpiryRow>, StateError> {
+    let rows: Vec<(
+        String,
+        String,
+        Option<i64>,
+        Option<String>,
+        i64,
+        String,
+        Option<i64>,
+    )> = sqlx::query_as(
+        "SELECT id, domain, expires_at, owner_email, grace_days, warning_offsets_days,
+                customer_since
+         FROM hostings WHERE expires_at IS NOT NULL ORDER BY expires_at ASC",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, domain, exp, email, grace, offs, since)| ExpiryRow {
+            id: HostingId(id),
+            domain,
+            expires_at: exp,
+            owner_email: email,
+            grace_days: grace,
+            warning_offsets_days: offs,
+            customer_since: since,
         })
         .collect())
 }
@@ -294,6 +323,7 @@ mod tests {
             Some("k@x.cz"),
             14,
             "30,7",
+            Some(1_700_000_000),
             100,
         )
         .await
@@ -301,6 +331,9 @@ mod tests {
         let row = get_expiry(&pool, &id).await.expect("get").expect("present");
         assert_eq!(row.expires_at, Some(1_900_000_000));
         assert_eq!(row.owner_email.as_deref(), Some("k@x.cz"));
+        // The date the operator originally typed survives the write — it is
+        // the only record of since when the hosting has been with us.
+        assert_eq!(row.customer_since, Some(1_700_000_000));
         assert_eq!(row.grace_days, 14);
         assert_eq!(row.warning_offsets_days, "30,7");
     }

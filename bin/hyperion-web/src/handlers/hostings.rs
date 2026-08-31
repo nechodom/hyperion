@@ -2830,6 +2830,11 @@ pub async fn post_set_expiry(
         } else {
             Some(form.owner_email.trim().to_string())
         },
+        // The service works this out from the date typed above: a past date
+        // is a renewal day plus the year the customer joined. Sending None
+        // does not erase a start date already on record — set_expiry keeps
+        // the stored one.
+        customer_since: None,
         grace_days: form.grace_days.unwrap_or(30).max(0),
         warning_offsets_days: form
             .warning_offsets

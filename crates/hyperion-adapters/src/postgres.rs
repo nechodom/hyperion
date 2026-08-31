@@ -47,18 +47,17 @@ pub async fn create_db_and_role(
     let (db, user) = names_for(hosting_id, domain_label);
     let password = crate::random_password();
     // CREATE ROLE/DATABASE statements; run as `postgres` system user via sudo -u.
+    //
+    // On STDIN, not `-c`: the statement carries the role's password, and
+    // /proc/<pid>/cmdline is world-readable — a tenant with shell on this node
+    // could read the database password of a role being created for someone
+    // else. The very next call in this function already feeds psql on stdin;
+    // this is the same thing for the half that holds a secret.
     let role_sql = build_role_sql(&user, &password);
-    cmd::run(
+    cmd::run_with_stdin(
         "/usr/bin/sudo",
-        &[
-            "-u",
-            "postgres",
-            "/usr/bin/psql",
-            "-v",
-            "ON_ERROR_STOP=1",
-            "-c",
-            &role_sql,
-        ],
+        &["-u", "postgres", "/usr/bin/psql", "-v", "ON_ERROR_STOP=1"],
+        role_sql.as_bytes(),
     )
     .await?;
     // The DB script uses the `\gexec` meta-command (to CREATE DATABASE
@@ -89,17 +88,12 @@ pub async fn reset_password(db_user: &str, new_password: &str) -> Result<(), Ada
         "ALTER ROLE \"{u}\" WITH PASSWORD '{escaped}';",
         u = escape_ident(db_user),
     );
-    cmd::run(
+    // STDIN, not `-c` — the new password would otherwise sit in this
+    // process's argv, which every local user can read out of /proc.
+    cmd::run_with_stdin(
         "/usr/bin/sudo",
-        &[
-            "-u",
-            "postgres",
-            "/usr/bin/psql",
-            "-v",
-            "ON_ERROR_STOP=1",
-            "-c",
-            &sql,
-        ],
+        &["-u", "postgres", "/usr/bin/psql", "-v", "ON_ERROR_STOP=1"],
+        sql.as_bytes(),
     )
     .await?;
     Ok(())

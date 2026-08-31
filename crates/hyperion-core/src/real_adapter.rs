@@ -1361,6 +1361,22 @@ impl AdapterPort for RealAdapter {
         if password.len() < 16 {
             return Err(AdapterError::Other("redis password too short".into()));
         }
+        // The ACL rule that carries the password is built into a command fed
+        // on STDIN, never argv: /proc/<pid>/cmdline is world-readable, so a
+        // tenant with shell on this node could read another tenant's Redis
+        // password straight out of it.
+        //
+        // redis-cli splits a stdin line on whitespace with shell-like quoting,
+        // so a password containing a space or a quote would be mis-parsed into
+        // a DIFFERENT acl rule. Generated passwords are 32 alphanumerics, and
+        // this refuses anything else rather than silently setting a rule that
+        // is not the one intended.
+        if !password.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return Err(AdapterError::Other(
+                "redis password must be alphanumeric — redis-cli would re-split anything else"
+                    .into(),
+            ));
+        }
         let pw_arg = format!(">{password}");
         let keyrule = format!("~h{db_number}:*");
         let cmd_args: Vec<&str> = vec![
@@ -1399,7 +1415,22 @@ impl AdapterPort for RealAdapter {
             "+info",
             &pw_arg,
         ];
-        hyperion_adapters::cmd::run("/usr/bin/redis-cli", &cmd_args).await?;
+        let line = format!("{}\n", cmd_args.join(" "));
+        let out =
+            hyperion_adapters::cmd::run_with_stdin("/usr/bin/redis-cli", &[], line.as_bytes())
+                .await?;
+        // Reading commands from stdin, redis-cli PRINTS an error reply and
+        // still exits 0 — unlike the argv form, which exits non-zero. Without
+        // this check the move off argv would have turned a failed ACL into a
+        // silent success, and the first sign of it would be a site that cannot
+        // reach its cache.
+        let reply = out.trim();
+        if reply.starts_with("(error)") || reply.starts_with("ERR ") || reply.starts_with("NOPERM")
+        {
+            return Err(AdapterError::Other(format!(
+                "redis ACL SETUSER refused: {reply}"
+            )));
+        }
         Ok(())
     }
 

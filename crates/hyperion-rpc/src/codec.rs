@@ -2226,6 +2226,7 @@ mod tests {
             node_id: None,
             master_url: None,
             enrolled_at: None,
+            public_ipv4: None,
         });
         write_frame(&mut a, &resp).await.expect("write");
         let got: Response = read_frame(&mut b).await.expect("read");

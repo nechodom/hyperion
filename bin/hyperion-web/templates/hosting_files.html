@@ -69,6 +69,16 @@
 <div style="display:grid;grid-template-columns:minmax(0,1fr){% if viewer.is_some() %} minmax(0,2fr){% endif %};gap:1rem;align-items:start">
 
 <div class="card no-pad-table">
+  {% if !entries.is_empty() %}
+  <div class="row" style="justify-content:flex-end;padding:0.55rem 0.9rem 0;gap:0.4rem">
+    <label for="show-hidden" class="text-soft small"
+           style="display:inline-flex;align-items:center;gap:0.4rem;cursor:pointer;user-select:none">
+      <input type="checkbox" id="show-hidden" checked>
+      Show hidden files
+      <span class="text-soft" id="hidden-count"></span>
+    </label>
+  </div>
+  {% endif %}
   {% if entries.is_empty() %}
     <div class="empty">
       <div class="empty-illustration">
@@ -100,7 +110,13 @@
             </tr>
           {% endif %}
           {% for e in entries %}
-            <tr>
+            {#- A dot-prefixed name is "hidden" by Unix convention. Marked
+                rather than dropped: the server has always listed them and
+                they are the ones that matter on a web host (.htaccess,
+                .user.ini, .env), so the default stays "shown" and the
+                toggle below only lets an operator quiet the noise
+                (.DS_Store, .git, .cache) while they work. -#}
+            <tr{% if e.name.starts_with('.') %} data-dotfile="1"{% endif %}>
               <td>
                 {% if e.kind == "dir" %}
                   <a href="/hostings/{{ selector }}/files?path={{ e.rel_path|e }}" style="display:inline-flex;gap:0.4rem;align-items:center">
@@ -294,5 +310,33 @@
     f.submit();
   });
 })();
+</script>
+
+{#- Client-side on purpose: the listing is already in the page, so hiding is
+    instant and costs no round-trip, and the choice is a per-viewer
+    preference rather than anything the server should hold. Remembered in
+    localStorage, which is per-artifact-origin and per-browser; a browser
+    that refuses it simply gets the default. -#}
+<script>
+  (function () {
+    var box = document.getElementById('show-hidden');
+    var count = document.getElementById('hidden-count');
+    if (!box) return;
+    var rows = document.querySelectorAll('tr[data-dotfile="1"]');
+    if (count && rows.length) { count.textContent = '(' + rows.length + ')'; }
+    var KEY = 'hyperion.files.showHidden';
+    try {
+      var saved = window.localStorage.getItem(KEY);
+      if (saved !== null) { box.checked = saved === '1'; }
+    } catch (e) { /* private mode, blocked site data — keep the default */ }
+    function apply() {
+      for (var i = 0; i < rows.length; i++) {
+        rows[i].style.display = box.checked ? '' : 'none';
+      }
+      try { window.localStorage.setItem(KEY, box.checked ? '1' : '0'); } catch (e) {}
+    }
+    box.addEventListener('change', apply);
+    apply();
+  })();
 </script>
 {% endblock %}

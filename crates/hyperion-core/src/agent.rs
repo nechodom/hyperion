@@ -154,6 +154,7 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
             node_id,
             master_url,
             enrolled_at,
+            public_ipv4: crate::service::own_public_ipv4().await,
         })
     }
 

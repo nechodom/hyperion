@@ -22,6 +22,16 @@ pub struct AgentInfo {
     /// Unix-seconds timestamp when enrollment completed.
     #[serde(default)]
     pub enrolled_at: Option<i64>,
+    /// This node's public IPv4 address, as the outside world sees it.
+    ///
+    /// The one thing an operator copies out of the panel constantly — it is
+    /// what goes into an A record, a firewall allow-list, or a customer's
+    /// migration ticket — and until now it was only obtainable by SSHing in.
+    /// `None` when the probe has not succeeded (no egress, IPv6-only host).
+    /// `#[serde(default)]` so an older agent still deserializes on a newer
+    /// master.
+    #[serde(default)]
+    pub public_ipv4: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

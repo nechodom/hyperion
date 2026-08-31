@@ -640,3 +640,47 @@ fn the_ftp_login_preview_reads_the_servers_table() {
          decide whether to say the domain was shortened"
     );
 }
+
+/// A child template must not carry markup after its last `{% endblock %}`.
+///
+/// Askama renders a child by filling the parent's blocks. Anything outside a
+/// block is not an error and not a warning — it is silently dropped. So a
+/// `<script>` appended to the end of the file compiles, the page renders, and
+/// the feature is simply absent: a toggle that draws and does nothing. That
+/// happened to the file manager's "show hidden files" checkbox.
+#[test]
+fn no_template_has_markup_after_its_last_endblock() {
+    let mut offenders = Vec::new();
+    let mut checked = 0usize;
+    for entry in std::fs::read_dir(templates_dir()).expect("read templates dir") {
+        let path = entry.expect("dir entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("html") {
+            continue;
+        }
+        let body = std::fs::read_to_string(&path).expect("read template");
+        // Only child templates fill blocks; a base defines them.
+        if !body.contains("{% extends") {
+            continue;
+        }
+        let Some(last) = body.rfind("{% endblock %}") else {
+            continue;
+        };
+        checked += 1;
+        let trailing = body[last + "{% endblock %}".len()..].trim();
+        if !trailing.is_empty() {
+            let name = path.file_name().unwrap_or_default().to_string_lossy();
+            let head: String = trailing.chars().take(60).collect();
+            offenders.push(format!("{name}: {head:?}"));
+        }
+    }
+    assert!(
+        checked > 0,
+        "no child templates found — the lint has drifted"
+    );
+    assert!(
+        offenders.is_empty(),
+        "these templates have markup after the last endblock, which Askama \
+         silently drops:\n  {}",
+        offenders.join("\n  ")
+    );
+}

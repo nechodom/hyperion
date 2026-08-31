@@ -233,8 +233,21 @@
         </div>
       </div>
       <div class="field">
-        <label for="default_to">Default recipient <span class="hint">where this node's notifications go when no hosting owner applies</span></label>
-        <input id="default_to" name="default_to" type="email" value="{{ mta.cfg_default_to|e }}">
+        <label for="default_to">Administrator notifications
+          <span class="hint">every alert that is not addressed to a hosting owner goes here</span></label>
+        {#- NOT type="email": that accepts exactly one address, and a team
+            needs several. The server splits on commas, semicolons, spaces and
+            newlines, so a column pasted out of a spreadsheet works too, and
+            drops anything without an @ rather than failing the whole send. -#}
+        <input id="default_to" name="default_to" type="text"
+               placeholder="ops@example.cz, admin@example.cz"
+               value="{{ mta.cfg_default_to|e }}">
+        <p class="text-soft small" style="margin:0.3rem 0 0;line-height:1.5">
+          Several addresses are allowed — separate them with commas. Everyone
+          listed gets a copy of expiry warnings, backup and certificate
+          failures, and every other alert this node raises on its own.
+          Letters addressed to a specific customer are unaffected.
+        </p>
       </div>
       <button type="submit" class="btn primary">Save mail settings</button>
     </form>

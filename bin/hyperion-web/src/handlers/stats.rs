@@ -1004,6 +1004,14 @@ fn fmt_action_label_inner(s: &str) -> String {
         "service.install.finish" => "Service install finished",
         "service.restart" => "Service restarted",
         "agent.config.update" => "Agent config updated",
+        // Named explicitly rather than left to the generator, which produced
+        // "Web login 2FA succeeded" — a sentence about the mechanism, on the
+        // one event where the reader wants a person and a verb.
+        "web.login.ok" => "Signed in",
+        "web.login.2fa_ok" => "Signed in with 2FA",
+        "web.login.failed" => "Sign-in failed",
+        "web.login.2fa_failed" => "2FA check failed",
+        "web.user.locked" => "Account locked",
         "web.user.create" => "User created",
         "web.user.set_role" => "User role changed",
         "web.user.2fa_disabled" => "2FA disabled",
@@ -1078,10 +1086,12 @@ mod tests {
             fmt_action_label("wp.integrity.scan"),
             "WordPress integrity scan"
         );
-        assert_eq!(
-            fmt_action_label("web.login.2fa_ok"),
-            "Web login 2FA succeeded"
-        );
+        // The sign-in kinds are now named by hand. The generator produced
+        // "Web login 2FA succeeded" — a sentence about the mechanism, on the
+        // one event where the reader is looking for a person and a verb.
+        assert_eq!(fmt_action_label("web.login.2fa_ok"), "Signed in with 2FA");
+        assert_eq!(fmt_action_label("web.login.ok"), "Signed in");
+        assert_eq!(fmt_action_label("web.login.failed"), "Sign-in failed");
         assert_eq!(
             fmt_action_label("cert.panel_adopted"),
             "Certificate panel adopted"

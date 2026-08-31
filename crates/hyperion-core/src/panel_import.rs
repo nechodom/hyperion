@@ -132,10 +132,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                 .to_string();
             match item.action {
                 Action::Create => match self.apply_one_import(&item.hosting, loc, ov).await {
-                    Ok(id) => created.push(ImportedHosting {
+                    Ok((id, notes)) => created.push(ImportedHosting {
                         domain: final_domain,
                         hosting_id: id,
                         databases: item.hosting.databases.len(),
+                        notes,
                     }),
                     Err(e) => skipped.push(SkippedHosting {
                         domain: final_domain,
@@ -167,7 +168,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         h: &IrHosting,
         loc: &Location,
         ov: Option<&hyperion_import::SiteImportOverride>,
-    ) -> Result<String, RpcError> {
+    ) -> Result<(String, Vec<String>), RpcError> {
         // 1. Provision a fresh Hyperion hosting — reuses ALL of create()
         //    (system user, dirs, nginx vhost, php-fpm pool, DB if any).
         //    The operator may RENAME the site at import: create under the chosen
@@ -182,7 +183,43 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let domain = Domain::parse(&target).map_err(|e| RpcError::Validation {
             message: format!("target domain '{target}': {e}"),
         })?;
-        let php_version = h.php_version.as_deref().and_then(|v| v.parse().ok());
+        // NOT `.parse().ok()`. PhpVersion's FromStr is an exact allow-list of
+        // 8.1-8.4, so a CloudPanel site on 7.4, 8.0, or reported as "8.2.10"
+        // parsed to Err and `.ok()` silently turned it into None — creating a
+        // kind="php" hosting with NO version, which answers "requires a PHP
+        // hosting" to every WordPress action while the import reports
+        // success. Substitute the nearest supported version and SAY SO.
+        let mut notes: Vec<String> = Vec::new();
+        let php_version = match h.php_version.as_deref() {
+            Some(raw) => match hyperion_types::PhpVersion::nearest_supported(raw) {
+                Some((v, substituted)) => {
+                    if substituted {
+                        notes.push(format!(
+                            "was on PHP {raw}, imported on {v} — Hyperion does not carry \
+                             {raw}; check the site still runs"
+                        ));
+                    }
+                    Some(v)
+                }
+                None => None,
+            },
+            None => None,
+        };
+        // A php site with no version is a half-built hosting: create() writes
+        // the row and skips the FPM pool, and nothing ever repairs it. Give it
+        // the lowest supported version rather than that.
+        let php_version = match (h.kind, php_version) {
+            (IrSiteKind::Static, v) => v,
+            (_, None) => {
+                notes.push(
+                    "the source reported no PHP version — imported on 8.1, change it on the \
+                     hosting if the site needs another"
+                        .into(),
+                );
+                Some(hyperion_types::PhpVersion::V8_1)
+            }
+            (_, some) => some,
+        };
         let database = h.databases.first().map(|d| match d.engine {
             IrDbEngine::Postgres => hyperion_types::DbProvision::Postgres,
             _ => hyperion_types::DbProvision::MariaDB,
@@ -355,7 +392,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         )
         .await;
 
-        Ok(created.id.as_str().to_string())
+        Ok((created.id.as_str().to_string(), notes))
     }
 }
 
