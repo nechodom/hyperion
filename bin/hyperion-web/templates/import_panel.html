@@ -77,24 +77,8 @@
   {% if plan_rows.is_empty() && stage == "plan" %}
     <p class="muted">No importable sites found on this node.</p>
   {% else if stage == "plan" %}
-  <div class="no-pad-table">
-    <div class="scroll-x">
-<table>
-      <thead><tr><th>Action</th><th>Domain</th><th>PHP</th><th>DBs</th><th>Notes</th></tr></thead>
-      <tbody>
-      {% for r in plan_rows %}
-        <tr>
-          <td><span class="pill {% if r.action == "create" %}ok{% else if r.action == "conflict" %}warn{% else %}{% endif %}">{{ r.action }}</span></td>
-          <td>{{ r.domain }}</td>
-          <td>{{ r.php }}</td>
-          <td>{{ r.db }}</td>
-          <td class="text-soft small">{{ r.reason }}</td>
-        </tr>
-      {% endfor %}
-      </tbody>
-    </table>
-</div>
-  </div>
+  {#- The table lives INSIDE the apply form below so the per-site PHP picker
+      submits with it. Rendered here as a placeholder comment only. -#}
   {% endif %}
 
   {% if !notes.is_empty() %}
@@ -108,6 +92,46 @@
   {% if stage == "plan" %}
   <form method="post" action="/import/apply" style="margin-top:1rem"
         onsubmit="return confirm('Create the planned hostings on this node?');">
+    <div class="no-pad-table">
+      <div class="scroll-x">
+<table>
+      <thead><tr><th>Action</th><th>Domain</th><th>PHP now</th><th>Import on</th><th>DBs</th><th>Notes</th></tr></thead>
+      <tbody>
+      {% for r in plan_rows %}
+        <tr>
+          <td><span class="pill {% if r.action == "create" %}ok{% else if r.action == "conflict" %}warn{% else %}{% endif %}">{{ r.action }}</span></td>
+          <td>{{ r.domain }}</td>
+          {#- What the SOURCE runs, verbatim. Frequently a version Hyperion
+              does not carry — 7.4 and 8.0 are exactly what people migrate
+              off — which is the whole reason the picker beside it exists. -#}
+          <td>{{ r.php }}</td>
+          <td>
+            {% if r.action == "create" %}
+            {#- Preselected with the version the import would pick anyway,
+                worked out by the same function the import uses. The operator
+                is the only one who knows whether this site's code survives
+                the jump, so it is a choice and not an announcement. -#}
+            <select name="php__{{ r.domain }}" aria-label="PHP version for {{ r.domain }}"
+                    style="padding:0.15rem 0.35rem;font-size:0.82rem">
+              {%- for opt in php_options %}
+              <option value="{{ opt }}"{% if opt.as_str() == r.php_target.as_str() %} selected{% endif %}>{{ opt }}</option>
+              {%- endfor %}
+            </select>
+            {% if r.php_substituted %}
+            <span class="text-soft small" title="Hyperion does not carry the version this site runs on">changed</span>
+            {% endif %}
+            {% else %}
+            <span class="text-soft">—</span>
+            {% endif %}
+          </td>
+          <td>{{ r.db }}</td>
+          <td class="text-soft small">{{ r.reason }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+</div>
+    </div>
     <input type="hidden" name="_csrf" value="{{ csrf_token }}">
     <input type="hidden" name="source_kind" value="{{ source_kind }}">
     <input type="hidden" name="mode" value="{{ mode }}">

@@ -47,6 +47,15 @@ pub struct SiteImportOverride {
     /// Override the first-billing timestamp (epoch secs) set by the profile.
     #[serde(default)]
     pub next_billing_at: Option<i64>,
+    /// Land the site on THIS PHP version instead of the one derived from what
+    /// the source reported. `None` = derive.
+    ///
+    /// The source's version is frequently one Hyperion does not carry (7.4 and
+    /// 8.0 are exactly the versions people migrate away from), so a choice has
+    /// to exist somewhere — and the operator is the only one who knows whether
+    /// the site's code survives the jump.
+    #[serde(default)]
+    pub php_version: Option<String>,
 }
 
 /// SSH connection to a remote source box. `key` carries the private key

@@ -12,6 +12,7 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use hyperion_rpc::codec::{Request, Response as RpcResponse};
 use hyperion_state::capabilities::Capability;
 use serde::Deserialize;
+use std::str::FromStr;
 
 /// A selectable node for the "run on" dropdown.
 pub struct NodeOpt {
@@ -23,7 +24,16 @@ pub struct NodeOpt {
 pub struct PlanRow {
     pub action: String,
     pub domain: String,
+    /// What the SOURCE reports this site runs on, verbatim — including
+    /// versions Hyperion does not carry, which is most of why the choice
+    /// below exists.
     pub php: String,
+    /// The supported version this site will land on unless the operator picks
+    /// another. Preselected in the form.
+    pub php_target: String,
+    /// True when `php_target` is not what the source runs, so the row can say
+    /// so instead of the operator finding out from a broken site.
+    pub php_substituted: bool,
     pub db: usize,
     pub reason: String,
 }
@@ -57,6 +67,8 @@ struct ImportTpl {
     source_label: String,
     source_version: String,
     plan_rows: Vec<PlanRow>,
+    /// The PHP versions this build supports, for the per-site picker.
+    php_options: Vec<String>,
     notes: Vec<KvRow>,
     created: Vec<KvRow>,
     skipped: Vec<KvRow>,
@@ -85,6 +97,10 @@ impl ImportTpl {
             source_label: String::new(),
             source_version: String::new(),
             plan_rows: Vec::new(),
+            php_options: hyperion_types::PhpVersion::all()
+                .iter()
+                .map(|v| v.as_str().to_string())
+                .collect(),
             notes: Vec::new(),
             created: Vec::new(),
             skipped: Vec::new(),
@@ -236,12 +252,28 @@ pub async fn post_plan(
             tpl.plan_rows = plan
                 .items
                 .iter()
-                .map(|i| PlanRow {
-                    action: action_str(&i.action).into(),
-                    domain: i.domain.clone(),
-                    php: i.php_version.clone().unwrap_or_else(|| "—".into()),
-                    db: i.db_count,
-                    reason: i.reason.clone(),
+                .map(|i| {
+                    // Where this site will land unless the operator picks
+                    // otherwise, worked out by the SAME function the import
+                    // will use — a preview that guesses differently from the
+                    // thing it previews is worse than no preview.
+                    let (target, substituted) = i
+                        .php_version
+                        .as_deref()
+                        .and_then(hyperion_types::PhpVersion::nearest_supported)
+                        .map(|(v, sub)| (v.as_str().to_string(), sub))
+                        // Nothing reported: the import gives a php site the
+                        // lowest supported version rather than none at all.
+                        .unwrap_or_else(|| ("8.1".to_string(), true));
+                    PlanRow {
+                        action: action_str(&i.action).into(),
+                        domain: i.domain.clone(),
+                        php: i.php_version.clone().unwrap_or_else(|| "—".into()),
+                        php_target: target,
+                        php_substituted: substituted,
+                        db: i.db_count,
+                        reason: i.reason.clone(),
+                    }
                 })
                 .collect();
             tpl.notes = plan
@@ -259,6 +291,33 @@ pub async fn post_plan(
     Ok(Html(tpl.render()?).into_response())
 }
 
+/// Per-site PHP choices out of the plan form.
+///
+/// Each row submits `php__<source domain>=<version>`. The domain is the plan's
+/// match key, so it is echoed back rather than re-derived — and it is used ONLY
+/// to look up an override, never to build a path or a command.
+fn php_overrides_from(body: &[u8]) -> Vec<hyperion_import::SiteImportOverride> {
+    url::form_urlencoded::parse(body)
+        .filter_map(|(k, v)| {
+            let domain = k.strip_prefix("php__")?.trim();
+            let version = v.trim();
+            if domain.is_empty() || version.is_empty() {
+                return None;
+            }
+            // Only versions this build actually carries. The field is a
+            // <select>, but a form post is not a promise.
+            hyperion_types::PhpVersion::from_str(version).ok()?;
+            Some(hyperion_import::SiteImportOverride {
+                source_domain: domain.to_string(),
+                target_domain: None,
+                profile_id: None,
+                next_billing_at: None,
+                php_version: Some(version.to_string()),
+            })
+        })
+        .collect()
+}
+
 /// POST /import/apply — run the import as a background job on the chosen node.
 ///
 /// The import can take minutes (large docroots, DB dumps, remote ssh/rsync), so
@@ -268,19 +327,51 @@ pub async fn post_plan(
 pub async fn post_apply(
     State(state): State<SharedState>,
     ctx: AuthCtx,
-    axum::Form(form): axum::Form<ImportForm>,
+    // RAW body, not `Form<ImportForm>`: the plan table submits one
+    // `php__<domain>` field per site, and a fixed struct silently drops every
+    // key it does not name. The fixed fields are still deserialized from the
+    // same bytes, so there is one body and one parse of the truth.
+    axum::extract::RawForm(body): axum::extract::RawForm,
 ) -> Result<Response, AppError> {
     if !ctx.can(Capability::PanelImport) {
         return Ok(Redirect::to("/?flash_error=admin+role+required").into_response());
     }
+    // The same bytes, parsed once for the fixed fields. `RawForm` hands over
+    // the urlencoded body; `Form` would have deserialized exactly this.
+    let pairs: Vec<(String, String)> = url::form_urlencoded::parse(&body)
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+    let field = |name: &str| -> String {
+        pairs
+            .iter()
+            .find(|(k, _)| k == name)
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default()
+    };
+    let mode = field("mode");
+    let form = ImportForm {
+        source_kind: field("source_kind"),
+        mode: if mode.is_empty() {
+            default_mode()
+        } else {
+            mode
+        },
+        node_id: field("node_id"),
+        ssh_host: field("ssh_host"),
+        ssh_user: field("ssh_user"),
+        ssh_port: field("ssh_port"),
+        ssh_key: field("ssh_key"),
+        archive_path: field("archive_path"),
+    };
+    let site_overrides = php_overrides_from(&body);
     let req = hyperion_import::ImportPanelReq {
         source_kind: form.source_kind.clone(),
         mode: form.mode.clone(),
         ssh: build_ssh(&form),
         archive_path: opt_archive(&form),
-        // The non-interactive panel-import path imports every site as-is; the
-        // per-site rename/profile/billing overrides only come from the wizard.
-        site_overrides: Vec::new(),
+        // Per-site PHP choices from the plan table. Rename/profile/billing
+        // overrides still only come from the self-service wizard.
+        site_overrides,
     };
     // Owned bits captured by the detached task (no secrets in the job payload —
     // the ssh key lives only in `req`, in memory, never persisted to the row).
@@ -392,5 +483,48 @@ fn action_str(a: &hyperion_import::Action) -> &'static str {
         hyperion_import::Action::Skip => "skip",
         hyperion_import::Action::Conflict => "conflict",
         hyperion_import::Action::Unsupported => "unsupported",
+    }
+}
+
+#[cfg(test)]
+mod php_override_tests {
+    use super::php_overrides_from;
+
+    /// The plan table submits one `php__<domain>` per site; the choice has to
+    /// survive the trip, because a fixed Form struct silently drops every key
+    /// it does not name and the operator's pick would vanish without a word.
+    #[test]
+    fn a_per_site_choice_reaches_the_import() {
+        let body = b"source_kind=cloudpanel&php__a.cz=8.2&php__b.cz=8.4&mode=inplace";
+        let mut got = php_overrides_from(body);
+        got.sort_by(|x, y| x.source_domain.cmp(&y.source_domain));
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].source_domain, "a.cz");
+        assert_eq!(got[0].php_version.as_deref(), Some("8.2"));
+        assert_eq!(got[1].source_domain, "b.cz");
+        assert_eq!(got[1].php_version.as_deref(), Some("8.4"));
+        // Nothing else is invented for these sites.
+        assert!(got[0].target_domain.is_none() && got[0].profile_id.is_none());
+    }
+
+    /// A <select> is not a promise: the body is whatever was posted, and a
+    /// version this build does not carry must not reach the importer.
+    #[test]
+    fn an_unsupported_version_is_dropped() {
+        for bad in ["7.4", "8.0", "9.9", "", "latest", "8.3;rm -rf /"] {
+            let body = format!("php__a.cz={bad}");
+            assert!(
+                php_overrides_from(body.as_bytes()).is_empty(),
+                "accepted {bad:?}"
+            );
+        }
+    }
+
+    /// Fields that are not a per-site PHP choice are none of this function's
+    /// business.
+    #[test]
+    fn other_fields_are_ignored() {
+        let body = b"source_kind=cloudpanel&ssh_key=secret&mode=inplace&php_=8.2&php=8.2";
+        assert!(php_overrides_from(body).is_empty());
     }
 }

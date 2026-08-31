@@ -190,14 +190,44 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // hosting" to every WordPress action while the import reports
         // success. Substitute the nearest supported version and SAY SO.
         let mut notes: Vec<String> = Vec::new();
-        let php_version = match h.php_version.as_deref() {
+        // An explicit choice from the wizard wins over anything derived: the
+        // operator is the one who knows whether this site's code survives the
+        // version it is being moved to. The note still names what the SOURCE
+        // was running, because that is the fact the operator needs later when
+        // something behaves differently.
+        let source_php = h
+            .php_version
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+        let chosen = ov
+            .and_then(|o| o.php_version.as_deref())
+            .map(str::trim)
+            .filter(|v| !v.is_empty());
+        let php_version = match chosen.or(source_php) {
             Some(raw) => match hyperion_types::PhpVersion::nearest_supported(raw) {
                 Some((v, substituted)) => {
-                    if substituted {
-                        notes.push(format!(
-                            "was on PHP {raw}, imported on {v} — Hyperion does not carry \
-                             {raw}; check the site still runs"
-                        ));
+                    match (chosen.is_some(), source_php) {
+                        // The operator picked, and it is not what the source
+                        // ran. Worth recording either way.
+                        (true, Some(src))
+                            if hyperion_types::PhpVersion::nearest_supported(src)
+                                .map(|(sv, _)| sv)
+                                != Some(v) =>
+                        {
+                            notes.push(format!("source ran PHP {src}, imported on {v} as chosen"));
+                        }
+                        (true, _) => {}
+                        // Derived, and Hyperion does not carry what the source
+                        // reported — 7.4 and 8.0 are exactly what people
+                        // migrate off.
+                        (false, _) if substituted => {
+                            notes.push(format!(
+                                "was on PHP {raw}, imported on {v} — Hyperion does not carry \
+                                 {raw}; check the site still runs"
+                            ));
+                        }
+                        _ => {}
                     }
                     Some(v)
                 }
