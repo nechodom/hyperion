@@ -329,17 +329,95 @@ async fn extract_auth(parts: &mut Parts, state: &SharedState) -> AuthCtx {
                     // will purge them all at once. Once that sweep
                     // happens the fall-through can tighten to
                     // "unknown sid ⇒ anonymous".
-                    let live = match hyperion_rpc_client::call(
+                    //
+                    // The same probe also returns the owner's CURRENT role
+                    // and capabilities. The cookie stamps them at login and
+                    // nothing re-read them, so a demotion, a revoked
+                    // capability, an edited custom role, a lock or a deleted
+                    // account changed nothing for a session already open —
+                    // the old privileges kept working until the cookie
+                    // expired, up to the full TTL counted from the user's
+                    // last login rather than from the admin's action.
+                    let standing = match hyperion_rpc_client::call(
                         &state.agent_socket,
-                        hyperion_rpc::codec::Request::WebSessionTouch { sid: s.sid.clone() },
+                        hyperion_rpc::codec::Request::WebSessionTouch {
+                            sid: s.sid.clone(),
+                            // From the Ed25519-signed cookie, so it cannot be
+                            // pointed at somebody else's account.
+                            user_id: s.user_id,
+                        },
                     )
                     .await
                     {
-                        Ok(hyperion_rpc::codec::Response::WebSessionTouch(b)) => b,
-                        // Unknown sid (legacy cookie) or RPC failure —
-                        // do NOT fail-closed: a transient socket blip
-                        // would log everyone out.
-                        _ => true,
+                        Ok(hyperion_rpc::codec::Response::WebSessionTouch(st)) => Some(st),
+                        // RPC failure — do NOT fail-closed: a transient
+                        // socket blip would log everyone out. The cookie's
+                        // own stamped privilege is used for that request,
+                        // which is the behaviour that existed before this
+                        // probe was widened.
+                        other => {
+                            tracing::warn!(
+                                got = ?std::mem::discriminant(&other),
+                                "session standing unavailable — falling back to the \
+                                 privileges stamped in the cookie"
+                            );
+                            None
+                        }
+                    };
+                    let mut s = s;
+                    // The bootstrap admin is resolved WITHOUT consulting
+                    // `web_users`, and this test has to come first.
+                    //
+                    // Its record lives in a file on this host
+                    // (`admin_user.json`) whose `id` is its own counter — it
+                    // does NOT share a namespace with `web_users.id`. Login
+                    // seeds a matching DB row and uses that row's id, but
+                    // when the seed fails it falls back to the file's id, and
+                    // from then on the session's `user_id` means a row in a
+                    // table it was never allocated from. Whatever ends up at
+                    // that id — the next invited user — becomes what the
+                    // bootstrap admin resolves to. Seen in a test: the
+                    // operator was silently reduced to a viewer's
+                    // capabilities by someone else being created. It runs
+                    // just as easily the other way, which is why the id is
+                    // not trusted for this account at all.
+                    //
+                    // The username decides it. A session claiming the
+                    // bootstrap id AND its username can only have been minted
+                    // by the bootstrap login, which verified the password
+                    // against the file.
+                    let is_bootstrap_admin =
+                        s.user_id == state.admin_user.id && s.username == state.admin_user.username;
+                    let live = match &standing {
+                        // Privilege stays what the cookie carries — the only
+                        // place this account's role has ever been recorded.
+                        _ if is_bootstrap_admin => {
+                            standing.as_ref().map(|st| st.live).unwrap_or(true)
+                        }
+                        Some(st) if !st.known_user => {
+                            // A real account that has been deleted, or whose
+                            // custom role was deleted out from under it. It
+                            // can no longer act — and saying so HERE is what
+                            // makes the deletion take effect now rather than
+                            // whenever the cookie happens to expire.
+                            false
+                        }
+                        // Locking is how an admin stops someone NOW. It used
+                        // to stop only their next login, which is not what
+                        // the button says.
+                        Some(st) if st.locked => false,
+                        Some(st) => {
+                            // Live privilege replaces what the cookie carries.
+                            // Done here, once, so all 76 `can()` gates and
+                            // every role check downstream get the current
+                            // answer without being touched.
+                            s.role = st.role.clone();
+                            s.caps = st.caps;
+                            s.scope_all = st.scope_all;
+                            s.caps_present = true;
+                            st.live
+                        }
+                        None => true,
                     };
                     if !live {
                         // Row present + revoked. Treat as anonymous.

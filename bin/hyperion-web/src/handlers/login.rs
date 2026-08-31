@@ -263,7 +263,7 @@ async fn post_login_via_rpc(
                     PURPOSE_SESSION
                 };
                 mint_session_redirect(
-                    &state, user_id, username, role, &form.next, &headers, purpose,
+                    &state, user_id, username, role, &form.next, &headers, purpose, true,
                 )
                 .await
             }
@@ -282,6 +282,7 @@ async fn post_login_via_rpc(
                         &form.next,
                         &headers,
                         PURPOSE_SESSION,
+                        true,
                     )
                     .await;
                 }
@@ -358,6 +359,8 @@ async fn post_login_bootstrap(
             &form.next,
             &headers,
             PURPOSE_SESSION_2FA_PENDING,
+            // The seed succeeded, so this id IS a web_users row.
+            true,
         )
         .await;
     }
@@ -370,6 +373,10 @@ async fn post_login_bootstrap(
         &form.next,
         &headers,
         bootstrap_purpose,
+        // The legacy fallback: `user.id` comes from admin_user.json, whose id
+        // counter is unrelated to web_users.id. Resolving capabilities by it
+        // would read whatever row happens to occupy that number.
+        false,
     )
     .await
 }
@@ -548,6 +555,7 @@ pub async fn post_login_2fa(
                 &form.next,
                 &headers_in,
                 PURPOSE_SESSION,
+                true,
             )
             .await?;
             let mut combined = r;
@@ -586,6 +594,7 @@ fn enforce_2fa_for(role: &str) -> bool {
     matches!(role, "super_admin" | "admin")
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn mint_session_redirect(
     state: &SharedState,
     user_id: i64,
@@ -594,10 +603,21 @@ async fn mint_session_redirect(
     next: &str,
     req_headers: &HeaderMap,
     purpose: &str,
+    caps_from_db: bool,
 ) -> Result<Response, AppError> {
     let now = hyperion_types::now_secs();
     let sid = ulid::Ulid::new().to_string();
-    let (caps, scope_all, caps_present) = crate::auth::resolve_caps(state, user_id).await;
+    // `caps_from_db` is false only for the bootstrap admin's legacy fallback:
+    // its `user_id` comes from a FILE whose id counter has nothing to do with
+    // `web_users.id`, so resolving capabilities by that number reads whatever
+    // row happens to sit there — someone else's. With it false the session
+    // carries no stamped caps and the web layer derives them from the role,
+    // which for this account is the only place they have ever been recorded.
+    let (caps, scope_all, caps_present) = if caps_from_db {
+        crate::auth::resolve_caps(state, user_id).await
+    } else {
+        (0, false, false)
+    };
     let session = Session {
         sid: sid.clone(),
         user_id,

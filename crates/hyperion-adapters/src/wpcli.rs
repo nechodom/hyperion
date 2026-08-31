@@ -989,6 +989,89 @@ pub async fn object_cache_dropin_present(root_dir: &str) -> bool {
 /// intrusion. `--skip-content` is what makes it non-destructive — without
 /// it, `--force` also replaces the bundled themes, and a site whose theme
 /// happens to be a customised twentytwentyX would silently lose that work.
+/// Point a WordPress URL option at `new_host`, keeping everything else.
+///
+/// `siteurl` and `home` are full URLs and often carry a scheme the operator
+/// chose and a subdirectory the site lives in (`https://x.cz/blog`). Only the
+/// host may change here — rewriting the whole value would silently move a
+/// site out of its subdirectory, and forcing a scheme would break a site
+/// deliberately served over http.
+///
+/// `None` when the value is not a URL this can safely edit, in which case the
+/// caller must leave it alone rather than guess.
+pub fn rewrite_url_host(current: &str, new_host: &str) -> Option<String> {
+    let mut u = url::Url::parse(current.trim()).ok()?;
+    if !matches!(u.scheme(), "http" | "https") {
+        return None;
+    }
+    u.set_host(Some(new_host)).ok()?;
+    // WordPress stores these WITHOUT a trailing slash; url::Url adds one for
+    // an empty path, and the difference is not cosmetic — WP compares the
+    // stored value against the request and a mismatch is its own redirect.
+    let out = u.to_string();
+    Some(out.strip_suffix('/').unwrap_or(&out).to_string())
+}
+
+#[cfg(test)]
+mod rewrite_url_host_tests {
+    use super::rewrite_url_host;
+
+    /// The ordinary case, both directions.
+    #[test]
+    fn only_the_host_changes() {
+        assert_eq!(
+            rewrite_url_host("https://example.cz", "www.example.cz").as_deref(),
+            Some("https://www.example.cz")
+        );
+        assert_eq!(
+            rewrite_url_host("https://www.example.cz", "example.cz").as_deref(),
+            Some("https://example.cz")
+        );
+    }
+
+    /// A site in a subdirectory must stay in it — rewriting the whole value
+    /// would move the site, and WordPress would 404 every page.
+    #[test]
+    fn a_subdirectory_survives() {
+        assert_eq!(
+            rewrite_url_host("https://example.cz/blog", "www.example.cz").as_deref(),
+            Some("https://www.example.cz/blog")
+        );
+    }
+
+    /// The scheme is the operator's, not ours: a site deliberately on http
+    /// must not be switched to https by a redirect setting.
+    #[test]
+    fn the_scheme_is_left_alone() {
+        assert_eq!(
+            rewrite_url_host("http://example.cz", "www.example.cz").as_deref(),
+            Some("http://www.example.cz")
+        );
+    }
+
+    /// WordPress stores these without a trailing slash and compares the
+    /// stored value against the request; adding one is its own redirect.
+    #[test]
+    fn no_trailing_slash_is_introduced() {
+        let out = rewrite_url_host("https://example.cz", "www.example.cz").expect("rewrite");
+        assert!(!out.ends_with('/'), "{out}");
+    }
+
+    /// Anything this cannot safely edit is left to the operator.
+    #[test]
+    fn a_value_that_is_not_an_http_url_is_refused() {
+        for raw in [
+            "",
+            "   ",
+            "example.cz",
+            "ftp://example.cz",
+            "javascript:alert(1)",
+        ] {
+            assert!(rewrite_url_host(raw, "www.example.cz").is_none(), "{raw:?}");
+        }
+    }
+}
+
 pub async fn core_repair(user: &str, htdocs: &str, version: &str) -> Result<String, AdapterError> {
     let v = if version.trim().is_empty() {
         "latest".to_string()

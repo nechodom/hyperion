@@ -125,8 +125,36 @@ async fn run_export_bundle(
 /// Apply the embedded migrations to a throwaway copy of the real state DB and
 /// report whether they succeed. Exits the process (0 ok / 1 fail).
 async fn dry_run_migrations(real_db: &std::path::Path) -> anyhow::Result<()> {
-    let dir = std::env::temp_dir().join(format!("hyperion-migcheck-{}", std::process::id()));
-    tokio::fs::create_dir_all(&dir).await?;
+    // Staged NEXT TO the real database, never in /tmp.
+    //
+    // /tmp is world-writable, `create_dir_all` succeeds on a pre-existing
+    // directory whatever its owner or mode, and `fs::copy` opens the
+    // destination O_CREAT|O_TRUNC, FOLLOWING a symlink. So any local user —
+    // on this product, any tenant with shell or PHP on the node — could
+    // pre-create /tmp/hyperion-migcheck-<pid> (the pid is guessable, and they
+    // can simply create many) holding a symlink named `state.db`, and have
+    // root write the entire panel database through it: argon2 password
+    // hashes, live session rows, TOTP secrets, API keys. Their own directory
+    // is not sticky and they own the symlink, which is exactly why
+    // fs.protected_symlinks does not stop it.
+    //
+    // The database's own directory is root-owned and 0700, so nothing can be
+    // planted there in the first place. `create_dir` — not `create_dir_all` —
+    // so a directory that somehow already exists is an error rather than
+    // something we adopt.
+    let parent = real_db
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("/var/lib/hyperion"));
+    tokio::fs::create_dir_all(parent).await?;
+    let dir = parent.join(format!("migcheck-{}", std::process::id()));
+    // A leftover from a run that was killed before its cleanup. Removing it
+    // is safe HERE precisely because this directory is not world-writable.
+    let _ = tokio::fs::remove_dir_all(&dir).await;
+    tokio::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&dir)
+        .await?;
     let temp_db = dir.join("state.db");
     if real_db.exists() {
         // Copy the main DB plus any WAL/SHM sidecars so we validate against the

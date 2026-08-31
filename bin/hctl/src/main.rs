@@ -2250,8 +2250,23 @@ fn print_pretty(resp: &Response) {
             }
         }
         Response::WebSessionAck => println!("session ack"),
-        Response::WebSessionTouch(b) => {
-            println!("session {}", if *b { "live" } else { "revoked/unknown" })
+        Response::WebSessionTouch(st) => {
+            println!(
+                "session {}",
+                if st.live { "live" } else { "revoked/unknown" }
+            );
+            // The privilege the session would actually act with right now,
+            // which is no longer whatever was stamped into its cookie.
+            println!(
+                "user      {}",
+                if !st.known_user {
+                    "gone".to_string()
+                } else if st.locked {
+                    "locked".to_string()
+                } else {
+                    format!("{} (caps {:#x}{})", st.role, st.caps, if st.scope_all { ", all hostings" } else { "" })
+                }
+            );
         }
         Response::WebSessionList(rows) => {
             if rows.is_empty() {

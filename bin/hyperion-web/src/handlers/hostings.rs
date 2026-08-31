@@ -5334,7 +5334,18 @@ pub async fn find_hosting_anywhere(
 ) -> Result<(hyperion_types::HostingDetail, Option<String>), AppError> {
     // 1. Master local.
     match hyperion_rpc_client::call(&state.agent_socket, Request::HostingGet(sel.clone())).await {
-        Ok(RpcResponse::HostingGet(d)) => return Ok((d, None)),
+        Ok(RpcResponse::HostingGet(d)) if detail_matches(&sel, d.id.as_str(), &d.domain) => {
+            return Ok((d, None))
+        }
+        Ok(RpcResponse::HostingGet(d)) => {
+            // Cannot be an attack — this is our own socket — so it is a bug
+            // worth seeing rather than something to route around.
+            tracing::error!(
+                asked = ?sel, got = %d.id.as_str(), domain = %d.domain,
+                "master answered HostingGet with a different hosting"
+            );
+            return Err(AppError::NotFound);
+        }
         Ok(RpcResponse::Error(e)) if !is_not_found_error(&e) => {
             return Err(AppError::Rpc(e.to_string()));
         }
@@ -5356,7 +5367,24 @@ pub async fn find_hosting_anywhere(
         )
         .await;
         match r {
-            Ok(RpcResponse::HostingGet(d)) => return Ok((d, Some(n.node_id))),
+            Ok(RpcResponse::HostingGet(d)) if detail_matches(&sel, d.id.as_str(), &d.domain) => {
+                return Ok((d, Some(n.node_id)))
+            }
+            Ok(RpcResponse::HostingGet(d)) => {
+                // A node answered for a hosting that is not the one asked
+                // for. Every authorization gate downstream keys on the
+                // returned `detail.id`, and this same lookup picks the node
+                // every later RPC is dispatched to — so an answer accepted
+                // here makes the answering node the resolver for someone
+                // else's site. Refuse it and keep asking; a node cannot take
+                // over a hosting by being enrolled more recently.
+                tracing::error!(
+                    node = %n.node_id, asked = ?sel,
+                    got_id = %d.id.as_str(), got_domain = %d.domain,
+                    "SECURITY: node answered HostingGet with a hosting that was not asked for"
+                );
+                continue;
+            }
             Ok(_) => continue, // not on this node (NotFound / other)
             Err(e) => {
                 // Node unreachable / errored — remember it. If the hosting
@@ -5376,6 +5404,29 @@ pub async fn find_hosting_anywhere(
 
 fn is_not_found_error(e: &hyperion_rpc::error::RpcError) -> bool {
     matches!(e, hyperion_rpc::error::RpcError::NotFound { .. })
+}
+
+/// Is this the hosting that was actually asked for?
+///
+/// The cluster lookup asks every enrolled node in turn and takes the first
+/// answer. Nothing checked that the answer matched the question, so a node
+/// that replied to EVERY `HostingGet` — a compromised agent, a stolen node
+/// secret, an operator-supplied node — became the resolver for every hosting
+/// in the cluster that is not on the master. That is not a read-only problem:
+/// the same call picks the node each later RPC is dispatched to, so file
+/// browse and write, suspend, limits, certificates, backups and the WordPress
+/// tooling all follow it, and the authorization gates key on the `detail.id`
+/// the node itself returned.
+///
+/// Nodes are asked in `enrolled_at DESC` order, so the newest node is asked
+/// first — a freshly enrolled rogue would win against every existing one.
+fn detail_matches(sel: &HostingSelector, got_id: &str, got_domain: &str) -> bool {
+    match sel {
+        HostingSelector::Id(id) => got_id == id.as_str(),
+        // Case-insensitively: a domain is a hostname, and the selector may
+        // come from a URL the operator typed.
+        HostingSelector::Domain(dm) => got_domain.eq_ignore_ascii_case(dm.as_str()),
+    }
 }
 
 /// Aggregate hostings from the master + every enrolled remote node.
@@ -11334,6 +11385,40 @@ async fn run_wp_staging_push_job(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The cluster lookup takes the FIRST node that answers, and the same
+    /// answer picks the node every later RPC is dispatched to. A node that
+    /// replies to every HostingGet would become the resolver for every
+    /// hosting in the cluster, so an answer that is not the hosting asked for
+    /// must be refused.
+    #[test]
+    fn a_node_cannot_answer_for_a_hosting_that_was_not_asked_for() {
+        let asked_id = HostingSelector::Id(hyperion_types::HostingId("h-victim".into()));
+        assert!(detail_matches(&asked_id, "h-victim", "victim.cz"));
+        assert!(!detail_matches(&asked_id, "h-attacker", "attacker.cz"));
+        // The domain matching is irrelevant when the id was asked for.
+        assert!(!detail_matches(&asked_id, "h-attacker", "victim.cz"));
+
+        let asked_domain =
+            HostingSelector::Domain(hyperion_validate::Domain::parse("victim.cz").expect("parse"));
+        assert!(detail_matches(&asked_domain, "h-victim", "victim.cz"));
+        assert!(!detail_matches(&asked_domain, "h-victim", "attacker.cz"));
+    }
+
+    /// A domain is a hostname, and the selector often comes from something
+    /// the operator typed — so case must not decide whether a legitimate
+    /// node's answer is accepted.
+    #[test]
+    fn the_domain_comparison_ignores_case_but_not_the_domain() {
+        let asked =
+            HostingSelector::Domain(hyperion_validate::Domain::parse("victim.cz").expect("parse"));
+        assert!(detail_matches(&asked, "h1", "VICTIM.cz"));
+        assert!(detail_matches(&asked, "h1", "Victim.CZ"));
+        // A prefix or a suffix is a different domain, not a near miss.
+        assert!(!detail_matches(&asked, "h1", "victim.cz.evil"));
+        assert!(!detail_matches(&asked, "h1", "notvictim.cz"));
+        assert!(!detail_matches(&asked, "h1", ""));
+    }
 
     /// Render the integrity card for a given scan result.
     fn render_integrity(scan: hyperion_types::WpIntegrityScanResult) -> String {

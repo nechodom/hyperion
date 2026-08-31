@@ -745,11 +745,15 @@ pub enum Request {
         user_agent: Option<String>,
     },
     /// Per-request liveness probe + last_seen update. Returns
-    /// `Response::Bool(true)` when the session is live (row
-    /// present, revoked_at IS NULL); `false` for revoked /
-    /// missing rows (treat as anonymous).
+    /// Liveness AND live privilege for one session.
+    ///
+    /// `user_id` comes from the Ed25519-signed cookie, so it cannot be
+    /// forged; it is what the role and capabilities are re-read for. The
+    /// cookie's own stamped role is not trusted for authorization — see
+    /// [`hyperion_types::SessionStanding`].
     WebSessionTouch {
         sid: String,
+        user_id: i64,
     },
     /// Newest-first list of `user_id`'s sessions (used by
     /// /settings/sessions).
@@ -1867,9 +1871,10 @@ pub enum Response {
     QuotaEnableKernel(hyperion_types::QuotaEnableSummary),
     /// Plain ack for write operations on web_sessions.
     WebSessionAck,
-    /// Liveness probe response. `true` ⇒ session is live and
-    /// `last_seen_at` was updated.
-    WebSessionTouch(bool),
+    /// Liveness plus the owner's CURRENT role and capabilities. Was a bare
+    /// `bool`, which is why a revoked privilege kept working for the rest of
+    /// the session.
+    WebSessionTouch(hyperion_types::SessionStanding),
     /// `/settings/sessions` list payload.
     WebSessionList(Vec<hyperion_types::WebSessionView>),
     /// How many sessions "sign out everywhere" actually revoked.

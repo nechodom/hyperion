@@ -2176,6 +2176,15 @@
         (<a href="#ssl">add it on the SSL tab</a>) — the
         alias is what puts the name into the certificate.
       </span>
+      <span class="muted hint" style="display:block;margin-top:0.3rem">
+        If this site runs WordPress, its Site Address is changed to match at the
+        same time. Otherwise the two would point at each other — the web server
+        sending visitors one way and WordPress sending them back — and the site
+        would answer <code>ERR_TOO_MANY_REDIRECTS</code>. Only the hostname is
+        changed; the scheme and any subdirectory stay as they are. Hyperion still
+        follows the redirect chain after saving and rolls the change back if it
+        cycles anyway.
+      </span>
     </div>
     <div class="field" style="margin-top:0.7rem">
       <label for="hsts_max_age">HSTS <code>max-age</code> <span class="hint">seconds (0 = off)</span></label>
@@ -4027,18 +4036,29 @@
   const panels = document.querySelectorAll('.tab-panels > .tab-panel');
   if (!tabs.length) return;
   function activate(id) {
+    // Nothing to activate — leave the page exactly as it is. Blanking every
+    // panel because an id matched nothing is how a stray hash, or an element
+    // in the strip that is not a tab, produced an empty page.
+    if (!id) return false;
     let matched = false;
     tabs.forEach(t => {
       const isMe = t.dataset.tab === id;
       t.classList.toggle('active', isMe);
       if (isMe) matched = true;
     });
+    if (!matched) return false;
     panels.forEach(p => p.classList.toggle('active', p.id === 'tab-' + id));
-    return matched;
+    return true;
   }
   tabs.forEach(t => t.addEventListener('click', ev => {
-    ev.preventDefault();
+    // Not every item in the strip is a tab. "Move / copy" is a plain link to
+    // the transfer wizard, styled to sit with the others — it has no
+    // data-tab. This handler used to preventDefault() on it anyway and then
+    // activate(undefined), so the click neither navigated NOR showed
+    // anything: the page went blank and stayed there.
     const id = t.dataset.tab;
+    if (!id) return;
+    ev.preventDefault();
     activate(id);
     remember(id);
     if (history.replaceState) history.replaceState(null, '', '#' + id);

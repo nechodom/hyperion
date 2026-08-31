@@ -390,8 +390,12 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
             .await
     }
 
-    async fn web_session_touch(&self, sid: String) -> Result<bool, RpcError> {
-        self.svc.web_session_touch(&sid).await
+    async fn web_session_touch(
+        &self,
+        sid: String,
+        user_id: i64,
+    ) -> Result<hyperion_types::SessionStanding, RpcError> {
+        self.svc.web_session_touch(&sid, user_id).await
     }
 
     async fn web_session_list(

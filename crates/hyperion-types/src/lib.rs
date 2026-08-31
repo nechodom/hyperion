@@ -42,7 +42,7 @@ pub use import::{ImportTokenInfo, ImportTokenOp, ImportTokenResult};
 pub use jobs::{
     ApiKeyCreated, ApiKeyResolved, ApiKeyView, BackupTargetProbe, BackupTargetView,
     HostingQuotaReport, HostingQuotaView, JobView, QuotaEnableSummary, S3BackupTarget,
-    WebSessionView,
+    SessionStanding, WebSessionView,
 };
 pub use limits::next_anniversary;
 pub use limits::{
