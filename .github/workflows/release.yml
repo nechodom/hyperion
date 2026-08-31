@@ -110,7 +110,14 @@ jobs:
           # binaries (a 12 MB download) — closing the "pulled mid-CI-build, got a
           # commit behind" race.
           printf '%s\n' "${{ github.sha }}" > dist/VERSION
-          ( cd dist && sha256sum hyperion-agent hyperion-web hctl hyperion-export > SHA256SUMS )
+          # Checksum EVERYTHING in dist/ rather than a hand-kept list. The
+          # list was the bug twice over: the per-architecture exporters were
+          # built, then not uploaded; uploaded, then not checksummed — so
+          # update.sh refused to install them. A glob cannot fall behind the
+          # thing it describes.
+          ( cd dist && sha256sum -- * > SHA256SUMS.tmp \
+              && grep -v ' SHA256SUMS' SHA256SUMS.tmp > SHA256SUMS \
+              && rm SHA256SUMS.tmp )
           cat dist/SHA256SUMS dist/VERSION
 
       - name: Compute version metadata
