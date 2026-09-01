@@ -6132,6 +6132,82 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             }
         }
 
+        // Extra FTP logins. An extra login works only because it SHARES the
+        // site's uid; if the site's own account is ever recreated it hands out
+        // a NEW uid, every extra login keeps the old one, and they still
+        // authenticate while being unable to write a byte. That reads as an
+        // FTP fault and is a uid mismatch, so it is named here rather than
+        // left to be guessed.
+        if !user.is_empty() {
+            let site = hyperion_adapters::users::lookup_raw(&user)
+                .await
+                .ok()
+                .flatten();
+            let rows = hyperion_state::ftp_accounts::list_for_hosting(&self.pool, &detail.id)
+                .await
+                .unwrap_or_default();
+            for acct in rows {
+                let info = hyperion_adapters::users::lookup_raw(&acct.login)
+                    .await
+                    .ok()
+                    .flatten();
+                match (&site, &info) {
+                    (_, None) => push(
+                        "extra_login",
+                        &format!("Extra login {}", acct.login),
+                        "error",
+                        "the panel lists this login but the system has no such account — \
+                         delete it here and add it again"
+                            .into(),
+                        "",
+                    ),
+                    (Some(site), Some(info)) if info.uid != site.uid || info.gid != site.gid => {
+                        push(
+                            "extra_login",
+                            &format!("Extra login {}", acct.login),
+                            "error",
+                            format!(
+                                "runs as uid {} while the site is uid {} — it can log in but \
+                                 cannot write anything in the site's own files. The automatic \
+                                 FTP repair puts this back within five minutes.",
+                                info.uid, site.uid
+                            ),
+                            "",
+                        )
+                    }
+                    (_, Some(_)) => {
+                        let have = hyperion_adapters::ftp::read_user_web_root(&acct.login)
+                            .await
+                            .ok()
+                            .flatten();
+                        let want = acct.local_root.trim();
+                        if !want.is_empty() && have.as_deref() != Some(want) {
+                            push(
+                                "extra_login",
+                                &format!("Extra login {}", acct.login),
+                                "warn",
+                                format!(
+                                    "lands in {} instead of {want} — its vsftpd override \
+                                     drifted. The automatic FTP repair rewrites it within \
+                                     five minutes.",
+                                    have.unwrap_or_else(|| "the account's home".into())
+                                ),
+                                "",
+                            );
+                        } else {
+                            push(
+                                "extra_login",
+                                &format!("Extra login {}", acct.login),
+                                "ok",
+                                format!("shares the site's uid and lands in {want}"),
+                                "",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(FtpCheckReport {
             items,
             local_root: local_root.unwrap_or_default(),
@@ -7149,6 +7225,101 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     }
                 }
             }
+            // Extra FTP logins, which nothing has ever re-checked.
+            //
+            // They work only because they SHARE the site's uid — that is what
+            // lets a file uploaded over FTP be edited by PHP and the other way
+            // round. Nothing kept the two in step. If the site's own account
+            // is recreated (a delete and a fresh provision hands out a new
+            // uid), every extra login keeps the old number, still
+            // authenticates, and can no longer write a single byte of the
+            // tree. It presents as "the login works but has no write
+            // permission", which reads as an FTP problem and is not one.
+            //
+            // Their per-user config was never re-asserted either: the site
+            // user's local_root is repaired above on every tick, while an
+            // extra login whose config drifted or vanished stayed broken
+            // forever — vsftpd then falls back to the global
+            // `local_root=/home/$USER`, a path that does not exist for a
+            // `<name>.<domain>` login.
+            if let Ok(Some(site)) = hyperion_adapters::users::lookup_raw(&user).await {
+                {
+                    let rows =
+                        hyperion_state::ftp_accounts::list_for_hosting(&self.pool, &detail.id)
+                            .await
+                            .unwrap_or_default();
+                    for acct in rows {
+                        let Ok(Some(info)) =
+                            hyperion_adapters::users::lookup_raw(&acct.login).await
+                        else {
+                            // Gone from passwd. Not recreated here: a login
+                            // without its password is a login nobody can use,
+                            // and inventing one silently would be worse than
+                            // saying so.
+                            tracing::warn!(
+                                login = %acct.login, domain = %detail.domain,
+                                "ftp_autoheal: extra login is missing from passwd"
+                            );
+                            continue;
+                        };
+                        if info.uid != site.uid || info.gid != site.gid {
+                            match hyperion_adapters::ftp::realign_extra_login(
+                                &acct.login,
+                                site.uid,
+                                site.gid,
+                            )
+                            .await
+                            {
+                                Ok(()) => {
+                                    healed += 1;
+                                    self.append_audit(
+                                        "hosting.ftp.autoheal",
+                                        Some(detail.id.as_str()),
+                                        &serde_json::json!({
+                                            "login": acct.login,
+                                            "was_uid": info.uid,
+                                            "now_uid": site.uid,
+                                            "reason": "extra login had lost the site's uid, \
+                                                       so it could not write",
+                                        })
+                                        .to_string(),
+                                        "ok",
+                                    )
+                                    .await;
+                                }
+                                Err(e) => tracing::warn!(
+                                    error = %e, login = %acct.login,
+                                    "ftp_autoheal: could not realign an extra login"
+                                ),
+                            }
+                        }
+                        // And its landing directory, from the row the panel
+                        // shows — not from the site root, which would quietly
+                        // move a login the operator pointed at a subdirectory.
+                        let want = acct.local_root.trim();
+                        if !want.is_empty() {
+                            let have = hyperion_adapters::ftp::read_user_web_root(&acct.login)
+                                .await
+                                .ok()
+                                .flatten();
+                            if have.as_deref() != Some(want) {
+                                if let Err(e) =
+                                    hyperion_adapters::ftp::set_user_web_root(&acct.login, want)
+                                        .await
+                                {
+                                    tracing::warn!(
+                                        error = %e, login = %acct.login,
+                                        "ftp_autoheal: extra login local_root"
+                                    );
+                                } else {
+                                    healed += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             // Ownership + traversal only — NOT repair_tree_permissions, which
             // chmods every directory to 0755 and would widen logs/ and tmp/
             // from the 0750 create deliberately gives them.
