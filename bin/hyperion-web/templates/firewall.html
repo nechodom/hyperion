@@ -60,6 +60,58 @@
       </h2>
 
       {% if !n.unreachable %}
+      {#- Default-drop. Until this is on, every "open port X" rule hyperion
+          writes is decoration: the chain's policy is ACCEPT, so it already
+          passes everything and the rules change nothing unless some other
+          ruleset drops first. Saying so plainly beats a page that looks like
+          it is managing a firewall it is not. -#}
+      {% if let Some(left) = n.armed_seconds_left %}
+        <div class="flash error" style="margin:0 0 0.7rem">
+          <svg class="flash-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          <div class="flash-body">
+            <strong>Default-drop is on and unconfirmed.</strong>
+            Open a NEW terminal and check you can still reach
+            <code>{{ n.label }}</code> over SSH. If you do not confirm,
+            the firewall goes back to accepting everything
+            {% if left.clone() > 0 %}in about {{ left }} s{% else %}at the next check{% endif %} —
+            deliberately, so a mistake here cannot lock you out for good.
+            <form method="post" action="/firewall/default-drop" style="margin-top:0.5rem;display:inline-flex;gap:0.4rem">
+              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+              <input type="hidden" name="target_node" value="{{ n.node_id }}">
+              <input type="hidden" name="action" value="confirm">
+              <button class="btn small primary" type="submit">I am still connected — keep it</button>
+            </form>
+            <form method="post" action="/firewall/default-drop" style="margin-top:0.5rem;display:inline-flex;gap:0.4rem">
+              <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+              <input type="hidden" name="target_node" value="{{ n.node_id }}">
+              <input type="hidden" name="action" value="disable">
+              <button class="btn small" type="submit">Revert now</button>
+            </form>
+          </div>
+        </div>
+      {% else %}
+        {#- Nothing armed. Either the chain is already dropping and confirmed,
+            or — far more likely — it is still `policy accept` and every rule
+            below is inert. The page used to imply otherwise simply by listing
+            "open ports" beside an Apply button. -#}
+        <div class="row" style="gap:0.5rem;align-items:center;flex-wrap:wrap;margin:0 0 0.7rem;font-size:0.85rem">
+          <form method="post" action="/firewall/default-drop" style="display:inline-flex;gap:0.4rem"
+                data-confirm-title="Switch {{ n.label }} to default-drop"
+                data-confirm-variant="danger"
+                data-confirm-body="The chain stops accepting anything that is not explicitly allowed. Loopback, established connections and every port sshd listens on are allowed first and verified before the switch — but if something is still wrong you lose SSH to this machine. You then have 5 minutes to confirm from a NEW terminal; without that confirmation it reverts on its own. Continue?"
+                data-confirm-confirm-label="Switch to default-drop">
+            <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+            <input type="hidden" name="target_node" value="{{ n.node_id }}">
+            <input type="hidden" name="action" value="enable">
+            <button class="btn small" type="submit">Switch to default-drop</button>
+          </form>
+          <span class="text-soft small">Until this is on, the chain's policy is
+            <code>accept</code> — it already lets everything through, so the
+            rules below only matter if something else drops first (a cloud
+            security group, or another ruleset).</span>
+        </div>
+      {% endif %}
+
       {# Brute-force ban posture — the active nftables drops, which the
          old page hid entirely. Counts + the newest few IPs, with a jump
          to the full /bans table. #}
@@ -110,6 +162,7 @@
                 <th style="text-align:left;padding:0.4rem 0.6rem;width:6rem">Port</th>
                 <th style="text-align:left;padding:0.4rem 0.6rem;width:4.5rem">Proto</th>
                 <th style="text-align:left;padding:0.4rem 0.6rem;width:8rem">Category</th>
+                <th style="text-align:left;padding:0.4rem 0.6rem;width:8rem">Opened by</th>
                 <th style="text-align:left;padding:0.4rem 0.6rem">Reason or service</th>
               </tr>
             </thead>
@@ -131,6 +184,16 @@
                     <span class="pill" style="background:#64748b;color:white;font-size:0.7rem">infra</span>
                   {% else %}
                     <span class="pill" style="background:var(--surface-2);color:var(--text-soft);font-size:0.7rem">unknown</span>
+                  {% endif %}
+                </td>
+                <td style="padding:0.5rem 0.6rem">
+                  {#- Read from the rule's own `comment "hyperion:…"` tag, not
+                      guessed from the port number — otherwise the panel would
+                      claim credit for whatever else happens to be open. -#}
+                  {% if p.opened_by_hyperion %}
+                    <span class="pill ok" style="font-size:0.7rem">hyperion</span>
+                  {% else %}
+                    <span class="text-soft" style="font-size:0.78rem">not by hyperion</span>
                   {% endif %}
                 </td>
                 <td style="padding:0.5rem 0.6rem">

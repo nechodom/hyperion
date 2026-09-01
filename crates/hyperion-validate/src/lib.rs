@@ -3,10 +3,12 @@
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 #![forbid(unsafe_code)]
 
+pub mod certname;
 pub mod domain;
 pub mod ftplogin;
 pub mod sysuser;
 
+pub use certname::{name_matches, uncovered_names};
 pub use domain::Domain;
 pub use ftplogin::{compose_extra_login, validate_login_name};
 pub use sysuser::SystemUserName;

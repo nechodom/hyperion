@@ -14,6 +14,26 @@ pub struct Config {
     pub email: EmailSection,
     pub remote_rpc: RemoteRpcSection,
     pub fail2ban: Fail2banSection,
+    pub permissions: PermissionsSection,
+}
+
+/// The permission self-repair. `enabled = false` makes
+/// `permissions_autoheal_tick` a no-op node-wide; the per-hosting switch on
+/// the Security card turns it off for one site.
+///
+/// Defaults to ON, which is also what an agent.toml with no `[permissions]`
+/// section gets — the repair has always run, so an operator who upgrades
+/// should not silently lose it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct PermissionsSection {
+    pub enabled: bool,
+}
+
+impl Default for PermissionsSection {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
 }
 
 /// Tunables for the native brute-force scanner. Every field defaults to the

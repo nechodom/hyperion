@@ -137,7 +137,26 @@ pub async fn get(pool: &SqlitePool, id: &HostingId) -> Result<Option<MonitorConf
     ))
 }
 
-/// Persist the operator-set fields. None values clear the column.
+/// Persist the operator-set fields. `None` clears the column — EXCEPT for the
+/// Slack webhook, which is a secret and therefore has three states.
+///
+/// The webhook is never sent back to the browser (it is a bearer credential:
+/// whoever holds it can post as that app), so the form cannot echo it into a
+/// `value=` the way it does for the e-mail and the generic webhook. That means
+/// an empty field is not a request to clear it — the operator simply was not
+/// shown it. Binding NULL for "empty" silently destroyed the integration every
+/// time anyone saved the monitor form for an unrelated reason, while the page
+/// promised "leave blank to keep".
+///
+/// So: `Set(v)` writes, `Clear` writes NULL, and `Keep` leaves the column
+/// exactly as it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SecretField<'a> {
+    Keep,
+    Clear,
+    Set(&'a str),
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn set_config(
     pool: &SqlitePool,
@@ -147,33 +166,45 @@ pub async fn set_config(
     interval_secs: Option<i64>,
     alert_after_fails: Option<i64>,
     alert_email: Option<&str>,
-    alert_slack_webhook: Option<&str>,
+    alert_slack_webhook: SecretField<'_>,
     alert_webhook_url: Option<&str>,
     now: i64,
 ) -> Result<(), StateError> {
-    sqlx::query(
+    // `Keep` leaves the column out of the SET list entirely rather than
+    // reading-then-writing it: no round trip, and no window in which a
+    // concurrent write could be clobbered by a stale value.
+    let slack_sql = match alert_slack_webhook {
+        SecretField::Keep => "",
+        _ => "monitor_alert_slack_webhook = ?,",
+    };
+    let sql = format!(
         "UPDATE hostings
          SET monitor_enabled = ?,
              monitor_url_path = ?,
              monitor_interval_secs = ?,
              monitor_alert_after_fails = ?,
              monitor_alert_email = ?,
-             monitor_alert_slack_webhook = ?,
+             {slack_sql}
              monitor_alert_webhook_url = ?,
              updated_at = ?
-         WHERE id = ?",
-    )
-    .bind(if enabled { 1 } else { 0 })
-    .bind(url_path)
-    .bind(interval_secs)
-    .bind(alert_after_fails)
-    .bind(alert_email)
-    .bind(alert_slack_webhook)
-    .bind(alert_webhook_url)
-    .bind(now)
-    .bind(id.as_str())
-    .execute(pool)
-    .await?;
+         WHERE id = ?"
+    );
+    let mut q = sqlx::query(&sql)
+        .bind(if enabled { 1 } else { 0 })
+        .bind(url_path)
+        .bind(interval_secs)
+        .bind(alert_after_fails)
+        .bind(alert_email);
+    match alert_slack_webhook {
+        SecretField::Keep => {}
+        SecretField::Clear => q = q.bind(None::<&str>),
+        SecretField::Set(v) => q = q.bind(Some(v)),
+    }
+    q.bind(alert_webhook_url)
+        .bind(now)
+        .bind(id.as_str())
+        .execute(pool)
+        .await?;
     Ok(())
 }
 
@@ -340,6 +371,73 @@ mod tests {
         assert_eq!(cfg.alert_state, "ok");
     }
 
+    /// The bug this three-state exists for: the webhook is a secret, so the
+    /// form cannot echo it back, so an empty field is not a request to delete
+    /// it. Binding NULL for "empty" meant that saving the monitor card to
+    /// change the interval — or anything else — silently destroyed the Slack
+    /// integration, while the page promised "leave blank to keep".
+    #[tokio::test]
+    async fn keep_leaves_the_webhook_alone_and_clear_removes_it() {
+        let pool = open_memory().await.expect("open");
+        let id = fresh_hosting(&pool, "keepme").await;
+        let hook = "https://hooks.slack.com/services/A/B/C";
+        set_config(
+            &pool,
+            &id,
+            true,
+            Some("/"),
+            Some(60),
+            Some(3),
+            None,
+            SecretField::Set(hook),
+            None,
+            10,
+        )
+        .await
+        .expect("set");
+
+        // An unrelated edit — a different interval, nothing about Slack.
+        set_config(
+            &pool,
+            &id,
+            true,
+            Some("/"),
+            Some(300),
+            Some(3),
+            None,
+            SecretField::Keep,
+            None,
+            20,
+        )
+        .await
+        .expect("keep");
+        let cfg = get(&pool, &id).await.expect("get").expect("present");
+        assert_eq!(cfg.interval_secs, 300, "the unrelated edit must apply");
+        assert_eq!(
+            cfg.alert_slack_webhook.as_deref(),
+            Some(hook),
+            "saving the card must not delete the webhook"
+        );
+
+        // Removing is explicit, and it works.
+        set_config(
+            &pool,
+            &id,
+            true,
+            Some("/"),
+            Some(300),
+            Some(3),
+            None,
+            SecretField::Clear,
+            None,
+            30,
+        )
+        .await
+        .expect("clear");
+        let cfg = get(&pool, &id).await.expect("get").expect("present");
+        assert!(cfg.alert_slack_webhook.is_none(), "Remove must remove");
+    }
+
     #[tokio::test]
     async fn set_config_round_trips() {
         let pool = open_memory().await.expect("open");
@@ -352,7 +450,7 @@ mod tests {
             Some(120),
             Some(5),
             Some("ops@example.cz"),
-            Some("https://hooks.slack.com/services/A/B/C"),
+            SecretField::Set("https://hooks.slack.com/services/A/B/C"),
             None,
             10,
         )
@@ -376,9 +474,20 @@ mod tests {
         let pool = open_memory().await.expect("open");
         let a = fresh_hosting(&pool, "a").await;
         let b = fresh_hosting(&pool, "b").await;
-        set_config(&pool, &a, true, None, None, None, None, None, None, 1)
-            .await
-            .expect("a");
+        set_config(
+            &pool,
+            &a,
+            true,
+            None,
+            None,
+            None,
+            None,
+            SecretField::Keep,
+            None,
+            1,
+        )
+        .await
+        .expect("a");
         // b stays disabled.
         let _ = b;
         let enabled = list_enabled(&pool).await.expect("list");

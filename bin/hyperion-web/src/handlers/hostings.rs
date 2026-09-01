@@ -166,6 +166,15 @@ struct DetailTpl<'a> {
     csrf_ftp_set: String,
     csrf_ftp_disable: String,
     ftp_new_password: Option<String>,
+    /// Names this hosting serves that the certificate on disk does NOT
+    /// cover — so the browser refuses them with a name mismatch.
+    ///
+    /// Adding an alias re-renders `server_name` and touches nothing else, so
+    /// the new name starts being served immediately over a certificate that
+    /// does not carry it. Nothing said so, and the certificate card showed the
+    /// alias as covered because the SAN list was filled from the alias list.
+    /// Empty when everything is covered, or when there is no certificate yet.
+    cert_uncovered_names: Vec<String>,
     /// Set when the password belongs to an EXTRA login rather than the site's
     /// own account — the panel must name the right one.
     ftp_new_login: Option<String>,
@@ -1330,6 +1339,9 @@ pub async fn post_create(
                 profiles: vec![],
                 csrf_ftp_set: csrf_token_for(&state, &ctx, "/hostings/ftp/set"),
                 csrf_ftp_disable: csrf_token_for(&state, &ctx, "/hostings/ftp/disable"),
+                // A hosting created seconds ago has the certificate that
+                // was just issued for it, covering exactly its own names.
+                cert_uncovered_names: Vec::new(),
                 ftp_new_password: None,
                 ftp_new_login: None,
                 ftp_login_example,
@@ -1462,6 +1474,28 @@ fn health_grade(score: i64) -> &'static str {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// "in 3 hours", "in 2 days" — the forward-looking twin of `fmt_ago`, which
+/// only formats the past and answers "—" for anything not behind us.
+///
+/// A due-now or overdue interval is reported as "shortly" rather than a
+/// negative: the scheduler's next tick is the honest answer, and "in -4
+/// minutes" reads as a bug.
+fn fmt_in(secs: i64) -> String {
+    if secs <= 60 {
+        return "shortly".into();
+    }
+    let mins = secs / 60;
+    if mins < 60 {
+        return format!("in {mins} min");
+    }
+    let hours = mins / 60;
+    if hours < 48 {
+        return format!("in {hours} h");
+    }
+    format!("in {} days", hours / 24)
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn compute_hosting_health(
     detail: &HostingDetail,
     backups: &[hyperion_types::BackupRunWire],
@@ -1469,6 +1503,12 @@ pub(crate) fn compute_hosting_health(
     wp_installed: bool,
     wp_updates_pending: i64,
     quota: &hyperion_types::HostingQuotaReport,
+    // "daily" | "weekly" | "monthly", or anything else for "off". From the
+    // OWNING node's hosting_kv.
+    backup_cadence: &str,
+    // Unix seconds of the last scheduled run, 0 for never. Reserved for the
+    // overdue calculation once the tick stamps it on every path.
+    _backup_last_run_at: i64,
     now: i64,
 ) -> HostingHealth {
     let mut checks: Vec<HealthCheck> = Vec::new();
@@ -1522,18 +1562,58 @@ pub(crate) fn compute_hosting_health(
         .filter(|b| b.state == "ok")
         .filter_map(|b| b.finished_at)
         .max();
-    let backup_ok = last_ok.map(|t| now - t < 7 * 86400).unwrap_or(false);
+    // Scheduled backups are the answer to "is this site protected?", not
+    // whether one has happened yet. A hosting created ten minutes ago has no
+    // backup and cannot have one — reporting that as a PROBLEM told the
+    // operator to go and fix something that was already arranged, and docked
+    // the score for it on every freshly created site. What matters is whether
+    // a cadence is set; the absence of one is the real problem, at any age.
+    let cadence_secs = match backup_cadence {
+        "daily" => Some(86_400),
+        "weekly" => Some(7 * 86_400),
+        "monthly" => Some(30 * 86_400),
+        _ => None,
+    };
+    let backup_ok = match (cadence_secs, last_ok) {
+        // Scheduled and recent enough: fine.
+        (Some(c), Some(t)) => now - t < c + 86_400,
+        // Scheduled, none yet: fine — it is arranged, and the tick treats
+        // "never" as due, so the first one is imminent.
+        (Some(_), None) => true,
+        // No schedule. A recent manual backup still counts, but nothing is
+        // keeping it that way.
+        (None, Some(t)) => now - t < 7 * 86400,
+        (None, None) => false,
+    };
+    let next_due = cadence_secs.map(|c| last_ok.map(|t| t + c).unwrap_or(now));
     checks.push(HealthCheck {
         severity: if backup_ok { "good" } else { "warn" },
         ok: backup_ok,
         label: "Recent backup".into(),
-        detail: match last_ok {
-            Some(t) if backup_ok => format!("Last backup {}.", crate::handlers::stats::fmt_ago(&t)),
-            Some(t) => format!(
-                "Last backup {} — older than 7 days.",
+        detail: match (cadence_secs, last_ok, next_due) {
+            (Some(_), None, _) => {
+                format!("{backup_cadence} backups are on — the first one runs at the next tick.")
+            }
+            (Some(_), Some(t), Some(next)) if backup_ok => format!(
+                "{backup_cadence} backups are on. Last {}, next {}.",
+                crate::handlers::stats::fmt_ago(&t),
+                fmt_in(next - now)
+            ),
+            (Some(_), Some(t), _) => format!(
+                "{backup_cadence} backups are on, but the last one was {} — overdue.",
                 crate::handlers::stats::fmt_ago(&t)
             ),
-            None => "No successful backup yet — run one from the Backups tab.".into(),
+            (None, Some(t), _) if backup_ok => format!(
+                "Last backup {} — but no schedule is set, so nothing keeps it current.",
+                crate::handlers::stats::fmt_ago(&t)
+            ),
+            (None, Some(t), _) => format!(
+                "Last backup {} and no schedule is set.",
+                crate::handlers::stats::fmt_ago(&t)
+            ),
+            (None, None, _) => {
+                "No backups and no schedule — turn one on from the Backups tab.".into()
+            }
         },
     });
     if !backup_ok {
@@ -2016,6 +2096,33 @@ pub async fn get_detail(
     } else {
         (vec![], vec![])
     };
+    let owner_kv = match crate::dispatcher::dispatch_to_node(
+        &state,
+        target,
+        Request::HostingKvList {
+            hosting_id: detail.id.as_str().to_string(),
+        },
+    )
+    .await
+    {
+        Ok(RpcResponse::HostingKvList(v)) => v,
+        _ => vec![],
+    };
+    let backup_cadence = owner_kv
+        .iter()
+        .find(|(k, _)| k == "backup_cadence")
+        .map(|(_, v)| v.clone())
+        .filter(|v| matches!(v.as_str(), "daily" | "weekly" | "monthly"))
+        .unwrap_or_else(|| "off".into());
+    // Last successful backup, as the OWNING node recorded it. Needed by the
+    // health check below, which is why this is fetched here and not with the
+    // rest of the backup UI further down.
+    let backup_last_run_at: i64 = owner_kv
+        .iter()
+        .find(|(k, _)| k == "backup_last_run_at")
+        .and_then(|(_, v)| v.parse::<i64>().ok())
+        .unwrap_or(0);
+
     // Composite health snapshot — computed from data already fetched
     // above (no extra RPC). Borrows `detail` before it's moved into the
     // template below.
@@ -2026,6 +2133,8 @@ pub async fn get_detail(
         wp_status.is_some(),
         wp_plugins.updates_pending,
         &quota,
+        &backup_cadence,
+        backup_last_run_at,
         hyperion_types::now_secs(),
     );
     // Operator notes + tags (panel-side metadata on the master's
@@ -2068,24 +2177,6 @@ pub async fn get_detail(
     // hosting_kv (seeded by profile_apply there + overridable here), so read
     // them from the owner rather than the master kv_pairs above. Best-effort:
     // cadence defaults to "off", pin to the node default.
-    let owner_kv = match crate::dispatcher::dispatch_to_node(
-        &state,
-        target,
-        Request::HostingKvList {
-            hosting_id: detail.id.as_str().to_string(),
-        },
-    )
-    .await
-    {
-        Ok(RpcResponse::HostingKvList(v)) => v,
-        _ => vec![],
-    };
-    let backup_cadence = owner_kv
-        .iter()
-        .find(|(k, _)| k == "backup_cadence")
-        .map(|(_, v)| v.clone())
-        .filter(|v| matches!(v.as_str(), "daily" | "weekly" | "monthly"))
-        .unwrap_or_else(|| "off".into());
     // Off-site destination picker. Admin-only, and the target list is fetched
     // only for admins — a non-admin render would otherwise pair a live pin
     // with an empty list and report a working target as unconfigured. Same
@@ -2177,6 +2268,20 @@ pub async fn get_detail(
         _ => Vec::new(),
     };
     let bot_families = bot_family_rows(&detail.vhost_options.blocked_bots);
+    // Every name nginx serves for this hosting, checked against what the
+    // certificate actually carries. Wildcards are matched with the SAME rule
+    // the certificate validator uses, so a `*.example.cz` cert is not reported
+    // as missing `www.example.cz`.
+    let cert_uncovered_names: Vec<String> = match detail.cert.as_ref() {
+        Some(cert) => hyperion_validate::uncovered_names(
+            &cert.sans,
+            std::iter::once(detail.domain.as_str())
+                .chain(detail.aliases.iter().map(String::as_str)),
+        ),
+        // No certificate at all: the SSL card already says so, and adding a
+        // second alarm for one fact helps nobody.
+        None => Vec::new(),
+    };
     // Computed before `detail` moves into the template struct.
     let ftp_login_example = ftp_login_example(&detail.domain);
     let ftp_login_qualifiers = hyperion_validate::ftplogin::login_qualifiers(&detail.domain);
@@ -2223,6 +2328,7 @@ pub async fn get_detail(
         profiles,
         csrf_ftp_set: csrf_token_for(&state, &ctx, "/hostings/ftp/set"),
         csrf_ftp_disable: csrf_token_for(&state, &ctx, "/hostings/ftp/disable"),
+        cert_uncovered_names,
         ftp_new_password,
         ftp_new_login,
         ftp_login_example,
@@ -4261,6 +4367,11 @@ pub struct MonitorSetForm {
     pub alert_slack_webhook: String,
     #[serde(default)]
     pub alert_webhook_url: String,
+    /// "1" from the Remove button. The webhook input is not rendered while
+    /// one is configured, so this is the only way to clear it — and it cannot
+    /// happen by accident on an unrelated save.
+    #[serde(default)]
+    pub remove_slack: Option<String>,
 }
 
 pub async fn post_monitor_set(
@@ -4312,11 +4423,16 @@ pub async fn post_monitor_set(
     } else {
         Some(form.alert_email.trim().to_string())
     };
+    // Empty is "leave it alone", NOT "delete it". The webhook is a bearer
+    // credential, so it is never rendered back into the form — an empty field
+    // means the operator was not shown it. Removing is its own explicit
+    // button, which posts remove_slack=1.
     let slack = if form.alert_slack_webhook.trim().is_empty() {
         None
     } else {
         Some(form.alert_slack_webhook.trim().to_string())
     };
+    let clear_slack_webhook = form.remove_slack.as_deref() == Some("1");
     let webhook = if form.alert_webhook_url.trim().is_empty() {
         None
     } else {
@@ -4326,6 +4442,7 @@ pub async fn post_monitor_set(
         &state,
         target,
         Request::MonitorSet {
+            clear_slack_webhook,
             sel: sel.clone(),
             enabled,
             url_path: path,

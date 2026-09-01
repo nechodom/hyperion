@@ -435,6 +435,9 @@ pub struct HostingService<A: AdapterPort + 'static> {
     pub email_default_to: Option<String>,
     /// Brute-force scanner tunables (agent.toml `[fail2ban]`).
     pub fail2ban: Fail2banConfig,
+    /// Node-wide switch for the permission self-repair (agent.toml
+    /// `[permissions] enabled`). Default true.
+    pub permissions_autoheal: bool,
     /// Path to agent.toml on disk, for the per-section settings editor.
     /// None disables UI-driven config writes (operator hand-edits only).
     pub agent_config_path: Option<std::path::PathBuf>,
@@ -1719,6 +1722,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             adapters,
             secrets,
             paths: HostingPaths::default(),
+            // The repair has always run; a service built without an
+            // explicit setting keeps it.
+            permissions_autoheal: true,
             remote_backup: None,
             retention: BackupRetention::default(),
             slack_default_webhook: None,
@@ -2266,6 +2272,13 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         self
     }
 
+    /// Node-wide switch for the permission self-repair. Default ON — the
+    /// repair has always run, so upgrading must not silently remove it.
+    pub fn with_permissions_autoheal(mut self, enabled: bool) -> Self {
+        self.permissions_autoheal = enabled;
+        self
+    }
+
     pub fn with_remote_backup(mut self, cfg: Option<RemoteBackupConfig>) -> Self {
         self.remote_backup = cfg;
         self
@@ -2803,7 +2816,8 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             Some(60),
             Some(3),
             None,
-            None,
+            // A brand-new hosting has no webhook to keep or clear.
+            hyperion_state::monitors::SecretField::Keep,
             None,
             now_secs(),
         )
@@ -2969,18 +2983,25 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         // a missing or unreadable file leaves it blank, exactly as before.
         let cert = match cert_row {
             Some(c) => {
-                let fingerprint_sha256 = tokio::fs::read_to_string(&c.cert_path)
+                let inspected = tokio::fs::read_to_string(&c.cert_path)
                     .await
                     .ok()
-                    .and_then(|pem| hyperion_adapters::cert::inspect_pem(&pem).ok())
-                    .map(|i| i.fingerprint)
-                    .unwrap_or_default();
+                    .and_then(|pem| hyperion_adapters::cert::inspect_pem(&pem).ok());
                 Some(CertInfo {
                     domain: c.domain,
-                    sans: aliases.clone(),
+                    // The names the FILE carries. This used to be filled with
+                    // the hosting's alias list, which made the field answer
+                    // its own question: add an alias, and the panel showed it
+                    // sitting in the certificate's SAN list while browsers
+                    // refused the name. An unreadable file leaves it empty,
+                    // which reads as "nothing known" rather than "covered".
+                    sans: inspected
+                        .as_ref()
+                        .map(|i| i.covered_names.clone())
+                        .unwrap_or_default(),
                     issuer: c.issuer,
                     not_after: c.not_after,
-                    fingerprint_sha256,
+                    fingerprint_sha256: inspected.map(|i| i.fingerprint).unwrap_or_default(),
                 })
             }
             None => None,
@@ -7529,10 +7550,64 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// repair runs only when it fires, and lands in the audit log both
     /// so the fix is traceable and so a repeating heal — something
     /// re-breaking modes on a schedule — is visible as a pattern.
+    /// Is the permission self-repair allowed to act on this hosting?
+    ///
+    /// **Default ON** (absent ⇒ enabled). The check has always run; what is
+    /// new is that it now FIXES what it finds, so there has to be a way to
+    /// say no — a site with deliberately unusual modes should not have them
+    /// quietly normalised every five minutes.
+    ///
+    /// A read error answers "on" for the same reason the brute-force scanner
+    /// does: silently stopping a repair is worse than repeating one.
+    pub async fn permissions_autoheal_enabled(&self, hosting_id: &str) -> bool {
+        match hyperion_state::hosting_kv::get(&self.pool, hosting_id, PERM_AUTOHEAL_KV_KEY).await {
+            Ok(Some(v)) => v.trim() != "off",
+            _ => true,
+        }
+    }
+
+    /// Turn the per-site permission self-repair on or off.
+    pub async fn permissions_autoheal_set(
+        &self,
+        sel: HostingSelector,
+        enabled: bool,
+    ) -> Result<bool, RpcError> {
+        let detail = self.get(sel).await?;
+        hyperion_state::hosting_kv::set(
+            &self.pool,
+            detail.id.as_str(),
+            PERM_AUTOHEAL_KV_KEY,
+            if enabled { "on" } else { "off" },
+            now_secs(),
+        )
+        .await
+        .map_err(|e| RpcError::Internal_with(format!("perm autoheal set: {e}")))?;
+        self.append_audit(
+            "hosting.permissions.autoheal.set",
+            Some(detail.id.as_str()),
+            &serde_json::json!({ "enabled": enabled }).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(enabled)
+    }
+
     pub async fn permissions_autoheal_tick(&self) -> Result<i64, RpcError> {
+        // Node-wide off switch. Checked here rather than at the call site so
+        // every caller — the timer, a future manual sweep — obeys it.
+        if !self.permissions_autoheal {
+            return Ok(0);
+        }
         let mut healed = 0i64;
         for s in self.list().await? {
             if s.state != HostingState::Active {
+                continue;
+            }
+            // Per-site opt-out, default ON. Same shape as the brute-force
+            // scanner's: absent means enabled, so nothing changes for a site
+            // that predates the key, and a read error also answers "on" —
+            // a DB hiccup must not quietly stop repairing a site.
+            if !self.permissions_autoheal_enabled(s.id.as_str()).await {
                 continue;
             }
             let Ok(detail) = self.get(HostingSelector::Id(s.id.clone())).await else {
@@ -7590,7 +7665,74 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     .await;
                 }
             }
+
+            // Two more classes the tree probe cannot see, both cheap enough
+            // to check on a timer (a stat each) and both with real
+            // consequences on a shared node:
+            //
+            //   * wp-config.php readable by other users — that is the database
+            //     password and the auth salts handed to every other tenant;
+            //   * logs/ and tmp/ readable by others — PHP session files live
+            //     in tmp, and a readable session file is a logged-in session.
+            //
+            // The full check (`wp_perm_check`) also walks the tree and does a
+            // real write probe; running THAT every five minutes over every
+            // hosting would be a filesystem scan on a schedule. These two are
+            // stats.
+            let site_dir = std::path::Path::new(&detail.root_dir)
+                .parent()
+                .unwrap_or(std::path::Path::new(&detail.root_dir))
+                .to_path_buf();
+            if wp_config_is_exposed(&detail.root_dir).await {
+                match self
+                    .wp_perm_repair(HostingSelector::Id(detail.id.clone()), "wp_config".into())
+                    .await
+                {
+                    Ok(_) => {
+                        healed += 1;
+                        tracing::info!(domain = %detail.domain,
+                            "permissions autoheal: tightened wp-config.php");
+                    }
+                    Err(e) => {
+                        tracing::warn!(domain = %detail.domain, error = %e,
+                            "permissions autoheal: could not tighten wp-config.php");
+                        self.append_audit(
+                            "hosting.permissions.autoheal",
+                            Some(detail.id.as_str()),
+                            &serde_json::json!({"scope": "wp_config", "error": e.to_string()})
+                                .to_string(),
+                            "failed",
+                        )
+                        .await;
+                    }
+                }
+            }
+            if site_dirs_are_exposed(&site_dir).await {
+                match self
+                    .wp_perm_repair(HostingSelector::Id(detail.id.clone()), "site_dirs".into())
+                    .await
+                {
+                    Ok(_) => {
+                        healed += 1;
+                        tracing::info!(domain = %detail.domain,
+                            "permissions autoheal: tightened logs/ and tmp/");
+                    }
+                    Err(e) => {
+                        tracing::warn!(domain = %detail.domain, error = %e,
+                            "permissions autoheal: could not tighten logs/ and tmp/");
+                        self.append_audit(
+                            "hosting.permissions.autoheal",
+                            Some(detail.id.as_str()),
+                            &serde_json::json!({"scope": "site_dirs", "error": e.to_string()})
+                                .to_string(),
+                            "failed",
+                        )
+                        .await;
+                    }
+                }
+            }
         }
+
         Ok(healed)
     }
 
@@ -12201,6 +12343,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             after_fails,
             email,
             slack,
+            // This path only flips `enabled`; it re-reads and re-sends every
+            // other field, so it never removes anything.
+            false,
             webhook,
         )
         .await
@@ -18002,6 +18147,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         alert_after_fails: Option<i64>,
         alert_email: Option<String>,
         alert_slack_webhook: Option<String>,
+        // Explicitly remove the stored Slack webhook. Separate from an empty
+        // `alert_slack_webhook` because the secret is never shown to the
+        // operator, so a blank field means "I was not shown it", not
+        // "delete it".
+        clear_slack_webhook: bool,
         alert_webhook_url: Option<String>,
     ) -> Result<(), RpcError> {
         let detail = self.get(sel).await?;
@@ -18033,6 +18183,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         let to_opt_str = |s: Option<String>| -> Option<String> {
             s.map(|t| t.trim().to_string()).filter(|t| !t.is_empty())
         };
+        let slack_clean = to_opt_str(alert_slack_webhook);
         hyperion_state::monitors::set_config(
             &self.pool,
             &detail.id,
@@ -18041,7 +18192,11 @@ impl<A: AdapterPort + 'static> HostingService<A> {
             interval_secs,
             alert_after_fails,
             to_opt_str(alert_email).as_deref(),
-            to_opt_str(alert_slack_webhook).as_deref(),
+            match (clear_slack_webhook, slack_clean.as_deref()) {
+                (true, _) => hyperion_state::monitors::SecretField::Clear,
+                (false, Some(v)) => hyperion_state::monitors::SecretField::Set(v),
+                (false, None) => hyperion_state::monitors::SecretField::Keep,
+            },
             to_opt_str(alert_webhook_url).as_deref(),
             now_secs(),
         )
@@ -21244,6 +21399,255 @@ impl<A: AdapterPort + 'static> HostingService<A> {
     /// `output` is the joined stdout of every command. `error` is
     /// the first non-empty NON-BENIGN stderr line ("File exists" /
     /// "already exists" are filtered as expected idempotency noise).
+    /// Where the pending default-drop rollback deadline lives.
+    ///
+    /// A FILE, not memory: if the agent is restarted or crashes while the
+    /// firewall is dropping and nobody has confirmed access yet, an in-memory
+    /// timer dies with it and the box stays locked. On boot the agent reads
+    /// this and reverts a deadline that has passed.
+    fn firewall_arm_file(&self) -> std::path::PathBuf {
+        // Beside the state DB — root-owned, 0700, and node-local, which is
+        // what this is: one node's firewall, not cluster state.
+        std::path::Path::new(&self.paths.acme_challenge_root)
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("/var/lib/hyperion"))
+            .join("firewall-default-drop-armed.json")
+    }
+
+    /// The port sshd actually listens on, read from its config.
+    ///
+    /// Not assumed to be 22. Switching the chain to `policy drop` with a rule
+    /// for 22 on a box whose sshd is on 2222 locks the operator out of a
+    /// remote VPS, and the panel would report success while doing it.
+    /// Multiple `Port` lines are all honoured — sshd accepts several.
+    async fn sshd_ports() -> Vec<u16> {
+        let body = tokio::fs::read_to_string("/etc/ssh/sshd_config")
+            .await
+            .unwrap_or_default();
+        sshd_ports_from(&body)
+    }
+
+    /// Run one `nft` invocation, returning its combined output.
+    async fn nft(args: &[&str]) -> Result<String, String> {
+        let out = tokio::process::Command::new("/usr/sbin/nft")
+            .args(args)
+            .output()
+            .await
+            .map_err(|e| format!("spawn nft: {e}"))?;
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        if out.status.success() {
+            return Ok(stdout);
+        }
+        Err(format!(
+            "`nft {}`: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
+    }
+
+    /// Turn hyperion's input chain into a real firewall: default DROP, with
+    /// only what is explicitly allowed getting through.
+    ///
+    /// Until now the chain was `policy accept`, so every rule the panel added
+    /// was decoration — the chain already passed everything. This is what
+    /// makes "hyperion manages the firewall" true, and it is also the single
+    /// most dangerous thing the panel can do: get it wrong on a remote VPS and
+    /// the operator loses SSH with no way back except the provider's console.
+    ///
+    /// So the order matters and is not negotiable:
+    ///
+    /// 1. add the survival rules while the chain still accepts everything —
+    ///    loopback, established/related, and every port sshd actually listens
+    ///    on, read from its config rather than assumed to be 22;
+    /// 2. read the chain BACK and refuse to continue unless they are really
+    ///    there. A rule that failed to apply must not be discovered after the
+    ///    policy flips;
+    /// 3. only then set `policy drop`;
+    /// 4. arm a deadline. If nobody confirms from the panel that they can
+    ///    still get in, the policy goes back to accept — including after an
+    ///    agent restart, which is why the deadline is a file and not a timer.
+    pub async fn firewall_enable_default_drop(
+        &self,
+        rollback_after_secs: i64,
+    ) -> Result<String, RpcError> {
+        let ports = Self::sshd_ports().await;
+        let port_list = ports
+            .iter()
+            .map(|p| p.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        // 1. Survival rules first, while the chain is still permissive.
+        let table = ["add", "table", "inet", "hyperion"];
+        let chain = [
+            "add", "chain", "inet", "hyperion", "input", "{", "type", "filter", "hook", "input",
+            "priority", "0", ";", "policy", "accept", ";", "}",
+        ];
+        Self::nft(&table)
+            .await
+            .map_err(|e| RpcError::Internal { message: e })?;
+        Self::nft(&chain)
+            .await
+            .map_err(|e| RpcError::Internal { message: e })?;
+
+        let ssh_set = format!("{{ {port_list} }}");
+        let survival: Vec<Vec<&str>> = vec![
+            // Answers to connections we made, and to anything already open —
+            // without this, flipping the policy kills the very SSH session
+            // doing the flipping.
+            vec![
+                "add",
+                "rule",
+                "inet",
+                "hyperion",
+                "input",
+                "ct",
+                "state",
+                "established,related",
+                "accept",
+                "comment",
+                "\"hyperion:established\"",
+            ],
+            vec![
+                "add",
+                "rule",
+                "inet",
+                "hyperion",
+                "input",
+                "iif",
+                "lo",
+                "accept",
+                "comment",
+                "\"hyperion:loopback\"",
+            ],
+            vec![
+                "add",
+                "rule",
+                "inet",
+                "hyperion",
+                "input",
+                "tcp",
+                "dport",
+                &ssh_set,
+                "accept",
+                "comment",
+                "\"hyperion:ssh\"",
+            ],
+        ];
+        for cmd in &survival {
+            Self::nft(cmd)
+                .await
+                .map_err(|e| RpcError::Internal { message: e })?;
+        }
+
+        // 2. Read back. Trusting the exit codes above is not enough: a rule
+        // can be accepted and still not be what we meant.
+        let listed = Self::nft(&["list", "chain", "inet", "hyperion", "input"])
+            .await
+            .map_err(|e| RpcError::Internal { message: e })?;
+        let has_established = listed.contains("hyperion:established");
+        let has_loopback = listed.contains("hyperion:loopback");
+        let has_ssh = listed.contains("hyperion:ssh");
+        if !(has_established && has_loopback && has_ssh) {
+            return Err(RpcError::Validation {
+                message: format!(
+                    "refusing to switch the firewall to default-drop: the rules that keep \
+                     you connected are not in the ruleset (established={has_established}, \
+                     loopback={has_loopback}, ssh={has_ssh}). Nothing has been changed."
+                ),
+            });
+        }
+
+        // 3. Flip the policy.
+        Self::nft(&[
+            "add", "chain", "inet", "hyperion", "input", "{", "type", "filter", "hook", "input",
+            "priority", "0", ";", "policy", "drop", ";", "}",
+        ])
+        .await
+        .map_err(|e| RpcError::Internal { message: e })?;
+
+        // 4. Arm the rollback.
+        let deadline = now_secs() + rollback_after_secs.clamp(60, 3600);
+        let _ = tokio::fs::write(
+            self.firewall_arm_file(),
+            serde_json::json!({ "deadline": deadline }).to_string(),
+        )
+        .await;
+
+        self.append_audit(
+            "firewall.default_drop.enable",
+            None,
+            &serde_json::json!({ "ssh_ports": ports, "deadline": deadline }).to_string(),
+            "ok",
+        )
+        .await;
+        Ok(format!(
+            "Default-drop is on. SSH is allowed on {port_list}, along with loopback and \
+             established connections. CONFIRM FROM ANOTHER SESSION that you can still get \
+             in — if you do not confirm, the firewall reverts to accepting everything."
+        ))
+    }
+
+    /// The operator got back in: cancel the automatic revert.
+    pub async fn firewall_confirm_default_drop(&self) -> Result<String, RpcError> {
+        let f = self.firewall_arm_file();
+        if tokio::fs::metadata(&f).await.is_err() {
+            return Ok("Nothing was waiting for confirmation.".into());
+        }
+        let _ = tokio::fs::remove_file(&f).await;
+        self.append_audit("firewall.default_drop.confirm", None, "{}", "ok")
+            .await;
+        Ok("Confirmed — the firewall stays on default-drop.".into())
+    }
+
+    /// Put the chain back to accepting everything.
+    pub async fn firewall_disable_default_drop(&self, reason: &str) -> Result<String, RpcError> {
+        Self::nft(&[
+            "add", "chain", "inet", "hyperion", "input", "{", "type", "filter", "hook", "input",
+            "priority", "0", ";", "policy", "accept", ";", "}",
+        ])
+        .await
+        .map_err(|e| RpcError::Internal { message: e })?;
+        let _ = tokio::fs::remove_file(self.firewall_arm_file()).await;
+        self.append_audit(
+            "firewall.default_drop.disable",
+            None,
+            &serde_json::json!({ "reason": reason }).to_string(),
+            "ok",
+        )
+        .await;
+        Ok("The firewall accepts everything again.".into())
+    }
+
+    /// Seconds left to confirm, or `None` when nothing is armed.
+    pub async fn firewall_arm_remaining(&self) -> Option<i64> {
+        let body = tokio::fs::read_to_string(self.firewall_arm_file())
+            .await
+            .ok()?;
+        let v: serde_json::Value = serde_json::from_str(&body).ok()?;
+        let deadline = v.get("deadline")?.as_i64()?;
+        Some(deadline - now_secs())
+    }
+
+    /// Revert an armed default-drop whose deadline has passed.
+    ///
+    /// Called from the agent's scheduler AND once at startup: a crash or a
+    /// restart between arming and confirming would otherwise leave the box
+    /// dropping with nobody watching, which is exactly the state this whole
+    /// dance exists to prevent.
+    pub async fn firewall_rollback_tick(&self) {
+        let Some(remaining) = self.firewall_arm_remaining().await else {
+            return;
+        };
+        if remaining > 0 {
+            return;
+        }
+        tracing::warn!("firewall default-drop was not confirmed in time — reverting to accept");
+        let _ = self
+            .firewall_disable_default_drop("not confirmed before the deadline")
+            .await;
+    }
+
     pub async fn firewall_apply_template(
         &self,
         template_id: &str,
@@ -21411,12 +21815,19 @@ impl<A: AdapterPort + 'static> HostingService<A> {
         use std::collections::BTreeSet;
         let mut tcp = BTreeSet::new();
         let mut udp = BTreeSet::new();
+        // (port, proto) pairs whose rule carried hyperion's comment tag.
+        let mut hyperion_ports: BTreeSet<(u16, &str)> = BTreeSet::new();
         for line in raw.lines() {
             let l = line.trim();
             if l.is_empty() || l.starts_with('#') {
                 continue;
             }
             // nft pattern.
+            // Rules hyperion itself added carry `comment "hyperion:<id>"`.
+            // That tag is the only reliable way to tell our rules from the
+            // distro's or the operator's — matching on port numbers would
+            // claim credit for whatever else happens to be open.
+            let ours = l.contains("hyperion:");
             for proto in ["tcp", "udp"] {
                 if let Some(idx) = l.find(&format!("{proto} dport ")) {
                     let after = &l[idx + proto.len() + " dport ".len()..];
@@ -21432,6 +21843,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                                 } else {
                                     udp.insert(p);
                                 }
+                                if ours {
+                                    hyperion_ports.insert((p, proto));
+                                }
                             }
                         }
                     } else {
@@ -21444,6 +21858,9 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                                 tcp.insert(p);
                             } else {
                                 udp.insert(p);
+                            }
+                            if ours {
+                                hyperion_ports.insert((p, proto));
                             }
                         }
                     }
@@ -21476,6 +21893,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     proto: "tcp".into(),
                     label,
                     category,
+                    opened_by_hyperion: hyperion_ports.contains(&(p, "tcp")),
                 }
             })
             .chain(udp.into_iter().map(|p| {
@@ -21485,6 +21903,7 @@ impl<A: AdapterPort + 'static> HostingService<A> {
                     proto: "udp".into(),
                     label,
                     category,
+                    opened_by_hyperion: hyperion_ports.contains(&(p, "udp")),
                 }
             }))
             .collect();
@@ -24570,6 +24989,122 @@ fn well_known_port_label(port: u16, proto: &str) -> (String, String) {
 /// Keep the ids in lock-step with the `port_templates()` data in
 /// `bin/hyperion-web/src/handlers/firewall.rs` — the template card
 /// passes its id over the wire.
+/// Every port sshd listens on, from its config text.
+///
+/// Split out of the reader so it can be tested: this is the value that decides
+/// whether flipping the firewall to default-drop keeps the operator connected
+/// or locks them out of a remote machine, and it is not a place to find out
+/// later that a comment or a lookalike directive was mis-parsed.
+///
+/// An empty or unreadable config yields sshd's own default, 22 — the same
+/// assumption sshd makes.
+/// Is `wp-config.php` readable by users other than its owner?
+///
+/// `symlink_metadata`, not `metadata`: the site user owns this tree, so
+/// following a symlink they planted would report the mode of whatever it aims
+/// at while the real file stays open. A symlink here is itself a finding, and
+/// answering `true` sends it to the repair, which refuses to chmod through one
+/// and says so.
+async fn wp_config_is_exposed(root_dir: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let p = std::path::Path::new(root_dir).join("wp-config.php");
+    match tokio::fs::symlink_metadata(&p).await {
+        Ok(md) => md.file_type().is_symlink() || md.permissions().mode() & 0o004 != 0,
+        // Absent is not a problem: plenty of sites are not WordPress.
+        Err(_) => false,
+    }
+}
+
+/// Are `logs/` or `tmp/` readable or writable by other users?
+///
+/// PHP session files live in `tmp/`, and another tenant who can read one is
+/// logged in as that site's visitors.
+async fn site_dirs_are_exposed(site_dir: &std::path::Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    for name in ["logs", "tmp"] {
+        let p = site_dir.join(name);
+        if let Ok(md) = tokio::fs::symlink_metadata(&p).await {
+            if !md.is_dir() {
+                // A symlink or a file where a directory belongs — the repair
+                // recreates it correctly.
+                return true;
+            }
+            if md.permissions().mode() & 0o007 != 0 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn sshd_ports_from(body: &str) -> Vec<u16> {
+    let mut ports: Vec<u16> = body
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.starts_with('#'))
+        .filter_map(|l| {
+            let rest = l.strip_prefix("Port")?;
+            // A bare prefix match would also take "PortForwarding"; the
+            // directive is only this one when a space follows.
+            if !rest.starts_with(char::is_whitespace) {
+                return None;
+            }
+            rest.split_whitespace().next()?.parse::<u16>().ok()
+        })
+        .collect();
+    if ports.is_empty() {
+        ports.push(22);
+    }
+    ports.sort_unstable();
+    ports.dedup();
+    ports
+}
+
+#[cfg(test)]
+mod sshd_ports_tests {
+    use super::sshd_ports_from;
+
+    /// The default sshd assumes when nothing says otherwise.
+    #[test]
+    fn no_directive_means_twenty_two() {
+        assert_eq!(sshd_ports_from(""), vec![22]);
+        assert_eq!(
+            sshd_ports_from("# Port 2222\nPermitRootLogin yes\n"),
+            vec![22]
+        );
+    }
+
+    /// The case that locks someone out: a box on a non-standard port. A rule
+    /// for 22 here would report success and take SSH away.
+    #[test]
+    fn a_moved_port_is_found() {
+        assert_eq!(sshd_ports_from("Port 2222\n"), vec![2222]);
+        assert_eq!(sshd_ports_from("  Port   2222   \n"), vec![2222]);
+    }
+
+    /// sshd accepts several; all of them have to survive the flip.
+    #[test]
+    fn every_listening_port_is_kept() {
+        assert_eq!(sshd_ports_from("Port 22\nPort 2222\n"), vec![22, 2222]);
+        assert_eq!(
+            sshd_ports_from("Port 2222\nPort 22\nPort 2222\n"),
+            vec![22, 2222]
+        );
+    }
+
+    /// Lookalikes and junk must not be read as a port — silently dropping the
+    /// real one is how the rule ends up naming a port nothing listens on.
+    #[test]
+    fn lookalike_directives_are_not_ports() {
+        assert_eq!(sshd_ports_from("PortForwarding yes\n"), vec![22]);
+        assert_eq!(sshd_ports_from("Ports 2222\n"), vec![22]);
+        assert_eq!(sshd_ports_from("Port notanumber\n"), vec![22]);
+        assert_eq!(sshd_ports_from("Port 99999\n"), vec![22]);
+        // A commented-out move must not be honoured.
+        assert_eq!(sshd_ports_from("#Port 2222\nPort 22\n"), vec![22]);
+    }
+}
+
 fn firewall_template_commands(id: &str) -> Option<Vec<Vec<String>>> {
     // Shared idempotent header: create table + chain.
     let header: Vec<Vec<&'static str>> = vec![
@@ -24897,6 +25432,8 @@ const INTEGRITY_ENABLED_KV_KEY: &str = "integrity_scan_enabled";
 /// floods are read from journals that cover the whole machine and cannot
 /// be pinned to one vhost, so one customer's switch must not silence them
 /// for everybody.
+/// Per-hosting switch for the permission self-repair. Absent ⇒ ON.
+const PERM_AUTOHEAL_KV_KEY: &str = "permissions_autoheal_enabled";
 const FAIL2BAN_HTTP_KV_KEY: &str = "http_bruteforce_scan_enabled";
 
 /// Thin pub wrapper so `panel_import` can reuse the exact repair the
@@ -31320,6 +31857,9 @@ mod tests {
             adapters: Arc::new(a2),
             secrets,
             paths: HostingPaths::default(),
+            // The repair has always run; a service built without an
+            // explicit setting keeps it.
+            permissions_autoheal: true,
             remote_backup: None,
             retention: BackupRetention::default(),
             slack_default_webhook: None,
@@ -31399,6 +31939,7 @@ mod tests {
             adapters: Arc::new(a2),
             secrets,
             paths: HostingPaths::default(),
+            permissions_autoheal: true,
             remote_backup: None,
             retention: BackupRetention::default(),
             slack_default_webhook: None,
@@ -31445,6 +31986,7 @@ mod tests {
             adapters: Arc::new(a),
             secrets,
             paths: HostingPaths::default(),
+            permissions_autoheal: true,
             remote_backup: None,
             retention: BackupRetention::default(),
             slack_default_webhook: None,
@@ -31563,6 +32105,7 @@ mod tests {
             adapters: Arc::new(a),
             secrets,
             paths: HostingPaths::default(),
+            permissions_autoheal: true,
             remote_backup: None,
             retention: BackupRetention::default(),
             slack_default_webhook: None,

@@ -171,3 +171,25 @@ mail_threshold = 8    # postfix/dovecot SASL auth failures
 #
 # {uptime}
 # """
+
+# ─── Permission self-repair ────────────────────────────────────────────────
+#
+# Every five minutes hyperion checks each active site for permissions that
+# stop it working or expose it to the other tenants on this node, and FIXES
+# what it finds:
+#
+#   * a document tree nginx cannot read or traverse — the "site randomly 404s
+#     everything" that follows an import or a root-shell unzip;
+#   * wp-config.php readable by other users — that is the database password
+#     and the auth salts handed to every other tenant on the box;
+#   * logs/ and tmp/ readable by others — PHP session files live in tmp, and a
+#     readable session file is a logged-in session.
+#
+# Only a repair that FAILS is written to the audit log; successful ones go to
+# the journal, so the activity feed is not filled with the machine tidying up
+# after itself.
+#
+# Default: on. Individual sites can opt out on their Security card without
+# turning it off for the whole node.
+[permissions]
+enabled = true

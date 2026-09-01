@@ -95,6 +95,12 @@ pub struct NodeFirewall {
     pub ban_v6: usize,
     /// Newest few bans, for an at-a-glance "who's being dropped".
     pub recent_bans: Vec<BanLine>,
+    /// Seconds left to confirm a default-drop switch before it reverts on its
+    /// own. `None` when nothing is waiting — which is the normal state.
+    ///
+    /// While this is `Some`, the node's firewall is DROPPING and nobody has
+    /// yet said they can still reach it, so the page has to shout.
+    pub armed_seconds_left: Option<i64>,
 }
 
 /// Fold a node's ban list into counts + the newest 3 for display.
@@ -266,7 +272,19 @@ pub async fn get_firewall(
             _ => Vec::new(),
         };
         let (ban_total, ban_auto, ban_manual, ban_v4, ban_v6, recent_bans) = summarize_bans(bans);
+        let armed_seconds_left = match hyperion_rpc_client::call(
+            &state.agent_socket,
+            Request::FirewallArmStatus,
+        )
+        .await
+        {
+            Ok(RpcResponse::FirewallDefaultDrop {
+                armed_seconds_left, ..
+            }) => armed_seconds_left,
+            _ => None,
+        };
         nodes.push(NodeFirewall {
+            armed_seconds_left,
             node_id: "master".to_string(),
             label: "master".to_string(),
             view,
@@ -309,7 +327,20 @@ pub async fn get_firewall(
             };
             let (ban_total, ban_auto, ban_manual, ban_v4, ban_v6, recent_bans) =
                 summarize_bans(bans);
+            let armed_seconds_left = match crate::dispatcher::dispatch_to_node(
+                &state,
+                Some(&w.node_id),
+                Request::FirewallArmStatus,
+            )
+            .await
+            {
+                Ok(RpcResponse::FirewallDefaultDrop {
+                    armed_seconds_left, ..
+                }) => armed_seconds_left,
+                _ => None,
+            };
             nodes.push(NodeFirewall {
+                armed_seconds_left,
                 node_id: w.node_id.clone(),
                 label: w.label.clone(),
                 view: view.unwrap_or_default(),
@@ -379,6 +410,72 @@ pub struct ApplyTemplateForm {
 /// fragment carries the result inline + a hint to refresh the
 /// per-node port table at the top if they want to see the new
 /// rules light up.
+/// POST /firewall/default-drop — switch a node's chain to `policy drop`,
+/// confirm that the operator still has access, or switch it back.
+///
+/// Three actions behind one route because they are one conversation: turning
+/// it on ARMS a deadline, and the only two ways out are confirming or letting
+/// it expire. Splitting them across routes would let the panel show a confirm
+/// button for a node that is not armed.
+pub async fn post_default_drop(
+    State(state): State<SharedState>,
+    ctx: AuthCtx,
+    Form(form): Form<DefaultDropForm>,
+) -> Result<Response, AppError> {
+    // Same gate as applying a template: this can take the node off the
+    // network, so it is admin-only and never available to a tenant role.
+    if !(ctx.can(Capability::SecurityManage) && ctx.scope_all()) {
+        return Ok(Redirect::to("/firewall?error=admin+role+required").into_response());
+    }
+    let target = if form.target_node.trim() == "master"
+        || form.target_node.trim().is_empty()
+        || form.target_node == crate::dispatcher::LOCAL_NODE_SENTINEL
+    {
+        None
+    } else {
+        Some(form.target_node.as_str())
+    };
+    let req = match form.action.as_str() {
+        // Five minutes: long enough to open a second terminal and try, short
+        // enough that a locked-out operator is not staring at a dead box.
+        "enable" => Request::FirewallEnableDefaultDrop {
+            rollback_after_secs: 300,
+        },
+        "confirm" => Request::FirewallConfirmDefaultDrop,
+        "disable" => Request::FirewallDisableDefaultDrop,
+        other => {
+            return Ok(Redirect::to(&format!(
+                "/firewall?error={}",
+                crate::handlers::hostings::urlencoding(&format!("unknown action: {other}"))
+            ))
+            .into_response())
+        }
+    };
+    let msg = match crate::dispatcher::dispatch_to_node(&state, target, req).await? {
+        RpcResponse::FirewallDefaultDrop { message, .. } => message,
+        RpcResponse::Error(e) => {
+            return Ok(Redirect::to(&format!(
+                "/firewall?error={}",
+                crate::handlers::hostings::urlencoding(&e.to_string())
+            ))
+            .into_response())
+        }
+        _ => "unexpected response".to_string(),
+    };
+    Ok(Redirect::to(&format!(
+        "/firewall?flash={}",
+        crate::handlers::hostings::urlencoding(&msg)
+    ))
+    .into_response())
+}
+
+#[derive(serde::Deserialize)]
+pub struct DefaultDropForm {
+    pub target_node: String,
+    /// "enable" | "confirm" | "disable"
+    pub action: String,
+}
+
 pub async fn post_apply(
     State(state): State<SharedState>,
     ctx: AuthCtx,

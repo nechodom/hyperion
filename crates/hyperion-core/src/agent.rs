@@ -680,6 +680,29 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
     async fn firewall_list(&self) -> Result<hyperion_types::FirewallView, RpcError> {
         self.svc.firewall_list().await
     }
+    async fn firewall_enable_default_drop(
+        &self,
+        rollback_after_secs: i64,
+    ) -> Result<String, RpcError> {
+        self.svc
+            .firewall_enable_default_drop(rollback_after_secs)
+            .await
+    }
+
+    async fn firewall_confirm_default_drop(&self) -> Result<String, RpcError> {
+        self.svc.firewall_confirm_default_drop().await
+    }
+
+    async fn firewall_disable_default_drop(&self) -> Result<String, RpcError> {
+        self.svc
+            .firewall_disable_default_drop("switched off from the panel")
+            .await
+    }
+
+    async fn firewall_arm_remaining(&self) -> Result<Option<i64>, RpcError> {
+        Ok(self.svc.firewall_arm_remaining().await)
+    }
+
     async fn firewall_apply_template(
         &self,
         template_id: String,
@@ -1423,6 +1446,7 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
         alert_after_fails: Option<i64>,
         alert_email: Option<String>,
         alert_slack_webhook: Option<String>,
+        clear_slack_webhook: bool,
         alert_webhook_url: Option<String>,
     ) -> Result<(), RpcError> {
         self.svc
@@ -1434,6 +1458,7 @@ impl<A: AdapterPort + 'static> AgentApi for AgentImpl<A> {
                 alert_after_fails,
                 alert_email,
                 alert_slack_webhook,
+                clear_slack_webhook,
                 alert_webhook_url,
             )
             .await

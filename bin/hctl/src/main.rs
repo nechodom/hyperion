@@ -1432,6 +1432,22 @@ fn print_pretty(resp: &Response) {
                 println!("{}", v.raw);
             }
         }
+        Response::FirewallDefaultDrop {
+            message,
+            armed_seconds_left,
+        } => {
+            if !message.is_empty() {
+                println!("{message}");
+            }
+            match armed_seconds_left {
+                Some(s) if *s > 0 => println!(
+                    "awaiting confirmation: {}s left before the firewall reverts to accept",
+                    s
+                ),
+                Some(_) => println!("awaiting confirmation: the deadline has passed"),
+                None => println!("nothing awaiting confirmation"),
+            }
+        }
         Response::FirewallTemplateApplied {
             applied,
             output,

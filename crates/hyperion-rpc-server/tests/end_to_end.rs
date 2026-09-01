@@ -228,6 +228,7 @@ async fn start_agent() -> (std::path::PathBuf, tempfile::TempDir) {
         adapters: Arc::new(StubAdapters::new()),
         secrets,
         paths: hyperion_core::HostingPaths::default(),
+        permissions_autoheal: true,
         remote_backup: None,
         retention: hyperion_core::BackupRetention::default(),
         slack_default_webhook: None,
