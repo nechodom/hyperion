@@ -262,6 +262,37 @@ fn badname_flag_in_help(help: &str) -> Option<&'static str> {
 /// `userdel` exit 8: "user currently used by process".
 const USERDEL_IN_USE: i32 = 8;
 
+/// Put an extra login's uid/gid back onto the hosting's.
+///
+/// An extra login is only useful because it SHARES the site's uid — that is
+/// what lets it write files PHP created and the other way round. Nothing kept
+/// the two in step: if the site's own account is ever recreated (a delete and
+/// a fresh provision hands out a new uid), every extra login keeps the old
+/// number and silently loses access to the tree. The login still
+/// authenticates, so it presents as "logs in fine, cannot write anything",
+/// which looks like an FTP problem and is not one.
+///
+/// `--non-unique` because sharing the uid is the point, and NOT `-o` alone:
+/// usermod refuses a duplicate uid without it. No `-m`: the home directory is
+/// the site's own tree and must not be moved.
+pub async fn realign_extra_login(login: &str, uid: u32, gid: u32) -> Result<(), AdapterError> {
+    validate_login_name(login)?;
+    cmd::run(
+        "/usr/sbin/usermod",
+        &[
+            "--non-unique",
+            "--uid",
+            &uid.to_string(),
+            "--gid",
+            &gid.to_string(),
+            "--",
+            login,
+        ],
+    )
+    .await?;
+    Ok(())
+}
+
 /// Remove an extra FTP login and its vsftpd override. Idempotent.
 ///
 /// `userdel` WITHOUT `-r`: the home directory is the site's own tree, shared
